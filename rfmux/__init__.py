@@ -17,7 +17,12 @@ __all__ = [
 ]
 
 # Check version numbers
-import importlib.metadata
+import sys
+
+if sys.version_info < (3, 8):
+    raise RuntimeError("Python >= 3.8 is required.")
+
+import importlib.metadata  # requires Python 3.8+
 from packaging.version import parse
 
 tuples = (("sqlalchemy", "2.0.0"),)

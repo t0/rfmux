@@ -31,18 +31,11 @@ import sqlite3
 from . import tworoutine, tuber
 
 from sqlalchemy.inspection import inspect as sqlinspect
+from sqlalchemy.orm import DeclarativeBase
 
-try:
-    # sqlalchemy 2.0+
-    from sqlalchemy.orm import DeclarativeBase
 
-    class Base(DeclarativeBase):
-        pass
-
-except ImportError:
-    from sqlalchemy.ext.declarative import declarative_base
-
-    Base = declarative_base()
+class Base(DeclarativeBase):
+    pass
 
 
 class HWMQueryException(Exception):

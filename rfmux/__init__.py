@@ -16,6 +16,23 @@ __all__ = [
     "TuberRemoteError",
 ]
 
+# Check version numbers
+import importlib.metadata
+from packaging.version import parse
+
+tuples = (("sqlalchemy", "2.0.0"),)
+
+for package, min_version in tuples:
+    try:
+        installed_version = importlib.metadata.version(package)
+    except PackageNotFoundError as e:
+        raise PackageNotFoundError(f"Package {package} is not installed!")
+
+    if parse(installed_version) < parse(min_version):
+        raise RuntimeError(
+            f"Package {package} {installed_version} is too old! At least {min_version} is required."
+        )
+
 # Alias from long.internal.name down to something reasonable
 from .core.crs import (
     Crate,

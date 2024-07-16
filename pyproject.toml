@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rfmux"
+version = "1.0"
+description = "Python library for t0.technology CRS board running rfmux firmware"
+authors = [
+  {name="Graeme Smecher", email="gsmecher@t0.technology"},
+  {name="Joshua Montgomery", email="joshua@t0.technology"},
+]
+dependencies = [
+  "aiohttp",
+  "ipython",
+  "matplotlib",
+  "numpy",
+  "pytest",
+  "pyyaml",
+  "scipy",
+  "simplejson",
+  "sqlalchemy",
+]
+
+[project.urls]
+homepage = "https://github.com/t0/rfmux"
+repository = "https://github.com/t0/rfmux"
+
+[tool.setuptools]
+packages = ["rfmux"]

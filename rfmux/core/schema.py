@@ -14,23 +14,12 @@ from . import hardware_map, tuber, tworoutine
 import base64
 import asyncio
 
-from packaging import version
 import sqlalchemy
 
 
 from .hardware_map import HWMResource, HWMQuery
 
-from packaging import version
-assert version.parse(sqlalchemy.__version__) >= version.parse('1.2')
-
 from . import tuber
-
-if version.parse(sqlalchemy.__version__) >= version.parse("1.4"): #TODO : is this still relevant?
-    def overlaps(val):
-        return dict(overlaps=val)
-else:
-    def overlaps(val):
-        return dict()
 
 
 @tuber.TuberCategory("Backplane", lambda b: b.slots.first())
@@ -49,12 +38,12 @@ class Crate(hardware_map.HWMResource):
         doc="""A SQLAlchemy subquery corresponding to this Crate's
             CRS boards. If you want to index this array using slot index,
             you should use the 'crs' object instead.""",
-        **overlaps("slot"),
+        overlaps="slot",
     )
 
     slot = relationship(
         "CRS",
-        backref=backref("crate", **overlaps("slots")),
+        backref=backref("crate", overlaps="slots"),
         collection_class=attribute_mapped_collection("slot"),
         doc="The Crate's CRS boards, indexed as you would expect.",
     )
@@ -84,37 +73,30 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
 
     def __init__(self, *args, **kwargs):
         if "module" not in kwargs and "modules" not in kwargs:
-            self.modules = [ReadoutModule(module=m+1) for m in range(4)]
+            self.modules = [ReadoutModule(module=m + 1) for m in range(4)]
         super().__init__(*args, **kwargs)
-
 
     modules = relationship(
         "ReadoutModule",
         lazy="dynamic",
         query_class=HWMQuery,
         doc="This is a SQLAlchemy subquery; you probably want 'module'",
-        **overlaps("module"),
+        overlaps="module",
     )
-
 
     module = relationship(
         "ReadoutModule",
-        backref=backref("crs", **overlaps("modules")),
+        backref=backref("crs", overlaps="modules"),
         collection_class=attribute_mapped_collection("module"),
         doc="""Readout modules associated with this CRS board.
 
             You can use these modules to write more legible function calls.
             For example, the following two calls are equivalent::
 
-                >>> x = d.get_fast_samples(100, d.UNITS.ADC_COUNTS,
-                ...                        average=False,
-                ...                        target=d.TARGET.DEMOD,
-                ...                        module=1)
+                >>> x = d.get_fast_samples(100, d.UNITS.NORMALIZED, module=1)
 
                 >>> mod = d.module[1]
-                >>> mod.get_fast_samples(100, d.UNITS.ADC_COUNTS,
-                ...                      average=False,
-                ...                      target=d.TARGET.DEMOD)
+                >>> mod.get_fast_samples(100, d.UNITS.NORMALIZED, module=1)
 
             When writing Python code that involves multiple operations in
             sequence to a single hardware element, the second form is often
@@ -123,11 +105,9 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
 
     def __repr__(self):
         if self.crate:
-            repstring =  "%r.%s(%s)" % (self.crate, self.__class__.__name__, "slot=%s" % self.slot)
+            return f"{self.crate}.{self.__class__.__name__}(slot={self.slot})"
         else:
-
-            repstring = "%s(%s)" % (self.__class__.__name__,"%s" % self.serial)
-        return repstring
+            return f"{self.__class__.__name__}({self.serial})"
 
     def set_fpga_bitstream(self, buf):
         """
@@ -139,7 +119,6 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
         b64_string = base64.b64encode(buf)
         self._set_fpga_bitstream_base64(b64_string)
 
-
     @property
     def tuber_uri(self):
         """Smarter, CRS-aware tuber_uri.
@@ -150,18 +129,16 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
 
         if self.hostname:
             # We have a hostname; just use it.
-            return "http://{}/tuber".format(self.hostname)
+            return f"http://{hostname}/tuber"
 
         if self.serial:
             # We have a serial number; compute the hostname.
-            return "http://crs{}.local/tuber".format(self.serial)
+            return f"http://rfmux{self.serial}.local/tuber"
 
         if self.slot and self.crate:
             # We have a slot and crate,
             # we can use the crate-based hostname (i.e. slot3.crate001.local).
-            return "http://slot{0}.crate{1}.local/tuber".format(
-                self.slot, self.crate.serial
-            )
+            return f"http://slot{self.slot}.crate{self.crate.serial}.local/tuber"
 
         raise NameError(
             "Couldn't figure out a Tuber URI for this object! "
@@ -171,6 +148,7 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
     @tworoutine.tworoutine
     async def resolve(self):
         await (~self._tuber_get_meta)()
+
 
 @tuber.TuberCategory(
     "ReadoutModule",
@@ -193,12 +171,12 @@ class ReadoutModule(HWMResource):
         return "%s.%s(%r)" % (self.crs.__repr__(), self.__class__.__name__, self.module)
 
     def index(self):
-        '''
+        """
         A shorthand string representation for this readout module, in the form:
         'crs0030_rmod1'
-        '''
-        
-        return 'crs%s_rmod%d' % (self.crs.serial, self.module)
+        """
+
+        return "crs%s_rmod%d" % (self.crs.serial, self.module)
 
     # Boilerplate
     _cls = Column(String, nullable=False)
@@ -206,10 +184,9 @@ class ReadoutModule(HWMResource):
     _crs_pk = Column(Integer, ForeignKey("crs._pk"), index=True)
     module = Column(Integer, index=True, doc="Module number (1-4)")
 
-
     channel = relationship(
         "ReadoutChannel",
-        backref=backref("module", **overlaps("channels")),
+        backref=backref("module", overlaps="channels"),
         collection_class=attribute_mapped_collection("channel"),
         doc="""Readout channels associated with this module.
 
@@ -234,7 +211,7 @@ class ReadoutModule(HWMResource):
         lazy="dynamic",
         query_class=HWMQuery,
         doc="This is a SQLAlchemy subquery; you probably want 'channel'",
-        **overlaps("channel"),
+        overlaps="channel",
     )
 
 
@@ -274,5 +251,6 @@ class ReadoutChannel(HWMResource):
 @hardware_map.algorithm(CRS, register=True)
 async def resolve(boards):
     await asyncio.gather(*[(~d.resolve)() for d in boards])
+
 
 # vim: sts=4 ts=4 sw=4 tw=78 smarttab expandtab

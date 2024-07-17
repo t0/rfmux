@@ -1,6 +1,6 @@
-'''
+"""
 Tuber object interface
-'''
+"""
 
 import asyncio
 import aiohttp
@@ -13,19 +13,24 @@ from . import tworoutine
 import simplejson
 
 __all__ = [
-    "TuberError", "TuberRemoteError",
-    "TuberCategory", "TuberObject",
+    "TuberError",
+    "TuberRemoteError",
+    "TuberCategory",
+    "TuberObject",
 ]
 
 
 class TuberError(Exception):
     pass
 
+
 class TuberStateError(TuberError):
     pass
 
+
 class TuberNetworkError(TuberError):
     pass
+
 
 class TuberRemoteError(TuberError):
     pass
@@ -39,10 +44,12 @@ class TuberResult:
         return iter(self.__dict__.values())
 
     def __repr__(self):
-        'Return a nicely formatted representation string'
-        return 'TuberResult({0})'.format(
-            ','.join('{0}={1!r}'.format(name, val)
-                     for name, val in self.__dict__.items()))
+        "Return a nicely formatted representation string"
+        return "TuberResult({0})".format(
+            ",".join(
+                "{0}={1!r}".format(name, val) for name, val in self.__dict__.items()
+            )
+        )
 
 
 def valid_dynamic_attr(name):
@@ -55,20 +62,28 @@ def valid_dynamic_attr(name):
     """
     # These are mostly hints for SQLAlchemy or IPython.
 
-    if name.startswith((
-            '__', '_sa', '_tuber', '_repr',
-            '_ipython', '_orm', '_tworoutine__', '_calls',
-    )):
+    if name.startswith(
+        (
+            "__",
+            "_sa",
+            "_tuber",
+            "_repr",
+            "_ipython",
+            "_orm",
+            "_tworoutine__",
+            "_calls",
+        )
+    ):
         return False
 
-    if name in {'trait_names', '_getAttributeNames', 'getdoc'}:
+    if name in {"trait_names", "_getAttributeNames", "getdoc"}:
         return False
 
     return True
 
 
 class Context(tworoutine.tworoutine):
-    '''A context container for TuberCalls. Permits calls to be aggregated.
+    """A context container for TuberCalls. Permits calls to be aggregated.
 
     Using this interface, you can write code like:
 
@@ -115,11 +130,13 @@ class Context(tworoutine.tworoutine):
     Adjust the `connect_timeout` and `request_timeout` attributes of the ctx
     object to change the connect and request timeouts. The default value
     (1800 seconds) allows calls to the board to be quite slow.
-    '''
+    """
 
     def __init__(self, obj, **ctx_kwargs):
         self.calls = []
-        self.connect_timeout = 1800 # TODO: these are too long. Come up with something rational here.
+        self.connect_timeout = (
+            1800  # TODO: these are too long. Come up with something rational here.
+        )
         self.request_timeout = 1800
         self.obj = obj
         self.ctx_kwargs = ctx_kwargs
@@ -135,7 +152,7 @@ class Context(tworoutine.tworoutine):
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        '''Ensure the context is flushed.'''
+        """Ensure the context is flushed."""
 
         if self.calls:
             await (~self)()
@@ -145,16 +162,17 @@ class Context(tworoutine.tworoutine):
         future = asyncio.Future()
 
         # Ensure call is made in the correct context
-        objname = request.setdefault('object', self.obj.tuber_objname)
-        assert objname == self.obj.tuber_objname, \
-            f'Got call to {objname} in context for {self.obj.tuber_objname}'
+        objname = request.setdefault("object", self.obj.tuber_objname)
+        assert (
+            objname == self.obj.tuber_objname
+        ), f"Got call to {objname} in context for {self.obj.tuber_objname}"
 
         self.calls.append((request, future))
 
         return future
 
     async def __acall__(self):
-        '''Break off a set of calls and return them for execution.'''
+        """Break off a set of calls and return them for execution."""
 
         calls = []
         futures = []
@@ -169,11 +187,14 @@ class Context(tworoutine.tworoutine):
             # Configure the max clients to be 4 per TuberObject.
             loop = asyncio.get_running_loop()
             if not hasattr(loop, "_tuber_session"):
-                connector = aiohttp.TCPConnector(limit=0, limit_per_host=4) # TODO: is this the right limit for CRS boards?
+                connector = aiohttp.TCPConnector(
+                    limit=0, limit_per_host=4
+                )  # TODO: is this the right limit for CRS boards?
                 loop._tuber_session = aiohttp.ClientSession(
                     json_serialize=simplejson.dumps,
                     connector=connector,
-                    headers={"Accept": "application/json"})
+                    headers={"Accept": "application/json"},
+                )
 
                 # Ensure that ClientSession.close() is called when the loop is
                 # closed.  ClientSession.__del__ does not close the session, so it
@@ -198,22 +219,23 @@ class Context(tworoutine.tworoutine):
             try:
                 async with cs.post(self.obj.tuber_uri, json=calls) as resp:
                     json_out = await resp.json(
-                            loads=simplejson.JSONDecoder(object_hook=TuberResult).decode,
-                            content_type=None)
+                        loads=simplejson.JSONDecoder(object_hook=TuberResult).decode,
+                        content_type=None,
+                    )
             except aiohttp.ClientConnectorError as e:
                 raise TuberNetworkError(e)
 
             # Resolve futures
             results = []
-            for (f, r) in zip(futures, json_out):
-                if hasattr(r, 'error') and r.error:
+            for f, r in zip(futures, json_out):
+                if hasattr(r, "error") and r.error:
                     f.set_exception(TuberRemoteError(r.error.message))
                 else:
                     results.append(r.result)
                     f.set_result(r.result)
 
             # Return a list of results
-            return [ await x for x in futures ]
+            return [await x for x in futures]
 
     def __getattr__(self, name):
 
@@ -237,9 +259,10 @@ class Context(tworoutine.tworoutine):
         setattr(self, name, caller)
         return caller
 
+
 # TODO: Is this description still valid with the CRS?
 class TuberCategory:
-    '''Pull Tuber functions into ORM objects based on categories.
+    """Pull Tuber functions into ORM objects based on categories.
 
     Here's an example. If "crs" is a CRS object, and you have the
     ordinary IceBoard function crs.set_timestamp_port(d.TIMESTAMP_PORT.TEST), you can run the
@@ -283,7 +306,7 @@ class TuberCategory:
 
     # "result" : {
     #   "__doc__" : "set_timestamp_port(self: libmkids.Dfmux, port: TimestampPort) -> None"}
-    '''
+    """
 
     def __init__(self, category, getobject, **arg_mappers):
         self.category = category
@@ -300,13 +323,13 @@ class TuberCategory:
         cls.tuber_context = tuber_context
 
         def __getattr__(self, name):
-            '''This is a fall-through replacement for __getattr__.
+            """This is a fall-through replacement for __getattr__.
 
             We assume we're capturing a function call that's missing
             arguments. We fill in these arguments and dispatch the call.
 
             See `TuberObject.__getattr__` for details.
-            '''
+            """
 
             # Refuse to __getattr__ a couple of special names used elsewhere.
             if not valid_dynamic_attr(name):
@@ -324,8 +347,7 @@ class TuberCategory:
                 @tworoutine.tworoutine
                 async def acall(*args, **kwargs):
                     mapped_args = {
-                        n: f(self)
-                        for (n, f) in decorator.arg_mappers.items()
+                        n: f(self) for (n, f) in decorator.arg_mappers.items()
                     }
 
                     return await (~m)(*args, **kwargs, **mapped_args)
@@ -337,16 +359,16 @@ class TuberCategory:
         cls.__getattr__ = __getattr__
 
         def __dir__(self):
-            '''Retrieve a list of class properties/methods that are relevant.
+            """Retrieve a list of class properties/methods that are relevant.
 
             We try to grab the original list of attributes from the ORM,
             and then augment it with any Tuber functions in our category.
 
             See `TuberObject.__dir__` for more details.
-            '''
+            """
 
             d = set(dir(self.__class__))
-            d.update(dir(super(self.__class__, self)))
+            d.update(dir(super()))
 
             o = decorator.getobject(self)
             # Return just the static attributes if the board object isn't set
@@ -356,8 +378,10 @@ class TuberCategory:
             (meta, metap, metam) = o._tuber_get_meta()
 
             for m in meta.methods:
-                if hasattr(metam[m], 'categories') and \
-                        decorator.category in metam[m].categories:
+                if (
+                    hasattr(metam[m], "categories")
+                    and decorator.category in metam[m].categories
+                ):
                     d.add(m)
             return sorted(d)
 
@@ -365,15 +389,17 @@ class TuberCategory:
 
         return cls
 
+
 class TuberObject:
-    '''A base class for TuberObjects.
+    """A base class for TuberObjects.
 
     This is a great way of using Python to correspond with network resources
     over a HTTP tunnel. It hides most of the gory details and makes your
     networked resource look and behave like a local Python object.
 
     To use it, you should subclass this TuberObject.
-    '''
+    """
+
     _tuber_meta = {}
     _tuber_meta_properties = {}
     _tuber_meta_methods = {}
@@ -383,29 +409,29 @@ class TuberObject:
 
     @property
     def tuber_uri(self):
-        '''Retrieve the URI associated with this TuberResource.'''
+        """Retrieve the URI associated with this TuberResource."""
         raise NotImplementedError("Subclass needs to define tuber_uri!")
 
     @property
     def tuber_objname(self):
-        '''Retrieve the Tuber Object associated with this TuberResource.'''
+        """Retrieve the Tuber Object associated with this TuberResource."""
         # TODO: Hack for now, to maintain compatibility with hidfmux the boards only
         # know "dfmux", even thought we are changing the ORM to 'CRS'. This will
         # be fixed in the future
 
-        #return self.__class__.__name__
+        # return self.__class__.__name__
         return "Dfmux"
 
     @property
     def __doc__(self):
-        '''Construct DocStrings using metadata from the underlying resource.'''
+        """Construct DocStrings using metadata from the underlying resource."""
 
         (meta, _, _) = self._tuber_get_meta()
 
         return f"{meta.name}:\t{meta.summary}\n\n{meta.explanation}"
 
     def __dir__(self):
-        '''Provide a list of what's here. (Used for tab-completion.)
+        """Provide a list of what's here. (Used for tab-completion.)
 
         This function calls the `_tuber_get_meta()` method to get a list of
         methods and properties stored on the board. If an error occurs in
@@ -413,16 +439,16 @@ class TuberObject:
         and future calls to `_tuber_get_meta()` do not attempt to access the
         board.  Use the `set_tuber_inspect(True)` module-level function to
         re-enable communication with the board.
-        '''
+        """
 
-        attrs = dir(super(self.__class__, self))
+        attrs = dir(super())
         (meta, _, _) = self._tuber_get_meta()
 
         return sorted(attrs + meta.properties + meta.methods)
 
     @tworoutine.tworoutine
     async def _tuber_get_meta(self):
-        '''Retrieve metadata associated with the remote network resource.
+        """Retrieve metadata associated with the remote network resource.
 
         This data isn't strictly needed to construct "blind" JSON-RPC calls,
         except for user-friendliness:
@@ -438,7 +464,7 @@ class TuberObject:
         an error was encountered while calling this function in an attempt
         at tab-completion, or manually by calling `set_tuber_inspect(False)`),
         then this function returns empty lists.
-        '''
+        """
 
         if self.tuber_uri not in self._tuber_meta:
             async with self.tuber_context() as ctx:
@@ -464,12 +490,11 @@ class TuberObject:
         return (
             self._tuber_meta[self.tuber_uri],
             self._tuber_meta_properties[self.tuber_uri],
-            self._tuber_meta_methods[self.tuber_uri]
+            self._tuber_meta_methods[self.tuber_uri],
         )
 
-
     def __getattr__(self, name):
-        '''Remote function call magic.
+        """Remote function call magic.
 
         This function is called to get attributes (e.g. class variables and
         functions) that don't exist on "self". Since we build up a cache of
@@ -489,7 +514,7 @@ class TuberObject:
         `valid_dynamic_attr()`, it is possible to trigger nasty recursion
         depth errors by trying to access an attribute that does not
         exist on the board.
-        '''
+        """
 
         # Refuse to __getattr__ a couple of special names used elsewhere.
         if not valid_dynamic_attr(name):
@@ -501,10 +526,13 @@ class TuberObject:
             (meta, metap, metam) = (
                 self._tuber_meta[self.tuber_uri],
                 self._tuber_meta_properties[self.tuber_uri],
-                self._tuber_meta_methods[self.tuber_uri]
+                self._tuber_meta_methods[self.tuber_uri],
             )
         except KeyError as e:
-            raise TuberStateError(e, "Attempt to retrieve metadata on TuberObject that doesn't have it yet! Did you forget to call resolve()?")
+            raise TuberStateError(
+                e,
+                "Attempt to retrieve metadata on TuberObject that doesn't have it yet! Did you forget to call resolve()?",
+            )
 
         if name not in meta.methods and name not in meta.properties:
             raise AttributeError(f"'{name}' is not a valid method or property!")
@@ -522,29 +550,33 @@ class TuberObject:
                     result = getattr(ctx, name)(*args, **kwargs)
                 return result.result()
 
-            if hasattr(metam[name], '__doc__'):
+            if hasattr(metam[name], "__doc__"):
                 # When available, prefer direct annotations via '__doc__' to
                 # overstructured metadata.
                 invoke.__acall__.__doc__ = metam[name].__doc__
             else:
-                invoke.__acall__.__doc__ = textwrap.dedent('''
+                invoke.__acall__.__doc__ = textwrap.dedent(
+                    """
                     {name}({args_short})
 
                     {args_long}
 
-                    {explanation}''').format(
-                        name=name,
-                        args_short=', '.join([a.name for a in metam[name].args]),
-                        args_long='\n'.join([
-                            "    {:<16} {}".format(
-                                arg.name + ":",
-                                arg.description
-                            ) for arg in metam[name].args]),
-                        explanation='\n'.join(textwrap.wrap(metam[name].explanation))
-                    )
+                    {explanation}"""
+                ).format(
+                    name=name,
+                    args_short=", ".join([a.name for a in metam[name].args]),
+                    args_long="\n".join(
+                        [
+                            "    {:<16} {}".format(arg.name + ":", arg.description)
+                            for arg in metam[name].args
+                        ]
+                    ),
+                    explanation="\n".join(textwrap.wrap(metam[name].explanation)),
+                )
 
             # Associate as a class method.
             setattr(self.__class__, name, invoke)
             return getattr(self, name)
+
 
 # vim: sts=4 ts=4 sw=4 tw=78 smarttab expandtab

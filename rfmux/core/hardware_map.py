@@ -219,9 +219,7 @@ class HWMQuery(sqlalchemy.orm.Query):
             # provided directly to the prototype function, and the ones
             # given to _call_proto.  Ensure only one set is non-null.
             if args and sub_args:
-                raise ValueError(
-                    f"Multiple argument lists! ({args}, {sub_args})"
-                )
+                raise ValueError(f"Multiple argument lists! ({args}, {sub_args})")
             a = list(args or sub_args)
 
             if kwargs and sub_kwargs:
@@ -235,7 +233,7 @@ class HWMQuery(sqlalchemy.orm.Query):
             assert all([isinstance(f, tworoutine.tworoutine) for f in funcs])
 
             fs = []
-            for (f, za) in zip(funcs, zip_args):
+            for f, za in zip(funcs, zip_args):
                 fs.append((~f)(*(za + a), **k))
 
             return await asyncio.gather(*fs)
@@ -310,7 +308,7 @@ class macro:
         try:
             iter(cls)
         except TypeError:
-            cls = (cls, )
+            cls = (cls,)
 
         self._valid_classes = cls
         self._register = register
@@ -318,8 +316,9 @@ class macro:
     def __call__(self, func):
 
         if not asyncio.iscoroutinefunction(func):
-            raise RuntimeError("The @macro decorator is intended for "
-                    "'async def' functions only!")
+            raise RuntimeError(
+                "The @macro decorator is intended for 'async def' functions only!"
+            )
 
         vcs = self._valid_classes
 
@@ -372,7 +371,7 @@ class algorithm:
         try:
             iter(cls)
         except TypeError:
-            cls = (cls, )
+            cls = (cls,)
 
         dec.__valid_classes = cls
         dec.__register = register
@@ -384,8 +383,10 @@ class algorithm:
 
         if dec.__allow_async:
             if not asyncio.iscoroutinefunction(func):
-                raise RuntimeError("The @algorithm decorator is intended for "
-                                   "'async def' functions only!")
+                raise RuntimeError(
+                    "The @algorithm decorator is intended for "
+                    "'async def' functions only!"
+                )
 
             @tworoutine.tworoutine
             async def acall(objs, *args, **kwargs):
@@ -405,8 +406,10 @@ class algorithm:
 
         else:
             if asyncio.iscoroutinefunction(func):
-                raise RuntimeError("The @algorithm decorator with allow_async=False is "
-                                   "intended for 'def' functions (i.e. not async) only!")
+                raise RuntimeError(
+                    "The @algorithm decorator with allow_async=False is "
+                    "intended for 'def' functions (i.e. not async) only!"
+                )
 
             def acall(objs, *args, **kwargs):
 
@@ -461,7 +464,7 @@ class Session(sqlalchemy.orm.Session):
 
 def HardwareMap(uri="sqlite:///:memory:", echo=False, data=None, *args, **kwargs):
     """Create a HardwareMap object (which is really a SQLAlchemy Session).
-    
+
     By default, this function creates an empty in-memory SQLAlchemy session.
 
     If the input URI points to an existing hardware map file on disk, this will
@@ -479,7 +482,7 @@ def HardwareMap(uri="sqlite:///:memory:", echo=False, data=None, *args, **kwargs
 
     path = uri.replace("sqlite:///", "")
     if not path.startswith(":memory:") and not os.path.exists(path):
-        raise IOError("Cannot find hardware map database {0}".format(path))
+        raise IOError(f"Cannot find hardware map database {path}")
 
     # connection function that retries connections to the database
     # a few times with exponential backoff
@@ -503,8 +506,8 @@ def HardwareMap(uri="sqlite:///:memory:", echo=False, data=None, *args, **kwargs
             except sqlite3.OperationalError as e:
                 if i < tries - 1:
                     logging.exception(
-                        "Caught OperationalError on connect, "
-                        "retrying {}/{}".format(i + 1, tries)
+                        f"Caught OperationalError on connect, "
+                        f"retrying {i+1}/{tries}"
                     )
                     time.sleep(delay)
                     delay *= 2

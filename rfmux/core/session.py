@@ -22,11 +22,8 @@ import os
 import time
 import mimetypes
 import logging
-import logging.config
 from . import hardware_map
 import re
-
-logger = logging.getLogger()
 
 
 def read_csv(filename):
@@ -39,10 +36,10 @@ def read_csv(filename):
             for field in re.findall(r"([^\t]* [^\t]*)", line.rstrip("\n")):
                 if field[0] != '"' or field[-1] != '"':
                     raise ValueError(
-                        "File {0} (line {1}). Unescaped space in field: "
-                        "'{2}'. Spaces are only legal in fields that begin and "
-                        "end with double-quote blocks. Fields should be "
-                        "tab-delimitted.".format(filename, l + 1, field)
+                        f"File {filename} (line {l+1}). Unescaped space in field: "
+                        f"'{field}'. Spaces are only legal in fields that begin and "
+                        f"end with double-quote blocks. Fields should be "
+                        f"tab-delimitted."
                     )
 
         # Second pass: Actually read the file
@@ -272,6 +269,7 @@ def hwm_lookup_constructor(loader, node):
 
     return obj
 
+
 class YAMLLoader(yaml.SafeLoader):
 
     # We allow some hooks to be queued when the document
@@ -279,12 +277,12 @@ class YAMLLoader(yaml.SafeLoader):
     __finalize_hooks = []
 
     def __init__(self, *args, **kwargs):
-        super(YAMLLoader, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         # Plumbing
-        self.add_constructor(u"!include", yaml_include_constructor)
-        self.add_constructor(u"!HardwareMap", hwm_constructor)
-        self.add_constructor(u"!HWMLookup", hwm_lookup_constructor)
+        self.add_constructor("!include", yaml_include_constructor)
+        self.add_constructor("!HardwareMap", hwm_constructor)
+        self.add_constructor("!HWMLookup", hwm_lookup_constructor)
 
     def register_finalization_hook(self, hook):
         self.__finalize_hooks.append(hook)
@@ -294,7 +292,7 @@ class YAMLLoader(yaml.SafeLoader):
         Make sure SQL database is up to date when the loader is finished.
         """
         t1 = time.time()
-        data = super(YAMLLoader, self).construct_document(*args, **kwargs)
+        data = super().construct_document(*args, **kwargs)
         # Write any pending transactions to the database
         if hasattr(self, "hwm"):
             self.hwm.commit()
@@ -308,7 +306,7 @@ class YAMLLoader(yaml.SafeLoader):
 
         t2 = time.time()
         if hasattr(self, "hwm"):
-            logger.info("Hardware map loaded in %.2f seconds" % (t2 - t1))
+            logging.info("Hardware map loaded in %.2f seconds" % (t2 - t1))
 
         return data
 
@@ -354,7 +352,7 @@ def load_from_database(path):
         save_database : '/tmp/rfmux.db'
     """
 
-    hwm = hardware_map.HardwareMap("sqlite:///{0}".format(path))
+    hwm = hardware_map.HardwareMap("sqlite:///{path}")
 
     # preload attributes for tab-completion in interactive sessions
     hwm.cache_attributes()

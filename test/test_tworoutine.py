@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-'''
+"""
 Tworoutine Tests
 ~~~~~~~~~~~~~~~~
 
 "Tworoutines" are the Python-3 equivalent of pydfmux's
 "asynchronous/parallelizable" infrastructure. The following tets ensure that the
 tworoutines API behaves within the limits imposed by Python 3 event loops.
-'''
+"""
 
 import unittest
 import asyncio
-import hidfmux
+import rfmux
 
 
-@hidfmux.tworoutine
+@rfmux.tworoutine
 async def async_return(x):
     """Trivial tworoutine definition that just returns its argument."""
     return x
@@ -34,7 +34,7 @@ class TworoutineFunctionTestCase(unittest.TestCase):
 
 
 class TworoutineMethodTestCase(unittest.TestCase):
-    @hidfmux.tworoutine
+    @rfmux.tworoutine
     async def async_return(self, x):
         return x
 
@@ -53,7 +53,7 @@ class TworoutineMethodTestCase(unittest.TestCase):
 
 class TworoutineClassMethodTestCase(unittest.TestCase):
     @classmethod
-    @hidfmux.tworoutine
+    @rfmux.tworoutine
     async def async_return(self, x):
         return x
 
@@ -76,7 +76,7 @@ class TworoutineClassMethodTestCase(unittest.TestCase):
 
 class TworoutineStaticMethodTestCase(unittest.TestCase):
     @staticmethod
-    @hidfmux.tworoutine
+    @rfmux.tworoutine
     async def async_return(x):
         return x
 

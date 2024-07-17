@@ -40,10 +40,12 @@ for package, min_version in tuples:
 
 # Alias from long.internal.name down to something reasonable
 from .core.crs import (
-    Crate,
     CRS,
-    ReadoutModule,
+    Crate,
     ReadoutChannel,
+    ReadoutModule,
+    Resonator,
+    Wafer,
 )
 
 

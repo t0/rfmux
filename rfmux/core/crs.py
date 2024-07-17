@@ -11,17 +11,17 @@ __all__ = [
     "ReadoutChannel",
     "Wafer",
     "Resonator",
-    "ChannelMapping",
 ]
 
 from .hardware_map import algorithm
-from .schema import Crate, CRS, ReadoutModule, ReadoutChannel
-from .session import HWMConstructor
+from .schema import Crate, CRS, ReadoutModule, ReadoutChannel, Resonator, Wafer
+from .session import HWMConstructor, HWMCSVConstructor
 
 
 from . import session
 
 import sys
+import os
 
 
 class YAMLLoader(session.YAMLLoader):
@@ -44,6 +44,16 @@ class YAMLLoader(session.YAMLLoader):
         self.add_constructor(
             "!CRS",
             HWMConstructor(lambda loader: getattr(loader.flavour, "CRS")),
+        )
+
+        # Cryogenic chain
+        self.add_constructor(
+            "!Wafer", HWMConstructor(lambda loader: getattr(loader.flavour, "Wafer"))
+        )
+
+        self.add_constructor(
+            "!Resonators",
+            HWMCSVConstructor(lambda loader: getattr(loader.flavour, "Resonator")),
         )
 
 

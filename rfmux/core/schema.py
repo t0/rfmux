@@ -49,7 +49,7 @@ class Crate(hardware_map.HWMResource):
     )
 
     def __repr__(self):
-        return "%s(%r)" % (self.__class__.__name__, self.serial)
+        return f"{self.__class__.__name__}({self.serial})"
 
 
 class CRS(hardware_map.HWMResource, tuber.TuberObject):
@@ -246,6 +246,56 @@ class ReadoutChannel(HWMResource):
         lambda x: x.module.crs if x.module else None,
         doc="Shortcut back to the CRS board",
     )
+
+
+class Wafer(HWMResource):
+    """Wafer keeps track of on-chip resonators, which have properties"""
+
+    __tablename__ = "wafers"
+    __mapper_args__ = {"polymorphic_identity": __package__, "polymorphic_on": "_cls"}
+
+    # MR what are table_args?
+
+    def __repr__(self):
+        return "%s(%r)" % (self.__class__.__name__, self.name)
+
+    _cls = Column(String, nullable=False)
+    _pk = Column(Integer, primary_key=True)
+
+    name = Column(String, nullable=False)  # eg DrkC
+
+    resonator = relationship(
+        "Resonator",
+        backref=backref("wafer", overlaps="resonators"),
+        collection_class=attribute_mapped_collection("name"),
+        doc="""doc.""",
+    )
+
+    resonators = relationship(
+        "Resonator",
+        lazy="dynamic",
+        query_class=HWMQuery,
+        doc="This is a SQLAlchemy subquery; you probably want 'resonator'",
+        overlaps="resonator",
+    )
+
+
+class Resonator(HWMResource):
+    """Resonator keeps tabs on individual MKID resonators and their properties"""
+
+    __tablename__ = "resonators"
+    __mapper_args__ = {"polymorphic_identity": __package__, "polymorphic_on": "_cls"}
+
+    def __repr__(self):
+        return f"{self.wafer}.{self.__class__.__name__}({self.name})"
+
+    _cls = Column(String, nullable=False)
+    _pk = Column(Integer, primary_key=True)
+    _mod_pk = Column(Integer, ForeignKey("wafers._pk"), index=True)
+
+    name = Column(String, index=True)
+    bias_freq = Column(Float, nullable=True)
+    bias_amplitude = Column(Float, nullable=True)
 
 
 @hardware_map.algorithm(CRS, register=True)

@@ -27,7 +27,7 @@ import re
 
 
 def read_csv(filename):
-    with open(filename, "rU") as f:
+    with open(filename, "r") as f:
         # First pass: look for fields containing spaces and ensure they're
         # quoted.
         for l, line in enumerate(f):
@@ -39,7 +39,7 @@ def read_csv(filename):
                         f"File {filename} (line {l+1}). Unescaped space in field: "
                         f"'{field}'. Spaces are only legal in fields that begin and "
                         f"end with double-quote blocks. Fields should be "
-                        f"tab-delimitted."
+                        f"tab-delimited."
                     )
 
         # Second pass: Actually read the file

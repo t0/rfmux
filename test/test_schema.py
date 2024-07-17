@@ -25,6 +25,7 @@ This test script can be invoked in three ways:
 import rfmux
 import pytest
 import os
+import textwrap
 
 
 def test_hardware_map_with_single_board():
@@ -102,6 +103,46 @@ def test_hardware_map_with_crate_slots_indexed_by_dictionary():
     assert c.slot[1].serial == "0024"
     assert c.slot[2].serial == "0025"
     assert c.slot[3].serial == "0026"
+
+
+def test_hardware_map_with_wafer_and_resonator_csv(tmp_path):
+    csvfile = tmp_path / "test.csv"
+
+    # Create a CSV file describing a few Resonators. We'll load this below in
+    # the HWM.
+    csvfile.write_text(
+        textwrap.dedent(
+            f"""
+                name\tbias_freq\tbias_amplitude
+                steve\t100e6\t0.1
+                nancy\t101e6\t0.2
+            """
+        ).strip()
+    )
+
+    s = rfmux.load_session(
+        f"""
+        !HardwareMap
+        - !Wafer
+          name: some_wafer
+          resonators: !Resonators "{str(csvfile)}"
+        """
+    )
+
+    # Query the resonators, sorted by bias amplitude.
+    r1, r2 = s.query(rfmux.Resonator).order_by(rfmux.Resonator.bias_amplitude).all()
+
+    # Ensure we picked them up with the correct values. Note that type
+    # conversion happens implicitly here - the CSV is just a bunch of strings.
+    assert r1.name == "steve"
+    assert r1.bias_freq == 100e6
+    assert r1.bias_amplitude == 0.1
+    assert r1.wafer.name == "some_wafer"
+
+    assert r2.name == "nancy"
+    assert r2.bias_freq == 101e6
+    assert r2.bias_amplitude == 0.2
+    assert r2.wafer.name == "some_wafer"
 
 
 @pytest.fixture

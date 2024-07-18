@@ -6,13 +6,14 @@ Using this code, we can create a hardware map and associated data.
 """
 
 __all__ = [
-    "YAMLLoader",
-    "HWMConstructor",
     "HWMCSVConstructor",
+    "HWMConstructor",
     "IncludedYAMLValue",
-    "load_session",
-    "set_yaml_loader_class",
+    "YAMLLoader",
     "load_from_database",
+    "load_session",
+    "read_csv",
+    "set_yaml_loader_class",
 ]
 
 import yaml
@@ -75,18 +76,8 @@ class HWMCSVConstructor:
 
         classes = []
 
-        # Load up the default bias properties if they are present
-        # NOTE: This is a race-condition. This only works if the !include
-        #       statement that loads the JSON comes before the !HardwareMap
-        #       portion. Suggestions for how to avoid this are welcome, but
-        #       I think it may be here to stay
-        dbps = getattr(loader, "defaultbprops", {})
-        dbps = dbps.get(node.tag.replace("!", ""), {})
-
         dr = read_csv(fn)
         for m in dr:
-            for key, val in dbps.items():
-                m.setdefault(key, val)
             for t in self._transforms:
                 t(loader, m)
             c = self._constructor(loader)(**m)
@@ -123,17 +114,6 @@ class HWMConstructor:
     def __call__(self, loader, node):
         # 'deep=True' is crucial and pretty much undocumented.
         m = loader.construct_mapping(node, deep=True)
-
-        # Load up the default bias properties if they are present
-        # NOTE: This is a race-condition. This only works if the !include
-        #       statement that loads the JSON comes before the !HardwareMap
-        #       portion. Suggestions for how to avoid this are welcome, but
-        #       I think it may be here to stay
-        dbps = getattr(loader, "defaultbprops", {})
-        dbps = dbps.get(node.tag.replace("!", ""), {})
-
-        for key, val in dbps.items():
-            m.setdefault(key, val)
 
         # Apply transformations, if any.
         for t in self._transforms:

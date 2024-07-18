@@ -11,17 +11,27 @@ __all__ = [
     "ReadoutChannel",
     "Wafer",
     "Resonator",
+    "ChannelMapping",
 ]
 
 from .hardware_map import algorithm
-from .schema import Crate, CRS, ReadoutModule, ReadoutChannel, Resonator, Wafer
-from .session import HWMConstructor, HWMCSVConstructor
+from .schema import (
+    CRS,
+    ChannelMapping,
+    Crate,
+    ReadoutChannel,
+    ReadoutModule,
+    Resonator,
+    Wafer,
+)
+from .session import HWMConstructor, HWMCSVConstructor, read_csv
 
 
 from . import session
 
 import sys
 import os
+import yaml
 
 
 class YAMLLoader(session.YAMLLoader):
@@ -55,6 +65,80 @@ class YAMLLoader(session.YAMLLoader):
             "!Resonators",
             HWMCSVConstructor(lambda loader: getattr(loader.flavour, "Resonator")),
         )
+
+        self.add_constructor("!ChannelMappings", ChannelMappingCSVConstructor)
+
+
+def ChannelMappingCSVConstructor(loader, node):
+    """
+    Expect the following attributes:
+
+    resonator:
+        A path specifying a resonator (wafer/name or name)
+
+    channel:
+        The channel number used to index ReadoutChannel
+    """
+
+    fn = os.path.join(os.path.dirname(loader.name), node.value)
+    dr = read_csv(fn)
+
+    to_add = []
+
+    for mapping in dr:
+        # Parse 'readout_channel' entry into a ReadoutChannel mapping
+        if "readout_channel" not in mapping:
+            raise yaml.YAMLError("Missing 'channel' mapping in ChannelMapping CSV")
+
+        match mapping["readout_channel"].split("/"):
+            case (serial, mod, channel):
+                mapping["readout_channel"] = (
+                    loader.hwm.query(ReadoutChannel)
+                    .join(ReadoutModule)
+                    .join(CRS)
+                    .filter(
+                        ReadoutChannel.channel == channel,
+                        ReadoutModule.module == mod,
+                        CRS.serial == serial,
+                    )
+                    .one()
+                )
+
+            case (crate, slot, mod, channel):
+                mapping["readout_channel"] = (
+                    loader.hwm.query(ReadoutChannel)
+                    .join(ReadoutModule)
+                    .join(CRS)
+                    .join(Crate)
+                    .filter(
+                        ReadoutChannel.channel == channel,
+                        ReadoutModule.module == mod,
+                        CRS.slot == slot,
+                        Crate.serial == crate,
+                    )
+                    .one()
+                )
+
+            case _:
+                raise yaml.YAMLError(f"Unable to parse {_} into a ReadoutChannel")
+
+        # Parse 'resonator' entry into a Resonator mapping
+        if "resonator" not in mapping:
+            raise yaml.YAMLError("Missing 'resonator' mapping in ChannelMapping CSV")
+
+        match mapping["resonator"].split("/"):
+            case (wafer, resonator):
+                mapping["resonator"] = (
+                    loader.hwm.query(Resonator)
+                    .join(Wafer)
+                    .filter(Resonator.name == resonator, Wafer.name == wafer)
+                    .one()
+                )
+
+            case _:
+                raise yaml.YAMLError(f"Unable to parse {_} into Resonator mapping!")
+
+    loader.hwm.add_all([ChannelMapping(**x) for x in dr])
 
 
 class AttributeMappingTouchup:

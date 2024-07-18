@@ -145,6 +145,77 @@ def test_hardware_map_with_wafer_and_resonator_csv(tmp_path):
     assert r2.wafer.name == "some_wafer"
 
 
+def test_hardware_map_with_channel_mappings(tmp_path):
+
+    # Create a CSV file describing a few Resonators. We'll load this below in
+    # the HWM.
+    mapping = tmp_path / "channel_mapping.csv"
+    mapping.write_text(
+        textwrap.dedent(
+            f"""
+                resonator\treadout_channel
+                some_wafer/steve\t0024/1/1
+                some_wafer/nancy\t0025/1/1
+                some_wafer/george\t003/1/1/2
+                some_wafer/georgina\t003/2/1/2
+            """
+        ).strip()
+    )
+
+    # Create a CSV file describing a few Resonators. We'll load this below in
+    # the HWM.
+    resonators = tmp_path / "resonators.csv"
+    resonators.write_text(
+        textwrap.dedent(
+            f"""
+                name\tbias_freq\tbias_amplitude
+                steve\t100e6\t0.1
+                nancy\t101e6\t0.2
+                george\t102e6\t0.3
+                georgina\t103e6\t0.4
+            """
+        ).strip()
+    )
+
+    s = rfmux.load_session(
+        f"""
+        !HardwareMap
+        - !Crate
+          serial: "003"
+          slots:
+            1: !CRS {{ serial: "0024" }}
+            2: !CRS {{ serial: "0025" }}
+
+        - !Wafer
+          name: some_wafer
+          resonators: !Resonators "{str(resonators)}"
+
+        - !ChannelMappings "{str(mapping)}"
+        """
+    )
+
+    # Query the resonators, sorted by bias amplitude.
+    r1, r2, r3, r4 = (
+        s.query(rfmux.Resonator).order_by(rfmux.Resonator.bias_amplitude).all()
+    )
+
+    assert r1.name == "steve"
+    assert r1.readout_channel.module.crs.serial == "0024"
+    assert r1.readout_channel.channel == 1
+
+    assert r2.name == "nancy"
+    assert r2.readout_channel.module.crs.serial == "0025"
+    assert r2.readout_channel.channel == 1
+
+    assert r3.name == "george"
+    assert r3.readout_channel.module.crs.serial == "0024"
+    assert r3.readout_channel.channel == 2
+
+    assert r4.name == "georgina"
+    assert r4.readout_channel.module.crs.serial == "0025"
+    assert r4.readout_channel.channel == 2
+
+
 @pytest.fixture
 def live_session():
     if "CRS_SERIAL" not in os.environ:

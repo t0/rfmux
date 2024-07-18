@@ -1,4 +1,4 @@
-#!/usr/bin/env -S PYTHONPATH=.. python3
+#!/usr/bin/env -S PYTHONPATH=.. pytest-3 -v
 
 """
 Calling tests.
@@ -24,7 +24,41 @@ This test script can be invoked in three ways:
 
 import rfmux
 import pytest
-import textwrap
+
+
+@pytest.mark.xfail(reason="@macro unexpectedly requires resolve()")
+def test_macro():
+    @rfmux.macro(rfmux.CRS)
+    async def macro_that_returns_serial_number(d):
+        return d.serial
+
+    s = rfmux.load_session(
+        """
+        !HardwareMap
+        - !CRS { serial: "0024" }
+        """
+    )
+    ds = s.query(rfmux.CRS)
+    assert set(ds.macro_that_returns_serial_number()) == {"0024"}
+
+    d = s.query(rfmux.CRS).one()
+    assert d.serial == d.macro_that_returns_serial_number()
+
+
+def test_algorithm():
+    @rfmux.algorithm(rfmux.CRS)
+    async def algorithm_that_returns_serial_number(d):
+        return d.serial
+
+    s = rfmux.load_session(
+        """
+        !HardwareMap
+        - !CRS { serial: "0024" }
+        """
+    )
+    ds = s.query(rfmux.CRS)
+    with pytest.warns(DeprecationWarning):
+        assert set(ds.algorithm_that_returns_serial_number()) == {"0024"}
 
 
 def test_simple_live_board_interaction(live_session):

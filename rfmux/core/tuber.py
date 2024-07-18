@@ -339,8 +339,12 @@ class TuberCategory:
                 raise AttributeError("'%s' is not a valid method or property!" % name)
             m = getattr(parent, name)
 
-            # There may be a latent tw*routine hangover here
-            raise AttributeError("'%s' is not a valid method or property!" % name)
+            async def acall(*args, **kwargs):
+                mapped_args = {n: f(self) for (n, f) in decorator.arg_mappers.items()}
+
+                return await m(*args, **kwargs, **mapped_args)
+
+            return acall
 
         cls.__getattr__ = __getattr__
 

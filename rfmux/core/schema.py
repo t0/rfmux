@@ -9,7 +9,7 @@ from sqlalchemy.orm import relationship, backref
 from sqlalchemy.orm.collections import attribute_mapped_collection
 from .hardware_map import Boolean
 
-from . import hardware_map, tuber, tworoutine
+from . import hardware_map, tuber
 
 import base64
 import asyncio
@@ -145,9 +145,8 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
             "I need serial or crate information."
         )
 
-    @tworoutine.tworoutine
     async def resolve(self):
-        await (~self._tuber_get_meta)()
+        await self._tuber_get_meta()
 
 
 @tuber.TuberCategory(
@@ -361,7 +360,7 @@ class ChannelMapping(HWMResource):
 
 @hardware_map.algorithm(CRS, register=True)
 async def resolve(boards):
-    await asyncio.gather(*[(~d.resolve)() for d in boards])
+    await asyncio.gather(*[d.resolve() for d in boards])
 
 
 # vim: sts=4 ts=4 sw=4 tw=78 smarttab expandtab

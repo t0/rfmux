@@ -7,8 +7,6 @@ import aiohttp
 import textwrap
 import types
 
-from . import tworoutine
-
 # Simplejson is now mandatory (it's faster enough to insist)
 import simplejson
 
@@ -70,7 +68,6 @@ def valid_dynamic_attr(name):
             "_repr",
             "_ipython",
             "_orm",
-            "_tworoutine__",
             "_calls",
         )
     ):
@@ -82,7 +79,7 @@ def valid_dynamic_attr(name):
     return True
 
 
-class Context(tworoutine.tworoutine):
+class Context:
     """A context container for TuberCalls. Permits calls to be aggregated.
 
     Using this interface, you can write code like:
@@ -155,7 +152,7 @@ class Context(tworoutine.tworoutine):
         """Ensure the context is flushed."""
 
         if self.calls:
-            await (~self)()
+            await self()
 
     def _add_call(self, **request):
 
@@ -171,7 +168,7 @@ class Context(tworoutine.tworoutine):
 
         return future
 
-    async def __acall__(self):
+    async def __call__(self):
         """Break off a set of calls and return them for execution."""
 
         calls = []
@@ -342,18 +339,7 @@ class TuberCategory:
                 raise AttributeError("'%s' is not a valid method or property!" % name)
             m = getattr(parent, name)
 
-            if isinstance(m, tworoutine.tworoutine):
-
-                @tworoutine.tworoutine
-                async def acall(*args, **kwargs):
-                    mapped_args = {
-                        n: f(self) for (n, f) in decorator.arg_mappers.items()
-                    }
-
-                    return await (~m)(*args, **kwargs, **mapped_args)
-
-                return acall
-
+            # There may be a latent tw*routine hangover here
             raise AttributeError("'%s' is not a valid method or property!" % name)
 
         cls.__getattr__ = __getattr__
@@ -446,7 +432,6 @@ class TuberObject:
 
         return sorted(attrs + meta.properties + meta.methods)
 
-    @tworoutine.tworoutine
     async def _tuber_get_meta(self):
         """Retrieve metadata associated with the remote network resource.
 
@@ -469,16 +454,16 @@ class TuberObject:
         if self.tuber_uri not in self._tuber_meta:
             async with self.tuber_context() as ctx:
                 ctx._add_call()
-                meta = await (~ctx)()
+                meta = await ctx()
                 meta = meta[0]
 
                 for p in meta.properties:
                     ctx._add_call(property=p)
-                prop_list = await (~ctx)()
+                prop_list = await ctx()
 
                 for m in meta.methods:
                     ctx._add_call(property=m)
-                meth_list = await (~ctx)()
+                meth_list = await ctx()
 
                 props = dict(zip(meta.properties, prop_list or []))
                 methods = dict(zip(meta.methods, meth_list or []))
@@ -544,35 +529,34 @@ class TuberObject:
 
         if name in meta.methods:
             # Generate a callable prototype
-            @tworoutine.tworoutine
             async def invoke(self, *args, **kwargs):
                 async with self.tuber_context() as ctx:
                     result = getattr(ctx, name)(*args, **kwargs)
                 return result.result()
 
-            if hasattr(metam[name], "__doc__"):
-                # When available, prefer direct annotations via '__doc__' to
-                # overstructured metadata.
-                invoke.__acall__.__doc__ = metam[name].__doc__
-            else:
-                invoke.__acall__.__doc__ = textwrap.dedent(
-                    """
-                    {name}({args_short})
+            # if hasattr(metam[name], "__doc__"):
+            #    # When available, prefer direct annotations via '__doc__' to
+            #    # overstructured metadata.
+            #    invoke.__call__.__doc__ = metam[name].__doc__
+            # else:
+            #    invoke.__call__.__doc__ = textwrap.dedent(
+            #        """
+            #        {name}({args_short})
 
-                    {args_long}
+            #        {args_long}
 
-                    {explanation}"""
-                ).format(
-                    name=name,
-                    args_short=", ".join([a.name for a in metam[name].args]),
-                    args_long="\n".join(
-                        [
-                            "    {:<16} {}".format(arg.name + ":", arg.description)
-                            for arg in metam[name].args
-                        ]
-                    ),
-                    explanation="\n".join(textwrap.wrap(metam[name].explanation)),
-                )
+            #        {explanation}"""
+            #    ).format(
+            #        name=name,
+            #        args_short=", ".join([a.name for a in metam[name].args]),
+            #        args_long="\n".join(
+            #            [
+            #                "    {:<16} {}".format(arg.name + ":", arg.description)
+            #                for arg in metam[name].args
+            #            ]
+            #        ),
+            #        explanation="\n".join(textwrap.wrap(metam[name].explanation)),
+            #    )
 
             # Associate as a class method.
             setattr(self.__class__, name, invoke)

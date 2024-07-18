@@ -16,6 +16,7 @@ dependencies = [
   "matplotlib",
   "numpy",
   "pytest",
+  "pytest-asyncio",
   "pyyaml",
   "scipy",
   "simplejson",

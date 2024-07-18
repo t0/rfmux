@@ -28,7 +28,7 @@ import sqlalchemy.types
 import sqlalchemy.exc
 import sqlite3
 
-from . import tworoutine, tuber
+from . import tuber
 
 from sqlalchemy.inspection import inspect as sqlinspect
 from sqlalchemy.orm import DeclarativeBase
@@ -112,8 +112,6 @@ class HWMQuery(sqlalchemy.orm.Query):
                 continue
             algs = self._algorithm_registry[cls]
             if name in algs:
-                if isinstance(algs[name], tworoutine.tworoutine):
-                    return tworoutine.tworoutine(~algs[name], self)
                 return functools.partial(algs[name], self)
 
         # Next, try attributes/methods from contained objects.
@@ -213,7 +211,6 @@ class HWMQuery(sqlalchemy.orm.Query):
         if self.count() == 0:
             return lambda *x, **y: []
 
-        @tworoutine.tworoutine
         async def acall(*sub_args, **sub_kwargs):
             # Note that we have two sets of (*args, **kwargs): the ones
             # provided directly to the prototype function, and the ones
@@ -228,15 +225,9 @@ class HWMQuery(sqlalchemy.orm.Query):
                 )
             k = (kwargs or sub_kwargs).copy()
 
-            # We could code up a synchronous code path here, but expect
-            # it to be asynchronous. Make it an error for now.
-            assert all([isinstance(f, tworoutine.tworoutine) for f in funcs])
-
-            fs = []
-            for f, za in zip(funcs, zip_args):
-                fs.append((~f)(*(za + a), **k))
-
-            return await asyncio.gather(*fs)
+            return await asyncio.gather(
+                *[f(*(za + a), **k) for f, za in zip(funcs, zip_args)]
+            )
 
         return acall
 
@@ -322,7 +313,6 @@ class macro:
 
         vcs = self._valid_classes
 
-        @tworoutine.tworoutine
         async def acall(obj, *args, **kwargs):
 
             # Check that the macro was called with an allowed class
@@ -361,12 +351,9 @@ class algorithm:
     The "print_channel" function is called *once*, and is passed in a HWMQuery
     of ReadoutChannels that can be iterated over. When we bump into the
     "print" statement, an array of integers is assembled.
-
-    If allow_async is set to True, the wrapped function must be async. It's
-    wrapped into a @tworoutine internally.
     """
 
-    def __init__(dec, cls, register=True, allow_async=True):
+    def __init__(dec, cls, register=True):
         # Accept either a class or a list of classes
         try:
             iter(cls)
@@ -375,56 +362,31 @@ class algorithm:
 
         dec.__valid_classes = cls
         dec.__register = register
-        dec.__allow_async = allow_async
 
     def __call__(dec, func):
 
         name = func.__name__
 
-        if dec.__allow_async:
-            if not asyncio.iscoroutinefunction(func):
-                raise RuntimeError(
-                    "The @algorithm decorator is intended for "
-                    "'async def' functions only!"
+        if not asyncio.iscoroutinefunction(func):
+            raise RuntimeError(
+                "The @algorithm decorator is intended for "
+                "'async def' functions only!"
+            )
+
+        async def acall(objs, *args, **kwargs):
+
+            vcs = dec.__valid_classes
+            if vcs and not all([issubclass(x.__class__, vcs) for x in objs]):
+                raise TypeError(
+                    "Algorithm called with wrong types! "
+                    "Expected %s, got %s"
+                    % (
+                        ", ".join([cls.__name__ for cls in vcs]),
+                        ", ".join(set([x.__class__.__name__ for x in objs])),
+                    )
                 )
 
-            @tworoutine.tworoutine
-            async def acall(objs, *args, **kwargs):
-
-                vcs = dec.__valid_classes
-                if vcs and not all([issubclass(x.__class__, vcs) for x in objs]):
-                    raise TypeError(
-                        "Algorithm called with wrong types! "
-                        "Expected %s, got %s"
-                        % (
-                            ", ".join([cls.__name__ for cls in vcs]),
-                            ", ".join(set([x.__class__.__name__ for x in objs])),
-                        )
-                    )
-
-                return await func(objs, *args, **kwargs)
-
-        else:
-            if asyncio.iscoroutinefunction(func):
-                raise RuntimeError(
-                    "The @algorithm decorator with allow_async=False is "
-                    "intended for 'def' functions (i.e. not async) only!"
-                )
-
-            def acall(objs, *args, **kwargs):
-
-                vcs = dec.__valid_classes
-                if vcs and not all([issubclass(x.__class__, vcs) for x in objs]):
-                    raise TypeError(
-                        "Algorithm called with wrong types! "
-                        "Expected %s, got %s"
-                        % (
-                            ", ".join([cls.__name__ for cls in vcs]),
-                            ", ".join(set([x.__class__.__name__ for x in objs])),
-                        )
-                    )
-
-                return func(objs, *args, **kwargs)
+            return await func(objs, *args, **kwargs)
 
         # Register this algorithm with the HWMQuery.
         if dec.__register:

@@ -8,7 +8,6 @@ __all__ = [
     "macro",
     "algorithm",
     "HardwareMap",
-    "tworoutine",
     "load_session",
     "get_session",
     "set_session",
@@ -48,8 +47,6 @@ from .core.crs import (
     Wafer,
 )
 
-
-from .core.tworoutine import tworoutine
 
 from .core.hardware_map import macro, algorithm, HardwareMap
 

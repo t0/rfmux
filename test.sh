@@ -28,7 +28,7 @@ if ! command -v pyenv &> /dev/null; then
 fi
 
 # Install necessary Python versions using pyenv
-PYTHON_VERSIONS=("3.8.5" "3.9.2" "3.10.13" "3.11.8" "3.12.2")
+PYTHON_VERSIONS=("3.10.13" "3.11.8" "3.12.2")
 for version in "${PYTHON_VERSIONS[@]}"; do
     if ! pyenv versions --bare | grep -q "^$version$"; then
         pyenv install "$version"
@@ -36,10 +36,10 @@ for version in "${PYTHON_VERSIONS[@]}"; do
 done
 
 # Optionally set a local Python version for the project
-pyenv local 3.8.5 3.9.2 3.10.13 3.11.8 3.12.2
+pyenv local 3.10.13 3.11.8 3.12.2
 
 # Ensure tox is installed locally (don't use the distro version)
-pip3.9 install --upgrade pip setuptools tox
+pip3.10 install --upgrade pip setuptools tox
 
 # Now kick off regression tests
-python3.9 -m tox
+python3.10 -m tox

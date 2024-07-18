@@ -1,8 +1,0 @@
-sqlalchemy >= 2.0.0
-aiohttp
-simplejson
-pyyaml
-numpy
-matplotlib
-scipy
-pytest

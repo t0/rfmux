@@ -19,8 +19,8 @@ __all__ = [
 # Check version numbers
 import sys
 
-if sys.version_info < (3, 8):
-    raise RuntimeError("Python >= 3.8 is required.")
+if sys.version_info < (3, 10):
+    raise RuntimeError("Python >= 3.10 is required.")
 
 import importlib.metadata  # requires Python 3.8+
 from packaging.version import parse

@@ -26,9 +26,9 @@ import rfmux
 import pytest
 
 
-@pytest.mark.xfail(reason="@macro unexpectedly requires resolve()")
-def test_macro():
-    @rfmux.macro(rfmux.CRS)
+@pytest.mark.asyncio
+async def test_macro():
+    @rfmux.macro(rfmux.CRS, register=True)
     async def macro_that_returns_serial_number(d):
         return d.serial
 
@@ -39,13 +39,14 @@ def test_macro():
         """
     )
     ds = s.query(rfmux.CRS)
-    assert set(ds.macro_that_returns_serial_number()) == {"0024"}
+    assert set(await ds.macro_that_returns_serial_number()) == {"0024"}
 
     d = s.query(rfmux.CRS).one()
-    assert d.serial == d.macro_that_returns_serial_number()
+    assert d.serial == await d.macro_that_returns_serial_number()
 
 
-def test_algorithm():
+@pytest.mark.asyncio
+async def test_algorithm():
     @rfmux.algorithm(rfmux.CRS)
     async def algorithm_that_returns_serial_number(d):
         return d.serial
@@ -57,25 +58,27 @@ def test_algorithm():
         """
     )
     ds = s.query(rfmux.CRS)
-    with pytest.warns(DeprecationWarning):
-        assert set(ds.algorithm_that_returns_serial_number()) == {"0024"}
+    assert set(await ds.algorithm_that_returns_serial_number()) == {"0024"}
 
 
-def test_simple_live_board_interaction(live_session):
+@pytest.mark.asyncio
+async def test_simple_live_board_interaction(live_session):
     d = live_session.query(rfmux.CRS).one()
-    d.resolve()
-    d.get_frequency(d.UNITS.HZ, channel=1, module=1)
+    await d.resolve()
+    await d.get_frequency(d.UNITS.HZ, channel=1, module=1)
 
 
-def test_live_board_interaction_with_orm(live_session):
+@pytest.mark.asyncio
+async def test_live_board_interaction_with_orm(live_session):
     ds = live_session.query(rfmux.CRS)
-    ds.resolve()
+    await ds.resolve()
 
     d = live_session.query(rfmux.CRS).one()
-    f = d.get_frequency(d.UNITS.HZ, channel=1, module=1)
-    fs = ds.get_frequency(d.UNITS.HZ, channel=1, module=1)
+    f = await d.get_frequency(d.UNITS.HZ, channel=1, module=1)
+    fs = await ds.get_frequency(d.UNITS.HZ, channel=1, module=1)
 
     assert {f} == set(fs)
+    print(f"Frequency is {f}")
 
 
 if __name__ == "__main__":

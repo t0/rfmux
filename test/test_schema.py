@@ -1,4 +1,4 @@
-#!/usr/bin/env -S PYTHONPATH=.. python3
+#!/usr/bin/env -S PYTHONPATH=.. pytest-3 -v
 
 """
 Schema tests.

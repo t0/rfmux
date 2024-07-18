@@ -257,7 +257,6 @@ class Context:
         return caller
 
 
-# TODO: Is this description still valid with the CRS?
 class TuberCategory:
     """Pull Tuber functions into ORM objects based on categories.
 
@@ -279,30 +278,11 @@ class TuberCategory:
         >>> mod.set_dac_scale(scale, d.UNITS.DBM)
 
     The TuberCategory decorator allows this kind of call.
-    Borrowing from FMCMezzanine again, we invoke the TuberCategory decorator as follows:
-
-        @tuber.TuberCategory("Module", lambda m: m.crs,
-            {"module": lambda m: m.module_number })
-        class Module(HWMResource):
-            [...]
-
     The decorator intercepts Tuber functions that claim to be members
     of the "Module" category, and using the Module object's
     module_number property, fills in "module" parameters before
     dispatching the function call back to the module's "crs"
     property.
-
-    TODO: Update this example to one with an actual module field
-    # "Categories" are exported by C code. For example, try the following:
-
-    #     $ curl -d '{"object":"CRS","property":"set_timestamp_port"}' \
-    #             http://crs004.local/tuber|json_pp
-
-    # This shell command asks the CRS to describe its 'set_timestamp_port'
-    # call. The response includes:
-
-    # "result" : {
-    #   "__doc__" : "set_timestamp_port(self: libmkids.Dfmux, port: TimestampPort) -> None"}
     """
 
     def __init__(self, category, getobject, **arg_mappers):

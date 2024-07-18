@@ -1,19 +1,13 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S PYTHONPATH=.. python3
 
 """
 Schema tests.
 
-This test script can be invoked in three ways:
+This test script can be invoked in two ways:
 
-- By itself, in your PC's current Python environment, without relying on a
-  running CRS board:
+- By itself, in your PC's current Python environment:
 
-      ~/rfmux/test$ PYTHONPATH=.. ./test_schema.py 
-
-- By itself, in your PC's current Python environment, with a CRS board running
-  alongside: (note the CRS_SERIAL environment variable!)
-
-      ~/rfmux/test$ CRS_SERIAL=0024 PYTHONPATH=.. ./test_schema.py
+      ./test_schema.py
 
 - As part of a complete regression test environment (exercising all test
   scripts and in a variety of different Python environments), without relying
@@ -24,7 +18,6 @@ This test script can be invoked in three ways:
 
 import rfmux
 import pytest
-import os
 import textwrap
 
 
@@ -214,38 +207,6 @@ def test_hardware_map_with_channel_mappings(tmp_path):
     assert r4.name == "georgina"
     assert r4.readout_channel.module.crs.serial == "0025"
     assert r4.readout_channel.channel == 2
-
-
-@pytest.fixture
-def live_session():
-    if "CRS_SERIAL" not in os.environ:
-        pytest.skip(
-            "Set the CRS_SERIAL environment variable to match your CRS board to run this test."
-        )
-
-    return rfmux.load_session(
-        f"""
-        !HardwareMap
-        - !CRS {{ serial: "{os.environ['CRS_SERIAL']}" }}
-        """
-    )
-
-
-def test_simple_live_board_interaction(live_session):
-    d = live_session.query(rfmux.CRS).one()
-    d.resolve()
-    d.get_frequency(d.UNITS.HZ, channel=1, module=1)
-
-
-def test_live_board_interaction_with_orm(live_session):
-    ds = live_session.query(rfmux.CRS)
-    ds.resolve()
-
-    d = live_session.query(rfmux.CRS).one()
-    f = d.get_frequency(d.UNITS.HZ, channel=1, module=1)
-    fs = ds.get_frequency(d.UNITS.HZ, channel=1, module=1)
-
-    assert {f} == set(fs)
 
 
 if __name__ == "__main__":

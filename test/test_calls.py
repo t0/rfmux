@@ -77,8 +77,8 @@ async def test_live_board_interaction_with_orm(live_session):
     f = await d.get_frequency(d.UNITS.HZ, channel=1, module=1)
     fs = await ds.get_frequency(d.UNITS.HZ, channel=1, module=1)
 
-    assert {f} == set(fs)
-    print(f"Frequency is {f}")
+    assert f == fs[0]
+    assert await d.module[1].channel[1].get_frequency(d.UNITS.HZ) == f
 
 
 if __name__ == "__main__":

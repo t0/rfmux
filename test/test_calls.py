@@ -81,5 +81,17 @@ async def test_live_board_interaction_with_orm(live_session):
     assert await d.module[1].channel[1].get_frequency(d.UNITS.HZ) == f
 
 
+@pytest.mark.asyncio
+async def test_macro_with_arg_filler():
+    @rfmux.macro(rfmux.CRS, register=True)
+    async def channel_macro(self, channel, module):
+        return module == 3 and channel == 4
+
+    s = rfmux.load_session('!HardwareMap [!CRS { serial: "0024" }]')
+    d = s.query(rfmux.CRS).one()
+
+    assert await d.module[3].channel[4].channel_macro()
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

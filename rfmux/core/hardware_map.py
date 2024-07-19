@@ -28,7 +28,7 @@ import sqlalchemy.types
 import sqlalchemy.exc
 import sqlite3
 
-from . import tuber
+import tuber
 
 from sqlalchemy.inspection import inspect as sqlinspect
 from sqlalchemy.orm import DeclarativeBase
@@ -101,7 +101,7 @@ class HWMQuery(sqlalchemy.orm.Query):
         # as a collection and call things like "count()" on it.
 
         # Refuse to __getattr__ a couple of special names used elsewhere.
-        if not tuber.valid_dynamic_attr(name):
+        if tuber.client.attribute_blacklisted(name):
             raise AttributeError()
 
         query_type = self.column_descriptions[0]["type"]

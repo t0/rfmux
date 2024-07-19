@@ -7,22 +7,78 @@ encouraged to create a subclass.
 from sqlalchemy import Column, Integer, String, ForeignKey, UniqueConstraint, Float
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy.orm.collections import attribute_mapped_collection
-from .hardware_map import Boolean
 
-from . import hardware_map, tuber
-
-import base64
-import asyncio
+from . import hardware_map
+from .hardware_map import Boolean, HWMResource, HWMQuery
 
 import sqlalchemy
+import tuber
 
 
-from .hardware_map import HWMResource, HWMQuery
+class ArgumentFiller:
+    """Allow ORM structure to partially fill function-call arguments.
 
-from . import tuber
+    The ORM gives you object-based handles to "ReadoutModule" and
+    "ReadoutChannel objects like so:
+
+        >>> mod = crs.module[3].channel[4]
+
+    The ArgumentFiller allows these indexed objects to autoamtically be
+    translated into function-call arguments on a TuberObject. For example:
+
+        >>> crs.get_frequency(d.UNITS.HZ, channel=3, module=4)
+
+    can be equivalently expressed as
+
+        >>> crs.module[3].channel[4].get_frequency(d.UNITS.HZ)
+
+    FIXME: it would be wonderful if tab-completion worked here, but it doesn't.
+    """
+
+    def __init__(self, getobject, **arg_mappers):
+        self.getobject = getobject
+        self.arg_mappers = arg_mappers
+
+    def __call__(decorator, cls):
+
+        def tuber_context(self):
+            obj = decorator.getobject(self)
+            kwargs = {n: f(self) for (n, f) in decorator.arg_mappers.items()}
+            return Context(obj, **kwargs)
+
+        cls.tuber_context = tuber_context
+
+        def __getattr__(self, name):
+            """This is a fall-through replacement for __getattr__.
+
+            We assume we're capturing a function call that's missing
+            arguments. We fill in these arguments and dispatch the call.
+
+            See `TuberObject.__getattr__` for details.
+            """
+
+            # Refuse to __getattr__ a couple of special names used elsewhere.
+            if tuber.client.attribute_blacklisted(name):
+                raise AttributeError("'%s' is not a valid method or property!" % name)
+
+            parent = decorator.getobject(self)
+
+            # Raise an Attribute error if the parent board isn't set
+            if parent is None:
+                raise AttributeError("'%s' is not a valid method or property!" % name)
+            m = getattr(parent, name)
+
+            async def acall(*args, **kwargs):
+                mapped_args = {n: f(self) for (n, f) in decorator.arg_mappers.items()}
+
+                return await m(*args, **kwargs, **mapped_args)
+
+            return acall
+
+        cls.__getattr__ = __getattr__
+        return cls
 
 
-@tuber.TuberCategory("Backplane", lambda b: b.slots.first())
 class Crate(hardware_map.HWMResource):
     __tablename__ = "crates"
     __table_args__ = (UniqueConstraint("serial"),)
@@ -76,6 +132,10 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
             self.modules = [ReadoutModule(module=m + 1) for m in range(4)]
         super().__init__(*args, **kwargs)
 
+    @sqlalchemy.orm.reconstructor
+    def reconstruct(self):
+        tuber.TuberObject.__init__(self, "Dfmux", hostname=self.tuber_hostname)
+
     modules = relationship(
         "ReadoutModule",
         lazy="dynamic",
@@ -109,36 +169,22 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
         else:
             return f"{self.__class__.__name__}({self.serial})"
 
-    def set_fpga_bitstream(self, buf):
-        """
-        Configures the FPGA with the specified buffer.
-
-        The buffer is an ordinary string object or similar, and
-        contains an already loaded .BIT or .BIN file.
-        """
-        b64_string = base64.b64encode(buf)
-        self._set_fpga_bitstream_base64(b64_string)
-
     @property
-    def tuber_uri(self):
-        """Smarter, CRS-aware tuber_uri.
-
-        The version of 'tuber_uri' in tuber.py doesn't know about calculating
-        hostnames from serials, for instance.
-        """
+    def tuber_hostname(self):
+        """Hostname, derived from whatever the ORM tree knows about"""
 
         if self.hostname:
             # We have a hostname; just use it.
-            return f"http://{hostname}/tuber"
+            return self.hostname
 
         if self.serial:
             # We have a serial number; compute the hostname.
-            return f"http://rfmux{self.serial}.local/tuber"
+            return f"rfmux{self.serial}.local"
 
         if self.slot and self.crate:
             # We have a slot and crate,
             # we can use the crate-based hostname (i.e. slot3.crate001.local).
-            return f"http://slot{self.slot}.crate{self.crate.serial}.local/tuber"
+            return f"slot{self.slot}.crate{self.crate.serial}.local"
 
         raise NameError(
             "Couldn't figure out a Tuber URI for this object! "
@@ -146,11 +192,10 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
         )
 
     async def resolve(self):
-        await self._tuber_get_meta()
+        await self.tuber_resolve()
 
 
-@tuber.TuberCategory(
-    "ReadoutModule",
+@ArgumentFiller(
     lambda m: m.crs,
     module=lambda m: m.module,
 )
@@ -214,8 +259,7 @@ class ReadoutModule(HWMResource):
     )
 
 
-@tuber.TuberCategory(
-    "ReadoutChannel",
+@ArgumentFiller(
     lambda c: c.crs,
     module=lambda c: c.module.module,
     channel=lambda c: c.channel,
@@ -356,11 +400,6 @@ class ChannelMapping(HWMResource):
     )
 
     crs = property(lambda x: x.readout_channel.crs if x.readout_channel else None)
-
-
-@hardware_map.algorithm(CRS, register=True)
-async def resolve(boards):
-    await asyncio.gather(*[d.resolve() for d in boards])
 
 
 # vim: sts=4 ts=4 sw=4 tw=78 smarttab expandtab

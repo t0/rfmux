@@ -488,9 +488,11 @@ def HardwareMap(uri="sqlite:///:memory:", echo=False, data=None, *args, **kwargs
     # of the relevant tables have been created.
     Base.metadata.create_all(e)
 
-    return sqlalchemy.orm.sessionmaker(
-        bind=e, query_cls=HWMQuery, class_=Session, *args, **kwargs
-    )()
+    return sqlalchemy.orm.scoped_session(
+        sqlalchemy.orm.sessionmaker(
+            bind=e, query_cls=HWMQuery, class_=Session, *args, **kwargs
+        )
+    )
 
 
 # vim: sts=4 ts=4 sw=4 tw=78 smarttab expandtab

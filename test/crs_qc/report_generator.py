@@ -131,12 +131,16 @@ class PDFReport:
 
         # Extract non-module-specific tests from "Board Health"
         board_health_tests = summary_data['summary'].get('Board Health', {})
-        non_module_data = [['Test', 'Status']]
-        for test, status in board_health_tests.items():
-            non_module_data.append([test, status])
 
-        # Use default style for non-module-specific table
-        self.add_table(non_module_data, 'Board health')
+        #only create Board Health tests if they were conducted
+        if board_health_tests:  
+            non_module_data = [['Test', 'Status']]
+            for test, status in board_health_tests.items():
+                non_module_data.append([test, status])
+
+            # Use default style for non-module-specific table
+            self.add_table(non_module_data, 'Board health')
+
 
         # Generate module-specific table data
         all_tests = sorted(set(test for module, tests in summary_data['summary'].items() if module.isdigit() for test in tests))
@@ -199,7 +203,7 @@ class PDFReport:
 
 
 
-    def generate_dac_passband_section(self, data):
+    def generate_dac_passband_section(self, data, results_dir, title):
         self.add_section('DAC Passband Test')
         self.add_paragraph('This test aims to determine if the DAC accurately produces signals of frequencies within its passband (550MHz). \
                             A flat passband is expected within 275MHz relative to the NCO \
@@ -208,48 +212,27 @@ class PDFReport:
 
 
         for module in data['modules']:
-
-            frequencies = [ freq / 1e6 for freq in module['frequencies']]
-
-            plot_path = self.plot_data_and_save('plot',
-                frequencies,
-                module['measured_dbm'],
-                frequencies,
-                module['predicted_magnitude_dbm_values'],
-                'measured',
-                'predited',
-                'Frequency (MHz)',
-                'Magnitude (dBm)',
-                f'Signal at DAC of module {module["module"]} with increasing frequency',
-                f'plot_dac_module_{module["module"]}_passband.png'
-            )
+            graph_name = title + "_module_"+ f'{module["module"]}' +'.png'
+            plot_path = os.path.join(results_dir, 'plots', graph_name)
             self.add_plot(plot_path, f'DAC passband at module {module["module"]}')
+
             if module['error']:
                 self.add_paragraph(f'Module {module["module"]} does not meet the flat passband requirement.\
                                     {module["error"]}')
             else:
                 self.add_paragraph(f'Module {module["module"]} meets the passband requirements')
 
-    def generate_dac_amplitude_transfer_section(self, data):
+    def generate_dac_amplitude_transfer_section(self, data, results_dir, title):
             self.add_section('DAC Amplitude Transfer Test')
             self.add_paragraph('This test aims to determine if the DAC accurately scales the output signal with an increase in amplitude. \
                             The setting of amplitude is internal to the FPGA and represents the fraction of power outputted by the dac.\
                             The relationship is expected to be logarithmic and is predicted with a DAC Transfer function')
 
             for module in data['modules']:
-                plot_path = self.plot_data_and_save('plot',
-                    module['amplitude_values'],
-                    module['magnitude_dbm_values'],
-                    module['amplitude_values'],
-                    module['predicted_magnitude_dbm_values'],
-                    'measured',
-                    'predited',
-                    'Amplitude (Normalized)',
-                    'Magnitude (dBm)',
-                    f'DAC output of module {module["module"]} with increasing amplitude',
-                    f'Signal power vs normalized amplitude in Module #{module["module"]}.png',scale = 'log'
-                )
-                self.add_plot(plot_path, f'Signal power vs normalized amplitude in Module #{module["module"]}')
+                graph_name = title + "_module_"+ f'{module["module"]}' +'.png'
+                plot_path = os.path.join(results_dir, 'plots', graph_name)
+                self.add_plot(plot_path, f'Signal power vs normalized amplitude at module {module["module"]}')
+
                 if module['error']:
                     self.add_paragraph(f'Module {module["module"]} does not scale its output with amplitude correctly.\
                                     {module["error"]}')
@@ -257,7 +240,7 @@ class PDFReport:
                     self.add_paragraph(f'Module {module["module"]} meets the amplitude scaling requirements')
 
                 '''
-                If want to add a table, add only select values
+                If want to add a table, add only select values, NOT like this
                 rounded_measured_dbm = [round(x, 2) for x in module['magnitude_dbm_values']]
                 rounded_predicted_dbm = [round(x, 2) for x in module['predicted_magnitude_dbm_values']]
                 table_data = [['Amplitude', 'Pass/Fail', 'Measured (dBm)', 'Predicted (dBm)']] + \
@@ -269,25 +252,15 @@ class PDFReport:
                 self.add_table(table_data, f'Magnitude vs Amplitude at module {module["module"]}')
                 '''
         
-    def generate_dac_scale_transfer_section(self, data):
+    def generate_dac_scale_transfer_section(self, data, results_dir, title):
         self.add_section('DAC Scale Transfer Test')
         self.add_paragraph('Following the test of amplitude scaling, this test will determine if the DAC converter\
                            outputs signals of expected power level. The test will repeatedly call set_dac_scale with increasing values., which\
                             will change the current input into the balun. We expect the power output to scale linearly')
 
         for module in data['modules']:
-            plot_path = self.plot_data_and_save('plot',
-                module['scale_values'],
-                module['magnitude_dbm_values'],
-                module['scale_values'],
-                module['predicted_magnitude_dbm_values'],
-                'measured',
-                'predited',
-                'Scale(dBm)',
-                'Magnitude (dBm)',
-                f'DAC output of module_{module["module"]} with increasing scale',
-                f'DAC_scale_module_{module["module"]}.png'
-            )
+            graph_name = title + "_module_"+ f'{module["module"]}' +'.png'
+            plot_path = os.path.join(results_dir, 'plots', graph_name)
             self.add_plot(plot_path, f'Magnitude vs scale at module {module["module"]}')
             
             rounded_measured_dbm = [round(x, 2) for x in module['magnitude_dbm_values']]
@@ -300,51 +273,70 @@ class PDFReport:
                                    rounded_predicted_dbm))
             self.add_table(table_data, f'Magnitude vs Scale Table at module {module["module"]}')
 
+    
+    def generate_dac_mixmode_section(self, data, results_dir, title):
+        self.add_section(f'DAC in Mixmode 1 and 2 {data["analog_bank"]} bank')
+        if data['analog_bank'] == 'low':
+            self.add_paragraph('This test aims to determine if the DAC accurately produces signals when a particular mixmode is set.\
+                                Following the selected configuration of module-filter, we obtain the data for a single Nyquist region from a corresponding module.\
+                                The graphs of the mixmodes shown below are stitched together from the 3 measurements to showcase the complete behavior of the system.\
+                                Furthermore, data from the benchtop measurement is used to gauge the expected power output. The expected shapes should be consistent with \
+                                NRZ mode in the first mixmode and RC mode in the second mixmode.')
 
-    def generate_dac_mixmode_section(self, data):
-        self.add_section('DAC response in Mixmode 1 and 2')
-        self.add_paragraph('This test aims to determine if the DAC accurately produces signals when a particular mixmode is set.\
-                        Following the selected configuration of module-filter, we obtain the data for a single nyqist region from a corresponding module.\
-                        The graphs of the mixmodes shown below are stitched together from the 3 measurements to showcase the complete behaviour of the system.\
-                        Furthermore, data from the beanchtop measurement is used to gauge the expected power output. The expected shapes should be consistent with \
-                        NRZ mode in the first mixmode and RC mode in the second mixmode')
+        # Initialize the data structure for both banks
+        combined_data = {
+            'low': {1: {}, 2: {}},
+            'high': {1: {}, 2: {}}
+        }
 
-        combined_data = {1: {}, 2: {}}
-        modules = set()
-
-        # Aggregate data for each mixmode and module
+        # Aggregate data for each mixmode and module, separated by bank
         for mixmode in data['mixmodes']:
             mode = mixmode['mixmode']
-            module = mixmode['module']  # assuming 'module' is a key in your data
-            modules.add(module)
-            if module not in combined_data[mode]:
-                combined_data[mode][module] = {'frequencies': [], 'magnitudes': [], 'reference_frequencies' : [], 'reference_magnitudes' : []}
+            module = mixmode['module']
+            bank = data['analog_bank']  # Determine if it's low or high bank
 
-            combined_data[mode][module]['frequencies'].extend(mixmode['frequencies'])
-            combined_data[mode][module]['magnitudes'].extend(mixmode['magnitude_dbm_values'])
-            combined_data[mode][module]['reference_frequencies'].extend(mixmode['reference_frequencies'])
-            combined_data[mode][module]['reference_magnitudes'].extend(mixmode['reference_magnitudes'])           
+            if module not in combined_data[bank][mode]:
+                combined_data[bank][mode][module] = {
+                    'frequencies': [],
+                    'magnitudes': [],
+                    'reference_frequencies': [],
+                    'reference_magnitudes': []
+                }
 
-        # Plot data for each mixmode
-        for mode in combined_data:
-            plot_path = self.plot_data_and_save(
-                plot_method='scatter',
-                x_set_1=None,
-                data_set_1=combined_data[mode],
-                label_set_1='Measured Frequencies',
-                label_set_2='Reference Frequencies',
-                x_label='Frequency (GHz)',
-                y_label='Signal Magnitude (dBm)',
-                title=f'DAC output in the mixmode #{mode}',
-                filename=f'DAC_output_in_the_mixmode_{mode}.png',
-                mixmode=True
-            )
-            self.add_plot(plot_path, f'Signal power vs normalized amplitude in Mixmode #{mode}')
+            combined_data[bank][mode][module]['frequencies'].extend(mixmode['frequencies'])
+            combined_data[bank][mode][module]['magnitudes'].extend(mixmode['magnitude_dbm_values'])
+            combined_data[bank][mode][module]['reference_frequencies'].extend(mixmode['reference_frequencies'])
+            combined_data[bank][mode][module]['reference_magnitudes'].extend(mixmode['reference_magnitudes'])
+
+        # Plot data for each mixmode and bank
+        for bank_name in ['low', 'high']:
+            for mode in combined_data[bank_name]:
+                if not combined_data[bank_name][mode]:
+                    continue  # Skip if no data for this bank and mixmode
+
+                # The combined data for all modules in this bank and mixmode
+                data_set_1 = combined_data[bank_name][mode]
+
+                plot_path = self.plot_data_and_save(
+                    plot_method='scatter',
+                    x_set_1=None,  # This is None because the data is in the dictionary
+                    data_set_1=data_set_1,  # Pass the dictionary directly
+                    x_set_2=None,  # No need to pass this if you're handling references separately
+                    data_set_2=None,
+                    label_set_1='Measured Frequencies',
+                    label_set_2='Reference Frequencies',
+                    x_label='Frequency (GHz)',
+                    y_label='Signal Magnitude (dBm)',
+                    title=f'DAC output in mixmode #{mode} for {bank_name} bank',
+                    filename=f'DAC_output_in_mixmode_{mode}_{bank_name}.png',
+                    mixmode=True
+                )
+                self.add_plot(plot_path, f'Signal power vs normalized amplitude in Mixmode #{mode} for {bank_name} bank')
 
 
 
     
-    def generate_adc_attenuation_section(self, data):
+    def generate_adc_attenuation_section(self, data, results_dir, title):
         self.add_section('ADC Attenuation Test')
         self.add_paragraph('This test aims to determine if the attenuation factor set at the ADC \
                            accurately scales the incoming signal and is consistent with the predictions from the ADC transfer function. \
@@ -353,18 +345,9 @@ class PDFReport:
                            A linear relationship is expected.')
 
         for module in data['modules']:
-            plot_path = self.plot_data_and_save('plot',
-                module['attenuation_values'],
-                module['magnitude_dbm_values'],
-                module['attenuation_values'],
-                module['predicted_magnitude_dbm_values'],
-                'measured',
-                'predited',
-                'Attenuation(dBm)',
-                'Magnitude (dBm)',
-                f'Signal at ADC of module {module["module"]} with increasing attenuation',
-                f'plot_adc_module_{module["module"]}.png'
-            )
+            graph_name = title + "_module_"+ f'{module["module"]}' +'.png'
+            plot_path = os.path.join(results_dir, 'plots', graph_name)
+            
             self.add_plot(plot_path, f'Magnitude vs attenuation at module {module["module"]}')
 
             rounded_measured_dbm = [round(x, 2) for x in module['magnitude_dbm_values']]
@@ -378,7 +361,7 @@ class PDFReport:
             self.add_table(table_data, f'Magnitude vs Attenuation Table at module {module["module"]}')
 
 
-    def generate_loopback_noise_section(self, data):
+    def generate_loopback_noise_section(self, data, results_dir, title):
         self.add_section('Loopback Noise Test')
         self.add_paragraph('Firstly, to study the noise environment, a pure noise measurement will be taken. Setting carrier amplitude\
                             to 0 and calculating the PSD from the ADC samples yields the first graph. The expectation of the mean whilte noise level \
@@ -395,21 +378,9 @@ class PDFReport:
                             Firstly, to study the noise environment, a pure noise measurement will be taken. Setting carrier amplitude\
                             to 0 and calculating the PSD from the ADC samples yields the following:
             '''
-            # Noise floor PSD
-            plot_path = self.plot_data_and_save('plot line',
-                module['psd_frequencies_white'],
-                module['psd_i_white'],
-                module['psd_frequencies_white'],
-                module['psd_q_white'],
-                'I',
-                'Q',
-                'Frequency (Hz from carrier)',
-                'Magnitude (dBm/Hz)',
-                f'PSD of the noise floor at 277.23MHz',
-                f'plot_loopback_module_{module["module"]}_PSD.png', scale='log', yscale='linear'
-            )
-
-            self.add_plot(plot_path, f'Noise floor in loopback at module {module["module"]}')
+            graph_name = title + '_white_'+ '_module_'+  f'{module["module"]}'  +'.png'
+            plot_path_white = os.path.join(results_dir, 'plots', graph_name)
+            self.add_plot(plot_path_white, f'Noise floor in loopback at module {module["module"]}')
                     
             if any(noise > -140 for noise in module['psd_i_white']) or any(noise > -140 for noise in module['psd_q_white']):
                 self.add_paragraph(f'FAIL: module {module["module"]} produces exessive noise >-140dBm')
@@ -417,33 +388,39 @@ class PDFReport:
             else:
                 self.add_paragraph(f'PASS: noise from module {module["module"]} is within expected bounds <-140dBm')
 
-
-    
-            # 1/f noise PSD
-            plt.figure(figsize=(14, 6))
-            plt.plot(module['combined_freqs'], module['fitted_psd_values_dBm_Hz'], 'r', label=f'fit to 1/f spectrum: n = {module["slope"]:.2f}')
-            plt.scatter(module['combined_freqs'], module['combined_psd_1_f'], label='1/f spectrum data')
-            plt.scatter([module['psd_frequencies_white'][np.argmax(module['psd_i_white'])]], [module['max_point_1_f_i']], color='red', label=f'Max I spike: {module["max_point_1_f_i"]:.2f} dBm')
-            plt.scatter([module['psd_frequencies_white'][np.argmax(module['psd_q_white'])]], [module['max_point_1_f_q']], color='green', label=f'Max Q spike: {module["max_point_1_f_q"]:.2f} dBm')
-            plt.xscale('log')
-            plt.title('PSD of 1/f Noise')
-            plt.xlabel('Frequency (Hz)')
-            plt.ylabel('PSD (dBm/Hz)')
-            plt.legend()
-            plot_path_1_f = os.path.join(self.results_dir, 'plots', f'PSD_of_1_f_Noise_at_277_23_MHz_module_{module["module"]}.png')
-            os.makedirs(os.path.dirname(plot_path_1_f), exist_ok=True)
-            plt.savefig(plot_path_1_f)
-            plt.tight_layout()
-            
+            graph_name = title + '_1_f_'+ '_module_'+ f'{module["module"]}'  +'.png'
+            plot_path_1_f = os.path.join(results_dir, 'plots', graph_name)
             self.add_plot(plot_path_1_f, f'IQ Standard deviation at module {module["module"]}')
             expected_slope = -1
             if abs((module['slope'] - expected_slope) / expected_slope) > 0.1:
                 self.add_paragraph("Observe the slope of the 1/f noise deviates from the expected value of -1 (insert potential reason why).")
-    
+
+    def generate_wideband_fft_section(self, data):
+        self.add_section('Wideband FFT')
+        self.add_paragraph('Performed a 60000 sample measurement and took a snapshot fft of the target band 0 - 2.5GHz (Nyquist)\
+                            to get an FFT with frequency resolution of 83kHz. The values on the units are a little nuts though')
+
+        for module in data['modules']:
+            plot_path = self.plot_data_and_save('plot line',
+                module['freqs_i'],
+                module['psd_i'],
+                module['freqs_q'],
+                module['psd_q'],
+                'I',
+                'Q',
+                'Frequency (Hz)',
+                'Magnitude (dBm/Hz)',
+                f'Wideband Zoom FFT with frequency resolution 83kHz',
+                f'plot_wideband_fft_module_{module["module"]}_PSD.png', scale='linear', yscale='linear'
+            )
+
+            self.add_plot(plot_path, f'Wideband FFT in loopback at module {module["module"]}')
+
+
 def generate_report_from_data(serial, data_file, results_dir, summary_file):
     with open(data_file, 'r') as file:
         data = json.load(file)
-    
+        
     with open(summary_file, 'r') as file:
         summary_data = json.load(file)
 
@@ -460,21 +437,24 @@ def generate_report_from_data(serial, data_file, results_dir, summary_file):
         elif section['title'] == 'Voltage Test':
             report.generate_voltage_section(section)
         elif section['title'] == 'Current Test':
-            report.generate_current_section(section)
+            report.generate_current_section(section, section['title'])
         elif section['title'] == 'Loopback Noise Test':
-            report.generate_loopback_noise_section(section)
+            report.generate_loopback_noise_section(section,results_dir, section['title'])
         elif section['title'] == 'DAC Scale Transfer Test':
-            report.generate_dac_scale_transfer_section(section)
+            report.generate_dac_scale_transfer_section(section,results_dir, section['title'])
         elif section['title'] == 'DAC Amplitude Transfer Test':
-            report.generate_dac_amplitude_transfer_section(section)
-        elif section['title'] == 'DAC Mixmodes Test':
-            report.generate_dac_mixmode_section(section)
+            report.generate_dac_amplitude_transfer_section(section, results_dir, section['title'])
+        elif section['title'].startswith('DAC Mixmodes Test'):
+            report.generate_dac_mixmode_section(section, results_dir, section['title'])
         elif section['title'] == 'ADC Attenuation Test':
-            report.generate_adc_attenuation_section(section)
+            report.generate_adc_attenuation_section(section, results_dir, section['title'])
         elif section['title'] == 'DAC Passband Test':
-            report.generate_dac_passband_section(section)
+            report.generate_dac_passband_section(section, results_dir, section['title'])
+        elif section['title'] == 'Wideband FFT for Noise Detection':
+            report.generate_wideband_fft_section(section, results_dir, section['title'])
+
         #elif section['title'] == 'ADC Even Phase Test':
-           # report.generate_adc_even_phase_section(section)
+            # report.generate_adc_even_phase_section(section)
 
     report.save()
 

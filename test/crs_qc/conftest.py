@@ -14,14 +14,15 @@ from report_generator import generate_report_from_data
 def pytest_addoption(parser):
     parser.addoption("--serial", action="store", default=None, help="Serial number of the board")
 
-
 @pytest.hookimpl(tryfirst=True)
 def pytest_sessionstart(session):
-    session.test_highbank = input("Would you like to run the test on both low (1-4) and high (5-8) banks? Enter Y/N  ")
-    if session.test_highbank == 'Y':
+    session.user_test_highbank = input("Would you like to run the test on both low (1-4) and high (5-8) banks? Enter Y/N  ")
+    if session.user_test_highbank == 'Y':
+        session.test_highbank = True
         session.num_runs = 2
         wait_for_action("Connect the modules 1-8 in loopback.(DAC#--ADC#): (1--1), (2--2), etc. Don't cross connect")
     else:
+        session.test_highbank = False
         session.num_runs = 1
         wait_for_action("Connect the modules 1-4 in loopback.(DAC#--ADC#): (1--1), (2--2), etc. Don't cross connect")
 
@@ -33,6 +34,11 @@ def pytest_sessionstart(session):
         'serial': session.config.getoption("--serial"),
         'summary': {}
     }
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    day = datetime.now().strftime('%Y%m%d')
+    serial = session.config.getoption("--serial")
+    session.results_dir = f'CRS_test_results/{day}/CRS_test_{serial}_{timestamp}'
+    os.makedirs(session.results_dir, exist_ok=True)
 
 
 @pytest.fixture(scope="session")
@@ -61,6 +67,10 @@ async def hwm(pytestconfig):
     yield hwm
 
 @pytest.fixture(scope="session")
+def user_test_highbank(request):
+    return request.session.user_test_highbank
+
+@pytest.fixture(scope="session")
 def test_highbank(request):
     return request.session.test_highbank
 
@@ -68,6 +78,9 @@ def test_highbank(request):
 def num_runs(request):
     return request.session.num_runs
 
+@pytest.fixture(scope="session")
+def results_dir(request):
+    return request.session.results_dir
 
 @pytest.fixture(scope="session")
 def results(request):
@@ -79,24 +92,20 @@ def summary_results(request):
 
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session):
+    results_dir = session.results_dir
     results = session.results
     summary_results = session.summary_results
-    results_file, results_dir = save_results(results)
+    results_file = save_results(results, results_dir)
     summary_file = save_summary_results(summary_results, results_dir)
     serial = results['serial']
     generate_report_from_data(serial, results_file, results_dir, summary_file)
 
-def save_results(results):
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    day = datetime.now().strftime('%Y%m%d')
-    serial = results['serial']
-    results_dir = f'CRS_test_results/{day}/CRS_test_{serial}_{timestamp}'
-    os.makedirs(results_dir, exist_ok=True)
+def save_results(results, results_dir):
     results_file = os.path.join(results_dir, 'results.json')
     with open(results_file, 'w') as file:
         json.dump(results, file, indent=4)
     print(f"Results saved to '{results_file}'")  # Debug print
-    return results_file, results_dir
+    return results_file
 
 def save_summary_results(summary_results, results_dir):
     summary_file = os.path.join(results_dir, 'summary_results.json')

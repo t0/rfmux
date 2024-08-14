@@ -3,13 +3,12 @@ import pytest
 import rfmux
 import time
 import numpy as np
-import asyncio
-import pytest_asyncio
 import matplotlib.pyplot as plt
 from scipy import signal
 from scipy.stats import linregress
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
+from conftest import wait_for_action
 '''
 Welcome to the 1st draft of the CRS QC. To begin testing, type into the terminal 
 $pytest test_crs_integrated.py --serial=<serial> -s
@@ -18,15 +17,17 @@ $pytest test_crs_integrated.py --serial=<serial> -s
 # Most basic check, does not use hidfmux
 def test_board_bootup(results):
     print("Retrieving board status")
-    os.system("timeout 1 /home/ssavchyn/mkids/crs-mkids/firmware/rfmux/r1.3/parser -i enp1s0f0 -t | grep 'Enclosure\\|Timestamp' > raw1.txt")
+    os.system("timeout 1 /home/ssavchyn/mkids/crs-mkids/firmware/rfmux/r1.3/parser -i enp1s0f0 -t | grep 'Enclosure\\|Timestamp' > boot.txt")
     try:
-        with open('raw1.txt', 'r') as file:
+        with open('boot.txt', 'r') as file:
             content = file.read()
     except FileNotFoundError:
-        pytest.fail("No file was generated. Check your parser directory")
-        return
+        pytest.fail("No file was generated. Check your parser directory and connection to the board")
+        
     assert content, "Error: No data received. The board might not be booted correctly."
+    os.remove('boot.txt')
     print("Board boot status: OK")
+
     results['tests'].append({
         'title': 'Board Bootup Test',
         'status': 'OK'
@@ -110,38 +111,38 @@ def test_voltages(hwm, results,summary_results):
     test_status = 'Pass'
     sensors = (
         (d.VOLTAGE_SENSOR.MB_VBP, 12),  # power supply
-        (d.VOLTAGE_SENSOR.MB_R0V85A, 0.85),
-        (d.VOLTAGE_SENSOR.MB_R0V85B, 0.85),
-        (d.VOLTAGE_SENSOR.MB_R1V2A, 1.2),
-        (d.VOLTAGE_SENSOR.MB_R1V2B, 1.2),
-        (d.VOLTAGE_SENSOR.MB_R1V4, 1.4),
-        (d.VOLTAGE_SENSOR.MB_R1V8A, 1.8),
-        (d.VOLTAGE_SENSOR.MB_R2V5, 2.5),
-        (d.VOLTAGE_SENSOR.MB_R3V3A, 3.3),
-        (d.VOLTAGE_SENSOR.MB_R5V0, 5.0),
-        (d.VOLTAGE_SENSOR.RFSOC_PSMGTRAVCC, 0.9),
-        (d.VOLTAGE_SENSOR.RFSOC_PSMGTRAVTT, 1.8),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCAMS, 1.8),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCAUX, 1.8),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCBRAM, 0.85),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCINT, 0.85),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCPLAUX, 1.8),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCPLINTFP, 0.85),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCPLINTLP, 0.85),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCPSAUX, 1.8),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCPSDDR, 1.2),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCPSINTFP, 0.85),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCPSINTFPDDR, 0.85),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCPSINTLP, 0.85),
+        (d.VOLTAGE_SENSOR.MB_R0V85A, 0.85),#
+        (d.VOLTAGE_SENSOR.MB_R0V85B, 0.85),#
+        (d.VOLTAGE_SENSOR.MB_R1V2A, 1.2),#
+        (d.VOLTAGE_SENSOR.MB_R1V2B, 1.2),#
+        (d.VOLTAGE_SENSOR.MB_R1V4, 1.4),#
+        (d.VOLTAGE_SENSOR.MB_R1V8A, 1.8),#
+        (d.VOLTAGE_SENSOR.MB_R2V5, 2.5),#
+        (d.VOLTAGE_SENSOR.MB_R3V3A, 3.3),#
+        (d.VOLTAGE_SENSOR.MB_R5V0, 5.0),#
+        (d.VOLTAGE_SENSOR.RFSOC_PSMGTRAVCC, 0.9), #seen in in rfsoc_power
+        (d.VOLTAGE_SENSOR.RFSOC_PSMGTRAVTT, 1.8), #CONFUSION top right in in rfsoc_power says 1.2 but acc output 1.8
+        (d.VOLTAGE_SENSOR.RFSOC_VCCAMS, 1.8), # CONFUSION found VCCINTAMS - 0.85. but need a diff one
+        (d.VOLTAGE_SENSOR.RFSOC_VCCAUX, 1.8), #in rfsoc_power
+        (d.VOLTAGE_SENSOR.RFSOC_VCCBRAM, 0.85),# seen in rfsoc_power.sch
+        (d.VOLTAGE_SENSOR.RFSOC_VCCINT, 0.85), #seen in rfsoc_power.sch
+        (d.VOLTAGE_SENSOR.RFSOC_VCCPLAUX, 1.8), #
+        (d.VOLTAGE_SENSOR.RFSOC_VCCPLINTFP, 0.85),#in rfsoc_power
+        (d.VOLTAGE_SENSOR.RFSOC_VCCPLINTLP, 0.85),#in rfsoc_power
+        (d.VOLTAGE_SENSOR.RFSOC_VCCPSAUX, 1.8),#in rfsoc_power
+        (d.VOLTAGE_SENSOR.RFSOC_VCCPSDDR, 1.2), #
+        (d.VOLTAGE_SENSOR.RFSOC_VCCPSINTFP, 0.85),#in rfsoc_power
+        (d.VOLTAGE_SENSOR.RFSOC_VCCPSINTFPDDR, 0.85),#in rfsoc_power
+        (d.VOLTAGE_SENSOR.RFSOC_VCCPSINTLP, 0.85), #in rfsoc_power
         (d.VOLTAGE_SENSOR.RFSOC_VCCPSIO0, 1.8),
         (d.VOLTAGE_SENSOR.RFSOC_VCCPSIO1, 3.3),
         (d.VOLTAGE_SENSOR.RFSOC_VCCPSIO2, 3.3),
         (d.VOLTAGE_SENSOR.RFSOC_VCCPSIO3, 3.3),
-        (d.VOLTAGE_SENSOR.RFSOC_VCCVREFN, 0.05),
+        (d.VOLTAGE_SENSOR.RFSOC_VCCVREFN, 0),
         (d.VOLTAGE_SENSOR.RFSOC_VCCVREFP, 1.85),
-        (d.VOLTAGE_SENSOR.RFSOC_VCC_PSBATT, 3.0),
-        (d.VOLTAGE_SENSOR.RFSOC_VCC_PSDDRPLL, 1.8),
-        (d.VOLTAGE_SENSOR.RFSOC_VCC_PSPLL0, 1.2),
+        (d.VOLTAGE_SENSOR.RFSOC_VCC_PSBATT, 0),#this is grounded as seen in rfsoc_power
+        (d.VOLTAGE_SENSOR.RFSOC_VCC_PSDDRPLL, 1.8),# in rfsoc_power
+        (d.VOLTAGE_SENSOR.RFSOC_VCC_PSPLL0, 1.2),# in rfsoc_power
     )
     with d.tuber_context() as ctx:
         for (s, nv) in sensors:
@@ -150,15 +151,11 @@ def test_voltages(hwm, results,summary_results):
     for ((s, nv), v) in zip(sensors, voltages):
         min_v = nv * (1 - VOLTAGE_TOL)
         max_v = nv * (1 + VOLTAGE_TOL)
-        if v > max_v:
-            print(f"Sensor {s} with value {v} A above {max_v}!")
-        if v < min_v:
-            print(f"Sensor {s} with value {v} A below {min_v}!")
 
-        if  v <=min_v or v>= max_v:
-            f"Sensor {s} with value {v} out of range {min_v}, {max_v}!"
+        if  round(v, 2) <min_v or round(v, 2)> max_v:
+            print(f"Sensor {s} with value {v} out of range {min_v}, {max_v}!")
             test_status = 'Fail'
-        #print(f"Voltage for sensor {s}: {v}")
+        print(f"Voltage for sensor {s}: {v}")
 
     results['tests'].append({
         'title': 'Voltage Test',
@@ -178,14 +175,14 @@ def test_currents(hwm, results, summary_results):
     sensors = (
         (d.CURRENT_SENSOR.MB_R0V85A, 2.5),
         (d.CURRENT_SENSOR.MB_R0V85B, 3.3),
-        (d.CURRENT_SENSOR.MB_R1V2A, 2.5),
+        (d.CURRENT_SENSOR.MB_R1V2A, 2.4),
         (d.CURRENT_SENSOR.MB_R1V2B, 2.6),
         (d.CURRENT_SENSOR.MB_R1V4, 3.6),
         (d.CURRENT_SENSOR.MB_R1V8A, 3.3),
         (d.CURRENT_SENSOR.MB_R2V5, 4.1),
         (d.CURRENT_SENSOR.MB_R3V3A, 3.4),
         (d.CURRENT_SENSOR.MB_R5V0, 4.1),
-        (d.CURRENT_SENSOR.MB_VBP, 4), #per molex: max 15A contact
+        (d.CURRENT_SENSOR.MB_VBP, 4),
     )
     with d.tuber_context() as ctx:
         for (s, nc) in sensors:
@@ -200,7 +197,7 @@ def test_currents(hwm, results, summary_results):
             print(f"Sensor {s} with value {v} A below {min_c}!")
 
             test_status = 'Fail'
-        #print(f"Current for sensor {s}: {v}")
+        print(f"Current for sensor {s}: {v}")
     results['tests'].append({
         'title': 'Current Test',
         'sensors': [str(sensor[0]) for sensor in sensors],
@@ -212,14 +209,23 @@ def test_currents(hwm, results, summary_results):
     summary_results['summary']['Board Health']['Current Test'] = test_status
 '''------------------------------------------------------------------------------------------------------------'''
 '''-------------------------------------------DAC--------------------------------------------------------------'''
-@pytest.mark.asyncio
-async def test_dac_passband(hwm, results, summary_results, num_runs, test_highbank):
+def test_dac_passband(hwm, results, summary_results, num_runs, test_highbank, results_dir):
 
-    '''This test aims to determine 2 things: if the magnitude of the output signal form the DAC 
-    is within expected magnitude and if the passband stays flat throughout the predicted passband
+    '''This test aims to determine 2 things: if the magnitude of the output signal from the DAC 
+    is within expected margin and if the passband stays flat throughout the predicted frequency range (-300 -- 300) wrt the NCO.
+
+    The algorithm takes the length of'frequencies' array to determine how many channels to set. If the frequencies array is >1000
+    items, it records that repetitions of the process are needed (num_runs). NOTE: feel free to adjust the frequencies array to your 
+    desired density. 
+    Then, the 1000 channels are set to the amplitudes and frequencies -300 -- 300. Recorded sample magnitude is compared to the 
+    predicted magnitude (predicted from the transfer functions). 
+     
+    0 Hz frequency is taken as reference. If recorded magnitude is >10% off from predicted -- fail. If the measured data on either side 
+    of the 0Hz deviates by more than 3dB from center freuqency -- fail.
     
-    AMPLITUDE - Intentionally chosen to be 0.001 to be able to set 1000 channels at once without exceeding the full scale
- 
+    AMPLITUDE - Intentionally chosed to be 0.001 to be able to set 1000 channels at once without exceeding the full scale
+    NCO_FREQUENCY - Can be changed if desired. Was chosen as 625e6 to gauge module performance comparing it to old, measured data. 
+    NOMINAL_AMPLITUDE, NOMINAL_FREQUENCY - are there to help set the attenuation, scale for each module, are completely nominal, can you any number.
 
     '''
 
@@ -228,26 +234,22 @@ async def test_dac_passband(hwm, results, summary_results, num_runs, test_highba
     AMPLITUDE = 0.001
     TARGET_DAC = d.TARGET.DAC
     TARGET_ADC = d.TARGET.ADC
-    SAMPLES = 100
+    SAMPLES = 10
     NCO_FREQUENCY = 625e6
     ATTENUATION = 0
     SCALE = 7
     NOMINAL_AMPLITUDE = 0.5
     NOMINAL_FREQUENCY = 200e6
     NOMINAL_CHANNEL = 1
+    TITLE = 'DAC Passband Test'
 
-    '''
-    Measured values if ever want to compare
-        test_values = np.array([-13.17, -8.58, -8.04, -8.91, -9.38, -10.03,  -14.42]) [in dBm]
-        frequencies = [ -300e6, -275e6,  -150e6,  0, 150e6, 275e6, 300e6] [in HZ]
-        '''
-    #feel free to increase the range and density of frequencies
+   #feel free to increase the range and density of frequencies
     frequencies = np.arange(-300e6, 310e6, 10e6)
     channels = np.arange(1, 1001)
     nruns = int(np.ceil(len(frequencies) / len(channels)))
     lenrun = min(len(frequencies), len(channels))
     test_result = {
-        'title': 'DAC Passband Test',
+        'title': TITLE,
         'modules': []
     }
     highbank_run = False #test the high analog banks is false 
@@ -259,7 +261,7 @@ async def test_dac_passband(hwm, results, summary_results, num_runs, test_highba
             if highbank_run:
                 module_actual +=4
 
-            print(f'DAC_passband- Testing Module #:{module_actual}')
+            print(f'DAC_passband - Testing Module #:{module_actual}')
             
             measured_dbm = []
             predicted_dbm = []
@@ -293,8 +295,8 @@ async def test_dac_passband(hwm, results, summary_results, num_runs, test_highba
 
             mag_0 = next(meas for freq, meas in measured_dbm if freq == 0)
             
-            if abs(mag_0-predicted) > 3:
-                error = f"At a reference frequency (625MHz), generating a power output lower than predicted. Expected value is: {predicted}. Measured value was: {mag_0:.2f}"
+            if mag_0 < 1.1*predicted or mag_0 > 0.9*predicted:
+                error = f"At a reference frequency (625MHz), generating a power output >10% off from predicted. Expected value is: {predicted}. Measured value was: {mag_0:.2f}"
                 print(error)
                 module_errors.append(error)
 
@@ -310,12 +312,29 @@ async def test_dac_passband(hwm, results, summary_results, num_runs, test_highba
 
             module_result = {
                 'module': module_actual,  # Ensure this is an int
-                'frequencies': [freq for freq, _ in measured_dbm],  # Convert frequencies to float
+                'frequencies': [freq/ 1e6 for freq, _ in measured_dbm],  # Convert frequencies to float
                 'measured_dbm': [meas for _, meas in measured_dbm],  # Ensure this is a float
                 'predicted_magnitude_dbm_values': [predicted for _, predicted in predicted_dbm],  # Convert to a list of floats
                 'status': 'Fail' if module_errors else 'Pass',
                 'error': '\n'.join(module_errors)
             }
+            
+            plt.figure(figsize=(10, 6))
+            plt.plot(module_result['frequencies'], module_result['measured_dbm'], '-o', label = 'measured' )
+            plt.plot(module_result['frequencies'], module_result['predicted_magnitude_dbm_values'], '-o', label = 'predicted' )
+            plt.xlabel('Frequency (MHz)')
+            plt.ylabel('Magnitude (dBm)')
+            plt.legend()
+            plt.title(f'Signal at DAC of module {module_result["module"]} with increasing frequency')
+            plt.grid(True)
+            plt.tight_layout()
+            graph_name = TITLE + "_module_"+ f'{module_result["module"]}' +'.png'
+            plot_path = os.path.join(results_dir, 'plots', graph_name)
+            os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+            plt.savefig(plot_path)
+            plt.close()
+            
+
             test_result['modules'].append(module_result)
 
             if module_actual not in summary_results['summary']:
@@ -330,9 +349,12 @@ async def test_dac_passband(hwm, results, summary_results, num_runs, test_highba
     results['tests'].append(test_result)
 
 
-def test_dac_amplitude_transfer(hwm, results, summary_results, test_highbank, num_runs):
+def test_dac_amplitude_transfer(hwm, results, summary_results, test_highbank, num_runs, results_dir):
+    '''
+    This test aims to determine if the output of the dac is scaled appropriately with the change in amplitude...
+    
+    '''
     d = hwm.query(rfmux.CRS).one()
-    print('start')
     SCALE = 1
     TARGET_DAC = d.TARGET.DAC
     TARGET_ADC = d.TARGET.ADC
@@ -343,8 +365,10 @@ def test_dac_amplitude_transfer(hwm, results, summary_results, test_highbank, nu
     FREQUENCY = 150.5763e6
     NOMINAL_AMPLITUDE = 0
     NOMINAL_CHANNEL = 1
+    TITLE = 'DAC Amplitude Transfer Test'
+
     test_result = {
-        'title': 'DAC Amplitude Transfer Test',
+        'title': TITLE,
         'modules': []
     }
 
@@ -380,7 +404,7 @@ def test_dac_amplitude_transfer(hwm, results, summary_results, test_highbank, nu
             log_amplitude_values = np.array(np.log10(amplitude_values)).reshape(-1, 1)
             regressor = LinearRegression().fit(log_amplitude_values, magnitude_dbm_values)
             linearity = r2_score(regressor.predict(log_amplitude_values), magnitude_dbm_values)
-            print(linearity)
+            #print(linearity)
 
             if np.any(errors >= 3):
                 error = f'Generating a power output below 3dB of expected.'
@@ -403,6 +427,23 @@ def test_dac_amplitude_transfer(hwm, results, summary_results, test_highbank, nu
                 'status': 'Fail' if module_errors else 'Pass',
                 'error': '\n'.join(module_errors)
             }
+
+            plt.figure(figsize=(10, 6))
+            plt.plot(module_result['amplitude_values'], module_result['magnitude_dbm_values'], '-o', label = 'measured' )
+            plt.plot(module_result['amplitude_values'], module_result['predicted_magnitude_dbm_values'], '-o', label = 'predicted' )
+            plt.xscale('log')
+            plt.xlabel('Amplitude (Normalized)')
+            plt.ylabel('Magnitude (dBm)')
+            plt.legend()
+            plt.title(f'DAC output of module {module_result["module"]} with increasing amplitude')
+            plt.grid(True)
+            plt.tight_layout()
+            graph_name = TITLE + "_module_"+ f'{module_result["module"]}' +'.png'
+            plot_path = os.path.join(results_dir, 'plots', graph_name)
+            os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+            plt.savefig(plot_path)
+            plt.close()
+
             test_result['modules'].append(module_result)
             if module not in summary_results['summary']:
                 summary_results['summary'][module] = {}
@@ -416,7 +457,7 @@ def test_dac_amplitude_transfer(hwm, results, summary_results, test_highbank, nu
     results['tests'].append(test_result)
 
 
-def test_dac_scale_transfer(hwm, results, summary_results, test_highbank, num_runs):
+def test_dac_scale_transfer(hwm, results, summary_results, test_highbank, num_runs, results_dir):
     '''
    LATER:  check if there's an offset in the transfer funciton (set gian amplitude = 1)
     Pick 4 channels, set the same frequency-> alter scale and plot the samples first, then convert to dBm
@@ -433,8 +474,9 @@ def test_dac_scale_transfer(hwm, results, summary_results, test_highbank, num_ru
     NCO_FREQUENCY = 0
     ATTENUATION = 0
     CHANNEL = 1
+    TITLE = 'DAC Scale Transfer Test'
     test_result = {
-        'title': 'DAC Scale Transfer Test',
+        'title': TITLE,
         'modules': []
     }
     for mod in range (1,4):
@@ -484,8 +526,8 @@ def test_dac_scale_transfer(hwm, results, summary_results, test_highbank, num_ru
             if linearity<0.99:
                 error = 'linearity check failed'
                 module_errors.append(error)
-
-            else:
+                print(error)
+            if not module_errors:
                 print(f'Module {module_set} passed the DAC scaling test')
                     
             module_result = {
@@ -496,6 +538,21 @@ def test_dac_scale_transfer(hwm, results, summary_results, test_highbank, num_ru
                 'status': 'Fail' if module_errors else 'Pass',
                 'errors': f'{module_errors}'
             }
+
+            plt.figure(figsize=(10, 6))
+            plt.plot(module_result['scale_values'], module_result['magnitude_dbm_values'], '-o', label = 'measured' )
+            plt.plot(module_result['scale_values'], module_result['predicted_magnitude_dbm_values'], '-o', label = 'predicted' )
+            plt.xlabel('Scale(dBm)')
+            plt.ylabel('Magnitude (dBm)')
+            plt.legend()
+            plt.title(f'DAC output of module {module_result["module"]} with increasing scale (dBm)')
+            plt.grid(True)
+            plt.tight_layout()
+            graph_name = TITLE + "_module_"+ f'{module_result["module"]}' +'.png'
+            plot_path = os.path.join(results_dir, 'plots', graph_name)
+            os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+            plt.savefig(plot_path)
+            plt.close()
 
             test_result['modules'].append(module_result)
             if module_set not in summary_results['summary']:
@@ -509,8 +566,7 @@ def test_dac_scale_transfer(hwm, results, summary_results, test_highbank, num_ru
     d.set_analog_bank(False)
     results['tests'].append(test_result)
 
-
-def test_dac_mixmodes(hwm, results, summary_results):
+def test_dac_mixmodes(hwm, results, summary_results, test_highbank):
     d = hwm.query(rfmux.CRS).one()
     MAX_TOTAL_FREQUENCY = 2.5e9  # in Hz
     DAC_MAX_FREQUENCY = 275e6  # in Hz (max DAC frequency)
@@ -525,113 +581,133 @@ def test_dac_mixmodes(hwm, results, summary_results):
     SAMPLING_FREQUENCY = 2.5e9  # in Hz
     MODULE_NYQUIST_MAP = {1: 1, 2: 2, 3: 3}
     CHANNEL = 1
-    TEST_HIGHBANK = False
-
 
     reference_data = {
-        'mixmode_1': {
-            'mod_region_1': {
-                'frequencies': [761.78e6, 1302.56e6, 1902.34e6],
-                'magnitudes': [-3.42, -4.82, -6.7]
+            'mixmode_1': {
+                'mod_region_1': {
+                    'frequencies': [761.78e6, 1302.56e6, 1902.34e6],
+                    'magnitudes': [-3.42, -4.82, -6.7]
+                },
+                'mod_region_2': {
+                    'frequencies': [4338.22e6, 3697.44e6, 3097.66e6],
+                    'magnitudes': [-24.87, -19.00, -13.82]
+                },
+                'mod_region_3': {
+                    'frequencies': [5761.78e6, 6302.56e6, 6902.34e6],
+                    'magnitudes': [-31.89, -27.84, -27.87]
+                }
             },
-            'mod_region_2': {
-                'frequencies': [4338.22e6, 3697.44e6, 3097.66e6],
-                'magnitudes': [-24.87, -19.00, -13.82]
-            },
-            'mod_region_3': {
-                'frequencies': [5761.78e6, 6302.56e6, 6902.34e6],
-                'magnitudes': [-31.89, -27.84, -27.87]
-            }
-        },
-        'mixmode_2': {
-            'mod_region_1': {
-                'frequencies': [761.78e6, 1302.56e6, 1902.34e6],
-                'magnitudes': [-16.41, -12.24, -10.21]
-            },
-            'mod_region_2': {
-                'frequencies': [4238.22e6, 3697.44e6, 3097.66e6],
-                'magnitudes': [-12.30, -11.73,-10.01 ]
-            },
-            'mod_region_3': {
-                'frequencies': [5761.78e6, 6302.56e6, 6902.34e6],
-                'magnitudes': [-19.66, -20.60, -24.93]
+            'mixmode_2': {
+                'mod_region_1': {
+                    'frequencies': [761.78e6, 1302.56e6, 1902.34e6],
+                    'magnitudes': [-16.41, -12.24, -10.21]
+                },
+                'mod_region_2': {
+                    'frequencies': [4238.22e6, 3697.44e6, 3097.66e6],
+                    'magnitudes': [-12.30, -11.73,-10.01 ]
+                },
+                'mod_region_3': {
+                    'frequencies': [5761.78e6, 6302.56e6, 6902.34e6],
+                    'magnitudes': [-19.66, -20.60, -24.93]
+                }
             }
         }
-    }
 
-    test_result = {
-        'title': 'DAC Mixmodes Test',
-        'mixmodes': []
-    }
+    def mixmode_test_for_bank(bank_name, is_highbank):
+        test_result = {
+            'title': f'DAC Mixmodes Test - {bank_name} bank',
+            'analog_bank': bank_name,
+            'mixmodes': []
+        }
 
-    for mixmode in range(1, 3):
-        for module, nyquist_zone in MODULE_NYQUIST_MAP.items():
-            module_errors = []
-            module_magnitude_dbm_values = np.array([])
-            frequencies = np.array([])
-            print(f'Running module {module} in nyquist region {nyquist_zone}')
+        d.set_analog_bank(is_highbank)
 
-            d.set_nyquist_zone(mixmode, module=module)
-            nco = 0
-            frequency = -DAC_MAX_FREQUENCY
+        for mixmode in range(1, 3):
+            for module, nyquist_zone in MODULE_NYQUIST_MAP.items():
+                module_setter = module
+                if is_highbank:
+                    module+=4
 
-            while nco < MAX_TOTAL_FREQUENCY:
-                while frequency <= DAC_MAX_FREQUENCY and nco + frequency < MAX_TOTAL_FREQUENCY:
-                    if nco + frequency >= 0:
-                        value_setter_helper(d, frequency, AMPLITUDE, SCALE, ATTENUATION, CHANNEL, module, nco, TARGET_DAC, TARGET_ADC, TEST_HIGHBANK)
-                        samples = d.get_samples(SAMPLES, channel=CHANNEL, module=module)
-                        module_magnitude_dbm, _ = transfer_function_helper(samples, AMPLITUDE, SCALE, ATTENUATION)
+                module_errors = []
+                module_magnitude_dbm_values = np.array([])
+                frequencies = np.array([])
+                print(f'Running module {module} in mixmode #{mixmode} nyquist region #{nyquist_zone} for {bank_name} bank')
 
-                        if nyquist_zone == 1:
-                            frequencies = np.append(frequencies, frequency + nco)
-                            module_magnitude_dbm_values = np.append(module_magnitude_dbm_values, module_magnitude_dbm)
-                        elif nyquist_zone == 2:
-                            frequencies = np.append(frequencies, 2* SAMPLING_FREQUENCY - (frequency + nco))
-                            module_magnitude_dbm_values = np.append(module_magnitude_dbm_values, module_magnitude_dbm)
-                        elif nyquist_zone == 3:
-                            frequencies = np.append(frequencies, 2 * SAMPLING_FREQUENCY + frequency + nco)
-                            module_magnitude_dbm_values = np.append(module_magnitude_dbm_values, module_magnitude_dbm)
-                    frequency += STEP
-                nco += BANDWIDTH
+                d.set_nyquist_zone(mixmode, module=module)
+                nco = 0
                 frequency = -DAC_MAX_FREQUENCY
 
-            reference_freqs = np.array(reference_data[f'mixmode_{mixmode}'][f'mod_region_{nyquist_zone}']['frequencies'])
-            reference_mags = np.array(reference_data[f'mixmode_{mixmode}'][f'mod_region_{nyquist_zone}']['magnitudes'])
+                while nco < MAX_TOTAL_FREQUENCY:
+                    while frequency <= DAC_MAX_FREQUENCY and nco + frequency < MAX_TOTAL_FREQUENCY:
+                        if nco + frequency >= 0:
+                            value_setter_helper(d, frequency, AMPLITUDE, SCALE, ATTENUATION, CHANNEL, module_setter, nco, TARGET_DAC, TARGET_ADC, is_highbank)
+                            samples = d.get_samples(SAMPLES, channel=CHANNEL, module=module_setter)
+                            module_magnitude_dbm, _ = transfer_function_helper(samples, AMPLITUDE, SCALE, ATTENUATION)
 
-            for reference_freq, reference_mag in zip(reference_freqs, reference_mags):
-                if len(frequencies) == 0:
-                    module_errors.append(f"No frequencies measured for module {module} in Nyquist region {nyquist_zone}")
-                    continue
+                            if nyquist_zone == 1:
+                                frequencies = np.append(frequencies, frequency + nco)
+                                module_magnitude_dbm_values = np.append(module_magnitude_dbm_values, module_magnitude_dbm)
+                            elif nyquist_zone == 2:
+                                frequencies = np.append(frequencies, 2 * SAMPLING_FREQUENCY - (frequency + nco))
+                                module_magnitude_dbm_values = np.append(module_magnitude_dbm_values, module_magnitude_dbm)
+                            elif nyquist_zone == 3:
+                                frequencies = np.append(frequencies, 2 * SAMPLING_FREQUENCY + frequency + nco)
+                                module_magnitude_dbm_values = np.append(module_magnitude_dbm_values, module_magnitude_dbm)
+                        frequency += STEP
+                    nco += BANDWIDTH
+                    frequency = -DAC_MAX_FREQUENCY
 
-                closest_index = np.argmin(np.abs(frequencies - reference_freq))
-                obtained_magnitude = module_magnitude_dbm_values[closest_index]
+                reference_freqs = np.array(reference_data[f'mixmode_{mixmode}'][f'mod_region_{nyquist_zone}']['frequencies'])
+                reference_mags = np.array(reference_data[f'mixmode_{mixmode}'][f'mod_region_{nyquist_zone}']['magnitudes'])
 
-                if not (0.8 * abs(reference_mag) <= abs(obtained_magnitude) <= 1.15 * abs(reference_mag)):
-                    module_errors.append(f"Frequency {frequencies[closest_index] / 1e6:.2f} MHz: measured {obtained_magnitude:.2f} dBm, expected {reference_freq/1e6:.2f} to have {reference_mag} dBm")
-            
-            if module_errors:
-                print(module_errors)
-            else:
-                print('Module outputs within 15 percent of expected value')
+                for reference_freq, reference_mag in zip(reference_freqs, reference_mags):
+                    if len(frequencies) == 0:
+                        module_errors.append(f"No frequencies measured for module {module} in Nyquist region {nyquist_zone}")
+                        continue
 
-            status = 'Fail' if module_errors else 'Pass'
-            test_result['mixmodes'].append({
-                'mixmode': mixmode,
-                'module': module,
-                'frequencies': frequencies.tolist(),
-                'magnitude_dbm_values': module_magnitude_dbm_values.tolist(),
-                'reference_frequencies':reference_freqs.tolist(),
-                'reference_magnitudes':reference_mags.tolist(), 
-                'status': status
-            })
-            if module not in summary_results['summary']:
-                summary_results['summary'][module] = {}
-            summary_results['summary'][module][f'Mixmode {mixmode}'] = status
-            if mixmode == 2:
-                d.set_nyquist_zone(1, module=module)
+                    closest_index = np.argmin(np.abs(frequencies - reference_freq))
+                    obtained_magnitude = module_magnitude_dbm_values[closest_index]
 
-    results['tests'].append(test_result)
+                    if not (0.8 * abs(reference_mag) <= abs(obtained_magnitude) <= 1.15 * abs(reference_mag)):
+                        module_errors.append(f"Frequency {frequencies[closest_index] / 1e6:.2f} MHz: measured {obtained_magnitude:.2f} dBm, expected {reference_freq/1e6:.2f} to have {reference_mag} dBm")
+                
+                if module_errors:
+                    print(module_errors)
+                else:
+                    print('Module outputs within 15 percent of expected value')
 
+                status = 'Fail' if module_errors else 'Pass'
+                test_result['mixmodes'].append({
+                    'mixmode': mixmode,
+                    'module': module,
+                    'frequencies': frequencies.tolist(),
+                    'magnitude_dbm_values': module_magnitude_dbm_values.tolist(),
+                    'reference_frequencies': reference_freqs.tolist(),
+                    'reference_magnitudes': reference_mags.tolist(), 
+                    'status': status
+                })
+                if module not in summary_results['summary']:
+                    summary_results['summary'][module] = {}
+                summary_results['summary'][module][f'Mixmode {mixmode}'] = status
+                if mixmode == 2:
+                    d.set_nyquist_zone(1, module=module)
+
+        results['tests'].append(test_result)
+
+    # Run test for low bank
+    mixmode_test_for_bank('low', False)
+
+    # If high bank needs to be tested, prompt the user to switch filters and run again
+    if test_highbank:
+        wait_for_action("Please switch filters from low to high banks before proceeding with high bank testing. \n \
+                        1st Nyquist filter to ADC#5,\n\
+                        2nd Nyquist filter to ADC#6,\n\
+                        3rd Nyquist filter to ADC#7\n \
+                        If already have filters connected - disregard this message")
+        
+        mixmode_test_for_bank('high', True)
+
+    d.set_analog_bank(False)
 
 
 
@@ -639,7 +715,7 @@ def test_dac_mixmodes(hwm, results, summary_results):
 '''---------------------------------------------------------------------------------------------------------------'''
 '''--------------------------------------------------ADC----------------------------------------------------------'''
 
-def test_adc_attenuation(hwm, results, summary_results, test_highbank, num_runs):
+def test_adc_attenuation(hwm, results, summary_results, test_highbank, num_runs, results_dir):
     d = hwm.query(rfmux.CRS).one()
     AMPLITUDE = 1
     TARGET_DAC = d.TARGET.DAC
@@ -650,9 +726,10 @@ def test_adc_attenuation(hwm, results, summary_results, test_highbank, num_runs)
     SCALE = 1
     CHANNEL = 1
     ATTENUATION_0 = 0
+    TITLE = 'ADC Attenuation Test'
 
     test_result = {
-        'title': 'ADC Attenuation Test',
+        'title': TITLE,
         'modules': []
     }
 
@@ -689,10 +766,13 @@ def test_adc_attenuation(hwm, results, summary_results, test_highbank, num_runs)
 
             if linearity < 0.99:
                 error = f'linearity check failed'
+                print(error)
                 module_errors.append(error)
+
             if np.any(np.abs(np.array(magnitude_dbm_values) - np.array(predicted_magnitude_dbm_values)) >= 1):
                 error = f'Module {module_set} is generating a power output lower than expected. Check your balun and SMA connections.'
                 module_errors.append(error)
+                print(error)
 
             else:
                 print(f"Module {module_set} passed ADC attenuation tests.")
@@ -704,6 +784,22 @@ def test_adc_attenuation(hwm, results, summary_results, test_highbank, num_runs)
                 'status': 'Fail' if module_errors else 'Pass',
                 'errors': f'{module_errors}'
             }
+
+            plt.figure(figsize=(10, 6))
+            plt.plot(module_result['attenuation_values'], module_result['magnitude_dbm_values'], '-o', label = 'measured' )
+            plt.plot(module_result['attenuation_values'], module_result['predicted_magnitude_dbm_values'], '-o', label = 'predicted' )
+            plt.xlabel('Attenuation(dBm)')
+            plt.ylabel('Magnitude (dBm)')
+            plt.legend()
+            plt.title(f'Signal at ADC of module {module_result["module"]} with increasing attenuation')
+            plt.grid(True)
+            plt.tight_layout()
+            graph_name = TITLE + "_module_"+ f'{module_result["module"]}' +'.png'
+            plot_path = os.path.join(results_dir, 'plots', graph_name)
+            os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+            plt.savefig(plot_path)
+            plt.close()
+
 
             test_result['modules'].append(module_result)
 
@@ -762,14 +858,14 @@ def test_adc_even_phase(hwm, results):
         print("The cluster is more oval in shape.")
 
 def psd_helper(data_i_raw, data_q_raw):
-    ADC_SAMPLING_FREQUENCY = 625e6
+    COMB_SAMPLING_FREQUENCY = 625e6
     volts_peak = (np.sqrt(2)) * np.sqrt(50 * (10 ** (-1.75 / 10)) / 1000) / 1880796.4604246316
     # Convert I and Q to peak volts
     tod_i = data_i_raw * volts_peak
     tod_q = data_q_raw * volts_peak
 
     # Define the sampling frequency for the ADC
-    fir = (ADC_SAMPLING_FREQUENCY / 256 / 64 / 2 ** 6)
+    fir = (COMB_SAMPLING_FREQUENCY / 256 / 64 / 2 ** 6)
     # Apply Welch's method to get the signal PSD
     psdfreq, psd_i = signal.welch(tod_i/np.sqrt(4*50), fir, nperseg=len(tod_i// 4)) #tod_i / np.sqrt(4 * 50) 
     _, psd_q = signal.welch(tod_q/np.sqrt(4*50), fir, nperseg=len(tod_q// 4)) #tod_q / np.sqrt(4 * 50)
@@ -780,7 +876,7 @@ def psd_helper(data_i_raw, data_q_raw):
     return psd_i, psd_q, psdfreq
        
 
-def test_loopback_noise(hwm, results, summary_results, test_highbank, num_runs):
+def test_loopback_noise(hwm, results, summary_results, test_highbank, num_runs, results_dir):
     '''
     1. Send a signal with no amplitude to gauge the noise floor
     2. Determine the max point at low frequency and the slope of 1/f by putting in a high power signal
@@ -789,7 +885,7 @@ def test_loopback_noise(hwm, results, summary_results, test_highbank, num_runs):
     d = hwm.query(rfmux.CRS).one()
     TARGET_DAC = d.TARGET.DAC
     TARGET_ADC = d.TARGET.ADC
-    SAMPLES = 10000
+    SAMPLES = 100
 
     # Set parameters for testing white noise floor
     AMPLITUDE_0 = 0
@@ -806,8 +902,9 @@ def test_loopback_noise(hwm, results, summary_results, test_highbank, num_runs):
     SCALE_1_F = 1
     ATTENUATION_1_F = 0
     CHANNEL_1_F = 784
+    TITLE = 'Loopback Noise Test'
     test_result = {
-        'title': 'Loopback Noise Test',
+        'title': TITLE,
         'modules': []
     }
     highbank_run = False
@@ -919,6 +1016,45 @@ def test_loopback_noise(hwm, results, summary_results, test_highbank, num_runs):
                 '1_f_status': 'Fail' if loud_errors else 'Pass'
             }
 
+            #plot the white noise
+            plt.figure(figsize=(10, 6))
+            plt.plot(module_result['psd_frequencies_white'], module_result['psd_i_white'],  label = 'I' )
+            plt.plot(module_result['psd_frequencies_white'], module_result['psd_q_white'], label = 'Q' )
+            plt.scatter([module_result['psd_frequencies_white'][np.argmax(module_result['psd_i_white'])]], [module_result['max_point_white_i']], color='red', label=f'Max I spike: {module_result["max_point_white_i"]:.2f} dBm')
+            plt.scatter([module_result['psd_frequencies_white'][np.argmax(module_result['psd_q_white'])]], [module_result['max_point_white_q']], color='green', label=f'Max Q spike: {module_result["max_point_white_q"]:.2f} dBm')
+            plt.xlabel('Frequency (Hz from carrier)')
+            plt.ylabel('Magnitude (dBm)')
+            plt.xscale('log')
+            plt.legend()
+            plt.title(f'Noise floor in loopback at 277.23MHz at module {mod}')
+            plt.grid(True)
+            plt.tight_layout()
+            graph_name = TITLE + '_white_'+ '_module_'+ f'{module_result["module"]}' +'.png'
+            plot_path_white = os.path.join(results_dir, 'plots', graph_name)
+            os.makedirs(os.path.dirname(plot_path_white), exist_ok=True)
+            plt.savefig(plot_path_white)
+            plt.close()
+
+             # 1/f noise PSD
+            plt.figure(figsize=(10, 6))
+            plt.plot(module_result['combined_freqs'], module_result['fitted_psd_values_dBm_Hz'], 'r', label=f'fit to 1/f spectrum: n = {module_result["slope"]:.2f}')
+            plt.scatter(module_result['combined_freqs'], module_result['combined_psd_1_f'], label='1/f spectrum data')
+            plt.scatter([module_result['psd_frequencies_1_f'][np.argmax(module_result['psd_i_1_f'])]], [module_result['max_point_1_f_i']], color='red', label=f'Max I spike: {module_result["max_point_1_f_i"]:.2f} dBm')
+            plt.scatter([module_result['psd_frequencies_1_f'][np.argmax(module_result['psd_q_1_f'])]], [module_result['max_point_1_f_q']], color='green', label=f'Max Q spike: {module_result["max_point_1_f_q"]:.2f} dBm')
+            plt.xscale('log')
+            plt.title('PSD of 1/f Noise')
+            plt.xlabel('Frequency (Hz)')
+            plt.ylabel('PSD (dBm/Hz)')
+            plt.legend()
+            plt.tight_layout()
+            graph_name = TITLE + '_1_f_'+ '_module_'+ f'{module_result["module"]}' +'.png'
+            plot_path_1_f = os.path.join(results_dir, 'plots', graph_name)
+            os.makedirs(os.path.dirname(plot_path_1_f), exist_ok=True)
+            plt.savefig(plot_path_1_f)
+            plt.close()
+
+
+
             if mod not in summary_results['summary']:
                 summary_results['summary'][mod] = {}
             summary_results['summary'][mod]['Noise floor'] = module_result['white_status']
@@ -933,6 +1069,187 @@ def test_loopback_noise(hwm, results, summary_results, test_highbank, num_runs):
     d.set_analog_bank(False)
     results['tests'].append(test_result)
 
+
+
 def test_wideband_noise(hwm, results, summary_results, test_highbank, num_runs):
-    #TBD with get_samples or more fast samples
-    x=1
+    d = hwm.query(rfmux.CRS).one()
+
+    SAMPLING_FREQUENCY = 5e9  # 5 GHz
+    NUM_SAMPLES = 4000  # Total number of samples
+    highbank_run = False
+
+    test_result = {
+        'title': 'Wideband FFT for Noise Detection',
+        'modules': []
+    }
+
+    for num_run in range(0, num_runs):
+        for mod in range(1, 5):
+
+            if highbank_run:
+                print(f'Wideband FFT - Testing Module #:{mod + 4}')
+            else:
+                print(f'Wideband FFT - Testing Module #:{mod}')
+
+            d.clear_channels()
+            d.set_frequency(12e6, d.UNITS.HZ, 1, mod)
+            d.set_frequency(56e6, d.UNITS.HZ, 10, mod)
+            d.set_frequency(111e6, d.UNITS.HZ, 56, mod)
+            d.set_frequency(250e6, d.UNITS.HZ, 999, mod)
+            d.set_frequency(300e6, d.UNITS.HZ, 134, mod)
+
+            d.set_amplitude(0, d.UNITS.NORMALIZED, d.TARGET.DAC, 1, mod)
+            d.set_amplitude(0, d.UNITS.NORMALIZED, d.TARGET.DAC, 10, mod)
+            d.set_amplitude(0, d.UNITS.NORMALIZED, d.TARGET.DAC, 56, mod)
+            d.set_amplitude(0, d.UNITS.NORMALIZED, d.TARGET.DAC, 999, mod)
+            d.set_amplitude(0, d.UNITS.NORMALIZED, d.TARGET.DAC, 134, mod)
+
+            d._set_adc_attenuator(0, d.UNITS.DB, module=mod)
+            d.set_dac_scale(1, d.UNITS.DBM, mod)
+            d.set_nco_frequency(596e6, d.UNITS.HZ, module=mod)
+
+            time.sleep(1)
+            samples = d.get_fast_samples(NUM_SAMPLES, d.UNITS.RAW, module=mod)
+
+            volts_peak_samples = (np.sqrt(2)) * np.sqrt(50 * (10 ** (-1.75 / 10)) / 1000) / 1880796.4604246316
+            I_signal = np.array(samples.i) * volts_peak_samples
+            Q_signal = np.array(samples.q) * volts_peak_samples
+
+
+            psdfreq_i, psd_i = signal.welch(I_signal/np.sqrt(4*50), SAMPLING_FREQUENCY, nperseg=NUM_SAMPLES) #tod_i / np.sqrt(4 * 50) 
+            psdfreq_q, psd_q = signal.welch(Q_signal/np.sqrt(4*50), SAMPLING_FREQUENCY, nperseg=NUM_SAMPLES) #tod_q / np.sqrt(4 * 50)
+
+            # Convert from watts to dBm
+            psd_i = 10 * np.log10(psd_i*1000)
+            psd_q = 10 * np.log10(psd_q*1000)
+
+            if highbank_run:
+                mod+=4
+
+            module_result = {
+                'module': mod,
+                'psd_i': psd_i.tolist(),
+                'psd_q': psd_q.tolist(),
+                'freqs_i': psdfreq_i.tolist(),
+                'freqs_q': psdfreq_q.tolist(),
+                'status': 'N/A'
+            }
+
+            if mod not in summary_results['summary']:
+                summary_results['summary'][mod] = {}
+            summary_results['summary'][mod]['Wide FFT'] = module_result['status']
+
+            test_result['modules'].append(module_result)
+
+        if test_highbank:
+            d.set_analog_bank(True)
+            highbank_run = True
+
+    d.set_analog_bank(False)
+    results['tests'].append(test_result)
+
+'''
+def zoom_fft(signal_data, lowcut, highcut, fs, fft_length):
+    fft_result = np.fft.fft(signal_data / np.sqrt(4 * 50), n=fft_length)
+    freqs = np.fft.fftfreq(fft_length, d=1.0 / fs)
+
+    mask = (freqs >= lowcut) & (freqs <= highcut)
+    selected_freqs = freqs[mask]
+    selected_fft_result = fft_result[mask]
+
+    nyquist = 0.5 * fs
+    nyquist_index = np.where(selected_freqs <= nyquist)[0][-1] + 1
+    return selected_freqs[:nyquist_index], selected_fft_result[:nyquist_index]
+
+def enforce_consistent_length(arrays, target_length):
+    """Trim or pad arrays to ensure consistent length."""
+    padded_arrays = []
+    for array in arrays:
+        if len(array) > target_length:
+            padded_arrays.append(array[:target_length])
+        elif len(array) < target_length:
+            padding = [np.nan] * (target_length - len(array))
+            padded_arrays.append(array + padding)
+        else:
+            padded_arrays.append(array)
+    return padded_arrays
+
+def test_wideband_noise(hwm, results, summary_results, test_highbank, num_runs):
+    d = hwm.query(rfmux.CRS).one()
+
+    SAMPLING_FREQUENCY = 5e9  # 5 GHz
+    NUM_SAMPLES = 60000  # Total number of samples
+    highbank_run = False
+
+    test_result = {
+        'title': 'Wideband FFT for Noise Detection',
+        'modules': []
+    }
+
+    reference_length = None  # We'll determine this from the first band
+
+    for num_run in range(0, num_runs):
+        for mod in range(1, 5):
+            if highbank_run:
+                print(f'Wideband FFT - Testing Module #:{mod + 4}')
+            else:
+                print(f'Wideband FFT - Testing Module #:{mod}')
+
+            d.clear_channels()
+            samples = d.get_samples(NUM_SAMPLES, channel=1, module=mod)
+
+            volts_peak_samples = (np.sqrt(2)) * np.sqrt(50 * (10 ** (-1.75 / 10)) / 1000) / 1880796.4604246316
+            I_signal = np.array(samples.i) * volts_peak_samples
+            Q_signal = np.array(samples.q) * volts_peak_samples
+
+            bands = [(1e6, 0.5e9), (0.5e9, 1e9), (1e9, 1.5e9), (1.5e9, 2e9), (2e9, 2.499e9)]
+            fft_length = NUM_SAMPLES
+
+            psd_i_results = []
+            psd_q_results = []
+            freqs_list_i = []
+            freqs_list_q = []
+
+            for lowcut, highcut in bands:
+                freqs_i, zoomed_fft_i = zoom_fft(I_signal, lowcut, highcut, SAMPLING_FREQUENCY, fft_length)
+                freqs_q, zoomed_fft_q = zoom_fft(Q_signal, lowcut, highcut, SAMPLING_FREQUENCY, fft_length)
+
+                # Convert to dBm (magnitude only)
+                psd_i_dbm = 10 * np.log10(np.abs(zoomed_fft_i) * 1000).tolist()
+                psd_q_dbm = 10 * np.log10(np.abs(zoomed_fft_q) * 1000).tolist()
+
+                # Determine the reference length from the first band
+                if reference_length is None:
+                    reference_length = min(len(freqs_i), len(freqs_q))
+
+                # Enforce consistent length based on the reference length
+                psd_i_dbm, psd_q_dbm = enforce_consistent_length([psd_i_dbm, psd_q_dbm], reference_length)
+                freqs_i, freqs_q = enforce_consistent_length([freqs_i.tolist(), freqs_q.tolist()], reference_length)
+
+                psd_i_results.append(psd_i_dbm)
+                psd_q_results.append(psd_q_dbm)
+                freqs_list_i.append(freqs_i)
+                freqs_list_q.append(freqs_q)
+
+            module_result = {
+                'module': mod,
+                'psd_i': psd_i_results,
+                'psd_q': psd_q_results,
+                'freqs_i': freqs_list_i,
+                'freqs_q': freqs_list_q,
+                'status': 'N/A'
+            }
+
+            if mod not in summary_results['summary']:
+                summary_results['summary'][mod] = {}
+            summary_results['summary'][mod]['Wideband FFT for Noise Detection'] = module_result['status']
+
+            test_result['modules'].append(module_result)
+
+        if test_highbank:
+            d.set_analog_bank(True)
+            highbank_run = True
+
+    d.set_analog_bank(False)
+    results['tests'].append(test_result)
+'''

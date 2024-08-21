@@ -50,7 +50,7 @@ from .core.crs import (
 
 from .core.hardware_map import macro, algorithm, HardwareMap
 
-from .core.session import load_session, get_session, set_session
+from .core.session import load_session, get_session, set_session, load_from_database
 
 from . import core, algorithms
 

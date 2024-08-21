@@ -25,7 +25,7 @@ if sys.version_info < (3, 10):
 import importlib.metadata  # requires Python 3.8+
 from packaging.version import parse
 
-tuples = (("sqlalchemy", "2.0.0"),)
+tuples = (("sqlalchemy", "2.0.0"), ("IPython", "8.0.0"))
 
 for package, min_version in tuples:
     try:
@@ -37,6 +37,13 @@ for package, min_version in tuples:
         raise RuntimeError(
             f"Package {package} {installed_version} is too old! At least {min_version} is required."
         )
+
+# For ipython sessions, activate awaitless
+try:
+    from . import awaitless
+    awaitless.load_ipython_extension()
+except (ImportError, RuntimeError):
+    pass
 
 # Alias from long.internal.name down to something reasonable
 from .core.crs import (

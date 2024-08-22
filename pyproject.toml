@@ -15,6 +15,7 @@ dependencies = [
   "ipython",
   "matplotlib",
   "numpy",
+  "pygetdata",
   "pytest",
   "pytest-asyncio",
   "pyyaml",

@@ -28,7 +28,7 @@ import sqlalchemy.types
 import sqlalchemy.exc
 import sqlite3
 
-import tuber
+from .. import tuber
 
 from sqlalchemy.inspection import inspect as sqlinspect
 from sqlalchemy.orm import DeclarativeBase

@@ -12,7 +12,7 @@ from . import hardware_map
 from .hardware_map import Boolean, HWMResource, HWMQuery
 
 import sqlalchemy
-import tuber
+from .. import tuber
 
 
 class ArgumentFiller:

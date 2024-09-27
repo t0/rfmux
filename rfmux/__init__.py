@@ -62,6 +62,6 @@ from .core.session import load_session, get_session, set_session, load_from_data
 
 from . import core, algorithms
 
-from tuber import TuberRemoteError
+from .tuber import TuberRemoteError
 
 # vim: sts=4 ts=4 sw=4 tw=78 smarttab expandtab

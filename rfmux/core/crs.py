@@ -42,6 +42,9 @@ class YAMLLoader(session.YAMLLoader):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        # Plumbing
+        self.add_constructor(u"!flavour", yaml_flavour_constructor)
+
         # Readout chain
         self.add_constructor(
             "!Crate",
@@ -67,6 +70,27 @@ class YAMLLoader(session.YAMLLoader):
         )
 
         self.add_constructor("!ChannelMappings", ChannelMappingCSVConstructor)
+
+
+def yaml_flavour_constructor(loader, node):
+    """!flavour tag for YAML.
+
+    This tag must occur within a HardwareMap directive. Note that it's
+    swallowed by the HardwareMap, which ignores its children after
+    instantiating them.  (The children add themselves in their instantiation
+    methods.)
+    """
+
+    name = loader.construct_scalar(node)
+    __import__(name)
+
+    flavour = loader.flavour = sys.modules[name]
+
+    if hasattr(flavour, "yaml_hook"):
+        loader.register_finalization_hook(flavour.yaml_hook)
+
+    return sys.modules[name]
+
 
 
 def ChannelMappingCSVConstructor(loader, node):

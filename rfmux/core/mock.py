@@ -406,6 +406,14 @@ class MockCRS:
         """Set frequency for a specific channel and module."""
         assert isinstance(frequency, (int, float)), "Frequency must be a number"
         units = self.validate_enum_member(units, FrequencyUnit, "frequency unit")
+
+    # Validate frequency range (-313.5 MHz to +313.5 MHz)
+        min_freq_hz = -313.5e6
+        max_freq_hz = 313.5e6
+        if not (min_freq_hz <= frequency <= max_freq_hz):
+            raise ValueError(f"Frequency must be between -313.5 MHz and +313.5 MHz.")
+
+
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
 
@@ -432,6 +440,12 @@ class MockCRS:
         target = self.validate_enum_member(target, Target, "target")
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
+
+        # Validate amplitude range when units are normalized
+        if units == self.AmplitudeUnit.NORMALIZED:
+            if not (-1.0 <= amplitude <= 1.0):
+                raise ValueError("Amplitude must be between -1.0 and +1.0 when units are 'normalized'.")
+
 
         self.amplitudes[(module, channel, target)] = {
             "value": amplitude,
@@ -545,21 +559,6 @@ class MockCRS:
         # You can enhance this method to return more realistic timestamps
         return self.timestamp
 
-    # def s21_response(self, frequency):
-    #     """Compute the S21 response of the filterbank at a given frequency."""
-    #     f0 = 1.2e9  # Resonance frequency at 1.2 GHz
-    #     BW = 20e6  # Bandwidth of 200 MHz
-    #     Q = f0 / BW  # Quality factor
-
-    #     # Lorentzian response
-    #     delta_f = frequency - f0
-    #     s21_mag = 1 / np.sqrt(1 + (2 * Q * delta_f / f0) ** 2)
-
-    #     # Phase response (for a simple resonator)
-    #     s21_phase = np.arctan2(-2 * Q * delta_f / f0, 1)
-
-    #     return s21_mag, s21_phase  # Magnitude and phase in radians
-
 
     async def get_samples(self, num_samples, channel=None, module=1):
         """Get sample data for a specific module."""
@@ -577,19 +576,21 @@ class MockCRS:
         fs = 496  # 1 MHz sample rate (adjust as needed)
         t = np.arange(num_samples) / fs  # Time vector
 
+        nco_freq = self.get_nco_frequency(units=Units.HZ, target='adc', module=module)
+
         if channel is not None:
             # Return samples for the specified channel
             assert 0 <= channel < 1024, "Invalid channel number"
 
             # Retrieve the frequency, amplitude, and phase for the channel
-            freq_info = self.frequencies.get((module, channel))
+            chan_freq = self.frequencies.get((module, channel))
             amp_info = self.amplitudes.get((module, channel, self.TARGET['CARRIER']))
             phase_info = self.phases.get((module, channel, self.TARGET['CARRIER']))
 
-            if freq_info is None or amp_info is None or phase_info is None:
+            if chan_freq is None or amp_info is None or phase_info is None:
                 raise ValueError("Frequency, amplitude, or phase not set for channel")
 
-            frequency = freq_info['value']  # Frequency in Hz
+            frequency = chan_freq['value']+nco_freq    # Frequency in Hz            
             amplitude = amp_info['value']   # Amplitude (normalized)
             phase = np.deg2rad(phase_info['value'])  # Convert phase to radians
 
@@ -631,16 +632,16 @@ class MockCRS:
 
             for ch in range(channels_per_module):
                 # Retrieve the frequency, amplitude, and phase for each channel
-                freq_info = self.frequencies.get((module, ch))
+                chan_freq = self.frequencies.get((module, ch))
                 amp_info = self.amplitudes.get((module, ch, self.TARGET['CARRIER']))
                 phase_info = self.phases.get((module, ch, self.TARGET['CARRIER']))
 
-                if freq_info is None or amp_info is None or phase_info is None:
+                if chan_freq is None or amp_info is None or phase_info is None:
                     # If not set, default to zero amplitude
                     i = np.zeros(num_samples)
                     q = np.zeros(num_samples)
                 else:
-                    frequency = freq_info['value']  # Frequency in Hz
+                    frequency = chan_freq['value']+nco_freq    # Frequency in Hz
                     amplitude = amp_info['value']   # Amplitude (normalized)
                     phase = np.deg2rad(phase_info['value'])  # Convert phase to radians
 
@@ -740,7 +741,13 @@ class MockCRS:
         if target is not None:
             target = self.validate_enum_member(target, Target, "target")
         assert module is not None and isinstance(module, int), "Module must be an integer"
-        self.nco_frequencies[(module, target)] = {"frequency": frequency, "units": units}
+        if target is None:
+            self.nco_frequencies[(module, Target.ADC)] = {"frequency": frequency, "units": units}
+            self.nco_frequencies[(module, Target.DAC)] = {"frequency": frequency, "units": units}
+
+        else:
+            self.nco_frequencies[(module, target)] = {"frequency": frequency, "units": units}
+
 
     def get_nco_frequency(self, units=Units.HZ, target=None, module=None):
         """Get NCO frequency."""

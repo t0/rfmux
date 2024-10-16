@@ -17,16 +17,17 @@ TO DO:
     - Overrange / overvoltage flags present in get_samples are not decoded here
 """
 
-from ...core.schema import CRS
-from ...core.hardware_map import macro
-from ...tuber.codecs import TuberResult
-
-import struct
 import array
-import enum
-import socket
 import contextlib
+import enum
 import numpy as np
+import socket
+import struct
+import warnings
+
+from ...core.hardware_map import macro
+from ...core.schema import CRS
+from ...tuber.codecs import TuberResult
 
 from dataclasses import dataclass, asdict
 
@@ -131,13 +132,14 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
     if channel is not None:
         assert 1 <= channel <= NUM_CHANNELS, f"Invalid channel {channel}!"
 
-    packets = []
-
     with contextlib.closing(
         socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     ) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((STREAMER_HOST, STREAMER_PORT))
+
+        # Set a large SO_RCVBUF
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16777216)
 
         # Use source-specific multicast (SSM) to collect packets from only this CRS board
         crs_ip = socket.inet_aton(socket.gethostbyname(crs.tuber_hostname))
@@ -147,6 +149,10 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
 
         # FIXME: CAUSALITY DELAY
 
+        # Allow up to 10 packet-loss retries
+        retries = 10
+
+        packets = []
         while len(packets) < num_samples:
             p = DfmuxPacket.from_bytes(sock.recv(STREAMER_LEN))
             if p.serial != int(crs.serial):
@@ -157,7 +163,6 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
             # In c++ code, this filtering is done kernel-side via BPF. It's
             # probably more efficient that way - we could do the same here too.
             if p.module != module - 1:
-                print(f"Punted unwanted module {p.module+1}")
                 continue
 
             # Sanity checks
@@ -174,9 +179,16 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
             # Check for contiguity
             with np.errstate(over="ignore"):
                 if packets and packets[-1].seq + 1 != p.seq:
-                    raise RuntimeError(
-                        f"Discontinuous packet capture! Index {len(packets)}, sequence {packets[-1].seq} -> {p.seq}"
-                    )
+                    if retries:
+                        warnings.warn(
+                            f"Discontinuous packet capture! Index {len(packets)}, sequence {packets[-1].seq} -> {p.seq}. Retrying ({retries} attempts remain.)"
+                        )
+                        retries -= 1
+                        packets = []
+                    else:
+                        raise RuntimeError(
+                            f"Discontinuous packet capture! Index {len(packets)}, sequence {packets[-1].seq} -> {p.seq}"
+                        )
 
             packets.append(p)
 

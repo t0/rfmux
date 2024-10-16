@@ -23,7 +23,7 @@ $ pytest test_crs_integrated.py --serial=<serial> -k "<test_test_name_1> or <tes
 # Most basic check, does not use hidfmux
 def test_board_bootup(results):
     print("Retrieving board status")
-    os.system("timeout 1 /home/ssavchyn/mkids/crs-mkids/firmware/rfmux/r1.3/parser -i enp1s0f0 -t | grep 'Enclosure\\|Timestamp' > boot.txt")
+    os.system("timeout 1 /home/montgojo/code/crs-mkids/firmware/rfmux/r1.4/parser -i enp1s0f0 -t | grep 'Enclosure\\|Timestamp' > boot.txt")
     try:
         with open('boot.txt', 'r') as file:
             content = file.read()
@@ -73,7 +73,7 @@ def value_setter_helper(d, frequency, amplitude, scale, attenuation, channel, mo
     if highbank == True:
         module+=4
     d.set_dac_scale(scale, d.UNITS.DBM, module)
-    d._set_adc_attenuator(attenuation, d.UNITS.DB, module=module)
+    d.set_adc_attenuator(attenuation, d.UNITS.DB, module=module)
     d.set_nco_frequency(nco, d.UNITS.HZ, target_dac, module=module)
     d.set_nco_frequency(-nco, d.UNITS.HZ, target_adc, module=module)
 
@@ -85,10 +85,9 @@ def covariance_matrix(samples):
     return ratio
 '''------------------------------------------------------------------------------------------------------------'''
 '''-------------------------------------------SENSORS--------------------------------------------------------------'''
-def test_temperature(hwm, results, summary_results):
+def test_temperature(d, results, summary_results):
     TEMPERATURE_MIN = 0.0
     TEMPERATURE_MAX = 70.0
-    d = hwm.query(rfmux.CRS).one()
     errors = []
     test_status = 'Pass'
 
@@ -125,8 +124,8 @@ def test_temperature(hwm, results, summary_results):
         summary_results['summary']['Board Health'] = {}
     summary_results['summary']['Board Health']['Temperature Test'] = test_status
     
-def test_voltages(hwm, results,summary_results):
-    d = hwm.query(rfmux.CRS).one()
+def test_voltages(d, results,summary_results):
+
     VOLTAGE_TOL = 0.10  # 10%
     test_status = 'Pass'
     sensors = (
@@ -189,8 +188,7 @@ def test_voltages(hwm, results,summary_results):
         summary_results['summary']['Board Health'] = {}
     summary_results['summary']['Board Health']['Voltage Test'] = test_status
 
-def test_currents(hwm, results, summary_results):
-    d = hwm.query(rfmux.CRS).one()
+def test_currents(d, results, summary_results):
     CURRENT_LIMIT = 0.1  # 10% tolerance on the current limit
     test_status = 'Pass'
     sensors = (
@@ -230,7 +228,7 @@ def test_currents(hwm, results, summary_results):
     summary_results['summary']['Board Health']['Current Test'] = test_status
 '''------------------------------------------------------------------------------------------------------------'''
 '''-------------------------------------------DAC--------------------------------------------------------------'''
-def test_dac_passband(hwm, results, summary_results, num_runs, test_highbank, results_dir):
+def test_dac_passband(d, results, summary_results, num_runs, test_highbank, results_dir):
 
     '''This test aims to determine 2 things: if the magnitude of the output signal from the DAC 
     is within expected margin and if the passband stays flat throughout the predicted frequency range (-300 -- 300) wrt the NCO.
@@ -250,7 +248,6 @@ def test_dac_passband(hwm, results, summary_results, num_runs, test_highbank, re
 
     '''
 
-    d= hwm.query(rfmux.CRS).one()
 
     AMPLITUDE = 0.001
     TARGET_DAC = d.TARGET.DAC
@@ -300,23 +297,24 @@ def test_dac_passband(hwm, results, summary_results, num_runs, test_highbank, re
                 #First, call the function to set all the parameters that won't change: attenuation, scale, nco
                 value_setter_helper(d, NOMINAL_FREQUENCY,NOMINAL_AMPLITUDE, SCALE, ATTENUATION, NOMINAL_CHANNEL, module, NCO_FREQUENCY, TARGET_DAC, TARGET_ADC, highbank_run)
                 
-                #Set all the nessesary channels for the run
-                for idx in range(start_idx, end_idx):
-                    channel = int(channels[idx - start_idx])  # Convert to int and access correct channel
-                    frequency = float(frequencies[idx])  # Convert to float
-                    d.set_frequency(frequency, d.UNITS.HZ, channel, module)
-                    d.set_amplitude(AMPLITUDE, d.UNITS.NORMALIZED, TARGET_DAC, channel, module)
+                with d.tuber_context() as ctx:
+                    #Set all the nessesary channels for the run
+                    for idx in range(start_idx, end_idx):
+                        channel = int(channels[idx - start_idx])  # Convert to int and access correct channel
+                        frequency = float(frequencies[idx])  # Convert to float
+                        ctx.set_frequency(frequency, d.UNITS.HZ, channel, module)
+                        ctx.set_amplitude(AMPLITUDE, d.UNITS.NORMALIZED, TARGET_DAC, channel, module)
+                    ctx()
                 time.sleep(0.2)
 
                 # Get all the samples for the current run
+                raw = d.get_samples(SAMPLES, channel=None, module=module)
+
                 for idx in range(start_idx, end_idx):
                     channel = int(channels[idx - start_idx])  # Convert to int and access correct channel
-
+                    rchan = raw[channel+1]
                     frequency = float(frequencies[idx])  # Ensure frequency is a float
-                    raw = d.get_samples(SAMPLES, channel=channel, module=module)
-                    
-
-                    measured, predicted = transfer_function_helper(raw, AMPLITUDE, SCALE, ATTENUATION)
+                    measured, predicted = transfer_function_helper(rchan, AMPLITUDE, SCALE, ATTENUATION)
                     measured_dbm.append((frequency, measured))
                     predicted_dbm.append((frequency, predicted))
 
@@ -383,13 +381,12 @@ def test_dac_passband(hwm, results, summary_results, num_runs, test_highbank, re
     results['tests'].append(test_result)
 
 
-def test_dac_amplitude_transfer(hwm, results, summary_results, test_highbank, num_runs, results_dir):
+def test_dac_amplitude_transfer(d, results, summary_results, test_highbank, num_runs, results_dir):
     '''
     This test aims to determine if the output of the dac is scaled appropriately with the change in amplitude. The algorithm uses only 1 channel
     at each module a set frequency, varying its amplitude. The result is compared to the transfer function prediction
     
     '''
-    d = hwm.query(rfmux.CRS).one()
     SCALE = 1
     TARGET_DAC = d.TARGET.DAC
     TARGET_ADC = d.TARGET.ADC
@@ -501,7 +498,7 @@ def test_dac_amplitude_transfer(hwm, results, summary_results, test_highbank, nu
     results['tests'].append(test_result)
 
 
-def test_dac_scale_transfer(hwm, results, summary_results, test_highbank, num_runs, results_dir):
+def test_dac_scale_transfer(d, results, summary_results, test_highbank, num_runs, results_dir):
     '''
     This test aims to determine if the output of the dac is scaled appropriately with the change in 'scale' value (actually controlled 
     by varying the current in the balun). The algorithm uses only 1 channel at each module a set frequency, varying its scale. 
@@ -511,7 +508,6 @@ def test_dac_scale_transfer(hwm, results, summary_results, test_highbank, num_ru
     Pick 4 channels, set the same frequency-> alter scale and plot the samples first, then convert to dBm
     plot together with prediction from the transfer funciton
     '''
-    d = hwm.query(rfmux.CRS).one()
     #set parameters for testing
     AMPLITUDE= 1
     NOMINAL_SCALE = 1
@@ -620,7 +616,7 @@ def test_dac_scale_transfer(hwm, results, summary_results, test_highbank, num_ru
     d.set_analog_bank(False)
     results['tests'].append(test_result)
 
-def test_dac_mixmodes(hwm, results, summary_results, test_highbank):
+def test_dac_mixmodes(d, results, summary_results, test_highbank):
     '''
     This test aims to verify the overall behaviour of the nyquist zones (1(NRZ) or 2(RC)) set in the firmware as well as a sanity check for the hardware response in
     the higher nquist regions. 
@@ -628,7 +624,6 @@ def test_dac_mixmodes(hwm, results, summary_results, test_highbank):
     data together into one graph per nyquist zone.
     '''
 
-    d = hwm.query(rfmux.CRS).one()
     MAX_TOTAL_FREQUENCY = 2.5e9  # in Hz
     DAC_MAX_FREQUENCY = 275e6  # in Hz (max DAC frequency)
     BANDWIDTH = 550e6  # in Hz (275 MHz on each side of NCO)
@@ -777,8 +772,7 @@ def test_dac_mixmodes(hwm, results, summary_results, test_highbank):
 '''---------------------------------------------------------------------------------------------------------------'''
 '''--------------------------------------------------ADC----------------------------------------------------------'''
 
-def test_adc_attenuation(hwm, results, summary_results, test_highbank, num_runs, results_dir):
-    d = hwm.query(rfmux.CRS).one()
+def test_adc_attenuation(d, results, summary_results, test_highbank, num_runs, results_dir):
     AMPLITUDE = 1
     TARGET_DAC = d.TARGET.DAC
     TARGET_ADC = d.TARGET.ADC
@@ -815,7 +809,7 @@ def test_adc_attenuation(hwm, results, summary_results, test_highbank, num_runs,
             print(f'ADC_attenuation - Testing Module #: {module_set}')
 
             for attenuation in range(0, 15):
-                d._set_adc_attenuator(attenuation, d.UNITS.DB, module=module_set)
+                d.set_adc_attenuator(attenuation, d.UNITS.DB, module=module_set)
                 raw_sampl = d.get_samples(SAMPLES, channel=CHANNEL, module=module_sample)
                 median_magnitude_dbm, predicted_magnitude_dbm = transfer_function_helper(raw_sampl, AMPLITUDE, SCALE, attenuation)
                 attenuation_values.append(attenuation)
@@ -882,8 +876,7 @@ def test_adc_attenuation(hwm, results, summary_results, test_highbank, num_runs,
 
 
 @pytest.mark.skip(reason="no way of currently testing this")
-def test_adc_even_phase(hwm, results):
-    d = hwm.query(rfmux.CRS).one()
+def test_adc_even_phase(d, results):
     AMPLITUDE = 0.1
     TARGET_DAC = d.TARGET.DAC
     TARGET_ADC = d.TARGET.ADC
@@ -942,12 +935,11 @@ def psd_helper(data_i_raw, data_q_raw):
     return psd_i, psd_q, psdfreq
        
 
-def test_loopback_noise(hwm, results, summary_results, test_highbank, num_runs, results_dir):
+def test_loopback_noise(d, results, summary_results, test_highbank, num_runs, results_dir):
     '''
     1. Send a signal with no amplitude to gauge the noise floor, and any spikes in the noise floor
     2. Send a higher power signal to dominate the output with 1/f noise. Determine the slope of 1/f and any unusual spikes
     '''
-    d = hwm.query(rfmux.CRS).one()
     TARGET_DAC = d.TARGET.DAC
     TARGET_ADC = d.TARGET.ADC
     SAMPLES = 10000
@@ -1145,8 +1137,7 @@ def test_loopback_noise(hwm, results, summary_results, test_highbank, num_runs, 
 
 
 
-def test_wideband_noise(hwm, results, summary_results, test_highbank, num_runs, results_dir):
-    d = hwm.query(rfmux.CRS).one()
+def test_wideband_noise(d, results, summary_results, test_highbank, num_runs, results_dir):
 
     SAMPLING_FREQUENCY = 5e9  # 5 GHz
     NUM_SAMPLES = 4000  # Total number of samples

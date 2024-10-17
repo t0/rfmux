@@ -1,6 +1,8 @@
 """
 py_get_samples: an experimental pure-Python, client-side implementation of the
 get_samples() call with dynamic determination of the multicast interface IP address.
+
+Modified to discard the first 6 samples to avoid stale data.
 """
 
 import array
@@ -137,11 +139,11 @@ def get_local_ip(crs_hostname):
 @macro(CRS, register=True)
 async def py_get_samples(crs, num_samples, channel=None, module=None):
     """
-    Asynchronously retrieves samples from the CRS device.
+    Asynchronously retrieves samples from the CRS device, discarding the first 6 samples.
 
     Args:
         crs: The CRS device instance.
-        num_samples: Number of samples to collect.
+        num_samples: Number of samples to collect after discarding the initial samples.
         channel: Specific channel number to collect data from (optional).
         module: Specific module number to collect data from.
 
@@ -184,6 +186,13 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
         # Set a timeout on the socket to prevent indefinite blocking
         sock.settimeout(5)  # Timeout after 5 seconds
 
+        # Number of initial samples to discard
+        # Empirically we need to discard a maximum of 6 samples to avoid getting stale samples
+        discard_count = 6
+
+        # Variable to track the previous sequence number for continuity checks
+        prev_seq = None
+
         # Allow up to 10 packet-loss retries
         retries = 10
 
@@ -221,22 +230,32 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
             if p.version != STREAMER_VERSION:
                 raise RuntimeError(f"Invalid packet version! {p.version} != {STREAMER_VERSION}")
 
-            # Check for packet sequence continuity
-            with np.errstate(over="ignore"):
-                if packets and packets[-1].seq + 1 != p.seq:
-                    if retries:
-                        warnings.warn(
-                            f"Discontinuous packet capture! Index {len(packets)}, sequence {packets[-1].seq} -> {p.seq}. "
-                            f"Retrying ({retries} attempts remain.)"
-                        )
-                        retries -= 1
-                        packets = []
-                        continue
-                    else:
-                        raise RuntimeError(
-                            f"Discontinuous packet capture! Index {len(packets)}, sequence {packets[-1].seq} -> {p.seq}"
-                        )
+            # Update the sequence number continuity check
+            if prev_seq is not None and prev_seq + 1 != p.seq:
+                if retries:
+                    warnings.warn(
+                        f"Discontinuous packet capture! Previous sequence {prev_seq} -> current sequence {p.seq}. "
+                        f"Retrying ({retries} attempts remain.)"
+                    )
+                    retries -= 1
+                    packets = []
+                    discard_count = 6  # Reset discard count
+                    prev_seq = None
+                    continue
+                else:
+                    raise RuntimeError(
+                        f"Discontinuous packet capture! Previous sequence {prev_seq} -> current sequence {p.seq}"
+                    )
 
+            # Update the previous sequence number
+            prev_seq = p.seq
+
+            if discard_count > 0:
+                # Discard the initial samples
+                discard_count -= 1
+                continue  # Skip adding this packet to the results
+
+            # Append the valid packet to the list
             packets.append(p)
 
     # Build the results dictionary with timestamps

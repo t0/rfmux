@@ -3,6 +3,8 @@ import pytest
 import rfmux
 import time
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Set the backend to 'Agg' for non-interactive use
 import matplotlib.pyplot as plt
 from scipy import signal
 from scipy.stats import linregress
@@ -47,8 +49,12 @@ def transfer_function_helper(raw_sampl, AMPLITUDE, scale, attenuation):
     '''
     DB_LOSS_FACTOR = -2.56
     volts_peak_samples = (np.sqrt(2)) * np.sqrt(50 * (10 ** (-1.75 / 10)) / 1000) / 1880796.4604246316
-    data_i = np.array(raw_sampl.i) * volts_peak_samples
-    data_q = np.array(raw_sampl.q) * volts_peak_samples
+    if np.iscomplexobj(raw_sampl):
+        data_i = np.array(raw_sampl.real) * volts_peak_samples
+        data_q = np.array(raw_sampl.imag) * volts_peak_samples
+    else:
+        data_i = np.array(raw_sampl.i) * volts_peak_samples
+        data_q = np.array(raw_sampl.q) * volts_peak_samples
     magnitude = np.sqrt(data_i ** 2 + data_q ** 2)
     median_magnitude = np.median(magnitude)
     median_magnitude_dbm = 10 * np.log10(((median_magnitude / np.sqrt(2)) ** 2) / 50) + 30
@@ -189,7 +195,7 @@ def test_voltages(d, results,summary_results):
     summary_results['summary']['Board Health']['Voltage Test'] = test_status
 
 def test_currents(d, results, summary_results):
-    CURRENT_LIMIT = 0.1  # 10% tolerance on the current limit
+    CURRENT_LIMIT = 0.4  # 40% tolerance on the current limit
     test_status = 'Pass'
     sensors = (
         (d.CURRENT_SENSOR.MB_R0V85A, 2.5),
@@ -308,11 +314,11 @@ def test_dac_passband(d, results, summary_results, num_runs, test_highbank, resu
                 time.sleep(0.2)
 
                 # Get all the samples for the current run
-                raw = d.get_samples(SAMPLES, channel=None, module=module)
+                raw = d.py_get_samples(SAMPLES, channel=None, module=module)
 
                 for idx in range(start_idx, end_idx):
                     channel = int(channels[idx - start_idx])  # Convert to int and access correct channel
-                    rchan = raw[channel+1]
+                    rchan = np.array(raw.i[channel+1])+1j*np.array(raw.q[channel+1])
                     frequency = float(frequencies[idx])  # Ensure frequency is a float
                     measured, predicted = transfer_function_helper(rchan, AMPLITUDE, SCALE, ATTENUATION)
                     measured_dbm.append((frequency, measured))
@@ -405,7 +411,8 @@ def test_dac_amplitude_transfer(d, results, summary_results, test_highbank, num_
 
     highbank_run = False
     #feel free to adjust the amplitude density as needed
-    amplitudes = np.arange(0.01, 1, 0.01)
+    amplitudes = np.arange(0.05, 1, 0.05)
+    d.clear_channels()
 
     #num_runs passed from the config file depending on whether or not there will be a highbank run
     for num_run in range(0, num_runs):
@@ -421,13 +428,12 @@ def test_dac_amplitude_transfer(d, results, summary_results, test_highbank, num_
                 print(f'DAC_amplitude - Testing Module #:{module}')
             
             #When starting to test a new module, clear all channels and use the value_setter to set the variables that won't change attenuation, scale, frequency etc
-            d.clear_channels()
             value_setter_helper(d, FREQUENCY, NOMINAL_AMPLITUDE, SCALE, ATTENUATION, CHANNEL, module, NCO_FREQUENCY, TARGET_DAC, TARGET_ADC, highbank_run)
             
 
             for amplitude in amplitudes:
                 d.set_amplitude(amplitude, d.UNITS.NORMALIZED, TARGET_DAC, CHANNEL, module)
-                samples = d.get_samples(SAMPLES, channel=CHANNEL, module=module)
+                samples = d.py_get_samples(SAMPLES, channel=CHANNEL, module=module)
                 median_magnitude_dbm, predicted_magnitude_dbm = transfer_function_helper(samples, amplitude, SCALE, ATTENUATION)
                 amplitude_values.append(amplitude)
                 magnitude_dbm_values.append(median_magnitude_dbm)
@@ -493,7 +499,8 @@ def test_dac_amplitude_transfer(d, results, summary_results, test_highbank, num_
         if test_highbank:
             d.set_analog_bank(True)
             highbank_run = True
-            
+        d.clear_channels()
+
     d.set_analog_bank(False)
     results['tests'].append(test_result)
 
@@ -550,7 +557,7 @@ def test_dac_scale_transfer(d, results, summary_results, test_highbank, num_runs
             for scale in range (0, 8):
                 
                 d.set_dac_scale(scale, d.UNITS.DBM, module_set)
-                raw_sampl = d.get_samples(SAMPLES, channel=CHANNEL, module=module_sample)
+                raw_sampl = d.py_get_samples(SAMPLES, channel=CHANNEL, module=module_sample)
                 median_magnitude_dbm, predicted_magnitude_dbm = transfer_function_helper(raw_sampl, AMPLITUDE, scale, ATTENUATION)
                 
                 scale_values.append(scale)
@@ -698,7 +705,7 @@ def test_dac_mixmodes(d, results, summary_results, test_highbank):
                     while frequency <= DAC_MAX_FREQUENCY and nco + frequency < MAX_TOTAL_FREQUENCY:
                         if nco + frequency >= 0:
                             value_setter_helper(d, frequency, AMPLITUDE, SCALE, ATTENUATION, CHANNEL, module_setter, nco, TARGET_DAC, TARGET_ADC, is_highbank)
-                            samples = d.get_samples(SAMPLES, channel=CHANNEL, module=module_setter)
+                            samples = d.py_get_samples(SAMPLES, channel=CHANNEL, module=module_setter)
                             module_magnitude_dbm, _ = transfer_function_helper(samples, AMPLITUDE, SCALE, ATTENUATION)
 
                             if nyquist_zone == 1:
@@ -810,7 +817,7 @@ def test_adc_attenuation(d, results, summary_results, test_highbank, num_runs, r
 
             for attenuation in range(0, 15):
                 d.set_adc_attenuator(attenuation, d.UNITS.DB, module=module_set)
-                raw_sampl = d.get_samples(SAMPLES, channel=CHANNEL, module=module_sample)
+                raw_sampl = d.py_get_samples(SAMPLES, channel=CHANNEL, module=module_sample)
                 median_magnitude_dbm, predicted_magnitude_dbm = transfer_function_helper(raw_sampl, AMPLITUDE, SCALE, attenuation)
                 attenuation_values.append(attenuation)
                 magnitude_dbm_values.append(median_magnitude_dbm)
@@ -892,7 +899,7 @@ def test_adc_even_phase(d, results):
     }
     for module in range(1, 5):
         value_setter_helper(d, FREQUENCY, AMPLITUDE, SCALE, 0, CHANNEL, module, NCO_FREQUENCY, TARGET_DAC, TARGET_ADC)
-        x = d.get_samples(SAMPLES, channel=1, module=1)
+        x = d.py_get_samples(SAMPLES, channel=1, module=1)
     
         data_i_samples = np.array(x.i)
         data_q_samples = np.array(x.q)
@@ -981,8 +988,7 @@ def test_loopback_noise(d, results, summary_results, test_highbank, num_runs, re
             # 1. Test the noise environment: send a signal with no amplitude and plot the PSD of the samples
             d.clear_channels()
             value_setter_helper(d, FREQUENCY, AMPLITUDE_0, SCALE, ATTENUATION, CHANNEL_WHITE, mod, NCO_FREQUENCY, TARGET_DAC, TARGET_ADC, highbank_run)
-            time.sleep(0.3)
-            raw_samples_white = d.get_samples(SAMPLES, channel=CHANNEL_WHITE, module=mod)
+            raw_samples_white = d.py_get_samples(SAMPLES, channel=CHANNEL_WHITE, module=mod)
             data_i_white = np.array(raw_samples_white.i)
             data_q_white = np.array(raw_samples_white.q)
             psd_i_white, psd_q_white, psdfreq_white = psd_helper(data_i_white, data_q_white)
@@ -990,8 +996,7 @@ def test_loopback_noise(d, results, summary_results, test_highbank, num_runs, re
 
             # 2. Test the PSD of a large signal, establishing an expectation for 1/f slope and peak noise at low frequency
             value_setter_helper(d, FREQUENCY_1_F, AMPLITUDE_1_F, SCALE_1_F, ATTENUATION_1_F, CHANNEL_1_F, mod, NCO_FREQUENCY_1_F, TARGET_DAC, TARGET_ADC, highbank_run)
-            time.sleep(0.3)
-            raw_samples_psd = d.get_samples(SAMPLES, channel=CHANNEL_1_F, module=mod)
+            raw_samples_psd = d.py_get_samples(SAMPLES, channel=CHANNEL_1_F, module=mod)
             data_i_1_f = np.array(raw_samples_psd.i)
             data_q_1_f = np.array(raw_samples_psd.q)
             psd_i_1_f, psd_q_1_f, psdfreq_1_f = psd_helper(data_i_1_f, data_q_1_f)

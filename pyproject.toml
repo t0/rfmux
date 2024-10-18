@@ -15,7 +15,7 @@ dependencies = [
   "ipython",
   "matplotlib",
   "numpy",
-  "pygetdata",
+#  "pygetdata", # This is not yet in PyPI. Should be added back when available.
   "pytest",
   "pytest-asyncio",
   "pyyaml",

@@ -1,8 +1,6 @@
 """
 py_get_samples: an experimental pure-Python, client-side implementation of the
 get_samples() call with dynamic determination of the multicast interface IP address.
-
-Modified to discard the first 6 samples to avoid stale data.
 """
 
 import array
@@ -34,7 +32,7 @@ class TimestampPort(str, enum.Enum):
     GND = "GND"
 
 
-@dataclass
+@dataclass(order=True)
 class Timestamp:
     y: np.int32
     d: np.int32
@@ -74,6 +72,12 @@ class Timestamp:
         ts.c &= 0x1FFFFFFF
 
         return ts
+
+    @classmethod
+    def from_TuberResult(cls, ts):
+        # Convert the TuberResult into a dictionary we can use
+        data = { f: getattr(ts, f) for f in dir(ts) if not f.startswith('_')}
+        return Timestamp(**data)
 
 
 @dataclass
@@ -139,11 +143,11 @@ def get_local_ip(crs_hostname):
 @macro(CRS, register=True)
 async def py_get_samples(crs, num_samples, channel=None, module=None):
     """
-    Asynchronously retrieves samples from the CRS device, discarding the first 6 samples.
+    Asynchronously retrieves samples from the CRS device.
 
     Args:
         crs: The CRS device instance.
-        num_samples: Number of samples to collect after discarding the initial samples.
+        num_samples: Number of samples to collect.
         channel: Specific channel number to collect data from (optional).
         module: Specific module number to collect data from.
 
@@ -158,12 +162,15 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
     if channel is not None:
         assert 1 <= channel <= NUM_CHANNELS, f"Invalid channel {channel}!"
 
+    # We are going to need a reference timestamp to ensure network delays don't
+    # result in visible glitches after API calls.
+    ts = Timestamp.from_TuberResult(await crs.get_timestamp())
+
     # Determine the local IP address to use for the multicast interface
     multicast_interface_ip = get_local_ip(crs.tuber_hostname)
 
-    with contextlib.closing(
-        socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    ) as sock:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
+
         # Configure the socket for multicast reception
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
@@ -185,10 +192,6 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
 
         # Set a timeout on the socket to prevent indefinite blocking
         sock.settimeout(5)  # Timeout after 5 seconds
-
-        # Number of initial samples to discard
-        # Empirically we need to discard a maximum of 6 samples to avoid getting stale samples
-        discard_count = 6
 
         # Variable to track the previous sequence number for continuity checks
         prev_seq = None
@@ -230,6 +233,10 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
             if p.version != STREAMER_VERSION:
                 raise RuntimeError(f"Invalid packet version! {p.version} != {STREAMER_VERSION}")
 
+            # Drop packets until the board's time equals the network's time
+            if ts > p.ts:
+                continue
+
             # Update the sequence number continuity check
             if prev_seq is not None and prev_seq + 1 != p.seq:
                 if retries:
@@ -239,7 +246,6 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
                     )
                     retries -= 1
                     packets = []
-                    discard_count = 6  # Reset discard count
                     prev_seq = None
                     continue
                 else:
@@ -250,10 +256,6 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
             # Update the previous sequence number
             prev_seq = p.seq
 
-            if discard_count > 0:
-                # Discard the initial samples
-                discard_count -= 1
-                continue  # Skip adding this packet to the results
 
             # Append the valid packet to the list
             packets.append(p)

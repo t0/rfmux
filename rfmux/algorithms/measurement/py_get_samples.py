@@ -218,8 +218,8 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
             p = DfmuxPacket.from_bytes(data)
 
             if p.serial != int(crs.serial):
-                raise RuntimeError(
-                    f"Packet serial number {p.serial} didn't match CRS serial number {crs.serial}!"
+                warnings.warn(
+                    f"Packet serial number {p.serial} didn't match CRS serial number {crs.serial}! Two boards on the network? IGMPv3 capable router will fix this warning."
                 )
 
             # Filter packets by module

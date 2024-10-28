@@ -4,12 +4,15 @@ To specialize a CRS object for a particular experiment, you're
 encouraged to create a subclass.
 """
 
+import functools
+
 from sqlalchemy import Column, Integer, String, ForeignKey, UniqueConstraint, Float
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy.orm.collections import attribute_mapped_collection
 
 from . import hardware_map
 from .hardware_map import Boolean, HWMResource, HWMQuery
+from .streamer import get_samples
 
 import sqlalchemy
 from .. import tuber
@@ -193,6 +196,10 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
 
     async def resolve(self):
         await self.tuber_resolve()
+
+    @functools.wraps(get_samples)
+    async def py_get_samples(*args, **kwargs):
+        return await get_samples(*args, **kwargs)
 
 
 @ArgumentFiller(

@@ -1,21 +1,12 @@
-"""
-py_get_samples: an experimental pure-Python, client-side implementation of the
-get_samples() call with dynamic determination of the multicast interface IP address.
-"""
-
 import array
-import contextlib
+import dataclasses
 import enum
 import numpy as np
 import socket
 import struct
 import warnings
 
-from ...core.hardware_map import macro
-from ...core.schema import CRS
-from ...tuber.codecs import TuberResult
-
-from dataclasses import dataclass, asdict, astuple
+from ..tuber.codecs import TuberResult
 
 STREAMER_PORT = 9876
 STREAMER_HOST = "239.192.0.2"
@@ -33,7 +24,7 @@ class TimestampPort(str, enum.Enum):
     GND = "GND"
 
 
-@dataclass(order=True)
+@dataclasses.dataclass(order=True)
 class Timestamp:
     y: np.int32 # 0-99
     d: np.int32 # 1-366
@@ -49,7 +40,7 @@ class Timestamp:
 
     def renormalize(self):
 
-        old = astuple(self)
+        old = dataclasses.astuple(self)
 
         carry, self.ss = divmod(self.ss, SS_PER_SECOND)
         self.s += carry
@@ -104,7 +95,7 @@ class Timestamp:
         return Timestamp(**data)
 
 
-@dataclass
+@dataclasses.dataclass
 class DfmuxPacket:
     magic: np.uint32
     version: np.uint16
@@ -164,8 +155,7 @@ def get_local_ip(crs_hostname):
     return local_ip
 
 
-@macro(CRS, register=True)
-async def py_get_samples(crs, num_samples, channel=None, module=None):
+async def get_samples(crs, num_samples, channel=None, module=None):
     """
     Asynchronously retrieves samples from the CRS device.
 
@@ -274,8 +264,11 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
 
             if p.serial != int(crs.serial):
                 warnings.warn(
-                    f"Packet serial number {p.serial} didn't match CRS serial number {crs.serial}! Two boards on the network? IGMPv3 capable router will fix this warning."
+                    f"Packet serial number {p.serial} didn't match CRS serial "
+                    f"number {int(crs.serial)}! Two boards on the network? "
+                    f"An IGMPv3 capable router will fix this warning."
                 )
+                continue
 
             # Filter packets by module
             if p.module != module - 1:
@@ -312,12 +305,14 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
             # Update the previous sequence number
             prev_seq = p.seq
 
-
             # Append the valid packet to the list
             packets.append(p)
 
-    # Build the results dictionary with timestamps
-    results = dict(ts=[TuberResult(asdict(p.ts)) for p in packets])
+    # Build the results dictionary
+    results = dict(
+            ts=[TuberResult(dataclasses.asdict(p.ts)) for p in packets],
+            seq=[p.seq for p in packets],
+    )
 
     if channel is None:
         # Return data for all channels

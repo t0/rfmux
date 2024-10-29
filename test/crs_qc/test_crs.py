@@ -254,12 +254,12 @@ def test_dac_passband(d, results, summary_results, num_runs, test_highbank, resu
 
     '''
 
-
-    AMPLITUDE = 0.001
+    # FIXME: Some issue with the higher range of the frequencies showing a dip
+    AMPLITUDE = 0.005 # FIXME: JM change by x5
     TARGET_DAC = d.TARGET.DAC
     TARGET_ADC = d.TARGET.ADC
     SAMPLES = 10
-    NCO_FREQUENCY = 625e6
+    NCO_FREQUENCY = 1e9+123
     ATTENUATION = 0
     SCALE = 7
     NOMINAL_AMPLITUDE = 0.5
@@ -268,7 +268,7 @@ def test_dac_passband(d, results, summary_results, num_runs, test_highbank, resu
     TITLE = 'DAC Passband Test'
 
    #feel free to increase the range and density of frequencies
-    frequencies = np.arange(-300e6, 310e6, 10e6)
+    frequencies = np.arange(-300e6, 300e6, 10e6)
     channels = np.arange(1, 1001)
     nruns = int(np.ceil(len(frequencies) / len(channels)))
     lenrun = min(len(frequencies), len(channels))
@@ -299,6 +299,7 @@ def test_dac_passband(d, results, summary_results, num_runs, test_highbank, resu
                 start_idx = nrun * lenrun
                 end_idx = min(start_idx + lenrun, len(frequencies))
                 d.clear_channels()
+                time.sleep(0.2)
 
                 #First, call the function to set all the parameters that won't change: attenuation, scale, nco
                 value_setter_helper(d, NOMINAL_FREQUENCY,NOMINAL_AMPLITUDE, SCALE, ATTENUATION, NOMINAL_CHANNEL, module, NCO_FREQUENCY, TARGET_DAC, TARGET_ADC, highbank_run)

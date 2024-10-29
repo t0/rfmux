@@ -155,66 +155,18 @@ def get_local_ip(crs_hostname):
     return local_ip
 
 
-async def get_samples(crs, num_samples, channel=None, module=None):
-    """
-    Asynchronously retrieves samples from the CRS device.
+class Parser:
+    def __init__(self, crs, **kwargs):
+        self.crs = crs
 
-    Args:
-        crs: The CRS device instance.
-        num_samples: Number of samples to collect.
-        channel: Specific channel number to collect data from (optional).
-        module: Specific module number to collect data from.
+        # Allow 'channel' or 'module' to be passed in at parser initialization
+        # time
+        self.kwargs = kwargs
 
-    Returns:
-        TuberResult: The collected samples and timestamps.
-    """
-    # Ensure 'module' parameter is specified and valid
-    assert (
-        module in crs.modules.module
-    ), f"Unspecified or invalid module! Available modules: {crs.modules.module}"
+        # Determine the local IP address to use for the multicast interface
+        self.multicast_interface_ip = get_local_ip(crs.tuber_hostname)
 
-    if channel is not None:
-        assert 1 <= channel <= NUM_CHANNELS, f"Invalid channel {channel}!"
-
-    # We need to ensure all data we grab from the network was emitted "now" or
-    # later, from the perspective of control flow. Because of delays in the
-    # signal path and network, we might actually get stale data.  We want to
-    # avoid the following pathology:
-    #
-    # >>> # cryostat is in "before" condition"
-    # >>> d.set_amplitude(...)
-    # >>> # cryostat is in "after" condition
-    # >>> x = await d.get_samples(...) # "x" had better reflect "after" condition!
-    #
-    # There are two ways data can be stale:
-    #
-    # 1. Buffers in the end-to-end network mean that any packets we grab "now"
-    # might actually be pretty old. We can fix this by grabbing a "now"
-    # timestamp from the board, and tossing any data packets that are older
-    # than it.
-    #
-    # 2. Adjusting the "now" timestamp to add a little smidgen of signal-path
-    # delay. This is because the signal path experiences group delay due to
-    # decimation filters (PFB, CIC) and the timestamp doesn't. There are also
-    # digital delays in the data converters (upsampling, downsampling) and
-    # analog delays in the system.
-
-    ts = Timestamp.from_TuberResult(await crs.get_timestamp())
-
-    # Math on timestamps only works if they are valid
-    assert ts.recent, "Timestamp wasn't recent - do you have a valid timestamp source?"
-
-    ts.ss += np.uint32(.02 * SS_PER_SECOND) # 20ms, per experiments at FIR6
-    ts.renormalize()
-
-    # Adjust the timestamp by a small amount of wall time to avoid stale-data
-    # problems. The time "error" is due to delays the signal path sees (group
-    # delay in the CICs) that the timestamp path does not see.
-
-    # Determine the local IP address to use for the multicast interface
-    multicast_interface_ip = get_local_ip(crs.tuber_hostname)
-
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
+        sock = self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
         # Configure the socket for multicast reception
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -227,16 +179,88 @@ async def get_samples(crs, num_samples, channel=None, module=None):
 
         # Set the interface to receive multicast packets
         sock.setsockopt(
-            socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(multicast_interface_ip)
+            socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.multicast_interface_ip)
         )
 
         # Join the multicast group on the specified interface
         mc_ip = socket.inet_aton(STREAMER_HOST)
-        mreq = struct.pack("4s4s", mc_ip, socket.inet_aton(multicast_interface_ip))
+        mreq = struct.pack("4s4s", mc_ip, socket.inet_aton(self.multicast_interface_ip))
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
         # Set a timeout on the socket to prevent indefinite blocking
         sock.settimeout(5)  # Timeout after 5 seconds
+
+
+    async def __aenter__(self):
+        # Run at least one get_samples call to flush out the pipeline -
+        # entering the context manager seems like a reasonable boundary
+        # for fresh samples, and subsequent calls might use "stale=True".
+
+        await self.get_samples(1, stale=False, channel=1, module=1)
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        return None
+
+    async def get_samples(self, num_samples, stale=False, channel=None, module=None):
+        """
+        Asynchronously retrieves samples from the CRS device.
+
+        Args:
+            num_samples: Number of samples to collect.
+            channel: Specific channel number to collect data from (optional).
+            module: Specific module number to collect data from.
+
+        Returns:
+            TuberResult: The collected samples and timestamps.
+        """
+
+        module = module or self.kwargs['module']
+        channel = channel or self.kwargs['channel']
+
+        # Ensure 'module' parameter is specified and valid
+        assert (
+            module in self.crs.modules.module
+        ), f"Unspecified or invalid module! Available modules: {self.crs.modules.module}"
+
+        if channel is not None:
+            assert 1 <= channel <= NUM_CHANNELS, f"Invalid channel {channel}!"
+
+        # We need to ensure all data we grab from the network was emitted "now" or
+        # later, from the perspective of control flow. Because of delays in the
+        # signal path and network, we might actually get stale data.  We want to
+        # avoid the following pathology:
+        #
+        # >>> # cryostat is in "before" condition"
+        # >>> d.set_amplitude(...)
+        # >>> # cryostat is in "after" condition
+        # >>> x = await d.get_samples(...) # "x" had better reflect "after" condition!
+        #
+        # There are two ways data can be stale:
+        #
+        # 1. Buffers in the end-to-end network mean that any packets we grab "now"
+        # might actually be pretty old. We can fix this by grabbing a "now"
+        # timestamp from the board, and tossing any data packets that are older
+        # than it.
+        #
+        # 2. Adjusting the "now" timestamp to add a little smidgen of signal-path
+        # delay. This is because the signal path experiences group delay due to
+        # decimation filters (PFB, CIC) and the timestamp doesn't. There are also
+        # digital delays in the data converters (upsampling, downsampling) and
+        # analog delays in the system.
+
+        ts = Timestamp.from_TuberResult(await self.crs.get_timestamp())
+
+        # Math on timestamps only works if they are valid
+        assert ts.recent, "Timestamp wasn't recent - do you have a valid timestamp source?"
+
+        ts.ss += np.uint32(.02 * SS_PER_SECOND) # 20ms, per experiments at FIR6
+        ts.renormalize()
+
+        # Adjust the timestamp by a small amount of wall time to avoid stale-data
+        # problems. The time "error" is due to delays the signal path sees (group
+        # delay in the CICs) that the timestamp path does not see.
+
 
         # Variable to track the previous sequence number for continuity checks
         prev_seq = None
@@ -244,11 +268,12 @@ async def get_samples(crs, num_samples, channel=None, module=None):
         # Allow up to 10 packet-loss retries
         retries = 10
 
+        num_stale_packets = 0
         packets = []
         # Start receiving packets
-        while len(packets) < num_samples:
+        while len(packets) < num_samples + num_stale_packets:
             try:
-                data = sock.recv(STREAMER_LEN)
+                data = self.sock.recv(STREAMER_LEN)
             except socket.timeout:
                 if retries > 0:
                     # Retry receiving packets after timeout
@@ -262,10 +287,10 @@ async def get_samples(crs, num_samples, channel=None, module=None):
             # Parse the received packet
             p = DfmuxPacket.from_bytes(data)
 
-            if p.serial != int(crs.serial):
+            if p.serial != int(self.crs.serial):
                 warnings.warn(
                     f"Packet serial number {p.serial} didn't match CRS serial "
-                    f"number {int(crs.serial)}! Two boards on the network? "
+                    f"number {int(self.crs.serial)}! Two boards on the network? "
                     f"An IGMPv3 capable router will fix this warning."
                 )
                 continue
@@ -284,7 +309,10 @@ async def get_samples(crs, num_samples, channel=None, module=None):
             # Drop packets until the board's time equals the network's time
             assert ts.source == p.ts.source, f"Timestamp source changed! Reference {ts.source}, packet {p.ts.source}"
             if ts > p.ts:
-                continue
+                if stale:
+                    num_stale_packets += 1
+                else:
+                    continue
 
             # Update the sequence number continuity check
             if prev_seq is not None and prev_seq + 1 != p.seq:
@@ -295,6 +323,7 @@ async def get_samples(crs, num_samples, channel=None, module=None):
                     )
                     retries -= 1
                     packets = []
+                    num_stale_packets = 0
                     prev_seq = None
                     continue
                 else:
@@ -308,23 +337,23 @@ async def get_samples(crs, num_samples, channel=None, module=None):
             # Append the valid packet to the list
             packets.append(p)
 
-    # Build the results dictionary
-    results = dict(
-            ts=[TuberResult(dataclasses.asdict(p.ts)) for p in packets],
-            seq=[p.seq for p in packets],
-    )
+        # Build the results dictionary
+        results = dict(
+                ts=[TuberResult(dataclasses.asdict(p.ts)) for p in packets],
+                seq=[p.seq for p in packets],
+        )
 
-    if channel is None:
-        # Return data for all channels
-        results["i"] = []
-        results["q"] = []
-        for c in range(NUM_CHANNELS):
-            # Extract 'i' and 'q' data for each channel across all packets
-            results["i"].append([p.s[2 * c] / 256 for p in packets])
-            results["q"].append([p.s[2 * c + 1] / 256 for p in packets])
-    else:
-        # Return data for the specified channel
-        results["i"] = [p.s[2 * (channel - 1)] / 256 for p in packets]
-        results["q"] = [p.s[2 * (channel - 1) + 1] / 256 for p in packets]
+        if channel is None:
+            # Return data for all channels
+            results["i"] = []
+            results["q"] = []
+            for c in range(NUM_CHANNELS):
+                # Extract 'i' and 'q' data for each channel across all packets
+                results["i"].append([p.s[2 * c] / 256 for p in packets])
+                results["q"].append([p.s[2 * c + 1] / 256 for p in packets])
+        else:
+            # Return data for the specified channel
+            results["i"] = [p.s[2 * (channel - 1)] / 256 for p in packets]
+            results["q"] = [p.s[2 * (channel - 1) + 1] / 256 for p in packets]
 
-    return TuberResult(results)
+        return TuberResult(results)

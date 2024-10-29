@@ -12,7 +12,7 @@ from sqlalchemy.orm.collections import attribute_mapped_collection
 
 from . import hardware_map
 from .hardware_map import Boolean, HWMResource, HWMQuery
-from .streamer import get_samples
+from .streamer import Parser
 
 import sqlalchemy
 from .. import tuber
@@ -197,10 +197,12 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
     async def resolve(self):
         await self.tuber_resolve()
 
-    @functools.wraps(get_samples)
-    async def py_get_samples(*args, **kwargs):
-        return await get_samples(*args, **kwargs)
+    @functools.wraps(Parser.get_samples)
+    async def py_get_samples(self, *args, **kwargs):
+        return await Parser(self).get_samples(*args, **kwargs)
 
+    def parser_context(self, *args, **kwargs):
+        return Parser(self, *args, **kwargs)
 
 @ArgumentFiller(
     lambda m: m.crs,

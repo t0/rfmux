@@ -184,8 +184,9 @@ class Parser:
 
         # Join the multicast group on the specified interface
         mc_ip = socket.inet_aton(STREAMER_HOST)
-        mreq = struct.pack("4s4s", mc_ip, socket.inet_aton(self.multicast_interface_ip))
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        crs_ip = socket.inet_aton(socket.gethostbyname(crs.tuber_hostname))
+        mreq = struct.pack("4s4s4s", mc_ip, socket.inet_aton(self.multicast_interface_ip), crs_ip)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_SOURCE_MEMBERSHIP, mreq)
 
         # Set a timeout on the socket to prevent indefinite blocking
         sock.settimeout(5)  # Timeout after 5 seconds

@@ -1,8 +1,6 @@
 """
 py_get_samples: an experimental pure-Python, client-side implementation of the
 get_samples() call with dynamic determination of the multicast interface IP address.
-
-Modified to discard the first 6 samples to avoid stale data.
 """
 
 import array
@@ -17,7 +15,7 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...tuber.codecs import TuberResult
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, astuple
 
 STREAMER_PORT = 9876
 STREAMER_HOST = "239.192.0.2"
@@ -25,6 +23,7 @@ STREAMER_LEN = 8240
 STREAMER_MAGIC = 0x5344494B
 STREAMER_VERSION = 5
 NUM_CHANNELS = 1024
+SS_PER_SECOND = 125000000
 
 
 class TimestampPort(str, enum.Enum):
@@ -34,19 +33,42 @@ class TimestampPort(str, enum.Enum):
     GND = "GND"
 
 
-@dataclass
+@dataclass(order=True)
 class Timestamp:
-    y: np.int32
-    d: np.int32
-    h: np.int32
-    m: np.int32
-    s: np.int32
-    ss: np.int32
+    y: np.int32 # 0-99
+    d: np.int32 # 1-366
+    h: np.int32 # 0-23
+    m: np.int32 # 0-59
+    s: np.int32 # 0-59
+    ss: np.int32 # 0-SS_PER_SECOND-1
     c: np.int32
     sbs: np.int32
 
     source: TimestampPort
     recent: bool
+
+    def renormalize(self):
+
+        old = astuple(self)
+
+        carry, self.ss = divmod(self.ss, SS_PER_SECOND)
+        self.s += carry
+
+        carry, self.s = divmod(self.s, 60)
+        self.m += carry
+
+        carry, self.m = divmod(self.m, 60)
+        self.h += carry
+
+        carry, self.h = divmod(self.h, 24)
+        self.d += carry
+
+        self.d -= 1  # convert to zero-indexed
+        carry, self.d = divmod(self.d, 365)  # does not work on leap day
+        self.d += 1  # restore to 1-indexed
+        self.y += carry
+        self.y %= 100  # and roll over
+
 
     @classmethod
     def from_bytes(cls, data):
@@ -74,6 +96,12 @@ class Timestamp:
         ts.c &= 0x1FFFFFFF
 
         return ts
+
+    @classmethod
+    def from_TuberResult(cls, ts):
+        # Convert the TuberResult into a dictionary we can use
+        data = { f: getattr(ts, f) for f in dir(ts) if not f.startswith('_')}
+        return Timestamp(**data)
 
 
 @dataclass
@@ -139,11 +167,11 @@ def get_local_ip(crs_hostname):
 @macro(CRS, register=True)
 async def py_get_samples(crs, num_samples, channel=None, module=None):
     """
-    Asynchronously retrieves samples from the CRS device, discarding the first 6 samples.
+    Asynchronously retrieves samples from the CRS device.
 
     Args:
         crs: The CRS device instance.
-        num_samples: Number of samples to collect after discarding the initial samples.
+        num_samples: Number of samples to collect.
         channel: Specific channel number to collect data from (optional).
         module: Specific module number to collect data from.
 
@@ -158,12 +186,46 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
     if channel is not None:
         assert 1 <= channel <= NUM_CHANNELS, f"Invalid channel {channel}!"
 
+    # We need to ensure all data we grab from the network was emitted "now" or
+    # later, from the perspective of control flow. Because of delays in the
+    # signal path and network, we might actually get stale data.  We want to
+    # avoid the following pathology:
+    #
+    # >>> # cryostat is in "before" condition"
+    # >>> d.set_amplitude(...)
+    # >>> # cryostat is in "after" condition
+    # >>> x = await d.get_samples(...) # "x" had better reflect "after" condition!
+    #
+    # There are two ways data can be stale:
+    #
+    # 1. Buffers in the end-to-end network mean that any packets we grab "now"
+    # might actually be pretty old. We can fix this by grabbing a "now"
+    # timestamp from the board, and tossing any data packets that are older
+    # than it.
+    #
+    # 2. Adjusting the "now" timestamp to add a little smidgen of signal-path
+    # delay. This is because the signal path experiences group delay due to
+    # decimation filters (PFB, CIC) and the timestamp doesn't. There are also
+    # digital delays in the data converters (upsampling, downsampling) and
+    # analog delays in the system.
+
+    ts = Timestamp.from_TuberResult(await crs.get_timestamp())
+
+    # Math on timestamps only works if they are valid
+    assert ts.recent, "Timestamp wasn't recent - do you have a valid timestamp source?"
+
+    ts.ss += np.uint32(.02 * SS_PER_SECOND) # 20ms, per experiments at FIR6
+    ts.renormalize()
+
+    # Adjust the timestamp by a small amount of wall time to avoid stale-data
+    # problems. The time "error" is due to delays the signal path sees (group
+    # delay in the CICs) that the timestamp path does not see.
+
     # Determine the local IP address to use for the multicast interface
     multicast_interface_ip = get_local_ip(crs.tuber_hostname)
 
-    with contextlib.closing(
-        socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    ) as sock:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
+
         # Configure the socket for multicast reception
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
@@ -185,10 +247,6 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
 
         # Set a timeout on the socket to prevent indefinite blocking
         sock.settimeout(5)  # Timeout after 5 seconds
-
-        # Number of initial samples to discard
-        # Empirically we need to discard a maximum of 6 samples to avoid getting stale samples
-        discard_count = 6
 
         # Variable to track the previous sequence number for continuity checks
         prev_seq = None
@@ -215,8 +273,8 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
             p = DfmuxPacket.from_bytes(data)
 
             if p.serial != int(crs.serial):
-                raise RuntimeError(
-                    f"Packet serial number {p.serial} didn't match CRS serial number {crs.serial}!"
+                warnings.warn(
+                    f"Packet serial number {p.serial} didn't match CRS serial number {crs.serial}! Two boards on the network? IGMPv3 capable router will fix this warning."
                 )
 
             # Filter packets by module
@@ -230,6 +288,11 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
             if p.version != STREAMER_VERSION:
                 raise RuntimeError(f"Invalid packet version! {p.version} != {STREAMER_VERSION}")
 
+            # Drop packets until the board's time equals the network's time
+            assert ts.source == p.ts.source, f"Timestamp source changed! Reference {ts.source}, packet {p.ts.source}"
+            if ts > p.ts:
+                continue
+
             # Update the sequence number continuity check
             if prev_seq is not None and prev_seq + 1 != p.seq:
                 if retries:
@@ -239,7 +302,6 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
                     )
                     retries -= 1
                     packets = []
-                    discard_count = 6  # Reset discard count
                     prev_seq = None
                     continue
                 else:
@@ -250,10 +312,6 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
             # Update the previous sequence number
             prev_seq = p.seq
 
-            if discard_count > 0:
-                # Discard the initial samples
-                discard_count -= 1
-                continue  # Skip adding this packet to the results
 
             # Append the valid packet to the list
             packets.append(p)

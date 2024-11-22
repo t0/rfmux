@@ -11,9 +11,9 @@ This test script can be invoked in three ways:
       ./test_calls.py
 
 - By itself, in your PC's current Python environment, with a CRS board running
-  alongside: (note the CRS_SERIAL environment variable!)
+  alongside:
 
-      CRS_SERIAL=0024 ./test_calls.py
+      ./test_calls.py --serial=0024
 
 - As part of a complete regression test environment (exercising all test
   scripts and in a variety of different Python environments), without relying

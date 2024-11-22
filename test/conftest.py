@@ -2,17 +2,20 @@ import pytest
 import rfmux
 import os
 
+def pytest_addoption(parser):
+    parser.addoption("--serial", action="store", default=None)
+
 
 @pytest.fixture
-def live_session():
-    if "CRS_SERIAL" not in os.environ:
+def live_session(pytestconfig):
+    if (serial := pytestconfig.getoption("serial")) is None:
         pytest.skip(
-            "Set the CRS_SERIAL environment variable to match your CRS board to run this test."
+            "Use the '--serial' argument to specify a running CRS board for this test."
         )
 
     return rfmux.load_session(
         f"""
         !HardwareMap
-        - !CRS {{ serial: "{os.environ['CRS_SERIAL']}" }}
+        - !CRS {{ serial: "{serial}" }}
         """
     )

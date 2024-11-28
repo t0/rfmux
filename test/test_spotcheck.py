@@ -1,4 +1,4 @@
-#!/usr/bin/env -S PYTHONPATH=.. pytest-3 -v
+#!/usr/bin/env -S PYTHONPATH=.. pytest-3 -v -W error::UserWarning
 
 """
 Spot checks for API regressions.

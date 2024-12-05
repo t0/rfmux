@@ -66,9 +66,6 @@ def patch_tuber_context(d):
     setattr(d, 'tuber_context', patched_tuber_context)
 
 
-def pytest_addoption(parser):
-    parser.addoption("--serial", action="store", default=None, help="Serial number of the board")
-
 @pytest.hookimpl(tryfirst=True)
 def pytest_sessionstart(session):
     session.user_test_highbank = input("Would you like to run the test on both low (1-4) and high (5-8) banks? Enter Y/N  ")

@@ -209,7 +209,20 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
     # digital delays in the data converters (upsampling, downsampling) and
     # analog delays in the system.
 
-    ts = Timestamp.from_TuberResult(await crs.get_timestamp())
+    async with crs.tuber_context() as tc:
+        ts = tc.get_timestamp()
+        high_bank = tc.get_analog_bank()
+
+    ts = Timestamp.from_TuberResult(ts.result())
+    high_bank = high_bank.result()
+
+    if high_bank:
+        assert module > 4, \
+                f"Can't retrieve samples from module {module} with set_analog_bank(True)"
+        module -= 4
+    else:
+        assert module <= 4, \
+                f"Can't retrieve samples from module {module} with set_analog_bank(False)"
 
     # Math on timestamps only works if they are valid
     assert ts.recent, "Timestamp wasn't recent - do you have a valid timestamp source?"

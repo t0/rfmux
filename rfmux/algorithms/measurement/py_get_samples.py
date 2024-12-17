@@ -165,7 +165,10 @@ def get_local_ip(crs_hostname):
 
 
 @macro(CRS, register=True)
-async def py_get_samples(crs, num_samples, channel=None, module=None):
+async def py_get_samples(crs : CRS,
+                         num_samples, average : bool = False,
+                         channel : int = None,
+                         module : int = None):
     """
     Asynchronously retrieves samples from the CRS device.
 
@@ -328,6 +331,28 @@ async def py_get_samples(crs, num_samples, channel=None, module=None):
 
             # Append the valid packet to the list
             packets.append(p)
+
+    if average:
+        mean_i = np.zeros(NUM_CHANNELS)
+        mean_q = np.zeros(NUM_CHANNELS)
+        std_i = np.zeros(NUM_CHANNELS)
+        std_q = np.zeros(NUM_CHANNELS)
+
+        for c in range(NUM_CHANNELS):
+            mean_i[c] = np.mean([p.s[2 * c] / 256 for p in packets])
+            mean_q[c] = np.mean([p.s[2 * c + 1] / 256 for p in packets])
+            std_i[c] = np.std([p.s[2 * c] / 256 for p in packets])
+            std_q[c] = np.std([p.s[2 * c + 1] / 256 for p in packets])
+
+        if channel is None:
+            return {
+                "mean": dict(i=mean_i, q=mean_q),
+                "std": dict(i=std_i, q=std_q),
+            }
+        return {
+            "mean": dict(i=mean_i[channel-1], q=mean_q[channel-1]),
+            "std": dict(i=std_i[channel-1], q=std_q[channel-1]),
+        }
 
     # Build the results dictionary with timestamps
     results = dict(ts=[TuberResult(asdict(p.ts)) for p in packets])

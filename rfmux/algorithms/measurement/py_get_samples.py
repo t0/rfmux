@@ -345,15 +345,17 @@ async def py_get_samples(crs : CRS,
             std_q[c] = np.std([p.s[2 * c + 1] / 256 for p in packets])
 
         if channel is None:
-            return {
-                "mean": dict(i=mean_i, q=mean_q),
-                "std": dict(i=std_i, q=std_q),
+            results = {
+                "mean": TuberResult(dict(i=mean_i, q=mean_q)),
+                "std": TuberResult(dict(i=std_i, q=std_q)),
             }
-        return {
-            "mean": dict(i=mean_i[channel-1], q=mean_q[channel-1]),
-            "std": dict(i=std_i[channel-1], q=std_q[channel-1]),
+        else:
+            results = {
+            "mean": TuberResult(dict(i=mean_i[channel-1], q=mean_q[channel-1])),
+            "std": TuberResult(dict(i=std_i[channel-1], q=std_q[channel-1])),
         }
-
+            
+        return TuberResult(results)
     # Build the results dictionary with timestamps
     results = dict(ts=[TuberResult(asdict(p.ts)) for p in packets])
 

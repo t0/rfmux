@@ -14,6 +14,7 @@ import warnings
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...tuber.codecs import TuberResult
+from ...core.utils.transferfunctions import VOLTS_PER_ROC
 
 from dataclasses import dataclass, asdict, astuple
 
@@ -27,10 +28,6 @@ STREAMER_MAGIC = 0x5344494B
 STREAMER_VERSION = 5
 NUM_CHANNELS = 1024
 SS_PER_SECOND = 125000000
-
-# Define the volts_per_roc conversion factor
-VOLTS_PER_ROC = (np.sqrt(2)) * np.sqrt(50 * (10**(-1.75 / 10)) / 1000) / 1880796.4604246316
-
 
 class TimestampPort(str, enum.Enum):
     BACKPLANE = "BACKPLANE"
@@ -374,6 +371,9 @@ async def py_get_samples(crs: CRS,
         reference (str, optional): 'relative' to report spectra in dBc and time-domain in counts,
             'absolute' to report spectra in dBm and time-domain in volts.
         spectrum_cutoff (float, optional): Fraction of Nyquist frequency to retain in the spectrum (default: 0.9).
+            The CIC corrections go to infinity at Nyqyuist. This cutoff avoids amplifying noise at the extrema.
+            If you are measuring large signals above the noise, then beyond-cutoff values still make sense, and
+            this can be adjusted to recover those signals.
 
     Returns:
         TuberResult: The collected time-domain samples and timestamps, plus optional spectral data.
@@ -647,20 +647,29 @@ async def py_get_samples(crs: CRS,
             # Single channel
             i_data = results["i"]
             q_data = results["q"]
-            freq, (arr1, arr2) = _compute_spectrum(
-                i_data, q_data, fs, dec_stage,
-                onesided=onesided,
-                scaling=scaling,
-                nperseg=nperseg if nperseg is not None else num_samples,
-                reference=reference,
-                spectrum_cutoff=spectrum_cutoff
-            )
-            spec_data["freq"] = freq.tolist()
+
             if onesided:
+                freq, (arr1, arr2) = _compute_spectrum(
+                    i_data, q_data, fs, dec_stage,
+                    onesided=onesided,
+                    scaling=scaling,
+                    nperseg=nperseg if nperseg is not None else num_samples,
+                    reference=reference,
+                    spectrum_cutoff=spectrum_cutoff
+                )
                 spec_data["i_psd"] = arr1.tolist()
                 spec_data["q_psd"] = arr2.tolist()
             else:
-                spec_data["complex_psd"] = arr1.tolist()  # arr2 is None in dual mode
+                freq, comp_psd = _compute_spectrum(
+                    i_data, q_data, fs, dec_stage,
+                    onesided=onesided,
+                    scaling=scaling,
+                    nperseg=nperseg if nperseg is not None else num_samples,
+                    reference=reference,
+                    spectrum_cutoff=spectrum_cutoff
+                )
+                spec_data["complex_psd"] = comp_psd.tolist()
+            spec_data["freq"] = freq.tolist()
 
         # Attach the spectrum to results
         results["spectrum"] = TuberResult(spec_data)

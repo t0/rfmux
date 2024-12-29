@@ -17,6 +17,9 @@ from ...tuber.codecs import TuberResult
 
 from dataclasses import dataclass, asdict, astuple
 
+# Added import for PSD computation
+from scipy.signal import welch
+
 STREAMER_PORT = 9876
 STREAMER_HOST = "239.192.0.2"
 STREAMER_LEN = 8240
@@ -24,6 +27,9 @@ STREAMER_MAGIC = 0x5344494B
 STREAMER_VERSION = 5
 NUM_CHANNELS = 1024
 SS_PER_SECOND = 125000000
+
+# Define the volts_per_roc conversion factor
+VOLTS_PER_ROC = (np.sqrt(2)) * np.sqrt(50 * (10**(-1.75 / 10)) / 1000) / 1880796.4604246316
 
 
 class TimestampPort(str, enum.Enum):
@@ -164,22 +170,220 @@ def get_local_ip(crs_hostname):
     return local_ip
 
 
+#
+# New: A small helper to compute the single-stage CIC correction
+# (used internally by _compute_spectrum).
+#
+def _cic_correction(frequencies, f_in, R=64, N=6):
+    """
+    Internal helper for single-stage CIC correction.
+
+    frequencies : array of frequency bins (Hz)
+    f_in : input sampling rate prior to decimation
+    R, N : decimation rate, number of stages
+    """
+    freq_ratio = frequencies / f_in
+    with np.errstate(divide='ignore', invalid='ignore'):
+        numerator = np.sin(np.pi * freq_ratio)
+        denominator = np.sin(np.pi * freq_ratio / R)
+        correction = (numerator / denominator) ** N
+        # Replace NaNs at DC with the ideal DC gain = R^N
+        correction[np.isnan(correction)] = R ** N
+    return correction / (R ** N)
+
+
+#
+# New: A local function to compute spectrum in dBc or dBm.
+# This is only called if return_spectrum=True.
+#
+def _compute_spectrum(i_data, q_data, fs, dec_stage,
+                     onesided=True, scaling='psd', nperseg=None,
+                     reference='relative',
+                     spectrum_cutoff=0.9):
+    """
+    Internal function to compute PSD/PS in dBc or dBm.
+
+    Parameters
+    ----------
+    i_data : list or ndarray
+        Time-domain I (real) samples.
+    q_data : list or ndarray
+        Time-domain Q (imag) samples.
+    fs : float
+        Sampling frequency in Hz.
+    dec_stage : int
+        Decimation stage to determine second CIC's decimation factor.
+    onesided : bool
+        If True, compute single-sideband PSD for I and Q separately.
+        If False, compute dual-sideband PSD for the complex signal.
+    scaling : str
+        'psd' for power spectral density (V²/Hz),
+        'ps' for power spectrum (V²).
+    nperseg : int or None
+        Number of samples per segment for Welch. Defaults to len(i_data).
+    reference : str
+        'relative' for dBc, 'absolute' for dBm.
+    spectrum_cutoff : float
+        Fraction of Nyquist frequency to retain in the spectrum (default: 0.9).
+
+    Returns
+    -------
+    tuple
+        - freq: ndarray
+            Frequency bins after cutoff.
+        - spectrum: ndarray or tuple of ndarrays
+            PSD in dBc or dBm after cutoff. Tuple contains (I PSD, Q PSD) if onesided=True.
+            Single ndarray contains complex PSD if onesided=False.
+    """
+    # Set default nperseg to num_samples if not provided
+    if nperseg is None:
+        nperseg = len(i_data)
+
+    # Convert 'psd'/'ps' to scipy's 'density'/'spectrum'
+    scipy_scaling = 'density' if scaling.lower() == 'psd' else 'spectrum'
+
+    arr_i = np.asarray(i_data)
+    arr_q = np.asarray(q_data)
+    arr_complex = arr_i + 1j * arr_q
+
+    if reference == 'relative':
+        # Reference power: magnitude-squared of the mean complex amplitude
+        carrier_power = np.abs(np.mean(arr_complex)) ** 2
+
+    # Define CIC decimation parameters
+    R1 = 64
+    R2 = 2 ** dec_stage
+    f_in1 = 625e6 / 256.0  # Original f_in before first CIC
+    f_in2 = f_in1 / R1      # f_in before second CIC
+
+    if onesided:
+        # Single-sideband: separate PSD for I and Q
+        freq_i, psd_i = welch(arr_i, fs=fs, nperseg=nperseg,
+                              scaling=scipy_scaling,
+                              return_onesided=True)
+        freq_q, psd_q = welch(arr_q, fs=fs, nperseg=nperseg,
+                              scaling=scipy_scaling,
+                              return_onesided=True)
+
+        # freq_i == freq_q for welch with same params
+        freq = freq_i
+
+        # Correct frequency scaling for CIC1 and CIC2
+        # freq_stage1 = freq * R1 * R2 (frequency relative to CIC1's input)
+        # freq_stage2 = freq * R2 (frequency relative to CIC2's input)
+        cic1_corr = _cic_correction(freq * R1 * R2, f_in=f_in1, R=R1, N=6)
+        cic2_corr = _cic_correction(freq * R2, f_in=f_in2, R=R2, N=6)
+        correction = cic1_corr * cic2_corr
+
+        # Apply correction
+        psd_i_corrected = psd_i / correction
+        psd_q_corrected = psd_q / correction
+
+        # Apply spectrum cutoff
+        nyquist = fs / 2
+        cutoff_freq = spectrum_cutoff * nyquist
+        cutoff_idx = freq <= cutoff_freq
+        freq = freq[cutoff_idx]
+        psd_i_corrected = psd_i_corrected[cutoff_idx]
+        psd_q_corrected = psd_q_corrected[cutoff_idx]
+
+        if reference == 'relative':
+            # Convert to dBc
+            i_dB = 10.0 * np.log10(psd_i_corrected / (carrier_power + 1e-30))
+            q_dB = 10.0 * np.log10(psd_q_corrected / (carrier_power + 1e-30))
+            return freq, (i_dB, q_dB)
+        elif reference == 'absolute':
+            # Convert PSD from V^2/Hz to dBm/Hz
+            # P (W) = PSD / R, since PSD is V^2/Hz and R=50 Ohms
+            p_i = psd_i_corrected / 50.0  # Power in Watts
+            p_q = psd_q_corrected / 50.0  # Power in Watts
+            # Convert to dBm
+            i_dBm = 10.0 * np.log10(p_i / 1e-3 + 1e-30)
+            q_dBm = 10.0 * np.log10(p_q / 1e-3 + 1e-30)
+            return freq, (i_dBm, q_dBm)
+        else:
+            raise ValueError("Invalid reference mode. Choose 'relative' or 'absolute'.")
+
+    else:
+        # Dual-sideband: PSD of complex array
+        freq, psd_complex = welch(arr_complex, fs=fs, nperseg=nperseg,
+                                 scaling=scipy_scaling,
+                                 return_onesided=False)
+
+        # Compute frequency relative to each CIC stage
+        # freq_stage1 = freq * R1 * R2 (relative to CIC1's input)
+        # freq_stage2 = freq * R2 (relative to CIC2's input)
+        freq_abs = np.abs(freq)
+        cic1_corr = _cic_correction(freq_abs * R1 * R2, f_in=f_in1, R=R1, N=6)
+        cic2_corr = _cic_correction(freq_abs * R2, f_in=f_in2, R=R2, N=6)
+        correction = cic1_corr * cic2_corr
+
+        # Apply correction
+        psd_complex_corrected = psd_complex / correction
+
+        # Apply spectrum cutoff
+        nyquist = fs / 2
+        cutoff_freq = spectrum_cutoff * nyquist
+        cutoff_idx = freq_abs <= cutoff_freq
+        freq = freq[cutoff_idx]
+        psd_complex_corrected = psd_complex_corrected[cutoff_idx]
+
+        if reference == 'relative':
+            # Convert to dBc
+            complex_dB = 10.0 * np.log10(psd_complex_corrected / (carrier_power + 1e-30))
+            return freq, complex_dB
+        elif reference == 'absolute':
+            # Convert PSD from V^2/Hz to dBm/Hz
+            # P (W) = PSD / R, since PSD is V^2/Hz and R=50 Ohms
+            p = psd_complex_corrected / 50.0  # Power in Watts
+            # Convert to dBm
+            complex_dBm = 10.0 * np.log10(p / 1e-3 + 1e-30)
+            return freq, complex_dBm
+        else:
+            raise ValueError("Invalid reference mode. Choose 'relative' or 'absolute'.")
+
+
 @macro(CRS, register=True)
-async def py_get_samples(crs : CRS,
-                         num_samples, average : bool = False,
-                         channel : int = None,
-                         module : int = None):
+async def py_get_samples(crs: CRS,
+                         num_samples: int,
+                         average: bool = False,
+                         channel: int = None,
+                         module: int = None,
+                         *,
+                         return_spectrum: bool = False,
+                         onesided: bool = True,
+                         scaling: str = 'psd',
+                         nperseg: int = None,
+                         reference: str = 'relative',
+                         spectrum_cutoff: float = 0.9):
     """
     Asynchronously retrieves samples from the CRS device.
 
     Args:
-        crs: The CRS device instance.
-        num_samples: Number of samples to collect.
-        channel: Specific channel number to collect data from (optional).
-        module: Specific module number to collect data from.
+        crs (CRS): The CRS device instance.
+        num_samples (int): Number of samples to collect.
+        average (bool, optional): If True, returns average and std dev only (time-domain).
+        channel (int, optional): Specific channel number to collect data from (optional).
+        module (int, optional): The module number from which to retrieve samples.
+        return_spectrum (bool, optional): If True, also compute and return the PSD or PS.
+        onesided (bool, optional): If True, produce single-sideband PSD (I/Q). Otherwise dual-sideband (complex).
+        scaling (str, optional): Specifies density vs spectrum. 'psd' => V^2/Hz; 'ps' => V^2.
+        nperseg (int, optional): Number of samples per segment used to average spectra.
+            By default there is no averaging (Defaults to num_samples). For plots with lots of samples
+            num_samples/10 is a good place to start for easier readability.
+        reference (str, optional): 'relative' to report spectra in dBc and time-domain in counts,
+            'absolute' to report spectra in dBm and time-domain in volts.
+        spectrum_cutoff (float, optional): Fraction of Nyquist frequency to retain in the spectrum (default: 0.9).
 
     Returns:
-        TuberResult: The collected samples and timestamps.
+        TuberResult: The collected time-domain samples and timestamps, plus optional spectral data.
+                     - In 'relative' mode:
+                         - Time-domain 'i' and 'q' in counts.
+                         - Spectrum in dBc.
+                     - In 'absolute' mode:
+                         - Time-domain 'i' and 'q' in volts.
+                         - Spectrum in dBm.
+                     - If channel=None, data arrays contain all channels.
     """
     # Ensure 'module' parameter is specified and valid
     assert (
@@ -232,10 +436,6 @@ async def py_get_samples(crs : CRS,
 
     ts.ss += np.uint32(.02 * SS_PER_SECOND) # 20ms, per experiments at FIR6
     ts.renormalize()
-
-    # Adjust the timestamp by a small amount of wall time to avoid stale-data
-    # problems. The time "error" is due to delays the signal path sees (group
-    # delay in the CICs) that the timestamp path does not see.
 
     # Determine the local IP address to use for the multicast interface
     multicast_interface_ip = get_local_ip(crs.tuber_hostname)
@@ -311,10 +511,10 @@ async def py_get_samples(crs : CRS,
 
             # Update the sequence number continuity check
             if prev_seq is not None and prev_seq + 1 != p.seq:
-                if retries:
+                if retries > 0:
                     warnings.warn(
                         f"Discontinuous packet capture! Previous sequence {prev_seq} -> current sequence {p.seq}. "
-                        f"Retrying ({retries} attempts remain.)"
+                        f"Retrying capture ({retries} attempts remain.)"
                     )
                     retries -= 1
                     packets = []
@@ -327,7 +527,6 @@ async def py_get_samples(crs : CRS,
 
             # Update the previous sequence number
             prev_seq = p.seq
-
 
             # Append the valid packet to the list
             packets.append(p)
@@ -344,6 +543,13 @@ async def py_get_samples(crs : CRS,
             std_i[c] = np.std([p.s[2 * c] / 256 for p in packets])
             std_q[c] = np.std([p.s[2 * c + 1] / 256 for p in packets])
 
+        if reference == 'absolute':
+            # Convert counts to volts
+            mean_i *= VOLTS_PER_ROC
+            mean_q *= VOLTS_PER_ROC
+            std_i *= VOLTS_PER_ROC
+            std_q *= VOLTS_PER_ROC
+
         if channel is None:
             results = {
                 "mean": TuberResult(dict(i=mean_i, q=mean_q)),
@@ -351,11 +557,12 @@ async def py_get_samples(crs : CRS,
             }
         else:
             results = {
-            "mean": TuberResult(dict(i=mean_i[channel-1], q=mean_q[channel-1])),
-            "std": TuberResult(dict(i=std_i[channel-1], q=std_q[channel-1])),
-        }
+                "mean": TuberResult(dict(i=mean_i[channel-1], q=mean_q[channel-1])),
+                "std": TuberResult(dict(i=std_i[channel-1], q=std_q[channel-1])),
+            }
             
         return TuberResult(results)
+
     # Build the results dictionary with timestamps
     results = dict(ts=[TuberResult(asdict(p.ts)) for p in packets])
 
@@ -365,11 +572,97 @@ async def py_get_samples(crs : CRS,
         results["q"] = []
         for c in range(NUM_CHANNELS):
             # Extract 'i' and 'q' data for each channel across all packets
-            results["i"].append([p.s[2 * c] / 256 for p in packets])
-            results["q"].append([p.s[2 * c + 1] / 256 for p in packets])
+            i_channel = np.array([p.s[2 * c] / 256 for p in packets])
+            q_channel = np.array([p.s[2 * c + 1] / 256 for p in packets])
+            if reference == 'absolute':
+                # Convert counts to volts
+                i_channel *= VOLTS_PER_ROC
+                q_channel *= VOLTS_PER_ROC
+            results["i"].append(i_channel.tolist())
+            results["q"].append(q_channel.tolist())
     else:
         # Return data for the specified channel
-        results["i"] = [p.s[2 * (channel - 1)] / 256 for p in packets]
-        results["q"] = [p.s[2 * (channel - 1) + 1] / 256 for p in packets]
+        i_channel = np.array([p.s[2 * (channel - 1)] / 256 for p in packets])
+        q_channel = np.array([p.s[2 * (channel - 1) + 1] / 256 for p in packets])
+        if reference == 'absolute':
+            # Convert counts to volts
+            i_channel *= VOLTS_PER_ROC
+            q_channel *= VOLTS_PER_ROC
+        results["i"] = i_channel.tolist()
+        results["q"] = q_channel.tolist()
+
+    #
+    # New: Optionally compute the spectrum and store in TuberResult
+    #
+    if return_spectrum:
+        # Retrieve decimation stage to determine sampling frequency
+        dec_stage = await crs.get_fir_stage()
+        fs = 625e6 / (256 * 64 * 2**dec_stage)
+
+        spec_data = {}
+        if channel is None:
+            # For all channels
+            spec_data["freq"] = None  # we will fill this once
+            if onesided:
+                # We'll store I/Q PSD in dBc or dBm for each channel
+                i_ch_spectra = []
+                q_ch_spectra = []
+                for c in range(NUM_CHANNELS):
+                    i_data = results["i"][c]
+                    q_data = results["q"][c]
+                    freq, (i_psd, q_psd) = _compute_spectrum(
+                        i_data, q_data, fs, dec_stage,
+                        onesided=onesided,
+                        scaling=scaling,
+                        nperseg=nperseg if nperseg is not None else num_samples,
+                        reference=reference,
+                        spectrum_cutoff=spectrum_cutoff
+                    )
+                    if spec_data["freq"] is None:
+                        spec_data["freq"] = freq.tolist()
+                    i_ch_spectra.append(i_psd.tolist())
+                    q_ch_spectra.append(q_psd.tolist())
+                spec_data["i_psd"] = i_ch_spectra
+                spec_data["q_psd"] = q_ch_spectra
+
+            else:
+                # Dual-sideband for each channel (complex PSD) in dBc or dBm
+                ch_spectra = []
+                for c in range(NUM_CHANNELS):
+                    i_data = results["i"][c]
+                    q_data = results["q"][c]
+                    freq, comp_psd = _compute_spectrum(
+                        i_data, q_data, fs, dec_stage,
+                        onesided=onesided,
+                        scaling=scaling,
+                        nperseg=nperseg if nperseg is not None else num_samples,
+                        reference=reference,
+                        spectrum_cutoff=spectrum_cutoff
+                    )
+                    if spec_data["freq"] is None:
+                        spec_data["freq"] = freq.tolist()
+                    ch_spectra.append(comp_psd.tolist())
+                spec_data["complex_psd"] = ch_spectra
+        else:
+            # Single channel
+            i_data = results["i"]
+            q_data = results["q"]
+            freq, (arr1, arr2) = _compute_spectrum(
+                i_data, q_data, fs, dec_stage,
+                onesided=onesided,
+                scaling=scaling,
+                nperseg=nperseg if nperseg is not None else num_samples,
+                reference=reference,
+                spectrum_cutoff=spectrum_cutoff
+            )
+            spec_data["freq"] = freq.tolist()
+            if onesided:
+                spec_data["i_psd"] = arr1.tolist()
+                spec_data["q_psd"] = arr2.tolist()
+            else:
+                spec_data["complex_psd"] = arr1.tolist()  # arr2 is None in dual mode
+
+        # Attach the spectrum to results
+        results["spectrum"] = TuberResult(spec_data)
 
     return TuberResult(results)

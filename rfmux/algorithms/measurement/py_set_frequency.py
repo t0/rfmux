@@ -9,7 +9,7 @@ from ...core.schema import CRS
 CABLE_DELAY_NS = 0.0
 
 @macro(CRS, register=True)
-async def set_cable_delay(crs, length_meters, velocity_factor=0.66):
+async def set_cable_delay(crs, meters, velocity_factor=0.66):
     """
     Set the cable delay (in nanoseconds) based on the physical length (in meters).
     
@@ -25,7 +25,7 @@ async def set_cable_delay(crs, length_meters, velocity_factor=0.66):
     speed_of_light = 3.0e8  # m/s (approximately)
     
     # Compute one-way delay
-    time_in_seconds = length_meters / (speed_of_light * velocity_factor)
+    time_in_seconds = meters / (speed_of_light * velocity_factor)
     
     CABLE_DELAY_NS = time_in_seconds
 
@@ -33,7 +33,7 @@ def get_cable_delay():
     """
     Retrieve the current cable delay (in nanoseconds).
     """
-    return CABLE_DELAY_NS + 2.34e-07
+    return CABLE_DELAY_NS + 2.3325e-07
 
 
 def load_pickle_from_repo():
@@ -62,4 +62,6 @@ async def py_set_frequency(crs : CRS, freq, channel, module):
     delta_phase = phase_from_latency + offset
     delta_phase = (delta_phase + np.pi) % (2*np.pi) - np.pi
 
-    await crs.set_phase(-delta_phase, crs.UNITS.RADIANS, crs.TARGET.DAC, channel=channel, module=module)
+    # This is set in the ADC, not DAC to avoid crest factor issues at the analog-digital interfaces.
+    # If it was set at the DAC, then all sinusoids generated would be in-phase!
+    await crs.set_phase(delta_phase, crs.UNITS.RADIANS, crs.TARGET.ADC, channel=channel, module=module)

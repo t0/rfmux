@@ -339,7 +339,7 @@ async def py_get_samples(crs: CRS,
                          *,
                          return_spectrum: bool = False,
                          scaling: str = 'psd',
-                         nperseg: int = None,
+                         nsegments: int = 1,
                          reference: str = 'relative',
                          spectrum_cutoff: float = 0.9):
     """
@@ -353,9 +353,8 @@ async def py_get_samples(crs: CRS,
         module (int, optional): The module number from which to retrieve samples.
         return_spectrum (bool, optional): If True, also compute and return the PSD or PS.
         scaling (str, optional): Specifies density vs spectrum. 'psd' => V^2/Hz; 'ps' => V^2.
-        nperseg (int, optional): Number of samples per segment used to average spectra.
-            By default there is no averaging (Defaults to num_samples). For plots with lots of samples
-            num_samples/10 is a good place to start for easier readability.
+        nsegments (int, optional) : Number of segments for averaging.
+            By default there is no averaging. For plots with lots of samples 10 is a good place to start.
         reference (str, optional): 'relative' to report spectra in dBc and time-domain in counts,
             'absolute' to report spectra in dBm and time-domain in volts.
         spectrum_cutoff (float, optional): Fraction of Nyquist frequency to retain in the spectrum (default: 0.9).
@@ -579,6 +578,10 @@ async def py_get_samples(crs: CRS,
     # New: Optionally compute the spectrum and store in TuberResult
     #
     if return_spectrum:
+
+        # Convert nsegments to nperseg for welch
+        nperseg = num_samples // nsegments
+
         # Retrieve decimation stage to determine sampling frequency
         dec_stage = await crs.get_fir_stage()
         fs = 625e6 / (256 * 64 * 2**dec_stage)
@@ -603,10 +606,10 @@ async def py_get_samples(crs: CRS,
                 if spec_data["freq_iq"] is None:
                     spec_data["freq_iq"] = d["freq_iq"].tolist()
                 if spec_data["freq_c"] is None:
-                    spec_data["freq_c"] = d["freq_c"].tolist()
+                    spec_data["freq_c"] = np.fft.fftshift(d["freq_c"]).tolist()
                 i_ch_spectra.append(d["i_psd"].tolist())
                 q_ch_spectra.append(d["q_psd"].tolist())
-                c_ch_spectra.append(d["complex_psd"].tolist())
+                c_ch_spectra.append(np.fft.fftshift(d["complex_psd"]).tolist())
 
             spec_data["i_psd"] = i_ch_spectra
             spec_data["q_psd"] = q_ch_spectra
@@ -624,8 +627,10 @@ async def py_get_samples(crs: CRS,
             spec_data["freq_iq"] = d["freq_iq"].tolist()
             spec_data["i_psd"] = d["i_psd"].tolist()
             spec_data["q_psd"] = d["q_psd"].tolist()
-            spec_data["freq_c"] = d["freq_c"].tolist()
-            spec_data["complex_psd"] = d["complex_psd"].tolist()
+
+            # FFT shift these to make plotting easier from left to right
+            spec_data["freq_c"] = np.fft.fftshift(d["freq_c"]).tolist()
+            spec_data["complex_psd"] = np.fft.fftshift(d["complex_psd"]).tolist()
 
         results["spectrum"] = TuberResult(spec_data)
 

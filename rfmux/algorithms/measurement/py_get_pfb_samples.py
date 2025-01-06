@@ -371,7 +371,7 @@ async def py_get_pfb_samples(
     crs : CRS
         The CRS device instance.
     nsamps : int
-        Number of time-domain samples to collect from the PFB.
+        Number of time-domain samples to collect from the PFB. Max: 1e7
     channel : int
         Which readout channel to acquire from (1..1024).
     module : int

@@ -200,6 +200,11 @@ async def take_netanal(
                 q_val = samples.mean.q[ch]
                 chunk_iq.append(i_val + 1j * q_val)
 
+            async with crs.tuber_context() as ctx:    
+                for j in range(max_chans):
+                    ctx.set_amplitude(0, channel=j+1, module=module)
+                await ctx()
+
         # Rotate new NCO chunk so the overlap freq aligns with previous NCO phase.
         if i > 0 and prev_boundary_iq is not None:
             boundary_new = chunk_iq[0]
@@ -219,11 +224,6 @@ async def take_netanal(
     fs_all = np.array(fs_all)
     iq_all = np.array(iq_all)
     phase_all = np.degrees(np.angle(iq_all))
-
-    async with crs.tuber_context() as ctx:    
-        for j in range(max_chans):
-            ctx.set_amplitude(0, channel=j+1, module=module)
-        await ctx()
 
     # Sort all interleaved and chunked data by ascending frequency.
     combined = sorted(zip(fs_all, iq_all, phase_all), key=lambda x: x[0])

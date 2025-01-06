@@ -51,7 +51,7 @@ bin_centres = np.array([x * 625e6/512 for x in range(-256, 256)])
 @macro(CRS, register=True)
 async def py_set_frequency(crs : CRS, freq, channel, module):
 
-    await crs.set_frequency(freq, channel=channel, module=module)
+    await crs.set_frequency(freq, channel=channel, module=module, disable_latency_correction=True)
     
     bin_index = np.argmin(np.abs(bin_centres - freq))-256
     

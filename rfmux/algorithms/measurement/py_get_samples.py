@@ -201,23 +201,62 @@ def get_local_ip(crs_hostname):
 
 def _cic_correction(frequencies, f_in, R=64, N=6):
     """
-    Internal helper for single-stage CIC correction.
+    Compute the single-stage CIC (Cascaded Integrator-Comb) filter correction factor.
+
+    CIC filters exhibit passband droop, especially at higher frequencies. This function
+    calculates a correction factor to approximately compensate for that droop. The
+    correction factor is derived analytically based on the idealized mathematical
+    expressions for a CIC filter. However, in firmware implementations, the filter
+    coefficients are quantized, so the actual correction will not be perfectly exact,
+    but will still be quite close.
 
     Parameters
     ----------
     frequencies : ndarray
-        Frequency bins (Hz) for which we want the correction factor.
+        Frequency bins (in Hz) for which the correction factor is desired. Typically
+        these might be FFT bin centers or some other set of discrete frequencies at
+        which droop compensation is needed.
     f_in : float
-        Input sampling rate prior to decimation.
-    R : int
-        CIC decimation rate.
-    N : int
-        Number of CIC stages.
+        Input (pre-decimation) sampling rate in Hz. This is the rate at which data
+        enters the CIC filter before it is decimated.
+    R : int, optional
+        The decimation rate. Default is 64.
+    N : int, optional
+        The number of CIC stages (integrator-comb pairs). Default is 6.
 
     Returns
     -------
     correction : ndarray
-        Correction factor to be multiplied (or divided) for droop compensation.
+        Array of correction values (dimensionless, same shape as `frequencies`) that can
+        be multiplied by the frequency response (or by the time-domain samples after
+        the CIC filter) to approximately correct for the droop introduced by the filter.
+
+    Notes
+    -----
+    1. The correction factor is computed using the ratio of sinc functions raised to
+       the power of N:
+
+       .. math::
+          H_{corr}(\omega) =
+              \\left(
+                  \\frac{\\sin\\left(\\pi f / f_{in}\\right)}
+                       {\\sin\\left(\\frac{\\pi f}{R f_{in}}\\right)}
+              \\right)^N
+              \\times \\frac{1}{R^N}
+
+       where :math:`f` is the frequency, :math:`f_{in}` is the input sample rate,
+       :math:`R` is the decimation ratio, and :math:`N` is the number of stages.
+
+    2. At DC (0 Hz), the expression above has an indeterminate form
+       :math:`0/0`. We replace those NaN values with the ideal DC gain of 
+       :math:`R^N`, then normalize by :math:`R^N`, effectively making the
+       correction factor 1 at DC.
+
+    3. In practical hardware/firmware implementations, the CIC coefficients may be
+       quantized or truncated, which means that the filter's actual response can deviate
+       slightly from the ideal model used here. Therefore, the computed correction
+       factor is an approximation that should perform well but will not be absolutely
+       precise.
     """
     freq_ratio = frequencies / f_in
     with np.errstate(divide='ignore', invalid='ignore'):
@@ -297,7 +336,7 @@ def _compute_spectrum(i_data, q_data, fs, dec_stage,
     freq_abs = np.abs(freq_dsb)
 
     # Apply CIC correction
-    cic1_corr_c = _cic_correction(freq_abs * R1 * R2, f_in1, R=R1, N=6)
+    cic1_corr_c = _cic_correction(freq_abs * R1 * R2, f_in1, R=R1, N=3)
     cic2_corr_c = _cic_correction(freq_abs * R2, f_in2, R=R2, N=6)
     correction_c = cic1_corr_c * cic2_corr_c
     psd_c_corrected = psd_c / correction_c

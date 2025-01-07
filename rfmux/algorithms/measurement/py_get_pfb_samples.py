@@ -349,7 +349,8 @@ async def py_get_pfb_samples(
     nsamps: int,
     channel: int,
     module: int,
-    binlim: float = 1.1e6,
+    *,
+    binlim: float = 1e6,
     trim: bool = True,
     nsegments: int = 100,
     reference: str = "relative",
@@ -377,7 +378,7 @@ async def py_get_pfb_samples(
     module : int
         Module index (1..8) from which to retrieve data.
     binlim : float, optional
-        Frequency range (±) for droop correction. Default=1.1e6.
+        Frequency range (±) for droop correction. Default=1e6.
     trim : bool, optional
         If True, we narrow the dual-sideband data around zero freq. Default True.
     nsegments : int, optional

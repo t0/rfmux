@@ -5,16 +5,14 @@ pairings in order to measure the complex S21 across a large bandwidth. Often use
 
 import warnings
 import asyncio
-import random
-import time
 import numpy as np
 from rfmux.core.hardware_map import macro
-from rfmux.core.schema import ReadoutModule
+from rfmux.core.schema import CRS
 
 
-@macro(ReadoutModule, register=True)
+@macro(CRS, register=True)
 async def take_netanal(
-    rmod : ReadoutModule,
+    crs : CRS,
     amp: float = 0.001,
     fmin: float = 100e6,
     fmax: float = 2450e6,
@@ -22,6 +20,7 @@ async def take_netanal(
     npoints: int = 5000,
     max_chans: int = 1023,
     max_span: float = 500e6,
+    module: int = 1
 ):
     """
     Perform a network analysis over the frequency range [fmin, fmax].
@@ -69,39 +68,37 @@ async def take_netanal(
         Frequency, I/Q, and phase arrays for the single measurement.
     """
 
-    crs = rmod.crs
-    module = rmod.module
-    # # If user passed modules as a list, run in parallel across those modules
-    # if isinstance(module, list) and len(module) > 0:
+    # If user passed modules as a list, run in parallel across those modules
+    if isinstance(module, list) and len(module) > 0:
 
-    #     # Ensure all modules are in [1..4] or all are in [5..8]
-    #     if not module:  # empty list
-    #         raise ValueError("Module list is empty.")
+        # Ensure all modules are in [1..4] or all are in [5..8]
+        if not module:  # empty list
+            raise ValueError("Module list is empty.")
 
-    #     # Check if they all lie within 1..4 OR all lie within 5..8
-    #     in_first_bank = all(1 <= m <= 4 for m in module)
-    #     in_second_bank = all(5 <= m <= 8 for m in module)
+        # Check if they all lie within 1..4 OR all lie within 5..8
+        in_first_bank = all(1 <= m <= 4 for m in module)
+        in_second_bank = all(5 <= m <= 8 for m in module)
 
-    #     if not (in_first_bank or in_second_bank):
-    #         raise ValueError(
-    #             f"Module list must be entirely in [1..4] or [5..8], got: {module}"
-    #         )   
-    #     tasks = []
-    #     for m in module:
-    #         # Call the same macro again, but for a single module=m
-    #         tasks.append(crs.take_netanal(
-    #             amp=amp,
-    #             fmin=fmin,
-    #             fmax=fmax,
-    #             nsamps=nsamps,
-    #             npoints=npoints,
-    #             max_chans=max_chans,
-    #             max_span=max_span,
-    #             module=m,
-    #         ))
-    #     results = await asyncio.gather(*tasks)
-    #     return results
-    #     # return {m: result for m, result in zip(module, results)}
+        if not (in_first_bank or in_second_bank):
+            raise ValueError(
+                f"Module list must be entirely in [1..4] or [5..8], got: {module}"
+            )
+        tasks = []
+        for m in module:
+            # Call the same macro again, but for a single module=m
+            tasks.append(crs.take_netanal(
+                amp=amp,
+                fmin=fmin,
+                fmax=fmax,
+                nsamps=nsamps,
+                npoints=npoints,
+                max_chans=max_chans,
+                max_span=max_span,
+                module=m,
+            ))
+        results = await asyncio.gather(*tasks)
+        return results
+        # return {m: result for m, result in zip(module, results)}
 
     # Generate a global array of frequencies across [fmin, fmax].
     freqs_global = np.linspace(fmin, fmax, npoints, endpoint=True)
@@ -178,32 +175,33 @@ async def take_netanal(
                 [comb[-1] - 50 * np.sign(comb[-1] - nco_freq) * np.random.random()]
             ])
 
-            # TODO: Update this to use context manager with the phase rotation is
-            #       in the firmware automatically.
-            # for j, freq_val in enumerate(ifreqs, start=1):
-            #     chunk_fs.append(freq_val)
-            #     await crs.set_frequency(freq_val - nco_freq, channel=j, module=module)
-            #     await crs.set_amplitude(amp, channel=j, module=module)
-            async with crs.tuber_context() as ctx:    
-                for j, freq_val in enumerate(ifreqs, start=1):
-                    chunk_fs.append(freq_val)
-                    ctx.set_frequency(freq_val - nco_freq, channel=j, module=module)
-                    ctx.set_amplitude(amp, channel=j, module=module)
+            # Not every internal loop has to use the same number of channels.
+            # This block ensures the unused ones are zeroed WHILE programming
+            # the others, and avoids zeroing channels again inside the inner loop.
+            async with crs.tuber_context() as ctx:
+                for j in range(1, max_chans + 1):
+                    if j <= len(ifreqs):
+                        freq_val = ifreqs[j - 1]
+                        # Record which freq is going to channel j
+                        chunk_fs.append(freq_val)
+                        # Set amplitude/frequency for this used channel
+                        ctx.set_frequency(freq_val - nco_freq, channel=j, module=module)
+                        ctx.set_amplitude(amp, channel=j, module=module)
+                    else:
+                        # Zero out all leftover channels
+                        ctx.set_frequency(0, channel=j, module=module)
+                        ctx.set_amplitude(0, channel=j, module=module)
+
                 await ctx()
 
             # Acquire samples and form complex I/Q.
-            samples = await crs.py_get_samples(
+            samples = await crs.get_samples(
                 nsamps, average=True, channel=None, module=module
             )
             for ch in range(len(ifreqs)):
                 i_val = samples.mean.i[ch]
                 q_val = samples.mean.q[ch]
                 chunk_iq.append(i_val + 1j * q_val)
-
-            async with crs.tuber_context() as ctx:    
-                for j in range(max_chans):
-                    ctx.set_amplitude(0, channel=j+1, module=module)
-                await ctx()
 
         # Rotate new NCO chunk so the overlap freq aligns with previous NCO phase.
         if i > 0 and prev_boundary_iq is not None:
@@ -220,6 +218,12 @@ async def take_netanal(
         # Accumulate into global arrays.
         fs_all.extend(chunk_fs)
         iq_all.extend(chunk_iq)
+
+    # Clean up before exiting
+    async with crs.tuber_context() as ctx:
+        for j in range(max_chans):
+            ctx.set_amplitude(0, channel=j+1, module=module)
+        await ctx()
 
     fs_all = np.array(fs_all)
     iq_all = np.array(iq_all)

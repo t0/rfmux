@@ -33,6 +33,7 @@ import numpy as np
 import socket
 import struct
 import warnings
+import asyncio
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
@@ -237,7 +238,7 @@ def _cic_correction(frequencies, f_in, R=64, N=6):
        the power of N:
 
        .. math::
-          H_{corr}(\omega) =
+          H_{corr}(\\omega) =
               \\left(
                   \\frac{\\sin\\left(\\pi f / f_{in}\\right)}
                        {\\sin\\left(\\frac{\\pi f}{R f_{in}}\\right)}
@@ -529,6 +530,10 @@ async def py_get_samples(crs: CRS,
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
 
+        # To use asyncio, we need a non-blocking socket
+        loop = asyncio.get_running_loop()
+        sock.setblocking(False)
+
         # Configure the socket for multicast reception
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
@@ -561,7 +566,7 @@ async def py_get_samples(crs: CRS,
         # Start receiving packets
         while len(packets) < num_samples:
             try:
-                data = sock.recv(STREAMER_LEN)
+                data = await loop.sock_recv(sock, STREAMER_LEN)
             except socket.timeout:
                 if retries > 0:
                     # Retry receiving packets after timeout

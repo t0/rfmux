@@ -20,7 +20,8 @@ async def take_netanal(
     npoints: int = 5000,
     max_chans: int = 1023,
     max_span: float = 500e6,
-    module = 1
+    *,
+    module
 ):
     """
     Perform a network analysis over the frequency range [fmin, fmax].
@@ -51,8 +52,8 @@ async def take_netanal(
         by default 1023.
     max_span : float, optional
         Maximum span (Hz) per NCO setting, defaults to the droop-free (non-extended) range of 500MHz.
-    module : int or list of int, optional
-        - If an integer, run one measurement on that module (default is 1).
+    module : int or list of int
+        - If an integer, run one measurement on that module.
         - If a list, e.g. [1, 2, 3], run concurrently for each module in the list
           and return a dict keyed by module number.
         - Note -- lists must be within a single analog bank (1-4) or (5-8).
@@ -82,11 +83,10 @@ async def take_netanal(
         if not (in_first_bank or in_second_bank):
             raise ValueError(
                 f"Module list must be entirely in [1..4] or [5..8], got: {module}"
-            )   
+            )
         tasks = []
         for m in module:
             # Call the same macro again, but for a single module=m
-            # and set `modules=None` to avoid recursion
             tasks.append(crs.take_netanal(
                 amp=amp,
                 fmin=fmin,
@@ -176,15 +176,27 @@ async def take_netanal(
                 [comb[-1] - 50 * np.sign(comb[-1] - nco_freq) * np.random.random()]
             ])
 
-            # TODO: Update this to use context manager with the phase rotation is
-            #       in the firmware automatically.
-            for j, freq_val in enumerate(ifreqs, start=1):
-                chunk_fs.append(freq_val)
-                await crs.py_set_frequency(freq_val - nco_freq, channel=j, module=module)
-                await crs.set_amplitude(amp, channel=j, module=module)
+            # Not every internal loop has to use the same number of channels.
+            # This block ensures the unused ones are zeroed WHILE programming
+            # the others, and avoids zeroing channels again inside the inner loop.
+            async with crs.tuber_context() as ctx:
+                for j in range(1, max_chans + 1):
+                    if j <= len(ifreqs):
+                        freq_val = ifreqs[j - 1]
+                        # Record which freq is going to channel j
+                        chunk_fs.append(freq_val)
+                        # Set amplitude/frequency for this used channel
+                        ctx.set_frequency(freq_val - nco_freq, channel=j, module=module)
+                        ctx.set_amplitude(amp, channel=j, module=module)
+                    else:
+                        # Zero out all leftover channels
+                        ctx.set_frequency(0, channel=j, module=module)
+                        ctx.set_amplitude(0, channel=j, module=module)
+
+                await ctx()
 
             # Acquire samples and form complex I/Q.
-            samples = await crs.py_get_samples(
+            samples = await crs.get_samples(
                 nsamps, average=True, channel=None, module=module
             )
             for ch in range(len(ifreqs)):
@@ -207,6 +219,12 @@ async def take_netanal(
         # Accumulate into global arrays.
         fs_all.extend(chunk_fs)
         iq_all.extend(chunk_iq)
+
+    # Clean up before exiting
+    async with crs.tuber_context() as ctx:
+        for j in range(max_chans):
+            ctx.set_amplitude(0, channel=j+1, module=module)
+        await ctx()
 
     fs_all = np.array(fs_all)
     iq_all = np.array(iq_all)

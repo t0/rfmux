@@ -313,6 +313,7 @@ class macro:
 
         vcs = self._valid_classes
 
+        @functools.wraps(func)
         async def acall(obj, *args, **kwargs):
 
             # Check that the macro was called with an allowed class

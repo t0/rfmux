@@ -51,7 +51,7 @@ bin_centres = np.array([x * 625e6/512 for x in range(-256, 256)])
 @macro(CRS, register=True)
 async def py_set_frequency(crs : CRS, freq, channel, module):
 
-    await crs.set_frequency(freq, channel=channel, module=module)
+    await crs.set_frequency(freq, channel=channel, module=module, latency_correction=False)
     
     bin_index = np.argmin(np.abs(bin_centres - freq))-256
     
@@ -64,4 +64,4 @@ async def py_set_frequency(crs : CRS, freq, channel, module):
 
     # This is set in the ADC, not DAC to avoid crest factor issues at the analog-digital interfaces.
     # If it was set at the DAC, then all sinusoids generated would be in-phase!
-    await crs.set_phase(delta_phase, crs.UNITS.RADIANS, crs.TARGET.ADC, channel=channel, module=module)
+    await crs.set_phase(delta_phase, crs.UNITS.RADIANS, crs.TARGET.ADC, channel=channel, module=module, latency_correction=False)

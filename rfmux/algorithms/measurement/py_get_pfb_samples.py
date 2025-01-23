@@ -380,7 +380,7 @@ async def py_get_pfb_samples(
     binlim : float, optional
         Frequency range (±) for droop correction. Default=1e6.
     trim : bool, optional
-        If True, we narrow the dual-sideband data around zero freq. Default True.
+        If True, we trim the dual-sideband data as well to be symmetric around zero freq. Default True.
     nsegments : int, optional
         Number of segments to average in linear space. Default=100 => good compromise.
     reference : {'relative','absolute'}, optional

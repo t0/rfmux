@@ -20,7 +20,8 @@ async def take_netanal(
     npoints: int = 5000,
     max_chans: int = 1023,
     max_span: float = 500e6,
-    module: int = 1
+    *,
+    module
 ):
     """
     Perform a network analysis over the frequency range [fmin, fmax].
@@ -51,8 +52,8 @@ async def take_netanal(
         by default 1023.
     max_span : float, optional
         Maximum span (Hz) per NCO setting, defaults to the droop-free (non-extended) range of 500MHz.
-    module : int or list of int, optional
-        - If an integer, run one measurement on that module (default is 1).
+    module : int or list of int
+        - If an integer, run one measurement on that module.
         - If a list, e.g. [1, 2, 3], run concurrently for each module in the list
           and return a dict keyed by module number.
         - Note -- lists must be within a single analog bank (1-4) or (5-8).

@@ -451,8 +451,8 @@ async def py_get_samples(crs: CRS,
         Number of Welch segments => nperseg = num_samples//nsegments. 
         Default 1 => entire data is one segment. For plots with lots of samples 10 is a good place to start.
     reference : {'relative','absolute'}, optional
-        'relative' => dBc or dBc/Hz with DC bin as carrier
-        'absolute' => dBm or dBm/Hz with absolute scaling
+        'relative' => dBc or dBc/Hz with DC bin as carrier in spectra, readout counts in TOD
+        'absolute' => dBm or dBm/Hz with absolute scaling in spectra, volts in TOD
     spectrum_cutoff : float, optional
         Fraction of Nyquist to retain. Default=0.9 => up to 0.9*(fs/2).
 
@@ -469,7 +469,7 @@ async def py_get_samples(crs: CRS,
     -----
     - If average=True, we only return time-domain mean and std dev (no spectrum).
     - If reference='absolute', we convert time-domain data to volts (VOLTS_PER_ROC).
-    - If reference='relative' the data are referenced to the total carrier power. 
+    - If reference='relative', the data are referenced to the total carrier power. 
       The DC bin is also overwritten to show the DC power rather than a density. 
       For the dual-sideband data this will be exactly 0dB.
     """

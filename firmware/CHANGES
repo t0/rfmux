@@ -6,6 +6,8 @@
   This includes Joshua's notebooks-as-documentation, and fixes a
   tuber/client.py incompatibility that prevents on-board hardware maps from
   being useful.
+- sysctl.conf: net.core.rmem_max and net.core.rmem_default are now huge
+- jupyter landing page is now an IPython notebook, not just Markdown
 
 ## r1.5.4 - 2025-01-13
 

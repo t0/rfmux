@@ -1,0 +1,283 @@
+# Changelog
+
+## r1.5.5 - 2025-01-23
+
+- updated captive rfmux snapshot to 9c416820f77d3afd20115e8e2001ef18367f22d4.
+  This includes Joshua's notebooks-as-documentation, and fixes a
+  tuber/client.py incompatibility that prevents on-board hardware maps from
+  being useful.
+
+## r1.5.4 - 2025-01-13
+
+- get_phase() no longer returns a value that's reverse engineered from what we
+  sent to the registers in the signal path. That's due to hidden latency
+  correction - a few API calls alter this value, and the bookkeeping required
+  to avoid unexpected phase changes is too complicated. Instead, we cache the
+  value associated with the last set_phase call in software (in unquantized
+  form) and retrieve this value with get_phase(). As a result, phase is
+  maintained much more consistenly across API calls that alter it
+  (e.g. set_cable_length, set_nco_frequency, set_frequency).
+
+- Latency correction for cable delays (set_cable_length/get_cable_length) now
+  correctly uses the NCO + channel frequency, not just the channel frequency.
+
+## r1.5.3 - 2024-12-20
+
+This is another minor update, with a few quality-of-life improvements:
+
+- CARRIER, DEMOD, and NULLER targets are now completely gone. Use
+  d.TARGET.ADC/d.TARGET.DAC instead.
+
+- Latency variations as a function of frequency and bin in the demodulator are
+  now fixed. This should make frequency sweeps much more predictable - there
+  will still be a large (relative to cable delays) latency term, but it should
+  no longer be discontinuous in unpredictable ways.
+
+## r1.5.2 - 2024-12-17
+
+This is a tweak on r1.5.1, with the following incremental changes:
+
+- "average=True" mode for get_pfb_samples, get_fast_samples, and get_samples
+  now returns separate I/Q metrics for std rather than a single measure of the
+  complex i/q timestream. This is more useful when I and Q noise come from
+  different sources and a separate measure of each component is useful.
+
+- set_frequency() is now subject to a bandwidth check, which is "narrow" by
+  default (250 MHz), and can be widened using set_extended_module_bandwidth().
+  Beyond 250 MHz (80% of Nyquist), the RFDC's interpolation/decimation filters
+  start to roll off - and close to Nyquist, alias spurs are not suppressed.
+
+- DAC inverse-sinc compensation is disabled for Nyquist zones 3/4. The filter
+  prototypes are not appropriate here.
+
+- set_frequency/get_frequency no longer require UNITS arguments. (HZ was the
+  only valid setting anyways.)
+
+## r1.5.1 - 2024-12-11
+
+This is a "big" release - we are going to try and re-instate a small,
+incremental release cadence. More frequent releases tend to be smoother.
+
+- Adds support for rev4 CRS boards
+
+- API now uses modules 1-8, with set_analog_bank selecting which half is valid
+
+- NCO and associated functions now attempt to configure RFDC compensation
+  settings (DAC pulse shaping; inverse-sinc compensation)
+
+- ADC dither enabled on power-up
+
+- get_samples() includes contiguity check
+
+- LO uses 32-bit phase accumulator again
+
+- Overrange/overvoltage errors are no longer sticky
+
+- Sporadic failures in get_pfb_samples fixed. These errors propagated an
+  exception upwards (so they were visible when they occurred) - if you didn't
+  notice, this fix is not interesting.
+
+- API modifications - Units gone for get_fast_samples/get_pfb_samples;
+  get_pfb_samples returns i/q lists rather than (i, q) tuples
+
+- "average" mode added to get_samples, get_pfb_samples, get_fast_samples
+
+- Parser is statically linked and hence more portable
+
+- ssh fixed (private keys were chmod'd permissively enough that sshd refused to
+  start)
+
+- Q-control and q-norm present in firmware
+
+## r1.4.3 - 2024-09-13
+
+- Adds set_clock_source, set_clock_priority, and get_clock_priority.
+  Also removes ETHERNET from the list of clocks that are automatically chosen,
+  and works around default selection of ETHERNET during boot-up due to lack of
+  a better option before the priority register is reprogrammed. 
+
+- DocString improvements for a number of API calls.
+
+- Adds PLL thermometry (MB_VCXO and MB_PLL1 thermometers)
+
+- Greatly improve argument-validation error messages
+
+## r1.4.2 - 2024-09-04
+
+- Fix "alien packets" in streaming path, hopefully. This uses an IGMPv3
+  "source-specific multicast" subscription, which *may or may not* leave the
+  kernel and hence *may or may not* require IGMPv3 support from downstream
+  network hardware. It appears to fix alien-packet problems in the Victoria
+  office and needs to be tested elsewhere to gain confidence.
+
+- Launch JupyterLab in /home/jupyter, with rfmux as a subdirectory
+
+## r1.4.1 - 2024-08-22
+
+- Improves _display() call - adds clear-screen and default message ability
+
+- Adds mDNS resolution - needed for friendly on-board rfmux
+
+- Uprev in-board rfmux (now includes awaitless)
+
+## r1.4.0 - 2024-07-31
+
+- Adds get_adc_calibration_mode / set_adc_calibration_mode
+
+- Adds set_adc_calibration_coefficients / get_adc_calibration_coefficients
+
+- Adds get_fast_samples
+
+- Fixes intermittent initialization failure in OLED display
+
+- Teach parser how to read sequences of channels or modules ("-m1,2 -c1-10")
+
+- Fix xilinx-ams housekeeping results (any voltages/temperatures within the RFSoC)
+
+- Adds overrange/overvoltage results to streamer/parser and get_samples
+
+## r1.3.2 - 2024-06-06
+
+- Corrects DAC/ADC gain for modules 2-4. There is a gain term (0.7 or 1.0)
+  embedded within the NCO, and before this fix, set_nco_frequency() only
+  correctly set it for module 1.
+
+- Adds set_analog_bank() / get_analog_bank() calls to select ADC/DAC channels
+  1-4 or 5-8. These are routed to modules 1-4. Routing is deliberately crude,
+  since we think this is otherwise a great way to get totally confused.
+
+- Adds get_pfb_samples(). This uses netlink packets to get between kernelspace
+  and userspace, and will probably be re-used when get_adc_samples() crashlands
+  too.
+
+- Fixes packet loss bug in streaming path (master.vhd / mod_rfmux.c). This is a
+  weird one - we think there's enough FIFO buffering between our AXI master and
+  the AXI port on the DDR4 to contain basically an entire readout packet (8192+
+  bytes). As a result, when our logic signals an IRQ to the PL, it's possible
+  the PL tries to retrieve and transmit the packet across the network before it
+  has actually arrived at the ARM. To fix this, we always leave the last packet
+  alone when servicing interrupts.
+
+- Quality-of-life improvements (i.e. better error messages when your function
+  calls don't match the board's expectations.)
+
+- Adds get_clock_source(), _hmc7044_peek(), and _hmc7044_poke commands to allow
+  external access to clocking configuration.
+
+## r1.3.1 - 2024-05-14
+
+- Correct NCO downconversion.
+
+- Correct ADC I/Q and early/late sample inputs.
+
+- set_dac_scale() is now accompanied by a get_dac_scale() call, which also
+  understands WATTS and DBM (in addition to the AMPS value, which corresponds
+  directly to the underlying xrfdc API but which is not useful at all to end
+  users.)
+
+## r1.3.0 - 2024-04-26
+
+- This is the first 4-module build. To get this to (almost) meet timing
+  closure, a great deal of timing-related rework was required.
+
+- The board now correctly streams serial numbers and registers via mDNS using
+  its serial number.
+
+- Rev3 device tree now present.
+
+- Fix streamer to correctly stream serial numbers
+
+- Parser: correctly write 1024 multiplexed channels (channels beyond 256? were
+  corrupt)
+
+- OLED display support added
+
+## r1.2.0 - 2023-12-18
+
+### Signal path changes
+
+- NCO mixer gain changed from 0.7 to 1.0. (XRFDC_MIXER_SCALE_0P7 to
+  XRFDC_MIXER_SCALE_1P0).
+
+- RF PLL changes: PLL clocking shifted from 200 MHz to 400 MHz, and RF PLLs
+  consolidated as much as possible. ADC channels 1,2 have independent RF PLLs.
+  All the others share a single RF PLL from a DAC tile.
+
+- The NULLER synth channel has been removed. It seems unlikely that feedback
+  will proceed on the nuller model (requiring a separate synth channel).
+
+### Software Changes
+
+- Added call for DAC drive strength (set_dac_scale) and ADC programmable
+  attenuator (set_adc_attenuator). We are in the process of changing the API
+  from CARRIER/NULLER targets to ADC and DAC numbers - these calls use ADC/DAC
+  arguments. They are currently the "odd ones out" but the rest of the API
+  should shift over too.
+
+- Added placeholder calls for Nyquist zone (set_nyquist_zone / get_nyquist_zone).
+  These calls are likely to change because they currently only accept an
+  argument of 1 (odd zones) or 2 (even zones). I expect it makes sense for us
+  to accept an argument between 1-3, and maintain enough state information that
+  a get_nyquist_zone() call remains consistent even though the underlying RFDC
+  call is a little weird.
+
+- The streamer no longer fails after a CPU-intensive API call (e.g.
+  clear_channels). This was a bug in the bridge between CPU AXI bus and our
+  internal IPIF-style bus.
+
+### Board support package changes
+
+- Updated to Tuber 0.7 - there should be no user-visible changes, but this
+  paves the way for warnings generated on the board to propagate up to the
+  client's Python environment.
+
+- Power-supply synchronization is now enabled. Because this results in
+  forced-continuous mode for lightly loaded buck converters, there is a
+  noticeable increase (something like 20%?) to power consumption.
+
+## r1.1.3 - 2023-10-04
+
+No minor version bump. Rootfs image now includes device-tree files for rev2 hardware.
+
+## r1.1.3 - 2023-07-12
+
+1. Adds get_firmware_release() method, using semantic versioning for this and
+future releases. This call returns the following:
+
+>>> await d.get_firmware_release()
+{'version': '1.1.3', 'name': 'mkids_crs'}
+
+2. Adds housekeeping calls:
+    
+    * get_motherboard_power
+    * get_motherboard_voltage
+    * get_motherboard_current
+    * get_motherboard_temperature
+    
+    The shunt resistances (which are empirical, anyways) are not terribly
+    exact but a decent first cut. They were derived as follows:
+    
+    - By tuning VBP to faithfully return a power reading that matches my
+      benchtop supply, and
+    - By tuning all other shunt resistances (which are ~the same?) to
+      produce a total current that's close to the VBP version, factoring in
+      some power-supply losses. (These are rail output currents, remember.)
+    
+    The result is probably accurate to ~20%, give or take.
+
+## r1.1.2 - 2023-05-29
+
+* Added set_nco_frequency and get_nco_frequency calls.
+
+## r1.1.1 - 2023-05-12
+
+* Firmware is now compatible with both rev0 and rev1 CRS boards.
+  This compatibility relies on EEPROM commissioning described here:
+  https://t0technology.atlassian.net/wiki/spaces/DH/pages/138018817/HOWTO+Commission+a+t0.CRS+Board
+
+* The boot image is now only EXT4 (there's no MBR or FAT partition).
+
+## r1.0.0 - 2023-04-28
+
+* Initial release of rfmux firmware on CRS rev0 hardware.
+  Notably missing: get_fast_samples.

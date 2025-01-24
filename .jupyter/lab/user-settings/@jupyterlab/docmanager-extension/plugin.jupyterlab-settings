@@ -5,6 +5,6 @@
     "lastModifiedCheckMargin": 500,
     "renameUntitledFileOnSave": true,
     "defaultViewers": {
-        "markdown": "Markdown Preview"
+        "markdown": "Jupytext Notebook"
     }
 }

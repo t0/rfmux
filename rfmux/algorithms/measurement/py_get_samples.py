@@ -541,7 +541,17 @@ async def py_get_samples(crs: CRS,
         sock.bind(("", STREAMER_PORT))
 
         # Set a large receive buffer size
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16777216)
+        rcvbuf = 16777216
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        if (
+            actual := sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        ) != 2 * rcvbuf:
+            warnings.warn(
+                f"Unable to set SO_RCVBUF to {rcvbuf} (got {actual}). Consider "
+                "'sudo sysctl net.core.rmem_max=67108864' or similar. This setting "
+                "can be made persistent across reboots by configuring "
+                "/etc/sysctl.conf or /etc/sysctl.d."
+            )
 
         # Set the interface to receive multicast packets
         sock.setsockopt(

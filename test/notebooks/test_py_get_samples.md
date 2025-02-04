@@ -28,15 +28,20 @@ from rfmux.algorithms.measurement.py_get_samples \
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+import warnings
+
+fir_stage = 6
+fsamp = 625e6/(256*64*2**fir_stage)
 ```
 
 ## DC signal in I only
 
 ```python
-x = _compute_spectrum(np.ones(1000),
-                      np.zeros(1000),
-                      625e6 / (256 * 64 * 2**6), 6,
-                      scaling='ps')
+with warnings.catch_warnings(action='ignore'):  # don't complain about divide-by-0
+    x = _compute_spectrum(np.ones(1000),
+                          np.zeros(1000),
+                          fsamp, fir_stage,
+                          scaling='ps')
 
 (freq_dsb, psd_dsb, psd_i, psd_q, freq_iq) = (
     x["freq_dsb"],
@@ -72,10 +77,11 @@ assert max(psd_dsb) == pytest.approx(0, abs=1)
 ## DC signal in Q only
 
 ```python
-x = _compute_spectrum(np.zeros(1000),
-                      np.ones(1000),
-                      625e6 / (256 * 64 * 2**6), 6,
-                      scaling='ps')
+with warnings.catch_warnings(action='ignore'):  # don't complain about divide-by-0
+    x = _compute_spectrum(np.zeros(1000),
+                          np.ones(1000),
+                          fsamp, fir_stage,
+                          scaling='ps')
 
 (freq_dsb, psd_dsb, psd_i, psd_q, freq_iq) = (
     x["freq_dsb"],
@@ -113,7 +119,7 @@ assert max(psd_dsb) == pytest.approx(0, abs=1)
 # Complex +Nyquist/2 signal
 x = _compute_spectrum(np.array([1, 0, -1, 0]*250),
                       np.array([0, 1, 0, -1]*250),
-                      625e6 / (256 * 64 * 2**6), 6,
+                      fsamp, fir_stage,
                       scaling='ps', reference='absolute')
 
 (freq_dsb, psd_dsb, psd_i, psd_q, freq_iq) = (
@@ -135,7 +141,11 @@ plt.legend()
 plt.grid(True)
 plt.tight_layout()
 
-### TODO: magnitude and mask checks
+# The complex PSD is only allowed to have "big" signal in a narrow neighbourhood around Nyquist/4.
+assert all(psd_dsb[np.abs(freq_dsb - fsamp/4) > 5] < -200)
+
+# Maximum magnitude should compensate for CIC droop - so needs to be > 0dB here
+assert max(np.abs(psd_dsb) > 0)
 ```
 
 ```python

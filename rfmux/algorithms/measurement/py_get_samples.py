@@ -27,13 +27,15 @@ The final output:
 
 
 import array
+import asyncio
 import contextlib
+import ctypes
 import enum
 import numpy as np
 import socket
 import struct
+import sys
 import warnings
-import asyncio
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
@@ -52,6 +54,38 @@ STREAMER_MAGIC = 0x5344494B
 STREAMER_VERSION = 5
 NUM_CHANNELS = 1024
 SS_PER_SECOND = 125000000
+
+
+class InAddr(ctypes.Structure):
+    _fields_ = [("s_addr", ctypes.c_uint32)]
+
+    def __init__(self, ip: bytes):
+        # Accept IP address as a string
+        self.s_addr = int.from_bytes(socket.inet_aton(ip), byteorder='little')
+
+
+class IPMreqSource(ctypes.Structure):
+    '''
+    The order of fields in this structure is implementation-specific.
+    Notably, fields have different order in Windows and Linux.
+    '''
+
+    match sys.platform:
+        case 'win32':
+            _fields_ = [
+                ("imr_multiaddr", InAddr),
+                ("imr_sourceaddr", InAddr),
+                ("imr_interface", InAddr),
+        ]
+        case 'linux':
+            _fields_ = [
+                ("imr_multiaddr", InAddr),
+                ("imr_interface", InAddr),
+                ("imr_sourceaddr", InAddr),
+            ]
+        case _:
+            raise NotImplementedError(f"Source-specific multicast support for {sys.platform} is incomplete.")
+
 
 class TimestampPort(str, enum.Enum):
     BACKPLANE = "BACKPLANE"
@@ -543,9 +577,13 @@ async def py_get_samples(crs: CRS,
         # Set a large receive buffer size
         rcvbuf = 16777216
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
-        if (
-            actual := sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-        ) != 2 * rcvbuf:
+
+        # Ensure SO_RCVBUF didn't just fail silently
+        actual = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        if sys.platform=='linux':
+            # Linux returns a doubled value
+            actual /= 2
+        if actual != rcvbuf:
             warnings.warn(
                 f"Unable to set SO_RCVBUF to {rcvbuf} (got {actual}). Consider "
                 "'sudo sysctl net.core.rmem_max=67108864' or similar. This setting "
@@ -559,9 +597,12 @@ async def py_get_samples(crs: CRS,
         )
 
         # Join the multicast group on the specified interface
-        mc_ip = socket.inet_aton(STREAMER_HOST)
-        mreq = struct.pack("4s4s", mc_ip, socket.inet_aton(multicast_interface_ip))
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        mreq = IPMreqSource(
+                imr_multiaddr=InAddr(STREAMER_HOST),
+                imr_interface=InAddr(multicast_interface_ip),
+                imr_sourceaddr=InAddr(socket.gethostbyname(crs.tuber_hostname)))
+
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_SOURCE_MEMBERSHIP, bytes(mreq))
 
         # Set a timeout on the socket to prevent indefinite blocking
         sock.settimeout(5)  # Timeout after 5 seconds

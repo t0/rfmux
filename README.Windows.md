@@ -19,26 +19,34 @@ First, a few pre-requisites:
 
 Now, you should be able to open up a DOS box (cmd.exe), and run:
 
+```
 > cd \path\to\rfmux
 rfmux> uv run ipython
+```
 
 This will launch an interactive Python session. You should be able to run:
 
+```
 In [1]: import rfmux
 In [2]: s = rfmux.load_session('!HardwareMap [ !CRS { serial: "0033" } ]')
 In [3]: d = s.query(rfmux.CRS).one()
 In [4]: await d.resolve()
+```
 
 You will need to substitute your board's serial number in the transcript above.
 You should now be able to interact with the board as in a Linux environment:
 
+```
 In [5]: x = await d.get_samples(10, channel=1, module=1)
+```
 
-It's also worth trying py_get_samples, because this function interacts with the
-Windows network stack directly and may cause Windows to ask for permission to
-access the network:
+It's also worth trying `py_get_samples`, because this function interacts with
+the Windows network stack directly and may cause Windows to ask for permission
+to access the network:
 
+```
 In [6]: x = await d.py_get_samples(10, channel=1, module=1)
+```
 
 If you've gotten this far, it's likely that the rest of rfmux should work fine.
 Again, Windows is not our primary development platform - which means you might

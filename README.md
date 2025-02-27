@@ -1,8 +1,8 @@
 # rfmux
 
 `rfmux` is the python API for t0.technology Control and Readout System (CRS).
-It includes python bindings to methods and properties for the on-board C++ and firmware operations; a framework asynchronous operation of large arrays; and a common set of algorithms for based operation of Kinetic Inductance Detectors.
-
+rfmux includes python bindings to methods and properties for the on-board C++ and firmware operations; a framework asynchronous operation of large arrays; and a common set of algorithms for based operation of Kinetic Inductance Detectors.
+The CRS + MKIDs firmware is described in [this conference proceedings](https://arxiv.org/abs/2406.16266).
 
 Distributed within `rfmux` is the binary files for the firmware itself (`/firmware`) as well as a C++ implementation of a data acquisition system (`parser`) for the continuously streamed downsampled data.
 
@@ -50,13 +50,18 @@ net.core.rmem_max=67108864
 ## Platform Compatibility
 
 - **Linux:** Primary platform for testing and deployment.
-- **Windows:** Supported but less tested. Specific windows README is available in the [Windows README](./README.Windows).
+- **Windows:** Supported but less tested. Specific windows README is available in the [Windows README](./README.Windows.md).
 
 ## Contribution & Feedback
 
 We actively encourage contributions and feedback. Understanding operator code and needs is how we determine what to add to rfmux.
 - **Pull Requests:** Your pull requests are welcome.
 - **Issues:** Please submit ticket issues for bugs or enhancement suggestions.
+
+### Collaborator Slack Channel
+Anybody working with a CRS board is welcome to join the #crs-collaboration slack channel.
+Just email Joshua@t0.technology with your name, affiliation, and what project you are working on.
+
 
 ## Usage & Operator API
 

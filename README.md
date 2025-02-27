@@ -74,7 +74,7 @@ If you have suggestions for algorithms or operations to be included in the API, 
 
 
 The rfmux API itself is currently compatible with two different end-to-end KIDs control software stacks:
-- **hidfmux:** End-to-end KIDs characterization and astrophysics deployment developed by McGill University.
+- **hidfmux:** End-to-end KIDs characterization and astrophysics deployment developed by researchers at McGill University.
 - **citkid:** Developed at JPL/Caltech. More details can be found at the [citkid GitHub repository](https://github.com/loganfoote/citkid).
 
 ## Documentation Philosophy

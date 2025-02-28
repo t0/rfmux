@@ -60,6 +60,23 @@ parser = "rfmux.tools.parser:main"
 [project.gui-scripts]
 periscope = "rfmux.tools.periscope.__main__:main"
 
+[dependency-groups]
+dev = [
+  "bs4",
+  "htpy",
+  "jupytext",
+  "markdown",
+  "nbclient",
+  "pytest_check",
+  "requests",
+  "scikit-learn",
+  "weasyprint",
+]
+
+# The dev group needs python 3.10+ (htpy, match syntax)
+[tool.uv.dependency-groups]
+dev = { requires-python = ">=3.10" }
+
 [project.urls]
 homepage = "https://github.com/t0/rfmux"
 repository = "https://github.com/t0/rfmux"
@@ -79,3 +96,12 @@ fallback_version = "0.0.0"
 
 [tool.uv]
 exclude-newer = "3 weeks"
+
+[tool.pytest.ini_options]
+markers = [
+  "offline",
+  "qc_stage1",
+  "qc_stage2",
+]
+
+asyncio_default_fixture_loop_scope = "session"

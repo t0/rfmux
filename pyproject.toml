@@ -48,6 +48,19 @@ parser = "rfmux.tools.parser:main"
 [project.gui-scripts]
 periscope = "rfmux.tools.periscope.__main__:main"
 
+[dependency-groups]
+dev = [
+  "htpy",
+  "jupytext",
+  "markdown",
+  "nbclient",
+  "pytest_check",
+  "reportlab",
+  "requests",
+  "scikit-learn",
+  "weasyprint",
+]
+
 [project.urls]
 homepage = "https://github.com/t0/rfmux"
 repository = "https://github.com/t0/rfmux"

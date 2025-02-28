@@ -27,6 +27,7 @@ import pytest
 
 
 @pytest.mark.asyncio
+@pytest.mark.offline
 async def test_macro():
     @rfmux.macro(rfmux.CRS, register=True)
     async def macro_that_returns_serial_number(d):
@@ -46,6 +47,7 @@ async def test_macro():
 
 
 @pytest.mark.asyncio
+@pytest.mark.offline
 async def test_algorithm():
     @rfmux.algorithm(rfmux.CRS)
     async def algorithm_that_returns_serial_number(d):

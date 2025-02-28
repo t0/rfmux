@@ -4,21 +4,28 @@
     padding: 0;
     box-sizing: border-box;
 }
+
 body {
     font-family: 'Lato', sans-serif;
-    font-size: 10px;
-    line-height: 1.4;
+    font-size: 11px;
+    line-height: 1.5;
     color: #333;
+    padding-bottom: 1em;
 }
+
 h1, h2, h3, h4, h5, h6 {
     font-family: 'Montserrat', sans-serif;
     font-weight: 700;
     color: #222;
-    margin-top: 1em;
-    margin-bottom: 0.5em;    /* Reduced spacing for compactness */
+    margin-top: 1.2em;
+    margin-bottom: 1em;
 }
+h1 {
+    border-bottom: 2px solid #ccc;
+}
+
 p {
-  margin-bottom: 0.75em;   /* Slight spacing between paragraphs */
+  margin-bottom: 1em;
 }
 
 /* Links */
@@ -30,13 +37,14 @@ a:hover { text-decoration: underline; }
 
 /* Tables: centered */
 table {
-    margin: 0 auto;
-    border: 1px solid #000;
+    margin: 1em auto;
+    border: 1px solid #ccc;
     border-collapse: collapse;
+    width: 90%;
 }
 th, td {
-    border: 1px solid #000;
-    padding: 4px;
+    border: 1px solid #222;
+    padding: 6px;
 }
 th {
     text-align: center;    
@@ -49,26 +57,62 @@ td {
 }
 td.pass { background-color: #c8e6c9; }
 td.fail { background-color: #ffcdd2; }
+tr {
+    /* Discourage splitting cells across page breaks */
+    page-break-inside: avoid;
+    break-inside: avoid;
+}
 
 /* Images: centered, scaled */
 figure {
-	display: inline-block;
-	margin: 0 auto;
+    display: block;
+    margin: 1em auto;
+    text-align: center;
 }
 figure img {
-	margin: 0 auto;
-	vertical-align: top;
-	max-width: 60%;
-	display: block;
-	height: auto;
+    margin: 0 auto;
+    vertical-align: top;
+    max-width: 60%;
+    display: block;
+    height: auto;
 }
 figure figcaption {
-	text-align: center;
-	font-weight: bold;
+    text-align: center;
+    font-weight: bold;
 }
 
 /* lists */
 ul, ol {
-	list-style-position: inside;
-	margin-left: 1.5em; padding-left: 1.5em; }
+    list-style-position: inside;
+    margin-left: 1.5em;
+    padding-left: 1.5em;
+    text-indent: -1.5em;
+}
+
+/* Page header/footer */
+@page {
+    margin: 1in;
+
+    /* Header */
+    @top-center {
+        content: "CRS Quality Control (QC) Report";
+	font-size: 12px;
+	font-family: 'Montserrat', sans-serif;
+    }
+
+    /* Footer */
+    @bottom-center {
+        content: "Page " counter(page) " / " counter(pages);
+	font-size: 12px;
+	font-family: 'Montserrat', sans-serif;
+	color: #222;
+    }
+}
+
+/* Suppress header on first page */
+@page :first { @top-center { content: none; } }
+
+/* For the table of contents, add page number links */
+#toc a::after {
+    content: ' ' leader('.') ' ' target-counter(attr(href), page);
 }

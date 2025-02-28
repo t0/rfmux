@@ -26,12 +26,17 @@ dependencies = [
 # for py_get_samples: 3.12.0 introduced socket.IP_ADD_SOURCE_MEMBERSHIP
 requires-python = ">=3.12"
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
-  "reportlab",
-  "nbclient",
+  "htpy",
   "jupytext",
+  "markdown",
+  "nbclient",
+  "pytest_check",
+  "reportlab",
+  "requests",
   "scikit-learn",
+  "weasyprint",
 ]
 
 [project.urls]

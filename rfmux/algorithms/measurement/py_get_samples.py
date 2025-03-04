@@ -58,6 +58,16 @@ SS_PER_SECOND = 125000000
 # packets are flowing normally
 STREAMER_TIMEOUT = 60
 
+# Source-specific multicasting support was added in 3.12.0
+if not hasattr(socket, 'IP_ADD_SOURCE_MEMBERSHIP'):
+    raise NotImplementedError(
+            "Module 'socket' doesn't have source-specific multicasting (SSM) "
+            "support, which was added in Python 3.12.0. Refer to "
+            "https://github.com/python/cpython/issues/89415 and the Python "
+            "3.12.0 release notes for details."
+    )
+
+
 class InAddr(ctypes.Structure):
     _fields_ = [("s_addr", ctypes.c_uint32)]
 

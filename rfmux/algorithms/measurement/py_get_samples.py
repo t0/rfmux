@@ -25,7 +25,6 @@ The final output:
 
 """
 
-
 import array
 import asyncio
 import contextlib
@@ -55,6 +54,9 @@ STREAMER_VERSION = 5
 NUM_CHANNELS = 1024
 SS_PER_SECOND = 125000000
 
+# This seems like a long timeout - in practice, we can see long delays when
+# packets are flowing normally
+STREAMER_TIMEOUT = 60
 
 class InAddr(ctypes.Structure):
     _fields_ = [("s_addr", ctypes.c_uint32)]
@@ -604,9 +606,6 @@ async def py_get_samples(crs: CRS,
 
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_SOURCE_MEMBERSHIP, bytes(mreq))
 
-        # Set a timeout on the socket to prevent indefinite blocking
-        sock.settimeout(5)  # Timeout after 5 seconds
-
         # Variable to track the previous sequence number for continuity checks
         prev_seq = None
 
@@ -616,17 +615,9 @@ async def py_get_samples(crs: CRS,
         packets = []
         # Start receiving packets
         while len(packets) < num_samples:
-            try:
-                data = await loop.sock_recv(sock, STREAMER_LEN)
-            except socket.timeout:
-                if retries > 0:
-                    # Retry receiving packets after timeout
-                    retries -= 1
-                    continue
-                else:
-                    raise RuntimeError("Socket timed out waiting for data. No more retries left.")
-            except Exception as e:
-                raise
+            data = await asyncio.wait_for(
+                loop.sock_recv(sock, STREAMER_LEN), STREAMER_TIMEOUT
+            )
 
             # Parse the received packet
             p = DfmuxPacket.from_bytes(data)

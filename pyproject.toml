@@ -50,6 +50,7 @@ periscope = "rfmux.tools.periscope.__main__:main"
 
 [dependency-groups]
 dev = [
+  "bs4",
   "htpy",
   "jupytext",
   "markdown",

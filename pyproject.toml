@@ -41,7 +41,6 @@ dev = [
   "markdown",
   "nbclient",
   "pytest_check",
-  "reportlab",
   "requests",
   "scikit-learn",
   "weasyprint",

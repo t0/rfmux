@@ -553,9 +553,8 @@ async def py_get_samples(crs: CRS,
     async with crs.tuber_context() as tc:
         ts = tc.get_timestamp()
         high_bank = tc.get_analog_bank()
+        (ts, high_bank) = await tc()
 
-    ts = Timestamp.from_TuberResult(ts.result())
-    high_bank = high_bank.result()
 
     if high_bank:
         assert module > 4, \
@@ -565,9 +564,26 @@ async def py_get_samples(crs: CRS,
         assert module <= 4, \
                 f"Can't retrieve samples from module {module} with set_analog_bank(False)"
 
+    # Because IRIG-B takes a full second to decode a timestamp, it's polite to
+    # stall here if we don't see a recent timestamp for up to a couple of
+    # seconds. This allows a set_timestamp_port() call followed by a
+    # py_get_samples() call to succeed, which may occur when a board is first
+    # initialized after power-up. Note that old packets (with stale timestamps)
+    # still need to traverse the network even if the board sees fresh ones,
+    # this PC may receive old ones until they flush out.
+    attempt = 5
+    while attempt>0 and not ts.recent:
+        warnings.warn(f"Got a stale timestamp. Trying again ({attempt} attempts remaining...)")
+        await asyncio.sleep(1)
+        ts = await crs.get_timestamp()
+        attempt -= 1
+
     # Math on timestamps only works if they are valid
     assert ts.recent, "Timestamp wasn't recent - do you have a valid timestamp source?"
 
+    # Ingest timestamp into Pythonic representation and nudge to compensate for
+    # FIR delay.
+    ts = Timestamp.from_TuberResult(ts)
     ts.ss += np.uint32(.02 * SS_PER_SECOND) # 20ms, per experiments at FIR6
     ts.renormalize()
 

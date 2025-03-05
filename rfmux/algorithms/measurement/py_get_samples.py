@@ -377,7 +377,7 @@ def _compute_spectrum(i_data, q_data, fs, dec_stage,
         arr_complex, fs=fs, nperseg=nperseg,
         scaling=scipy_scaling,
         return_onesided=False,
-        detrend=None # Important because we need the DC information for normalization
+        detrend=False # Important because we need the DC information for normalization
     )
     # The CIC corrections are symmetric
     freq_abs = np.abs(freq_dsb)

@@ -1,5 +1,6 @@
 #!/usr/bin/env -S python3
 import argparse
+import bs4
 import datetime
 import json
 import matplotlib.pyplot as plt
@@ -10,10 +11,12 @@ import pytest
 import shelve
 import socket
 import sys
+import uuid
 import warnings
 
 from htpy import (
     body,
+    div,
     h1,
     h2,
     h3,
@@ -131,6 +134,8 @@ def main(directory, html_filename, pdf_filename):
         """
         ),
         runs,
+        h2["Table of Contents"],
+        div(id='toc'),
     ]
 
     # Assemble document
@@ -141,13 +146,37 @@ def main(directory, html_filename, pdf_filename):
     ]
     encoded = doc.encode()
 
+    # Inject TOC by finding the placeholder, and filling it with a list of all
+    # subsequent headers
+    soup = bs4.BeautifulSoup(encoded, 'html.parser')
+    container = soup.find('div', {'id': 'toc'})
+    headings = container.find_all_next(['h1','h2','h3','h4','h5','h6'])
+
+    toc_entries = []
+    for heading in headings:
+        # Add id if we don't already have one - need a link target
+        if not heading.has_attr('id'):
+            heading['id'] = uuid.uuid4().hex
+
+        heading_tag = heading.name  # 'h1', 'h2', etc.
+
+        # Build a list item for the ToC
+        # you can nest sub-lists based on heading levels if needed.
+        toc_entries.append(f'<li><a href="#{heading.get("id")}">{heading.get_text()}</a></li>')
+
+    # Combine into a single list
+    toc_html = '<ul>' + ''.join(toc_entries) + '</ul>'
+    container.append(bs4.BeautifulSoup(toc_html, 'html.parser'))
+
+    reencoded = str(soup)
+
     # Save HTML if requested
     if html_filename is not None:
-        with open(html_filename, "wb") as f:
-            f.write(encoded)
+        with open(html_filename, "w") as f:
+            f.write(reencoded)
 
     # Save PDF
-    w = weasyprint.HTML(string=encoded, base_url=directory)
+    w = weasyprint.HTML(string=reencoded, base_url=directory)
     css_path = pathlib.Path(__file__).parent / "style.css"
     w.write_pdf(pdf_filename, stylesheets=[weasyprint.CSS(css_path.as_posix())])
 

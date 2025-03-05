@@ -130,7 +130,9 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
     def __init__(self, *args, **kwargs):
         if "module" not in kwargs and "modules" not in kwargs:
             self.modules = [ReadoutModule(module=m + 1) for m in range(8)]
-        super().__init__(*args, **kwargs)
+
+        hardware_map.HWMResource.__init__(self, *args, **kwargs)
+        tuber.TuberObject.__init__(self, "Dfmux", hostname=self.tuber_hostname)
 
     @sqlalchemy.orm.reconstructor
     def reconstruct(self):

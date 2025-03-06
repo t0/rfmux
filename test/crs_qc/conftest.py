@@ -37,11 +37,11 @@ def pytest_sessionstart(session):
     session.serial = serial
 
     if (results_dir := session.config.getoption("--directory")) is None:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        day = datetime.datetime.now().strftime("%Y%m%d")
-        results_dir = f"CRS_test_results/{day}/CRS_test_{session.serial}_{timestamp}"
+        raise pytest.UsageError(
+            "--directory not provided! Need to know where to store results."
+        )
+    os.makedirs(results_dir, exist_ok=True)
     session.results_dir = results_dir
-    os.makedirs(session.results_dir, exist_ok=True)
 
     # Initialize shelf file with appropriate structure
     session.shelf_filename = f"{session.results_dir}/qc"
@@ -54,7 +54,7 @@ def pytest_sessionstart(session):
             {
                 # TODO: it would be nice to assemble a list of what tests ran, when
                 "date": datetime.datetime.now(),
-                "args": sys.argv[1:],
+                "args": session.config.invocation_params.args,
                 "logs": [],
             }
         )

@@ -49,6 +49,8 @@ packages = ["rfmux"]
 [tool.pytest.ini_options]
 markers = [
   "offline",
+  "qc_stage1",
+  "qc_stage2",
 ]
 
 asyncio_default_fixture_loop_scope = "session"

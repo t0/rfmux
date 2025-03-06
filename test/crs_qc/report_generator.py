@@ -38,7 +38,12 @@ from htpy import (
 )
 import weasyprint
 
-from .crs_qc import render_markdown, ResultTable
+try:
+    # when imported from conftest.py, we need package-relative imports
+    from .crs_qc import render_markdown, ResultTable
+except ImportError:
+    # when invoked separately, we need a straight import
+    from crs_qc import render_markdown, ResultTable
 
 
 def main(directory, html_filename, pdf_filename):

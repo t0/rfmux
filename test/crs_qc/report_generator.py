@@ -15,6 +15,7 @@ import uuid
 import warnings
 
 from htpy import (
+    a,
     body,
     div,
     h1,
@@ -152,21 +153,45 @@ def main(directory, html_filename, pdf_filename):
     container = soup.find('div', {'id': 'toc'})
     headings = container.find_all_next(['h1','h2','h3','h4','h5','h6'])
 
-    toc_entries = []
+    toc_root = []
+    toc_stack = [(0, toc_root)]
     for heading in headings:
         # Add id if we don't already have one - need a link target
         if not heading.has_attr('id'):
             heading['id'] = uuid.uuid4().hex
 
-        heading_tag = heading.name  # 'h1', 'h2', etc.
+        # pop back to the correct parent level
+        level = int(heading.name[1])
+        while level <= toc_stack[-1][0] and len(toc_stack) > 1:
+            toc_stack.pop()
 
-        # Build a list item for the ToC
-        # you can nest sub-lists based on heading levels if needed.
-        toc_entries.append(f'<li><a href="#{heading.get("id")}">{heading.get_text()}</a></li>')
+        # add this one
+        toc_stack[-1][1].append(node := {
+            "level": level,
+            "id": heading['id'],
+            "title": heading.get_text(),
+            "children": [],
+        })
 
-    # Combine into a single list
-    toc_html = '<ul>' + ''.join(toc_entries) + '</ul>'
-    container.append(bs4.BeautifulSoup(toc_html, 'html.parser'))
+        toc_stack.append((level, node["children"]))
+
+    def build_toc_ul(nodes):
+        """Recursively build TOC markup"""
+        if not nodes:
+            return []
+
+        parts = []
+        for n in nodes:
+            parts.append(li[
+                a(href=f'#{n["id"]}')[n["title"]], # this node
+                build_toc_ul(n["children"]) # children
+            ])
+
+        return ul[*parts]
+
+    toc_html = build_toc_ul(toc_root)
+
+    container.append(bs4.BeautifulSoup(toc_html.encode(), 'html.parser'))
 
     reencoded = str(soup)
 

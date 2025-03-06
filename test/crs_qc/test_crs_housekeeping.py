@@ -23,6 +23,7 @@ class SensorReading:
         return cls(name, nom=nom, min=(1 - rel) * nom, max=(1 + rel) * nom)
 
 
+@pytest.mark.qc_stage1
 @pytest.mark.asyncio
 async def test_housekeeping_temperature(d, request, shelf, check):
     """
@@ -79,6 +80,7 @@ async def test_housekeeping_temperature(d, request, shelf, check):
         ]
 
 
+@pytest.mark.qc_stage1
 @pytest.mark.asyncio
 async def test_housekeeping_voltages(d, request, shelf, check):
     """
@@ -193,6 +195,7 @@ async def test_housekeeping_voltages(d, request, shelf, check):
         ]
 
 
+@pytest.mark.qc_stage1
 @pytest.mark.asyncio
 async def test_housekeeping_currents(d, request, shelf, check):
     """

@@ -64,7 +64,7 @@ async def test_communications(d, request, shelf, check):
         check.fail(str(e))
 
     with shelf as x:
-        x["sections"][request.node.name] = [
+        x["sections"][request.node.nodeid] = [
             render_markdown(test_communications.__doc__),
             rt,
         ]
@@ -87,7 +87,7 @@ async def test_metadata(d, request, shelf):
         rt.row(k, getattr(r, k))
 
     with shelf as x:
-        x["sections"][request.node.name] = [
+        x["sections"][request.node.nodeid] = [
             render_markdown(test_metadata.__doc__),
             rt,
         ]

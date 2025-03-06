@@ -74,7 +74,7 @@ async def test_housekeeping_temperature(d, request, shelf, check):
             rt.fail(s.name, v, s.nom, s.min, s.max)
 
     with shelf as x:
-        x["sections"][request.node.name] = [
+        x["sections"][request.node.nodeid] = [
             render_markdown(test_housekeeping_temperature.__doc__),
             rt,
         ]
@@ -189,7 +189,7 @@ async def test_housekeeping_voltages(d, request, shelf, check):
             rt.fail(s.name, v, s.nom, s.min, s.max)
 
     with shelf as x:
-        x["sections"][request.node.name] = [
+        x["sections"][request.node.nodeid] = [
             render_markdown(test_housekeeping_voltages.__doc__),
             rt,
         ]
@@ -233,7 +233,7 @@ async def test_housekeeping_currents(d, request, shelf, check):
             rt.fail(s.name, v, s.min, s.max)
 
     with shelf as x:
-        x["sections"][request.node.name] = [
+        x["sections"][request.node.nodeid] = [
             render_markdown(test_housekeeping_currents.__doc__),
             rt,
         ]

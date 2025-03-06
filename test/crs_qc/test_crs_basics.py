@@ -56,10 +56,11 @@ async def test_communications(d, request, shelf, check):
         rt.fail("Multicast reception", str(e))
         check.fail(str(e))
 
-    shelf["sections"][request.node.name] = [
-        render_markdown(test_communications.__doc__),
-        rt,
-    ]
+    with shelf as x:
+        x["sections"][request.node.name] = [
+            render_markdown(test_communications.__doc__),
+            rt,
+        ]
 
 
 @pytest.mark.asyncio
@@ -77,7 +78,8 @@ async def test_metadata(d, request, shelf):
     for k in r:
         rt.row(k, getattr(r, k))
 
-    shelf["sections"][request.node.name] = [
-        render_markdown(test_metadata.__doc__),
-        rt,
-    ]
+    with shelf as x:
+        x["sections"][request.node.name] = [
+            render_markdown(test_metadata.__doc__),
+            rt,
+        ]

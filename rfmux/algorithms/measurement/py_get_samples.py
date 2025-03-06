@@ -35,6 +35,7 @@ import socket
 import struct
 import sys
 import warnings
+import pytest
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
@@ -42,8 +43,6 @@ from ...tuber.codecs import TuberResult
 from ...core.utils.transferfunctions import VOLTS_PER_ROC
 
 from dataclasses import dataclass, asdict, astuple
-
-# Added import for PSD computation
 from scipy.signal import welch
 
 STREAMER_PORT = 9876
@@ -811,3 +810,57 @@ async def py_get_samples(crs: CRS,
         results["spectrum"] = TuberResult(spec_data)
 
     return TuberResult(results)
+
+
+@pytest.mark.filterwarnings("ignore:divide by zero encountered in log10")
+def test__compute_spectrum_dc_i(request):
+    # DC signal in I only
+    x = _compute_spectrum(
+        np.ones(1000), np.zeros(1000), 625e6 / (256 * 64 * 2**6), 6, scaling="ps"
+    )
+
+    (freq_dsb, psd_dsb, psd_i, psd_q, freq_iq) = (
+        x["freq_dsb"],
+        x["psd_dual_sideband"],
+        x["psd_i"],
+        x["psd_q"],
+        x["freq_iq"],
+    )
+
+    # Q had better be negligible
+    assert all(psd_q < -300)
+
+    # I and DSB spectra are only allowed energy at DC
+    assert all((psd_i < -300) | (np.abs(freq_iq) < 1))
+    assert all((psd_dsb < -300) | (np.abs(freq_dsb) < 1))
+
+    # magnitude 1 -> expect 0 dB
+    assert max(psd_i) == pytest.approx(0, abs=1)
+    assert max(psd_dsb) == pytest.approx(0, abs=1)
+
+
+@pytest.mark.filterwarnings("ignore:divide by zero encountered in log10")
+def test__compute_spectrum_dc_q(request):
+    # DC signal in Q only
+    x = _compute_spectrum(
+        np.zeros(1000), np.ones(1000), 625e6 / (256 * 64 * 2**6), 6, scaling="ps"
+    )
+
+    (freq_dsb, psd_dsb, psd_i, psd_q, freq_iq) = (
+        x["freq_dsb"],
+        x["psd_dual_sideband"],
+        x["psd_i"],
+        x["psd_q"],
+        x["freq_iq"],
+    )
+
+    # I had better be negligible
+    assert all(psd_i < -300)
+
+    # Q and DSB spectra are only allowed energy at DC
+    assert all((psd_q < -300) | (np.abs(freq_iq) < 1))
+    assert all((psd_dsb < -300) | (np.abs(freq_dsb) < 1))
+
+    # magnitude 1 -> expect 0 dB
+    assert max(psd_q) == pytest.approx(0, abs=1)
+    assert max(psd_dsb) == pytest.approx(0, abs=1)

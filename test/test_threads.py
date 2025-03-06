@@ -18,9 +18,11 @@ storage.  This should give us a single Session object per thread.
 [1]: https://docs.sqlalchemy.org/en/20/orm/contextual.html#sqlalchemy.orm.scoped_session
 """
 
-import threading
+import pytest
 import rfmux
+import threading
 
+@pytest.mark.offline
 def test_are_sessions_distinct_between_threads():
     '''Check that threads each get their own underlying Session / HardwareMap'''
 

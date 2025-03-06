@@ -153,6 +153,15 @@ async def d(request):
     await d.tuber_resolve()
     await d.set_timestamp_port(d.TIMESTAMP_PORT.TEST)
 
+    # If we're going to be doing low or high banking things, make sure we're
+    # correctly configured. If neither --low-bank or --high-bank were
+    # specified, don't configure anything - any misconfiguration should be
+    # caught by error checks in the on-board C++ code.
+    if low_bank:
+        await d.set_analog_bank(high=False)
+    elif high_bank:
+        await d.set_analog_bank(high=True)
+
     yield d
 
 

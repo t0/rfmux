@@ -196,7 +196,7 @@ async def test_dac_passband(d, request, shelf, check):
         )
 
     with shelf as x:
-        x["sections"][request.node.name] = render
+        x["sections"][request.node.nodeid] = render
 
 
 @pytest.mark.qc_stage2
@@ -222,7 +222,7 @@ async def test_dac_amplitude_transfer(d, request, shelf, check):
 
     # feel free to adjust the amplitude density as needed
     amplitudes = np.arange(0.05, 1, 0.05)
-    d.clear_channels()
+    await d.clear_channels()
 
     for m in d.modules:
         module_errors = []
@@ -304,7 +304,7 @@ async def test_dac_amplitude_transfer(d, request, shelf, check):
         )
 
     with shelf as x:
-        x["sections"][request.node.name] = render
+        x["sections"][request.node.nodeid] = render
 
 
 @pytest.mark.qc_stage2
@@ -423,7 +423,7 @@ async def test_dac_scale_transfer(d, request, shelf, check):
         )
 
     with shelf as x:
-        x["sections"][request.node.name] = render
+        x["sections"][request.node.nodeid] = render
 
 
 @pytest.mark.xfail
@@ -636,7 +636,7 @@ async def test_adc_attenuation(
             magnitude_dbm_values = []
             predicted_magnitude_dbm_values = []
 
-            d.clear_channels()
+            await d.clear_channels()
             await value_setter_helper(
                 d,
                 FREQUENCY,
@@ -829,4 +829,4 @@ async def test_wideband_noise(d, request, shelf, check):
         )
 
     with shelf as x:
-        x["sections"][request.node.name] = render
+        x["sections"][request.node.nodeid] = render

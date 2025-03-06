@@ -87,6 +87,25 @@ def shelf(request):
     return shelve.open(request.session.shelf_filename, writeback=True)
 
 
+def pytest_collection_modifyitems(config, items):
+    """
+    When invoked with --high-bank or --low-bank, ensure test IDs reflect it.
+    Otherwise, test IDs overlap between the two runs and data collisions occur.
+    """
+
+    high_bank = config.getoption("--high-bank")
+    low_bank = config.getoption("--low-bank")
+
+    # quirk: because we access these results using sorted(), we want the low
+    # banks to be first in the list. That's why we use 1-3 and 4-8, rather than
+    # "low" and "high" (which come out backwards)
+    for item in items:
+        if high_bank:
+            item._nodeid += "[5-8]"
+        elif low_bank:
+            item._nodeid += "[1-4]"
+
+
 @pytest_asyncio.fixture(scope="function")
 async def d(request):
     """

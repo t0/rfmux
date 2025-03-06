@@ -78,6 +78,7 @@ def covariance_matrix(samples):
 """-------------------------------------------DAC--------------------------------------------------------------"""
 
 
+@pytest.mark.qc_stage2
 @pytest.mark.asyncio
 async def test_dac_passband(d, request, shelf, check):
     """
@@ -198,6 +199,7 @@ async def test_dac_passband(d, request, shelf, check):
         x["sections"][request.node.name] = render
 
 
+@pytest.mark.qc_stage2
 @pytest.mark.asyncio
 async def test_dac_amplitude_transfer(d, request, shelf, check):
     """
@@ -305,6 +307,7 @@ async def test_dac_amplitude_transfer(d, request, shelf, check):
         x["sections"][request.node.name] = render
 
 
+@pytest.mark.qc_stage2
 @pytest.mark.asyncio
 async def test_dac_scale_transfer(d, request, shelf, check):
     """
@@ -424,6 +427,7 @@ async def test_dac_scale_transfer(d, request, shelf, check):
 
 
 @pytest.mark.xfail
+@pytest.mark.qc_stage2
 @pytest.mark.asyncio
 async def test_dac_mixmodes(d, results, summary_results, test_highbank):
     """
@@ -609,6 +613,7 @@ async def test_dac_mixmodes(d, results, summary_results, test_highbank):
 
 
 @pytest.mark.xfail
+@pytest.mark.qc_stage2
 @pytest.mark.asyncio
 async def test_adc_attenuation(
     d, results, summary_results, test_highbank, num_runs, results_dir
@@ -726,6 +731,7 @@ async def test_adc_attenuation(
 
 
 @pytest.mark.skip(reason="no way of currently testing this")
+@pytest.mark.qc_stage2
 @pytest.mark.asyncio
 async def test_adc_even_phase(d, results):
     AMPLITUDE = 0.1
@@ -764,6 +770,7 @@ async def test_adc_even_phase(d, results):
         print("The cluster is more oval in shape.")
 
 
+@pytest.mark.qc_stage2
 @pytest.mark.asyncio
 async def test_wideband_noise(d, request, shelf, check):
     """

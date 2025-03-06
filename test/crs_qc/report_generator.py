@@ -154,16 +154,15 @@ def main(directory, html_filename, pdf_filename):
 
     # Inject TOC by finding the placeholder, and filling it with a list of all
     # subsequent headers
-    soup = bs4.BeautifulSoup(encoded, 'html.parser')
-    container = soup.find('div', {'id': 'toc'})
-    headings = container.find_all_next(['h1','h2','h3','h4','h5','h6'])
+    soup = bs4.BeautifulSoup(encoded, "html.parser")
+    container = soup.find("div", {"id": "toc"})
+    headings = container.find_all_next(["h1", "h2", "h3", "h4", "h5", "h6"])
 
-    toc_root = []
-    toc_stack = [(0, toc_root)]
+    toc_stack = [(0, [])]
     for heading in headings:
         # Add id if we don't already have one - need a link target
-        if not heading.has_attr('id'):
-            heading['id'] = uuid.uuid4().hex
+        if not heading.has_attr("id"):
+            heading["id"] = uuid.uuid4().hex
 
         # pop back to the correct parent level
         level = int(heading.name[1])
@@ -171,12 +170,14 @@ def main(directory, html_filename, pdf_filename):
             toc_stack.pop()
 
         # add this one
-        toc_stack[-1][1].append(node := {
-            "level": level,
-            "id": heading['id'],
-            "title": heading.get_text(),
-            "children": [],
-        })
+        toc_stack[-1][1].append(
+            node := {
+                "level": level,
+                "id": heading["id"],
+                "title": heading.get_text(),
+                "children": [],
+            }
+        )
 
         toc_stack.append((level, node["children"]))
 
@@ -187,16 +188,21 @@ def main(directory, html_filename, pdf_filename):
 
         parts = []
         for n in nodes:
-            parts.append(li[
-                a(href=f'#{n["id"]}')[n["title"]], # this node
-                build_toc_ul(n["children"]) # children
-            ])
+            parts.append(
+                li[
+                    a(href=f'#{n["id"]}')[n["title"]],  # this node
+                    build_toc_ul(n["children"]),  # children
+                ]
+            )
 
         return ul[*parts]
 
-    toc_html = build_toc_ul(toc_root)
+    toc_html = build_toc_ul(toc_stack[0][1])
 
-    container.append(bs4.BeautifulSoup(toc_html.encode(), 'html.parser'))
+    # If we produced anything, append it to the table of contents.
+    # (If we didn't -- well, that was a funny empty test run)
+    if toc_html:
+        container.append(bs4.BeautifulSoup(toc_html.encode(), "html.parser"))
 
     reencoded = str(soup)
 

@@ -13,7 +13,7 @@ from .crs_qc import render_markdown, ResultTable
 
 
 # Ensure network can resolve the board. Does not use rfmux.
-@pytest.mark.qc
+@pytest.mark.qc_stage1
 @pytest.mark.asyncio
 async def test_communications(d, request, shelf, check):
     """
@@ -40,9 +40,16 @@ async def test_communications(d, request, shelf, check):
         rt.fail("Name resolution", e.message)
         check.fail(e.message)
 
-    # 2. Can we make a bare/empty HTTP request to it?
+    # 2. Can we make a bare HTTP request to it?
     try:
-        text = requests.post(f"http://{hostname}/tuber", data="[]").text
+        # Coming up after this is a py_get_samples() call. Because
+        # py_get_samples uses "module=1", we sneak in a set_analog_bank(False)
+        # call here to ensure we aren't inadvertently set up for high banking.
+        text = requests.post(f"http://{hostname}/tuber", json={
+            "object":"Dfmux",
+            "method":"set_analog_bank",
+            "args":[False]
+        }).text
         rt.pass_("HTTP POST", "Pass")
     except Exception as e:
         rt.fail("HTTP POST", e.message)
@@ -63,6 +70,7 @@ async def test_communications(d, request, shelf, check):
         ]
 
 
+@pytest.mark.qc_stage1
 @pytest.mark.asyncio
 async def test_metadata(d, request, shelf):
     """

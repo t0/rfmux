@@ -52,23 +52,30 @@ td.fail { background-color: #ffcdd2; }
 
 /* Images: centered, scaled */
 figure {
-	display: inline-block;
-	margin: 0 auto;
+    display: inline-block;
+    margin: 0 auto;
 }
 figure img {
-	margin: 0 auto;
-	vertical-align: top;
-	max-width: 60%;
-	display: block;
-	height: auto;
+    margin: 0 auto;
+    vertical-align: top;
+    max-width: 60%;
+    display: block;
+    height: auto;
 }
 figure figcaption {
-	text-align: center;
-	font-weight: bold;
+    text-align: center;
+    font-weight: bold;
 }
 
 /* lists */
 ul, ol {
-	list-style-position: inside;
-	margin-left: 1.5em; padding-left: 1.5em; }
+    list-style-position: inside;
+    margin-left: 1.5em; padding-left: 1.5em;
+}
+
+/* For the table of contents, add page number links */
+#toc {
+    a::after {
+        content: ' ' leader('.') ' ' target-counter(attr(href), page);
+    }
 }

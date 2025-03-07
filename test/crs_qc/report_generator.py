@@ -102,7 +102,9 @@ def main(directory, html_filename, pdf_filename):
                 if l["outcome"] == "passed":
                     rt.pass_(l["nodeid"], "Passed")
                 elif l["outcome"] == "failed":
-                    rt.fail(l["nodeid"], "Failed")
+                    # Format failures as a list
+                    failures = ul[(li[f] for f in l["failures"])]
+                    rt.fail(l["nodeid"], failures)
                 else:
                     rt.row(l["nodeid"], l["outcome"])
 
@@ -141,7 +143,7 @@ def main(directory, html_filename, pdf_filename):
         ),
         runs,
         h2["Table of Contents"],
-        div(id='toc'),
+        div(id="toc"),
     ]
 
     # Assemble document

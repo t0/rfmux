@@ -3,14 +3,16 @@ import matplotlib
 import os
 import pytest
 import pytest_asyncio
-from . import report_generator
+import re
 import rfmux
 import shelve
 import subprocess
 import sys
-import pytest_check  # imported to ensure "check" can be used as a fixture
+
+from pytest_check import check_log
 
 from .crs_qc import ResultTable
+from . import report_generator
 
 matplotlib.use("Agg")  # for non-interactive use
 
@@ -60,21 +62,39 @@ def pytest_sessionstart(session):
         )
 
 
+_collected_warnings = {}
+
+
+def pytest_warning_recorded(warning_message, when, nodeid, location):
+    """
+    Capture warnings during test execution so they can be stored with other results
+    """
+    _collected_warnings.setdefault(nodeid, []).append(warning_message)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     """
     Capture a "pass" / "fail" result for each test, and store it in the results shelf.
     """
 
+    # We need to grab failures before pytest_check's hook gets there and clears
+    # them.  We also need to strip ANSI colour codes from what's produced.
+    escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    failures = [escape.sub("", failure) for failure in check_log.get_failures()]
+
     outcome = yield
     report = outcome.get_result()
 
+    # We will need to strip ANSI colour codes from the failures
     if call.when == "call":
         with shelve.open(item.session.shelf_filename, writeback=True) as shelf:
             shelf["runs"][-1]["logs"].append(
                 {
                     "nodeid": item.nodeid,
                     "outcome": report.outcome,
+                    "failures": failures,
+                    "warnings": _collected_warnings.get(item.nodeid, []),
                 }
             )
 

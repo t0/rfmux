@@ -40,7 +40,8 @@ class ResultTable:
             case str():
                 return x
             case _:
-                raise TypeError("Unsupported type")
+                # assume they know what they're doing - might be a htpy native type
+                return x
 
     def __init__(self, *headings):
         self.headings = headings

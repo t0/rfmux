@@ -95,27 +95,25 @@ def main(directory, html_filename, pdf_filename):
                 )
 
         # Generate test results for each run
-        runs = []
+        runs = ResultTable("Run", "Test", "Status")
         for n, run in enumerate(qc["runs"]):
-            rt = ResultTable("Test", "Status")
             for l in run["logs"]:
                 if l["outcome"] == "passed":
-                    rt.pass_(l["nodeid"], "Passed")
+                    runs.pass_(f"{n+1}", l["nodeid"], "Passed")
                 elif l["outcome"] == "failed":
                     # Format failures as a list
                     failures = ul[(li[f] for f in l["failures"])]
-                    rt.fail(l["nodeid"], failures)
+                    runs.fail(f"{n+1}", l["nodeid"], failures)
                 else:
-                    rt.row(l["nodeid"], l["outcome"])
-
-            r = [h3[f"Run {n+1}"], rt]
-            runs.extend(r)
+                    runs.row(f"{n+1}", l["nodeid"], l["outcome"])
 
     # Render document preamble
     preamble = [
         render_markdown(
             f"""
             # CRS QC Test Results: Serial {serial}
+
+            ## Environment
 
             This report was assembled in the following environment:
 
@@ -130,6 +128,8 @@ def main(directory, html_filename, pdf_filename):
             | Python Version | {sys.version} |
             | Pytest Version | {pytest.__version__} |
 
+            ## Runs
+
             This report was assembled from {num_runs} different test runs:
         """
         ),
@@ -138,7 +138,7 @@ def main(directory, html_filename, pdf_filename):
             f"""
             Typically, newer test results replace results from older ones.
 
-            ## Run Summaries
+            ## Run Details
         """
         ),
         runs,

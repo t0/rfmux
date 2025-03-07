@@ -6,18 +6,19 @@ Please see README for hints on using and extending these test cases.
 """
 
 import htpy
+import matplotlib.pyplot as plt
+import numpy as np
 import os
 import pytest
 import rfmux
 import time
-import numpy as np
-import matplotlib.pyplot as plt
 
-from .crs_qc import render_markdown, ResultTable
+from .crs_qc import render_markdown, render_fig, ResultTable
 from scipy import signal
 from scipy.stats import linregress
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
+from matplotlib.patches import Polygon
 
 
 def transfer_function_helper(raw_sampl, AMPLITUDE, scale, attenuation):
@@ -74,21 +75,20 @@ def covariance_matrix(samples):
     return ratio
 
 
-"""------------------------------------------------------------------------------------------------------------"""
-"""-------------------------------------------DAC--------------------------------------------------------------"""
-
-
 @pytest.mark.qc_stage2
 @pytest.mark.asyncio
 async def test_dac_passband(d, request, shelf, check):
-    """
-    ## DAC Passband Checks
+    report = [
+        render_markdown(
+            f"""
+    ## DAC Passband Checks (Modules {', '.join(str(m) for m in d.modules.module)})
 
     Validate:
 
     * Amplitude variation is less than 6 dB from nominal across the passband
     """
-    render = [render_markdown(test_dac_passband.__doc__)]
+        )
+    ]
 
     # FIXME: Some issue with the higher range of the frequencies showing a dip
     AMPLITUDE = 0.005
@@ -97,7 +97,7 @@ async def test_dac_passband(d, request, shelf, check):
     ATTENUATION = 0
     SCALE = 7
 
-    MARGIN_DBM = 6
+    MARGIN_DB = 6
 
     # Feel free to increase the range and density of frequencies
     frequencies = np.arange(-250e6, 250e6, step=1e6)
@@ -151,67 +151,67 @@ async def test_dac_passband(d, request, shelf, check):
 
         rt = ResultTable("Metric", "Measurement", "Nominal", "Minimum", "Maximum")
 
-        if check.between(mag_0, mag_0 - MARGIN_DBM, mag_0 + MARGIN_DBM):
+        if check.between(mag_0, mag_0 - MARGIN_DB, mag_0 + MARGIN_DB):
             rt.pass_(
                 "Gain at NCO Centre",
                 f"{mag_0:.1f} dBm",
                 f"{predicted:.1f} dBm",
-                f"{predicted-MARGIN_DBM:.1f} dBm",
-                f"{predicted+MARGIN_DBM:.1f} dBm",
+                f"{predicted-MARGIN_DB:.1f} dBm",
+                f"{predicted+MARGIN_DB:.1f} dBm",
             )
         else:
             rt.fail(
                 "Gain at NCO Centre",
                 f"{mag_0:.1f} dBm",
                 f"{predicted:.1f} dBm",
-                f"{predicted-MARGIN_DBM:.1f} dBm",
-                f"{predicted+MARGIN_DBM:.1f} dBm",
+                f"{predicted-MARGIN_DB:.1f} dBm",
+                f"{predicted+MARGIN_DB:.1f} dBm",
             )
 
-        errors = np.abs(measured_dbm - predicted) > MARGIN_DBM
-        check.is_false(any(errors))
+        errors = np.abs(measured_dbm - predicted) > MARGIN_DB
+        if any(errors):
+            check.fail(
+                f"Measurement and prediction disagreed by more than {MARGIN_DB} dB"
+            )
 
-        plt.figure(figsize=(10, 6))
-        plt.plot(frequencies, measured_dbm, "-,", label="measured")
-        plt.plot(frequencies[errors], measured_dbm[errors], "ro", fillstyle="none")
-        plt.plot(frequencies, predicted_dbm, "-,", label="predicted")
-        plt.xlabel("Frequency (MHz)")
-        plt.ylabel("Magnitude (dBm)")
-        plt.legend()
-        # plt.title(f'Signal at DAC of module {m.module} with increasing frequency')
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(f"{request.session.results_dir}/{request.node.name}-{m.module}.png")
-        plt.close()
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(frequencies, measured_dbm, "-,", label="measured")
+        ax.plot(frequencies[errors], measured_dbm[errors], "ro", fillstyle="none")
+        ax.plot(frequencies, predicted_dbm, "-,", label="predicted")
+        ax.set_xlabel("Frequency (MHz)")
+        ax.set_ylabel("Magnitude (dBm)")
+        ax.legend()
+        ax.grid(True)
+        fig.tight_layout()
 
-        render.extend(
+        report.extend(
             [
                 htpy.h3[f"Module {m.module}"],
                 rt,
                 htpy.figure[
-                    htpy.img(src=f"{request.node.name}-{m.module}.png"),
+                    render_fig(fig),
                     htpy.figcaption[f"ADC Frequency Sweep, Module {m.module}"],
                 ],
             ]
         )
+        plt.close(fig)
 
     with shelf as x:
-        x["sections"][request.node.nodeid] = render
+        # Rendered report material
+        x["sections"][request.node.nodeid] = report
+
+        # Auxiliary free-form data
+        x[request.node.nodeid] = dict(
+            frequencies=frequencies,
+            errors=errors,
+            predicted_dbm=predicted_dbm,
+            measured_dbm=measured_dbm,
+        )
 
 
 @pytest.mark.qc_stage2
 @pytest.mark.asyncio
 async def test_dac_amplitude_transfer(d, request, shelf, check):
-    """
-    ## DAC Amplitude Transfer Checks
-
-    This test aims to determine if the output of the dac is scaled
-    appropriately with the change in amplitude. The algorithm uses only 1
-    channel at each module a set frequency, varying its amplitude. The result
-    is compared to the transfer function prediction
-    """
-    render = [render_markdown(test_dac_amplitude_transfer.__doc__)]
-
     SCALE = 1
     SAMPLES = 100
     ATTENUATION = 0
@@ -219,6 +219,30 @@ async def test_dac_amplitude_transfer(d, request, shelf, check):
     NCO_FREQUENCY = 0
     FREQUENCY = 150.5763e6
     NOMINAL_AMPLITUDE = 0
+    MAX_ERROR_DB = 3  # dB
+
+    report = [
+        render_markdown(
+            f"""
+    ## DAC Amplitude Transfer Checks (Modules {', '.join(str(m) for m in d.modules.module)})
+
+    - **Objective**: Ensure variations in DAC amplitude are reflected in readout samples.
+    - **Expected Outcome**: A plot showing green circles on data points, within the grey shape showing acceptable measurements.
+    - **Limitations:** Uses only channel 1
+
+    | Parameter           | Value                     |
+    | :------------------ | :------------------------ |
+    | `SCALE`             | {SCALE}                   |
+    | `SAMPLES`           | {SAMPLES}                 |
+    | `ATTENUATION`       | {ATTENUATION}             |
+    | `CHANNEL`           | {CHANNEL}                 |
+    | `NCO_FREQUENCY`     | {NCO_FREQUENCY}           |
+    | `FREQUENCY`         | {FREQUENCY/1e6:.3g} MHz   |
+    | `NOMINAL_AMPLITUDE` | {NOMINAL_AMPLITUDE}       |
+    | `MAX_ERROR_DB`      | {MAX_ERROR_DB} dB         |
+    """
+        )
+    ]
 
     # feel free to adjust the amplitude density as needed
     amplitudes = np.arange(0.05, 1, 0.05)
@@ -264,54 +288,97 @@ async def test_dac_amplitude_transfer(d, request, shelf, check):
         )
 
         # if any value is 3dB from predicted -- fail
-        if np.any(errors >= 3):
-            check.fail(f"Module {m.module}: power output deviated by > 3 dB")
+        if np.any(errors >= MAX_ERROR_DB):
+            check.fail(f"Power output deviated by > {MAX_ERROR_DB} dB")
 
         if linearity < 0.999:
             check.fail("The output is not linear on a lin-log scale.")
 
-        plt.figure(figsize=(10, 6))
-        plt.plot(
-            amplitude_values,
-            magnitude_dbm_values,
-            "-o",
-            label="measured",
-        )
-        plt.plot(
-            amplitude_values,
-            predicted_magnitude_dbm_values,
-            "-o",
-            label="predicted",
-        )
-        plt.xscale("log")
-        plt.xlabel("Amplitude (Normalized)")
-        plt.ylabel("Magnitude (dBm)")
-        plt.legend()
-        plt.title(f"DAC output of module {m.module} with increasing amplitude")
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(f"{request.session.results_dir}/{request.node.name}-{m.module}.png")
-        plt.close()
+        fig, ax = plt.subplots(figsize=(10, 6))
 
-        render.extend(
+        # needed to index by [errors] and for scalar offsets
+        amplitude_values = np.array(amplitude_values)
+        predicted_magnitude_dbm_values = np.array(predicted_magnitude_dbm_values)
+        magnitude_dbm_values = np.array(magnitude_dbm_values)
+
+        # Plot allowed region as a light gray box
+        ax.add_patch(
+            Polygon(
+                list(
+                    zip(amplitude_values, predicted_magnitude_dbm_values + MAX_ERROR_DB)
+                )
+                + list(
+                    zip(amplitude_values, predicted_magnitude_dbm_values - MAX_ERROR_DB)
+                )[::-1],
+                closed=True,
+                fill=True,
+                facecolor="lightgray",
+                linestyle="none",
+            )
+        )
+
+        # Plot measurement as a black line
+        ax.plot(amplitude_values, magnitude_dbm_values, "k.-")
+
+        # Overplot where errors occurred in red
+        ax.plot(
+            np.array(amplitude_values)[errors >= MAX_ERROR_DB],
+            np.array(magnitude_dbm_values)[errors >= MAX_ERROR_DB],
+            "ro",
+            fillstyle="none",
+        )
+
+        # Where they didn't - green
+        ax.plot(
+            np.array(amplitude_values)[errors < MAX_ERROR_DB],
+            np.array(magnitude_dbm_values)[errors < MAX_ERROR_DB],
+            "go",
+            fillstyle="none",
+        )
+
+        ax.set_xscale("log")
+        ax.set_xlabel("Amplitude (Normalized)")
+        ax.set_ylabel("Magnitude (dBm)")
+        ax.set_title(f"DAC output of module {m.module} with increasing amplitude")
+        ax.grid(True)
+        fig.tight_layout()
+
+        report.extend(
             [
                 htpy.h3[f"Module {m.module}"],
                 htpy.figure[
-                    htpy.img(src=f"{request.node.name}-{m.module}.png"),
-                    htpy.figcaption[f"DAC Amplitude Transfer Function, {m.module}"],
+                    render_fig(fig),
+                    htpy.figcaption[
+                        f"DAC Amplitude Transfer Function, Module {m.module}"
+                    ],
                 ],
             ]
         )
 
+        plt.close(fig)
+
     with shelf as x:
-        x["sections"][request.node.nodeid] = render
+        # Rendered report material
+        x["sections"][request.node.nodeid] = report
+
+        # Auxiliary free-form data
+        x[request.node.nodeid] = dict(
+            amplitude_values=amplitude_values,
+            errors=errors,
+            linearity=linearity,
+            log_amplitude_values=log_amplitude_values,
+            magnitude_dbm_values=magnitude_dbm_values,
+            predicted_magnitude_dbm_values=predicted_magnitude_dbm_values,
+        )
 
 
 @pytest.mark.qc_stage2
 @pytest.mark.asyncio
 async def test_dac_scale_transfer(d, request, shelf, check):
-    """
-    ## DAC Scale Tests
+    report = [
+        render_markdown(
+            f"""
+    ## DAC Scale Tests (Modules {', '.join(str(m) for m in d.modules.module)})
 
     This test aims to determine if the output of the dac is scaled
     appropriately with the change in 'scale' value (actually controlled by
@@ -324,7 +391,8 @@ async def test_dac_scale_transfer(d, request, shelf, check):
       samples first, then convert to dBm
     * plot together with prediction from the transfer function
     """
-    render = [render_markdown(test_dac_scale_transfer.__doc__)]
+        )
+    ]
 
     # set parameters for testing
     AMPLITUDE = 1
@@ -412,7 +480,7 @@ async def test_dac_scale_transfer(d, request, shelf, check):
         plt.savefig(f"{request.session.results_dir}/{request.node.name}-{m.module}.png")
         plt.close()
 
-        render.extend(
+        report.extend(
             [
                 htpy.h3[f"Module {m.module}"],
                 htpy.figure[
@@ -423,7 +491,7 @@ async def test_dac_scale_transfer(d, request, shelf, check):
         )
 
     with shelf as x:
-        x["sections"][request.node.nodeid] = render
+        x["sections"][request.node.nodeid] = report
 
 
 @pytest.mark.xfail
@@ -773,13 +841,24 @@ async def test_adc_even_phase(d, results):
 @pytest.mark.qc_stage2
 @pytest.mark.asyncio
 async def test_wideband_noise(d, request, shelf, check):
-    """
-    ## Wideband Noise Checks
-    """
-    render = [render_markdown(test_wideband_noise.__doc__)]
-
     SAMPLING_FREQUENCY = 5e9  # 5 GHz
     NUM_SAMPLES = 4000  # Total number of samples
+
+    report = [
+        render_markdown(
+            f"""
+    ## Wideband Noise Checks (Modules {', '.join(str(m) for m in d.modules.module)})
+
+    - **Objective**: Plot wideband noise with no stimulus from the DAC.
+    - **Expected Outcome**: A plot showing I/Q PSDs
+    - **Limitations:** This test succeeds unconditionally.
+
+    | Parameter           | Value                     |
+    | :------------------ | :------------------------ |
+    | `NUM_SAMPLES`       | {NUM_SAMPLES}             |
+    """
+        )
+    ]
 
     for m in d.modules:
         await d.clear_channels()
@@ -806,27 +885,33 @@ async def test_wideband_noise(d, request, shelf, check):
         psd_q = 10 * np.log10(psd_q * 1000)
 
         # plot the white noise
-        plt.figure(figsize=(10, 6))
-        plt.plot(psdfreq_i.tolist(), psd_i.tolist(), label="I")
-        plt.plot(psdfreq_q.tolist(), psd_q.tolist(), label="Q")
-        plt.xlabel("Frequency (Hz)")
-        plt.ylabel("Magnitude (dBm/Hz)")
-        plt.legend()
-        plt.title(f"Wideband FFT at module {m.module}")
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(f"{request.session.results_dir}/{request.node.name}-{m.module}.png")
-        plt.close()
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(psdfreq_i.tolist(), psd_i.tolist(), label="I")
+        ax.plot(psdfreq_q.tolist(), psd_q.tolist(), label="Q")
+        ax.set_xlabel("Frequency (Hz)")
+        ax.set_ylabel("Magnitude (dBm/Hz)")
+        ax.legend()
+        ax.set_title(f"Wideband FFT at module {m.module}")
+        ax.grid(True)
+        fig.tight_layout()
 
-        render.extend(
+        report.extend(
             [
                 htpy.h3[f"Module {m.module}"],
                 htpy.figure[
-                    htpy.img(src=f"{request.node.name}-{m.module}.png"),
+                    render_fig(fig),
                     htpy.figcaption[f"Wideband Noise, Module {m.module}"],
                 ],
             ]
         )
 
+        plt.close(fig)
+
     with shelf as x:
-        x["sections"][request.node.nodeid] = render
+        # Rendered report material
+        x["sections"][request.node.nodeid] = report
+
+        # Auxiliary free-form data
+        x[request.node.nodeid] = dict(
+            samples=samples,
+        )

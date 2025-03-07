@@ -109,17 +109,32 @@ def shelf(request):
 
 def pytest_collection_modifyitems(config, items):
     """
-    When invoked with --high-bank or --low-bank, ensure test IDs reflect it.
-    Otherwise, test IDs overlap between the two runs and data collisions occur.
+    Alter nodeid to reflect QC structure.
+
+    We need this for three reasons:
+    - To ensure that results (in the report) are grouped by phase,
+    - To ensure that tests that run in multiple phases are given unique IDs
+      (and hence their results are kept separate), and
+    - To ensure "high"/"low" banks have the same treatment (their results do
+      not conflict).
     """
 
+    # When invoked with --high-bank or --low-bank, ensure test IDs reflect it.
+    # Otherwise, test IDs overlap between the two runs and data collisions
+    # occur.
     high_bank = config.getoption("--high-bank")
     low_bank = config.getoption("--low-bank")
 
-    # quirk: because we access these results using sorted(), we want the low
-    # banks to be first in the list. That's why we use 1-3 and 4-8, rather than
-    # "low" and "high" (which come out backwards)
     for item in items:
+        # prefix nodeid with QC stage markers, if any. This forces an ordering
+        # by stage.
+        for mark in item.iter_markers():
+            if mark.name.startswith("qc_stage"):
+                item._nodeid = f"{mark.name}::{item._nodeid}"
+
+        # quirk: because we access these results using sorted(), we want the
+        # low banks to be first in the list. That's why we use 1-3 and 4-8,
+        # rather than "low" and "high" (which come out backwards)
         if high_bank:
             item._nodeid += "[5-8]"
         elif low_bank:
@@ -218,4 +233,4 @@ def pytest_sessionfinish(session):
         # If called with "--view", open it. If this unexpectedly opens gimp, try
         # $ xdg-mime default org.gnome.Evince.desktop application/pdf
         if session.config.getoption("view"):
-            subprocess.call(("xdg-open", pdf))
+            subprocess.Popen(("xdg-open", pdf), start_new_session=True)

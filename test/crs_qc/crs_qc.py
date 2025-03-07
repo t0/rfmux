@@ -1,13 +1,29 @@
-import markupsafe
-import markdown
+import base64
+import contextlib
 import htpy
+import io
+import markdown
+import markupsafe
+import matplotlib.figure
 import textwrap
 
 
-def render_markdown(source):
-    # Documentation contained in the DocString
+def render_fig(fig: matplotlib.figure.Figure):
+    """Convert a Figure into an embedded base64-encoded string"""
+    with contextlib.closing(io.BytesIO()) as buf:
+        fig.savefig(buf, format="png")
+        img_base64 = base64.b64encode(buf.getbuffer()).decode()
+        return htpy.img(src=f"data:image/png;base64,{img_base64}")
+
+
+def render_markdown(source: str):
+    """
+    Convert Markdown (in a string) to markupsafe AST nodes
+
+    The declarative HTML library we use (htpy) understands these directly.
+    """
     docstring = textwrap.dedent(source)
-    md = markdown.markdown(docstring, extensions=["tables"])
+    md = markdown.markdown(docstring, extensions=["tables", "attr_list"])
     doc = markupsafe.Markup(md)
     return doc
 

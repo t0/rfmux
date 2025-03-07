@@ -26,7 +26,9 @@ class SensorReading:
 @pytest.mark.qc_stage1
 @pytest.mark.asyncio
 async def test_housekeeping_temperature(d, request, shelf, check):
-    """
+    report = [
+        render_markdown(
+            f"""
     ## Temperatures
 
     Nominal values are fairly arbitrary. Selected maximum operating
@@ -40,6 +42,8 @@ async def test_housekeeping_temperature(d, request, shelf, check):
     Given the board's thermal design and hot spots, it is likely that the VCXO
     is the part with the lowest thermal margin.
     """
+        )
+    ]
 
     NOM = 50.0
     MIN = 0.0
@@ -64,8 +68,10 @@ async def test_housekeeping_temperature(d, request, shelf, check):
             ctx.get_motherboard_temperature(s.name)
         temps = await ctx()
 
-    rt = ResultTable(
-        "Sensor", r"Reading (C)", "Nominal (C)", "Minimum (C)", r"Maximum (C)"
+    report.append(
+        rt := ResultTable(
+            "Sensor", r"Reading (C)", "Nominal (C)", "Minimum (C)", r"Maximum (C)"
+        )
     )
     for s, v in zip(sensors, temps):
         if check(s.min <= v <= s.max):
@@ -74,16 +80,15 @@ async def test_housekeeping_temperature(d, request, shelf, check):
             rt.fail(s.name, v, s.nom, s.min, s.max)
 
     with shelf as x:
-        x["sections"][request.node.nodeid] = [
-            render_markdown(test_housekeeping_temperature.__doc__),
-            rt,
-        ]
+        x["sections"][request.node.nodeid] = report
 
 
 @pytest.mark.qc_stage1
 @pytest.mark.asyncio
 async def test_housekeeping_voltages(d, request, shelf, check):
-    """
+    report = [
+        render_markdown(
+            f"""
     ## Voltages
 
     There are, in general, two kinds of on-board voltage measurements:
@@ -102,6 +107,8 @@ async def test_housekeeping_voltages(d, request, shelf, check):
     * Point-of-load (POL) measurements take their min/max values verbatim from
       the relevant component datasheets (primarily, DS926).
     """
+        )
+    ]
 
     VOLTAGE_TOL = 0.10  # 10%
     sensors = (
@@ -181,7 +188,9 @@ async def test_housekeeping_voltages(d, request, shelf, check):
         voltages = await ctx()
 
     # Evaluate pass/fail
-    rt = ResultTable("Sensor", "Reading", "Nominal", "Minimum", "Maximum")
+    report.append(
+        rt := ResultTable("Sensor", "Reading", "Nominal", "Minimum", "Maximum")
+    )
     for s, v in zip(sensors, voltages):
         if check(s.min < v < s.max):
             rt.pass_(s.name, v, s.nom, s.min, s.max)
@@ -189,22 +198,23 @@ async def test_housekeeping_voltages(d, request, shelf, check):
             rt.fail(s.name, v, s.nom, s.min, s.max)
 
     with shelf as x:
-        x["sections"][request.node.nodeid] = [
-            render_markdown(test_housekeeping_voltages.__doc__),
-            rt,
-        ]
+        x["sections"][request.node.nodeid] = report
 
 
 @pytest.mark.qc_stage1
 @pytest.mark.asyncio
 async def test_housekeeping_currents(d, request, shelf, check):
-    """
+    report = [
+        render_markdown(
+            f"""
     ## Currents
 
     Because current measurements rely on parasitic elements, these tests are
     barely constrained and are mostly useful to gather historical measurements
     of nominal values.
     """
+        )
+    ]
 
     # These are sloppy measurements - give them a huge margin.
     # Nominal readings aren't reported and are arbitrary.
@@ -225,7 +235,9 @@ async def test_housekeeping_currents(d, request, shelf, check):
             ctx.get_motherboard_current(s.name)
         currents = await ctx()
 
-    rt = ResultTable("Sensor", "Reading (A)", "Minimum (A)", "Maximum (A)")
+    report.append(
+        rt := ResultTable("Sensor", "Reading (A)", "Minimum (A)", "Maximum (A)")
+    )
     for s, v in zip(sensors, currents):
         if check.between(v, s.min, s.max):
             rt.pass_(s.name, v, s.min, s.max)
@@ -233,7 +245,4 @@ async def test_housekeeping_currents(d, request, shelf, check):
             rt.fail(s.name, v, s.min, s.max)
 
     with shelf as x:
-        x["sections"][request.node.nodeid] = [
-            render_markdown(test_housekeeping_currents.__doc__),
-            rt,
-        ]
+        x["sections"][request.node.nodeid] = report

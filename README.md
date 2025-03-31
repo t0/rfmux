@@ -17,7 +17,7 @@ cd rfmux
 pip install .
 ```
 
-Note that rfmux requires Python 3.10 or later
+Note that rfmux requires Python 3.12 or later
 
 ## Firmware & Git LFS
 

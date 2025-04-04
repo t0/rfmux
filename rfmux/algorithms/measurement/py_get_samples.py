@@ -39,7 +39,7 @@ import warnings
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...tuber.codecs import TuberResult
-from ...core.utils.transferfunctions import VOLTS_PER_ROC
+from ...core.utils.transferfunctions import VOLTS_PER_ROC, decimation_to_sampling
 
 from dataclasses import dataclass, asdict, astuple
 
@@ -315,7 +315,49 @@ def _cic_correction(frequencies, f_in, R=64, N=6):
     return correction / (R ** N)
 
 
-def _compute_spectrum(i_data, q_data, fs, dec_stage,
+def _apply_full_cic_compensation_psd(frequencies, psd, dec_stage=6, spectrum_cutoff=0.9):
+    '''
+    frequencies : ndarray
+        Frequency bins (in Hz) for which the correction factor is desired.
+    psd : ndarray
+        Input power spectrum
+    dec_stage : int
+        Decimation stage used for data. ("FIR stage" in older firmware). (default: 6)
+    spectrum_cutoff : float
+        Fraction of Nyquist frequency to retain in the spectrum (default: 0.9).
+
+    Returns
+    -------
+
+    Arrays (frequencies, corrected_psd)'''
+
+    # Define CIC decimation parameters
+    R1 = 64
+    R2 = 2**dec_stage
+    f_in1 = 625e6 / 256.0  # Original samplerate before 1st CIC
+    f_in2 = f_in1 / R1     # Samplerate before 2nd CIC
+    fs = f_in2 / R2        # Final sample rate
+
+    # The CIC corrections are symmetric, take abs in case this is a dual-sideband PSD
+    freq_abs = np.abs(frequencies)
+
+    # Apply CIC correction for both CIC stages
+    cic1_corr_c = _cic_correction(freq_abs * R1 * R2, f_in1, R=R1, N=3)
+    cic2_corr_c = _cic_correction(freq_abs * R2, f_in2, R=R2, N=6)
+    correction = cic1_corr_c * cic2_corr_c
+    psd_corrected = psd / correction
+
+    # Enforce cutoff
+    nyquist = fs / 2
+    cutoff_freq = spectrum_cutoff * nyquist
+    cutoff_idx_c = freq_abs <= cutoff_freq
+    frequencies = frequencies[cutoff_idx_c]
+    psd_corrected = psd_corrected[cutoff_idx_c]
+
+    return frequencies, psd_corrected
+
+
+def _compute_spectrum(i_data, q_data, dec_stage,
                      scaling='psd', nperseg=None,
                      reference='relative',
                      spectrum_cutoff=0.9):
@@ -331,8 +373,6 @@ def _compute_spectrum(i_data, q_data, fs, dec_stage,
         Time-domain I (real) samples.
     q_data : array-like
         Time-domain Q (imag) samples.
-    fs : float
-        Sampling frequency in Hz.
     dec_stage : int
         Decimation stage to define the second CIC correction factor.
     scaling : {'psd','ps'}
@@ -365,12 +405,7 @@ def _compute_spectrum(i_data, q_data, fs, dec_stage,
     arr_q = np.asarray(q_data)
     arr_complex = arr_i + 1j * arr_q
 
-
-    # Define CIC decimation parameters
-    R1 = 64
-    R2 = 2 ** dec_stage
-    f_in1 = 625e6 / 256.0  # Original samplerate before 1st CIC
-    f_in2 = f_in1 / R1     # Samplerate before 2nd CIC
+    fs = decimation_to_sampling(dec_stage)
 
     # Welch for dual-sideband complex
     freq_dsb, psd_c = welch(
@@ -379,21 +414,9 @@ def _compute_spectrum(i_data, q_data, fs, dec_stage,
         return_onesided=False,
         detrend=False # Important because we need the DC information for normalization
     )
-    # The CIC corrections are symmetric
-    freq_abs = np.abs(freq_dsb)
 
-    # Apply CIC correction
-    cic1_corr_c = _cic_correction(freq_abs * R1 * R2, f_in1, R=R1, N=3)
-    cic2_corr_c = _cic_correction(freq_abs * R2, f_in2, R=R2, N=6)
-    correction_c = cic1_corr_c * cic2_corr_c
-    psd_c_corrected = psd_c / correction_c
-
-    # Enforce cutoff
-    nyquist = fs / 2
-    cutoff_freq = spectrum_cutoff * nyquist
-    cutoff_idx_c = freq_abs <= cutoff_freq
-    freq_dsb = freq_dsb[cutoff_idx_c]
-    psd_c_corrected = psd_c_corrected[cutoff_idx_c]
+    # Correct for the CIC1 and CIC2 transfer functions
+    freq_dsb, psd_c_corrected = _apply_full_cic_compensation_psd(frequencies=freq_dsb, psd=psd_c, dec_stage=dec_stage, spectrum_cutoff=spectrum_cutoff)
 
     # Carrier normalization based on DC bin
     carrier_normalization = psd_c_corrected[0]*(fs/nperseg)
@@ -418,17 +441,8 @@ def _compute_spectrum(i_data, q_data, fs, dec_stage,
     freq_iq = freq_i
 
     # CIC Correction
-    cic1_corr = _cic_correction(freq_iq * R1 * R2, f_in1, R=R1, N=6)
-    cic2_corr = _cic_correction(freq_iq * R2, f_in2, R=R2, N=6)
-    correction_iq = cic1_corr * cic2_corr
-
-    psd_i_corrected = psd_i / correction_iq
-    psd_q_corrected = psd_q / correction_iq
-
-    cutoff_idx_iq = freq_iq <= cutoff_freq
-    freq_iq = freq_iq[cutoff_idx_iq]
-    psd_i_corrected = psd_i_corrected[cutoff_idx_iq]
-    psd_q_corrected = psd_q_corrected[cutoff_idx_iq]
+    freq_iq, psd_i_corrected = _apply_full_cic_compensation_psd(frequencies=freq_i, psd=psd_i, dec_stage=dec_stage, spectrum_cutoff=spectrum_cutoff)
+    freq_iq, psd_q_corrected = _apply_full_cic_compensation_psd(frequencies=freq_q, psd=psd_q, dec_stage=dec_stage, spectrum_cutoff=spectrum_cutoff)
 
     # Convert to dBc or dBm
     if reference == 'relative' and scaling == 'psd': # Normalize by the _PS_ of the DC bin
@@ -755,7 +769,6 @@ async def py_get_samples(crs: CRS,
 
         # Retrieve decimation stage => helps define final sampling freq
         dec_stage = await crs.get_fir_stage()
-        fs = 625e6/(256*64*(2**dec_stage))
 
         spec_data = {}
         if channel is None:
@@ -769,7 +782,7 @@ async def py_get_samples(crs: CRS,
                 i_data = results["i"][c]
                 q_data = results["q"][c]
                 d = _compute_spectrum(
-                    i_data, q_data, fs, dec_stage,
+                    i_data, q_data, dec_stage,
                     scaling=scaling,
                     nperseg=nperseg if nperseg else num_samples,
                     reference=reference,
@@ -794,7 +807,7 @@ async def py_get_samples(crs: CRS,
             i_data = results["i"]
             q_data = results["q"]
             d = _compute_spectrum(
-                i_data, q_data, fs, dec_stage,
+                i_data, q_data, dec_stage,
                 scaling=scaling,
                 nperseg=nperseg if nperseg else num_samples,
                 reference=reference,

@@ -168,22 +168,14 @@ class UDPReceiver(QtCore.QThread):
             "4s4s", socket.inet_aton(STREAMER_HOST), socket.inet_aton(local_ip)
         )
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-        self.sock.setblocking(False)
 
     def run(self):
         while not self.isInterruptionRequested():
-            r, _, _ = select.select([self.sock], [], [], 0.001)
-            if self.sock in r:
-                try:
-                    while True:
-                        data = self.sock.recv(STREAMER_LEN)
-                        packet = DfmuxPacket.from_bytes(data)
-                        if packet.module != (self.module - 1):
-                            continue
-                        self.packet_queue.put(packet)
-                except BlockingIOError:
-                    pass
-        self.sock.close()
+            data = self.sock.recv(STREAMER_LEN)
+            packet = DfmuxPacket.from_bytes(data)
+            if packet.module != (self.module - 1):
+                continue
+            self.packet_queue.put(packet)
 
 
 class FFTWorker(QtCore.QThread):

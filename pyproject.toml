@@ -29,6 +29,9 @@ requires-python = ">=3.12"
 [project.optional-dependencies]
 gui = ["PyQt6", "pyqtgraph"]
 
+[project.gui-scripts]
+periscope = "rfmux:tools.periscope.main"
+
 [project.urls]
 homepage = "https://github.com/t0/rfmux"
 repository = "https://github.com/t0/rfmux"

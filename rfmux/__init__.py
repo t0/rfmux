@@ -1,6 +1,7 @@
 __all__ = [
     "core",
     "algorithms",
+    "tools",
     "Crate",
     "CRS",
     "ReadoutModule",

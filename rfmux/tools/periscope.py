@@ -13,33 +13,15 @@ import sys
 import time
 import warnings
 
+from .. import streamer
+
 from PyQt6 import QtWidgets, QtCore
 from PyQt6.QtGui import QIntValidator
 import pyqtgraph as pg
 
-# For our IRIG timestamp, we need the following constant:
-SS_PER_SECOND = 125000000
-
 # Configure PyQtGraph for performance.
 pg.setConfigOptions(antialias=False)
 pg.setConfigOptions(useOpenGL=False)
-
-# Constants
-STREAMER_PORT = 9876
-STREAMER_HOST = "239.192.0.2"
-STREAMER_LEN = 8240  # expected packet length in bytes
-NUM_CHANNELS = 1024
-HEADER_FORMAT = "<IHHBBBBI"  # header: 16 bytes total
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-
-
-def get_local_ip(crs_hostname: str) -> str:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        try:
-            s.connect((crs_hostname, 1))
-            return s.getsockname()[0]
-        except Exception:
-            raise Exception("Could not determine local IP address!")
 
 
 class CircularBuffer:
@@ -64,115 +46,17 @@ class CircularBuffer:
             return self.buffer[self.ptr : self.ptr + self.size]
 
 
-@dataclasses.dataclass(order=True)
-class Timestamp:
-    y: int  # Year (0-99)
-    d: int  # Day (1-366)
-    h: int  # Hour (0-23)
-    m: int  # Minute (0-59)
-    s: int  # Second (0-59)
-    ss: int  # Sub-second (0 to SS_PER_SECOND-1)
-    c: int  # Unused here
-    sbs: int  # Unused here
-    source: str = "GND"
-    recent: bool = False
-
-    def renormalize(self):
-        carry, self.ss = divmod(self.ss, SS_PER_SECOND)
-        self.s += carry
-        carry, self.s = divmod(self.s, 60)
-        self.m += carry
-        carry, self.m = divmod(self.m, 60)
-        self.h += carry
-        carry, self.h = divmod(self.h, 24)
-        self.d += carry
-
-    @classmethod
-    def from_bytes(cls, data: bytes):
-        vals = struct.unpack("<8I", data)
-        return cls(*vals, source="GND", recent=False)
-
-    @classmethod
-    def from_TuberResult(cls, ts):
-        return cls(
-            ts.y, ts.d, ts.h, ts.m, ts.s, ts.ss, ts.c, ts.sbs, ts.source, ts.recent
-        )
-
-
-class DfmuxPacket:
-    def __init__(
-        self,
-        magic,
-        version,
-        serial,
-        num_modules,
-        block,
-        fir_stage,
-        module,
-        seq,
-        s,
-        ts: Timestamp,
-    ):
-        self.magic = magic
-        self.version = version
-        self.serial = serial
-        self.num_modules = num_modules
-        self.block = block
-        self.fir_stage = fir_stage
-        self.module = module  # zero-indexed module number
-        self.seq = seq
-        self.s = s  # array of channel samples
-        self.ts = ts  # Timestamp object
-
-    @classmethod
-    def from_bytes(cls, data: bytes):
-        if len(data) != STREAMER_LEN:
-            raise ValueError(f"Packet size {len(data)} != expected {STREAMER_LEN}")
-        header = struct.Struct(HEADER_FORMAT)
-        header_args = header.unpack(data[:HEADER_SIZE])
-        body = array.array("i")
-        bodysize = NUM_CHANNELS * 2 * body.itemsize
-        body.frombytes(data[HEADER_SIZE : HEADER_SIZE + bodysize])
-        ts_data = data[HEADER_SIZE + bodysize :]
-        ts = Timestamp.from_bytes(ts_data)
-        return cls(*header_args, s=body, ts=ts)
-
-
 class UDPReceiver(QtCore.QThread):
     def __init__(self, crs_hostname: str, module: int, parent=None):
         super().__init__(parent)
-        self.crs_hostname = crs_hostname
         self.module = module
         self.packet_queue = queue.Queue()
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("", STREAMER_PORT))
-        # Set a large receive buffer size
-        rcvbuf = 16777216 * 8
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
-
-        actual = self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-        if sys.platform == "linux":
-            actual /= 2
-        if actual != rcvbuf:
-            warnings.warn(
-                f"Unable to set SO_RCVBUF to {rcvbuf} (got {actual}). Consider "
-                "'sudo sysctl net.core.rmem_max=67108864' or similar."
-            )
-
-        local_ip = get_local_ip(crs_hostname)
-        self.sock.setsockopt(
-            socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(local_ip)
-        )
-        mreq = struct.pack(
-            "4s4s", socket.inet_aton(STREAMER_HOST), socket.inet_aton(local_ip)
-        )
-        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        self.sock = streamer.get_multicast_socket(crs_hostname)
 
     def run(self):
         while not self.isInterruptionRequested():
-            data = self.sock.recv(STREAMER_LEN)
-            packet = DfmuxPacket.from_bytes(data)
+            data = self.sock.recv(streamer.STREAMER_LEN)
+            packet = streamer.DfmuxPacket.from_bytes(data)
             if packet.module != (self.module - 1):
                 continue
             self.packet_queue.put(packet)
@@ -344,7 +228,7 @@ class RealTimePlot(QtWidgets.QMainWindow):
             return [
                 int(ch.strip())
                 for ch in channels_str.split(",")
-                if ch.strip() and 1 <= int(ch.strip()) <= NUM_CHANNELS
+                if ch.strip() and 1 <= int(ch.strip()) <= streamer.NUM_CHANNELS
             ]
         except Exception:
             return [1]
@@ -488,7 +372,7 @@ class RealTimePlot(QtWidgets.QMainWindow):
         while not self.receiver.packet_queue.empty():
             packet = self.receiver.packet_queue.get()
             self.packets_processed += 1
-            ts = Timestamp(
+            ts = streamer.Timestamp(
                 packet.ts.y,
                 packet.ts.d,
                 packet.ts.h,
@@ -500,9 +384,11 @@ class RealTimePlot(QtWidgets.QMainWindow):
                 packet.ts.source,
                 packet.ts.recent,
             )
-            ts.ss += int(0.02 * SS_PER_SECOND)
+            ts.ss += int(0.02 * streamer.SS_PER_SECOND)
             ts.renormalize()
-            current_time = ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / SS_PER_SECOND
+            current_time = (
+                ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND
+            )
             if self.start_time is None:
                 self.start_time = current_time
             rel_time = current_time - self.start_time

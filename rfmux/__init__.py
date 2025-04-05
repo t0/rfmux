@@ -2,6 +2,7 @@ __all__ = [
     "core",
     "algorithms",
     "tools",
+    "streamer",
     "Crate",
     "CRS",
     "ReadoutModule",
@@ -61,7 +62,7 @@ from .core.hardware_map import macro, algorithm, HardwareMap
 from .core.dirfile import load_dirfile
 from .core.session import load_session, get_session, set_session, load_from_database
 
-from . import core, algorithms
+from . import core, algorithms, streamer
 
 from .tuber import TuberRemoteError
 

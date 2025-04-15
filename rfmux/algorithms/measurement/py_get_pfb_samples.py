@@ -12,7 +12,7 @@ both single-sideband and dual-sideband PSD data in either dBc/Hz or dBm/Hz, depe
 """
 
 import numpy as np
-from rfmux.core.utils.transferfunctions import VOLTS_PER_ROC
+from rfmux.core.transferfunctions import VOLTS_PER_ROC
 from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
 from rfmux.tuber.codecs import TuberResult

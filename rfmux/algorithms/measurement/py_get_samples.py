@@ -39,7 +39,7 @@ import warnings
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...tuber.codecs import TuberResult
-from ...core.utils.transferfunctions import VOLTS_PER_ROC, spectrum_from_slow_tod
+from ...core.transferfunctions import VOLTS_PER_ROC, spectrum_from_slow_tod
 
 from dataclasses import dataclass, asdict, astuple
 

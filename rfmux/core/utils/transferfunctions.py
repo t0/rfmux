@@ -1,6 +1,7 @@
 """
 Transfer functions for various hardware items.
 """
+
 import numpy as np
 
 # Added import for PSD computation
@@ -8,15 +9,17 @@ from scipy.signal import welch
 
 
 # TODO: Empirical value (should probably be a hybrid)
-VOLTS_PER_ROC = (np.sqrt(2)) * np.sqrt(50* (10**(-1.75/10))/1000)/1880796.4604246316 
+VOLTS_PER_ROC = (
+    (np.sqrt(2)) * np.sqrt(50 * (10 ** (-1.75 / 10)) / 1000) / 1880796.4604246316
+)
 
 CREST_FACTOR = 3.5
 
-TERMINATION = 50.
+TERMINATION = 50.0
 COMB_SAMPLING_FREQ = 625e6
 PFB_SAMPLING_FREQ = COMB_SAMPLING_FREQ / 256
 
-DDS_PHASE_ACC_NBITS = 32 # bits
+DDS_PHASE_ACC_NBITS = 32  # bits
 FREQ_QUANTUM = COMB_SAMPLING_FREQ / 256 / 2**DDS_PHASE_ACC_NBITS
 
 # TODO: verify still appropriate
@@ -28,7 +31,7 @@ BASE_FREQUENCY = COMB_SAMPLING_FREQ / 256 / 2**12
 
 
 def convert_roc_to_volts(roc):
-    '''
+    """
     Convenience function for converting a measured value in readout
     counts (ROCs) to voltage units.
 
@@ -41,15 +44,15 @@ def convert_roc_to_volts(roc):
 
     Returns
     -------
-    
+
     (float) value in volts
-    '''
+    """
 
     return roc * VOLTS_PER_ROC
 
 
-def convert_roc_to_dbm(roc, termination=50.):
-    '''
+def convert_roc_to_dbm(roc, termination=50.0):
+    """
     Convenience function for converting a measured value in readout
     counts (ROCs) to log power units.
 
@@ -66,17 +69,17 @@ def convert_roc_to_dbm(roc, termination=50.):
 
     Returns
     -------
-    
+
     (float) value in dbm
-    '''
+    """
 
     volts = convert_roc_to_volts(roc)
     dbm = convert_volts_to_dbm(volts, termination)
     return dbm
 
 
-def convert_volts_to_watts(volts, termination=50.):
-    '''
+def convert_volts_to_watts(volts, termination=50.0):
+    """
     Convenience function for converting a signal amplitude in
     volts (for a sinusoidal signal) to  power units.
 
@@ -93,17 +96,18 @@ def convert_volts_to_watts(volts, termination=50.):
 
     Returns
     -------
-    
-    (float) value in watts
-    '''
 
-    v_rms = volts / np.sqrt(2.)
+    (float) value in watts
+    """
+
+    v_rms = volts / np.sqrt(2.0)
     watts = v_rms**2 / termination
 
     return watts
 
-def convert_volts_to_dbm(volts, termination=50.):
-    '''
+
+def convert_volts_to_dbm(volts, termination=50.0):
+    """
     Convenience function for converting a signal amplitude in
     volts (for a sinusoidal signal) to log power units.
 
@@ -120,16 +124,16 @@ def convert_volts_to_dbm(volts, termination=50.):
 
     Returns
     -------
-    
+
     (float) value in dbm
-    '''
+    """
 
     watts = convert_volts_to_watts(volts, termination)
-    return 10. * np.log10(watts * 1e3)
+    return 10.0 * np.log10(watts * 1e3)
 
 
 def decimation_to_sampling(dec):
-    return (625e6 / 256 / 64 / 2**dec)
+    return 625e6 / 256 / 64 / 2**dec
 
 
 def _general_single_cic_correction(frequencies, f_in, R=64, N=6):
@@ -184,7 +188,7 @@ def _general_single_cic_correction(frequencies, f_in, R=64, N=6):
        :math:`R` is the decimation ratio, and :math:`N` is the number of stages.
 
     2. At DC (0 Hz), the expression above has an indeterminate form
-       :math:`0/0`. We replace those NaN values with the ideal DC gain of 
+       :math:`0/0`. We replace those NaN values with the ideal DC gain of
        :math:`R^N`, then normalize by :math:`R^N`, effectively making the
        correction factor 1 at DC.
 
@@ -195,17 +199,17 @@ def _general_single_cic_correction(frequencies, f_in, R=64, N=6):
        precise.
     """
     freq_ratio = frequencies / f_in
-    with np.errstate(divide='ignore', invalid='ignore'):
+    with np.errstate(divide="ignore", invalid="ignore"):
         numerator = np.sin(np.pi * freq_ratio)
         denominator = np.sin(np.pi * freq_ratio / R)
         correction = (numerator / denominator) ** N
         # Replace NaNs at DC with the ideal DC gain = R^N
-        correction[np.isnan(correction)] = R ** N
-    return correction / (R ** N)
+        correction[np.isnan(correction)] = R**N
+    return correction / (R**N)
 
 
 def compensate_psd_for_cics(frequencies, psd, dec_stage=6, spectrum_cutoff=0.9):
-    '''
+    """
     frequencies : ndarray
         Frequency bins (in Hz) for which the correction factor is desired.
     psd : ndarray
@@ -218,7 +222,7 @@ def compensate_psd_for_cics(frequencies, psd, dec_stage=6, spectrum_cutoff=0.9):
     Returns
     -------
 
-    Arrays (frequencies, corrected_psd)'''
+    Arrays (frequencies, corrected_psd)"""
 
     # Define CIC decimation parameters
     R1 = 64
@@ -245,10 +249,16 @@ def compensate_psd_for_cics(frequencies, psd, dec_stage=6, spectrum_cutoff=0.9):
 
     return frequencies, psd_corrected
 
-def spectrum_from_slow_tod(i_data, q_data, dec_stage,
-                     scaling='psd', nperseg=None,
-                     reference='relative',
-                     spectrum_cutoff=0.9):
+
+def spectrum_from_slow_tod(
+    i_data,
+    q_data,
+    dec_stage,
+    scaling="psd",
+    nperseg=None,
+    reference="relative",
+    spectrum_cutoff=0.9,
+):
     """
     Internal function to compute both the I/Q single-sideband PSD and
     the dual-sideband complex PSD in either dBc or dBm, depending on 'reference'.
@@ -287,7 +297,7 @@ def spectrum_from_slow_tod(i_data, q_data, dec_stage,
         nperseg = len(i_data)
 
     # Convert 'psd'/'ps' to scipy's 'density'/'spectrum'
-    scipy_scaling = 'density' if scaling.lower() == 'psd' else 'spectrum'
+    scipy_scaling = "density" if scaling.lower() == "psd" else "spectrum"
 
     arr_i = np.asarray(i_data)
     arr_q = np.asarray(q_data)
@@ -297,53 +307,94 @@ def spectrum_from_slow_tod(i_data, q_data, dec_stage,
 
     # Welch for dual-sideband complex
     freq_dsb, psd_c = welch(
-        arr_complex, fs=fs, nperseg=nperseg,
+        arr_complex,
+        fs=fs,
+        nperseg=nperseg,
         scaling=scipy_scaling,
         return_onesided=False,
-        detrend=False # Important because we need the DC information for normalization
+        detrend=False,  # Important because we need the DC information for normalization
     )
 
     # Correct for the CIC1 and CIC2 transfer functions
-    freq_dsb, psd_c_corrected = compensate_psd_for_cics(frequencies=freq_dsb, psd=psd_c, dec_stage=dec_stage, spectrum_cutoff=spectrum_cutoff)
+    freq_dsb, psd_c_corrected = compensate_psd_for_cics(
+        frequencies=freq_dsb,
+        psd=psd_c,
+        dec_stage=dec_stage,
+        spectrum_cutoff=spectrum_cutoff,
+    )
 
     # Carrier normalization based on DC bin
-    carrier_normalization = psd_c_corrected[0]*(fs/nperseg)
+    carrier_normalization = psd_c_corrected[0] * (fs / nperseg)
 
-    if reference == 'relative' and scaling == 'psd': # Normalize by the _PS_ of the DC bin:
+    if (
+        reference == "relative" and scaling == "psd"
+    ):  # Normalize by the _PS_ of the DC bin:
         ## OVERWRITE the DC bin on the assumption that this is the carrier we are normalizing to
         ## This gives people the correct "reference" right on the plot, as we are correctly assuming
         ## the carrier in total power, not a power density
-        psd_c_corrected[0] = psd_c_corrected[0]*(fs/nperseg)
-        psd_dual_sideband_db = 10.0 * np.log10(psd_c_corrected / (carrier_normalization + 1e-30))
-                
-    elif reference == 'relative' and scaling == 'ps': # DC bin already correctly normalized:
-        psd_dual_sideband_db = 10.0 * np.log10(psd_c_corrected / ((psd_c_corrected[0]) + 1e-30))
+        psd_c_corrected[0] = psd_c_corrected[0] * (fs / nperseg)
+        psd_dual_sideband_db = 10.0 * np.log10(
+            psd_c_corrected / (carrier_normalization + 1e-30)
+        )
+
+    elif (
+        reference == "relative" and scaling == "ps"
+    ):  # DC bin already correctly normalized:
+        psd_dual_sideband_db = 10.0 * np.log10(
+            psd_c_corrected / ((psd_c_corrected[0]) + 1e-30)
+        )
     else:
         # absolute => convert V^2 -> W => dBm
         p_c = psd_c_corrected / 50.0
         psd_dual_sideband_db = 10.0 * np.log10(p_c / 1e-3 + 1e-30)
 
     # Single-sideband I/Q
-    freq_i, psd_i = welch(arr_i, fs=fs, nperseg=nperseg, scaling=scipy_scaling, return_onesided=True, detrend=None)
-    freq_q, psd_q = welch(arr_q, fs=fs, nperseg=nperseg, scaling=scipy_scaling, return_onesided=True, detrend=None)
+    freq_i, psd_i = welch(
+        arr_i,
+        fs=fs,
+        nperseg=nperseg,
+        scaling=scipy_scaling,
+        return_onesided=True,
+        detrend=None,
+    )
+    freq_q, psd_q = welch(
+        arr_q,
+        fs=fs,
+        nperseg=nperseg,
+        scaling=scipy_scaling,
+        return_onesided=True,
+        detrend=None,
+    )
     freq_iq = freq_i
 
     # CIC Correction
-    freq_iq, psd_i_corrected = compensate_psd_for_cics(frequencies=freq_i, psd=psd_i, dec_stage=dec_stage, spectrum_cutoff=spectrum_cutoff)
-    freq_iq, psd_q_corrected = compensate_psd_for_cics(frequencies=freq_q, psd=psd_q, dec_stage=dec_stage, spectrum_cutoff=spectrum_cutoff)
+    freq_iq, psd_i_corrected = compensate_psd_for_cics(
+        frequencies=freq_i,
+        psd=psd_i,
+        dec_stage=dec_stage,
+        spectrum_cutoff=spectrum_cutoff,
+    )
+    freq_iq, psd_q_corrected = compensate_psd_for_cics(
+        frequencies=freq_q,
+        psd=psd_q,
+        dec_stage=dec_stage,
+        spectrum_cutoff=spectrum_cutoff,
+    )
 
     # Convert to dBc or dBm
-    if reference == 'relative' and scaling == 'psd': # Normalize by the _PS_ of the DC bin
+    if (
+        reference == "relative" and scaling == "psd"
+    ):  # Normalize by the _PS_ of the DC bin
         ## OVERWRITE the DC bin on the assumption that this is the carrier we are normalizing to
         ## This gives people the correct "reference" right on the plot, as we are correctly assuming
         ## the carrier in total power, not a power density
-        psd_i_corrected[0] = psd_i_corrected[0]*(fs/nperseg)
-        psd_q_corrected[0] = psd_q_corrected[0]*(fs/nperseg)
+        psd_i_corrected[0] = psd_i_corrected[0] * (fs / nperseg)
+        psd_q_corrected[0] = psd_q_corrected[0] * (fs / nperseg)
 
         ## Then normalize to the TOTAL power (in I and Q)
         psd_i_db = 10.0 * np.log10(psd_i_corrected / (carrier_normalization + 1e-30))
         psd_q_db = 10.0 * np.log10(psd_q_corrected / (carrier_normalization + 1e-30))
-    elif reference == 'relative' and scaling == 'ps': # We are already dealing with PS
+    elif reference == "relative" and scaling == "ps":  # We are already dealing with PS
         psd_i_db = 10.0 * np.log10(psd_i_corrected / (psd_c_corrected[0] + 1e-30))
         psd_q_db = 10.0 * np.log10(psd_q_corrected / (psd_c_corrected[0] + 1e-30))
     else:

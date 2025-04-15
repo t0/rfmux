@@ -209,7 +209,7 @@ def compensate_psd_for_cics(frequencies, psd, dec_stage=6, spectrum_cutoff=0.9):
     frequencies : ndarray
         Frequency bins (in Hz) for which the correction factor is desired.
     psd : ndarray
-        Input power spectrum
+        Input power spectrum or power spectral density
     dec_stage : int
         Decimation stage used for data. ("FIR stage" in older firmware). (default: 6)
     spectrum_cutoff : float

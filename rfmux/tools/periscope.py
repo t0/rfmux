@@ -1,507 +1,602 @@
 #!/usr/bin/env -S uv run
+"""
+Periscope – real‑time multi‑pane viewer (Qt 6, pyqtgraph)
 
-import argparse
-import array
-import dataclasses
-import math
+Architecture
+------------
+* UDPReceiver  → background multicast → queue
+* Circular     → fixed‑size ring buffers
+* FFTWorker    → off‑thread ASD (counts / √Hz)
+* ClickableViewBox → persistent coordinate read‑out
+* MainWindow   → dynamic layout: Time, IQ, FFT
+
+2025‑04‑17 update (9‑fix)
+-------------------------
+* Guard `AA_EnableHighDpiScaling` (Qt ≥ 6.2 removed it).
+* Restore robust legend‑fade helper (fixes TypeError on startup).
+"""
+
+# ───────────────────────────────── Imports ─────────────────────────────────
+import argparse, math, queue, sys, time, warnings
+from typing import Dict, List
+
 import numpy as np
-import queue
-import select
-import socket
-import struct
-import sys
-import time
-import warnings
-
-from .. import streamer
-
-from PyQt6 import QtWidgets, QtCore
-from PyQt6.QtGui import QIntValidator
+from PyQt6 import QtCore, QtWidgets
+from PyQt6.QtGui import QFont, QIntValidator
 import pyqtgraph as pg
+from rfmux import streamer
 
-# Configure PyQtGraph for performance.
-pg.setConfigOptions(antialias=False)
-pg.setConfigOptions(useOpenGL=False)
+pg.setConfigOptions(useOpenGL=False, antialias=False)
 
+# ─────────────────────────────── Parameters ───────────────────────────────
+LINE_WIDTH       = 2          # stroke width
+UI_FONT_SIZE     = 12         # axis / title font (pt)
 
-class CircularBuffer:
-    def __init__(self, size, dtype=np.float64):
-        self.size = size
-        self.buffer = np.zeros(size * 2, dtype=dtype)
+DENSITY_GRID     = 512        # heat‑map resolution
+DENSITY_DOT_SIZE = 1          # density‑dot draw radius (px)
+SMOOTH_SIGMA     = 1.3        # Gaussian σ for density smoothing
+LOG_COMPRESS     = True       # log‑compress density
+
+FFT_THROTTLE     = 1          # GUI frames between FFTs
+SCATTER_POINTS   = 1000       # points in IQ scatter
+SCATTER_SIZE     = 7          # scatter diameter (px)
+
+try:
+    from scipy.ndimage import gaussian_filter
+except ImportError:
+    gaussian_filter = None
+    SMOOTH_SIGMA = 0
+
+# ────────────────────────────── Clickable viewbox ─────────────────────────
+class ClickableViewBox(pg.ViewBox):
+    """ViewBox that shows data coordinates on double‑click (persistent dialog)."""
+
+    def mouseDoubleClickEvent(self, ev):
+        if ev.button() == QtCore.Qt.MouseButton.LeftButton:
+            pt_view = self.mapSceneToView(ev.scenePos())
+
+            # axis titles
+            plot_item = self.parentItem()
+            x_label = y_label = ""
+            if isinstance(plot_item, pg.PlotItem):
+                x_axis = plot_item.getAxis("bottom")
+                y_axis = plot_item.getAxis("left")
+                if x_axis and x_axis.label:
+                    x_label = x_axis.label.toPlainText().strip()
+                if y_axis and y_axis.label:
+                    y_label = y_axis.label.toPlainText().strip()
+            x_label = x_label or "X"
+            y_label = y_label or "Y"
+
+            # undo log scaling if needed
+            log_x, log_y = self.state["logMode"]
+            x_val = 10 ** pt_view.x() if log_x else pt_view.x()
+            y_val = 10 ** pt_view.y() if log_y else pt_view.y()
+
+            parent_widget = self.scene().views()[0].window()
+
+            box = QtWidgets.QMessageBox(parent_widget)
+            box.setWindowTitle("Coordinates")
+            box.setText(
+                f"{y_label}: {y_val:.6g}\n"
+                f"{x_label}: {x_val:.6g}"
+            )
+            box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Close)
+            box.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+            box.show()
+            ev.accept()
+        else:
+            super().mouseDoubleClickEvent(ev)
+
+# ──────────────────────────────── Utilities ───────────────────────────────
+class Circular:
+    """Fixed‑size ring buffer with continuous NumPy slice."""
+    def __init__(self, size: int, dtype=float):
+        self.N = size
+        self.buf = np.zeros(size * 2, dtype=dtype)
         self.ptr = 0
         self.count = 0
 
-    def add(self, value):
-        self.buffer[self.ptr] = value
-        self.buffer[self.ptr + self.size] = value
-        self.ptr = (self.ptr + 1) % self.size
-        if self.count < self.size:
-            self.count += 1
+    def add(self, v):
+        self.buf[self.ptr] = v
+        self.buf[self.ptr + self.N] = v
+        self.ptr = (self.ptr + 1) % self.N
+        self.count = min(self.count + 1, self.N)
 
-    def get_data(self):
-        if self.count < self.size:
-            return self.buffer[: self.count]
-        else:
-            # Return a contiguous block regardless of wrap-around.
-            return self.buffer[self.ptr : self.ptr + self.size]
+    def data(self) -> np.ndarray:
+        return (
+            self.buf[self.ptr : self.ptr + self.N]
+            if self.count == self.N
+            else self.buf[: self.count]
+        )
 
 
 class UDPReceiver(QtCore.QThread):
-    def __init__(self, crs_hostname: str, module: int, parent=None):
-        super().__init__(parent)
-        self.module = module
-        self.packet_queue = queue.Queue()
-        self.sock = streamer.get_multicast_socket(crs_hostname)
+    """Background multicast receiver → queue."""
+    def __init__(self, host: str, module: int):
+        super().__init__()
+        self.module_id = module
+        self.queue = queue.Queue()
+        self.sock = streamer.get_multicast_socket(host)
 
     def run(self):
         while not self.isInterruptionRequested():
-            data = self.sock.recv(streamer.STREAMER_LEN)
-            packet = streamer.DfmuxPacket.from_bytes(data)
-            if packet.module != (self.module - 1):
-                continue
-            self.packet_queue.put(packet)
+            pkt = streamer.DfmuxPacket.from_bytes(
+                self.sock.recv(streamer.STREAMER_LEN)
+            )
+            if pkt.module == self.module_id - 1:
+                self.queue.put(pkt)
 
 
 class FFTWorker(QtCore.QThread):
-    fftComputed = QtCore.pyqtSignal(
-        int, np.ndarray, np.ndarray, np.ndarray, np.ndarray
-    )  # channel, fft_I, fft_Q, fft_Mag, freq
+    """Off‑thread FFT → amplitude‑spectral‑density (counts / √Hz)."""
+    done = QtCore.pyqtSignal(int, np.ndarray, np.ndarray, np.ndarray, np.ndarray)
 
-    def __init__(self, channel: int, I_data, Q_data, Mag_data, x_data, parent=None):
-        super().__init__(parent)
-        self.channel = channel
-        self.I_data = I_data
-        self.Q_data = Q_data
-        self.Mag_data = Mag_data
-        self.x_data = x_data
+    def __init__(self, ch, I_view, Q_view, M_view, t_view):
+        super().__init__()
+        self.ch, self.Iv, self.Qv, self.Mv, self.tv = (
+            ch,
+            I_view,
+            Q_view,
+            M_view,
+            t_view,
+        )
+
+    @staticmethod
+    def _asd(x, fs):
+        """Return one‑sided ASD (counts/√Hz) for a real sequence."""
+        N = len(x)
+        X = np.abs(np.fft.rfft(x))
+        X *= np.sqrt(2.0 / fs) / N
+        X[0] /= np.sqrt(2.0)
+        if N % 2 == 0:
+            X[-1] /= np.sqrt(2.0)
+        return X
 
     def run(self):
-        # Infer sampling rate from x_data
-        if len(self.x_data) > 1:
-            dt = np.diff(self.x_data)
-            mean_dt = np.mean(dt)
-            sampling_rate_inferred = (
-                (1.0 / mean_dt) if mean_dt > 0 else 625e6 / 256 / 64 / 64
-            )
-            sampling_rate_inferred *= 1.25
-        else:
-            sampling_rate_inferred = 625e6 / 256 / 64 / 64
-        fft_I = np.abs(np.fft.rfft(self.I_data))
-        fft_Q = np.abs(np.fft.rfft(self.Q_data))
-        fft_Mag = np.abs(np.fft.rfft(self.Mag_data))
-        freq = np.linspace(0, sampling_rate_inferred / 2, len(fft_I))
-        self.fftComputed.emit(self.channel, fft_I, fft_Q, fft_Mag, freq)
+        I = np.ascontiguousarray(self.Iv)
+        Q = np.ascontiguousarray(self.Qv)
+        M = np.ascontiguousarray(self.Mv)
+        t = np.ascontiguousarray(self.tv)
+
+        fs = 1.0 / np.mean(np.diff(t)) if len(t) > 1 else 625e6 / 256 / 64 / 64
+        freqs = np.linspace(0.0, fs / 2, len(I) // 2 + 1)
+
+        fi = self._asd(I, fs)
+        fq = self._asd(Q, fs)
+        fm = self._asd(M, fs)
+
+        self.done.emit(self.ch, fi, fq, fm, freqs)
 
 
-class RealTimePlot(QtWidgets.QMainWindow):
+# ──────────────────────────── Main application ────────────────────────────
+class Periscope(QtWidgets.QMainWindow):
     def __init__(
         self,
-        crs_hostname: str,
-        module: int,
-        default_channels: str = "1",
-        default_buffer_size: int = 5000,
-        update_period: int = 33,
-        parent=None,
+        host,
+        module,
+        chan_str="1",
+        buf_size=5000,
+        refresh_ms=33,
+        dot_px=DENSITY_DOT_SIZE,
     ):
-        """
-        :param update_period: Update period in milliseconds.
-        """
-        super().__init__(parent)
-        self.crs_hostname = crs_hostname
-        self.module = module
-        self.buffer_size = default_buffer_size
-        self.update_period = update_period
+        super().__init__()
 
-        # Time reference.
-        self.start_time = None
-
-        # State.
-        self.resizing = False
-        self.dark_mode = True
-        self.fft_throttle = 1  # FFT update throttle count.
+        self.host, self.module = host, module
+        self.N = buf_size
+        self.refresh_ms = refresh_ms
+        self.dot_px = max(1, int(dot_px))
+        self.channels = self._parse_channels(chan_str)
         self.paused = False
 
-        # Metrics.
-        self.last_metrics_update_time = time.time()
-        self.frame_count = 0
-        self.packets_processed = 0
-
-        # Title label.
-        self.title_label = QtWidgets.QLabel(f"CRS: {crs_hostname}    Module: {module}")
-        self.title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        title_font = self.title_label.font()
-        title_font.setPointSize(16)
-        self.title_label.setFont(title_font)
-
-        # Initialize channel list and buffers.
-        self.channels = self.parse_channels(default_channels)
-        self.init_buffers()
-
-        # FFT worker tracking per channel.
+        self.start_time = None
+        self.frame_cnt = self.pkt_cnt = 0
+        self.t_last = time.time()
         self.fft_workers = {}
 
-        # Set up UDP receiver.
-        self.receiver = UDPReceiver(self.crs_hostname, self.module)
+        cmap = pg.colormap.get("turbo")
+        self.cmap = cmap
+        lut_rgb = cmap.getLookupTable(0.0, 1.0, 255)
+        self.lut = np.vstack(
+            [np.zeros((1, 4), np.uint8), np.hstack([lut_rgb, 255 * np.ones((255, 1), np.uint8)])]
+        )
+
+        self.receiver = UDPReceiver(host, module)
         self.receiver.start()
 
-        # Build UI.
-        central_widget = QtWidgets.QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QtWidgets.QVBoxLayout(central_widget)
-        main_layout.addWidget(self.title_label)
+        self._build_ui(chan_str)
+        self._init_buffers()
+        self._build_layout()
 
-        # Control Panel.
-        control_panel = QtWidgets.QHBoxLayout()
-        control_panel.addWidget(QtWidgets.QLabel("Channels (comma-separated):"))
-        self.channels_edit = QtWidgets.QLineEdit(default_channels)
-        control_panel.addWidget(self.channels_edit)
-        self.update_channels_btn = QtWidgets.QPushButton("Update Channels")
-        self.update_channels_btn.clicked.connect(self.update_channels)
-        control_panel.addWidget(self.update_channels_btn)
-        control_panel.addWidget(QtWidgets.QLabel("Buffer Size:"))
-        self.buffer_edit = QtWidgets.QLineEdit(str(self.buffer_size))
-        self.buffer_edit.setValidator(QIntValidator(100, 100000, self))
-        self.buffer_edit.editingFinished.connect(self.buffer_edit_changed)
-        control_panel.addWidget(self.buffer_edit)
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self._update_gui)
+        self.timer.start(refresh_ms)
 
-        self.dark_mode_checkbox = QtWidgets.QCheckBox("Dark Mode")
-        self.dark_mode_checkbox.setChecked(True)
-        self.dark_mode_checkbox.toggled.connect(self.toggle_theme)
-        control_panel.addWidget(self.dark_mode_checkbox)
+        self.setWindowTitle("Periscope – real‑time viewer")
 
-        self.pause_button = QtWidgets.QPushButton("Pause")
-        self.pause_button.clicked.connect(self.toggle_pause)
-        control_panel.addWidget(self.pause_button)
+    # ────────────────────────────── UI scaffolding ────────────────────────
+    def _build_ui(self, chan_str: str):
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        vbox = QtWidgets.QVBoxLayout(central)
 
-        # Plot mode checkboxes.
-        self.time_checkbox = QtWidgets.QCheckBox("Time Domain")
-        self.time_checkbox.setChecked(True)
-        self.time_checkbox.toggled.connect(self.update_plot_layout)
-        control_panel.addWidget(self.time_checkbox)
-        self.iq_checkbox = QtWidgets.QCheckBox("IQ Scatter")
-        self.iq_checkbox.setChecked(True)
-        self.iq_checkbox.toggled.connect(self.update_plot_layout)
-        control_panel.addWidget(self.iq_checkbox)
-        self.fft_checkbox = QtWidgets.QCheckBox("FFT")
-        self.fft_checkbox.setChecked(True)
-        self.fft_checkbox.toggled.connect(self.update_plot_layout)
-        control_panel.addWidget(self.fft_checkbox)
-        control_panel.addStretch()
-        main_layout.addLayout(control_panel)
+        title = QtWidgets.QLabel(f"CRS: {self.host}    Module: {self.module}")
+        title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        f = title.font()
+        f.setPointSize(16)
+        title.setFont(f)
+        vbox.addWidget(title)
 
-        # Plot area.
-        self.plots_container = QtWidgets.QWidget()
-        self.plot_grid = QtWidgets.QGridLayout(self.plots_container)
-        main_layout.addWidget(self.plots_container)
+        bar = QtWidgets.QHBoxLayout()
+        vbox.addLayout(bar)
+        bar.addWidget(QtWidgets.QLabel("Channels:"))
+        self.e_ch = QtWidgets.QLineEdit(chan_str)
+        self.e_ch.returnPressed.connect(self._update_channels)
+        bar.addWidget(self.e_ch)
+        bar.addWidget(QtWidgets.QPushButton("Update", clicked=self._update_channels))
 
-        # Status bar for real-time metrics.
+        bar.addWidget(QtWidgets.QLabel("Buffer:"))
+        self.e_buf = QtWidgets.QLineEdit(str(self.N))
+        self.e_buf.setValidator(QIntValidator(100, 100_000, self))
+        self.e_buf.editingFinished.connect(self._change_buffer)
+        bar.addWidget(self.e_buf)
+
+        self.b_pause = QtWidgets.QPushButton("Pause", clicked=self._toggle_pause)
+        bar.addWidget(self.b_pause)
+
+        self.cb_time = QtWidgets.QCheckBox("Time", checked=True)
+        self.cb_iq = QtWidgets.QCheckBox("IQ", checked=True)
+        self.cb_fft = QtWidgets.QCheckBox("FFT", checked=True)
+
+        self.rb_density = QtWidgets.QRadioButton("Density", checked=True)
+        self.rb_scatter = QtWidgets.QRadioButton("Scatter")
+
+        self.rb_density.setToolTip(
+            "Density (heat‑map).\nEvery sample contributes to a 2‑D histogram.\nFastest for large buffers."
+        )
+        self.rb_scatter.setToolTip(
+            "Scatter (1 000 points).\nRecent samples coloured by age.\nSlower than density on large buffers."
+        )
+
+        group = QtWidgets.QButtonGroup(self)
+        for rb in (self.rb_density, self.rb_scatter):
+            group.addButton(rb)
+            rb.toggled.connect(self._build_layout)
+
+        bar.addWidget(self.cb_time)
+        bar.addWidget(self.cb_iq)
+        bar.addWidget(self.rb_density)
+        bar.addWidget(self.rb_scatter)
+        bar.addWidget(self.cb_fft)
+        for cb in (self.cb_time, self.cb_iq, self.cb_fft):
+            cb.toggled.connect(self._build_layout)
+
+        self.rb_density.setVisible(self.cb_iq.isChecked())
+        self.rb_scatter.setVisible(self.cb_iq.isChecked())
+        self.cb_iq.toggled.connect(self.rb_density.setVisible)
+        self.cb_iq.toggled.connect(self.rb_scatter.setVisible)
+
+        bar.addStretch()
+        self.container = QtWidgets.QWidget()
+        vbox.addWidget(self.container)
+        self.grid = QtWidgets.QGridLayout(self.container)
         self.setStatusBar(QtWidgets.QStatusBar())
 
-        # Dictionaries to hold plot widgets and curves.
-        # Structure: self.plot_widgets[channel][mode] = PlotWidget; same for self.curves.
-        self.plot_widgets = {}
-        self.curves = {}
-        self.update_plot_layout()
-
-        self.setWindowTitle("Real-Time I/Q Data Plot")
-        self.update_count = 0
-
-        # Timer for GUI updates.
-        self.timer = QtCore.QTimer(self)
-        self.timer.timeout.connect(self.update_plot)
-        self.timer.start(self.update_period)
-
-    def init_buffers(self):
-        """Initialize circular buffers for each channel."""
-        self.data_buffer = {}
-        self.x_buffer = {}
+    # ───────────────────────────── data buffers ───────────────────────────
+    def _init_buffers(self):
+        self.buf, self.tbuf = {}, {}
         for ch in self.channels:
-            self.data_buffer[ch] = {
-                "I": CircularBuffer(self.buffer_size),
-                "Q": CircularBuffer(self.buffer_size),
-                "Mag": CircularBuffer(self.buffer_size),
-            }
-            self.x_buffer[ch] = CircularBuffer(self.buffer_size)
+            self.buf[ch] = {k: Circular(self.N) for k in "IQM"}
+            self.tbuf[ch] = Circular(self.N)
 
-    def parse_channels(self, channels_str):
-        try:
-            return [
-                int(ch.strip())
-                for ch in channels_str.split(",")
-                if ch.strip() and 1 <= int(ch.strip()) <= streamer.NUM_CHANNELS
-            ]
-        except Exception:
-            return [1]
+    # ───────────────────────────── layout builder ─────────────────────────
+    def _build_layout(self):
+        while self.grid.count():
+            self.grid.takeAt(0).widget().deleteLater()
 
-    def update_channels(self):
-        new_channels = self.parse_channels(self.channels_edit.text())
-        if not new_channels:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Invalid Channels",
-                "Please enter at least one valid channel number (1-1024).",
-            )
-            return
-        if new_channels != self.channels:
-            self.channels = new_channels
-            self.init_buffers()
-            self.update_plot_layout()
+        modes = [
+            m
+            for m, cb in zip(("T", "IQ", "F"), (self.cb_time, self.cb_iq, self.cb_fft))
+            if cb.isChecked()
+        ]
+        self.plots, self.curves = {}, {}
 
-    def buffer_edit_changed(self):
-        try:
-            new_size = int(self.buffer_edit.text())
-        except ValueError:
-            return
-        if new_size != self.buffer_size:
-            self.buffer_size = new_size
-            self.init_buffers()
+        font = QFont()
+        font.setPointSize(UI_FONT_SIZE)
 
-    def update_plot_layout(self):
-        """Rebuild the grid of plots based on active modes and channels."""
-        # Determine active modes in fixed order.
-        modes = []
-        if self.time_checkbox.isChecked():
-            modes.append("Time Domain")
-        if self.iq_checkbox.isChecked():
-            modes.append("IQ Scatter")
-        if self.fft_checkbox.isChecked():
-            modes.append("FFT")
-        self.active_modes = modes
-
-        # Clear existing plots from the grid.
-        while self.plot_grid.count():
-            item = self.plot_grid.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-
-        self.plot_widgets = {}
-        self.curves = {}
-        # For each channel (row) and each active mode (column), create a PlotWidget.
         for row, ch in enumerate(self.channels):
-            self.plot_widgets[ch] = {}
-            self.curves[ch] = {}
-            for col, mode in enumerate(self.active_modes):
-                pw = pg.PlotWidget(title=f"Channel {ch} - {mode}")
+            self.plots[ch], self.curves[ch] = {}, {}
+            for col, mode in enumerate(modes):
+                vb = ClickableViewBox()
+                if mode == "F":
+                    pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – FFT")
+                    pw.setLogMode(x=True, y=True)
+                    pw.setLabel("bottom", "Freq (Hz)")
+                    pw.setLabel("left", "Amplitude Spectral Density (Counts / √Hz)")
+                else:
+                    pane_title = "Time" if mode == "T" else "IQ"
+                    pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – {pane_title}")
+                    if mode == "T":
+                        pw.setLabel("left", "Amplitude (Readout Counts)")
+
                 pw.showGrid(x=True, y=True)
-                if mode == "Time Domain":
-                    pw.setLabel("bottom", "Time (s)")
-                    legend = pw.addLegend(offset=(10, 10))
-                    curve_I = pw.plot(pen=pg.mkPen("#1f77b4", width=2), name="I")
-                    curve_Q = pw.plot(pen=pg.mkPen("#ff7f0e", width=2), name="Q")
-                    curve_Mag = pw.plot(pen=pg.mkPen("#2ca02c", width=2), name="Mag")
-                    for curve in (curve_I, curve_Q, curve_Mag):
-                        curve.setDownsampling(True, "peak")
-                        curve.setClipToView(True)
-                    self.curves[ch]["Time Domain"] = {
-                        "I": curve_I,
-                        "Q": curve_Q,
-                        "Mag": curve_Mag,
+                self.plots[ch][mode] = pw
+                self.grid.addWidget(pw, row, col)
+
+                pi = pw.getPlotItem()
+                for ax_name in ("left", "bottom", "right", "top"):
+                    ax = pi.getAxis(ax_name)
+                    if ax is not None:
+                        ax.setTickFont(font)
+                        if ax.label is not None:
+                            ax.label.setFont(font)
+                pi.titleLabel.setFont(font)
+
+                # ---- Time pane --------------------------------------------
+                if mode == "T":
+                    pw.setLabel("bottom", "Time (s)")
+                    legend = pw.addLegend(offset=(30, 10))
+                    self.curves[ch]["T"] = {
+                        k: pw.plot(pen=pg.mkPen(col, width=LINE_WIDTH), name=k)
+                        for k, col in zip(
+                            ("I", "Q", "Mag"), ("#1f77b4", "#ff7f0e", "#2ca02c")
+                        )
                     }
-                elif mode == "IQ Scatter":
+                    self._fade_hidden_entries(legend, hide_labels=("I", "Q"))
+                    self._make_legend_clickable(legend)
+
+                # ---- FFT pane --------------------------------------------
+                elif mode == "F":
+                    legend = pw.addLegend(offset=(30, 10))
+                    self.curves[ch]["F"] = {
+                        k: pw.plot(pen=pg.mkPen(col, width=LINE_WIDTH), name=k)
+                        for k, col in zip(
+                            ("I", "Q", "Mag"), ("#1f77b4", "#ff7f0e", "#2ca02c")
+                        )
+                    }
+                    self._fade_hidden_entries(legend, hide_labels=("I", "Q"))
+                    self._make_legend_clickable(legend)
+
+                # ---- IQ pane ---------------------------------------------
+                else:
                     pw.setLabel("bottom", "I")
                     pw.setLabel("left", "Q")
                     pw.getViewBox().setAspectLocked(True)
-                    scatter = pg.ScatterPlotItem(
-                        pen=pg.mkPen(None), brush=pg.mkBrush("#1f77b4"), size=5
-                    )
-                    pw.addItem(scatter)
-                    self.curves[ch]["IQ Scatter"] = scatter
-                elif mode == "FFT":
-                    pw.setLabel("bottom", "Frequency (Hz)")
-                    pw.setLogMode(x=True, y=True)
-                    legend = pw.addLegend(offset=(10, 10))
-                    fft_I = pw.plot(pen=pg.mkPen("#1f77b4", width=2), name="FFT I")
-                    fft_Q = pw.plot(pen=pg.mkPen("#ff7f0e", width=2), name="FFT Q")
-                    fft_Mag = pw.plot(pen=pg.mkPen("#2ca02c", width=2), name="FFT Mag")
-                    for curve in (fft_I, fft_Q, fft_Mag):
-                        curve.setDownsampling(True, "peak")
-                        curve.setClipToView(True)
-                    self.curves[ch]["FFT"] = {
-                        "FFT I": fft_I,
-                        "FFT Q": fft_Q,
-                        "FFT Mag": fft_Mag,
-                    }
-                    # Add clickable legend items for FFT curves.
-                    for sample, label in legend.items:
+                    if self.rb_scatter.isChecked():
+                        sp = pg.ScatterPlotItem(pen=None, size=SCATTER_SIZE)
+                        pw.addItem(sp)
+                        self.curves[ch]["IQ"] = {"mode": "scatter", "item": sp}
+                    else:
+                        img = pg.ImageItem(axisOrder="row-major")
+                        img.setLookupTable(self.lut)
+                        pw.addItem(img)
+                        self.curves[ch]["IQ"] = {"mode": "density", "item": img}
 
-                        def make_mouse_press(curve, lbl):
-                            def mousePressEvent(event):
-                                curve.setVisible(not curve.isVisible())
-                                lbl.setColor("w" if curve.isVisible() else "r")
+    # ───────────────────────── legend helpers ─────────────────────────────
+    @staticmethod
+    def _fade_hidden_entries(legend, hide_labels):
+        for sample, label in legend.items:
+            txt = label.labelItem.toPlainText() if hasattr(label, "labelItem") else ""
+            if txt in hide_labels:
+                sample.setOpacity(0.3)
+                label.setOpacity(0.3)
 
-                            return mousePressEvent
+    @staticmethod
+    def _make_legend_clickable(legend):
+        for sample, label in legend.items:
+            curve = sample.item
 
-                        label.mousePressEvent = make_mouse_press(sample, label)
-                self.plot_widgets[ch][mode] = pw
-                self.plot_grid.addWidget(pw, row, col)
-        self.apply_theme()
+            def toggle(evt, *, c=curve, s=sample, l=label):
+                vis = not c.isVisible()
+                c.setVisible(vis)
+                op = 1.0 if vis else 0.3
+                s.setOpacity(op)
+                l.setOpacity(op)
 
-    def apply_theme(self):
-        for ch, plots in self.plot_widgets.items():
-            for mode, pw in plots.items():
-                pw.setBackground("k" if self.dark_mode else "w")
-        self.title_label.setStyleSheet(
-            "color: white;" if self.dark_mode else "color: black;"
-        )
+            label.mousePressEvent = toggle
+            sample.mousePressEvent = toggle
 
-    def toggle_theme(self, state):
-        self.dark_mode = state
-        self.apply_theme()
-
-    def toggle_pause(self):
+    # ─────────────────────────── GUI callbacks ────────────────────────────
+    def _toggle_pause(self):
         self.paused = not self.paused
-        self.pause_button.setText("Resume" if self.paused else "Pause")
+        self.b_pause.setText("Resume" if self.paused else "Pause")
 
-    def onFFTComputed(self, channel, fft_I, fft_Q, fft_Mag, freq):
-        if channel in self.curves and "FFT" in self.curves[channel]:
-            fft_curves = self.curves[channel]["FFT"]
-            fft_curves["FFT I"].setData(x=freq, y=fft_I)
-            fft_curves["FFT Q"].setData(x=freq, y=fft_Q)
-            fft_curves["FFT Mag"].setData(x=freq, y=fft_Mag)
-        self.fft_workers[channel] = None
+    def _update_channels(self):
+        new = self._parse_channels(self.e_ch.text())
+        if new != self.channels:
+            self.channels = new
+            self._init_buffers()
+            self._build_layout()
 
-    def update_plot(self):
-        # When paused, flush the UDP queue and skip updating plots.
+    def _change_buffer(self):
+        try:
+            n = int(self.e_buf.text())
+        except ValueError:
+            return
+        if n != self.N:
+            self.N = n
+            self._init_buffers()
+
+    # ---- curve update helper ---------------------------------------------
+    @staticmethod
+    def _fast_set(curve, x, y):
+        curve.setData(x, y)  # always update X & Y (ensures scrolling)
+
+    # ─────────────────────────── main update ─────────────────────────────
+    def _update_gui(self):
         if self.paused:
-            while not self.receiver.packet_queue.empty():
-                self.receiver.packet_queue.get()
+            while not self.receiver.queue.empty():
+                self.receiver.queue.get()
             return
 
-        # Process all packets in the queue.
-        while not self.receiver.packet_queue.empty():
-            packet = self.receiver.packet_queue.get()
-            self.packets_processed += 1
-            ts = streamer.Timestamp(
-                packet.ts.y,
-                packet.ts.d,
-                packet.ts.h,
-                packet.ts.m,
-                packet.ts.s,
-                packet.ts.ss,
-                packet.ts.c,
-                packet.ts.sbs,
-                packet.ts.source,
-                packet.ts.recent,
-            )
+        while not self.receiver.queue.empty():
+            pkt = self.receiver.queue.get()
+            self.pkt_cnt += 1
+            ts = pkt.ts
             ts.ss += int(0.02 * streamer.SS_PER_SECOND)
             ts.renormalize()
-            current_time = (
+            t_now = (
                 ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND
             )
             if self.start_time is None:
-                self.start_time = current_time
-            rel_time = current_time - self.start_time
-
+                self.start_time = t_now
+            t_rel = t_now - self.start_time
             for ch in self.channels:
-                I_val = packet.s[2 * (ch - 1)] / 256.0
-                Q_val = packet.s[2 * (ch - 1) + 1] / 256.0
-                mag = math.sqrt(I_val**2 + Q_val**2)
-                # Add new sample to each circular buffer.
-                self.data_buffer[ch]["I"].add(I_val)
-                self.data_buffer[ch]["Q"].add(Q_val)
-                self.data_buffer[ch]["Mag"].add(mag)
-                self.x_buffer[ch].add(rel_time)
+                I = pkt.s[2 * (ch - 1)] / 256.0
+                Q = pkt.s[2 * (ch - 1) + 1] / 256.0
+                self.buf[ch]["I"].add(I)
+                self.buf[ch]["Q"].add(Q)
+                self.buf[ch]["M"].add(math.hypot(I, Q))
+                self.tbuf[ch].add(t_rel)
 
-        # For each channel, extract contiguous window of data.
         for ch in self.channels:
-            I_data = self.data_buffer[ch]["I"].get_data()
-            Q_data = self.data_buffer[ch]["Q"].get_data()
-            Mag_data = self.data_buffer[ch]["Mag"].get_data()
-            xdata = self.x_buffer[ch].get_data()
+            I = self.buf[ch]["I"].data()
+            Q = self.buf[ch]["Q"].data()
+            M = self.buf[ch]["M"].data()
+            t = self.tbuf[ch].data()
 
-            # Update Time Domain and IQ Scatter plots.
-            if "Time Domain" in self.active_modes:
-                curves = self.curves[ch]["Time Domain"]
-                curves["I"].setData(x=xdata, y=I_data)
-                curves["Q"].setData(x=xdata, y=Q_data)
-                curves["Mag"].setData(x=xdata, y=Mag_data)
-            if "IQ Scatter" in self.active_modes:
-                pts = [{"pos": [I, Q]} for I, Q in zip(I_data, Q_data)]
-                self.curves[ch]["IQ Scatter"].setData(pts)
+            if "T" in self.curves[ch]:
+                c = self.curves[ch]["T"]
+                self._fast_set(c["Mag"], t, M)
+                if c["I"].isVisible():
+                    self._fast_set(c["I"], t, I)
+                if c["Q"].isVisible():
+                    self._fast_set(c["Q"], t, Q)
 
-            # Offload FFT computation if enabled and not already running.
-            if "FFT" in self.active_modes:
-                if self.update_count % self.fft_throttle == 0:
-                    # Only start a new FFT worker if sufficient data is available.
-                    if self.data_buffer[ch]["I"].count >= self.buffer_size:
-                        if self.fft_workers.get(ch) is None:
-                            worker = FFTWorker(
-                                ch,
-                                I_data.copy(),
-                                Q_data.copy(),
-                                Mag_data.copy(),
-                                xdata.copy(),
-                            )
-                            worker.fftComputed.connect(self.onFFTComputed)
-                            self.fft_workers[ch] = worker
-                            worker.start()
+            if "IQ" in self.curves[ch] and len(I):
+                pane = self.curves[ch]["IQ"]
+                mode = pane["mode"]
+                if mode == "density":
+                    g = DENSITY_GRID
+                    Imin, Imax = I.min(), I.max()
+                    Qmin, Qmax = Q.min(), Q.max()
+                    if Imin == Imax or Qmin == Qmax:
+                        continue
+                    ix = ((I - Imin) * (g - 1) / (Imax - Imin)).astype(np.intp)
+                    qy = ((Q - Qmin) * (g - 1) / (Qmax - Qmin)).astype(np.intp)
+                    hist = pane.get("hist_buf")
+                    if hist is None or hist.shape != (g, g):
+                        hist = np.zeros((g, g), np.uint32)
+                        pane["hist_buf"] = hist
+                    else:
+                        hist.fill(0)
+                    r = self.dot_px // 2
+                    if self.dot_px == 1:
+                        np.add.at(hist, (qy, ix), 1)
+                    else:
+                        for dy in range(-r, r + 1):
+                            for dx in range(-r, r + 1):
+                                ys = qy + dy
+                                xs = ix + dx
+                                mask = (
+                                    (ys >= 0) & (ys < g) & (xs >= 0) & (xs < g)
+                                )
+                                np.add.at(hist, (ys[mask], xs[mask]), 1)
+                    if SMOOTH_SIGMA and gaussian_filter is not None:
+                        hist = gaussian_filter(
+                            hist.astype(np.float32), SMOOTH_SIGMA, mode="nearest"
+                        )
+                    if LOG_COMPRESS:
+                        hist = np.log1p(hist, out=hist.astype(np.float32))
+                    if hist.max() > 0:
+                        hist *= 255.0 / hist.max()
+                    img = pane["item"]
+                    img.setImage(
+                        hist.astype(np.uint8), levels=(0, 255), autoLevels=False
+                    )
+                    img.setRect(
+                        QtCore.QRectF(Imin, Qmin, Imax - Imin, Qmax - Qmin)
+                    )
+                else:  # scatter
+                    idx = (
+                        np.linspace(0, len(I) - 1, SCATTER_POINTS, dtype=np.intp)
+                        if len(I) > SCATTER_POINTS
+                        else np.arange(len(I))
+                    )
+                    xs, ys = I[idx], Q[idx]
+                    rel = idx / idx.max() if idx.size else idx
+                    colors = self.cmap.map(rel.astype(np.float32), mode="byte")
+                    pane["item"].setData(
+                        xs, ys, brush=colors, pen=None, size=SCATTER_SIZE
+                    )
 
-        self.update_count += 1
-        self.frame_count += 1
+            if (
+                "F" in self.curves[ch]
+                and self.buf[ch]["I"].count >= 2
+                and self.frame_cnt % FFT_THROTTLE == 0
+                and self.fft_workers.get(ch) is None
+            ):
+                w = FFTWorker(ch, I, Q, M, t)
+                w.done.connect(self._fft_done)
+                self.fft_workers[ch] = w
+                w.start()
 
-        # Update real-time metrics (approx. once per second).
-        current_time = time.time()
-        if current_time - self.last_metrics_update_time >= 1.0:
-            fps = self.frame_count / (current_time - self.last_metrics_update_time)
-            pkt_rate = self.packets_processed / (
-                current_time - self.last_metrics_update_time
-            )
-            self.statusBar().showMessage(
-                f"FPS: {fps:.2f} | Packets/s: {pkt_rate:.2f} | Buffer Size: {self.buffer_size}"
-            )
-            self.last_metrics_update_time = current_time
-            self.frame_count = 0
-            self.packets_processed = 0
+        self.frame_cnt += 1
+        now = time.time()
+        if now - self.t_last >= 1.0:
+            fps = self.frame_cnt / (now - self.t_last)
+            pps = self.pkt_cnt / (now - self.t_last)
+            self.statusBar().showMessage(f"FPS {fps:.1f} | Packets/s {pps:.1f}")
+            self.frame_cnt = self.pkt_cnt = 0
+            self.t_last = now
 
-    def resizeEvent(self, event):
-        self.resizing = True
-        QtCore.QTimer.singleShot(300, self.end_resize)
-        super().resizeEvent(event)
+    # ─────────────────────── FFT callback ────────────────────────────────
+    def _fft_done(self, ch, fi, fq, fm, freqs):
+        if ch in self.curves and "F" in self.curves[ch]:
+            curves = self.curves[ch]["F"]
+            self._fast_set(curves["Mag"], freqs, fm)
+            if curves["I"].isVisible():
+                self._fast_set(curves["I"], freqs, fi)
+            if curves["Q"].isVisible():
+                self._fast_set(curves["Q"], freqs, fq)
+        self.fft_workers[ch] = None
 
-    def end_resize(self):
-        self.resizing = False
-        for ch in self.channels:
-            if "Time Domain" in self.plot_widgets[ch]:
-                self.plot_widgets[ch]["Time Domain"].enableAutoRange(
-                    axis=pg.ViewBox.YAxis, enable=True
-                )
-            if "FFT" in self.plot_widgets[ch]:
-                self.plot_widgets[ch]["FFT"].enableAutoRange(
-                    axis=pg.ViewBox.YAxis, enable=True
-                )
+    # ───────────────────────── helpers / cleanup ─────────────────────────
+    @staticmethod
+    def _parse_channels(txt: str):
+        out = []
+        for tok in txt.split(","):
+            tok = tok.strip()
+            if tok.isdigit():
+                v = int(tok)
+                if 1 <= v <= streamer.NUM_CHANNELS:
+                    out.append(v)
+        return out or [1]
 
-    def closeEvent(self, event):
+    def closeEvent(self, ev):
         self.receiver.requestInterruption()
         self.receiver.wait()
-        # Optionally wait for any FFT workers to finish.
-        for worker in self.fft_workers.values():
-            if worker is not None:
-                worker.wait()
-        event.accept()
+        [w.wait() for w in self.fft_workers.values() if w is not None]
+        ev.accept()
 
 
+# ─────────────────────────────── CLI entry ───────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(
-        prog="periscope",
-        description="Real-time, streaming visualization for the CRS",
-    )
-    parser.add_argument("hostname")
-    parser.add_argument("--module", "-m", type=int, default=1)
-    parser.add_argument("--channels", "-c", type=str, default="1")
-    parser.add_argument("--num-samples", "-n", type=int, default=5000)
-    parser.add_argument("--refresh-ms", "-r", type=int, default=100)
-    args = parser.parse_args()
-
+    ap = argparse.ArgumentParser(description="Periscope – real‑time viewer")
+    ap.add_argument("hostname")
+    ap.add_argument("-m", "--module", type=int, default=1)
+    ap.add_argument("-c", "--channels", default="1")
+    ap.add_argument("-n", "--num-samples", type=int, default=5000)
+    ap.add_argument("-f", "--fps", type=float, default=30.0)
+    ap.add_argument("-d", "--density-dot", type=int, default=DENSITY_DOT_SIZE)
+    args = ap.parse_args()
+    if args.fps <= 0:
+        ap.error("FPS must be positive.")
+    if args.fps > 30:
+        warnings.warn("FPS > 30 seems unnecessary", RuntimeWarning)
+    if args.density_dot < 1:
+        ap.error("Density‑dot size must be ≥1 pixel.")
+    refresh_ms = int(round(1000.0 / args.fps))
     app = QtWidgets.QApplication(sys.argv[:1])
-    window = RealTimePlot(
-        crs_hostname=args.hostname,
-        module=args.module,
-        default_channels=args.channels,
-        default_buffer_size=args.num_samples,
-        update_period=args.refresh_ms,
+    win = Periscope(
+        args.hostname,
+        args.module,
+        args.channels,
+        args.num_samples,
+        refresh_ms,
+        args.density_dot,
     )
-    window.show()
+    win.show()
     sys.exit(app.exec())
 
 

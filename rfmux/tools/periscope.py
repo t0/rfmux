@@ -21,6 +21,7 @@ import argparse, math, queue, sys, time, warnings
 from typing import Dict, List
 
 import numpy as np
+import socket
 from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtGui import QFont, QIntValidator
 import pyqtgraph as pg
@@ -118,14 +119,28 @@ class UDPReceiver(QtCore.QThread):
         self.module_id = module
         self.queue = queue.Queue()
         self.sock = streamer.get_multicast_socket(host)
+        self.sock.settimeout(0.2)               # ‹— NEW: wake up regularly
 
     def run(self):
         while not self.isInterruptionRequested():
-            pkt = streamer.DfmuxPacket.from_bytes(
-                self.sock.recv(streamer.STREAMER_LEN)
-            )
+            try:
+                pkt = streamer.DfmuxPacket.from_bytes(
+                    self.sock.recv(streamer.STREAMER_LEN)
+                )
+            except socket.timeout:
+                continue                         # check interruption flag
+            except OSError:
+                break                            # socket closed during quit
             if pkt.module == self.module_id - 1:
                 self.queue.put(pkt)
+
+    def stop(self):
+        """Interrupt the thread and close the socket to unblock recv()."""
+        self.requestInterruption()
+        try:                                    # closing twice is harmless
+            self.sock.close()
+        except OSError:
+            pass
 
 
 class FFTWorker(QtCore.QThread):
@@ -564,9 +579,20 @@ class Periscope(QtWidgets.QMainWindow):
         return out or [1]
 
     def closeEvent(self, ev):
-        self.receiver.requestInterruption()
+        """Graceful shutdown of timers and worker threads."""
+        self.timer.stop()
+
+        # stop UDP thread
+        self.receiver.stop()
         self.receiver.wait()
-        [w.wait() for w in self.fft_workers.values() if w is not None]
+
+        # stop FFT workers that may still be crunching
+        for w in self.fft_workers.values():
+            if w is not None:
+                w.quit()
+                w.wait()
+
+        super().closeEvent(ev)      # allow base‑class cleanup
         ev.accept()
 
 
@@ -598,6 +624,108 @@ def main():
     )
     win.show()
     sys.exit(app.exec())
+
+# ──────────────────────────── Convenience launcher ───────────────────────────
+def launch(
+    hostname: str,
+    *,
+    module: int = 1,
+    channels: str = "1",
+    buf_size: int = 5_000,
+    fps: float = 30.0,
+    density_dot: int = DENSITY_DOT_SIZE,
+    blocking: bool | None = None,
+):
+    """
+    One‑liner start‑up for the Periscope viewer.
+
+    Parameters
+    ----------
+    hostname      Multicast host (e.g. ``"rfmux0009.local"``).
+    module        1‑based module number recognised by the firmware.
+    channels      Comma‑separated list of channels, e.g. ``"1,2,5"``.
+    buf_size      Ring‑buffer length (samples).
+    fps           GUI refresh rate (frames per second).
+    density_dot   Pixel radius for IQ‑density dots.
+    blocking      • ``True``  – enter the Qt event‑loop and block  
+                  • ``False`` – return immediately, caller manages loop  
+                  • ``None``  – *auto*: block in a plain Python REPL,  
+                    return immediately inside IPython/Jupyter when a *Qt*
+                    event‑loop is already active.
+
+    Returns
+    -------
+    viewer        The new :class:`Periscope` instance (always).
+    app           The ``QApplication`` instance (only when *blocking* is False).
+
+    Usage examples
+    --------------
+    Plain Python / IPython (no event‑loop yet) – blocks until the window closes::
+
+        import periscope as ps
+        ps.launch("rfmux0009.local", module=1, channels="1,2")
+
+    Jupyter notebook or IPython with ``%gui qt`` already enabled – keeps the
+    prompt live::
+
+        %gui qt          # (only once per session)
+        import periscope as ps
+        viewer, app = ps.launch("rfmux0009.local", blocking=False)
+
+    Multiple windows in the same process::
+
+        import periscope as ps
+        viewers = [
+            ps.launch(h, module=m, blocking=False)
+            for h, m in [("rfmux0009.local", 1), ("rfmux0010.local", 2)]
+        ]
+    """
+    # --------------------- automatic 'blocking' decision --------------------
+    if blocking is None:
+        blocking = not _qt_eventloop_running()
+
+    from PyQt6 import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
+    refresh_ms = int(round(1000.0 / fps))
+
+    viewer = Periscope(
+        hostname, module, channels, buf_size, refresh_ms, density_dot
+    )
+    viewer.show()
+
+    if blocking:
+        if _running_inside_ipython():
+            # Jupyter / IPython ➜ just run the loop; do NOT call sys.exit()
+            app.exec()               # returns when the window is closed
+        else:
+            # Plain script ➜ keep normal Unix exit code semantics
+            sys.exit(app.exec())
+    return viewer, app
+
+def _running_inside_ipython() -> bool:
+    """True when executed from IPython or a Jupyter kernel."""
+    try:
+        from IPython import get_ipython
+        return get_ipython() is not None
+    except Exception:
+        return False
+
+# Helper: detect an active Qt event‑loop under IPython/Jupyter
+def _qt_eventloop_running() -> bool:
+    try:
+        from IPython import get_ipython
+
+        ip = get_ipython()
+        if ip is None:
+            return False
+        # IPython ≥ 8 stores the active GUI event‑loop in this attribute
+        if getattr(ip, "active_eventloop", None) == "qt":
+            return True
+        # Older IPython (fallback)
+        return str(getattr(ip, "eventloop", "")).lower() == "qt"
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":

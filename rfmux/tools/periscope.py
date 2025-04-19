@@ -4,14 +4,20 @@ Periscope – Real‑Time Multi‑Pane Viewer
 =======================================
 
 A real-time data visualizer using Qt6 + pyqtgraph, off-loading heavy computations
-to a bounded QThreadPool. It shows time-domain (T), IQ domain (density or scatter),
-and FFT (F) views per selected channel.
+to a bounded QThreadPool. It shows:
+- Time-domain (T)
+- IQ domain (density or scatter)
+- FFT (F)
+- Single-Sideband PSD (S) [optional]
+- Double-Sideband PSD (D) [optional]
 
 Key Features
 ------------
 - IQ histogram/scatter handled in IQTask (thread pool).
 - Built-in FFT mode from pyqtgraph, using (time, amplitude).
 - Concurrency bounded by CPU core count.
+- SSB PSD (I, Q, Mag) and DSB PSD (I + jQ) also off-loaded to worker threads,
+  properly normalized for PSD in Counts²/Hz.
 
 Dependencies
 ------------
@@ -35,7 +41,7 @@ import socket
 import sys
 import time
 import warnings
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 
@@ -213,7 +219,7 @@ class UDPReceiver(QtCore.QThread):
 
 class IQSignals(QObject):
     """
-    PyQt signals container for IQTask results.
+    PyQt signals container for IQTask results (IQ scatter/density).
     """
     done = pyqtSignal(int, str, object)
     # (channel, mode, payload)
@@ -310,10 +316,136 @@ class IQTask(QRunnable):
         self.signals.done.emit(self.ch, self.mode, payload)
 
 
+# ───────────────────── PSD Worker for SSB & DSB ─────────────────────
+class PSDSignals(QObject):
+    """
+    PyQt signals container for PSDTask results (SSB or DSB PSD).
+    """
+    done = pyqtSignal(int, str, object)
+    # (channel, mode, payload)
+
+
+class PSDTask(QRunnable):
+    """
+    Off-thread worker to compute single-sideband (SSB) or double-sideband (DSB)
+    PSD for a given channel's data. SSB PSD is done individually for I, Q, and M;
+    DSB PSD is done once from the complex I + jQ.
+
+    Parameters
+    ----------
+    ch : int
+        Channel index.
+    I, Q, M : np.ndarray
+        Time-domain I/Q magnitude arrays.
+    t : np.ndarray
+        Time array (seconds).
+    mode : str
+        Either 'SSB' or 'DSB'.
+    signals : PSDSignals
+        Signal object for emitting computed results.
+    """
+    def __init__(self, ch: int, I: np.ndarray, Q: np.ndarray, M: np.ndarray,
+                 t: np.ndarray, mode: str, signals: PSDSignals):
+        super().__init__()
+        self.ch = ch
+        self.I = I.copy()
+        self.Q = Q.copy()
+        self.M = M.copy()
+        self.t = t.copy()
+        self.mode = mode  # "SSB" or "DSB"
+        self.signals = signals
+
+    def run(self):
+        """
+        Compute the PSD and emit results. 
+        """
+        # Not enough data check:
+        if len(self.t) < 2 or len(self.I) < 2:
+            if self.mode == "SSB":
+                # Return empty for I, Q, M
+                payload = ([], [], [], [], [], [], [])
+            else:
+                # Return empty for freq, PSD
+                payload = ([], [])
+            self.signals.done.emit(self.ch, self.mode, payload)
+            return
+
+        dt = np.mean(np.diff(self.t))
+        fs = 1.0 / dt
+
+        if self.mode == "SSB":
+            # SSB PSD for I, Q, M -> real signals => single-sided
+            fI, psdI = self._compute_ssb_psd(self.I, fs)
+            fQ, psdQ = self._compute_ssb_psd(self.Q, fs)
+            fM, psdM = self._compute_ssb_psd(self.M, fs)
+            # All three freq arrays should be identical, so we can just return one.
+            payload = (fI, psdI, psdQ, psdM, fQ, fM, fs)
+            # We'll store them for clarity: 
+            #   freq = fI
+            #   PSD_I = psdI, PSD_Q = psdQ, PSD_M = psdM
+        else:
+            # DSB PSD from complex: c = I + jQ
+            c = self.I + 1j*self.Q
+            f, psd = self._compute_dsb_psd(c, fs)
+            payload = (f, psd)
+
+        self.signals.done.emit(self.ch, self.mode, payload)
+
+    @staticmethod
+    def _compute_ssb_psd(x: np.ndarray, fs: float) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute single-sided real PSD using a standard approach:
+          PSD = (2/(fs*N)) * |FFT(rfft(x))|^2
+        (except DC and possibly the Nyquist, which doesn't get doubled).
+        """
+        n = len(x)
+        xf = np.fft.rfft(x, n=n)
+        # raw power
+        pwr = (np.abs(xf)**2) / (fs * n)
+        # single-sided factor of 2 except DC or (Nyquist if n even)
+        # freq array
+        freq = np.fft.rfftfreq(n, d=1.0/fs)
+
+        # Double everything except DC (index=0) and possibly last bin if n is even
+        # (Nyquist freq is only one-sided).
+        if n % 2 == 0:
+            # even length -> last bin is f_nyquist
+            pwr[1:-1] *= 2.0
+        else:
+            # odd length -> no exact Nyquist bin
+            pwr[1:] *= 2.0
+
+        return freq, pwr
+
+    @staticmethod
+    def _compute_dsb_psd(xc: np.ndarray, fs: float) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute double-sided PSD from a complex timeseries:
+          PSD = (1/(fs*N)) * |FFT(xc)|^2, full frequency range
+        Then shift to [-fs/2, +fs/2].
+        """
+        n = len(xc)
+        xf = np.fft.fft(xc, n=n)
+        pwr = (np.abs(xf)**2) / (fs * n)
+
+        freq = np.fft.fftfreq(n, d=1.0/fs)
+        # Shift so freq is ascending from negative to positive:
+        freq = np.fft.fftshift(freq)
+        pwr = np.fft.fftshift(pwr)
+
+        return freq, pwr
+
+
 class Periscope(QtWidgets.QMainWindow):
     """
-    Multi-pane viewer for Time (T), IQ, and FFT (F) data. 
-    Uses built-in FFT mode from pyqtgraph to automatically generate correct axes.
+    Multi-pane viewer for:
+    - Time (T)
+    - IQ (density or scatter)
+    - FFT (F)
+    - SSB PSD (S) [optional]
+    - DSB PSD (D) [optional]
+
+    The latter two are done off-thread with proper PSD normalization.
 
     Parameters
     ----------
@@ -353,12 +485,18 @@ class Periscope(QtWidgets.QMainWindow):
         self.pkt_cnt = 0
         self.t_last = time.time()
 
-        # IQ thread concurrency
+        # IQ concurrency
         self.iq_workers: Dict[int, bool] = {}
         self.iq_signals = IQSignals()
         self.iq_signals.done.connect(self._iq_done)
 
-        # Color map (turbo)
+        # PSD concurrency
+        self.psd_workers: Dict[int, Dict[str, bool]] = {}
+        # For each channel -> { "S": False, "D": False }
+        self.psd_signals = PSDSignals()
+        self.psd_signals.done.connect(self._psd_done)
+
+        # Color map (turbo) for IQ density
         cmap = pg.colormap.get("turbo")
         lut_rgb = cmap.getLookupTable(0.0, 1.0, 255)
         self.lut = np.vstack([
@@ -387,11 +525,11 @@ class Periscope(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self._update_gui)
         self.timer.start(self.refresh_ms)
 
-        self.setWindowTitle("Periscope – Real‑Time Viewer (TOD, IQ, FFT)")
+        self.setWindowTitle("Periscope – Real‑Time Viewer (TOD, IQ, FFT, SSB PSD, DSB PSD)")
 
     def _build_ui(self, chan_str: str):
         """
-        Create top-level UI elements and layout.
+        Create top-level UI elements and layout, including new PSD checkboxes.
         """
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -426,10 +564,13 @@ class Periscope(QtWidgets.QMainWindow):
         bar.addWidget(self.b_pause)
 
         self.cb_time = QtWidgets.QCheckBox("TOD", checked=True)
-        self.cb_iq = QtWidgets.QCheckBox("IQ", checked=True)
-        self.cb_fft = QtWidgets.QCheckBox("FFT", checked=True)
+        self.cb_iq   = QtWidgets.QCheckBox("IQ",   checked=True)
+        self.cb_fft  = QtWidgets.QCheckBox("FFT",  checked=True)
+        self.cb_ssb  = QtWidgets.QCheckBox("SSB PSD", checked=False)
+        self.cb_dsb  = QtWidgets.QCheckBox("DSB PSD", checked=False)
 
-        for cb in (self.cb_time, self.cb_iq, self.cb_fft):
+        # Connect them to layout rebuild
+        for cb in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
             cb.toggled.connect(self._build_layout)
 
         self.rb_density = QtWidgets.QRadioButton("Density", checked=True)
@@ -444,6 +585,8 @@ class Periscope(QtWidgets.QMainWindow):
         bar.addWidget(self.rb_density)
         bar.addWidget(self.rb_scatter)
         bar.addWidget(self.cb_fft)
+        bar.addWidget(self.cb_ssb)
+        bar.addWidget(self.cb_dsb)
 
         # Dark Mode checkbox
         self.cb_dark = QtWidgets.QCheckBox("Dark Mode", checked=True)
@@ -467,16 +610,19 @@ class Periscope(QtWidgets.QMainWindow):
     def _init_buffers(self):
         """
         Initialize ring buffers for each channel (I, Q, M, t).
+        Also init psd_workers[ch].
         """
         self.buf = {}
         self.tbuf = {}
         for ch in self.channels:
             self.buf[ch] = {k: Circular(self.N) for k in ("I", "Q", "M")}
             self.tbuf[ch] = Circular(self.N)
+            # PSD concurrency flags
+            self.psd_workers[ch] = {"S": False, "D": False}
 
     def _build_layout(self):
         """
-        Build the plot layout (Time, IQ, FFT) for each selected channel.
+        Build the plot layout for each selected channel and each enabled mode.
         """
         # Clear old layout
         while self.grid.count():
@@ -485,38 +631,53 @@ class Periscope(QtWidgets.QMainWindow):
             if w:
                 w.deleteLater()
 
+        # Gather modes
         modes = []
         if self.cb_time.isChecked():
-            modes.append("T")
+            modes.append("T")   # Time
         if self.cb_iq.isChecked():
-            modes.append("IQ")
+            modes.append("IQ")  # IQ density/scatter
         if self.cb_fft.isChecked():
-            modes.append("F")
+            modes.append("F")   # FFT
+        if self.cb_ssb.isChecked():
+            modes.append("S")   # SSB PSD
+        if self.cb_dsb.isChecked():
+            modes.append("D")   # DSB PSD
 
-        self.plots = {}
+        self.plots  = {}
         self.curves = {}
         font = QFont()
         font.setPointSize(UI_FONT_SIZE)
 
         for row, ch in enumerate(self.channels):
-            self.plots[ch] = {}
+            self.plots[ch]  = {}
             self.curves[ch] = {}
 
             for col, mode in enumerate(modes):
                 vb = ClickableViewBox()
-                if mode == "F":
-                    pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – FFT")
-                    pw.setLogMode(x=True, y=True)
-                    pw.setLabel("bottom", "Freq (Hz)")
-                    pw.setLabel("left", "Raw FFT (Counts)")
-                elif mode == "T":
+                if mode == "T":
                     pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – Time")
                     pw.setLabel("left", "Amplitude (Counts)")
-                else:  # "IQ"
+                elif mode == "IQ":
                     pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – IQ")
                     pw.setLabel("bottom", "I")
                     pw.setLabel("left", "Q")
                     pw.getViewBox().setAspectLocked(True)
+                elif mode == "F":
+                    pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – FFT")
+                    pw.setLogMode(x=True, y=True)
+                    pw.setLabel("bottom", "Freq (Hz)")
+                    pw.setLabel("left", "Raw FFT (Counts)")
+                elif mode == "S":
+                    pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – SSB PSD")
+                    pw.setLogMode(x=True, y=True)
+                    pw.setLabel("bottom", "Freq (Hz)")
+                    pw.setLabel("left", "PSD (Counts²/Hz)")
+                else:  # "D"
+                    pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – DSB PSD")
+                    pw.setLogMode(x=False, y=True)
+                    pw.setLabel("bottom", "Freq (Hz)")
+                    pw.setLabel("left", "PSD (Counts²/Hz)")
 
                 self._apply_plot_theme(pw)
                 pw.showGrid(x=True, y=True, alpha=0.3)
@@ -524,7 +685,6 @@ class Periscope(QtWidgets.QMainWindow):
                 self.grid.addWidget(pw, row, col)
 
                 pi = pw.getPlotItem()
-                # Adjust font settings
                 for axis_name in ("left", "bottom", "right", "top"):
                     axis = pi.getAxis(axis_name)
                     if axis:
@@ -533,7 +693,6 @@ class Periscope(QtWidgets.QMainWindow):
                             axis.label.setFont(font)
                 pi.titleLabel.setFont(font)
 
-                # Time domain
                 if mode == "T":
                     legend = pw.addLegend(offset=(30, 10))
                     self.curves[ch]["T"] = {
@@ -546,7 +705,6 @@ class Periscope(QtWidgets.QMainWindow):
                     self._fade_hidden_entries(legend, hide_labels=("I", "Q"))
                     self._make_legend_clickable(legend)
 
-                # FFT
                 elif mode == "F":
                     legend = pw.addLegend(offset=(30, 10))
                     self.curves[ch]["F"] = {
@@ -559,12 +717,10 @@ class Periscope(QtWidgets.QMainWindow):
                     # Enable built-in FFT mode
                     for curve in self.curves[ch]["F"].values():
                         curve.setFftMode(True)
-
                     self._fade_hidden_entries(legend, hide_labels=("I", "Q"))
                     self._make_legend_clickable(legend)
 
-                # IQ
-                else:
+                elif mode == "IQ":
                     if self.rb_scatter.isChecked():
                         sp = pg.ScatterPlotItem(pen=None, size=SCATTER_SIZE)
                         pw.addItem(sp)
@@ -574,6 +730,24 @@ class Periscope(QtWidgets.QMainWindow):
                         img.setLookupTable(self.lut)
                         pw.addItem(img)
                         self.curves[ch]["IQ"] = {"mode": "density", "item": img}
+
+                elif mode == "S":
+                    # SSB PSD => 3 curves: I, Q, M
+                    legend = pw.addLegend(offset=(30, 10))
+                    self.curves[ch]["S"] = {
+                        k: pw.plot(pen=pg.mkPen(c, width=LINE_WIDTH), name=k)
+                        for k, c in zip(
+                            ("I", "Q", "Mag"),
+                            ("#1f77b4", "#ff7f0e", "#2ca02c")
+                        )
+                    }
+                    self._make_legend_clickable(legend)
+
+                else:  # "D" => DSB PSD => 1 curve: "Cmplx"
+                    legend = pw.addLegend(offset=(30, 10))
+                    curve = pw.plot(pen=pg.mkPen("#bcbd22", width=LINE_WIDTH), name="Complex Dual-Sideband")
+                    self.curves[ch]["D"] = {"Cmplx": curve}
+                    self._make_legend_clickable(legend)
 
     def _apply_plot_theme(self, pw: pg.PlotWidget):
         """
@@ -625,8 +799,8 @@ class Periscope(QtWidgets.QMainWindow):
 
     def _update_gui(self):
         """
-        Periodic UI refresh, reading new packets, updating time & FFT plots,
-        and scheduling off-thread IQ computations.
+        Periodic UI refresh, reading new packets, updating time & FFT,
+        scheduling off-thread IQ tasks and PSD tasks if needed.
         """
         if self.paused:
             # Discard queued packets when paused
@@ -658,7 +832,7 @@ class Periscope(QtWidgets.QMainWindow):
 
         self.frame_cnt += 1
 
-        # Update each channel's data
+        # Update each channel's time, IQ, FFT
         for ch in self.channels:
             I = self.buf[ch]["I"].data()
             Q = self.buf[ch]["Q"].data()
@@ -674,19 +848,34 @@ class Periscope(QtWidgets.QMainWindow):
                 if c["Q"].isVisible():
                     c["Q"].setData(t, Q)
 
-            # IQ (schedule off-thread computation if no worker is running)
+            # IQ (off-thread histogram/scatter)
             if "IQ" in self.curves[ch] and not self.iq_workers.get(ch, False):
                 mode = self.curves[ch]["IQ"]["mode"]
                 task = IQTask(ch, I, Q, self.dot_px, mode, self.iq_signals)
                 self.iq_workers[ch] = True
                 self.pool.start(task)
 
-            # FFT
+            # FFT (built-in)
             if "F" in self.curves[ch]:
                 c = self.curves[ch]["F"]
                 c["I"].setData(t, I, fftMode=True)
                 c["Q"].setData(t, Q, fftMode=True)
                 c["Mag"].setData(t, M, fftMode=True)
+
+            # SSB PSD
+            if "S" in self.curves[ch]:
+                # Only run if not already in progress
+                if not self.psd_workers[ch]["S"]:
+                    task = PSDTask(ch, I, Q, M, t, "SSB", self.psd_signals)
+                    self.psd_workers[ch]["S"] = True
+                    self.pool.start(task)
+
+            # DSB PSD
+            if "D" in self.curves[ch]:
+                if not self.psd_workers[ch]["D"]:
+                    task = PSDTask(ch, I, Q, M, t, "DSB", self.psd_signals)
+                    self.psd_workers[ch]["D"] = True
+                    self.pool.start(task)
 
         # Status bar: show updated FPS/packets rate
         now = time.time()
@@ -701,16 +890,7 @@ class Periscope(QtWidgets.QMainWindow):
     @QtCore.pyqtSlot(int, str, object)
     def _iq_done(self, ch: int, task_mode: str, payload):
         """
-        Slot to handle completion of off-thread IQ calculations.
-
-        Parameters
-        ----------
-        ch : int
-            Channel index.
-        task_mode : str
-            Mode of IQ calculation ('density' or 'scatter').
-        payload : object
-            Computation result (image array or scatter data).
+        Handle completion of off-thread IQ calculations.
         """
         self.iq_workers[ch] = False
         if ch not in self.curves or "IQ" not in self.curves[ch]:
@@ -719,8 +899,7 @@ class Periscope(QtWidgets.QMainWindow):
         pane = self.curves[ch]["IQ"]
         local_mode = pane["mode"]
         if local_mode != task_mode:
-            # A stale result from an old mode
-            return
+            return  # stale
 
         item = pane["item"]
         if task_mode == "density":
@@ -730,6 +909,36 @@ class Periscope(QtWidgets.QMainWindow):
         else:
             xs, ys, colors = payload
             item.setData(xs, ys, brush=colors, pen=None, size=SCATTER_SIZE)
+
+    @QtCore.pyqtSlot(int, str, object)
+    def _psd_done(self, ch: int, psd_mode: str, payload):
+        """
+        Handle completion of off-thread PSD computations (SSB or DSB).
+        """
+        self.psd_workers[ch][psd_mode[0]] = False  # "S" or "D"
+        if ch not in self.curves:
+            return
+
+        if psd_mode == "SSB":
+            if "S" not in self.curves[ch]:
+                return
+            c = self.curves[ch]["S"]
+            # payload = (freqI, psdI, psdQ, psdM, freqQ, freqM, fs)
+            freqI, psdI, psdQ, psdM, _, _, _ = payload
+            # Update curves
+            c["I"].setData(freqI, psdI)
+            if c["Q"].isVisible():
+                c["Q"].setData(freqI, psdQ)
+            if c["Mag"].isVisible():
+                c["Mag"].setData(freqI, psdM)
+
+        else:  # "DSB"
+            if "D" not in self.curves[ch]:
+                return
+            c = self.curves[ch]["D"]
+            # payload = (freq, psd)
+            freq, psd = payload
+            c["Cmplx"].setData(freq, psd)
 
     def _toggle_pause(self):
         """
@@ -798,7 +1007,7 @@ def main():
     Entry point for command-line usage of Periscope.
     """
     ap = argparse.ArgumentParser(
-        description="Periscope – real-time viewer with built-in FFT mode."
+        description="Periscope – real-time viewer with optional SSB/DSB PSD computations."
     )
     ap.add_argument("hostname")
     ap.add_argument("-m", "--module", type=int, default=1)

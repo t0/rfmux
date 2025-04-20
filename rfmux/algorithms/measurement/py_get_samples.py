@@ -38,224 +38,8 @@ import warnings
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...tuber.codecs import TuberResult
-from ...core.utils.transferfunctions import VOLTS_PER_ROC
+from ...core.transferfunctions import VOLTS_PER_ROC, spectrum_from_slow_tod
 from ... import streamer
-
-# Added import for PSD computation
-from scipy.signal import welch
-
-def _cic_correction(frequencies, f_in, R=64, N=6):
-    """
-    Compute the single-stage CIC (Cascaded Integrator-Comb) filter correction factor.
-
-    CIC filters exhibit passband droop, especially at higher frequencies. This function
-    calculates a correction factor to approximately compensate for that droop. The
-    correction factor is derived analytically based on the idealized mathematical
-    expressions for a CIC filter. However, in firmware implementations, the filter
-    coefficients are quantized, so the actual correction will not be perfectly exact,
-    but will still be quite close.
-
-    Parameters
-    ----------
-    frequencies : ndarray
-        Frequency bins (in Hz) for which the correction factor is desired. Typically
-        these might be FFT bin centers or some other set of discrete frequencies at
-        which droop compensation is needed.
-    f_in : float
-        Input (pre-decimation) sampling rate in Hz. This is the rate at which data
-        enters the CIC filter before it is decimated.
-    R : int, optional
-        The decimation rate. Default is 64.
-    N : int, optional
-        The number of CIC stages (integrator-comb pairs). Default is 6.
-
-    Returns
-    -------
-    correction : ndarray
-        Array of correction values (dimensionless, same shape as `frequencies`) that can
-        be multiplied by the frequency response (or by the time-domain samples after
-        the CIC filter) to approximately correct for the droop introduced by the filter.
-
-    Notes
-    -----
-    1. The correction factor is computed using the ratio of sinc functions raised to
-       the power of N:
-
-       .. math::
-          H_{corr}(\\omega) =
-              \\left(
-                  \\frac{\\sin\\left(\\pi f / f_{in}\\right)}
-                       {\\sin\\left(\\frac{\\pi f}{R f_{in}}\\right)}
-              \\right)^N
-              \\times \\frac{1}{R^N}
-
-       where :math:`f` is the frequency, :math:`f_{in}` is the input sample rate,
-       :math:`R` is the decimation ratio, and :math:`N` is the number of stages.
-
-    2. At DC (0 Hz), the expression above has an indeterminate form
-       :math:`0/0`. We replace those NaN values with the ideal DC gain of 
-       :math:`R^N`, then normalize by :math:`R^N`, effectively making the
-       correction factor 1 at DC.
-
-    3. In practical hardware/firmware implementations, the CIC coefficients may be
-       quantized or truncated, which means that the filter's actual response can deviate
-       slightly from the ideal model used here. Therefore, the computed correction
-       factor is an approximation that should perform well but will not be absolutely
-       precise.
-    """
-    freq_ratio = frequencies / f_in
-    with np.errstate(divide='ignore', invalid='ignore'):
-        numerator = np.sin(np.pi * freq_ratio)
-        denominator = np.sin(np.pi * freq_ratio / R)
-        correction = (numerator / denominator) ** N
-        # Replace NaNs at DC with the ideal DC gain = R^N
-        correction[np.isnan(correction)] = R ** N
-    return correction / (R ** N)
-
-
-def _compute_spectrum(i_data, q_data, fs, dec_stage,
-                     scaling='psd', nperseg=None,
-                     reference='relative',
-                     spectrum_cutoff=0.9):
-    """
-    Internal function to compute both the I/Q single-sideband PSD and
-    the dual-sideband complex PSD in either dBc or dBm, depending on 'reference'.
-    The 'scaling' argument can be 'psd' => power spectral density (V^2/Hz)
-    or 'ps' => power spectrum (V^2).
-
-    Parameters
-    ----------
-    i_data : array-like
-        Time-domain I (real) samples.
-    q_data : array-like
-        Time-domain Q (imag) samples.
-    fs : float
-        Sampling frequency in Hz.
-    dec_stage : int
-        Decimation stage to define the second CIC correction factor.
-    scaling : {'psd','ps'}
-        Whether we interpret Welch output as a PSD (V^2/Hz) or total power spectrum (V^2).
-    nperseg : int, optional
-        Number of samples per Welch segment. Default is all samples (no segmentation).
-    reference : {'relative','absolute'}
-        If 'relative', we do dBc => referencing the DC bin as the carrier.
-        If 'absolute', we do dBm => referencing an absolute scale with 50 ohms.
-    spectrum_cutoff : float
-        Fraction of Nyquist frequency to retain in the spectrum (default: 0.9).
-
-    Returns
-    -------
-    dict
-        A dictionary containing:
-          "freq_iq" : array of frequency bins for single-sideband I/Q,
-          "psd_i"   : array of final I data in dBc or dBm,
-          "psd_q"   : array of final Q data in dBc or dBm,
-          "freq_dsb": array of frequency bins for the dual-sideband data,
-          "psd_dual_sideband": array of final dual-sideband data in dBc or dBm.
-    """
-    if nperseg is None:
-        nperseg = len(i_data)
-
-    # Convert 'psd'/'ps' to scipy's 'density'/'spectrum'
-    scipy_scaling = 'density' if scaling.lower() == 'psd' else 'spectrum'
-
-    arr_i = np.asarray(i_data)
-    arr_q = np.asarray(q_data)
-    arr_complex = arr_i + 1j * arr_q
-
-
-    # Define CIC decimation parameters
-    R1 = 64
-    R2 = 2 ** dec_stage
-    f_in1 = 625e6 / 256.0  # Original samplerate before 1st CIC
-    f_in2 = f_in1 / R1     # Samplerate before 2nd CIC
-
-    # Welch for dual-sideband complex
-    freq_dsb, psd_c = welch(
-        arr_complex, fs=fs, nperseg=nperseg,
-        scaling=scipy_scaling,
-        return_onesided=False,
-        detrend=False # Important because we need the DC information for normalization
-    )
-    # The CIC corrections are symmetric
-    freq_abs = np.abs(freq_dsb)
-
-    # Apply CIC correction
-    cic1_corr_c = _cic_correction(freq_abs * R1 * R2, f_in1, R=R1, N=3)
-    cic2_corr_c = _cic_correction(freq_abs * R2, f_in2, R=R2, N=6)
-    correction_c = cic1_corr_c * cic2_corr_c
-    psd_c_corrected = psd_c / correction_c
-
-    # Enforce cutoff
-    nyquist = fs / 2
-    cutoff_freq = spectrum_cutoff * nyquist
-    cutoff_idx_c = freq_abs <= cutoff_freq
-    freq_dsb = freq_dsb[cutoff_idx_c]
-    psd_c_corrected = psd_c_corrected[cutoff_idx_c]
-
-    # Carrier normalization based on DC bin
-    carrier_normalization = psd_c_corrected[0]*(fs/nperseg)
-
-    if reference == 'relative' and scaling == 'psd': # Normalize by the _PS_ of the DC bin:
-        ## OVERWRITE the DC bin on the assumption that this is the carrier we are normalizing to
-        ## This gives people the correct "reference" right on the plot, as we are correctly assuming
-        ## the carrier in total power, not a power density
-        psd_c_corrected[0] = psd_c_corrected[0]*(fs/nperseg)
-        psd_dual_sideband_db = 10.0 * np.log10(psd_c_corrected / (carrier_normalization + 1e-30))
-                
-    elif reference == 'relative' and scaling == 'ps': # DC bin already correctly normalized:
-        psd_dual_sideband_db = 10.0 * np.log10(psd_c_corrected / ((psd_c_corrected[0]) + 1e-30))
-    else:
-        # absolute => convert V^2 -> W => dBm
-        p_c = psd_c_corrected / 50.0
-        psd_dual_sideband_db = 10.0 * np.log10(p_c / 1e-3 + 1e-30)
-
-    # Single-sideband I/Q
-    freq_i, psd_i = welch(arr_i, fs=fs, nperseg=nperseg, scaling=scipy_scaling, return_onesided=True, detrend=None)
-    freq_q, psd_q = welch(arr_q, fs=fs, nperseg=nperseg, scaling=scipy_scaling, return_onesided=True, detrend=None)
-    freq_iq = freq_i
-
-    # CIC Correction
-    cic1_corr = _cic_correction(freq_iq * R1 * R2, f_in1, R=R1, N=6)
-    cic2_corr = _cic_correction(freq_iq * R2, f_in2, R=R2, N=6)
-    correction_iq = cic1_corr * cic2_corr
-
-    psd_i_corrected = psd_i / correction_iq
-    psd_q_corrected = psd_q / correction_iq
-
-    cutoff_idx_iq = freq_iq <= cutoff_freq
-    freq_iq = freq_iq[cutoff_idx_iq]
-    psd_i_corrected = psd_i_corrected[cutoff_idx_iq]
-    psd_q_corrected = psd_q_corrected[cutoff_idx_iq]
-
-    # Convert to dBc or dBm
-    if reference == 'relative' and scaling == 'psd': # Normalize by the _PS_ of the DC bin
-        ## OVERWRITE the DC bin on the assumption that this is the carrier we are normalizing to
-        ## This gives people the correct "reference" right on the plot, as we are correctly assuming
-        ## the carrier in total power, not a power density
-        psd_i_corrected[0] = psd_i_corrected[0]*(fs/nperseg)
-        psd_q_corrected[0] = psd_q_corrected[0]*(fs/nperseg)
-
-        ## Then normalize to the TOTAL power (in I and Q)
-        psd_i_db = 10.0 * np.log10(psd_i_corrected / (carrier_normalization + 1e-30))
-        psd_q_db = 10.0 * np.log10(psd_q_corrected / (carrier_normalization + 1e-30))
-    elif reference == 'relative' and scaling == 'ps': # We are already dealing with PS
-        psd_i_db = 10.0 * np.log10(psd_i_corrected / (psd_c_corrected[0] + 1e-30))
-        psd_q_db = 10.0 * np.log10(psd_q_corrected / (psd_c_corrected[0] + 1e-30))
-    else:
-        # absolute => convert V^2 to W => W to dBm
-        p_i = psd_i_corrected / 50.0
-        p_q = psd_q_corrected / 50.0
-        psd_i_db = 10.0 * np.log10(p_i / 1e-3 + 1e-30)
-        psd_q_db = 10.0 * np.log10(p_q / 1e-3 + 1e-30)
-
-    return {
-        "freq_iq": freq_iq,
-        "psd_i": psd_i_db,
-        "psd_q": psd_q_db,
-        "freq_dsb": freq_dsb,
-        "psd_dual_sideband": psd_dual_sideband_db,
-    }
 
 
 @macro(CRS, register=True)
@@ -527,13 +311,16 @@ async def py_get_samples(crs: CRS,
             for c in range(streamer.NUM_CHANNELS):
                 i_data = results["i"][c]
                 q_data = results["q"][c]
-                d = _compute_spectrum(
-                    i_data, q_data, fs, dec_stage,
+                
+                # Calculate spectrum for this channel
+                d = spectrum_from_slow_tod(
+                    i_data, q_data, dec_stage,
                     scaling=scaling,
                     nperseg=nperseg if nperseg else num_samples,
                     reference=reference,
                     spectrum_cutoff=spectrum_cutoff
                 )
+                
                 # Store freq_iq, freq_dsb once
                 if spec_data["freq_iq"] is None:
                     spec_data["freq_iq"] = d["freq_iq"].tolist()
@@ -552,8 +339,8 @@ async def py_get_samples(crs: CRS,
         else:
             i_data = results["i"]
             q_data = results["q"]
-            d = _compute_spectrum(
-                i_data, q_data, fs, dec_stage,
+            d = spectrum_from_slow_tod(
+                i_data, q_data, dec_stage,
                 scaling=scaling,
                 nperseg=nperseg if nperseg else num_samples,
                 reference=reference,

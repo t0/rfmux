@@ -844,21 +844,31 @@ class Periscope(QtWidgets.QMainWindow):
                 vb = ClickableViewBox()
                 if mode == "T":
                     pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – Time")
-                    pw.setLabel("left", "Amplitude (Counts)" if not self.real_units else "Amplitude (Volts)")
+                    if not self.real_units:
+                        pw.setLabel("left", "Amplitude", units="Counts")
+                    else:
+                        pw.setLabel("left", "Amplitude", units="V")
                 elif mode == "IQ":
                     pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – IQ")
-                    pw.setLabel("bottom", "I (Counts)" if not self.real_units else "I (Volts)")
-                    pw.setLabel("left", "Q (Counts)" if not self.real_units else "Q (Volts)")
+                    if not self.real_units:
+                        pw.setLabel("bottom", "I", units="Counts")
+                        pw.setLabel("left", "Q", units="Counts")
+                    else:
+                        pw.setLabel("bottom", "I", units="V")
+                        pw.setLabel("left", "Q", units="V")
                     pw.getViewBox().setAspectLocked(True)
                 elif mode == "F":
                     pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – Raw FFT")
                     pw.setLogMode(x=True, y=True)
-                    pw.setLabel("bottom", "Freq (Hz)")
-                    pw.setLabel("left", "Amplitude (Counts)" if not self.real_units else "Amplitude (Volts)")
+                    pw.setLabel("bottom", "Freq", units="Hz")
+                    if not self.real_units:
+                        pw.setLabel("left", "Amplitude", units="Counts")
+                    else:
+                        pw.setLabel("left", "Amplitude", units="V")
                 elif mode == "S":
                     pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – SSB PSD")
                     pw.setLogMode(x=True, y=not self.real_units)
-                    pw.setLabel("bottom", "Freq (Hz)")
+                    pw.setLabel("bottom", "Freq", units="Hz")
                     if not self.real_units:
                         pw.setLabel("left", "PSD (Counts²/Hz)")
                     else:
@@ -867,7 +877,7 @@ class Periscope(QtWidgets.QMainWindow):
                 else:  # "D"
                     pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – DSB PSD")
                     pw.setLogMode(x=False, y=not self.real_units)
-                    pw.setLabel("bottom", "Freq (Hz)")
+                    pw.setLabel("bottom", "Freq", units="Hz")
                     if not self.real_units:
                         pw.setLabel("left", "PSD (Counts²/Hz)")
                     else:

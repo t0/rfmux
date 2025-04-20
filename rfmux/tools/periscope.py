@@ -52,7 +52,7 @@ import pyqtgraph as pg
 
 # Local imports
 from .. import streamer
-from ..core.utils.transferfunctions import (
+from ..core.transferfunctions import (
     spectrum_from_slow_tod,
     convert_roc_to_volts,
 )
@@ -728,7 +728,6 @@ class Periscope(QtWidgets.QMainWindow):
         top_h = QtWidgets.QHBoxLayout(top_bar)
         top_h.addWidget(QtWidgets.QLabel("Channels:"))
         top_h.addWidget(self.e_ch)
-        top_h.addWidget(QtWidgets.QPushButton("Update", clicked=self._update_channels))
         top_h.addSpacing(20)
         top_h.addWidget(QtWidgets.QLabel("Buffer:"))
         top_h.addWidget(self.e_buf)
@@ -848,8 +847,8 @@ class Periscope(QtWidgets.QMainWindow):
                     pw.setLabel("left", "Amplitude (Counts)" if not self.real_units else "Amplitude (Volts)")
                 elif mode == "IQ":
                     pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – IQ")
-                    pw.setLabel("bottom", "I")
-                    pw.setLabel("left", "Q")
+                    pw.setLabel("bottom", "I (Counts)" if not self.real_units else "I (Volts)")
+                    pw.setLabel("left", "Q (Counts)" if not self.real_units else "Q (Volts)")
                     pw.getViewBox().setAspectLocked(True)
                 elif mode == "F":
                     pw = pg.PlotWidget(viewBox=vb, title=f"Ch {ch} – Raw FFT")

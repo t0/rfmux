@@ -3,7 +3,7 @@
 ARCHITECTURAL SUMMARY
 ---------------------
 This module implements the Periscope real-time multi-pane viewer using PyQt6. It
-visualizes data from a DfMux-like data streamer in multiple ways:
+visualizes data from a CRS data streamer in multiple ways:
     - Time-domain (TOD)
     - IQ (density or scatter)
     - FFT (using pyqtgraph’s fftMode=True)
@@ -19,7 +19,6 @@ Key Components & Concurrency:
 Performance Notes:
     - Real-time updates rely on a QTimer to periodically pull new data from a thread-safe queue.
     - The code can optionally use SciPy for faster density/histogram manipulations.
-    - The system is designed for scientific/engineering use, supporting real-unit conversions.
 
 --------------------------------------------------------------------------------
 Periscope – Real‑Time Multi‑Pane Viewer
@@ -29,8 +28,8 @@ Features:
 - Time‑domain (TOD)
 - IQ (density or scatter)
 - FFT (pyqtgraph’s fftMode=True)
-- Single‑Sideband PSD (S)
-- Dual‑Sideband PSD (D)
+- Single‑Sideband PSD
+- Dual‑Sideband PSD
 """
 
 import argparse

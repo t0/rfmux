@@ -29,7 +29,7 @@ Features:
 - IQ (density or scatter)
 - FFT (pyqtgraph’s fftMode=True)
 - Single‑Sideband PSD
-- Dual‑Sideband PSD
+- Dual‑Sideband PSD (DSB)
 """
 
 import argparse
@@ -292,8 +292,8 @@ class IQSignals(QObject):
     Holds custom signals emitted by IQ tasks.
     """
     done = pyqtSignal(int, str, object)
-    # Emitted with arguments: (channel, mode_string, payload)
-    #   channel: int
+    # Emitted with arguments: (row, mode_string, payload)
+    #   row: int (index in self.channel_list)
     #   mode_string: "density" or "scatter"
     #   payload: task-specific data
 
@@ -304,8 +304,10 @@ class IQTask(QRunnable):
 
     Parameters
     ----------
+    row : int
+        Row index in the channel list (used to map results back to correct UI row).
     ch : int
-        Channel index.
+        Actual channel number (data source).
     I : np.ndarray
         Array of I samples.
     Q : np.ndarray
@@ -318,8 +320,9 @@ class IQTask(QRunnable):
         An IQSignals instance to emit results back to the GUI thread.
     """
 
-    def __init__(self, ch, I, Q, dot_px, mode, signals: IQSignals):
+    def __init__(self, row, ch, I, Q, dot_px, mode, signals: IQSignals):
         super().__init__()
+        self.row = row
         self.ch = ch
         self.I = I.copy()
         self.Q = Q.copy()
@@ -339,7 +342,7 @@ class IQTask(QRunnable):
                 payload = (empty, (0, 1, 0, 1))
             else:
                 payload = ([], [], [])
-            self.signals.done.emit(self.ch, self.mode, payload)
+            self.signals.done.emit(self.row, self.mode, payload)
             return
 
         if self.mode == "density":
@@ -350,7 +353,7 @@ class IQTask(QRunnable):
             Qmin, Qmax = self.Q.min(), self.Q.max()
             if Imin == Imax or Qmin == Qmax:
                 payload = (hist.astype(np.uint8), (Imin, Imax, Qmin, Qmax))
-                self.signals.done.emit(self.ch, self.mode, payload)
+                self.signals.done.emit(self.row, self.mode, payload)
                 return
 
             ix = ((self.I - Imin) * (g - 1) / (Imax - Imin)).astype(np.intp)
@@ -404,7 +407,7 @@ class IQTask(QRunnable):
             )
             payload = (xs, ys, colors)
 
-        self.signals.done.emit(self.ch, self.mode, payload)
+        self.signals.done.emit(self.row, self.mode, payload)
 
 
 class PSDSignals(QObject):
@@ -412,8 +415,8 @@ class PSDSignals(QObject):
     Holds custom signals emitted by PSD tasks.
     """
     done = pyqtSignal(int, str, object)
-    # Emitted with arguments: (channel, mode_string, payload)
-    #   channel: int
+    # Emitted with arguments: (row, mode_string, payload)
+    #   row: int (index in self.channel_list)
     #   mode_string: "SSB" or "DSB"
     #   payload: task-specific data
 
@@ -424,8 +427,10 @@ class PSDTask(QRunnable):
 
     Parameters
     ----------
+    row : int
+        Row index in the channel list (used to map results back to correct UI row).
     ch : int
-        Channel index.
+        Actual channel number (data source).
     I : np.ndarray
         Array of I samples.
     Q : np.ndarray
@@ -448,6 +453,7 @@ class PSDTask(QRunnable):
 
     def __init__(
         self,
+        row: int,
         ch: int,
         I: np.ndarray,
         Q: np.ndarray,
@@ -459,6 +465,7 @@ class PSDTask(QRunnable):
         signals: PSDSignals,
     ):
         super().__init__()
+        self.row = row
         self.ch = ch
         self.I = I.copy()
         self.Q = Q.copy()
@@ -481,7 +488,7 @@ class PSDTask(QRunnable):
                 payload = ([], [], [], [], [], [], 0.0)
             else:
                 payload = ([], [])
-            self.signals.done.emit(self.ch, self.mode, payload)
+            self.signals.done.emit(self.row, self.mode, payload)
             return
 
         ref = (
@@ -527,7 +534,7 @@ class PSDTask(QRunnable):
             order = np.argsort(freq_dsb)  # sort ‑ve → +ve
             payload = (freq_dsb[order], psd_dsb[order])
 
-        self.signals.done.emit(self.ch, self.mode, payload)
+        self.signals.done.emit(self.row, self.mode, payload)
 
 
 class Periscope(QtWidgets.QMainWindow):
@@ -547,6 +554,7 @@ class Periscope(QtWidgets.QMainWindow):
         The module index (1-based) used to filter incoming packets.
     chan_str : str, optional
         Comma-separated string of channels to display. Defaults to "1".
+        (Duplicates are allowed; each appearance will create a new row.)
     buf_size : int, optional
         Size of each ring buffer for storing incoming data. Defaults to 5000.
     refresh_ms : int, optional
@@ -570,7 +578,9 @@ class Periscope(QtWidgets.QMainWindow):
         self.N = buf_size
         self.refresh_ms = refresh_ms
         self.dot_px = max(1, int(dot_px))
-        self.channels = self._parse_channels(chan_str)
+
+        # Store channel list exactly as typed (duplicates allowed)
+        self.channel_list = self._parse_channels(chan_str)
 
         self.paused = False
         self.start_time = None
@@ -578,16 +588,22 @@ class Periscope(QtWidgets.QMainWindow):
         self.pkt_cnt = 0
         self.t_last = time.time()
 
-        self.dec_stages: Dict[int, int] = {ch: 6 for ch in self.channels}
+        # Decimation stage: only 1 per *unique* channel number
+        unique_channels = set(self.channel_list)
+        self.dec_stage = 6
         self.last_dec_update = 0.0
 
-        # IQ concurrency tracking
+        # IQ concurrency tracking, keyed by row
         self.iq_workers: Dict[int, bool] = {}
+
         self.iq_signals = IQSignals()
         self.iq_signals.done.connect(self._iq_done)
 
-        # PSD concurrency tracking
+        # PSD concurrency tracking, keyed by row -> { 'S': bool, 'D': bool }
         self.psd_workers: Dict[int, Dict[str, bool]] = {}
+        for row in range(len(self.channel_list)):
+            self.psd_workers[row] = {"S": False, "D": False}
+
         self.psd_signals = PSDSignals()
         self.psd_signals.done.connect(self._psd_done)
 
@@ -600,7 +616,7 @@ class Periscope(QtWidgets.QMainWindow):
         )
 
         # Start the background receiver thread
-        self.receiver = UDPReceiver(host, module)
+        self.receiver = UDPReceiver(self.host, self.module)
         self.receiver.start()
 
         # Thread pool for IQ and PSD tasks
@@ -797,21 +813,20 @@ class Periscope(QtWidgets.QMainWindow):
 
     def _init_buffers(self):
         """
-        Recreate the ring buffers for each selected channel
-        to match the current buffer size self.N.
+        Recreate the ring buffers for each *unique* channel to match
+        the current buffer size self.N.
         """
+        unique_chs = set(self.channel_list)
         self.buf = {}
         self.tbuf = {}
-        for ch in self.channels:
+        for ch in unique_chs:
             self.buf[ch] = {k: Circular(self.N) for k in ("I", "Q", "M")}
             self.tbuf[ch] = Circular(self.N)
-            self.psd_workers[ch] = {"S": False, "D": False}
-            self.dec_stages[ch] = 6
 
     def _build_layout(self):
         """
         Rebuild the plot layout grid based on the currently enabled modes (TOD, IQ, FFT, SSB, DSB).
-        Each channel is placed in a row, and each active mode is placed in a column.
+        Each entry in self.channel_list is placed in a row, and each active mode is placed in a column.
         """
         while self.grid.count():
             item = self.grid.takeAt(0)
@@ -831,14 +846,15 @@ class Periscope(QtWidgets.QMainWindow):
         if self.cb_dsb.isChecked():
             modes.append("D")
 
-        self.plots = {}
-        self.curves = {}
+        self.plots = []
+        self.curves = []
         font = QFont()
         font.setPointSize(UI_FONT_SIZE)
 
-        for row, ch in enumerate(self.channels):
-            self.plots[ch] = {}
-            self.curves[ch] = {}
+        # For each row in channel_list, build a row of plots
+        for row, ch in enumerate(self.channel_list):
+            rowPlots = {}
+            rowCurves = {}
             for col, mode in enumerate(modes):
                 vb = ClickableViewBox()
                 if mode == "T":
@@ -885,7 +901,7 @@ class Periscope(QtWidgets.QMainWindow):
 
                 self._apply_plot_theme(pw)
                 pw.showGrid(x=True, y=True, alpha=0.3)
-                self.plots[ch][mode] = pw
+                rowPlots[mode] = pw
                 self.grid.addWidget(pw, row, col)
 
                 # Axis font
@@ -900,7 +916,7 @@ class Periscope(QtWidgets.QMainWindow):
 
                 if mode == "T":
                     legend = pw.addLegend(offset=(30, 10))
-                    self.curves[ch]["T"] = {
+                    rowCurves["T"] = {
                         k: pw.plot(pen=pg.mkPen(c, width=LINE_WIDTH), name=k)
                         for k, c in zip(("I", "Q", "Mag"), ("#1f77b4", "#ff7f0e", "#2ca02c"))
                     }
@@ -909,39 +925,44 @@ class Periscope(QtWidgets.QMainWindow):
 
                 elif mode == "F":
                     legend = pw.addLegend(offset=(30, 10))
-                    self.curves[ch]["F"] = {
+                    fcurves = {
                         k: pw.plot(pen=pg.mkPen(c, width=LINE_WIDTH), name=k)
                         for k, c in zip(("I", "Q", "Mag"), ("#1f77b4", "#ff7f0e", "#2ca02c"))
                     }
-                    for curve in self.curves[ch]["F"].values():
+                    for curve in fcurves.values():
                         curve.setFftMode(True)
                     self._fade_hidden_entries(legend, hide_labels=("I", "Q"))
                     self._make_legend_clickable(legend)
+                    rowCurves["F"] = fcurves
 
                 elif mode == "IQ":
                     if self.rb_scatter.isChecked():
                         sp = pg.ScatterPlotItem(pen=None, size=SCATTER_SIZE)
                         pw.addItem(sp)
-                        self.curves[ch]["IQ"] = {"mode": "scatter", "item": sp}
+                        rowCurves["IQ"] = {"mode": "scatter", "item": sp}
                     else:
                         img = pg.ImageItem(axisOrder="row-major")
                         img.setLookupTable(self.lut)
                         pw.addItem(img)
-                        self.curves[ch]["IQ"] = {"mode": "density", "item": img}
+                        rowCurves["IQ"] = {"mode": "density", "item": img}
 
                 elif mode == "S":
                     legend = pw.addLegend(offset=(30, 10))
-                    self.curves[ch]["S"] = {
+                    sdict = {
                         k: pw.plot(pen=pg.mkPen(c, width=LINE_WIDTH), name=k)
                         for k, c in zip(("I", "Q", "Mag"), ("#1f77b4", "#ff7f0e", "#2ca02c"))
                     }
+                    rowCurves["S"] = sdict
                     self._make_legend_clickable(legend)
 
                 else:  # "D"
                     legend = pw.addLegend(offset=(30, 10))
                     curve = pw.plot(pen=pg.mkPen("#bcbd22", width=LINE_WIDTH), name="Complex DSB")
-                    self.curves[ch]["D"] = {"Cmplx": curve}
+                    rowCurves["D"] = {"Cmplx": curve}
                     self._make_legend_clickable(legend)
+
+            self.plots.append(rowPlots)
+            self.curves.append(rowCurves)
 
     def _apply_plot_theme(self, pw: pg.PlotWidget):
         """
@@ -1039,7 +1060,8 @@ class Periscope(QtWidgets.QMainWindow):
                 self.start_time = t_now
             t_rel = t_now - self.start_time
 
-            for ch in self.channels:
+            # Write data to ring buffers for *unique* channels only
+            for ch in set(self.channel_list):
                 Ival = pkt.s[2 * (ch - 1)] / 256.0
                 Qval = pkt.s[2 * (ch - 1) + 1] / 256.0
                 self.buf[ch]["I"].add(Ival)
@@ -1052,11 +1074,11 @@ class Periscope(QtWidgets.QMainWindow):
         # Recompute dec_stage once per second
         now = time.time()
         if (now - self.last_dec_update) > 1.0:
-            self._update_dec_stages()
+            self._update_dec_stage()
             self.last_dec_update = now
 
-        # Per‑channel updates
-        for ch in self.channels:
+        # Update each row's plots
+        for row, ch in enumerate(self.channel_list):
             rawI = self.buf[ch]["I"].data()
             rawQ = self.buf[ch]["Q"].data()
             rawM = self.buf[ch]["M"].data()
@@ -1069,9 +1091,11 @@ class Periscope(QtWidgets.QMainWindow):
             else:
                 I, Q, M = rawI, rawQ, rawM
 
-            # T
-            if "T" in self.curves[ch]:
-                c = self.curves[ch]["T"]
+            rowCurves = self.curves[row]
+
+            # Time-domain
+            if "T" in rowCurves:
+                c = rowCurves["T"]
                 if c["I"].isVisible():
                     c["I"].setData(tarr, I)
                 if c["Q"].isVisible():
@@ -1080,26 +1104,27 @@ class Periscope(QtWidgets.QMainWindow):
                     c["Mag"].setData(tarr, M)
 
             # IQ – off‑thread
-            if "IQ" in self.curves[ch] and not self.iq_workers.get(ch, False):
-                mode = self.curves[ch]["IQ"]["mode"]
-                self.iq_workers[ch] = True
-                task = IQTask(ch, rawI, rawQ, self.dot_px, mode, self.iq_signals)
+            if "IQ" in rowCurves and not self.iq_workers.get(row, False):
+                mode = rowCurves["IQ"]["mode"]
+                self.iq_workers[row] = True
+                task = IQTask(row, ch, rawI, rawQ, self.dot_px, mode, self.iq_signals)
                 self.pool.start(task)
 
             # FFT
-            if "F" in self.curves[ch]:
-                c = self.curves[ch]["F"]
+            if "F" in rowCurves:
+                c = rowCurves["F"]
                 c["I"].setData(tarr, I, fftMode=True)
                 c["Q"].setData(tarr, Q, fftMode=True)
                 c["Mag"].setData(tarr, M, fftMode=True)
 
             # PSD tasks
-            dstage = self.dec_stages[ch]
+            dstage = self.dec_stage
             segments = self.spin_segments.value()
 
-            if "S" in self.curves[ch] and not self.psd_workers[ch]["S"]:
-                self.psd_workers[ch]["S"] = True
+            if "S" in rowCurves and not self.psd_workers[row]["S"]:
+                self.psd_workers[row]["S"] = True
                 task = PSDTask(
+                    row=row,
                     ch=ch,
                     I=rawI,
                     Q=rawQ,
@@ -1112,9 +1137,10 @@ class Periscope(QtWidgets.QMainWindow):
                 )
                 self.pool.start(task)
 
-            if "D" in self.curves[ch] and not self.psd_workers[ch]["D"]:
-                self.psd_workers[ch]["D"] = True
+            if "D" in rowCurves and not self.psd_workers[row]["D"]:
+                self.psd_workers[row]["D"] = True
                 task = PSDTask(
+                    row=row,
                     ch=ch,
                     I=rawI,
                     Q=rawQ,
@@ -1136,39 +1162,41 @@ class Periscope(QtWidgets.QMainWindow):
             self.pkt_cnt = 0
             self.t_last = now
 
-    def _update_dec_stages(self):
+    def _update_dec_stage(self):
         """
-        Update each channel's decimation stage by measuring the time buffer
-        sample spacing and inferring the sample rate.
+        Update the global decimation stage by measuring the sample rate
+        from the first channel in self.channel_list.
         """
-        for ch in self.channels:
-            tarr = self.tbuf[ch].data()
-            if len(tarr) < 2:
-                continue
-            dt = (tarr[-1] - tarr[0]) / max(1, (len(tarr) - 1))
-            fs = 1.0 / dt if dt > 0 else 1.0
-            self.dec_stages[ch] = infer_dec_stage(fs)
+        if not self.channel_list:
+            return
+        ch = self.channel_list[0]
+        tarr = self.tbuf[ch].data()
+        if len(tarr) < 2:
+            return
+        dt = (tarr[-1] - tarr[0]) / max(1, (len(tarr) - 1))
+        fs = 1.0 / dt if dt > 0 else 1.0
+        self.dec_stage = infer_dec_stage(fs)
 
     # ───────────────────────── Slots ─────────────────────────
     @QtCore.pyqtSlot(int, str, object)
-    def _iq_done(self, ch: int, task_mode: str, payload):
+    def _iq_done(self, row: int, task_mode: str, payload):
         """
         Slot called when an off-thread IQTask finishes.
 
         Parameters
         ----------
-        ch : int
-            Channel index.
+        row : int
+            Row index in self.channel_list (to map results back).
         task_mode : {"density", "scatter"}
             The IQ mode that was computed.
         payload : object
             Task result data. For "density", it's (hist2D, (Imin, Imax, Qmin, Qmax)).
             For "scatter", it's (xs, ys, color_array).
         """
-        self.iq_workers[ch] = False
-        if ch not in self.curves or "IQ" not in self.curves[ch]:
+        self.iq_workers[row] = False
+        if row >= len(self.curves) or "IQ" not in self.curves[row]:
             return
-        pane = self.curves[ch]["IQ"]
+        pane = self.curves[row]["IQ"]
         if pane["mode"] != task_mode:
             return
 
@@ -1176,6 +1204,7 @@ class Periscope(QtWidgets.QMainWindow):
         if task_mode == "density":
             hist, (Imin, Imax, Qmin, Qmax) = payload
             if self.real_units:
+                # Convert the min/max for display range
                 Imin, Imax = convert_roc_to_volts(np.array([Imin, Imax], dtype=float))
                 Qmin, Qmax = convert_roc_to_volts(np.array([Qmin, Qmax], dtype=float))
             item.setImage(hist, levels=(0, 255), autoLevels=False)
@@ -1195,28 +1224,42 @@ class Periscope(QtWidgets.QMainWindow):
             item.setData(xs, ys, brush=colors, pen=None, size=SCATTER_SIZE)
 
     @QtCore.pyqtSlot(int, str, object)
-    def _psd_done(self, ch: int, psd_mode: str, payload):
+    def _psd_done(self, row: int, psd_mode: str, payload):
         """
         Slot called when an off-thread PSDTask finishes.
 
         Parameters
         ----------
-        ch : int
-            Channel index.
+        row : int
+            Row index in self.channel_list.
         psd_mode : {"SSB", "DSB"}
             The PSD mode that was computed.
         payload : object
             Task result data. For "SSB", it's (freq_i, psd_i, psd_q, psd_mag, ...).
             For "DSB", it's (freq_dsb, psd_dsb).
         """
-        self.psd_workers[ch][psd_mode[0]] = False
-        if ch not in self.curves:
+        # ------------------------------------------------------------------
+        # A PSD task may finish *after* the channel list / layout has been
+        # rebuilt (e.g. the user changed channels or toggled plot modes).
+        # In that case the bookkeeping dictionary for the original row
+        # no longer exists.  Discard the result silently.
+        # ------------------------------------------------------------------
+        if row not in self.psd_workers:
+            return
+
+        key = psd_mode[0]          # 'S' for SSB, 'D' for DSB
+        if key in self.psd_workers[row]:
+            self.psd_workers[row][key] = False
+        else:                      # dictionary exists but requested key gone
+            return
+
+        if row >= len(self.curves):
             return
 
         if psd_mode == "SSB":
-            if "S" not in self.curves[ch]:
+            if "S" not in self.curves[row]:
                 return
-            c = self.curves[ch]["S"]
+            c = self.curves[row]["S"]
             freq_i, psd_i, psd_q, psd_m, _, _, _ = payload
             if c["I"].isVisible():
                 c["I"].setData(freq_i, psd_i)
@@ -1226,9 +1269,9 @@ class Periscope(QtWidgets.QMainWindow):
                 c["Mag"].setData(freq_i, psd_m)
 
         else:  # "DSB"
-            if "D" not in self.curves[ch]:
+            if "D" not in self.curves[row]:
                 return
-            c = self.curves[ch]["D"]
+            c = self.curves[row]["D"]
             freq_dsb, psd_dsb = payload
             c["Cmplx"].setData(freq_dsb, psd_dsb)
 
@@ -1289,8 +1332,14 @@ class Periscope(QtWidgets.QMainWindow):
         re-initialize buffers and layout if channels changed.
         """
         new_ch = self._parse_channels(self.e_ch.text())
-        if new_ch != self.channels:
-            self.channels = new_ch
+        if new_ch != self.channel_list:
+            self.channel_list = new_ch
+            # Reset concurrency dictionaries
+            self.iq_workers.clear()
+            self.psd_workers.clear()
+            for row in range(len(self.channel_list)):
+                self.psd_workers[row] = {"S": False, "D": False}
+
             self._init_buffers()
             self._build_layout()
 

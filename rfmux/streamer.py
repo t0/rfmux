@@ -90,6 +90,11 @@ class Timestamp:
         Normalizes the timestamp fields, carrying over seconds->minutes->hours->days
         as needed. Ignores leap years for day-of-year handling.
         """
+
+        # if the timestamp wasn't recent, fields aren't trustworthy and we shouldn't bother
+        if not self.recent:
+            return
+
         old = dataclasses.astuple(self)
 
         carry, self.ss = divmod(self.ss, SS_PER_SECOND)

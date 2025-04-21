@@ -1280,12 +1280,15 @@ class Periscope(QtWidgets.QMainWindow):
 
             # Basic timestamp alignment
             ts = pkt.ts
-            ts.ss += int(0.02 * streamer.SS_PER_SECOND)
-            ts.renormalize()
-            t_now = ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND
-            if self.start_time is None:
-                self.start_time = t_now
-            t_rel = t_now - self.start_time
+            if ts.recent:
+                ts.ss += int(0.02 * streamer.SS_PER_SECOND)
+                ts.renormalize()
+                t_now = ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND
+                if self.start_time is None:
+                    self.start_time = t_now
+                t_rel = t_now - self.start_time
+            else:
+                t_rel = None
 
             # Fill ring buffers
             for ch in self.all_chs:

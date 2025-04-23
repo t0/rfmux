@@ -55,6 +55,9 @@ from ..core.transferfunctions import (
     spectrum_from_slow_tod,
     convert_roc_to_volts,
 )
+from ..core.hardware_map import macro
+from ..core.schema import CRS
+
 
 # ───────────────────────── Global Settings ─────────────────────────
 pg.setConfigOptions(useOpenGL=False, antialias=False)
@@ -1672,9 +1675,9 @@ def main():
     win.show()
     sys.exit(app.exec())
 
-
-def launch(
-    hostname: str,
+@macro(CRS, register=True)
+async def raise_periscope(
+    crs: CRS,
     *,
     module: int = 1,
     channels: str = "1",
@@ -1692,8 +1695,7 @@ def launch(
 
     Parameters
     ----------
-    hostname : str
-        Multicast/UDP host address.
+    CRS : CRS object
     module : int, optional
         Module number to filter data (default is 1).
     channels : str, optional
@@ -1728,7 +1730,7 @@ def launch(
     refresh_ms = int(round(1000.0 / fps))
 
     viewer = Periscope(
-        host=hostname,
+        host=crs.tuber_hostname,
         module=module,
         chan_str=channels,
         buf_size=buf_size,

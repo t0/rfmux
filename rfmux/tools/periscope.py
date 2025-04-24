@@ -1,5 +1,25 @@
 #!/usr/bin/env -S uv run
 """
+Periscope – Real‑Time Multi‑Pane Viewer
+=======================================
+
+Features:
+- Time‑domain (TOD)
+- IQ (density or scatter)
+- FFT (pyqtgraph’s fftMode=True)
+- Single‑Sideband PSD (SSB)
+- Dual‑Sideband PSD (DSB)
+
+USAGE
+-----
+Command-Line Examples:
+- Requires rfmux to be installed as a python package
+    - `$ cd rfmux ; pip -e .`
+- `$ periscope rfmux0022.local --module 2 --channels "3&5,7"`
+IPython / Jupyter: invoke directly from CRS object
+- `>>> crs.raise_periscope(module=2, channels="3&5")`
+- If in a non-blocking mode, you can still interact with your session concurrently.
+
 ARCHITECTURAL SUMMARY
 ---------------------
 This module implements the Periscope real-time multi-pane viewer using PyQt6. It
@@ -17,29 +37,26 @@ Key Components & Concurrency:
     - The main Periscope class orchestrates the UI, buffer management, and dispatch of tasks.
 
 Performance Notes:
-    - Real-time updates rely on a QTimer to periodically pull new data from a thread-safe queue.
-    - The code can optionally use SciPy for faster density/histogram manipulations.
+    - GPUs are hard, and Python doesn't love concurrency, so performance is dictated
+      by the single-threaded nature of PyQtGraph's rendering engine. So any time you have
+      very long buffers being plotted it will be pokey. If you want buttery smooth performance
+      for many different channels at once, the best way to get this is to launch multiple
+      instances.
 
 --------------------------------------------------------------------------------
-Periscope – Real‑Time Multi‑Pane Viewer
-=======================================
-
-Features:
-- Time‑domain (TOD)
-- IQ (density or scatter)
-- FFT (pyqtgraph’s fftMode=True)
-- Single‑Sideband PSD (SSB)
-- Dual‑Sideband PSD (DSB)
 """
 
 import argparse
 import math
 import os
+import threading
 import queue
 import socket
+import platform
 import sys
 import time
 import warnings
+import random
 from typing import Dict, List
 
 import numpy as np
@@ -83,6 +100,56 @@ BASE_SAMPLING = 625e6 / 256.0 / 64.0  # ≈38 147.46 Hz base for dec=0
 
 
 # ───────────────────────── Utility helpers ─────────────────────────
+
+# Helper function: pin current (calling) thread to core_id on Linux only.
+def _pin_current_thread_to_core():
+    """
+    Pins the calling thread to a randomly selected CPU core from the set of
+    cores this process is allowed to run on (Linux only). On other platforms
+    or if unsupported, it emits a warning and does nothing.
+
+    Notes
+    -----
+    - Uses os.sched_getaffinity(0) to retrieve the process's allowed CPU cores.
+    - Picks one randomly (via random.choice).
+    - Calls os.sched_setaffinity(tid, {chosen_core}) for the native thread ID.
+    - Requires Python 3.8+ for threading.get_native_id().
+    - If permission is denied or the environment doesn't support thread affinity,
+      it emits a warning but continues.
+    """
+
+    if platform.system() != "Linux":
+        warnings.warn(
+            "Warning: Thread pinning is only supported on Linux. "
+            "Performance may suffer\n"
+        )
+        return
+    try:
+        # Retrieve the set of CPU cores the current process is allowed to use
+        allowed_cores = os.sched_getaffinity(0)
+        if not allowed_cores:
+            warnings.warn(
+                "Warning: No cores found in sched_getaffinity(0). "
+                "Not pinning.\n"
+            )
+            return
+
+        # Select one core randomly
+        chosen_core = random.choice(list(allowed_cores))
+
+        # Get the OS thread ID (Python 3.8+)
+        tid = threading.get_native_id()
+
+        # Pin this thread to the chosen core
+        os.sched_setaffinity(tid, {chosen_core})
+
+    except (AttributeError, NotImplementedError, PermissionError) as e:
+        # Possibly older Python or lacking permissions
+        warnings.warn(f"Warning: Could not pin thread to a single CPU: {e}\n")
+
+    except Exception as ex:
+        warnings.warn(f"Warning: Unexpected error pinning thread to single CPU: {ex}\n")
+
 def _get_ipython():
     """
     Attempt to import and return IPython's get_ipython() if available.
@@ -703,7 +770,7 @@ class Periscope(QtWidgets.QMainWindow):
 
         # Thread pool
         self.pool = QThreadPool()
-        self.pool.setMaxThreadCount(os.cpu_count() or 1)
+        self.pool.setMaxThreadCount(1) # These are pretty lightweight, can live in a single thread
 
         # Display settings
         self.dark_mode = True
@@ -915,11 +982,9 @@ class Periscope(QtWidgets.QMainWindow):
             "  - Use the density mode for IQ, smaller buffers, or enable a subset of I,Q,M.\n"            
             "  - Periscope is limited by the single-thread renderer. Lauching multiple instances can improve performance for viewing many channels.\n\n"
             "**Command-Line Examples:**\n"
-            "  - `$ periscope.py rfmux0022.local --module 2 --channels \"3&5,7`\n"
-            "  - `$ periscope.py rfmux0022.local -c \"1,2,3&4\"`\n\n"
-            "**IPython / Jupyter:**\n"
-            "  - `>>> from rfmux.core.tools import periscope as ps`\n"
-            "  - `>>> ps.launch(\"rfmux0022.local\", module=2, channels=\"3&5\")`\n"
+            "  - `$ periscope rfmux0022.local --module 2 --channels \"3&5,7`\n\n"
+            "**IPython / Jupyter:** invoke directly from CRS object\n"
+            "  - `>>> crs.raise_periscope(module=2, channels=\"3&5\")`\n"
             "  - If in a non-blocking mode, you can still interact with your session concurrently.\n\n"
         )
         msg.setText(help_text)
@@ -1664,6 +1729,9 @@ def main():
     refresh_ms = int(round(1000.0 / args.fps))
     app = QtWidgets.QApplication(sys.argv[:1])
 
+    # Bind only the main GUI (this) thread to a single CPU to reduce scheduling jitter
+    _pin_current_thread_to_core()
+
     win = Periscope(
         host=args.hostname,
         module=args.module,
@@ -1727,6 +1795,10 @@ async def raise_periscope(
         blocking = not qt_loop
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
+
+    # Bind only the main GUI (this) thread to a single CPU to reduce scheduling jitter
+    _pin_current_thread_to_core()
+
     refresh_ms = int(round(1000.0 / fps))
 
     viewer = Periscope(

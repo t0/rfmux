@@ -37,6 +37,3 @@ repository = "https://github.com/t0/rfmux"
 
 [tool.setuptools]
 packages = ["rfmux"]
-
-[project.scripts]
-periscope = "rfmux.tools.periscope:main"

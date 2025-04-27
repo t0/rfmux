@@ -46,7 +46,7 @@ Performance Notes:
 --------------------------------------------------------------------------------
 """
 
-import argparse
+import argparse, textwrap
 import math
 import os
 import threading
@@ -1732,11 +1732,39 @@ def main():
     auto-scaling, and global I/Q/M toggles. Launches Periscope in blocking mode.
     """
     ap = argparse.ArgumentParser(
-        description=(
-            "Periscope – Real-time multi-pane viewer with optional multi-channel grouping, "
-            "auto-scaling, and I/Q/M toggles."
-        )
-    )
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+    description=textwrap.dedent("""\
+        Periscope — real-time CRS packet visualizer.
+
+        Connects to a UDP/multicast stream, filters a single module, and drives a
+        PyQt6 GUI with up to five linked views per channel group:
+
+          • Time-domain waveform (TOD)
+          • IQ plane (density or scatter)
+          • Raw FFT
+          • Single-sideband PSD (SSB)  – CIC-corrected
+          • Dual-sideband PSD (DSB)    – CIC-corrected
+
+        Key options
+        -----------
+          • Comma-separated channel list with ‘&’ to overlay channels on one row,
+            e.g. "3&5,7" → two rows: {3,5} and {7}
+          • -n / --num-samples   Ring-buffer length per channel (history / FFT depth)
+          • -f / --fps           Maximum GUI refresh rate (frames s⁻¹) [typically system-limited anyway]
+          • -d / --density-dot   Dot size in IQ-density mode (pixels) [not typically adjusted]
+
+        Advanced features
+        -----------------
+          • Real-unit conversion (counts → V, dBm/Hz, dBc/Hz) with CIC droop compensation in the PSDs
+          • Welch segmentation to average PSD noise floor
+
+        Example
+        -------
+          $ periscope rfmux0022.local --module 2 --channels "3&5,7"
+
+        Run with -h / --help for the full option list.
+    """))
+
     ap.add_argument("hostname")
     ap.add_argument("-m", "--module", type=int, default=1)
     ap.add_argument("-c", "--channels", default="1")

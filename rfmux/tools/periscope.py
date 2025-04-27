@@ -52,14 +52,40 @@ import os
 import threading
 import queue
 import socket
-import platform
-import sys
+import sys, warnings, ctypes.util, ctypes, platform
 import time
-import warnings
 import random
 from typing import Dict, List
-
 import numpy as np
+
+def _check_xcb_cursor_runtime() -> bool:
+    """
+    Detects whether libxcb-cursor is available on the current system.
+    Returns True if it can be opened, False otherwise (after emitting a warning).
+    """
+    if platform.system() != "Linux":        # macOS/Windows ship Qt plugins that do not need it
+        return True
+
+    libname = ctypes.util.find_library("xcb-cursor")   # returns None if not found
+    if libname is None:
+        warnings.warn(
+            "System library 'libxcb-cursor0' is missing.\n"
+            "Install it with:  sudo apt-get install libxcb-cursor0  (Debian/Ubuntu)\n"
+            "or the equivalent package for your distribution.",
+            RuntimeWarning,
+        )
+        return False
+    try:
+        ctypes.CDLL(libname)    # will raise OSError on broken symlink
+        return True
+    except OSError as exc:
+        warnings.warn(
+            f"libxcb-cursor was found ({libname}) but cannot be loaded: {exc}. Try reinstalling it.",
+            RuntimeWarning,
+        )
+        return False
+
+_check_xcb_cursor_runtime()
 
 from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, Qt

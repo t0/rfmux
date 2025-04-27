@@ -24,7 +24,7 @@ This is required for the real-time GUI visualization tool `periscope`. It can be
 ```bash
 $ sudo apt-get install libxcb-cursor0
 ```
-Once the pip command above has completed, the visualizer can be called directionly from the commandline:
+Once the pip command above has completed, the visualizer can be called directly from the commandline:
 ```bash
 $ periscope rfmux0022.local --module 2 --channels "1,3&5"
 ```

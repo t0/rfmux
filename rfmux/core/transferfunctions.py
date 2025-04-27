@@ -324,7 +324,11 @@ def spectrum_from_slow_tod(
     )
 
     # Carrier normalization based on DC bin
-    carrier_normalization = psd_c_corrected[0] * (fs / nperseg)
+    # DC‑bin normalization for relative scale
+    carrier_norm_raw = psd_c_corrected[0] * (fs / nperseg)
+    # Avoid zero division: floor to machine‑tiny
+    eps = np.finfo(float).tiny
+    carrier_normalization = max(carrier_norm_raw, eps)
 
     if (
         reference == "relative" and scaling == "psd"
@@ -334,19 +338,25 @@ def spectrum_from_slow_tod(
         ## the carrier in total power, not a power density
         psd_c_corrected[0] = psd_c_corrected[0] * (fs / nperseg)
         psd_dual_sideband_db = 10.0 * np.log10(
-            psd_c_corrected / (carrier_normalization + 1e-30)
+            psd_c_corrected / (carrier_normalization)
         )
 
     elif (
         reference == "relative" and scaling == "ps"
     ):  # DC bin already correctly normalized:
         psd_dual_sideband_db = 10.0 * np.log10(
-            psd_c_corrected / ((psd_c_corrected[0]) + 1e-30)
+            psd_c_corrected / ((psd_c_corrected[0]))
         )
-    else:
+    elif reference=='absolute':
         # absolute => convert V^2 -> W => dBm
         p_c = psd_c_corrected / 50.0
-        psd_dual_sideband_db = 10.0 * np.log10(p_c / 1e-3 + 1e-30)
+        # clamp the ratio p_c/1e-3 to avoid log10(0)
+        ratio = p_c / 1e-3
+        ratio_safe = np.maximum(ratio, eps)
+        psd_dual_sideband_db = 10.0 * np.log10(ratio_safe)        
+
+    else: # Keep in counts
+        psd_dual_sideband_db = psd_c_corrected
 
     # Single-sideband I/Q
     freq_i, psd_i = welch(
@@ -381,6 +391,10 @@ def spectrum_from_slow_tod(
         spectrum_cutoff=spectrum_cutoff,
     )
 
+    # Claim to avoid divide by zero
+    psd_i_corrected = np.maximum(psd_i_corrected, eps)
+    psd_q_corrected = np.maximum(psd_q_corrected, eps)  
+
     # Convert to dBc or dBm
     if (
         reference == "relative" and scaling == "psd"
@@ -392,17 +406,29 @@ def spectrum_from_slow_tod(
         psd_q_corrected[0] = psd_q_corrected[0] * (fs / nperseg)
 
         ## Then normalize to the TOTAL power (in I and Q)
-        psd_i_db = 10.0 * np.log10(psd_i_corrected / (carrier_normalization + 1e-30))
-        psd_q_db = 10.0 * np.log10(psd_q_corrected / (carrier_normalization + 1e-30))
+        psd_i_db = 10.0 * np.log10(psd_i_corrected / (carrier_normalization))
+        psd_q_db = 10.0 * np.log10(psd_q_corrected / (carrier_normalization))
     elif reference == "relative" and scaling == "ps":  # We are already dealing with PS
-        psd_i_db = 10.0 * np.log10(psd_i_corrected / (psd_c_corrected[0] + 1e-30))
-        psd_q_db = 10.0 * np.log10(psd_q_corrected / (psd_c_corrected[0] + 1e-30))
-    else:
-        # absolute => convert V^2 to W => W to dBm
+        # floor the DC bin so we never divide by zero
+        carrier = max(psd_c_corrected[0], eps)      
+        psd_i_db = 10.0 * np.log10(psd_i_corrected / carrier)
+        psd_q_db = 10.0 * np.log10(psd_q_corrected / carrier)        
+    elif reference == 'absolute':
+        # absolute => convert V^2 -> W -> dBm, with zero‑floor
         p_i = psd_i_corrected / 50.0
         p_q = psd_q_corrected / 50.0
-        psd_i_db = 10.0 * np.log10(p_i / 1e-3 + 1e-30)
-        psd_q_db = 10.0 * np.log10(p_q / 1e-3 + 1e-30)
+    
+        # avoid log10(0)
+        ratio_i = p_i / 1e-3
+        ratio_q = p_q / 1e-3
+        ratio_i = np.maximum(ratio_i, eps)
+        ratio_q = np.maximum(ratio_q, eps)
+
+        psd_i_db = 10.0 * np.log10(ratio_i)
+        psd_q_db = 10.0 * np.log10(ratio_q)
+    else: # Keep in counts
+        psd_i_db = psd_i_corrected
+        psd_q_db = psd_q_corrected
 
     return {
         "freq_iq": freq_iq,

@@ -28,11 +28,10 @@ The final output:
 import array
 import asyncio
 import contextlib
-import ctypes
+import dataclasses
 import enum
 import numpy as np
 import socket
-import struct
 import sys
 import warnings
 
@@ -40,207 +39,7 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...tuber.codecs import TuberResult
 from ...core.transferfunctions import VOLTS_PER_ROC, spectrum_from_slow_tod
-
-from dataclasses import dataclass, asdict, astuple
-
-STREAMER_PORT = 9876
-STREAMER_HOST = "239.192.0.2"
-STREAMER_LEN = 8240
-STREAMER_MAGIC = 0x5344494B
-STREAMER_VERSION = 5
-NUM_CHANNELS = 1024
-SS_PER_SECOND = 125000000
-
-# This seems like a long timeout - in practice, we can see long delays when
-# packets are flowing normally
-STREAMER_TIMEOUT = 60
-
-# Source-specific multicasting support was added in 3.12.0
-if not hasattr(socket, 'IP_ADD_SOURCE_MEMBERSHIP'):
-    raise NotImplementedError(
-            "Module 'socket' doesn't have source-specific multicasting (SSM) "
-            "support, which was added in Python 3.12.0. Refer to "
-            "https://github.com/python/cpython/issues/89415 and the Python "
-            "3.12.0 release notes for details."
-    )
-
-
-class InAddr(ctypes.Structure):
-    _fields_ = [("s_addr", ctypes.c_uint32)]
-
-    def __init__(self, ip: bytes):
-        # Accept IP address as a string
-        self.s_addr = int.from_bytes(socket.inet_aton(ip), byteorder='little')
-
-
-class IPMreqSource(ctypes.Structure):
-    '''
-    The order of fields in this structure is implementation-specific.
-    Notably, fields have different order in Windows and Linux.
-    '''
-
-    match sys.platform:
-        case 'win32':
-            _fields_ = [
-                ("imr_multiaddr", InAddr),
-                ("imr_sourceaddr", InAddr),
-                ("imr_interface", InAddr),
-        ]
-        case 'linux':
-            _fields_ = [
-                ("imr_multiaddr", InAddr),
-                ("imr_interface", InAddr),
-                ("imr_sourceaddr", InAddr),
-            ]
-        case _:
-            raise NotImplementedError(f"Source-specific multicast support for {sys.platform} is incomplete.")
-
-
-class TimestampPort(str, enum.Enum):
-    BACKPLANE = "BACKPLANE"
-    TEST = "TEST"
-    SMA = "SMA"
-    GND = "GND"
-
-
-@dataclass(order=True)
-class Timestamp:
-    y: np.int32 # 0-99
-    d: np.int32 # 1-366
-    h: np.int32 # 0-23
-    m: np.int32 # 0-59
-    s: np.int32 # 0-59
-    ss: np.int32 # 0-SS_PER_SECOND-1
-    c: np.int32
-    sbs: np.int32
-
-    source: TimestampPort
-    recent: bool
-
-    def renormalize(self):
-        """
-        Normalizes the timestamp fields, carrying over seconds->minutes->hours->days
-        as needed. Ignores leap years for day-of-year handling.
-        """
-        old = astuple(self)
-
-        carry, self.ss = divmod(self.ss, SS_PER_SECOND)
-        self.s += carry
-
-        carry, self.s = divmod(self.s, 60)
-        self.m += carry
-
-        carry, self.m = divmod(self.m, 60)
-        self.h += carry
-
-        carry, self.h = divmod(self.h, 24)
-        self.d += carry
-
-        self.d -= 1  # convert to zero-indexed
-        carry, self.d = divmod(self.d, 365)  # does not work on leap day
-        self.d += 1  # restore to 1-indexed
-        self.y += carry
-        self.y %= 100  # and roll over
-
-
-    @classmethod
-    def from_bytes(cls, data):
-        # Unpack the timestamp data from the last portion of the packet
-        args = struct.unpack("<8I", data)
-        ts = Timestamp(*args, recent=False, source=TimestampPort.GND)
-
-        # Decode the source from the 'c' field
-        source_bits = (ts.c >> 29) & 0x3
-        if source_bits == 0:
-            ts.source = TimestampPort.BACKPLANE
-        elif source_bits == 1:
-            ts.source = TimestampPort.TEST
-        elif source_bits == 2:
-            ts.source = TimestampPort.SMA
-        elif source_bits == 3:
-            ts.source = TimestampPort.GND
-        else:
-            raise RuntimeError("Unexpected timestamp source!")
-
-        # Decode the 'recent' flag from the 'c' field
-        ts.recent = bool(ts.c & 0x80000000)
-
-        # Mask off the higher bits to get the actual count
-        ts.c &= 0x1FFFFFFF
-
-        return ts
-
-    @classmethod
-    def from_TuberResult(cls, ts):
-        # Convert the TuberResult into a dictionary we can use
-        data = { f: getattr(ts, f) for f in dir(ts) if not f.startswith('_')}
-        return Timestamp(**data)
-
-
-@dataclass
-class DfmuxPacket:
-    magic: np.uint32
-    version: np.uint16
-    serial: np.uint16
-
-    num_modules: np.uint8
-    block: np.uint8
-    fir_stage: np.uint8
-    module: np.uint8
-
-    seq: np.uint32
-
-    s: array.array
-
-    ts: Timestamp
-
-    @classmethod
-    def from_bytes(cls, data):
-        """
-        Parses the entire DfmuxPacket from raw bytes, which contain:
-          - a header (<IHHBBBBI)
-          - channel data (NUM_CHANNELS * 2 * sizeof(int))
-          - a timestamp (8 * sizeof(uint32))
-        """
-        # Ensure the data length matches the expected packet length
-        assert (
-            len(data) == STREAMER_LEN
-        ), f"Packet had unexpected size {len(data)} != {STREAMER_LEN}!"
-
-        # Unpack the packet header
-        header = struct.Struct("<IHHBBBBI")
-        header_args = header.unpack(data[: header.size])
-
-        # Extract the body (channel data)
-        body = array.array("i")
-        bodysize = NUM_CHANNELS * 2 * body.itemsize
-        body.frombytes(data[header.size : header.size + bodysize])
-
-        # Parse the timestamp from the remaining data
-        ts = Timestamp.from_bytes(data[header.size + bodysize :])
-
-        # Return a DfmuxPacket instance with the parsed data
-        return DfmuxPacket(*header_args, s=body, ts=ts)
-
-
-def get_local_ip(crs_hostname):
-    """
-    Determines the local IP address used to reach the CRS device.
-
-    Args:
-        crs_hostname (str): The hostname or IP address of the CRS device.
-
-    Returns:
-        str: The local IP address of the network interface used to reach the CRS device.
-    """
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        try:
-            # Connect to the CRS hostname on an arbitrary port to determine the local IP
-            s.connect((crs_hostname, 1))
-            local_ip = s.getsockname()[0]
-        except Exception:
-            raise Exception("Could not determine local IP address!")
-    return local_ip
+from ... import streamer
 
 
 @macro(CRS, register=True)
@@ -308,7 +107,7 @@ async def py_get_samples(crs: CRS,
     ), f"Unspecified or invalid module! Available modules: {crs.modules.module}"
 
     if channel is not None:
-        assert 1 <= channel <= NUM_CHANNELS, f"Invalid channel {channel}!"
+        assert 1 <= channel <= streamer.NUM_CHANNELS, f"Invalid channel {channel}!"
 
     # We need to ensure all data we grab from the network was emitted "now" or
     # later, from the perspective of control flow. Because of delays in the
@@ -366,54 +165,15 @@ async def py_get_samples(crs: CRS,
 
     # Ingest timestamp into Pythonic representation and nudge to compensate for
     # FIR delay.
-    ts = Timestamp.from_TuberResult(ts)
-    ts.ss += np.uint32(.02 * SS_PER_SECOND) # 20ms, per experiments at FIR6
+    ts = streamer.Timestamp.from_TuberResult(ts)
+    ts.ss += np.uint32(.02 * streamer.SS_PER_SECOND) # 20ms, per experiments at FIR6
     ts.renormalize()
 
-    # Determine the local IP address to use for the multicast interface
-    multicast_interface_ip = get_local_ip(crs.tuber_hostname)
-
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
+    with streamer.get_multicast_socket(crs.tuber_hostname) as sock:
 
         # To use asyncio, we need a non-blocking socket
         loop = asyncio.get_running_loop()
         sock.setblocking(False)
-
-        # Configure the socket for multicast reception
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-        # Bind the socket to all interfaces on the specified port
-        sock.bind(("", STREAMER_PORT))
-
-        # Set a large receive buffer size
-        rcvbuf = 16777216
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
-
-        # Ensure SO_RCVBUF didn't just fail silently
-        actual = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-        if sys.platform=='linux':
-            # Linux returns a doubled value
-            actual /= 2
-        if actual != rcvbuf:
-            warnings.warn(
-                f"Unable to set SO_RCVBUF to {rcvbuf} (got {actual}). Consider "
-                "'sudo sysctl net.core.rmem_max=67108864' or similar. This setting "
-                "can be made persistent across reboots by configuring "
-                "/etc/sysctl.conf or /etc/sysctl.d."
-            )
-
-        # Set the interface to receive multicast packets
-        sock.setsockopt(
-            socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(multicast_interface_ip)
-        )
-
-        # Join the multicast group on the specified interface
-        mreq = IPMreqSource(
-                imr_multiaddr=InAddr(STREAMER_HOST),
-                imr_interface=InAddr(multicast_interface_ip),
-                imr_sourceaddr=InAddr(socket.gethostbyname(crs.tuber_hostname)))
-
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_SOURCE_MEMBERSHIP, bytes(mreq))
 
         # Variable to track the previous sequence number for continuity checks
         prev_seq = None
@@ -425,11 +185,11 @@ async def py_get_samples(crs: CRS,
         # Start receiving packets
         while len(packets) < num_samples:
             data = await asyncio.wait_for(
-                loop.sock_recv(sock, STREAMER_LEN), STREAMER_TIMEOUT
+                loop.sock_recv(sock, streamer.STREAMER_LEN), streamer.STREAMER_TIMEOUT
             )
 
             # Parse the received packet
-            p = DfmuxPacket.from_bytes(data)
+            p = streamer.DfmuxPacket.from_bytes(data)
 
             if p.serial != int(crs.serial):
                 warnings.warn(
@@ -441,11 +201,11 @@ async def py_get_samples(crs: CRS,
                 continue  # Skip packets from other modules
 
             # Sanity checks on the packet
-            if p.magic != STREAMER_MAGIC:
-                raise RuntimeError(f"Invalid packet magic! {p.magic} != {STREAMER_MAGIC}")
+            if p.magic != streamer.STREAMER_MAGIC:
+                raise RuntimeError(f"Invalid packet magic! {p.magic} != {streamer.STREAMER_MAGIC}")
 
-            if p.version != STREAMER_VERSION:
-                raise RuntimeError(f"Invalid packet version! {p.version} != {STREAMER_VERSION}")
+            if p.version != streamer.STREAMER_VERSION:
+                raise RuntimeError(f"Invalid packet version! {p.version} != {streamer.STREAMER_VERSION}")
 
             # Check if this packet is older than our "now" timestamp
             assert ts.source == p.ts.source, f"Timestamp source changed! {ts.source} vs {p.ts.source}"
@@ -476,12 +236,12 @@ async def py_get_samples(crs: CRS,
 
     # If average => just return time-domain averages
     if average:
-        mean_i = np.zeros(NUM_CHANNELS)
-        mean_q = np.zeros(NUM_CHANNELS)
-        std_i = np.zeros(NUM_CHANNELS)
-        std_q = np.zeros(NUM_CHANNELS)
+        mean_i = np.zeros(streamer.NUM_CHANNELS)
+        mean_q = np.zeros(streamer.NUM_CHANNELS)
+        std_i = np.zeros(streamer.NUM_CHANNELS)
+        std_q = np.zeros(streamer.NUM_CHANNELS)
 
-        for c in range(NUM_CHANNELS):
+        for c in range(streamer.NUM_CHANNELS):
             mean_i[c] = np.mean([p.s[2*c]/256 for p in packets])
             mean_q[c] = np.mean([p.s[2*c+1]/256 for p in packets])
             std_i[c] = np.std([p.s[2*c]/256 for p in packets])
@@ -508,13 +268,13 @@ async def py_get_samples(crs: CRS,
         return TuberResult(results)
 
     # Otherwise build the normal time-domain results
-    results = dict(ts=[TuberResult(asdict(p.ts)) for p in packets])
+    results = dict(ts=[TuberResult(dataclasses.asdict(p.ts)) for p in packets])
 
     if channel is None:
         # Return data for all channels
         results["i"] = []
         results["q"] = []
-        for c in range(NUM_CHANNELS):
+        for c in range(streamer.NUM_CHANNELS):
             i_channel = np.array([p.s[2*c]/256 for p in packets])
             q_channel = np.array([p.s[2*c+1]/256 for p in packets])
             if reference == 'absolute':
@@ -538,6 +298,7 @@ async def py_get_samples(crs: CRS,
 
         # Retrieve decimation stage => helps define final sampling freq
         dec_stage = await crs.get_fir_stage()
+        fs = 625e6/(256*64*(2**dec_stage))
 
         spec_data = {}
         if channel is None:
@@ -547,9 +308,11 @@ async def py_get_samples(crs: CRS,
             i_ch_spectra=[]
             q_ch_spectra=[]
             c_ch_spectra=[]
-            for c in range(NUM_CHANNELS):
+            for c in range(streamer.NUM_CHANNELS):
                 i_data = results["i"][c]
                 q_data = results["q"][c]
+                
+                # Calculate spectrum for this channel
                 d = spectrum_from_slow_tod(
                     i_data, q_data, dec_stage,
                     scaling=scaling,
@@ -557,6 +320,7 @@ async def py_get_samples(crs: CRS,
                     reference=reference,
                     spectrum_cutoff=spectrum_cutoff
                 )
+                
                 # Store freq_iq, freq_dsb once
                 if spec_data["freq_iq"] is None:
                     spec_data["freq_iq"] = d["freq_iq"].tolist()

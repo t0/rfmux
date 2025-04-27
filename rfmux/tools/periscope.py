@@ -14,7 +14,7 @@ USAGE
 -----
 Command-Line Examples:
 - Requires rfmux to be installed as a python package
-    - `$ cd rfmux ; pip -e .`
+    - `$ cd rfmux ; pip install -e .`
 - `$ periscope rfmux0022.local --module 2 --channels "3&5,7"`
 IPython / Jupyter: invoke directly from CRS object
 - `>>> crs.raise_periscope(module=2, channels="3&5")`

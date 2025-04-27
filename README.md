@@ -19,6 +19,20 @@ pip install .
 
 Note that rfmux requires Python 3.12 or later
 
+An additional system library that cannot be automatically installed with pip is xcb-cursor.
+This is required for the real-time GUI visualization tool `periscope`. It can be installed via:
+```bash
+$ sudo apt-get install libxcb-cursor0
+```
+Once the pip command above has completed, the visualizer can be called directionly from the commandline:
+```bash
+$ periscope rfmux0022.local --module 2 --channels "1,3&5"
+```
+or directly from within a Python / IPython / Jupyter environment as a method of a CRS object:
+```python
+>>> crs.raise_periscope(module=2, channels="1,3&5")
+```
+
 ## Firmware & Git LFS
 
 The repository contains a `firmware` directory with large binary files managed via Git LFS. To enable and retrieve these files:

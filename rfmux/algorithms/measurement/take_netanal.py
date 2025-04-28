@@ -21,7 +21,9 @@ async def take_netanal(
     max_chans: int = 1023,
     max_span: float = 500e6,
     *,
-    module
+    module,
+    progress_callback=None,
+    data_callback=None,
 ):
     """
     Perform a network analysis over the frequency range [fmin, fmax].
@@ -57,6 +59,10 @@ async def take_netanal(
         - If a list, e.g. [1, 2, 3], run concurrently for each module in the list
           and return a dict keyed by module number.
         - Note -- lists must be within a single analog bank (1-4) or (5-8).
+    progress_callback : callable, optional
+        Callback function that receives (module, progress_percentage) updates.
+    data_callback : callable, optional
+        Callback function that receives (module, freqs, amps, phases) updates.
 
     Returns
     -------
@@ -96,10 +102,11 @@ async def take_netanal(
                 max_chans=max_chans,
                 max_span=max_span,
                 module=m,
+                progress_callback=progress_callback,
+                data_callback=data_callback,
             ))
         results = await asyncio.gather(*tasks)
         return results
-        # return {m: result for m, result in zip(module, results)}
 
     # Generate a global array of frequencies across [fmin, fmax].
     freqs_global = np.linspace(fmin, fmax, npoints, endpoint=True)
@@ -141,6 +148,8 @@ async def take_netanal(
     prev_boundary_iq = None  # To store I/Q of the overlap freq from previous chunk.
 
     # Process each chunk.
+    total_chunks = len(chunks)
+    
     for i, (start_idx, end_idx) in enumerate(chunks):
         freqs_chunk = freqs_global[start_idx:end_idx + 1]
         if not len(freqs_chunk):
@@ -203,6 +212,11 @@ async def take_netanal(
                 i_val = samples.mean.i[ch]
                 q_val = samples.mean.q[ch]
                 chunk_iq.append(i_val + 1j * q_val)
+            
+            # Report progress
+            if progress_callback:
+                progress = ((i * niter + it + 1) / (total_chunks * niter)) * 100
+                progress_callback(module, progress)
 
         # Rotate new NCO chunk so the overlap freq aligns with previous NCO phase.
         if i > 0 and prev_boundary_iq is not None:
@@ -219,6 +233,14 @@ async def take_netanal(
         # Accumulate into global arrays.
         fs_all.extend(chunk_fs)
         iq_all.extend(chunk_iq)
+        
+        # Report data update
+        if data_callback:
+            fs_array = np.array(fs_all)
+            iq_array = np.array(iq_all)
+            amp_array = np.abs(iq_array)
+            phase_array = np.degrees(np.angle(iq_array))
+            data_callback(module, fs_array, amp_array, phase_array)
 
     # Clean up before exiting
     async with crs.tuber_context() as ctx:

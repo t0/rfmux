@@ -6,9 +6,10 @@ Periscope – Real‑Time Multi‑Pane Viewer
 Features:
 - Time‑domain (TOD)
 - IQ (density or scatter)
-- FFT (pyqtgraph’s fftMode=True)
+- FFT (pyqtgraph's fftMode=True)
 - Single‑Sideband PSD (SSB)
 - Dual‑Sideband PSD (DSB)
+- Network Analysis (amplitude and phase vs frequency)
 
 USAGE
 -----
@@ -26,15 +27,17 @@ This module implements the Periscope real-time multi-pane viewer using PyQt6. It
 visualizes data from a CRS data streamer in multiple ways:
     - Time-domain (TOD)
     - IQ (density or scatter)
-    - FFT (using pyqtgraph’s fftMode=True)
+    - FFT (using pyqtgraph's fftMode=True)
     - Single-Sideband PSD (SSB)
     - Dual-Sideband PSD (DSB)
+    - Network Analysis (amplitude and phase vs frequency)
 
 Key Components & Concurrency:
     - A ring buffer (Circular) for each channel stores incoming data.
     - A UDPReceiver runs in its own QThread to receive streaming data asynchronously.
     - Separate IQTask and PSDTask workers offload expensive computations to a QThreadPool.
     - The main Periscope class orchestrates the UI, buffer management, and dispatch of tasks.
+    - NetworkAnalysisTask runs network analyses in the background and sends updates to the GUI.
 
 Performance Notes:
     - GPUs are hard, and Python doesn't love concurrency, so performance is dictated
@@ -55,8 +58,16 @@ import socket
 import sys, warnings, ctypes.util, ctypes, platform
 import time
 import random
-from typing import Dict, List
+import pickle
+import csv
+import datetime
+from typing import Dict, List, Optional, Any
 import numpy as np
+
+# Create session
+import asyncio
+from ..core.session import load_session
+from ..core.schema import CRS
 
 def _check_xcb_cursor_runtime() -> bool:
     """
@@ -122,7 +133,7 @@ except ImportError:  # SciPy not installed – graceful degradation
     convolve = None
     SMOOTH_SIGMA = 0.0
 
-BASE_SAMPLING = 625e6 / 256.0 / 64.0  # ≈38 147.46 Hz base for dec=0
+BASE_SAMPLING = 625e6 / 256.0 / 64.0  # ≈38 147.46 Hz base for dec=0
 
 
 # ───────────────────────── Utility helpers ─────────────────────────
@@ -628,6 +639,199 @@ class PSDTask(QRunnable):
         self.signals.done.emit(self.row, self.mode, self.ch, payload)
 
 
+# ───────────────────────── Network Analysis Task & Signals ─────────────────────────
+class NetworkAnalysisSignals(QObject):
+    """
+    Holds custom signals emitted by network analysis tasks.
+    """
+    progress = pyqtSignal(int, float)  # module, progress percentage
+    data_update = pyqtSignal(int, np.ndarray, np.ndarray, np.ndarray)  # module, freqs, amps, phases
+    completed = pyqtSignal(int)  # module
+    error = pyqtSignal(str)  # error message
+
+
+class NetworkAnalysisTask(QRunnable):
+    """
+    Off-thread worker for running network analysis.
+    
+    Parameters
+    ----------
+    crs : CRS
+        CRS object from HardwareMap
+    module : int
+        Module number to run analysis on
+    params : dict
+        Network analysis parameters
+    signals : NetworkAnalysisSignals
+        Signals for communication with GUI thread
+    """
+    
+    def __init__(self, crs: "CRS", module: int, params: dict, signals: NetworkAnalysisSignals):
+        super().__init__()
+        self.crs = crs
+        self.module = module
+        self.params = params
+        self.signals = signals
+        self._running = True
+        
+    def stop(self):
+        """Signal the task to stop."""
+        self._running = False
+    
+    def run(self):
+        """Execute the network analysis."""
+        # Based on take_netanal logic but emits data progressively
+        loop = None
+        try:
+            amp = self.params.get('amp', 0.001)
+            fmin = self.params.get('fmin', 100e6)
+            fmax = self.params.get('fmax', 2450e6)
+            nsamps = self.params.get('nsamps', 10)
+            npoints = self.params.get('npoints', 5000)
+            max_chans = self.params.get('max_chans', 1023)
+            max_span = self.params.get('max_span', 500e6)
+            
+            # Generate frequency array
+            freqs_global = np.linspace(fmin, fmax, npoints, endpoint=True)
+            
+            # Identify chunks
+            chunks = []
+            i_start = 0
+            while i_start < npoints:
+                f_candidate_stop = freqs_global[i_start] + max_span
+                if f_candidate_stop > fmax:
+                    f_candidate_stop = fmax
+                i_end = np.searchsorted(freqs_global, f_candidate_stop, side='right') - 1
+                if i_end <= i_start:
+                    i_end = i_start
+                chunks.append((i_start, i_end))
+                if i_end >= npoints - 1:
+                    break
+                i_start = i_end
+                
+            # Prepare arrays for data collection
+            fs_all, iq_all = [], []
+            prev_boundary_iq = None
+            
+            # Get current event loop to run async ops from the thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            total_chunks = len(chunks)
+            
+            # Process each chunk
+            for i, (start_idx, end_idx) in enumerate(chunks):
+                if not self._running:
+                    break
+                    
+                freqs_chunk = freqs_global[start_idx:end_idx + 1]
+                if not len(freqs_chunk):
+                    continue
+                    
+                # Set NCO frequency
+                nco_freq = 0.5 * (freqs_chunk[0] + freqs_chunk[-1])
+                loop.run_until_complete(self.crs.set_nco_frequency(nco_freq, module=self.module))
+                
+                chunk_fs, chunk_iq = [], []
+                n_chunk_points = len(freqs_chunk)
+                niter = int(np.ceil(n_chunk_points / max_chans))
+                
+                # Process comb groups
+                for it in range(niter):
+                    if not self._running:
+                        break
+                        
+                    idx_local = it + np.arange(max_chans) * niter
+                    idx_local = idx_local[idx_local < n_chunk_points]
+                    if not len(idx_local):
+                        break
+                        
+                    comb = freqs_chunk[idx_local]
+                    
+                    # Add random offsets to dither IMD tones
+                    ifreqs = np.concatenate([
+                        [comb[0] - 50 * np.sign(comb[0] - nco_freq) * np.random.random()],
+                        comb[1:-1] + 100 * (np.random.random(len(comb) - 2) - 0.5),
+                        [comb[-1] - 50 * np.sign(comb[-1] - nco_freq) * np.random.random()]
+                    ])
+                    
+                    # Set frequencies and amplitudes
+                    ctx_ops = []
+                    for j in range(1, max_chans + 1):
+                        if j <= len(ifreqs):
+                            freq_val = ifreqs[j - 1]
+                            chunk_fs.append(freq_val)
+                            ctx_ops.append(self.crs.set_frequency(freq_val - nco_freq, channel=j, module=self.module))
+                            ctx_ops.append(self.crs.set_amplitude(amp, channel=j, module=self.module))
+                        else:
+                            ctx_ops.append(self.crs.set_frequency(0, channel=j, module=self.module))
+                            ctx_ops.append(self.crs.set_amplitude(0, channel=j, module=self.module))
+                    
+                    # Execute all operations
+                    loop.run_until_complete(asyncio.gather(*ctx_ops))
+                    
+                    # Get samples
+                    samples = loop.run_until_complete(self.crs.get_samples(
+                        nsamps, average=True, channel=None, module=self.module))
+                    
+                    # Extract I/Q data
+                    for ch in range(len(ifreqs)):
+                        i_val = samples.mean.i[ch]
+                        q_val = samples.mean.q[ch]
+                        chunk_iq.append(i_val + 1j * q_val)
+                    
+                    # Update progress
+                    progress = ((i * niter + it + 1) / (total_chunks * niter)) * 100
+                    self.signals.progress.emit(self.module, progress)
+                
+                # Rotate chunk for phase consistency
+                if i > 0 and prev_boundary_iq is not None:
+                    boundary_new = chunk_iq[0]
+                    if abs(boundary_new) > 1e-15:
+                        rot = prev_boundary_iq / boundary_new
+                        chunk_iq = [iq_val * rot for iq_val in chunk_iq[1:]]
+                        chunk_fs = chunk_fs[1:]
+                
+                prev_boundary_iq = chunk_iq[-1]
+                
+                # Accumulate
+                fs_all.extend(chunk_fs)
+                iq_all.extend(chunk_iq)
+                
+                # Send data update
+                fs_array = np.array(fs_all)
+                iq_array = np.array(iq_all)
+                amp_array = np.abs(iq_array)
+                phase_array = np.degrees(np.angle(iq_array))
+                
+                self.signals.data_update.emit(self.module, fs_array, amp_array, phase_array)
+            
+            # Clean up channels
+            ctx_ops = []
+            for j in range(max_chans):
+                ctx_ops.append(self.crs.set_amplitude(0, channel=j+1, module=self.module))
+            loop.run_until_complete(asyncio.gather(*ctx_ops))
+            
+            # Sort final data by frequency
+            fs_all = np.array(fs_all)
+            iq_all = np.array(iq_all)
+            order = np.argsort(fs_all)
+            fs_sorted = fs_all[order]
+            iq_sorted = iq_all[order]
+            amp_sorted = np.abs(iq_sorted)
+            phase_sorted = np.degrees(np.angle(iq_sorted))
+            
+            # Emit final data
+            self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
+            self.signals.completed.emit(self.module)
+            
+        except Exception as e:
+            self.signals.error.emit(str(e))
+        finally:
+            if loop:
+                loop.close()
+
+
 # ───────────────────────── Multi-Channel Parsing ─────────────────────────
 def _parse_channels_multich(txt: str) -> List[List[int]]:
     """
@@ -684,7 +888,7 @@ def _mode_title(mode: str) -> str:
     Parameters
     ----------
     mode : str
-        One of {"T", "IQ", "F", "S", "D"}.
+        One of {"T", "IQ", "F", "S", "D", "NA"}.
 
     Returns
     -------
@@ -701,7 +905,252 @@ def _mode_title(mode: str) -> str:
         return "SSB PSD"
     if mode == "D":
         return "DSB PSD"
+    if mode == "NA":
+        return "Network Analysis"
     return mode
+
+
+class NetworkAnalysisDialog(QtWidgets.QDialog):
+    """
+    Dialog for configuring network analysis parameters.
+    """
+    def __init__(self, parent=None, modules=None):
+        super().__init__(parent)
+        self.setWindowTitle("Network Analysis Configuration")
+        self.setModal(False)
+        self.modules = modules or [1, 2, 3, 4]
+        self._setup_ui()
+        
+    def _setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Parameters group
+        param_group = QtWidgets.QGroupBox("Analysis Parameters")
+        param_layout = QtWidgets.QFormLayout(param_group)
+        
+        # Module selection
+        self.module_combo = QtWidgets.QComboBox()
+        self.module_combo.addItem("All Modules", None)
+        for m in self.modules:
+            self.module_combo.addItem(f"Module {m}", m)
+        param_layout.addRow("Module:", self.module_combo)
+        
+        # Frequency range
+        self.fmin_edit = QtWidgets.QLineEdit("100e6")
+        self.fmax_edit = QtWidgets.QLineEdit("2450e6")
+        param_layout.addRow("Min Frequency (Hz):", self.fmin_edit)
+        param_layout.addRow("Max Frequency (Hz):", self.fmax_edit)
+        
+        # Amplitude
+        self.amp_edit = QtWidgets.QLineEdit("0.001")
+        param_layout.addRow("Amplitude:", self.amp_edit)
+        
+        # Number of points
+        self.points_edit = QtWidgets.QLineEdit("5000")
+        param_layout.addRow("Number of Points:", self.points_edit)
+        
+        # Number of samples to average
+        self.samples_edit = QtWidgets.QLineEdit("10")
+        param_layout.addRow("Samples to Average:", self.samples_edit)
+        
+        # Max channels
+        self.max_chans_edit = QtWidgets.QLineEdit("1023")
+        param_layout.addRow("Max Channels:", self.max_chans_edit)
+        
+        # Max span
+        self.max_span_edit = QtWidgets.QLineEdit("500e6")
+        param_layout.addRow("Max Span (Hz):", self.max_span_edit)
+        
+        layout.addWidget(param_group)
+        
+        # Buttons
+        btn_layout = QtWidgets.QHBoxLayout()
+        
+        self.start_btn = QtWidgets.QPushButton("Start Analysis")
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        
+        btn_layout.addWidget(self.start_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+        
+        # Connect buttons
+        self.start_btn.clicked.connect(self.accept)
+        self.cancel_btn.clicked.connect(self.reject)
+        
+    def get_parameters(self):
+        """Get the configured parameters."""
+        selected_module = self.module_combo.currentData()
+        
+        try:
+            params = {
+                'module': selected_module,
+                'fmin': float(eval(self.fmin_edit.text())),
+                'fmax': float(eval(self.fmax_edit.text())),
+                'amp': float(eval(self.amp_edit.text())),
+                'npoints': int(self.points_edit.text()),
+                'nsamps': int(self.samples_edit.text()),
+                'max_chans': int(self.max_chans_edit.text()),
+                'max_span': float(eval(self.max_span_edit.text()))
+            }
+            return params
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Invalid parameter: {str(e)}")
+            return None
+
+
+class NetworkAnalysisWindow(QtWidgets.QMainWindow):
+    """
+    Window for displaying network analysis results.
+    """
+    def __init__(self, parent=None, modules=None):
+        super().__init__(parent)
+        self.setWindowTitle("Network Analysis Results")
+        self.modules = modules or []
+        self.data = {}  # module -> (freqs, amps, phases)
+        self._setup_ui()
+        
+    def _setup_ui(self):
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        layout = QtWidgets.QVBoxLayout(central)
+        
+        # Toolbar
+        toolbar = QtWidgets.QToolBar()
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+        
+        # Export button
+        export_btn = QtWidgets.QPushButton("Export Data")
+        export_btn.clicked.connect(self._export_data)
+        toolbar.addWidget(export_btn)
+        
+        # Progress bars
+        self.progress_bars = {}
+        if self.modules:
+            progress_group = QtWidgets.QGroupBox("Analysis Progress")
+            progress_layout = QtWidgets.QVBoxLayout(progress_group)
+            
+            for module in self.modules:
+                hlayout = QtWidgets.QHBoxLayout()
+                label = QtWidgets.QLabel(f"Module {module}:")
+                pbar = QtWidgets.QProgressBar()
+                pbar.setRange(0, 100)
+                pbar.setValue(0)
+                hlayout.addWidget(label)
+                hlayout.addWidget(pbar)
+                progress_layout.addLayout(hlayout)
+                self.progress_bars[module] = pbar
+                
+            layout.addWidget(progress_group)
+        
+        # Plot area
+        self.tabs = QtWidgets.QTabWidget()
+        layout.addWidget(self.tabs)
+        
+        self.plots = {}
+        for module in self.modules:
+            tab = QtWidgets.QWidget()
+            tab_layout = QtWidgets.QVBoxLayout(tab)
+            
+            # Create amplitude and phase plots
+            amp_plot = pg.PlotWidget(title=f"Module {module} - Amplitude")
+            amp_plot.setLabel('left', 'Amplitude')
+            amp_plot.setLabel('bottom', 'Frequency', units='Hz')
+            amp_plot.showGrid(x=True, y=True, alpha=0.3)
+            
+            phase_plot = pg.PlotWidget(title=f"Module {module} - Phase")
+            phase_plot.setLabel('left', 'Phase', units='deg')
+            phase_plot.setLabel('bottom', 'Frequency', units='Hz')
+            phase_plot.showGrid(x=True, y=True, alpha=0.3)
+            
+            # Create curves
+            amp_curve = amp_plot.plot(pen=pg.mkPen('r', width=LINE_WIDTH))
+            phase_curve = phase_plot.plot(pen=pg.mkPen('b', width=LINE_WIDTH))
+            
+            tab_layout.addWidget(amp_plot)
+            tab_layout.addWidget(phase_plot)
+            self.tabs.addTab(tab, f"Module {module}")
+            
+            self.plots[module] = {
+                'amp_plot': amp_plot,
+                'phase_plot': phase_plot,
+                'amp_curve': amp_curve,
+                'phase_curve': phase_curve
+            }
+        
+        self.resize(1000, 800)
+        
+    def update_data(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
+        """Update the plot data for a specific module."""
+        self.data[module] = (freqs, amps, phases)
+        if module in self.plots:
+            self.plots[module]['amp_curve'].setData(freqs, amps)
+            self.plots[module]['phase_curve'].setData(freqs, phases)
+    
+    def update_progress(self, module: int, progress: float):
+        """Update the progress bar for a specific module."""
+        if module in self.progress_bars:
+            self.progress_bars[module].setValue(int(progress))
+    
+    def complete_analysis(self, module: int):
+        """Mark analysis as complete for a module."""
+        if module in self.progress_bars:
+            self.progress_bars[module].setValue(100)
+    
+    def _export_data(self):
+        """Export the collected data."""
+        if not self.data:
+            QtWidgets.QMessageBox.warning(self, "No Data", "No data to export yet.")
+            return
+        
+        dialog = QtWidgets.QFileDialog(self)
+        dialog.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
+        dialog.setNameFilters([
+            "Pickle Files (*.pkl)",
+            "CSV Files (*.csv)",
+            "All Files (*)"
+        ])
+        dialog.setDefaultSuffix("pkl")
+        
+        if dialog.exec():
+            filename = dialog.selectedFiles()[0]
+            
+            try:
+                if filename.endswith('.pkl'):
+                    # Export as pickle
+                    with open(filename, 'wb') as f:
+                        data_to_save = {
+                            'timestamp': datetime.datetime.now().isoformat(),
+                            'data': self.data
+                        }
+                        pickle.dump(data_to_save, f)
+                        
+                elif filename.endswith('.csv'):
+                    # Export as CSV (one file per module)
+                    base, ext = os.path.splitext(filename)
+                    for module, (freqs, amps, phases) in self.data.items():
+                        module_filename = f"{base}_module{module}{ext}"
+                        with open(module_filename, 'w', newline='') as f:
+                            writer = csv.writer(f)
+                            writer.writerow(['Frequency (Hz)', 'Amplitude', 'Phase (deg)'])
+                            for freq, amp, phase in zip(freqs, amps, phases):
+                                writer.writerow([freq, amp, phase])
+                                
+                else:
+                    # Default to pickle
+                    with open(filename, 'wb') as f:
+                        data_to_save = {
+                            'timestamp': datetime.datetime.now().isoformat(),
+                            'data': self.data
+                        }
+                        pickle.dump(data_to_save, f)
+                        
+                QtWidgets.QMessageBox.information(self, "Export Complete", 
+                                                  f"Data exported to {filename}")
+                
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Export Error", 
+                                               f"Error exporting data: {str(e)}")
 
 
 class Periscope(QtWidgets.QMainWindow):
@@ -710,15 +1159,17 @@ class Periscope(QtWidgets.QMainWindow):
       - Time-domain waveforms (TOD)
       - IQ (density or scatter)
       - FFT
-      - Single-Sideband PSD (SSB)
-      - Dual-Sideband PSD (DSB)
+      - Single-sideband PSD (SSB)
+      - Dual-sideband PSD (DSB)
+      - Network Analysis (amplitude and phase vs frequency)
 
     Additional Features
     -------------------
     - Multi-channel grouping via '&'.
-    - An “Auto Scale” checkbox for IQ/FFT/SSB/DSB (not TOD).
+    - An "Auto Scale" checkbox for IQ/FFT/SSB/DSB (not TOD).
     - Global toggles to hide/show I, Q, and Mag lines for TOD, FFT, and SSB.
     - A "Help" button to display usage and interaction details.
+    - Network Analysis functionality with real-time updates.
 
     Parameters
     ----------
@@ -735,6 +1186,8 @@ class Periscope(QtWidgets.QMainWindow):
         GUI refresh interval in milliseconds (default 33).
     dot_px : int, optional
         Dot diameter in pixels for IQ density mode (default is 1).
+    crs : CRS, optional
+        CRS object for hardware communication (needed for network analysis).
     """
 
     def __init__(
@@ -745,6 +1198,7 @@ class Periscope(QtWidgets.QMainWindow):
         buf_size=5_000,
         refresh_ms=33,
         dot_px=DENSITY_DOT_SIZE,
+        crs=None,
     ):
         super().__init__()
         self.host = host
@@ -752,6 +1206,7 @@ class Periscope(QtWidgets.QMainWindow):
         self.N = buf_size
         self.refresh_ms = refresh_ms
         self.dot_px = max(1, int(dot_px))
+        self.crs = crs
 
         # Parse multi-channel format
         self.channel_list = _parse_channels_multich(chan_str)
@@ -762,7 +1217,7 @@ class Periscope(QtWidgets.QMainWindow):
         self.pkt_cnt = 0
         self.t_last = time.time()
 
-        # Single decimation stage, updated from first channel’s sample rate
+        # Single decimation stage, updated from first channel's sample rate
         self.dec_stage = 6
         self.last_dec_update = 0.0
 
@@ -782,6 +1237,15 @@ class Periscope(QtWidgets.QMainWindow):
         self.psd_signals = PSDSignals()
         self.psd_signals.done.connect(self._psd_done)
 
+        # Network analysis tracking
+        self.netanal_signals = NetworkAnalysisSignals()
+        self.netanal_signals.progress.connect(self._netanal_progress)
+        self.netanal_signals.data_update.connect(self._netanal_data_update)
+        self.netanal_signals.completed.connect(self._netanal_completed)
+        self.netanal_signals.error.connect(self._netanal_error)
+        self.netanal_window = None
+        self.netanal_tasks: Dict[int, NetworkAnalysisTask] = {}
+
         # Density LUT
         cmap = pg.colormap.get("turbo")
         lut_rgb = cmap.getLookupTable(0.0, 1.0, 255)
@@ -796,7 +1260,7 @@ class Periscope(QtWidgets.QMainWindow):
 
         # Thread pool
         self.pool = QThreadPool()
-        self.pool.setMaxThreadCount(1) # These are pretty lightweight, can live in a single thread
+        self.pool.setMaxThreadCount(4)  # Allow multiple network analyses
 
         # Display settings
         self.dark_mode = True
@@ -827,7 +1291,7 @@ class Periscope(QtWidgets.QMainWindow):
     def _build_ui(self, chan_str: str):
         """
         Create and configure all top-level widgets and layouts,
-        preserving the original style, plus the new Help button.
+        preserving the original style, plus the new Help button and Network Analysis button.
 
         Parameters
         ----------
@@ -879,6 +1343,14 @@ class Periscope(QtWidgets.QMainWindow):
         for cb in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
             cb.toggled.connect(self._build_layout)
 
+        # Network Analysis button
+        self.btn_netanal = QtWidgets.QPushButton("Network Analysis")
+        self.btn_netanal.setToolTip("Open network analysis configuration window.")
+        self.btn_netanal.clicked.connect(self._show_netanal_dialog)
+        if self.crs is None:
+            self.btn_netanal.setEnabled(False)
+            self.btn_netanal.setToolTip("CRS object not available - cannot run network analysis.")
+
         # The new Help button
         self.btn_help = QtWidgets.QPushButton("Help")
         self.btn_help.setToolTip("Show usage, interaction details, and examples.")
@@ -896,7 +1368,8 @@ class Periscope(QtWidgets.QMainWindow):
         for cb in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
             top_h.addWidget(cb)
         top_h.addStretch(1)
-        # Insert the Help button to the top bar
+        # Insert the Network Analysis and Help buttons
+        top_h.addWidget(self.btn_netanal)
         top_h.addWidget(self.btn_help)
 
         main_vbox.addWidget(top_bar)
@@ -1003,10 +1476,15 @@ class Periscope(QtWidgets.QMainWindow):
             "  - Double-click within a plot: Show the coordinates of the clicked position.\n"
             "  - Export plot to CSV, Image, Vector Graphics, or interactive Matplotlib window: Right-click -> Export\n"
             "  - See PyQtGraph docs for more.\n\n"
+            "**Network Analysis:**\n"
+            "  - Click the 'Network Analysis' button to open the configuration dialog.\n"
+            "  - Configure parameters like frequency range, amplitude, and number of points.\n"
+            "  - Analysis runs in a separate window with real-time updates.\n"
+            "  - Export results as pickle or CSV files.\n\n"
             "**Performance tips for higher FPS:**\n"
             "  - Disable auto-scaling in the configuration pain\n"
             "  - Use the density mode for IQ, smaller buffers, or enable a subset of I,Q,M.\n"            
-            "  - Periscope is limited by the single-thread renderer. Lauching multiple instances can improve performance for viewing many channels.\n\n"
+            "  - Periscope is limited by the single-thread renderer. Launching multiple instances can improve performance for viewing many channels.\n\n"
             "**Command-Line Examples:**\n"
             "  - `$ periscope rfmux0022.local --module 2 --channels \"3&5,7`\n\n"
             "**IPython / Jupyter:** invoke directly from CRS object\n"
@@ -1016,6 +1494,61 @@ class Periscope(QtWidgets.QMainWindow):
         msg.setText(help_text)
         msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Close)
         msg.exec()
+
+    def _show_netanal_dialog(self):
+        """Show the network analysis configuration dialog."""
+        dialog = NetworkAnalysisDialog(self, modules=[1, 2, 3, 4, 5, 6, 7, 8])
+        if dialog.exec():
+            params = dialog.get_parameters()
+            if params:
+                self._start_network_analysis(params)
+    
+    def _start_network_analysis(self, params: dict):
+        """Start network analysis on selected modules."""
+        if self.crs is None:
+            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
+            return
+            
+        # Determine which modules to run
+        selected_module = params.get('module')
+        if selected_module is None:
+            modules = list(range(1, 9))  # All modules
+        else:
+            modules = [selected_module]
+        
+        # Create results window
+        self.netanal_window = NetworkAnalysisWindow(self, modules)
+        self.netanal_window.show()
+        
+        # Start tasks for each module
+        for module in modules:
+            task_params = params.copy()
+            task_params['module'] = module
+            
+            task = NetworkAnalysisTask(self.crs, module, task_params, self.netanal_signals)
+            self.netanal_tasks[module] = task
+            self.pool.start(task)
+    
+    def _netanal_progress(self, module: int, progress: float):
+        """Handle network analysis progress updates."""
+        if self.netanal_window:
+            self.netanal_window.update_progress(module, progress)
+    
+    def _netanal_data_update(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
+        """Handle network analysis data updates."""
+        if self.netanal_window:
+            self.netanal_window.update_data(module, freqs, amps, phases)
+    
+    def _netanal_completed(self, module: int):
+        """Handle network analysis completion."""
+        if self.netanal_window:
+            self.netanal_window.complete_analysis(module)
+        if module in self.netanal_tasks:
+            del self.netanal_tasks[module]
+    
+    def _netanal_error(self, error_msg: str):
+        """Handle network analysis errors."""
+        QtWidgets.QMessageBox.critical(self, "Network Analysis Error", error_msg)
 
     def _toggle_config(self, visible: bool):
         """
@@ -1289,7 +1822,7 @@ class Periscope(QtWidgets.QMainWindow):
                 if mode != "T":
                     pw.enableAutoRange(pg.ViewBox.XYAxes, True)
 
-        # Apply “Show Curves” toggles
+        # Apply "Show Curves" toggles
         self._toggle_iqmag()
 
     def _apply_plot_theme(self, pw: pg.PlotWidget):
@@ -1524,6 +2057,8 @@ class Periscope(QtWidgets.QMainWindow):
         if not first_group:
             return
         ch = first_group[0]
+        tarr = self.tbuf[ch]        
+        ch = first_group[0]
         tarr = self.tbuf[ch].data()
         if len(tarr) < 2:
             return
@@ -1722,6 +2257,11 @@ class Periscope(QtWidgets.QMainWindow):
         self.timer.stop()
         self.receiver.stop()
         self.receiver.wait()
+        
+        # Stop any running network analysis tasks
+        for task in self.netanal_tasks.values():
+            task.stop()
+        
         super().closeEvent(ev)
         ev.accept()
 
@@ -1734,33 +2274,36 @@ def main():
     ap = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
     description=textwrap.dedent("""\
-        Periscope — real-time CRS packet visualizer.
+        Periscope — real-time CRS packet visualizer with network analysis.
 
         Connects to a UDP/multicast stream, filters a single module, and drives a
-        PyQt6 GUI with up to five linked views per channel group:
+        PyQt6 GUI with up to six linked views per channel group:
 
           • Time-domain waveform (TOD)
           • IQ plane (density or scatter)
           • Raw FFT
           • Single-sideband PSD (SSB)  – CIC-corrected
           • Dual-sideband PSD (DSB)    – CIC-corrected
+          • Network Analysis — amplitude and phase vs frequency
 
         Key options
         -----------
-          • Comma-separated channel list with ‘&’ to overlay channels on one row,
+          • Comma-separated channel list with '&' to overlay channels on one row,
             e.g. "3&5,7" → two rows: {3,5} and {7}
           • -n / --num-samples   Ring-buffer length per channel (history / FFT depth)
           • -f / --fps           Maximum GUI refresh rate (frames s⁻¹) [typically system-limited anyway]
           • -d / --density-dot   Dot size in IQ-density mode (pixels) [not typically adjusted]
+          • --enable-netanal     Create CRS object to enable network analysis
 
         Advanced features
         -----------------
           • Real-unit conversion (counts → V, dBm/Hz, dBc/Hz) with CIC droop compensation in the PSDs
           • Welch segmentation to average PSD noise floor
+          • Network analysis with real-time amplitude and phase measurements
 
         Example
         -------
-          $ periscope rfmux0022.local --module 2 --channels "3&5,7"
+          $ periscope rfmux0022.local --module 2 --channels "3&5,7" --enable-netanal
 
         Run with -h / --help for the full option list.
     """))
@@ -1771,6 +2314,8 @@ def main():
     ap.add_argument("-n", "--num-samples", type=int, default=5_000)
     ap.add_argument("-f", "--fps", type=float, default=30.0)
     ap.add_argument("-d", "--density-dot", type=int, default=DENSITY_DOT_SIZE)
+    ap.add_argument("--enable-netanal", action="store_true", 
+                    help="Create CRS object to enable network analysis")
     args = ap.parse_args()
 
     if args.fps <= 0:
@@ -1786,6 +2331,31 @@ def main():
     # Bind only the main GUI (this) thread to a single CPU to reduce scheduling jitter
     _pin_current_thread_to_core()
 
+    # Create CRS object if requested
+    crs = None
+    if args.enable_netanal:
+        try:
+            # Extract serial number from hostname
+            hostname = args.hostname
+            if "rfmux" in hostname and ".local" in hostname:
+                serial = hostname.replace("rfmux", "").replace(".local", "")
+            else:
+                # Default to hostname as serial
+                serial = hostname
+            
+            # Create and resolve CRS in a synchronous way
+            s = load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')
+            crs = s.query(CRS).one()
+            
+            # Resolve the CRS object
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(crs.resolve())
+            
+        except Exception as e:
+            warnings.warn(f"Failed to create CRS object: {str(e)}\nNetwork analysis will be disabled.")
+            crs = None
+
     win = Periscope(
         host=args.hostname,
         module=args.module,
@@ -1793,9 +2363,11 @@ def main():
         buf_size=args.num_samples,
         refresh_ms=refresh_ms,
         dot_px=args.density_dot,
+        crs=crs  # Pass the CRS object
     )
     win.show()
     sys.exit(app.exec())
+
 
 @macro(CRS, register=True)
 async def raise_periscope(
@@ -1817,7 +2389,8 @@ async def raise_periscope(
 
     Parameters
     ----------
-    CRS : CRS object
+    crs : CRS object
+        CRS object for hardware communication (needed for network analysis).
     module : int, optional
         Module number to filter data (default is 1).
     channels : str, optional
@@ -1862,6 +2435,7 @@ async def raise_periscope(
         buf_size=buf_size,
         refresh_ms=refresh_ms,
         dot_px=density_dot,
+        crs=crs,  # Pass the CRS object for network analysis
     )
     viewer.show()
 

@@ -63,6 +63,7 @@ import csv
 import datetime
 from typing import Dict, List, Optional, Any
 import numpy as np
+import concurrent.futures
 
 # Create session
 import asyncio
@@ -674,20 +675,55 @@ class NetworkAnalysisTask(QRunnable):
         self.signals = signals
         self._running = True
         self._last_update_time = 0
-        self._update_interval = 0.1  # Update every 100ms        
+        self._update_interval = 0.1  # Update every 100ms
+        self._task = None
+        self._loop = None
         
     def stop(self):
-        """Signal the task to stop."""
+        """
+        Signal the task to stop and cancel any running asyncio tasks.
+        """
         self._running = False
+        
+        # Cancel the async task if it exists
+        if self._task and not self._task.done() and self._loop:
+            # Schedule task cancellation in the event loop
+            self._loop.call_soon_threadsafe(self._task.cancel)
+            
+            # Clean up channels
+            if self._loop.is_running():
+                try:
+                    # Try to schedule cleanup in the event loop
+                    cleanup_future = asyncio.run_coroutine_threadsafe(
+                        self._cleanup_channels(), self._loop
+                    )
+                    # Wait for cleanup with a timeout
+                    cleanup_future.result(timeout=2.0)
+                except (asyncio.CancelledError, concurrent.futures.TimeoutError, Exception):
+                    pass
+    
+    async def _cleanup_channels(self):
+        """Clean up channels on the module being analyzed."""
+        try:
+            async with self.crs.tuber_context() as ctx:
+                # Zero out amplitudes for all channels on this module
+                for j in range(1, 1024):  # Assuming max channels is 1023
+                    ctx.set_amplitude(0, channel=j, module=self.module)
+                await ctx()
+        except Exception:
+            # Ignore errors during cleanup
+            pass
     
     def run(self):
         """Execute the network analysis using the take_netanal macro."""
+        # Import here to avoid circular imports
+        import concurrent.futures
+        
         # Create event loop for async operations
-        loop = None
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
             # Create callbacks that emit signals
             def progress_cb(module, progress):
                 if self._running:
@@ -719,40 +755,63 @@ class NetworkAnalysisTask(QRunnable):
             clear_channels = self.params.get('clear_channels', True)
 
             # Clear channels if requested
-            if clear_channels:
-                loop.run_until_complete(self.crs.clear_channels(module=self.module))
+            if clear_channels and self._running:
+                self._loop.run_until_complete(self.crs.clear_channels(module=self.module))
 
             # Set cable length before running the analysis
-            loop.run_until_complete(self.crs.set_cable_length(length=cable_length, module=self.module))
+            if self._running:
+                self._loop.run_until_complete(self.crs.set_cable_length(length=cable_length, module=self.module))
 
-            # Call the actual take_netanal macro
-            result = loop.run_until_complete(self.crs.take_netanal(
-                amp=amp,
-                fmin=fmin,
-                fmax=fmax,
-                nsamps=nsamps,
-                npoints=npoints,
-                max_chans=max_chans,
-                max_span=max_span,
-                module=self.module,
-                progress_callback=progress_cb,
-                data_callback=data_cb
-            ))
-            
-            # Extract and emit final data
-            if self._running and result:
-                fs_sorted, iq_sorted, phase_sorted = result
-                amp_sorted = np.abs(iq_sorted)
+            # Create a task for the netanal operation
+            if self._running:
+                netanal_coro = self.crs.take_netanal(
+                    amp=amp,
+                    fmin=fmin,
+                    fmax=fmax,
+                    nsamps=nsamps,
+                    npoints=npoints,
+                    max_chans=max_chans,
+                    max_span=max_span,
+                    module=self.module,
+                    progress_callback=progress_cb,
+                    data_callback=data_cb
+                )
                 
-                # Emit final data update
-                self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
-                self.signals.completed.emit(self.module)
+                # Create and store the task so it can be canceled
+                self._task = self._loop.create_task(netanal_coro)
+                
+                try:
+                    # Run the task and get the result
+                    result = self._loop.run_until_complete(self._task)
+                    
+                    # Extract and emit final data if task completed successfully
+                    if self._running and result:
+                        fs_sorted, iq_sorted, phase_sorted = result
+                        amp_sorted = np.abs(iq_sorted)
+                        
+                        # Emit final data update
+                        self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
+                        self.signals.completed.emit(self.module)
+                except asyncio.CancelledError:
+                    # Task was canceled, emit error signal
+                    self.signals.error.emit(f"Analysis canceled for module {self.module}")
+                    
+                    # Make sure to clean up channels
+                    self._loop.run_until_complete(self._cleanup_channels())
             
         except Exception as e:
             self.signals.error.emit(str(e))
         finally:
-            if loop:
-                loop.close()
+            # Clean up resources
+            if self._task and not self._task.done():
+                self._task.cancel()
+                
+            # Clean up the event loop
+            if self._loop and self._loop.is_running():
+                self._loop.stop()
+            if self._loop:
+                self._loop.close()
+                self._loop = None
 
 # ───────────────────────── Multi-Channel Parsing ─────────────────────────
 def _parse_channels_multich(txt: str) -> List[List[int]]:
@@ -855,11 +914,11 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         self.module_entry.setToolTip("Enter module numbers (e.g., '1,2,5' or '1-4' or 'All')")
         param_layout.addRow("Modules:", self.module_entry)
         
-        # Frequency range
-        self.fmin_edit = QtWidgets.QLineEdit("100e6")
-        self.fmax_edit = QtWidgets.QLineEdit("2450e6")
-        param_layout.addRow("Min Frequency (Hz):", self.fmin_edit)
-        param_layout.addRow("Max Frequency (Hz):", self.fmax_edit)
+        # Frequency range (in MHz instead of Hz)
+        self.fmin_edit = QtWidgets.QLineEdit("100")
+        self.fmax_edit = QtWidgets.QLineEdit("2450")
+        param_layout.addRow("Min Frequency (MHz):", self.fmin_edit)
+        param_layout.addRow("Max Frequency (MHz):", self.fmax_edit)
 
         # Cable length
         self.cable_length_edit = QtWidgets.QLineEdit("0.75")
@@ -930,8 +989,8 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
             
             params = {
                 'module': selected_module,
-                'fmin': float(eval(self.fmin_edit.text())),
-                'fmax': float(eval(self.fmax_edit.text())),
+                'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
+                'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
                 'cable_length': float(self.cable_length_edit.text()),
                 'amp': float(eval(self.amp_edit.text())),
                 'npoints': int(self.points_edit.text()),
@@ -948,14 +1007,19 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
 
 class NetworkAnalysisWindow(QtWidgets.QMainWindow):
     """
-    Window for displaying network analysis results.
+    Window for displaying network analysis results with real units support.
     """
     def __init__(self, parent=None, modules=None):
         super().__init__(parent)
         self.setWindowTitle("Network Analysis Results")
         self.modules = modules or []
         self.data = {}  # module -> (freqs, amps, phases)
+        self.raw_data = {}  # Store the raw IQ data for unit conversion
+        self.unit_mode = "counts"  # Default: counts, alternatives: "dbm", "volts"
+        self.first_setup = True  # Flag to track initial setup
         self._setup_ui()
+        # Set initial size only on creation
+        self.resize(1000, 800)
 
     def _setup_ui(self):
         central = QtWidgets.QWidget()
@@ -967,21 +1031,6 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        # Add edit parameters button to toolbar (after export_btn and rerun_btn)
-        edit_params_btn = QtWidgets.QPushButton("Edit Parameters")
-        edit_params_btn.clicked.connect(self._edit_parameters)
-        toolbar.addWidget(edit_params_btn)
-
-        # Export button
-        export_btn = QtWidgets.QPushButton("Export Data")
-        export_btn.clicked.connect(self._export_data)
-        toolbar.addWidget(export_btn)
-        
-        # Re-run analysis button
-        rerun_btn = QtWidgets.QPushButton("Re-run Analysis")
-        rerun_btn.clicked.connect(self._rerun_analysis)
-        toolbar.addWidget(rerun_btn)
-        
         # Cable length control for quick adjustments
         self.cable_length_label = QtWidgets.QLabel("Cable Length (m):")
         self.cable_length_spin = QtWidgets.QDoubleSpinBox()
@@ -989,14 +1038,65 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.cable_length_spin.setValue(0.75)
         self.cable_length_spin.setSingleStep(0.05)
         toolbar.addWidget(self.cable_length_label)
-        toolbar.addWidget(self.cable_length_spin)
+        toolbar.addWidget(self.cable_length_spin)        
 
-        # Progress bars
-        self.progress_bars = {}
+        # Add edit parameters button to toolbar
+        edit_params_btn = QtWidgets.QPushButton("Edit Other Parameters")
+        edit_params_btn.clicked.connect(self._edit_parameters)
+        toolbar.addWidget(edit_params_btn)
+
+        # Re-run analysis button
+        rerun_btn = QtWidgets.QPushButton("Re-run Analysis")
+        rerun_btn.clicked.connect(self._rerun_analysis)
+        toolbar.addWidget(rerun_btn)        
+
+        # Add spacer to push the unit controls to the far right
+        spacer = QtWidgets.QWidget()
+        spacer.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, 
+                            QtWidgets.QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(spacer)
+        
+        # Export button
+        export_btn = QtWidgets.QPushButton("Export Data")
+        export_btn.clicked.connect(self._export_data)
+        toolbar.addWidget(export_btn)        
+
+        # Create Real Units controls (will add to toolbar at the end)
+        unit_group = QtWidgets.QWidget()
+        unit_layout = QtWidgets.QHBoxLayout(unit_group)
+        unit_layout.setContentsMargins(0, 0, 0, 0)
+        unit_layout.setAlignment(Qt.AlignmentFlag.AlignRight)
+        
+        self.rb_counts = QtWidgets.QRadioButton("Counts")
+        self.rb_dbm = QtWidgets.QRadioButton("dBm")
+        self.rb_volts = QtWidgets.QRadioButton("Volts")
+        self.rb_counts.setChecked(True)
+        
+        unit_layout.addWidget(QtWidgets.QLabel("Units:"))
+        unit_layout.addWidget(self.rb_counts)
+        unit_layout.addWidget(self.rb_dbm)
+        unit_layout.addWidget(self.rb_volts)
+        
+        # Connect signals
+        self.rb_counts.toggled.connect(lambda: self._update_unit_mode("counts"))
+        self.rb_dbm.toggled.connect(lambda: self._update_unit_mode("dbm"))
+        self.rb_volts.toggled.connect(lambda: self._update_unit_mode("volts"))
+        
+        # Set fixed size policy to make alignment more predictable
+        unit_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, 
+                                QtWidgets.QSizePolicy.Policy.Preferred)
+        
+        # Now add the unit controls at the far right
+        toolbar.addSeparator()
+        toolbar.addWidget(unit_group)
+
+        # Progress bars group with hide capability
+        self.progress_group = None
         if self.modules:
-            progress_group = QtWidgets.QGroupBox("Analysis Progress")
-            progress_layout = QtWidgets.QVBoxLayout(progress_group)
+            self.progress_group = QtWidgets.QGroupBox("Analysis Progress")
+            progress_layout = QtWidgets.QVBoxLayout(self.progress_group)
             
+            self.progress_bars = {}
             for module in self.modules:
                 hlayout = QtWidgets.QHBoxLayout()
                 label = QtWidgets.QLabel(f"Module {module}:")
@@ -1008,7 +1108,9 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 progress_layout.addLayout(hlayout)
                 self.progress_bars[module] = pbar
                 
-            layout.addWidget(progress_group)
+            layout.addWidget(self.progress_group)
+        else:
+            self.progress_bars = {}
         
         # Plot area
         self.tabs = QtWidgets.QTabWidget()
@@ -1021,20 +1123,16 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             
             # Create amplitude and phase plots
             amp_plot = pg.PlotWidget(title=f"Module {module} - Amplitude")
-            amp_plot.setLabel('left', 'Amplitude')
-            amp_plot.setLabel('bottom', 'Frequency', units='Hz')
+            self._update_amplitude_labels(amp_plot)
+            amp_plot.setLabel('bottom', 'Frequency', units='GHz')
             amp_plot.showGrid(x=True, y=True, alpha=0.3)
             
             phase_plot = pg.PlotWidget(title=f"Module {module} - Phase")
             phase_plot.setLabel('left', 'Phase', units='deg')
-            phase_plot.setLabel('bottom', 'Frequency', units='Hz')
+            phase_plot.setLabel('bottom', 'Frequency', units='GHz')
             phase_plot.showGrid(x=True, y=True, alpha=0.3)
             
-            # Create curves
-            amp_curve = amp_plot.plot(pen=pg.mkPen('r', width=LINE_WIDTH))
-            phase_curve = phase_plot.plot(pen=pg.mkPen('b', width=LINE_WIDTH))
-
-            # Use periscope color scheme: orange for amplitude, blue for phase
+            # Create curves with periscope color scheme
             amp_curve = amp_plot.plot(pen=pg.mkPen('#ff7f0e', width=LINE_WIDTH))
             phase_curve = phase_plot.plot(pen=pg.mkPen('#1f77b4', width=LINE_WIDTH))
 
@@ -1048,25 +1146,108 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 'amp_curve': amp_curve,
                 'phase_curve': phase_curve
             }
+            
+            # Link the x-axis of amplitude and phase plots for synchronized zooming
+            phase_plot.setXLink(amp_plot)
 
-        # Link the x-axis of amplitude and phase plots for synchronized zooming
-        amp_plot.setXLink(phase_plot)
+    def _update_unit_mode(self, mode):
+        """Update unit mode and redraw plots."""
+        if mode != self.unit_mode:
+            self.unit_mode = mode
+            # Update all plot labels
+            for module in self.plots:
+                self._update_amplitude_labels(self.plots[module]['amp_plot'])
+            
+            # Redraw with new units
+            self._redraw_all_plots()
+    
+    def _update_amplitude_labels(self, plot):
+        """Update plot labels based on current unit mode."""
+        if self.unit_mode == "counts":
+            plot.setLabel('left', 'Amplitude', units='Counts')
+        elif self.unit_mode == "dbm":
+            plot.setLabel('left', 'Power', units='dBm')
+        elif self.unit_mode == "volts":
+            plot.setLabel('left', 'Amplitude', units='V')
+
+    def _redraw_all_plots(self):
+        """Redraw all plots with current unit mode."""
+        for module, (freqs, amps, phases, iq_data) in self.raw_data.items():
+            if module in self.plots:
+                # Convert amplitude to selected units
+                converted_amps = self._convert_amplitude(amps, iq_data)
+                
+                # Convert frequency to GHz for display
+                freq_ghz = freqs / 1e9
+                
+                # Update plots
+                self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
+                self.plots[module]['phase_curve'].setData(freq_ghz, phases)
+                
+                # Enable auto range to fit new data
+                self.plots[module]['amp_plot'].autoRange()
+    
+    def _convert_amplitude(self, amps, iq_data):
+        """
+        Convert amplitude values to the selected unit.
+        
+        Parameters
+        ----------
+        amps : ndarray
+            Raw amplitude values (magnitude of complex data)
+        iq_data : ndarray
+            Complex IQ data from network analysis
+            
+        Returns
+        -------
+        ndarray
+            Converted amplitude values in the selected unit
+        """
+        from ..core.transferfunctions import (
+            convert_roc_to_volts,
+            convert_roc_to_dbm,
+        )
+        
+        if self.unit_mode == "counts":
+            return amps  # Raw counts
+        elif self.unit_mode == "volts":
+            return convert_roc_to_volts(amps)
+        elif self.unit_mode == "dbm":
+            # For network analysis, amp values are already magnitudes
+            # so we can directly convert to dBm
+            return convert_roc_to_dbm(amps)
+        
+        # Default fallback
+        return amps
 
     def closeEvent(self, event):
         """Handle window close event by informing parent and stopping tasks."""
         parent = self.parent()
         
-        # Stop all associated network analysis tasks
-        if hasattr(parent, 'netanal_tasks'):
+        # Stop all associated network analysis tasks from parent
+        if parent and hasattr(parent, 'netanal_tasks'):
             for module, task in list(parent.netanal_tasks.items()):
                 task.stop()
+                # Give tasks time to clean up
+                time.sleep(0.1)
                 parent.netanal_tasks.pop(module, None)
         
         # Inform parent that window is closing
-        if hasattr(parent, 'netanal_window'):
+        if parent and hasattr(parent, 'netanal_window'):
             parent.netanal_window = None
         
+        # Call the parent class's closeEvent method
         super().closeEvent(event)
+
+    def _check_all_complete(self):
+        """Check if all progress bars are at 100% and hide the progress group if so."""
+        if not self.progress_group:
+            return
+            
+        all_complete = all(pbar.value() == 100 for pbar in self.progress_bars.values())
+        if all_complete:
+            # Hide the progress group when all modules are complete
+            self.progress_group.setVisible(False)
 
     def _edit_parameters(self):
         """Open dialog to edit parameters besides cable length."""
@@ -1077,6 +1258,9 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             if params:
                 # Keep the current cable length
                 params['cable_length'] = self.cable_length_spin.value()
+                # Make progress group visible again
+                if self.progress_group:
+                    self.progress_group.setVisible(True)
                 self.parent()._rerun_network_analysis(params)
 
     def _rerun_analysis(self):
@@ -1085,6 +1269,9 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             # Get original parameters and update cable length
             params = self.original_params.copy()
             params['cable_length'] = self.cable_length_spin.value()
+            # Make progress group visible again
+            if self.progress_group:
+                self.progress_group.setVisible(True)
             self.parent()._rerun_network_analysis(params)
     
     def set_original_params(self, params):
@@ -1097,22 +1284,31 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         fmin = params.get('fmin', 100e6)
         fmax = params.get('fmax', 2450e6)
         for module in self.plots:
-            self.plots[module]['amp_plot'].setXRange(fmin, fmax)
-            self.plots[module]['phase_plot'].setXRange(fmin, fmax)
+            self.plots[module]['amp_plot'].setXRange(fmin/1e9, fmax/1e9)
+            self.plots[module]['phase_plot'].setXRange(fmin/1e9, fmax/1e9)
             # Disable auto range on X axis but keep Y auto range
             self.plots[module]['amp_plot'].enableAutoRange(pg.ViewBox.XAxis, False)
             self.plots[module]['phase_plot'].enableAutoRange(pg.ViewBox.XAxis, False)
             self.plots[module]['amp_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
             self.plots[module]['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
-          
-        self.resize(1000, 800)
         
     def update_data(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
         """Update the plot data for a specific module."""
+        # Store the raw data for unit conversion
+        iq_data = amps * np.exp(1j * np.radians(phases))  # Reconstruct complex data
+        self.raw_data[module] = (freqs, amps, phases, iq_data)
         self.data[module] = (freqs, amps, phases)
+        
         if module in self.plots:
-            self.plots[module]['amp_curve'].setData(freqs, amps)
-            self.plots[module]['phase_curve'].setData(freqs, phases)
+            # Convert amplitude to selected units
+            converted_amps = self._convert_amplitude(amps, iq_data)
+            
+            # Convert frequency to GHz for display
+            freq_ghz = freqs / 1e9
+            
+            # Update plots
+            self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
+            self.plots[module]['phase_curve'].setData(freq_ghz, phases)
     
     def update_progress(self, module: int, progress: float):
         """Update the progress bar for a specific module."""
@@ -1123,6 +1319,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         """Mark analysis as complete for a module."""
         if module in self.progress_bars:
             self.progress_bars[module].setValue(100)
+            # Check if all modules are complete to hide progress bars
+            self._check_all_complete()
     
     def _export_data(self):
         """Export the collected data."""
@@ -1148,7 +1346,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                     with open(filename, 'wb') as f:
                         data_to_save = {
                             'timestamp': datetime.datetime.now().isoformat(),
-                            'data': self.data
+                            'data': self.data,
+                            'unit_mode': self.unit_mode
                         }
                         pickle.dump(data_to_save, f)
                         
@@ -1156,11 +1355,23 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                     # Export as CSV (one file per module)
                     base, ext = os.path.splitext(filename)
                     for module, (freqs, amps, phases) in self.data.items():
+                        # Convert amps to current unit for export
+                        iq_data = self.raw_data[module][3]
+                        converted_amps = self._convert_amplitude(amps, iq_data)
+                        
                         module_filename = f"{base}_module{module}{ext}"
                         with open(module_filename, 'w', newline='') as f:
                             writer = csv.writer(f)
-                            writer.writerow(['Frequency (Hz)', 'Amplitude', 'Phase (deg)'])
-                            for freq, amp, phase in zip(freqs, amps, phases):
+                            unit_label = self.unit_mode
+                            if self.unit_mode == "dbm":
+                                unit_label = "dBm"
+                                writer.writerow(['Frequency (Hz)', f'Power ({unit_label})', 'Phase (deg)'])
+                            elif self.unit_mode == "volts":
+                                unit_label = "V"
+                                writer.writerow(['Frequency (Hz)', f'Amplitude ({unit_label})', 'Phase (deg)'])
+                            else:
+                                writer.writerow(['Frequency (Hz)', f'Amplitude ({unit_label})', 'Phase (deg)'])
+                            for freq, amp, phase in zip(freqs, converted_amps, phases):
                                 writer.writerow([freq, amp, phase])
                                 
                 else:
@@ -1168,7 +1379,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                     with open(filename, 'wb') as f:
                         data_to_save = {
                             'timestamp': datetime.datetime.now().isoformat(),
-                            'data': self.data
+                            'data': self.data,
+                            'unit_mode': self.unit_mode
                         }
                         pickle.dump(data_to_save, f)
                         
@@ -1178,7 +1390,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Export Error", 
                                                f"Error exporting data: {str(e)}")
-
+                
 class NetworkAnalysisParamsDialog(QtWidgets.QDialog):
     """Dialog for editing network analysis parameters (excluding cable length)."""
     def __init__(self, parent=None, params=None):
@@ -1194,11 +1406,11 @@ class NetworkAnalysisParamsDialog(QtWidgets.QDialog):
         # Parameters form
         form = QtWidgets.QFormLayout()
         
-        # Frequency range
-        self.fmin_edit = QtWidgets.QLineEdit(str(self.params.get('fmin', '100e6')))
-        self.fmax_edit = QtWidgets.QLineEdit(str(self.params.get('fmax', '2450e6')))
-        form.addRow("Min Frequency (Hz):", self.fmin_edit)
-        form.addRow("Max Frequency (Hz):", self.fmax_edit)
+        # Frequency range (in MHz instead of Hz)
+        self.fmin_edit = QtWidgets.QLineEdit(str(self.params.get('fmin', 100e6) / 1e6))  # Convert Hz to MHz
+        self.fmax_edit = QtWidgets.QLineEdit(str(self.params.get('fmax', 2450e6) / 1e6))  # Convert Hz to MHz
+        form.addRow("Min Frequency (MHz):", self.fmin_edit)
+        form.addRow("Max Frequency (MHz):", self.fmax_edit)
         
         # Amplitude
         self.amp_edit = QtWidgets.QLineEdit(str(self.params.get('amp', '0.001')))
@@ -1245,8 +1457,8 @@ class NetworkAnalysisParamsDialog(QtWidgets.QDialog):
         try:
             params = self.params.copy()
             params.update({
-                'fmin': float(eval(self.fmin_edit.text())),
-                'fmax': float(eval(self.fmax_edit.text())),
+                'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
+                'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
                 'amp': float(eval(self.amp_edit.text())),
                 'npoints': int(self.points_edit.text()),
                 'nsamps': int(self.samples_edit.text()),
@@ -1686,6 +1898,11 @@ class Periscope(QtWidgets.QMainWindow):
     def _netanal_data_update(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
         """Handle network analysis data updates."""
         if self.netanal_window:
+            # Reconstruct the complex IQ data for proper unit conversion
+            iq_data = np.array(amps) * np.exp(1j * np.radians(phases))
+            
+            # Keep the window's update_data method signature the same
+            # but store raw complex data internally for unit conversion
             self.netanal_window.update_data(module, freqs, amps, phases)
     
     def _netanal_completed(self, module: int):
@@ -2408,8 +2625,9 @@ class Periscope(QtWidgets.QMainWindow):
         self.receiver.wait()
         
         # Stop any running network analysis tasks
-        for task in self.netanal_tasks.values():
+        for module, task in list(self.netanal_tasks.items()):
             task.stop()
+            self.netanal_tasks.pop(module, None)
         
         super().closeEvent(ev)
         ev.accept()

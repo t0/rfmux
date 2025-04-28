@@ -178,15 +178,7 @@ async def take_netanal(
 
             # Add random offsets to dither IMD tones
             # but ensure they don't exceed NCO bandwidth at the extrema.
-            # WARNING: This does assume users aren't taking data with <50Hz
-            #          resolution. If so, will need to get more clever and
-            #          apply the edge cases to all relevant frequencies and not
-            #          just the extrema.
-            ifreqs = np.concatenate([
-                [comb[0] - 50 * np.sign(comb[0] - nco_freq) * np.random.random()],
-                comb[1:-1] + 100 * (np.random.random(len(comb) - 2) - 0.5),
-                [comb[-1] - 50 * np.sign(comb[-1] - nco_freq) * np.random.random()]
-            ])
+            ifreqs = _safe_concatenate_frequencies(comb, nco_freq)
 
             # Not every internal loop has to use the same number of channels.
             # This block ensures the unused ones are zeroed WHILE programming
@@ -274,3 +266,41 @@ async def take_netanal(
     fs_sorted, iq_sorted, phase_sorted = zip(*combined)
 
     return np.array(fs_sorted), np.array(iq_sorted), np.array(phase_sorted)
+
+def _safe_concatenate_frequencies(comb, nco_freq):
+    """
+    Safely concatenate frequency arrays with dithering, handling edge cases
+    with small numbers of elements.
+    
+    Parameters
+    ----------
+    comb : ndarray
+        Array of frequencies to dither
+    nco_freq : float
+        NCO frequency reference
+        
+    Returns
+    -------
+    ndarray
+        Array of dithered frequencies
+    """
+    if len(comb) == 0:
+        return np.array([])
+    
+    if len(comb) == 1:
+        # Only one frequency - just dither it slightly
+        return np.array([comb[0] - 50 * np.sign(comb[0] - nco_freq) * np.random.random()])
+    
+    if len(comb) == 2:
+        # Two frequencies - dither both as edge cases
+        return np.array([
+            comb[0] - 50 * np.sign(comb[0] - nco_freq) * np.random.random(),
+            comb[1] - 50 * np.sign(comb[1] - nco_freq) * np.random.random()
+        ])
+    
+    # Normal case with more than 2 frequencies
+    return np.concatenate([
+        [comb[0] - 50 * np.sign(comb[0] - nco_freq) * np.random.random()],
+        comb[1:-1] + 100 * (np.random.random(len(comb) - 2) - 0.5),
+        [comb[-1] - 50 * np.sign(comb[-1] - nco_freq) * np.random.random()]
+    ])

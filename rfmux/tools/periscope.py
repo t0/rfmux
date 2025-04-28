@@ -304,8 +304,18 @@ class Circular:
 
 class ClickableViewBox(pg.ViewBox):
     """
-    A custom ViewBox that opens a coordinate readout dialog when double-clicked.
+    A custom ViewBox that opens a coordinate readout dialog when double-clicked
+    and supports rectangle selection zooming.
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Default to RectMode (box zoom)
+        self.setMouseMode(pg.ViewBox.RectMode)  
+
+    def enableZoomBoxMode(self, enable=True):
+        """Enable or disable zoom box mode."""
+        self.setMouseMode(pg.ViewBox.RectMode if enable else pg.ViewBox.PanMode)
 
     def mouseDoubleClickEvent(self, ev):
         """
@@ -345,6 +355,20 @@ class ClickableViewBox(pg.ViewBox):
         box.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         box.show()
         ev.accept()
+    
+    def enableZoomBoxMode(self, enable=True):
+        """
+        Enable or disable zoom box mode.
+        
+        Parameters
+        ----------
+        enable : bool
+            If True, enables rectangle selection zooming. If False, returns to pan mode.
+        """
+        if enable:
+            self.setMouseMode(pg.ViewBox.RectMode)
+        else:
+            self.setMouseMode(pg.ViewBox.PanMode)
 
 
 class UDPReceiver(QtCore.QThread):
@@ -1017,6 +1041,9 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.raw_data = {}  # Store the raw IQ data for unit conversion
         self.unit_mode = "counts"  # Default: counts, alternatives: "dbm", "volts"
         self.first_setup = True  # Flag to track initial setup
+        self.zoom_box_mode = True  # Default to zoom box mode ON
+
+        # Setup the UI components
         self._setup_ui()
         # Set initial size only on creation
         self.resize(1000, 800)
@@ -1050,17 +1077,17 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         rerun_btn.clicked.connect(self._rerun_analysis)
         toolbar.addWidget(rerun_btn)        
 
+        # Export button
+        export_btn = QtWidgets.QPushButton("Export Data")
+        export_btn.clicked.connect(self._export_data)
+        toolbar.addWidget(export_btn)
+
         # Add spacer to push the unit controls to the far right
         spacer = QtWidgets.QWidget()
         spacer.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, 
                             QtWidgets.QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
         
-        # Export button
-        export_btn = QtWidgets.QPushButton("Export Data")
-        export_btn.clicked.connect(self._export_data)
-        toolbar.addWidget(export_btn)        
-
         # Create Real Units controls (will add to toolbar at the end)
         unit_group = QtWidgets.QWidget()
         unit_layout = QtWidgets.QHBoxLayout(unit_group)
@@ -1081,14 +1108,26 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.rb_counts.toggled.connect(lambda: self._update_unit_mode("counts"))
         self.rb_dbm.toggled.connect(lambda: self._update_unit_mode("dbm"))
         self.rb_volts.toggled.connect(lambda: self._update_unit_mode("volts"))
+
+        # Zoom box
+        zoom_box_cb = QtWidgets.QCheckBox("Zoom Box Mode")
+        zoom_box_cb.setChecked(self.zoom_box_mode)  # Default to ON
+        zoom_box_cb.setToolTip("When enabled, left-click drag creates a zoom box. When disabled, left-click drag pans.")
+        zoom_box_cb.toggled.connect(self._toggle_zoom_box)        
+        
+        # Store reference to the checkbox
+        self.zoom_box_cb = zoom_box_cb        
         
         # Set fixed size policy to make alignment more predictable
         unit_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, 
                                 QtWidgets.QSizePolicy.Policy.Preferred)
         
         # Now add the unit controls at the far right
-        toolbar.addSeparator()
         toolbar.addWidget(unit_group)
+        toolbar.addSeparator()
+        
+        # Add zoom box mode checkbox
+        toolbar.addWidget(zoom_box_cb)        
 
         # Progress bars group with hide capability
         self.progress_group = None
@@ -1121,17 +1160,19 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             tab = QtWidgets.QWidget()
             tab_layout = QtWidgets.QVBoxLayout(tab)
             
-            # Create amplitude and phase plots
-            amp_plot = pg.PlotWidget(title=f"Module {module} - Amplitude")
+            # Create amplitude and phase plots with ClickableViewBox
+            vb_amp = ClickableViewBox()
+            amp_plot = pg.PlotWidget(viewBox=vb_amp, title=f"Module {module} - Magnitude")
             self._update_amplitude_labels(amp_plot)
             amp_plot.setLabel('bottom', 'Frequency', units='GHz')
             amp_plot.showGrid(x=True, y=True, alpha=0.3)
-            
-            phase_plot = pg.PlotWidget(title=f"Module {module} - Phase")
+
+            vb_phase = ClickableViewBox()
+            phase_plot = pg.PlotWidget(viewBox=vb_phase, title=f"Module {module} - Phase")
             phase_plot.setLabel('left', 'Phase', units='deg')
             phase_plot.setLabel('bottom', 'Frequency', units='GHz')
             phase_plot.showGrid(x=True, y=True, alpha=0.3)
-            
+
             # Create curves with periscope color scheme
             amp_curve = amp_plot.plot(pen=pg.mkPen('#ff7f0e', width=LINE_WIDTH))
             phase_curve = phase_plot.plot(pen=pg.mkPen('#1f77b4', width=LINE_WIDTH))
@@ -1147,8 +1188,24 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 'phase_curve': phase_curve
             }
             
+            # Apply zoom box mode
+            self._apply_zoom_box_mode()            
+
             # Link the x-axis of amplitude and phase plots for synchronized zooming
             phase_plot.setXLink(amp_plot)
+
+    def _toggle_zoom_box(self, enable):
+        """Toggle zoom box mode for all plots."""
+        self.zoom_box_mode = enable
+        self._apply_zoom_box_mode()
+        
+    def _apply_zoom_box_mode(self):
+        """Apply the current zoom box mode setting to all plots."""
+        for module in self.plots:
+            for plot_type in ['amp_plot', 'phase_plot']:
+                viewbox = self.plots[module][plot_type].getViewBox()
+                if isinstance(viewbox, ClickableViewBox):
+                    viewbox.enableZoomBoxMode(self.zoom_box_mode)            
 
     def _update_unit_mode(self, mode):
         """Update unit mode and redraw plots."""
@@ -1763,6 +1820,13 @@ class Periscope(QtWidgets.QMainWindow):
         self.cb_auto_scale.setToolTip("Enable/disable auto-range for IQ/FFT/SSB/DSB. Can improve display performance.")
         self.cb_auto_scale.toggled.connect(self._toggle_auto_scale)
         disp_h.addWidget(self.cb_auto_scale)
+
+        # Add Zoom Box Mode checkbox
+        self.cb_zoom_box = QtWidgets.QCheckBox("Zoom Box Mode", checked=True)
+        self.cb_zoom_box.setToolTip("When enabled, left-click drag creates a zoom box. When disabled, left-click drag pans.")
+        self.cb_zoom_box.toggled.connect(self._toggle_zoom_box_mode)
+        disp_h.addWidget(self.cb_zoom_box)
+
         cfg_hbox.addWidget(disp_g)
 
         main_vbox.addWidget(self.ctrl_panel)
@@ -1812,6 +1876,52 @@ class Periscope(QtWidgets.QMainWindow):
         msg.setText(help_text)
         msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Close)
         msg.exec()
+
+    def _toggle_zoom_box_mode(self, enable: bool):
+        """
+        Enable or disable zoom box mode for all plot viewboxes.
+
+        Parameters
+        ----------
+        enable : bool
+            If True, enables rectangle selection zooming. If False, returns to pan mode.
+        """
+        if not hasattr(self, "plots"):
+            return
+        self.zoom_box_mode = enable  # Store the state            
+
+        for rowPlots in self.plots:
+            for mode, plot_widget in rowPlots.items():
+                viewbox = plot_widget.getViewBox()
+                if isinstance(viewbox, ClickableViewBox):
+                    viewbox.enableZoomBoxMode(enable)
+        
+        # Also update any network analysis plots if they exist
+        if hasattr(self, "netanal_window") and self.netanal_window:
+            for module in self.netanal_window.plots:
+                for plot_type in ['amp_plot', 'phase_plot']:
+                    viewbox = self.netanal_window.plots[module][plot_type].getViewBox()
+                    if isinstance(viewbox, ClickableViewBox):
+                        viewbox.enableZoomBoxMode(enable)
+
+            # Also update the Network Analysis window's zoom box checkbox if it exists
+            if hasattr(self.netanal_window, 'zoom_box_cb'):
+                self.netanal_window.zoom_box_cb.setChecked(enable)                        
+                        
+        # Show help message if enabling
+        if enable:
+            msg = QtWidgets.QMessageBox(self)
+            msg.setWindowTitle("Zoom Box Mode Enabled")
+            msg.setText(
+                "Zoom Box Mode is now enabled:\n\n"
+                "• Left-click and drag to draw a selection rectangle\n"
+                "• Release to zoom to that selection\n"
+                "• Right-click to zoom out\n\n"
+                "You can toggle this feature off in the configuration panel."
+            )
+            msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
+            msg.exec()
+        
 
     def _show_netanal_dialog(self):
         """Show the network analysis configuration dialog."""
@@ -2190,6 +2300,10 @@ class Periscope(QtWidgets.QMainWindow):
 
         # Apply "Show Curves" toggles
         self._toggle_iqmag()
+
+        # Apply zoom box mode to all plots
+        if hasattr(self, "zoom_box_mode"):
+            self._toggle_zoom_box_mode(self.zoom_box_mode)        
 
     def _apply_plot_theme(self, pw: pg.PlotWidget):
         """

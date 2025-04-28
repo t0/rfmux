@@ -59,6 +59,7 @@ import sys, warnings, ctypes.util, ctypes, platform
 import time
 import random
 import pickle
+import traceback
 import csv
 import datetime
 from typing import Dict, List, Optional, Any
@@ -671,6 +672,7 @@ class NetworkAnalysisSignals(QObject):
     """
     progress = pyqtSignal(int, float)  # module, progress percentage
     data_update = pyqtSignal(int, np.ndarray, np.ndarray, np.ndarray)  # module, freqs, amps, phases
+    data_update_with_amp = pyqtSignal(int, np.ndarray, np.ndarray, np.ndarray, float)  # module, freqs, amps, phases, amplitude
     completed = pyqtSignal(int)  # module
     error = pyqtSignal(str)  # error message
 
@@ -689,14 +691,17 @@ class NetworkAnalysisTask(QRunnable):
         Network analysis parameters
     signals : NetworkAnalysisSignals
         Signals for communication with GUI thread
+    amplitude : float, optional
+        Specific amplitude value to use for this task
     """
     
-    def __init__(self, crs: "CRS", module: int, params: dict, signals: NetworkAnalysisSignals):
+    def __init__(self, crs: "CRS", module: int, params: dict, signals: NetworkAnalysisSignals, amplitude=None):
         super().__init__()
         self.crs = crs
         self.module = module
         self.params = params
         self.signals = signals
+        self.amplitude = amplitude if amplitude is not None else params.get('amp', 0.001)
         self._running = True
         self._last_update_time = 0
         self._update_interval = 0.1  # Update every 100ms
@@ -740,8 +745,6 @@ class NetworkAnalysisTask(QRunnable):
     
     def run(self):
         """Execute the network analysis using the take_netanal macro."""
-        # Import here to avoid circular imports
-        import concurrent.futures
         
         # Create event loop for async operations
         self._loop = asyncio.new_event_loop()
@@ -765,10 +768,12 @@ class NetworkAnalysisTask(QRunnable):
                     current_time = time.time()
                     if current_time - self._last_update_time >= self._update_interval:
                         self._last_update_time = current_time                    
+                    
+                    # Emit standard update and amplitude-specific update
                     self.signals.data_update.emit(module, freqs, amps, phases)
+                    self.signals.data_update_with_amp.emit(module, freqs, amps, phases, self.amplitude)
             
             # Extract parameters
-            amp = self.params.get('amp', 0.001)
             fmin = self.params.get('fmin', 100e6)
             fmax = self.params.get('fmax', 2450e6)
             nsamps = self.params.get('nsamps', 10)
@@ -789,7 +794,7 @@ class NetworkAnalysisTask(QRunnable):
             # Create a task for the netanal operation
             if self._running:
                 netanal_coro = self.crs.take_netanal(
-                    amp=amp,
+                    amp=self.amplitude,  # Use the specific amplitude for this task
                     fmin=fmin,
                     fmax=fmax,
                     nsamps=nsamps,
@@ -815,6 +820,7 @@ class NetworkAnalysisTask(QRunnable):
                         
                         # Emit final data update
                         self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
+                        self.signals.data_update_with_amp.emit(self.module, fs_sorted, amp_sorted, phase_sorted, self.amplitude)
                         self.signals.completed.emit(self.module)
                 except asyncio.CancelledError:
                     # Task was canceled, emit error signal
@@ -950,6 +956,7 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         
         # Amplitude
         self.amp_edit = QtWidgets.QLineEdit("0.001")
+        self.amp_edit.setToolTip("Enter a single value or comma-separated list (e.g., 0.001,0.01,0.1)")
         param_layout.addRow("Amplitude:", self.amp_edit)
         
         # Number of points
@@ -1011,12 +1018,22 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
                 if modules:
                     selected_module = modules
             
+            # Parse amplitude values
+            amp_text = self.amp_edit.text().strip()
+            amps = []
+            for part in amp_text.split(','):
+                part = part.strip()
+                if part:
+                    amps.append(float(eval(part)))
+            if not amps:
+                amps = [0.001]  # Default amplitude if none provided
+            
             params = {
+                'amps': amps,
                 'module': selected_module,
                 'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
                 'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
                 'cable_length': float(self.cable_length_edit.text()),
-                'amp': float(eval(self.amp_edit.text())),
                 'npoints': int(self.points_edit.text()),
                 'nsamps': int(self.samples_edit.text()),
                 'max_chans': int(self.max_chans_edit.text()),
@@ -1025,6 +1042,7 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
             }
             return params
         except Exception as e:
+            traceback.print_exc()  # Print full stacktrace to console
             QtWidgets.QMessageBox.critical(self, "Error", f"Invalid parameter: {str(e)}")
             return None
 
@@ -1037,11 +1055,12 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("Network Analysis Results")
         self.modules = modules or []
-        self.data = {}  # module -> (freqs, amps, phases)
+        self.data = {}  # module -> amplitude data dictionary
         self.raw_data = {}  # Store the raw IQ data for unit conversion
         self.unit_mode = "counts"  # Default: counts, alternatives: "dbm", "volts"
         self.first_setup = True  # Flag to track initial setup
         self.zoom_box_mode = True  # Default to zoom box mode ON
+        self.plots = {}  # Initialize plots dictionary early
 
         # Setup the UI components
         self._setup_ui()
@@ -1077,17 +1096,17 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         rerun_btn.clicked.connect(self._rerun_analysis)
         toolbar.addWidget(rerun_btn)        
 
-        # Export button
-        export_btn = QtWidgets.QPushButton("Export Data")
-        export_btn.clicked.connect(self._export_data)
-        toolbar.addWidget(export_btn)
-
         # Add spacer to push the unit controls to the far right
         spacer = QtWidgets.QWidget()
         spacer.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, 
                             QtWidgets.QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
         
+        # Export button
+        export_btn = QtWidgets.QPushButton("Export Data")
+        export_btn.clicked.connect(self._export_data)
+        toolbar.addWidget(export_btn)        
+
         # Create Real Units controls (will add to toolbar at the end)
         unit_group = QtWidgets.QWidget()
         unit_layout = QtWidgets.QHBoxLayout(unit_group)
@@ -1123,9 +1142,9 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                                 QtWidgets.QSizePolicy.Policy.Preferred)
         
         # Now add the unit controls at the far right
-        toolbar.addWidget(unit_group)
         toolbar.addSeparator()
-        
+        toolbar.addWidget(unit_group)
+
         # Add zoom box mode checkbox
         toolbar.addWidget(zoom_box_cb)        
 
@@ -1136,7 +1155,11 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             progress_layout = QtWidgets.QVBoxLayout(self.progress_group)
             
             self.progress_bars = {}
+            self.progress_labels = {}  # Add labels to show amplitude progress
             for module in self.modules:
+                vlayout = QtWidgets.QVBoxLayout()
+                
+                # Main progress layout
                 hlayout = QtWidgets.QHBoxLayout()
                 label = QtWidgets.QLabel(f"Module {module}:")
                 pbar = QtWidgets.QProgressBar()
@@ -1144,12 +1167,21 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 pbar.setValue(0)
                 hlayout.addWidget(label)
                 hlayout.addWidget(pbar)
-                progress_layout.addLayout(hlayout)
+                vlayout.addLayout(hlayout)
+                
+                # Amplitude progress label
+                amp_label = QtWidgets.QLabel("")
+                amp_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                vlayout.addWidget(amp_label)
+                
+                progress_layout.addLayout(vlayout)
                 self.progress_bars[module] = pbar
+                self.progress_labels[module] = amp_label
                 
             layout.addWidget(self.progress_group)
         else:
             self.progress_bars = {}
+            self.progress_labels = {}
         
         # Plot area
         self.tabs = QtWidgets.QTabWidget()
@@ -1162,16 +1194,20 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             
             # Create amplitude and phase plots with ClickableViewBox
             vb_amp = ClickableViewBox()
-            amp_plot = pg.PlotWidget(viewBox=vb_amp, title=f"Module {module} - Magnitude")
+            amp_plot = pg.PlotWidget(viewBox=vb_amp, title=f"Module {module} - Amplitude")
             self._update_amplitude_labels(amp_plot)
             amp_plot.setLabel('bottom', 'Frequency', units='GHz')
             amp_plot.showGrid(x=True, y=True, alpha=0.3)
-
+            
             vb_phase = ClickableViewBox()
             phase_plot = pg.PlotWidget(viewBox=vb_phase, title=f"Module {module} - Phase")
             phase_plot.setLabel('left', 'Phase', units='deg')
             phase_plot.setLabel('bottom', 'Frequency', units='GHz')
             phase_plot.showGrid(x=True, y=True, alpha=0.3)
+            
+            # Add legends for multiple amplitude plots
+            amp_legend = amp_plot.addLegend(offset=(30, 10))
+            phase_legend = phase_plot.addLegend(offset=(30, 10))
 
             # Create curves with periscope color scheme
             amp_curve = amp_plot.plot(pen=pg.mkPen('#ff7f0e', width=LINE_WIDTH))
@@ -1185,7 +1221,11 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 'amp_plot': amp_plot,
                 'phase_plot': phase_plot,
                 'amp_curve': amp_curve,
-                'phase_curve': phase_curve
+                'phase_curve': phase_curve,
+                'amp_legend': amp_legend,
+                'phase_legend': phase_legend,
+                'amp_curves': {},  # Will store multiple curves for different amplitudes
+                'phase_curves': {}  # Will store multiple curves for different amplitudes
             }
             
             # Apply zoom box mode
@@ -1193,6 +1233,11 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
 
             # Link the x-axis of amplitude and phase plots for synchronized zooming
             phase_plot.setXLink(amp_plot)
+
+    def update_amplitude_progress(self, module: int, current_amp: int, total_amps: int, amplitude: float):
+        """Update the amplitude progress display for a module."""
+        if hasattr(self, 'progress_labels') and module in self.progress_labels:
+            self.progress_labels[module].setText(f"Amplitude {current_amp}/{total_amps} ({amplitude})")
 
     def _toggle_zoom_box(self, enable):
         """Toggle zoom box mode for all plots."""
@@ -1229,17 +1274,36 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
 
     def _redraw_all_plots(self):
         """Redraw all plots with current unit mode."""
-        for module, (freqs, amps, phases, iq_data) in self.raw_data.items():
+        for module in self.raw_data:
             if module in self.plots:
-                # Convert amplitude to selected units
-                converted_amps = self._convert_amplitude(amps, iq_data)
+                # Update main curve if default data exists
+                if 'default' in self.raw_data[module]:
+                    freqs, amps, phases, iq_data = self.raw_data[module]['default']
+                    converted_amps = self._convert_amplitude(amps, iq_data)
+                    freq_ghz = freqs / 1e9
+                    self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
+                    self.plots[module]['phase_curve'].setData(freq_ghz, phases)
                 
-                # Convert frequency to GHz for display
-                freq_ghz = freqs / 1e9
-                
-                # Update plots
-                self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
-                self.plots[module]['phase_curve'].setData(freq_ghz, phases)
+                # Update amplitude-specific curves
+                for amp_key, data_tuple in self.raw_data[module].items():
+                    if amp_key != 'default':
+                        # Handle the case where data_tuple has 5 elements (amplitude-specific)
+                        if len(data_tuple) == 5:
+                            freqs, amps, phases, iq_data, amplitude = data_tuple
+                        else:
+                            # This shouldn't typically happen, but just in case
+                            freqs, amps, phases, iq_data = data_tuple
+                            # Try to extract amplitude from key
+                            try:
+                                amplitude = float(amp_key.split('_')[-1])
+                            except (ValueError, IndexError):
+                                continue  # Skip this entry if we can't determine the amplitude
+                        
+                        if amplitude in self.plots[module]['amp_curves']:
+                            converted_amps = self._convert_amplitude(amps, iq_data)
+                            freq_ghz = freqs / 1e9
+                            self.plots[module]['amp_curves'][amplitude].setData(freq_ghz, converted_amps)
+                            self.plots[module]['phase_curves'][amplitude].setData(freq_ghz, phases)
                 
                 # Enable auto range to fit new data
                 self.plots[module]['amp_plot'].autoRange()
@@ -1337,6 +1401,10 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         # Set cable length spinner to match original value
         self.cable_length_spin.setValue(params.get('cable_length', 0.75))
         
+        # Only try to set plot ranges if plots exist
+        if not hasattr(self, 'plots') or not self.plots:
+            return
+            
         # Set initial plot ranges based on frequency parameters
         fmin = params.get('fmin', 100e6)
         fmax = params.get('fmax', 2450e6)
@@ -1348,13 +1416,71 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             self.plots[module]['phase_plot'].enableAutoRange(pg.ViewBox.XAxis, False)
             self.plots[module]['amp_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
             self.plots[module]['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
+    
+    def update_data_with_amp(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray, amplitude: float):
+        """Update the plot data for a specific module and amplitude."""
+        # Store the raw data for unit conversion
+        iq_data = amps * np.exp(1j * np.radians(phases))  # Reconstruct complex data
         
+        # Use a unique key that includes the amplitude
+        key = f"{module}_{amplitude}"
+        
+        # Initialize dictionaries if needed
+        if module not in self.raw_data:
+            self.raw_data[module] = {}
+        if module not in self.data:
+            self.data[module] = {}
+        
+        # Store the data with amplitude
+        self.raw_data[module][key] = (freqs, amps, phases, iq_data, amplitude)
+        self.data[module][key] = (freqs, amps, phases)
+        
+        if module in self.plots:
+            # Convert amplitude to selected units
+            converted_amps = self._convert_amplitude(amps, iq_data)
+            
+            # Convert frequency to GHz for display
+            freq_ghz = freqs / 1e9
+            
+            # Generate a color based on the amplitude index in the list of amplitudes
+            amps_list = self.original_params.get('amps', [amplitude])
+            if amplitude in amps_list:
+                amp_index = amps_list.index(amplitude)
+            else:
+                amp_index = 0
+                
+            # Use the same color families as the main application
+            channel_families = [
+                "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+                "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+            ]
+            color = channel_families[amp_index % len(channel_families)]
+            
+            # Create or update curves for this amplitude
+            if amplitude not in self.plots[module]['amp_curves']:
+                self.plots[module]['amp_curves'][amplitude] = self.plots[module]['amp_plot'].plot(
+                    pen=pg.mkPen(color, width=LINE_WIDTH), name=f"Amp: {amplitude}")
+                self.plots[module]['phase_curves'][amplitude] = self.plots[module]['phase_plot'].plot(
+                    pen=pg.mkPen(color, width=LINE_WIDTH), name=f"Amp: {amplitude}")
+            
+            # Update the curves
+            self.plots[module]['amp_curves'][amplitude].setData(freq_ghz, converted_amps)
+            self.plots[module]['phase_curves'][amplitude].setData(freq_ghz, phases)
+    
     def update_data(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
         """Update the plot data for a specific module."""
         # Store the raw data for unit conversion
         iq_data = amps * np.exp(1j * np.radians(phases))  # Reconstruct complex data
-        self.raw_data[module] = (freqs, amps, phases, iq_data)
-        self.data[module] = (freqs, amps, phases)
+        
+        # Initialize dictionaries if needed
+        if module not in self.raw_data:
+            self.raw_data[module] = {}
+        if module not in self.data:
+            self.data[module] = {}
+        
+        # Store under 'default' key
+        self.raw_data[module]['default'] = (freqs, amps, phases, iq_data)
+        self.data[module]['default'] = (freqs, amps, phases)
         
         if module in self.plots:
             # Convert amplitude to selected units
@@ -1411,25 +1537,30 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 elif filename.endswith('.csv'):
                     # Export as CSV (one file per module)
                     base, ext = os.path.splitext(filename)
-                    for module, (freqs, amps, phases) in self.data.items():
-                        # Convert amps to current unit for export
-                        iq_data = self.raw_data[module][3]
-                        converted_amps = self._convert_amplitude(amps, iq_data)
-                        
-                        module_filename = f"{base}_module{module}{ext}"
-                        with open(module_filename, 'w', newline='') as f:
-                            writer = csv.writer(f)
-                            unit_label = self.unit_mode
-                            if self.unit_mode == "dbm":
-                                unit_label = "dBm"
-                                writer.writerow(['Frequency (Hz)', f'Power ({unit_label})', 'Phase (deg)'])
-                            elif self.unit_mode == "volts":
-                                unit_label = "V"
-                                writer.writerow(['Frequency (Hz)', f'Amplitude ({unit_label})', 'Phase (deg)'])
-                            else:
-                                writer.writerow(['Frequency (Hz)', f'Amplitude ({unit_label})', 'Phase (deg)'])
-                            for freq, amp, phase in zip(freqs, converted_amps, phases):
-                                writer.writerow([freq, amp, phase])
+                    for module, data_dict in self.data.items():
+                        # Get default data if available
+                        if 'default' in data_dict:
+                            freqs, amps, phases = data_dict['default']
+                            
+                            # Get corresponding raw data for conversion
+                            if module in self.raw_data and 'default' in self.raw_data[module]:
+                                iq_data = self.raw_data[module]['default'][3]
+                                converted_amps = self._convert_amplitude(amps, iq_data)
+                                
+                                module_filename = f"{base}_module{module}{ext}"
+                                with open(module_filename, 'w', newline='') as f:
+                                    writer = csv.writer(f)
+                                    unit_label = self.unit_mode
+                                    if self.unit_mode == "dbm":
+                                        unit_label = "dBm"
+                                        writer.writerow(['Frequency (Hz)', f'Power ({unit_label})', 'Phase (deg)'])
+                                    elif self.unit_mode == "volts":
+                                        unit_label = "V"
+                                        writer.writerow(['Frequency (Hz)', f'Amplitude ({unit_label})', 'Phase (deg)'])
+                                    else:
+                                        writer.writerow(['Frequency (Hz)', f'Amplitude ({unit_label})', 'Phase (deg)'])
+                                    for freq, amp, phase in zip(freqs, converted_amps, phases):
+                                        writer.writerow([freq, amp, phase])
                                 
                 else:
                     # Default to pickle
@@ -1445,6 +1576,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                                                   f"Data exported to {filename}")
                 
             except Exception as e:
+                traceback.print_exc()  # Print stack trace to console
                 QtWidgets.QMessageBox.critical(self, "Export Error", 
                                                f"Error exporting data: {str(e)}")
                 
@@ -1471,7 +1603,8 @@ class NetworkAnalysisParamsDialog(QtWidgets.QDialog):
         
         # Amplitude
         self.amp_edit = QtWidgets.QLineEdit(str(self.params.get('amp', '0.001')))
-        form.addRow("Amplitude:", self.amp_edit)
+        self.amp_edit.setToolTip("Enter a single value or comma-separated list (e.g., 0.001,0.01,0.1)")
+        form.addRow("Amplitude (Normalized Units):", self.amp_edit)
         
         # Number of points
         self.points_edit = QtWidgets.QLineEdit(str(self.params.get('npoints', '5000')))
@@ -1512,8 +1645,19 @@ class NetworkAnalysisParamsDialog(QtWidgets.QDialog):
     def get_parameters(self):
         """Get the updated parameters."""
         try:
+            # Parse amplitude values
+            amp_text = self.amp_edit.text().strip()
+            amps = []
+            for part in amp_text.split(','):
+                part = part.strip()
+                if part:
+                    amps.append(float(eval(part)))
+            if not amps:
+                amps = [0.001]  # Default amplitude if none provided
+            
             params = self.params.copy()
             params.update({
+                'amps': amps,
                 'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
                 'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
                 'amp': float(eval(self.amp_edit.text())),
@@ -1616,10 +1760,11 @@ class Periscope(QtWidgets.QMainWindow):
         self.netanal_signals = NetworkAnalysisSignals()
         self.netanal_signals.progress.connect(self._netanal_progress)
         self.netanal_signals.data_update.connect(self._netanal_data_update)
+        self.netanal_signals.data_update_with_amp.connect(self._netanal_data_update_with_amp)
         self.netanal_signals.completed.connect(self._netanal_completed)
         self.netanal_signals.error.connect(self._netanal_error)
         self.netanal_window = None
-        self.netanal_tasks: Dict[int, NetworkAnalysisTask] = {}
+        self.netanal_tasks: Dict[str, NetworkAnalysisTask] = {}  # Changed to str key to support multiple amplitudes
 
         # Density LUT
         cmap = pg.colormap.get("turbo")
@@ -1811,21 +1956,24 @@ class Periscope(QtWidgets.QMainWindow):
         # General Display
         disp_g = QtWidgets.QGroupBox("General Display")
         disp_h = QtWidgets.QHBoxLayout(disp_g)
-        self.cb_dark = QtWidgets.QCheckBox("Dark Mode", checked=self.dark_mode)
-        self.cb_dark.setToolTip("Switch between dark/light themes.")
-        self.cb_dark.toggled.connect(self._toggle_dark_mode)
-        disp_h.addWidget(self.cb_dark)
-
-        self.cb_auto_scale = QtWidgets.QCheckBox("Auto Scale", checked=self.auto_scale_plots)
-        self.cb_auto_scale.setToolTip("Enable/disable auto-range for IQ/FFT/SSB/DSB. Can improve display performance.")
-        self.cb_auto_scale.toggled.connect(self._toggle_auto_scale)
-        disp_h.addWidget(self.cb_auto_scale)
 
         # Add Zoom Box Mode checkbox
         self.cb_zoom_box = QtWidgets.QCheckBox("Zoom Box Mode", checked=True)
         self.cb_zoom_box.setToolTip("When enabled, left-click drag creates a zoom box. When disabled, left-click drag pans.")
         self.cb_zoom_box.toggled.connect(self._toggle_zoom_box_mode)
         disp_h.addWidget(self.cb_zoom_box)
+
+        # Dark Mode Toggle
+        self.cb_dark = QtWidgets.QCheckBox("Dark Mode", checked=self.dark_mode)
+        self.cb_dark.setToolTip("Switch between dark/light themes.")
+        self.cb_dark.toggled.connect(self._toggle_dark_mode)
+        disp_h.addWidget(self.cb_dark)
+
+        # Autoscale button
+        self.cb_auto_scale = QtWidgets.QCheckBox("Auto Scale", checked=self.auto_scale_plots)
+        self.cb_auto_scale.setToolTip("Enable/disable auto-range for IQ/FFT/SSB/DSB. Can improve display performance.")
+        self.cb_auto_scale.toggled.connect(self._toggle_auto_scale)
+        disp_h.addWidget(self.cb_auto_scale)        
 
         cfg_hbox.addWidget(disp_g)
 
@@ -1953,14 +2101,82 @@ class Periscope(QtWidgets.QMainWindow):
         self.netanal_window.set_original_params(params)
         self.netanal_window.show()
         
-        # Start tasks for each module
+        # Get amplitudes from params
+        amplitudes = params.get('amps', [params.get('amp', 0.001)])
+        
+        # Set up amplitude queues for each module
+        self.amplitude_queues = {}
+        self.current_amp_index = {}
+        
         for module in modules:
-            task_params = params.copy()
-            task_params['module'] = module
+            # Create queue of amplitudes for this module
+            self.amplitude_queues[module] = list(amplitudes)
+            self.current_amp_index[module] = 0
             
-            task = NetworkAnalysisTask(self.crs, module, task_params, self.netanal_signals)
-            self.netanal_tasks[module] = task
-            self.pool.start(task)
+            # Update the amplitude progress display
+            if self.netanal_window:
+                self.netanal_window.update_amplitude_progress(
+                    module, 1, len(amplitudes), amplitudes[0]
+                )
+            
+            # Start the first amplitude task
+            self._start_next_amplitude_task(module, params)
+    
+    def _start_next_amplitude_task(self, module: int, params: dict):
+        """Start the next amplitude task for a module."""
+        if module not in self.amplitude_queues or not self.amplitude_queues[module]:
+            return  # No more amplitudes to process
+        
+        # Get the next amplitude
+        amplitude = self.amplitude_queues[module][0]
+        self.amplitude_queues[module].pop(0)  # Remove it from the queue
+        
+        # Create and start the task
+        task_params = params.copy()
+        task_params['module'] = module
+        
+        # Use a unique key that includes the amplitude value
+        task_key = f"{module}_amp_{amplitude}"  # Changed from f"{module}_amp"
+        task = NetworkAnalysisTask(self.crs, module, task_params, self.netanal_signals, amplitude=amplitude)
+        self.netanal_tasks[task_key] = task
+        self.pool.start(task)
+            
+    def _netanal_completed(self, module: int):
+        """Handle network analysis completion."""
+
+
+        if self.netanal_window:
+            self.netanal_window.complete_analysis(module)
+        
+        # Look for any task for this module and clean it up
+        # This is safer than assuming a specific key format
+        for task_key in list(self.netanal_tasks.keys()):
+            if task_key.startswith(f"{module}_amp"):
+                del self.netanal_tasks[task_key]
+                break
+        
+        # Start the next amplitude task if there are more in the queue
+        if module in self.amplitude_queues and self.amplitude_queues[module]:
+            # Update the current amplitude index
+            self.current_amp_index[module] += 1
+            
+            # Update the amplitude progress display
+            if self.netanal_window:
+                total_amps = len(self.netanal_window.original_params.get('amps', []))
+                next_amp = self.amplitude_queues[module][0]
+                self.netanal_window.update_amplitude_progress(
+                    module, 
+                    self.current_amp_index[module] + 1,  # +1 for 1-based counting
+                    total_amps,
+                    next_amp
+                )
+            
+            # Reset the progress bar to 0 for the next amplitude
+            if self.netanal_window and module in self.netanal_window.progress_bars:
+                self.netanal_window.progress_bars[module].setValue(0)
+            
+            # Start the next amplitude task
+            self._start_next_amplitude_task(module, self.netanal_window.original_params)
     
     def _rerun_network_analysis(self, params: dict):
         """Rerun network analysis in the existing window."""
@@ -1976,6 +2192,13 @@ class Periscope(QtWidgets.QMainWindow):
             
             # Clear existing plots
             for module in self.netanal_window.plots:
+                # Remove all existing amplitude-specific curves
+                for amp in list(self.netanal_window.plots[module]['amp_curves'].keys()):
+                    self.netanal_window.plots[module]['amp_curves'][amp].clear()
+                    self.netanal_window.plots[module]['phase_curves'][amp].clear()
+                self.netanal_window.plots[module]['amp_curves'].clear()
+                self.netanal_window.plots[module]['phase_curves'].clear()
+                # Clear main curves
                 self.netanal_window.plots[module]['amp_curve'].setData([], [])
                 self.netanal_window.plots[module]['phase_curve'].setData([], [])
             
@@ -1991,14 +2214,32 @@ class Periscope(QtWidgets.QMainWindow):
         else:
             modules = [selected_module]
         
-        # Start tasks for each module
+        # Clear existing tasks
+        for key in list(self.netanal_tasks.keys()):
+            task = self.netanal_tasks[key]
+            task.stop()
+            self.netanal_tasks.pop(key)
+        
+        # Get amplitudes from params
+        amplitudes = params.get('amps', [params.get('amp', 0.001)])
+        
+        # Set up amplitude queues for each module
+        self.amplitude_queues = {}
+        self.current_amp_index = {}
+        
         for module in modules:
-            task_params = params.copy()
-            task_params['module'] = module
+            # Create queue of amplitudes for this module
+            self.amplitude_queues[module] = list(amplitudes)
+            self.current_amp_index[module] = 0
             
-            task = NetworkAnalysisTask(self.crs, module, task_params, self.netanal_signals)
-            self.netanal_tasks[module] = task
-            self.pool.start(task)
+            # Update the amplitude progress display
+            if self.netanal_window:
+                self.netanal_window.update_amplitude_progress(
+                    module, 1, len(amplitudes), amplitudes[0]
+                )
+            
+            # Start the first amplitude task
+            self._start_next_amplitude_task(module, params)
     
     def _netanal_progress(self, module: int, progress: float):
         """Handle network analysis progress updates."""
@@ -2014,13 +2255,12 @@ class Periscope(QtWidgets.QMainWindow):
             # Keep the window's update_data method signature the same
             # but store raw complex data internally for unit conversion
             self.netanal_window.update_data(module, freqs, amps, phases)
-    
-    def _netanal_completed(self, module: int):
-        """Handle network analysis completion."""
+            
+    def _netanal_data_update_with_amp(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray, amplitude: float):
+        """Handle network analysis data updates with amplitude information."""
         if self.netanal_window:
-            self.netanal_window.complete_analysis(module)
-        if module in self.netanal_tasks:
-            del self.netanal_tasks[module]
+            self.netanal_window.update_data_with_amp(module, freqs, amps, phases, amplitude)
+
     
     def _netanal_error(self, error_msg: str):
         """Handle network analysis errors."""
@@ -2739,9 +2979,10 @@ class Periscope(QtWidgets.QMainWindow):
         self.receiver.wait()
         
         # Stop any running network analysis tasks
-        for module, task in list(self.netanal_tasks.items()):
+        for task_key in list(self.netanal_tasks.keys()):
+            task = self.netanal_tasks[task_key]
             task.stop()
-            self.netanal_tasks.pop(module, None)
+            self.netanal_tasks.pop(task_key, None)
         
         super().closeEvent(ev)
         ev.accept()

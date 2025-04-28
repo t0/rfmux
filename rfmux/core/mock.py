@@ -16,6 +16,7 @@ from aiohttp import web
 import atexit
 from enum import Enum
 import numpy as np
+import types
 
 from .schema import CRS
 
@@ -102,17 +103,20 @@ class ServerProcess(mp_ctx.Process):
         await model._thread_lock_acquire()
 
         try:
-            request = json.loads(body)
+            request_data = json.loads(body)
             model._num_tuber_calls += 1
 
-            if isinstance(request, list):
-                r = [await self.__single_handler(model, r) for r in request]
-            elif isinstance(request, dict):
-                r = await self.__single_handler(model, request)
+            if isinstance(request_data, list):
+                response = [await self.__single_handler(model, r) for r in request_data]
+            elif isinstance(request_data, dict):
+                response = await self.__single_handler(model, request_data)
             else:
-                r = {"error": "Didn't know what to do!"}
+                response = {"error": "Didn't know what to do!"}
 
-            return web.Response(text=json.dumps(r), content_type='application/json')
+            # Convert to serializable format
+            serializable_response = convert_to_serializable(response)
+
+            return web.Response(text=json.dumps(serializable_response), content_type='application/json')
 
         except Exception as e:
             raise e
@@ -174,6 +178,18 @@ class ServerProcess(mp_ctx.Process):
         else:
             return {"error": "Didn't know what to do!"}
 
+
+
+def convert_to_serializable(obj):
+    """Recursively convert NumPy arrays in the object to lists."""
+    if isinstance(obj, dict):
+        return {k: convert_to_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(element) for element in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    else:
+        return obj
 
 class ClockSource(str, Enum):
     VCXO = "VCXO"
@@ -331,6 +347,22 @@ class MockCRS:
         # Initialize resonator parameters
         self.resonator_frequencies = []
         self.resonator_Q_factors = []
+
+        # Initialize dynamic resonance parameters
+        self.ff_factor = 0.01  # Frequency shift scaling factor (ffs)
+        self.p_sky = 0        # External fixed power source (ps)
+        self.resonator_current_f0s = None  # To be set in generate_resonators
+        self.resonator_pe = None            # Power estimates for each resonator
+
+        num_resonators = 10
+        f_start = 1e9     # 1 MHz
+        f_end = 2e9     # 10 MHz
+        nominal_Q = 1000
+        min_spacing = 0.3e6  # 100 kHz
+
+        # # Generate resonators
+        self.generate_resonators(num_resonators, f_start, f_end, nominal_Q, min_spacing)
+        self.initialize_dynamic_resonators()
 
         self.frequencies = {}
         self.amplitudes = {}
@@ -560,123 +592,6 @@ class MockCRS:
         return self.timestamp
 
 
-    async def get_samples(self, num_samples, channel=None, module=1):
-        """Get sample data for a specific module."""
-        # Validate inputs
-        assert isinstance(num_samples, int), "Number of samples must be an integer"
-        assert channel is None or isinstance(channel, int), "Channel must be None or an integer"
-        assert module in [1, 2, 3, 4], "Invalid module number"
-        await asyncio.sleep(0.01)
-
-        # Simulate overrange and overvoltage flags (randomly or fixed)
-        overrange = False  # or random.choice([True, False])
-        overvoltage = False  # or random.choice([True, False])
-
-        # Sample rate for time vector
-        fs = 496  # 1 MHz sample rate (adjust as needed)
-        t = np.arange(num_samples) / fs  # Time vector
-
-        nco_freq = self.get_nco_frequency(units=Units.HZ, target='adc', module=module)
-
-        if channel is not None:
-            # Return samples for the specified channel
-            assert 0 <= channel < 1024, "Invalid channel number"
-
-            # Retrieve the frequency, amplitude, and phase for the channel
-            chan_freq = self.frequencies.get((module, channel))
-            amp_info = self.amplitudes.get((module, channel, self.TARGET['CARRIER']))
-            phase_info = self.phases.get((module, channel, self.TARGET['CARRIER']))
-
-            if chan_freq is None or amp_info is None or phase_info is None:
-                raise ValueError("Frequency, amplitude, or phase not set for channel")
-
-            frequency = chan_freq['value']+nco_freq    # Frequency in Hz            
-            amplitude = amp_info['value']   # Amplitude (normalized)
-            phase = np.deg2rad(phase_info['value'])  # Convert phase to radians
-
-            # Compute S21 response at the channel's frequency
-            s21_mag, s21_phase = self.s21_response(frequency)
-
-            # Total phase includes channel phase and S21 phase
-            total_phase = phase + s21_phase
-
-            # Generate I and Q samples with time variation
-            i = amplitude * s21_mag * np.cos(total_phase) * np.ones(num_samples)
-            q = amplitude * s21_mag * np.sin(total_phase) * np.ones(num_samples)
-
-            # Add random noise
-            noise_level = 0.0  # Adjust noise level as needed
-            i += np.random.normal(0, noise_level, size=np.shape(i) if np.shape(i) else None)
-            q += np.random.normal(0, noise_level, size=np.shape(q) if np.shape(q) else None)
-
-            # Convert to lists for JSON serialization
-            i_list = i.tolist()
-            q_list = q.tolist()
-            t_list = t.tolist()
-
-            return {
-                "i": i_list,
-                "q": q_list,
-                "ts": t_list,
-                "flags": {"overrange": overrange, "overvoltage": overvoltage}
-            }
-        else:
-            # Return samples for all channels
-            # Ensure num_samples doesn't exceed max_samples_per_module
-            assert num_samples <= self.max_samples_per_module, "Number of samples exceeds maximum for a module-call"
-
-            channels_per_module = 1024
-
-            i_data = []
-            q_data = []
-
-            for ch in range(channels_per_module):
-                # Retrieve the frequency, amplitude, and phase for each channel
-                chan_freq = self.frequencies.get((module, ch))
-                amp_info = self.amplitudes.get((module, ch, self.TARGET['CARRIER']))
-                phase_info = self.phases.get((module, ch, self.TARGET['CARRIER']))
-
-                if chan_freq is None or amp_info is None or phase_info is None:
-                    # If not set, default to zero amplitude
-                    i = np.zeros(num_samples)
-                    q = np.zeros(num_samples)
-                else:
-                    frequency = chan_freq['value']+nco_freq    # Frequency in Hz
-                    amplitude = amp_info['value']   # Amplitude (normalized)
-                    phase = np.deg2rad(phase_info['value'])  # Convert phase to radians
-
-                    # Compute S21 response at the channel's frequency
-                    s21_mag, s21_phase = self.s21_response(frequency)
-
-                    # Total phase includes channel phase and S21 phase
-                    total_phase = phase + s21_phase
-
-                    # Generate I and Q samples with time variation
-                    i = amplitude * s21_mag * np.cos(total_phase) * np.ones(num_samples)
-                    q = amplitude * s21_mag * np.sin(total_phase) * np.ones(num_samples)
-
-                    # Add random noise
-                    noise_level = 0.0  # Adjust noise level as needed
-                    i += np.random.normal(0, noise_level, size=np.shape(i) if np.shape(i) else None)
-                    q += np.random.normal(0, noise_level, size=np.shape(q) if np.shape(q) else None)
-
-
-                # Convert to lists for JSON serialization
-                i_list = i.tolist()
-                q_list = q.tolist()
-                t_list = t.tolist()
-
-                i_data.append(i_list)
-                q_data.append(q_list)
-
-            return {
-                "i": i_data,
-                "q": q_data,
-                "ts": t_list,
-                "flags": {"overrange": overrange, "overvoltage": overvoltage}
-            }
-
-
     async def get_pfb_samples(self, num_samples, units=Units.NORMALIZED, channel=None, module=1):
         """Get PFB samples for a specific channel and module."""
         # Validate inputs
@@ -886,10 +801,25 @@ class MockCRS:
         self.hmc7044_registers[address] = value
 
 
+    def initialize_dynamic_resonators(self):
+        """Initialize dynamic resonance parameters based on generated resonators."""
+        if not self.resonator_frequencies.size or not self.resonator_Q_factors.size:
+            # Avoid initializing before resonators are generated
+            self.resonator_current_f0s = np.array([])
+            self.resonator_pe = np.array([])
+            return
+        
+        self.num_resonators = len(self.resonator_frequencies)
+        self.resonator_current_f0s = np.copy(self.resonator_frequencies)
+        self.resonator_pe = np.zeros(self.num_resonators)
+        
+        # Initialize history tracking for multiple resonators
+        self.resonator_f0_history = [[] for _ in range(self.num_resonators)]
+
     def generate_resonators(self, num_resonators, f_start, f_end, nominal_Q, min_spacing):
         """Generate random resonator frequencies and Q factors."""
         frequencies = []
-        Q_factors = []
+        Q_factors = []  # Correct initialization
 
         # Calculate the total frequency range
         freq_range = f_end - f_start
@@ -919,14 +849,19 @@ class MockCRS:
         # Store the resonator parameters
         self.resonator_frequencies = np.array(frequencies)
         self.resonator_Q_factors = np.array(Q_factors)
+        
+        # Initialize dynamic resonance parameters
+        self.initialize_dynamic_resonators()
 
     def s21_response(self, frequency):
         """Compute the combined S21 response of the resonator comb at a given frequency."""
         # Initialize S21 to 1 (no attenuation)
         s21 = 1.0 + 0j  # Complex number
 
-        # For each resonator, compute its contribution
-        for f0, Q in zip(self.resonator_frequencies, self.resonator_Q_factors):
+        # For each resonator, compute its contribution based on current f0
+        for idx in range(self.num_resonators):
+            f0 = self.resonator_current_f0s[idx]
+            Q = self.resonator_Q_factors[idx]
             delta_f = frequency - f0
             # Compute the complex S21 response for the inverted resonance
             s21_resonator = 1 - (1 / (1 + 2j * Q * delta_f / f0))
@@ -937,3 +872,148 @@ class MockCRS:
         s21_mag = abs(s21)
         s21_phase = np.angle(s21)
         return s21_mag, s21_phase  # Magnitude and phase in radians
+
+    def update_resonator_frequencies(self, s21_mag_array):
+        """
+        Update resonance frequencies based on power estimates.
+
+        Args:
+            s21_mag_array (np.ndarray): Array of S21 magnitudes for each resonator.
+        """
+
+        # Power estimate pe is proportional to |1 - S21_resonator|
+        #pe = (1.0 - s21_mag_array) ** 2
+        pe = (s21_mag_array) ** 2
+
+        self.resonator_pe = pe
+
+        # Update resonance frequencies based on pe
+        self.resonator_current_f0s *= (1 - (self.resonator_pe + self.p_sky) * self.ff_factor)
+        #self.resonator_current_f0s -= (self.resonator_pe + self.p_sky) * self.ff_factor
+
+
+    async def get_samples(self, num_samples, channel=None, module=1):
+        """Get sample data for a specific module."""
+        # Validate inputs
+        assert isinstance(num_samples, int), "Number of samples must be an integer"
+        assert channel is None or isinstance(channel, int), "Channel must be None or an integer"
+        assert module in [1, 2, 3, 4], "Invalid module number"
+        await asyncio.sleep(0.01)
+
+        # Simulate overrange and overvoltage flags (fixed for simplicity)
+        overrange = False
+        overvoltage = False
+
+        # Sample rate for time vector
+        fs = 1e6  # 1 MHz sample rate
+        t = np.arange(num_samples) / fs  # Time vector
+
+        nco_freq = self.get_nco_frequency(units=Units.HZ, target='adc', module=module)
+        # Initialize t_list once
+        t_list = t.tolist()
+
+        if channel is not None:
+            # Handle single channel
+            # Retrieve the frequency, amplitude, and phase for the channel
+            chan_freq = self.frequencies.get((module, channel))
+            amp_info = self.amplitudes.get((module, channel, self.TARGET['CARRIER']))
+            phase_info = self.phases.get((module, channel, self.TARGET['CARRIER']))
+
+            if chan_freq is None or amp_info is None or phase_info is None:
+                raise ValueError("Frequency, amplitude, or phase not set for channel")
+
+            frequency = chan_freq['value'] + nco_freq    # Frequency in Hz            
+            amplitude = amp_info['value']   # Amplitude (normalized)
+            phase = np.deg2rad(phase_info['value'])  # Convert phase to radians
+
+            # Initialize lists to store samples
+            i_samples = []
+            q_samples = []
+
+            # Converge S21 response:
+            for i in range(1000):
+                # Compute S21 response
+                s21_mag, s21_phase = self.s21_response(frequency)
+                # Update resonance frequencies based on power estimates
+                self.update_resonator_frequencies(np.array([amplitude*s21_mag]))  # Single resonator
+
+            for sample_idx in range(num_samples):
+
+                # Total phase includes channel phase and S21 phase
+                total_phase = phase + s21_phase
+
+                # Generate I and Q samples
+                i = amplitude * s21_mag * np.cos(total_phase)
+                q = amplitude * s21_mag * np.sin(total_phase)
+
+                # Add random noise
+                noise_level = 0.0  # Adjust noise level as needed
+                i += np.random.normal(0, noise_level)
+                q += np.random.normal(0, noise_level)
+
+                # Append samples
+                i_samples.append(i)
+                q_samples.append(q)
+
+            # Convert to lists for JSON serialization
+            i_list = i_samples  # Already a Python list
+            q_list = q_samples  # Already a Python list
+
+            return {
+                "i": i_list,
+                "q": q_list,
+                "ts": t_list,
+                "flags": {"overrange": overrange, "overvoltage": overvoltage}
+            }
+        else:
+            # Handle all channels
+            channels_per_module = 1024
+
+            # Initialize lists to store samples
+            i_data = []
+            q_data = []
+
+            for ch in range(channels_per_module):
+                chan_freq = self.frequencies.get((module, ch))
+                amp_info = self.amplitudes.get((module, ch, self.TARGET['CARRIER']))
+                phase_info = self.phases.get((module, ch, self.TARGET['CARRIER']))
+
+                if chan_freq is None or amp_info is None or phase_info is None:
+                    # If not set, default to zero amplitude
+                    i = np.zeros(num_samples)
+                    q = np.zeros(num_samples)
+                else:
+                    frequency = chan_freq['value']+nco_freq    # Frequency in Hz
+                    amplitude = amp_info['value']   # Amplitude (normalized)
+                    phase = np.deg2rad(phase_info['value'])  # Convert phase to radians
+
+
+                    # Converge S21 response:
+                    for i in range(1000):
+                        # Compute S21 response
+                        s21_mag, s21_phase = self.s21_response(frequency)
+                        # Update resonance frequencies based on power estimates
+                        self.update_resonator_frequencies(np.array([amplitude*s21_mag]))  # Single resonator
+
+                    # Generate I and Q samples
+                    total_phase = phase + s21_phase
+                    i = amplitude * s21_mag * np.cos(total_phase) * np.ones(num_samples)
+                    q = amplitude * s21_mag * np.sin(total_phase) * np.ones(num_samples)
+
+                    # Add random noise
+                    noise_level = 0.0  # Adjust noise level as needed
+                    i += np.random.normal(0, noise_level, size=np.shape(i) if np.shape(i) else None)
+                    q += np.random.normal(0, noise_level, size=np.shape(q) if np.shape(q) else None)
+                # Convert to lists for JSON serialization
+                i_list = i.tolist()
+                q_list = q.tolist()
+
+                i_data.append(i_list)
+                q_data.append(q_list)
+
+            return {
+                "i": i_data,
+                "q": q_data,
+                "ts": t_list,
+                "flags": {"overrange": overrange, "overvoltage": overvoltage}
+            }

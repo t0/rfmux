@@ -159,6 +159,9 @@ async def take_netanal(
         nco_freq = 0.5 * (freqs_chunk[0] + freqs_chunk[-1])
         await crs.set_nco_frequency(nco_freq, module=module)
 
+        # Track data at the chunk level
+        chunk_fs_full, chunk_iq_full = [], []        
+
         # Arrays to collect data from this chunk before optional rotation.
         chunk_fs, chunk_iq = [], []
         n_chunk_points = len(freqs_chunk)
@@ -212,7 +215,18 @@ async def take_netanal(
                 i_val = samples.mean.i[ch]
                 q_val = samples.mean.q[ch]
                 chunk_iq.append(i_val + 1j * q_val)
+           
+            # Append this comb's data to the full chunk data
+            chunk_fs_full.extend(chunk_fs)
+            chunk_iq_full.extend(chunk_iq)
             
+            if data_callback and chunk_fs_full:
+                fs_array = np.array(fs_all + chunk_fs_full)  # Show accumulating data
+                iq_array = np.array(iq_all + chunk_iq_full)
+                amp_array = np.abs(iq_array)
+                phase_array = np.degrees(np.angle(iq_array))
+                data_callback(module, fs_array, amp_array, phase_array)
+
             # Report progress
             if progress_callback:
                 progress = ((i * niter + it + 1) / (total_chunks * niter)) * 100
@@ -220,21 +234,24 @@ async def take_netanal(
 
         # Rotate new NCO chunk so the overlap freq aligns with previous NCO phase.
         if i > 0 and prev_boundary_iq is not None:
-            boundary_new = chunk_iq[0]
+            boundary_new = chunk_iq_full[0]
             if abs(boundary_new) > 1e-15:
                 rot = prev_boundary_iq / boundary_new
-                # Remove the overlap freq from this chunk's arrays, apply rotation to the rest.
-                chunk_iq = [iq_val * rot for iq_val in chunk_iq[1:]]
-                chunk_fs = chunk_fs[1:]
+                # Apply rotation to all but the first point (overlap point)
+                rotated_iq = [chunk_iq_full[0]] + [iq_val * rot for iq_val in chunk_iq_full[1:]]
+                # Now remove the overlap point
+                chunk_iq_full = rotated_iq[1:]
+                chunk_fs_full = chunk_fs_full[1:]
 
         # Update the boundary freq's I/Q for use in the next chunk.
-        prev_boundary_iq = chunk_iq[-1]
+        if chunk_iq_full:
+            prev_boundary_iq = chunk_iq_full[-1]
 
         # Accumulate into global arrays.
-        fs_all.extend(chunk_fs)
-        iq_all.extend(chunk_iq)
+        fs_all.extend(chunk_fs_full)
+        iq_all.extend(chunk_iq_full)
         
-        # Report data update
+        # Report final data update after rotation
         if data_callback:
             fs_array = np.array(fs_all)
             iq_array = np.array(iq_all)

@@ -25,7 +25,7 @@ $ pytest test_crs_integrated.py --serial=<serial> -k "<test_test_name_1> or <tes
 # Most basic check, does not use hidfmux
 def test_board_bootup(results):
     print("Retrieving board status")
-    os.system("timeout 1 /home/montgojo/code/crs-mkids/firmware/rfmux/r1.4/parser -i enp1s0f0 -t | grep 'Enclosure\\|Timestamp' > boot.txt")
+    os.system("timeout 1 /home/joshua/code/crs-mkids/firmware/rfmux/r1.4/parser -i enp6s0 -t | grep 'Enclosure\\|Timestamp' > boot.txt")
     try:
         with open('boot.txt', 'r') as file:
             content = file.read()

@@ -673,16 +673,41 @@ class NetworkAnalysisTask(QRunnable):
         self.params = params
         self.signals = signals
         self._running = True
+        self._last_update_time = 0
+        self._update_interval = 0.1  # Update every 100ms        
         
     def stop(self):
         """Signal the task to stop."""
         self._running = False
     
     def run(self):
-        """Execute the network analysis."""
-        # Based on take_netanal logic but emits data progressively
+        """Execute the network analysis using the take_netanal macro."""
+        # Create event loop for async operations
         loop = None
         try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Create callbacks that emit signals
+            def progress_cb(module, progress):
+                if self._running:
+                    self.signals.progress.emit(module, progress)
+            
+            def data_cb(module, freqs_raw, amps_raw, phases_raw):
+                if self._running:
+                    # Sort data by frequency before displaying
+                    sort_idx = np.argsort(freqs_raw)
+                    freqs = freqs_raw[sort_idx]
+                    amps = amps_raw[sort_idx]
+                    phases = phases_raw[sort_idx]
+                    
+                    # Throttle updates to prevent GUI lag
+                    current_time = time.time()
+                    if current_time - self._last_update_time >= self._update_interval:
+                        self._last_update_time = current_time                    
+                    self.signals.data_update.emit(module, freqs, amps, phases)
+            
+            # Extract parameters
             amp = self.params.get('amp', 0.001)
             fmin = self.params.get('fmin', 100e6)
             fmax = self.params.get('fmax', 2450e6)
@@ -690,147 +715,44 @@ class NetworkAnalysisTask(QRunnable):
             npoints = self.params.get('npoints', 5000)
             max_chans = self.params.get('max_chans', 1023)
             max_span = self.params.get('max_span', 500e6)
+            cable_length = self.params.get('cable_length', 0.75)
+            clear_channels = self.params.get('clear_channels', True)
+
+            # Clear channels if requested
+            if clear_channels:
+                loop.run_until_complete(self.crs.clear_channels(module=self.module))
+
+            # Set cable length before running the analysis
+            loop.run_until_complete(self.crs.set_cable_length(length=cable_length, module=self.module))
+
+            # Call the actual take_netanal macro
+            result = loop.run_until_complete(self.crs.take_netanal(
+                amp=amp,
+                fmin=fmin,
+                fmax=fmax,
+                nsamps=nsamps,
+                npoints=npoints,
+                max_chans=max_chans,
+                max_span=max_span,
+                module=self.module,
+                progress_callback=progress_cb,
+                data_callback=data_cb
+            ))
             
-            # Generate frequency array
-            freqs_global = np.linspace(fmin, fmax, npoints, endpoint=True)
-            
-            # Identify chunks
-            chunks = []
-            i_start = 0
-            while i_start < npoints:
-                f_candidate_stop = freqs_global[i_start] + max_span
-                if f_candidate_stop > fmax:
-                    f_candidate_stop = fmax
-                i_end = np.searchsorted(freqs_global, f_candidate_stop, side='right') - 1
-                if i_end <= i_start:
-                    i_end = i_start
-                chunks.append((i_start, i_end))
-                if i_end >= npoints - 1:
-                    break
-                i_start = i_end
+            # Extract and emit final data
+            if self._running and result:
+                fs_sorted, iq_sorted, phase_sorted = result
+                amp_sorted = np.abs(iq_sorted)
                 
-            # Prepare arrays for data collection
-            fs_all, iq_all = [], []
-            prev_boundary_iq = None
-            
-            # Get current event loop to run async ops from the thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            total_chunks = len(chunks)
-            
-            # Process each chunk
-            for i, (start_idx, end_idx) in enumerate(chunks):
-                if not self._running:
-                    break
-                    
-                freqs_chunk = freqs_global[start_idx:end_idx + 1]
-                if not len(freqs_chunk):
-                    continue
-                    
-                # Set NCO frequency
-                nco_freq = 0.5 * (freqs_chunk[0] + freqs_chunk[-1])
-                loop.run_until_complete(self.crs.set_nco_frequency(nco_freq, module=self.module))
-                
-                chunk_fs, chunk_iq = [], []
-                n_chunk_points = len(freqs_chunk)
-                niter = int(np.ceil(n_chunk_points / max_chans))
-                
-                # Process comb groups
-                for it in range(niter):
-                    if not self._running:
-                        break
-                        
-                    idx_local = it + np.arange(max_chans) * niter
-                    idx_local = idx_local[idx_local < n_chunk_points]
-                    if not len(idx_local):
-                        break
-                        
-                    comb = freqs_chunk[idx_local]
-                    
-                    # Add random offsets to dither IMD tones
-                    ifreqs = np.concatenate([
-                        [comb[0] - 50 * np.sign(comb[0] - nco_freq) * np.random.random()],
-                        comb[1:-1] + 100 * (np.random.random(len(comb) - 2) - 0.5),
-                        [comb[-1] - 50 * np.sign(comb[-1] - nco_freq) * np.random.random()]
-                    ])
-                    
-                    # Set frequencies and amplitudes
-                    ctx_ops = []
-                    for j in range(1, max_chans + 1):
-                        if j <= len(ifreqs):
-                            freq_val = ifreqs[j - 1]
-                            chunk_fs.append(freq_val)
-                            ctx_ops.append(self.crs.set_frequency(freq_val - nco_freq, channel=j, module=self.module))
-                            ctx_ops.append(self.crs.set_amplitude(amp, channel=j, module=self.module))
-                        else:
-                            ctx_ops.append(self.crs.set_frequency(0, channel=j, module=self.module))
-                            ctx_ops.append(self.crs.set_amplitude(0, channel=j, module=self.module))
-                    
-                    # Execute all operations
-                    loop.run_until_complete(asyncio.gather(*ctx_ops))
-                    
-                    # Get samples
-                    samples = loop.run_until_complete(self.crs.get_samples(
-                        nsamps, average=True, channel=None, module=self.module))
-                    
-                    # Extract I/Q data
-                    for ch in range(len(ifreqs)):
-                        i_val = samples.mean.i[ch]
-                        q_val = samples.mean.q[ch]
-                        chunk_iq.append(i_val + 1j * q_val)
-                    
-                    # Update progress
-                    progress = ((i * niter + it + 1) / (total_chunks * niter)) * 100
-                    self.signals.progress.emit(self.module, progress)
-                
-                # Rotate chunk for phase consistency
-                if i > 0 and prev_boundary_iq is not None:
-                    boundary_new = chunk_iq[0]
-                    if abs(boundary_new) > 1e-15:
-                        rot = prev_boundary_iq / boundary_new
-                        chunk_iq = [iq_val * rot for iq_val in chunk_iq[1:]]
-                        chunk_fs = chunk_fs[1:]
-                
-                prev_boundary_iq = chunk_iq[-1]
-                
-                # Accumulate
-                fs_all.extend(chunk_fs)
-                iq_all.extend(chunk_iq)
-                
-                # Send data update
-                fs_array = np.array(fs_all)
-                iq_array = np.array(iq_all)
-                amp_array = np.abs(iq_array)
-                phase_array = np.degrees(np.angle(iq_array))
-                
-                self.signals.data_update.emit(self.module, fs_array, amp_array, phase_array)
-            
-            # Clean up channels
-            ctx_ops = []
-            for j in range(max_chans):
-                ctx_ops.append(self.crs.set_amplitude(0, channel=j+1, module=self.module))
-            loop.run_until_complete(asyncio.gather(*ctx_ops))
-            
-            # Sort final data by frequency
-            fs_all = np.array(fs_all)
-            iq_all = np.array(iq_all)
-            order = np.argsort(fs_all)
-            fs_sorted = fs_all[order]
-            iq_sorted = iq_all[order]
-            amp_sorted = np.abs(iq_sorted)
-            phase_sorted = np.degrees(np.angle(iq_sorted))
-            
-            # Emit final data
-            self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
-            self.signals.completed.emit(self.module)
+                # Emit final data update
+                self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
+                self.signals.completed.emit(self.module)
             
         except Exception as e:
             self.signals.error.emit(str(e))
         finally:
             if loop:
                 loop.close()
-
 
 # ───────────────────────── Multi-Channel Parsing ─────────────────────────
 def _parse_channels_multich(txt: str) -> List[List[int]]:
@@ -929,17 +851,19 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         param_layout = QtWidgets.QFormLayout(param_group)
         
         # Module selection
-        self.module_combo = QtWidgets.QComboBox()
-        self.module_combo.addItem("All Modules", None)
-        for m in self.modules:
-            self.module_combo.addItem(f"Module {m}", m)
-        param_layout.addRow("Module:", self.module_combo)
+        self.module_entry = QtWidgets.QLineEdit("All")
+        self.module_entry.setToolTip("Enter module numbers (e.g., '1,2,5' or '1-4' or 'All')")
+        param_layout.addRow("Modules:", self.module_entry)
         
         # Frequency range
         self.fmin_edit = QtWidgets.QLineEdit("100e6")
         self.fmax_edit = QtWidgets.QLineEdit("2450e6")
         param_layout.addRow("Min Frequency (Hz):", self.fmin_edit)
         param_layout.addRow("Max Frequency (Hz):", self.fmax_edit)
+
+        # Cable length
+        self.cable_length_edit = QtWidgets.QLineEdit("0.75")
+        param_layout.addRow("Cable Length (m):", self.cable_length_edit)        
         
         # Amplitude
         self.amp_edit = QtWidgets.QLineEdit("0.001")
@@ -958,8 +882,14 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         param_layout.addRow("Max Channels:", self.max_chans_edit)
         
         # Max span
-        self.max_span_edit = QtWidgets.QLineEdit("500e6")
-        param_layout.addRow("Max Span (Hz):", self.max_span_edit)
+        self.max_span_edit = QtWidgets.QLineEdit("500")
+        param_layout.addRow("Max Span (MHz):", self.max_span_edit)
+        
+        # Add checkbox for clearing channels
+        self.clear_channels_cb = QtWidgets.QCheckBox("Clear all channels first")
+        self.clear_channels_cb.setToolTip("Clear all channels on the selected module(s) before starting analysis")
+        self.clear_channels_cb.setChecked(True)  # Default to cleared channels
+        param_layout.addRow("", self.clear_channels_cb)
         
         layout.addWidget(param_group)
         
@@ -976,21 +906,39 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         # Connect buttons
         self.start_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
-        
+
     def get_parameters(self):
         """Get the configured parameters."""
-        selected_module = self.module_combo.currentData()
-        
         try:
+            # Parse module entry
+            module_text = self.module_entry.text().strip()
+            selected_module = None
+            if module_text.lower() != 'all':
+                # Parse comma-separated values and ranges
+                modules = []
+                for part in module_text.split(','):
+                    part = part.strip()
+                    if '-' in part:
+                        # Handle range like "1-4"
+                        start, end = map(int, part.split('-'))
+                        modules.extend(range(start, end + 1))
+                    elif part:
+                        # Handle single values
+                        modules.append(int(part))
+                if modules:
+                    selected_module = modules
+            
             params = {
                 'module': selected_module,
                 'fmin': float(eval(self.fmin_edit.text())),
                 'fmax': float(eval(self.fmax_edit.text())),
+                'cable_length': float(self.cable_length_edit.text()),
                 'amp': float(eval(self.amp_edit.text())),
                 'npoints': int(self.points_edit.text()),
                 'nsamps': int(self.samples_edit.text()),
                 'max_chans': int(self.max_chans_edit.text()),
-                'max_span': float(eval(self.max_span_edit.text()))
+                'max_span': float(eval(self.max_span_edit.text())) * 1e6,  # Convert MHz to Hz
+                'clear_channels': self.clear_channels_cb.isChecked()
             }
             return params
         except Exception as e:
@@ -1008,7 +956,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.modules = modules or []
         self.data = {}  # module -> (freqs, amps, phases)
         self._setup_ui()
-        
+
     def _setup_ui(self):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -1018,12 +966,31 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         toolbar = QtWidgets.QToolBar()
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
-        
+
+        # Add edit parameters button to toolbar (after export_btn and rerun_btn)
+        edit_params_btn = QtWidgets.QPushButton("Edit Parameters")
+        edit_params_btn.clicked.connect(self._edit_parameters)
+        toolbar.addWidget(edit_params_btn)
+
         # Export button
         export_btn = QtWidgets.QPushButton("Export Data")
         export_btn.clicked.connect(self._export_data)
         toolbar.addWidget(export_btn)
         
+        # Re-run analysis button
+        rerun_btn = QtWidgets.QPushButton("Re-run Analysis")
+        rerun_btn.clicked.connect(self._rerun_analysis)
+        toolbar.addWidget(rerun_btn)
+        
+        # Cable length control for quick adjustments
+        self.cable_length_label = QtWidgets.QLabel("Cable Length (m):")
+        self.cable_length_spin = QtWidgets.QDoubleSpinBox()
+        self.cable_length_spin.setRange(0.0, 10.0)
+        self.cable_length_spin.setValue(0.75)
+        self.cable_length_spin.setSingleStep(0.05)
+        toolbar.addWidget(self.cable_length_label)
+        toolbar.addWidget(self.cable_length_spin)
+
         # Progress bars
         self.progress_bars = {}
         if self.modules:
@@ -1066,7 +1033,11 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             # Create curves
             amp_curve = amp_plot.plot(pen=pg.mkPen('r', width=LINE_WIDTH))
             phase_curve = phase_plot.plot(pen=pg.mkPen('b', width=LINE_WIDTH))
-            
+
+            # Use periscope color scheme: orange for amplitude, blue for phase
+            amp_curve = amp_plot.plot(pen=pg.mkPen('#ff7f0e', width=LINE_WIDTH))
+            phase_curve = phase_plot.plot(pen=pg.mkPen('#1f77b4', width=LINE_WIDTH))
+
             tab_layout.addWidget(amp_plot)
             tab_layout.addWidget(phase_plot)
             self.tabs.addTab(tab, f"Module {module}")
@@ -1077,7 +1048,63 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 'amp_curve': amp_curve,
                 'phase_curve': phase_curve
             }
+
+        # Link the x-axis of amplitude and phase plots for synchronized zooming
+        amp_plot.setXLink(phase_plot)
+
+    def closeEvent(self, event):
+        """Handle window close event by informing parent and stopping tasks."""
+        parent = self.parent()
         
+        # Stop all associated network analysis tasks
+        if hasattr(parent, 'netanal_tasks'):
+            for module, task in list(parent.netanal_tasks.items()):
+                task.stop()
+                parent.netanal_tasks.pop(module, None)
+        
+        # Inform parent that window is closing
+        if hasattr(parent, 'netanal_window'):
+            parent.netanal_window = None
+        
+        super().closeEvent(event)
+
+    def _edit_parameters(self):
+        """Open dialog to edit parameters besides cable length."""
+        dialog = NetworkAnalysisParamsDialog(self, self.original_params)
+        if dialog.exec():
+            # Get updated parameters
+            params = dialog.get_parameters()
+            if params:
+                # Keep the current cable length
+                params['cable_length'] = self.cable_length_spin.value()
+                self.parent()._rerun_network_analysis(params)
+
+    def _rerun_analysis(self):
+        """Re-run the analysis with potentially updated parameters."""
+        if hasattr(self.parent(), '_rerun_network_analysis'):
+            # Get original parameters and update cable length
+            params = self.original_params.copy()
+            params['cable_length'] = self.cable_length_spin.value()
+            self.parent()._rerun_network_analysis(params)
+    
+    def set_original_params(self, params):
+        """Store original parameters for re-run functionality."""
+        self.original_params = params
+        # Set cable length spinner to match original value
+        self.cable_length_spin.setValue(params.get('cable_length', 0.75))
+        
+        # Set initial plot ranges based on frequency parameters
+        fmin = params.get('fmin', 100e6)
+        fmax = params.get('fmax', 2450e6)
+        for module in self.plots:
+            self.plots[module]['amp_plot'].setXRange(fmin, fmax)
+            self.plots[module]['phase_plot'].setXRange(fmin, fmax)
+            # Disable auto range on X axis but keep Y auto range
+            self.plots[module]['amp_plot'].enableAutoRange(pg.ViewBox.XAxis, False)
+            self.plots[module]['phase_plot'].enableAutoRange(pg.ViewBox.XAxis, False)
+            self.plots[module]['amp_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
+            self.plots[module]['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
+          
         self.resize(1000, 800)
         
     def update_data(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
@@ -1152,6 +1179,85 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.critical(self, "Export Error", 
                                                f"Error exporting data: {str(e)}")
 
+class NetworkAnalysisParamsDialog(QtWidgets.QDialog):
+    """Dialog for editing network analysis parameters (excluding cable length)."""
+    def __init__(self, parent=None, params=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Network Analysis Parameters")
+        self.setModal(True)
+        self.params = params or {}
+        self._setup_ui()
+        
+    def _setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Parameters form
+        form = QtWidgets.QFormLayout()
+        
+        # Frequency range
+        self.fmin_edit = QtWidgets.QLineEdit(str(self.params.get('fmin', '100e6')))
+        self.fmax_edit = QtWidgets.QLineEdit(str(self.params.get('fmax', '2450e6')))
+        form.addRow("Min Frequency (Hz):", self.fmin_edit)
+        form.addRow("Max Frequency (Hz):", self.fmax_edit)
+        
+        # Amplitude
+        self.amp_edit = QtWidgets.QLineEdit(str(self.params.get('amp', '0.001')))
+        form.addRow("Amplitude:", self.amp_edit)
+        
+        # Number of points
+        self.points_edit = QtWidgets.QLineEdit(str(self.params.get('npoints', '5000')))
+        form.addRow("Number of Points:", self.points_edit)
+        
+        # Number of samples to average
+        self.samples_edit = QtWidgets.QLineEdit(str(self.params.get('nsamps', '10')))
+        form.addRow("Samples to Average:", self.samples_edit)
+        
+        # Max channels
+        self.max_chans_edit = QtWidgets.QLineEdit(str(self.params.get('max_chans', '1023')))
+        form.addRow("Max Channels:", self.max_chans_edit)
+        
+        # Max span
+        self.max_span_edit = QtWidgets.QLineEdit(str(self.params.get('max_span', 500e6) / 1e6))
+        form.addRow("Max Span (MHz):", self.max_span_edit)
+        
+        # Add checkbox for clearing channels
+        self.clear_channels_cb = QtWidgets.QCheckBox("Clear all channels first")
+        self.clear_channels_cb.setToolTip("Clear all channels on the selected module(s) before starting analysis")
+        self.clear_channels_cb.setChecked(self.params.get('clear_channels', True))  # Use existing value or default to True
+        form.addRow("", self.clear_channels_cb)
+        
+        layout.addLayout(form)
+        
+        # Buttons
+        btn_layout = QtWidgets.QHBoxLayout()
+        self.ok_btn = QtWidgets.QPushButton("OK")
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        btn_layout.addWidget(self.ok_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+        
+        # Connect buttons
+        self.ok_btn.clicked.connect(self.accept)
+        self.cancel_btn.clicked.connect(self.reject)
+        
+    def get_parameters(self):
+        """Get the updated parameters."""
+        try:
+            params = self.params.copy()
+            params.update({
+                'fmin': float(eval(self.fmin_edit.text())),
+                'fmax': float(eval(self.fmax_edit.text())),
+                'amp': float(eval(self.amp_edit.text())),
+                'npoints': int(self.points_edit.text()),
+                'nsamps': int(self.samples_edit.text()),
+                'max_chans': int(self.max_chans_edit.text()),
+                'max_span': float(eval(self.max_span_edit.text())) * 1e6,  # Convert MHz to Hz
+                'clear_channels': self.clear_channels_cb.isChecked()
+            })
+            return params
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Invalid parameter: {str(e)}")
+            return None
 
 class Periscope(QtWidgets.QMainWindow):
     """
@@ -1497,12 +1603,14 @@ class Periscope(QtWidgets.QMainWindow):
 
     def _show_netanal_dialog(self):
         """Show the network analysis configuration dialog."""
-        dialog = NetworkAnalysisDialog(self, modules=[1, 2, 3, 4, 5, 6, 7, 8])
+        dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)))
+        # Set the default module to the one periscope was launched with
+        dialog.module_entry.setText(str(self.module))
         if dialog.exec():
             params = dialog.get_parameters()
             if params:
                 self._start_network_analysis(params)
-    
+
     def _start_network_analysis(self, params: dict):
         """Start network analysis on selected modules."""
         if self.crs is None:
@@ -1513,12 +1621,53 @@ class Periscope(QtWidgets.QMainWindow):
         selected_module = params.get('module')
         if selected_module is None:
             modules = list(range(1, 9))  # All modules
+        elif isinstance(selected_module, list):
+            modules = selected_module
         else:
             modules = [selected_module]
-        
-        # Create results window
+
+        # Always create a new window for "Start Analysis"
         self.netanal_window = NetworkAnalysisWindow(self, modules)
+        self.netanal_window.set_original_params(params)
         self.netanal_window.show()
+        
+        # Start tasks for each module
+        for module in modules:
+            task_params = params.copy()
+            task_params['module'] = module
+            
+            task = NetworkAnalysisTask(self.crs, module, task_params, self.netanal_signals)
+            self.netanal_tasks[module] = task
+            self.pool.start(task)
+    
+    def _rerun_network_analysis(self, params: dict):
+        """Rerun network analysis in the existing window."""
+        if self.crs is None:
+            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
+            return
+            
+        if hasattr(self, 'netanal_window') and self.netanal_window is not None:
+            # Clear existing data and reset progress bars
+            self.netanal_window.data.clear()
+            for module, pbar in self.netanal_window.progress_bars.items():
+                pbar.setValue(0)
+            
+            # Clear existing plots
+            for module in self.netanal_window.plots:
+                self.netanal_window.plots[module]['amp_curve'].setData([], [])
+                self.netanal_window.plots[module]['phase_curve'].setData([], [])
+            
+            # Update the parameters in the window
+            self.netanal_window.set_original_params(params)
+        
+        # Determine which modules to run
+        selected_module = params.get('module')
+        if selected_module is None:
+            modules = list(range(1, 9))  # All modules
+        elif isinstance(selected_module, list):
+            modules = selected_module
+        else:
+            modules = [selected_module]
         
         # Start tasks for each module
         for module in modules:
@@ -2314,8 +2463,6 @@ def main():
     ap.add_argument("-n", "--num-samples", type=int, default=5_000)
     ap.add_argument("-f", "--fps", type=float, default=30.0)
     ap.add_argument("-d", "--density-dot", type=int, default=DENSITY_DOT_SIZE)
-    ap.add_argument("--enable-netanal", action="store_true", 
-                    help="Create CRS object to enable network analysis")
     args = ap.parse_args()
 
     if args.fps <= 0:
@@ -2331,30 +2478,29 @@ def main():
     # Bind only the main GUI (this) thread to a single CPU to reduce scheduling jitter
     _pin_current_thread_to_core()
 
-    # Create CRS object if requested
+    # Create CRS object so we can tell it what to do
     crs = None
-    if args.enable_netanal:
-        try:
-            # Extract serial number from hostname
-            hostname = args.hostname
-            if "rfmux" in hostname and ".local" in hostname:
-                serial = hostname.replace("rfmux", "").replace(".local", "")
-            else:
-                # Default to hostname as serial
-                serial = hostname
-            
-            # Create and resolve CRS in a synchronous way
-            s = load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')
-            crs = s.query(CRS).one()
-            
-            # Resolve the CRS object
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(crs.resolve())
-            
-        except Exception as e:
-            warnings.warn(f"Failed to create CRS object: {str(e)}\nNetwork analysis will be disabled.")
-            crs = None
+    try:
+        # Extract serial number from hostname
+        hostname = args.hostname
+        if "rfmux" in hostname and ".local" in hostname:
+            serial = hostname.replace("rfmux", "").replace(".local", "")
+        else:
+            # Default to hostname as serial
+            serial = hostname
+        
+        # Create and resolve CRS in a synchronous way
+        s = load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')
+        crs = s.query(CRS).one()
+        
+        # Resolve the CRS object
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(crs.resolve())
+        
+    except Exception as e:
+        warnings.warn(f"Failed to create CRS object: {str(e)}\nNetwork analysis will be disabled.")
+        crs = None
 
     win = Periscope(
         host=args.hostname,
@@ -2367,7 +2513,6 @@ def main():
     )
     win.show()
     sys.exit(app.exec())
-
 
 @macro(CRS, register=True)
 async def raise_periscope(

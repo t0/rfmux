@@ -1058,10 +1058,13 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.data = {}  # module -> amplitude data dictionary
         self.raw_data = {}  # Store the raw IQ data for unit conversion
         self.unit_mode = "counts"  # Default: counts, alternatives: "dbm", "volts"
+        self.normalize_magnitudes = False  # Add this flag to track normalization state
         self.first_setup = True  # Flag to track initial setup
         self.zoom_box_mode = True  # Default to zoom box mode ON
         self.plots = {}  # Initialize plots dictionary early
-
+        self.original_params = {}  # Initial parameters
+        self.current_params = {}   # Most recently used parameters
+        
         # Setup the UI components
         self._setup_ui()
         # Set initial size only on creation
@@ -1096,16 +1099,17 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         rerun_btn.clicked.connect(self._rerun_analysis)
         toolbar.addWidget(rerun_btn)        
 
+        # Export button
+        export_btn = QtWidgets.QPushButton("Export Data")
+        export_btn.clicked.connect(self._export_data)
+        toolbar.addWidget(export_btn) 
+        
         # Add spacer to push the unit controls to the far right
         spacer = QtWidgets.QWidget()
         spacer.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, 
                             QtWidgets.QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
-        
-        # Export button
-        export_btn = QtWidgets.QPushButton("Export Data")
-        export_btn.clicked.connect(self._export_data)
-        toolbar.addWidget(export_btn)        
+               
 
         # Create Real Units controls (will add to toolbar at the end)
         unit_group = QtWidgets.QWidget()
@@ -1141,6 +1145,13 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         unit_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, 
                                 QtWidgets.QSizePolicy.Policy.Preferred)
         
+        # Normalize Magnitudes checkbox
+        self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Magnitudes")
+        self.normalize_checkbox.setChecked(False)
+        self.normalize_checkbox.setToolTip("Normalize all magnitude curves to their first data point")
+        self.normalize_checkbox.toggled.connect(self._toggle_normalization)
+        toolbar.addWidget(self.normalize_checkbox)
+
         # Now add the unit controls at the far right
         toolbar.addSeparator()
         toolbar.addWidget(unit_group)
@@ -1209,9 +1220,9 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             amp_legend = amp_plot.addLegend(offset=(30, 10))
             phase_legend = phase_plot.addLegend(offset=(30, 10))
 
-            # Create curves with periscope color scheme
-            amp_curve = amp_plot.plot(pen=pg.mkPen('#ff7f0e', width=LINE_WIDTH))
-            phase_curve = phase_plot.plot(pen=pg.mkPen('#1f77b4', width=LINE_WIDTH))
+            # Create curves with periscope color scheme - but don't add data yet
+            amp_curve = amp_plot.plot([], [], pen=pg.mkPen('#ff7f0e', width=LINE_WIDTH))  # Empty data
+            phase_curve = phase_plot.plot([], [], pen=pg.mkPen('#1f77b4', width=LINE_WIDTH))  # Empty data
 
             tab_layout.addWidget(amp_plot)
             tab_layout.addWidget(phase_plot)
@@ -1234,10 +1245,53 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             # Link the x-axis of amplitude and phase plots for synchronized zooming
             phase_plot.setXLink(amp_plot)
 
+    def clear_plots(self):
+        """Clear all plots, curves, and legends."""
+        for module in self.plots:
+            plot_info = self.plots[module]
+            amp_plot = plot_info['amp_plot']
+            phase_plot = plot_info['phase_plot']
+            
+            # Clear legends
+            plot_info['amp_legend'].clear()
+            plot_info['phase_legend'].clear()
+            
+            # Remove all amplitude-specific curves from plots
+            for amp, curve in list(plot_info['amp_curves'].items()):
+                amp_plot.removeItem(curve)
+            for amp, curve in list(plot_info['phase_curves'].items()):
+                phase_plot.removeItem(curve)
+            
+            # Clear curve dictionaries
+            plot_info['amp_curves'].clear()
+            plot_info['phase_curves'].clear()
+            
+            # Make sure main curves have no data 
+            plot_info['amp_curve'].setData([], [])
+            plot_info['phase_curve'].setData([], [])
+
     def update_amplitude_progress(self, module: int, current_amp: int, total_amps: int, amplitude: float):
         """Update the amplitude progress display for a module."""
         if hasattr(self, 'progress_labels') and module in self.progress_labels:
             self.progress_labels[module].setText(f"Amplitude {current_amp}/{total_amps} ({amplitude})")
+
+    def _toggle_normalization(self, checked):
+        """Toggle normalization of magnitude plots."""
+        self.normalize_magnitudes = checked
+        
+        # Update axis labels
+        for module in self.plots:
+            self._update_amplitude_labels(self.plots[module]['amp_plot'])
+        
+        # Make sure main curves are cleared if we have amplitude-specific curves
+        for module in self.plots:
+            if len(self.plots[module]['amp_curves']) > 0:
+                # Clear main curves if we have amplitude-specific curves
+                self.plots[module]['amp_curve'].setData([], [])
+                self.plots[module]['phase_curve'].setData([], [])
+        
+        # Redraw plots with normalization applied
+        self._redraw_all_plots()
 
     def _toggle_zoom_box(self, enable):
         """Toggle zoom box mode for all plots."""
@@ -1264,27 +1318,28 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             self._redraw_all_plots()
     
     def _update_amplitude_labels(self, plot):
-        """Update plot labels based on current unit mode."""
-        if self.unit_mode == "counts":
-            plot.setLabel('left', 'Amplitude', units='Counts')
-        elif self.unit_mode == "dbm":
-            plot.setLabel('left', 'Power', units='dBm')
-        elif self.unit_mode == "volts":
-            plot.setLabel('left', 'Amplitude', units='V')
+        """Update plot labels based on current unit mode and normalization state."""
+        if self.normalize_magnitudes:
+            if self.unit_mode == "dbm":
+                plot.setLabel('left', 'Normalized Power', units='dBm')
+            else:
+                plot.setLabel('left', 'Normalized Magnitude', units='')
+        else:
+            if self.unit_mode == "counts":
+                plot.setLabel('left', 'Amplitude', units='Counts')
+            elif self.unit_mode == "dbm":
+                plot.setLabel('left', 'Power', units='dBm')
+            elif self.unit_mode == "volts":
+                plot.setLabel('left', 'Amplitude', units='V')
 
     def _redraw_all_plots(self):
         """Redraw all plots with current unit mode."""
         for module in self.raw_data:
             if module in self.plots:
-                # Update main curve if default data exists
-                if 'default' in self.raw_data[module]:
-                    freqs, amps, phases, iq_data = self.raw_data[module]['default']
-                    converted_amps = self._convert_amplitude(amps, iq_data)
-                    freq_ghz = freqs / 1e9
-                    self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
-                    self.plots[module]['phase_curve'].setData(freq_ghz, phases)
+                # Check if we have amplitude-specific curves
+                has_amp_curves = len(self.plots[module]['amp_curves']) > 0
                 
-                # Update amplitude-specific curves
+                # Update amplitude-specific curves first
                 for amp_key, data_tuple in self.raw_data[module].items():
                     if amp_key != 'default':
                         # Handle the case where data_tuple has 5 elements (amplitude-specific)
@@ -1305,12 +1360,24 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                             self.plots[module]['amp_curves'][amplitude].setData(freq_ghz, converted_amps)
                             self.plots[module]['phase_curves'][amplitude].setData(freq_ghz, phases)
                 
+                # Now handle the default curve - ONLY if there are no amplitude-specific curves
+                if 'default' in self.raw_data[module] and not has_amp_curves:
+                    freqs, amps, phases, iq_data = self.raw_data[module]['default']
+                    converted_amps = self._convert_amplitude(amps, iq_data)
+                    freq_ghz = freqs / 1e9
+                    self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
+                    self.plots[module]['phase_curve'].setData(freq_ghz, phases)
+                else:
+                    # Make sure default curves have no data if we have amplitude-specific curves
+                    self.plots[module]['amp_curve'].setData([], [])
+                    self.plots[module]['phase_curve'].setData([], [])
+                
                 # Enable auto range to fit new data
                 self.plots[module]['amp_plot'].autoRange()
-    
+        
     def _convert_amplitude(self, amps, iq_data):
         """
-        Convert amplitude values to the selected unit.
+        Convert amplitude values to the selected unit, with optional normalization.
         
         Parameters
         ----------
@@ -1318,28 +1385,43 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             Raw amplitude values (magnitude of complex data)
         iq_data : ndarray
             Complex IQ data from network analysis
-            
+                
         Returns
         -------
         ndarray
-            Converted amplitude values in the selected unit
+            Converted amplitude values in the selected unit, optionally normalized
         """
         from ..core.transferfunctions import (
             convert_roc_to_volts,
             convert_roc_to_dbm,
         )
         
+        # First convert to the right units
         if self.unit_mode == "counts":
-            return amps  # Raw counts
+            result = amps  # Raw counts
         elif self.unit_mode == "volts":
-            return convert_roc_to_volts(amps)
+            result = convert_roc_to_volts(amps)
         elif self.unit_mode == "dbm":
             # For network analysis, amp values are already magnitudes
-            # so we can directly convert to dBm
-            return convert_roc_to_dbm(amps)
+            result = convert_roc_to_dbm(amps)
+        else:
+            result = amps  # Default fallback
+            
+        # Then normalize if requested (and if there's data)
+        if self.normalize_magnitudes and len(result) > 0:
+            # For dBm, we subtract the first value instead of dividing
+            if self.unit_mode == "dbm":
+                # Handle cases where the first value might be invalid (inf or nan)
+                ref_val = result[0]
+                if np.isfinite(ref_val):
+                    result = result - ref_val
+            else:
+                # For counts or volts, we divide by the first value
+                ref_val = result[0]
+                if ref_val != 0 and np.isfinite(ref_val):
+                    result = result / ref_val
         
-        # Default fallback
-        return amps
+        return result
 
     def closeEvent(self, event):
         """Handle window close event by informing parent and stopping tasks."""
@@ -1372,13 +1454,15 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
 
     def _edit_parameters(self):
         """Open dialog to edit parameters besides cable length."""
-        dialog = NetworkAnalysisParamsDialog(self, self.original_params)
+        dialog = NetworkAnalysisParamsDialog(self, self.current_params)  # Use current, not original
         if dialog.exec():
             # Get updated parameters
             params = dialog.get_parameters()
             if params:
                 # Keep the current cable length
                 params['cable_length'] = self.cable_length_spin.value()
+                # Update current parameters
+                self.current_params = params.copy()
                 # Make progress group visible again
                 if self.progress_group:
                     self.progress_group.setVisible(True)
@@ -1387,18 +1471,20 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
     def _rerun_analysis(self):
         """Re-run the analysis with potentially updated parameters."""
         if hasattr(self.parent(), '_rerun_network_analysis'):
-            # Get original parameters and update cable length
-            params = self.original_params.copy()
+            # Get current parameters and update cable length
+            params = self.current_params.copy()
             params['cable_length'] = self.cable_length_spin.value()
             # Make progress group visible again
             if self.progress_group:
                 self.progress_group.setVisible(True)
             self.parent()._rerun_network_analysis(params)
     
-    def set_original_params(self, params):
-        """Store original parameters for re-run functionality."""
-        self.original_params = params
-        # Set cable length spinner to match original value
+    def set_params(self, params):
+        """Set parameters for analysis."""
+        self.original_params = params.copy()  # Keep original for reference
+        self.current_params = params.copy()   # Keep current for dialog
+        
+        # Set cable length spinner to match value
         self.cable_length_spin.setValue(params.get('cable_length', 0.75))
         
         # Only try to set plot ranges if plots exist
@@ -1436,6 +1522,12 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.data[module][key] = (freqs, amps, phases)
         
         if module in self.plots:
+            # Hide the main curve if this is the first amplitude-specific curve
+            if len(self.plots[module]['amp_curves']) == 0:
+                # Set main curves to empty data to effectively hide them
+                self.plots[module]['amp_curve'].setData([], [])
+                self.plots[module]['phase_curve'].setData([], [])
+            
             # Convert amplitude to selected units
             converted_amps = self._convert_amplitude(amps, iq_data)
             
@@ -1466,7 +1558,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             # Update the curves
             self.plots[module]['amp_curves'][amplitude].setData(freq_ghz, converted_amps)
             self.plots[module]['phase_curves'][amplitude].setData(freq_ghz, phases)
-    
+
     def update_data(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
         """Update the plot data for a specific module."""
         # Store the raw data for unit conversion
@@ -1483,15 +1575,17 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.data[module]['default'] = (freqs, amps, phases)
         
         if module in self.plots:
-            # Convert amplitude to selected units
-            converted_amps = self._convert_amplitude(amps, iq_data)
-            
-            # Convert frequency to GHz for display
-            freq_ghz = freqs / 1e9
-            
-            # Update plots
-            self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
-            self.plots[module]['phase_curve'].setData(freq_ghz, phases)
+            # Only show default curve if no amplitude-specific curves exist yet
+            if len(self.plots[module]['amp_curves']) == 0:
+                # Convert amplitude to selected units
+                converted_amps = self._convert_amplitude(amps, iq_data)
+                
+                # Convert frequency to GHz for display
+                freq_ghz = freqs / 1e9
+                
+                # Update plots
+                self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
+                self.plots[module]['phase_curve'].setData(freq_ghz, phases)
     
     def update_progress(self, module: int, progress: float):
         """Update the progress bar for a specific module."""
@@ -1601,8 +1695,10 @@ class NetworkAnalysisParamsDialog(QtWidgets.QDialog):
         form.addRow("Min Frequency (MHz):", self.fmin_edit)
         form.addRow("Max Frequency (MHz):", self.fmax_edit)
         
-        # Amplitude
-        self.amp_edit = QtWidgets.QLineEdit(str(self.params.get('amp', '0.001')))
+        # Amplitude - handle both 'amps' list and 'amp' single value
+        amps = self.params.get('amps', [self.params.get('amp', 0.001)])
+        amp_str = ','.join(str(a) for a in amps)  # Convert list to comma-separated string
+        self.amp_edit = QtWidgets.QLineEdit(amp_str)
         self.amp_edit.setToolTip("Enter a single value or comma-separated list (e.g., 0.001,0.01,0.1)")
         form.addRow("Amplitude (Normalized Units):", self.amp_edit)
         
@@ -1657,10 +1753,10 @@ class NetworkAnalysisParamsDialog(QtWidgets.QDialog):
             
             params = self.params.copy()
             params.update({
-                'amps': amps,
+                'amps': amps,  # Store as list in 'amps'
+                'amp': amps[0],  # Also store first value in 'amp' for backward compatibility
                 'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
                 'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
-                'amp': float(eval(self.amp_edit.text())),
                 'npoints': int(self.points_edit.text()),
                 'nsamps': int(self.samples_edit.text()),
                 'max_chans': int(self.max_chans_edit.text()),
@@ -2098,7 +2194,7 @@ class Periscope(QtWidgets.QMainWindow):
 
         # Always create a new window for "Start Analysis"
         self.netanal_window = NetworkAnalysisWindow(self, modules)
-        self.netanal_window.set_original_params(params)
+        self.netanal_window.set_params(params)
         self.netanal_window.show()
         
         # Get amplitudes from params
@@ -2187,23 +2283,15 @@ class Periscope(QtWidgets.QMainWindow):
         if hasattr(self, 'netanal_window') and self.netanal_window is not None:
             # Clear existing data and reset progress bars
             self.netanal_window.data.clear()
+            self.netanal_window.raw_data.clear()  # Also clear raw data
             for module, pbar in self.netanal_window.progress_bars.items():
                 pbar.setValue(0)
             
-            # Clear existing plots
-            for module in self.netanal_window.plots:
-                # Remove all existing amplitude-specific curves
-                for amp in list(self.netanal_window.plots[module]['amp_curves'].keys()):
-                    self.netanal_window.plots[module]['amp_curves'][amp].clear()
-                    self.netanal_window.plots[module]['phase_curves'][amp].clear()
-                self.netanal_window.plots[module]['amp_curves'].clear()
-                self.netanal_window.plots[module]['phase_curves'].clear()
-                # Clear main curves
-                self.netanal_window.plots[module]['amp_curve'].setData([], [])
-                self.netanal_window.plots[module]['phase_curve'].setData([], [])
+            # Clear all plots and legends
+            self.netanal_window.clear_plots()
             
             # Update the parameters in the window
-            self.netanal_window.set_original_params(params)
+            self.netanal_window.set_params(params)  # Will rename this in next section
         
         # Determine which modules to run
         selected_module = params.get('module')

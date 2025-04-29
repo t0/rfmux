@@ -20,6 +20,7 @@ async def take_netanal(
     npoints: int = 5000,
     max_chans: int = 1023,
     max_span: float = 500e6,
+    rotate_phase_to_0: bool = True,
     *,
     module,
     progress_callback=None,
@@ -54,6 +55,10 @@ async def take_netanal(
         by default 1023.
     max_span : float, optional
         Maximum span (Hz) per NCO setting, defaults to the droop-free (non-extended) range of 500MHz.
+    rotate_phase_to_0 : bool, optional
+        If True, applies an arbitrary global phase rotation to make the first point 
+        have zero phase. This makes it easier to compare phase responses across 
+        different measurements, by default True.
     module : int or list of int
         - If an integer, run one measurement on that module.
         - If a list, e.g. [1, 2, 3], run concurrently for each module in the list
@@ -101,6 +106,7 @@ async def take_netanal(
                 npoints=npoints,
                 max_chans=max_chans,
                 max_span=max_span,
+                rotate_phase_to_0=rotate_phase_to_0,
                 module=m,
                 progress_callback=progress_callback,
                 data_callback=data_callback,
@@ -146,6 +152,8 @@ async def take_netanal(
     # Prepare arrays for final data across all chunks.
     fs_all, iq_all = [], []
     prev_boundary_iq = None  # To store I/Q of the overlap freq from previous chunk.
+    first_point_rotation = None  # Store rotation to set first point phase to 0
+    first_data_point = None  # Store the very first data point for rotation reference
 
     # Process each chunk.
     total_chunks = len(chunks)
@@ -203,17 +211,36 @@ async def take_netanal(
             samples = await crs.get_samples(
                 nsamps, average=True, channel=None, module=module
             )
+            new_iq_points = []
             for ch in range(len(ifreqs)):
                 i_val = samples.mean.i[ch]
                 q_val = samples.mean.q[ch]
-                chunk_iq.append(i_val + 1j * q_val)
-           
-            # Append this comb's data to the full chunk data
+                iq_val = i_val + 1j * q_val
+                
+                # Store the very first data point if we haven't seen one yet
+                if i == 0 and it == 0 and ch == 0 and first_data_point is None:
+                    first_data_point = iq_val
+                    # Calculate the phase rotation factor (only once for the entire dataset)
+                    if rotate_phase_to_0 and abs(first_data_point) > 1e-15:
+                        first_point_rotation = abs(first_data_point) / first_data_point
+                
+                # Apply the rotation to this point if needed
+                if rotate_phase_to_0 and first_point_rotation is not None:
+                    iq_val = iq_val * first_point_rotation
+                    
+                new_iq_points.append(iq_val)
+                
+            # Add the frequency points
             chunk_fs_full.extend(chunk_fs)
-            chunk_iq_full.extend(chunk_iq)
+            # Add the (potentially rotated) IQ points
+            chunk_iq_full.extend(new_iq_points)
+            
+            # Clear the temporary arrays for the next iteration
+            chunk_fs = []
+            chunk_iq = []
             
             if data_callback and chunk_fs_full:
-                fs_array = np.array(fs_all + chunk_fs_full)  # Show accumulating data
+                fs_array = np.array(fs_all + chunk_fs_full)
                 iq_array = np.array(iq_all + chunk_iq_full)
                 amp_array = np.abs(iq_array)
                 phase_array = np.degrees(np.angle(iq_array))

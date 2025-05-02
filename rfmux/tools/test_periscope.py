@@ -50,9 +50,12 @@ import rfmux.streamer as streamer
 import rfmux.tools.periscope as ps
 from rfmux.streamer import (
     STREAMER_MAGIC,
-    STREAMER_VERSION,
-    STREAMER_LEN,
-    NUM_CHANNELS,       # 1024
+    LONG_PACKET_VERSION,
+    LONG_PACKET_SIZE,
+    LONG_PACKET_CHANNELS,
+    SHORT_PACKET_VERSION,
+    SHORT_PACKET_SIZE,
+    SHORT_PACKET_CHANNELS,
     SS_PER_SECOND,
     TimestampPort,
     Timestamp,
@@ -101,8 +104,8 @@ def dfmuxpacket_to_bytes(self: DfmuxPacket) -> bytes:
 
     # 2) Channel data
     body_bytes = self.s.tobytes()
-    if len(body_bytes) != NUM_CHANNELS*2*4:
-        raise ValueError(f"Channel data must be 1024*2=2048 int => 8192 bytes.")
+    if len(body_bytes) not in {LONG_PACKET_CHANNELS*2*4, SHORT_PACKET_CHANNELS*2*4}:
+        raise ValueError(f"Channel data must be num_channels*2*4 bytes.")
     
     # 3) Timestamp
     ts_struct = struct.Struct("<8I")
@@ -118,7 +121,7 @@ def dfmuxpacket_to_bytes(self: DfmuxPacket) -> bytes:
     )
 
     packet = hdr + body_bytes + ts_data
-    if len(packet) != streamer.STREAMER_LEN:
+    if len(packet) not in {LONG_PACKET_SIZE, SHORT_PACKET_SIZE}:
         raise ValueError(f"Packet length mismatch: {len(packet)} != {STREAMER_LEN}")
     return packet
 
@@ -255,7 +258,7 @@ class FourModuleLiteThread(threading.Thread):
         seq = self.seq_list[mod]
         self.seq_list[mod]+=1
 
-        arr = array.array("i",[0]*(NUM_CHANNELS*2))
+        arr = array.array("i",[0]*(LONG_PACKET_CHANNELS*2))
 
         t_abs = time.time()
         for ch in range(16):
@@ -300,7 +303,7 @@ class FourModuleLiteThread(threading.Thread):
 
         pkt=DfmuxPacket(
             magic=streamer.STREAMER_MAGIC,
-            version=streamer.STREAMER_VERSION,
+            version=streamer.LONG_PACKET_VERSION,
             serial=0,
             num_modules=1,
             block=0,
@@ -390,7 +393,7 @@ class KidsRasterThread(threading.Thread):
                 time.sleep(leftover)
 
     def _make_packet(self)->DfmuxPacket:
-        arr=array.array("i",[0]*(NUM_CHANNELS*2))
+        arr=array.array("i",[0]*(LONG_PACKET_CHANNELS*2))
         # fill first 16 => 4x4
         t_abs= time.time()
         for ch in range(16):
@@ -440,7 +443,7 @@ class KidsRasterThread(threading.Thread):
 
         pkt= DfmuxPacket(
             magic=streamer.STREAMER_MAGIC,
-            version=streamer.STREAMER_VERSION,
+            version=streamer.LONG_PACKET_VERSION,
             serial=0,
             num_modules=1,
             block=0,

@@ -11,10 +11,15 @@ import warnings
 # Constants
 STREAMER_PORT = 9876
 STREAMER_HOST = "239.192.0.2"
-STREAMER_LEN = 8240  # expected packet length in bytes
+LONG_PACKET_SIZE = 8240  # expected packet length in bytes
+SHORT_PACKET_SIZE = 1072  # expected packet length in bytes
 STREAMER_MAGIC = 0x5344494B
-STREAMER_VERSION = 5
-NUM_CHANNELS = 1024
+
+LONG_PACKET_VERSION = 5
+SHORT_PACKET_VERSION = 6
+LONG_PACKET_CHANNELS = 1024
+SHORT_PACKET_CHANNELS = 128
+
 SS_PER_SECOND = 125000000
 
 # This seems like a long timeout - in practice, we can see long delays when
@@ -171,21 +176,31 @@ class DfmuxPacket:
         """
         Parses the entire DfmuxPacket from raw bytes, which contain:
           - a header (<IHHBBBBI)
-          - channel data (NUM_CHANNELS * 2 * sizeof(int))
+          - channel data (num_channels * 2 * sizeof(int))
           - a timestamp (8 * sizeof(uint32))
         """
         # Ensure the data length matches the expected packet length
         assert (
-            len(data) == STREAMER_LEN
-        ), f"Packet had unexpected size {len(data)} != {STREAMER_LEN}!"
+            len(data) in {LONG_PACKET_SIZE, SHORT_PACKET_SIZE}
+        ), f"Packet had unexpected size {len(data)}!"
 
-        # Unpack the packet header
+        # Unpack the packet header - we need this to determine the channel count
         header = struct.Struct("<IHHBBBBI")
-        header_args = header.unpack(data[: header.size])
+        header_args = (magic, version, serial, *_) = header.unpack(data[: header.size])
+
+        if magic != STREAMER_MAGIC:
+            raise RuntimeError(f"Invalid packet magic 0x{magic:08}")
+
+        if version == LONG_PACKET_VERSION:
+            num_channels = LONG_PACKET_CHANNELS
+        elif version == SHORT_PACKET_VERSION:
+            num_channels = SHORT_PACKET_CHANNELS
+        else:
+            raise RuntimeError(f"Invalid packet version 0x{version:04x}")
 
         # Extract the body (channel data)
         body = array.array("i")
-        bodysize = NUM_CHANNELS * 2 * body.itemsize
+        bodysize = num_channels * 2 * body.itemsize
         body.frombytes(data[header.size : header.size + bodysize])
 
         # Parse the timestamp from the remaining data
@@ -193,6 +208,14 @@ class DfmuxPacket:
 
         # Return a DfmuxPacket instance with the parsed data
         return DfmuxPacket(*header_args, s=body, ts=ts)
+
+
+    def get_num_channels(self):
+        if self.version == LONG_PACKET_VERSION:
+            return LONG_PACKET_CHANNELS
+        elif self.version == SHORT_PACKET_VERSION:
+            return SHORT_PACKET_CHANNELS
+        raise RuntimeError(f"Invalid packet version 0x{self.version:04x}")
 
 
 def get_local_ip(crs_hostname):

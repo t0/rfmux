@@ -363,7 +363,7 @@ class UDPReceiver(QtCore.QThread):
         """
         while not self.isInterruptionRequested():
             try:
-                data = self.sock.recv(streamer.STREAMER_LEN)
+                data = self.sock.recv(streamer.LONG_PACKET_SIZE)
                 pkt = streamer.DfmuxPacket.from_bytes(data)
             except socket.timeout:
                 continue
@@ -663,14 +663,14 @@ def _parse_channels_multich(txt: str) -> List[List[int]]:
                 sub = sub.strip()
                 if sub.isdigit():
                     c = int(sub)
-                    if 1 <= c <= streamer.NUM_CHANNELS:
+                    if 1 <= c <= streamer.LONG_PACKET_CHANNELS:
                         group.append(c)
             if group:
                 out.append(group)
         else:
             if token.isdigit():
                 c = int(token)
-                if 1 <= c <= streamer.NUM_CHANNELS:
+                if 1 <= c <= streamer.LONG_PACKET_CHANNELS:
                     out.append([c])
     if not out:
         return [[1]]
@@ -1386,6 +1386,9 @@ class Periscope(QtWidgets.QMainWindow):
 
             # Fill ring buffers
             for ch in self.all_chs:
+                # short-packet case: skip channels that aren't being streamed
+                if ch > pkt.get_num_channels():
+                    continue
                 Ival = pkt.s[2 * (ch - 1)] / 256.0
                 Qval = pkt.s[2 * (ch - 1) + 1] / 256.0
                 self.buf[ch]["I"].add(Ival)

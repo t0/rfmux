@@ -101,13 +101,14 @@ async def py_get_samples(crs: CRS,
       The DC bin is also overwritten to show the DC power rather than a density. 
       For the dual-sideband data this will be exactly 0dB.
     """
-    # Ensure 'module' parameter is valid
+
+    # Ensure 'module' parameter is valid. We can't validate 'channel' until
+    # later on, when we have a packet to inspect. (This is kinder than
+    # explicitly querying the readout mode, since older firmware may not
+    # support it.)
     assert (
         module in crs.modules.module
     ), f"Unspecified or invalid module! Available modules: {crs.modules.module}"
-
-    if channel is not None:
-        assert 1 <= channel <= streamer.NUM_CHANNELS, f"Invalid channel {channel}!"
 
     # We need to ensure all data we grab from the network was emitted "now" or
     # later, from the perspective of control flow. Because of delays in the
@@ -133,10 +134,9 @@ async def py_get_samples(crs: CRS,
     # analog delays in the system.
 
     async with crs.tuber_context() as tc:
-        ts = tc.get_timestamp()
+        tc.get_timestamp()
         high_bank = tc.get_analog_bank()
         (ts, high_bank) = await tc()
-
 
     if high_bank:
         assert module > 4, \
@@ -175,8 +175,9 @@ async def py_get_samples(crs: CRS,
         loop = asyncio.get_running_loop()
         sock.setblocking(False)
 
-        # Variable to track the previous sequence number for continuity checks
+        # Variable to track the previous sequence number and version for continuity checks
         prev_seq = None
+        prev_ver = None
 
         # Allow up to 10 packet-loss retries
         retries = 10
@@ -185,7 +186,8 @@ async def py_get_samples(crs: CRS,
         # Start receiving packets
         while len(packets) < num_samples:
             data = await asyncio.wait_for(
-                loop.sock_recv(sock, streamer.STREAMER_LEN), streamer.STREAMER_TIMEOUT
+                loop.sock_recv(sock, streamer.LONG_PACKET_SIZE),
+                streamer.STREAMER_TIMEOUT
             )
 
             # Parse the received packet
@@ -200,48 +202,50 @@ async def py_get_samples(crs: CRS,
             if p.module != module - 1:
                 continue  # Skip packets from other modules
 
-            # Sanity checks on the packet
-            if p.magic != streamer.STREAMER_MAGIC:
-                raise RuntimeError(f"Invalid packet magic! {p.magic} != {streamer.STREAMER_MAGIC}")
-
-            if p.version != streamer.STREAMER_VERSION:
-                raise RuntimeError(f"Invalid packet version! {p.version} != {streamer.STREAMER_VERSION}")
-
             # Check if this packet is older than our "now" timestamp
             assert ts.source == p.ts.source, f"Timestamp source changed! {ts.source} vs {p.ts.source}"
             if ts > p.ts:
                 continue
 
             # Update the sequence number continuity check
-            if prev_seq is not None and prev_seq + 1 != p.seq:
+            if (prev_seq is not None and prev_seq + 1 != p.seq) or \
+                    (prev_ver is not None and prev_ver != p.version):
+
                 if retries > 0:
                     warnings.warn(
-                        f"Discontinuous packet capture! Previous sequence {prev_seq} -> current sequence {p.seq}. "
+                        f"Discontinuous packet capture! Previous sequence {prev_seq} -> current sequence {p.seq} "
+                        f"or version switch {prev_ver} -> {p.version}. "
                         f"Retrying capture ({retries} attempts remain.)"
                     )
                     retries -= 1
                     packets = []
                     prev_seq = None
+                    prev_ver = None
                     continue
                 else:
                     raise RuntimeError(
                         f"Discontinuous packet capture! Previous sequence {prev_seq} -> current sequence {p.seq}"
                     )
 
-            # Update the previous sequence number
+            # Update the previous sequence number and version
             prev_seq = p.seq
+            prev_ver = p.version
 
             # Append the valid packet to the list
             packets.append(p)
 
+    num_channels = packets[0].get_num_channels()
+    if channel is not None and channel > num_channels:
+        raise ValueError(f"Invalid channel {channel}! Packets only contain {num_channels} channels in this readout mode.")
+
     # If average => just return time-domain averages
     if average:
-        mean_i = np.zeros(streamer.NUM_CHANNELS)
-        mean_q = np.zeros(streamer.NUM_CHANNELS)
-        std_i = np.zeros(streamer.NUM_CHANNELS)
-        std_q = np.zeros(streamer.NUM_CHANNELS)
+        mean_i = np.zeros(num_channels)
+        mean_q = np.zeros(num_channels)
+        std_i = np.zeros(num_channels)
+        std_q = np.zeros(num_channels)
 
-        for c in range(streamer.NUM_CHANNELS):
+        for c in range(num_channels):
             mean_i[c] = np.mean([p.s[2*c]/256 for p in packets])
             mean_q[c] = np.mean([p.s[2*c+1]/256 for p in packets])
             std_i[c] = np.std([p.s[2*c]/256 for p in packets])
@@ -274,7 +278,7 @@ async def py_get_samples(crs: CRS,
         # Return data for all channels
         results["i"] = []
         results["q"] = []
-        for c in range(streamer.NUM_CHANNELS):
+        for c in range(num_channels):
             i_channel = np.array([p.s[2*c]/256 for p in packets])
             q_channel = np.array([p.s[2*c+1]/256 for p in packets])
             if reference == 'absolute':
@@ -308,7 +312,7 @@ async def py_get_samples(crs: CRS,
             i_ch_spectra=[]
             q_ch_spectra=[]
             c_ch_spectra=[]
-            for c in range(streamer.NUM_CHANNELS):
+            for c in range(num_channels):
                 i_data = results["i"][c]
                 q_data = results["q"][c]
                 

@@ -20,7 +20,7 @@ SHORT_PACKET_VERSION = 6
 LONG_PACKET_CHANNELS = 1024
 SHORT_PACKET_CHANNELS = 128
 
-SS_PER_SECOND = 125000000
+SS_PER_SECOND = 156250000
 
 # This seems like a long timeout - in practice, we can see long delays when
 # packets are flowing normally

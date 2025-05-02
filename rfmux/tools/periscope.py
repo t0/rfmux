@@ -255,6 +255,128 @@ def infer_dec_stage(fs: float) -> int:
     dec_rounded = int(round(dec_approx))
     return max(0, min(15, dec_rounded))
 
+# ───────────────────────── Multi-Channel Parsing ─────────────────────────
+def _parse_channels_multich(txt: str) -> List[List[int]]:
+    """
+    Parse a comma-separated string of channel specifications, supporting '&'
+    to group multiple channels on a single row.
+
+    Examples
+    --------
+    "3&5" => [[3,5]]
+    "3,5" => [[3],[5]]
+    "2&4,7&9" => [[2,4],[7,9]]
+    "1,2,3&8" => [[1],[2],[3,8]]
+
+    Parameters
+    ----------
+    txt : str
+        A comma-separated list of channels. Ampersand '&' merges them into one row.
+
+    Returns
+    -------
+    list of list of int
+        Each sub-list is a row containing one or more channels. If none found, returns [[1]].
+    """
+    out = []
+    for token in txt.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "&" in token:
+            subs = token.split("&")
+            group = []
+            for sub in subs:
+                sub = sub.strip()
+                if sub.isdigit():
+                    c = int(sub)
+                    if 1 <= c <= streamer.NUM_CHANNELS:
+                        group.append(c)
+            if group:
+                out.append(group)
+        else:
+            if token.isdigit():
+                c = int(token)
+                if 1 <= c <= streamer.NUM_CHANNELS:
+                    out.append([c])
+    if not out:
+        return [[1]]
+    return out
+
+
+def _mode_title(mode: str) -> str:
+    """
+    Provide a more user-friendly label for each plot mode.
+
+    Parameters
+    ----------
+    mode : str
+        One of {"T", "IQ", "F", "S", "D", "NA"}.
+
+    Returns
+    -------
+    str
+        A human-readable title segment for that mode.
+    """
+    if mode == "T":
+        return "Time"
+    if mode == "IQ":
+        return "IQ"
+    if mode == "F":
+        return "Raw FFT"
+    if mode == "S":
+        return "SSB PSD"
+    if mode == "D":
+        return "DSB PSD"
+    if mode == "NA":
+        return "Network Analysis"
+    return mode
+
+
+def normalize_to_dbm(normalized_amplitude, dac_scale_dbm, resistance=50.0):
+    """Convert normalized amplitude (0-1) to dBm power."""
+    if normalized_amplitude <= 0:
+        return float('-inf')  # -infinity dBm for zero amplitude
+        
+    # Calculate maximum voltage from dac_scale_dbm (peak voltage)
+    power_max_mw = 10**(dac_scale_dbm/10)
+    power_max_w = power_max_mw / 1000
+    v_rms_max = np.sqrt(power_max_w * resistance)
+    v_peak_max = v_rms_max * np.sqrt(2.0)
+    
+    # Calculate peak voltage from normalized amplitude
+    v_peak = normalized_amplitude * v_peak_max
+    
+    # Convert to RMS for power calculation
+    v_rms = v_peak / np.sqrt(2.0)
+    
+    # Calculate power and convert to dBm
+    power_w = v_rms**2 / resistance
+    power_mw = power_w * 1000
+    dbm = 10 * np.log10(power_mw)
+    
+    return dbm
+
+def dbm_to_normalize(dbm, dac_scale_dbm, resistance=50.0):
+    """Convert dBm power to normalized amplitude (0-1)."""
+    # Convert dBm to RMS voltage
+    power_mw = 10**(dbm/10)
+    power_w = power_mw / 1000
+    v_rms = np.sqrt(power_w * resistance)
+    
+    # Convert RMS to peak voltage
+    v_peak = v_rms * np.sqrt(2.0)
+    
+    # Calculate maximum peak voltage from dac_scale_dbm
+    power_max_mw = 10**(dac_scale_dbm/10)
+    power_max_w = power_max_mw / 1000
+    v_rms_max = np.sqrt(power_max_w * resistance)
+    v_peak_max = v_rms_max * np.sqrt(2.0)
+    
+    # Calculate normalized amplitude
+    normalized_amplitude = v_peak / v_peak_max
+    
+    return normalized_amplitude
 
 # ───────────────────────── Lock‑Free Ring Buffer ─────────────────────────
 class Circular:
@@ -419,7 +541,6 @@ class UDPReceiver(QtCore.QThread):
         except OSError:
             pass
 
-
 # ───────────────────────── IQ Task & Signals ─────────────────────────
 class IQSignals(QObject):
     """
@@ -540,7 +661,6 @@ class IQTask(QRunnable):
             payload = (xs, ys, colors)
 
         self.signals.done.emit(self.row, self.mode, payload)
-
 
 # ───────────────────────── PSD Task & Signals ─────────────────────────
 class PSDSignals(QObject):
@@ -664,7 +784,6 @@ class PSDTask(QRunnable):
 
         self.signals.done.emit(self.row, self.mode, self.ch, payload)
 
-
 # ───────────────────────── Network Analysis Task & Signals ─────────────────────────
 class NetworkAnalysisSignals(QObject):
     """
@@ -676,6 +795,40 @@ class NetworkAnalysisSignals(QObject):
     completed = pyqtSignal(int)  # module
     error = pyqtSignal(str)  # error message
 
+class DACScaleFetcher(QtCore.QThread):
+    """Asynchronously fetch DAC scales for all modules."""
+    dac_scales_ready = QtCore.pyqtSignal(dict)
+    
+    def __init__(self, crs):
+        super().__init__()
+        self.crs = crs
+        
+    def run(self):
+        dac_scales = {}
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            for module in range(1, 9):
+                try:
+                    dac_scale = loop.run_until_complete(
+                        self.crs.get_dac_scale('DBM', module=module)
+                    )
+                    dac_scales[module] = dac_scale - 1.5  # Compensation for the balun
+                except Exception as e:
+                    # Silently handle the expected "Can't access module X with low analog banking" error
+                    if "Can't access module" in str(e) and "analog banking" in str(e):
+                        # Just set to None without printing error
+                        dac_scales[module] = None
+                    else:
+                        # Still print unexpected ValueErrors
+                        print(f"Error fetching DAC scale for module {module}: {e}")
+                        dac_scales[module] = None
+        finally:
+            loop.close()
+            
+        self.dac_scales_ready.emit(dac_scales)
 
 class NetworkAnalysisTask(QRunnable):
     """
@@ -843,93 +996,397 @@ class NetworkAnalysisTask(QRunnable):
                 self._loop.close()
                 self._loop = None
 
-# ───────────────────────── Multi-Channel Parsing ─────────────────────────
-def _parse_channels_multich(txt: str) -> List[List[int]]:
-    """
-    Parse a comma-separated string of channel specifications, supporting '&'
-    to group multiple channels on a single row.
-
-    Examples
-    --------
-    "3&5" => [[3,5]]
-    "3,5" => [[3],[5]]
-    "2&4,7&9" => [[2,4],[7,9]]
-    "1,2,3&8" => [[1],[2],[3,8]]
-
-    Parameters
-    ----------
-    txt : str
-        A comma-separated list of channels. Ampersand '&' merges them into one row.
-
-    Returns
-    -------
-    list of list of int
-        Each sub-list is a row containing one or more channels. If none found, returns [[1]].
-    """
-    out = []
-    for token in txt.split(","):
-        token = token.strip()
-        if not token:
-            continue
-        if "&" in token:
-            subs = token.split("&")
-            group = []
-            for sub in subs:
-                sub = sub.strip()
-                if sub.isdigit():
-                    c = int(sub)
-                    if 1 <= c <= streamer.NUM_CHANNELS:
-                        group.append(c)
-            if group:
-                out.append(group)
-        else:
-            if token.isdigit():
-                c = int(token)
-                if 1 <= c <= streamer.NUM_CHANNELS:
-                    out.append([c])
-    if not out:
-        return [[1]]
-    return out
-
-
-def _mode_title(mode: str) -> str:
-    """
-    Provide a more user-friendly label for each plot mode.
-
-    Parameters
-    ----------
-    mode : str
-        One of {"T", "IQ", "F", "S", "D", "NA"}.
-
-    Returns
-    -------
-    str
-        A human-readable title segment for that mode.
-    """
-    if mode == "T":
-        return "Time"
-    if mode == "IQ":
-        return "IQ"
-    if mode == "F":
-        return "Raw FFT"
-    if mode == "S":
-        return "SSB PSD"
-    if mode == "D":
-        return "DSB PSD"
-    if mode == "NA":
-        return "Network Analysis"
-    return mode
-
-
-class NetworkAnalysisDialog(QtWidgets.QDialog):
-    """
-    Dialog for configuring network analysis parameters.
-    """
-    def __init__(self, parent=None, modules=None):
+class NetworkAnalysisDialogBase(QtWidgets.QDialog):
+    """Base class for network analysis dialogs with shared functionality."""
+    def __init__(self, parent=None, params=None, modules=None, dac_scales=None):
         super().__init__(parent)
+        self.params = params or {}
+        self.modules = modules or [1, 2, 3, 4]
+        self.dac_scales = dac_scales or {m: None for m in self.modules}  # Default to None (unknown)
+        self.currently_updating = False  # Flag to prevent circular updates
+        
+    def setup_amplitude_group(self, layout):
+        """Setup the amplitude settings group with normalized and dBm inputs."""
+        # Create the group box with an empty title (we'll add a title in the form layout)
+        amp_group = QtWidgets.QGroupBox()
+        amp_layout = QtWidgets.QFormLayout(amp_group)
+        
+        # Get amplitude values
+        amps = self.params.get('amps', [self.params.get('amp', 0.001)])
+        amp_str = ','.join(str(a) for a in amps) if amps else "0.001"
+        
+        # Normalized amplitude input
+        self.amp_edit = QtWidgets.QLineEdit(amp_str)
+        self.amp_edit.setToolTip("Enter a single value or comma-separated list (e.g., 0.001,0.01,0.1)")
+        amp_layout.addRow("Normalized Amplitude:", self.amp_edit)
+        
+        # dBm input 
+        self.dbm_edit = QtWidgets.QLineEdit()
+        self.dbm_edit.setToolTip("Enter a single value or comma-separated list in dBm (e.g., -30,-20,-10)")
+        amp_layout.addRow("Power (dBm):", self.dbm_edit)
+        
+        # DAC scale information
+        self.dac_scale_info = QtWidgets.QLabel("Fetching DAC scales...")
+        self.dac_scale_info.setWordWrap(True)
+        amp_layout.addRow("DAC Scale (dBm):", self.dac_scale_info)
+        
+        # Connect signals for updating between normalized and dBm
+        # Only update values during typing, but don't validate
+        self.amp_edit.textChanged.connect(self._update_dbm_from_normalized_no_validate)
+        self.dbm_edit.textChanged.connect(self._update_normalized_from_dbm_no_validate)
+        
+        # Add validation when editing is finished
+        self.amp_edit.editingFinished.connect(self._validate_normalized_values)
+        self.dbm_edit.editingFinished.connect(self._validate_dbm_values)
+        
+        # Add the group to the main layout with a title in the left column
+        layout.addRow("Amplitude Settings:", amp_group)
+        
+        return amp_group
+        
+    def _update_dbm_from_normalized_no_validate(self):
+        """Update dBm values based on normalized amplitude inputs, without validation warnings."""
+        if self.currently_updating:
+            return  # Prevent recursive updates
+            
+        # Skip if dBm field is disabled (unknown DAC scale)
+        if not self.dbm_edit.isEnabled():
+            return
+            
+        self.currently_updating = True
+        try:
+            amp_text = self.amp_edit.text().strip()
+            if not amp_text:
+                self.dbm_edit.setText("")
+                return
+                
+            # Get DAC scale for selected modules
+            dac_scale = self._get_selected_dac_scale()
+            if dac_scale is None:
+                # If scale becomes unknown, disable the field
+                self.dbm_edit.setEnabled(False)
+                self.dbm_edit.setToolTip("Unable to query current DAC scale - dBm input disabled")
+                self.dbm_edit.clear()
+                return
+                
+            normalized_values = []
+            # Parse comma-separated values
+            for part in amp_text.split(','):
+                part = part.strip()
+                if part:
+                    try:
+                        value = float(eval(part))
+                        normalized_values.append(value)
+                    except (ValueError, SyntaxError, NameError):
+                        continue
+            
+            # Convert to dBm
+            dbm_values = []
+            for norm in normalized_values:
+                dbm = normalize_to_dbm(norm, dac_scale)
+                dbm_values.append(f"{dbm:.2f}")
+            
+            # Update dBm field
+            self.dbm_edit.setText(", ".join(dbm_values))
+        finally:
+            self.currently_updating = False
+
+    def _update_normalized_from_dbm_no_validate(self):
+        """Update normalized amplitude values based on dBm inputs, without validation warnings."""
+        if self.currently_updating:
+            return  # Prevent recursive updates
+            
+        # Skip if dBm field is disabled (unknown DAC scale)
+        if not self.dbm_edit.isEnabled():
+            return
+            
+        self.currently_updating = True
+        try:
+            dbm_text = self.dbm_edit.text().strip()
+            if not dbm_text:
+                self.amp_edit.setText("")
+                return
+                
+            # Get DAC scale for selected modules
+            dac_scale = self._get_selected_dac_scale()
+            if dac_scale is None:
+                # If scale becomes unknown, disable the field
+                self.dbm_edit.setEnabled(False)
+                self.dbm_edit.setToolTip("Unable to query current DAC scale - dBm input disabled")
+                self.dbm_edit.clear()
+                return
+                
+            dbm_values = []
+            # Parse comma-separated values
+            for part in dbm_text.split(','):
+                part = part.strip()
+                if part:
+                    try:
+                        value = float(eval(part))
+                        dbm_values.append(value)
+                    except (ValueError, SyntaxError, NameError):
+                        continue
+            
+            # Convert to normalized amplitude
+            normalized_values = []
+            for dbm in dbm_values:
+                norm = dbm_to_normalize(dbm, dac_scale)
+                normalized_values.append(f"{norm:.6f}")
+            
+            # Update normalized field
+            self.amp_edit.setText(", ".join(normalized_values))
+        finally:
+            self.currently_updating = False
+
+    def _validate_normalized_values(self):
+        """Validate normalized amplitude values when editing is finished."""
+        amp_text = self.amp_edit.text().strip()
+        if not amp_text:
+            return
+            
+        dac_scale = self._get_selected_dac_scale()
+        if dac_scale is None:
+            return
+            
+        normalized_values = []
+        for part in amp_text.split(','):
+            part = part.strip()
+            if part:
+                try:
+                    value = float(eval(part))
+                    normalized_values.append(value)
+                except (ValueError, SyntaxError, NameError):
+                    continue
+        
+        warnings = []
+        for norm in normalized_values:
+            if norm > 1.0:
+                warnings.append(f"Warning: Normalized amplitude {norm:.6f} > 1.0 (maximum)")
+            elif norm < 1e-4:
+                warnings.append(f"Warning: Normalized amplitude {norm:.6f} < 1e-4 (minimum recommended)")
+        
+        if warnings:
+            QtWidgets.QMessageBox.warning(self, "Amplitude Warning", "\n".join(warnings))
+
+    def _validate_dbm_values(self):
+        """Validate dBm values when editing is finished."""
+        dbm_text = self.dbm_edit.text().strip()
+        if not dbm_text:
+            return
+            
+        dac_scale = self._get_selected_dac_scale()
+        if dac_scale is None:
+            return
+            
+        dbm_values = []
+        for part in dbm_text.split(','):
+            part = part.strip()
+            if part:
+                try:
+                    value = float(eval(part))
+                    dbm_values.append(value)
+                except (ValueError, SyntaxError, NameError):
+                    continue
+        
+        warnings = []
+        for dbm in dbm_values:
+            if dbm > dac_scale:
+                warnings.append(f"Warning: {dbm:.2f} dBm > {dac_scale:+.2f} dBm (DAC max)")
+            
+            norm = dbm_to_normalize(dbm, dac_scale)
+            if norm > 1.0:
+                warnings.append(f"Warning: {dbm:.2f} dBm gives normalized amplitude > 1.0")
+            elif norm < 1e-4:
+                warnings.append(f"Warning: {dbm:.2f} dBm gives normalized amplitude < 1e-4")
+        
+        if warnings:
+            QtWidgets.QMessageBox.warning(self, "Amplitude Warning", "\n".join(warnings))
+
+    def _update_dac_scale_info(self):
+        """Update the DAC scale information label based on selected modules."""
+        selected_modules = self._get_selected_modules()
+        
+        # Check if any selected module has a known DAC scale
+        has_known_scale = False
+        scales = []
+        
+        for m in selected_modules:
+            dac_scale = self.dac_scales.get(m)
+            if dac_scale is not None:
+                has_known_scale = True
+                scales.append(f"Module {m}: {dac_scale:+.2f} dBm")
+            else:
+                scales.append(f"Module {m}: Unknown")
+        
+        # Update the info text
+        if not selected_modules:
+            text = "Unknown (no modules selected)"
+        else:
+            text = "\n".join(scales)
+        
+        self.dac_scale_info.setText(text)
+        
+        # Enable/disable dBm input based on whether we have known scales
+        if has_known_scale:
+            self.dbm_edit.setEnabled(True)
+            self.dbm_edit.setToolTip("Enter a single value or comma-separated list in dBm (e.g., -30,-20,-10)")
+            self._update_dbm_from_normalized()  # Update conversion
+        else:
+            self.dbm_edit.setEnabled(False)
+            self.dbm_edit.setToolTip("Unable to query current DAC scale - dBm input disabled")
+            self.dbm_edit.clear()  # Clear any existing text
+    
+    def _get_selected_modules(self):
+        """
+        Get the list of currently selected modules.
+        This method should be overridden by subclasses.
+        """
+        return []
+        
+    def _get_selected_dac_scale(self):
+        """Get the DAC scale for the currently selected module(s)."""
+        selected_modules = self._get_selected_modules()
+        
+        if not selected_modules:
+            return None  # No modules selected
+            
+        # Look for the first module with a known scale
+        for module in selected_modules:
+            dac_scale = self.dac_scales.get(module)
+            if dac_scale is not None:
+                return dac_scale
+                
+        # If no selected module has a known scale, return None
+        return None
+    
+    def _update_dbm_from_normalized(self):
+        """Update dBm values based on normalized amplitude inputs."""
+        if self.currently_updating:
+            return  # Prevent recursive updates
+            
+        # Skip if dBm field is disabled (unknown DAC scale)
+        if not self.dbm_edit.isEnabled():
+            return
+            
+        self.currently_updating = True
+        try:
+            amp_text = self.amp_edit.text().strip()
+            if not amp_text:
+                self.dbm_edit.setText("")
+                return
+                
+            # Get DAC scale for selected modules
+            dac_scale = self._get_selected_dac_scale()
+            if dac_scale is None:
+                # If scale becomes unknown, disable the field
+                self.dbm_edit.setEnabled(False)
+                self.dbm_edit.setToolTip("Unable to query current DAC scale - dBm input disabled")
+                self.dbm_edit.clear()
+                return
+                
+            normalized_values = []
+            # Parse comma-separated values
+            for part in amp_text.split(','):
+                part = part.strip()
+                if part:
+                    try:
+                        value = float(eval(part))
+                        normalized_values.append(value)
+                    except (ValueError, SyntaxError, NameError):
+                        continue
+            
+            # Convert to dBm
+            dbm_values = []
+            warnings = []
+            
+            for norm in normalized_values:
+                if norm > 1.0:
+                    warnings.append(f"Warning: Normalized amplitude {norm:.6f} > 1.0 (maximum)")
+                elif norm < 1e-4:
+                    warnings.append(f"Warning: Normalized amplitude {norm:.6f} < 1e-4 (minimum recommended)")
+                    
+                dbm = normalize_to_dbm(norm, dac_scale)
+                dbm_values.append(f"{dbm:.2f}")
+            
+            # Update dBm field
+            self.dbm_edit.setText(", ".join(dbm_values))
+            
+            # Show warnings if any
+            if warnings:
+                QtWidgets.QMessageBox.warning(self, "Amplitude Warning", 
+                                            "\n".join(warnings))
+        finally:
+            self.currently_updating = False
+    
+    def _update_normalized_from_dbm(self):
+        """Update normalized amplitude values based on dBm inputs."""
+        if self.currently_updating:
+            return  # Prevent recursive updates
+            
+        # Skip if dBm field is disabled (unknown DAC scale)
+        if not self.dbm_edit.isEnabled():
+            return
+            
+        self.currently_updating = True
+        try:
+            dbm_text = self.dbm_edit.text().strip()
+            if not dbm_text:
+                self.amp_edit.setText("")
+                return
+                
+            # Get DAC scale for selected modules
+            dac_scale = self._get_selected_dac_scale()
+            if dac_scale is None:
+                # If scale becomes unknown, disable the field
+                self.dbm_edit.setEnabled(False)
+                self.dbm_edit.setToolTip("Unable to query current DAC scale - dBm input disabled")
+                self.dbm_edit.clear()
+                return
+                
+            dbm_values = []
+            # Parse comma-separated values
+            for part in dbm_text.split(','):
+                part = part.strip()
+                if part:
+                    try:
+                        value = float(eval(part))
+                        dbm_values.append(value)
+                    except (ValueError, SyntaxError, NameError):
+                        continue
+            
+            # Convert to normalized amplitude
+            normalized_values = []
+            warnings = []
+            
+            for dbm in dbm_values:
+                if dbm > dac_scale:
+                    warnings.append(f"Warning: {dbm:.2f} dBm > {dac_scale:.2f} dBm (DAC max)")
+                
+                norm = dbm_to_normalize(dbm, dac_scale)
+                
+                if norm > 1.0:
+                    warnings.append(f"Warning: {dbm:.2f} dBm gives normalized amplitude > 1.0")
+                elif norm < 1e-4:
+                    warnings.append(f"Warning: {dbm:.2f} dBm gives normalized amplitude < 1e-4")
+                    
+                normalized_values.append(f"{norm:.6f}")
+            
+            # Update normalized field
+            self.amp_edit.setText(", ".join(normalized_values))
+            
+            # Show warnings if any
+            if warnings:
+                QtWidgets.QMessageBox.warning(self, "Amplitude Warning", 
+                                            "\n".join(warnings))
+        finally:
+            self.currently_updating = False
+
+class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
+    """Dialog for configuring network analysis parameters with dBm support."""
+    def __init__(self, parent=None, modules=None, dac_scales=None):
+        super().__init__(parent, None, modules, dac_scales)
         self.setWindowTitle("Network Analysis Configuration")
         self.setModal(False)
-        self.modules = modules or [1, 2, 3, 4]
         self._setup_ui()
         
     def _setup_ui(self):
@@ -942,6 +1399,7 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         # Module selection
         self.module_entry = QtWidgets.QLineEdit("All")
         self.module_entry.setToolTip("Enter module numbers (e.g., '1,2,5' or '1-4' or 'All')")
+        self.module_entry.textChanged.connect(self._update_dac_scale_info)
         param_layout.addRow("Modules:", self.module_entry)
         
         # Frequency range (in MHz instead of Hz)
@@ -954,41 +1412,32 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         self.cable_length_edit = QtWidgets.QLineEdit("0.75")
         param_layout.addRow("Cable Length (m):", self.cable_length_edit)        
         
-        # Amplitude
-        self.amp_edit = QtWidgets.QLineEdit("0.001")
-        self.amp_edit.setToolTip("Enter a single value or comma-separated list (e.g., 0.001,0.01,0.1)")
-        param_layout.addRow("Amplitude:", self.amp_edit)
+        # Add amplitude settings group
+        self.setup_amplitude_group(param_layout)
         
-        # Number of points
+        # Remainder of the original UI
         self.points_edit = QtWidgets.QLineEdit("5000")
         param_layout.addRow("Number of Points:", self.points_edit)
         
-        # Number of samples to average
         self.samples_edit = QtWidgets.QLineEdit("10")
         param_layout.addRow("Samples to Average:", self.samples_edit)
         
-        # Max channels
         self.max_chans_edit = QtWidgets.QLineEdit("1023")
         param_layout.addRow("Max Channels:", self.max_chans_edit)
         
-        # Max span
         self.max_span_edit = QtWidgets.QLineEdit("500")
         param_layout.addRow("Max Span (MHz):", self.max_span_edit)
         
-        # Add checkbox for clearing channels
         self.clear_channels_cb = QtWidgets.QCheckBox("Clear all channels first")
-        self.clear_channels_cb.setToolTip("Clear all channels on the selected module(s) before starting analysis")
-        self.clear_channels_cb.setChecked(True)  # Default to cleared channels
+        self.clear_channels_cb.setChecked(True)
         param_layout.addRow("", self.clear_channels_cb)
         
         layout.addWidget(param_group)
         
         # Buttons
         btn_layout = QtWidgets.QHBoxLayout()
-        
         self.start_btn = QtWidgets.QPushButton("Start Analysis")
         self.cancel_btn = QtWidgets.QPushButton("Cancel")
-        
         btn_layout.addWidget(self.start_btn)
         btn_layout.addWidget(self.cancel_btn)
         layout.addLayout(btn_layout)
@@ -996,6 +1445,35 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         # Connect buttons
         self.start_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
+        
+        # Initialize dBm field based on default normalized value
+        self._update_dbm_from_normalized()
+        self.setMinimumSize(500, 600)  # Width, height in pixels
+        
+    def _get_selected_modules(self):
+        """Parse module entry to determine which modules are selected."""
+        module_text = self.module_entry.text().strip()
+        selected_modules = []
+        
+        if module_text.lower() == 'all':
+            selected_modules = list(range(1, 9))  # All modules
+        else:
+            # Parse comma-separated values and ranges
+            for part in module_text.split(','):
+                part = part.strip()
+                if '-' in part:
+                    try:
+                        start, end = map(int, part.split('-'))
+                        selected_modules.extend(range(start, end + 1))
+                    except ValueError:
+                        continue
+                elif part:
+                    try:
+                        selected_modules.append(int(part))
+                    except ValueError:
+                        continue
+        
+        return selected_modules
 
     def get_parameters(self):
         """Get the configured parameters."""
@@ -1004,19 +1482,9 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
             module_text = self.module_entry.text().strip()
             selected_module = None
             if module_text.lower() != 'all':
-                # Parse comma-separated values and ranges
-                modules = []
-                for part in module_text.split(','):
-                    part = part.strip()
-                    if '-' in part:
-                        # Handle range like "1-4"
-                        start, end = map(int, part.split('-'))
-                        modules.extend(range(start, end + 1))
-                    elif part:
-                        # Handle single values
-                        modules.append(int(part))
-                if modules:
-                    selected_module = modules
+                selected_modules = self._get_selected_modules()
+                if selected_modules:
+                    selected_module = selected_modules
             
             # Parse amplitude values
             amp_text = self.amp_edit.text().strip()
@@ -1045,7 +1513,6 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
             traceback.print_exc()  # Print full stacktrace to console
             QtWidgets.QMessageBox.critical(self, "Error", f"Invalid parameter: {str(e)}")
             return None
-
 
 class NetworkAnalysisWindow(QtWidgets.QMainWindow):
     """
@@ -1443,18 +1910,31 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
     def _check_all_complete(self):
-        """Check if all progress bars are at 100% and hide the progress group if so."""
+        """
+        Check if all progress bars are at 100% and hide the progress group 
+        only if all amplitudes have completed for all modules.
+        """
         if not self.progress_group:
             return
             
+        # Only hide if there are no pending amplitudes for any module
+        no_pending_amplitudes = True
+        
+        for module in self.parent().amplitude_queues:
+            if self.parent().amplitude_queues[module]:
+                # If any module has pending amplitudes, don't hide
+                no_pending_amplitudes = False
+                break
+        
+        # Only hide progress bars if all are complete AND there are no pending amplitudes
         all_complete = all(pbar.value() == 100 for pbar in self.progress_bars.values())
-        if all_complete:
-            # Hide the progress group when all modules are complete
+        if all_complete and no_pending_amplitudes:
+            # Hide the progress group only when truly everything is done
             self.progress_group.setVisible(False)
 
     def _edit_parameters(self):
         """Open dialog to edit parameters besides cable length."""
-        dialog = NetworkAnalysisParamsDialog(self, self.current_params)  # Use current, not original
+        dialog = NetworkAnalysisParamsDialog(self, self.current_params)
         if dialog.exec():
             # Get updated parameters
             params = dialog.get_parameters()
@@ -1674,15 +2154,32 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.critical(self, "Export Error", 
                                                f"Error exporting data: {str(e)}")
                 
-class NetworkAnalysisParamsDialog(QtWidgets.QDialog):
-    """Dialog for editing network analysis parameters (excluding cable length)."""
+class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
+    """Dialog for editing network analysis parameters with dBm support."""
     def __init__(self, parent=None, params=None):
-        super().__init__(parent)
+        super().__init__(parent, params)
         self.setWindowTitle("Edit Network Analysis Parameters")
         self.setModal(True)
-        self.params = params or {}
         self._setup_ui()
         
+        if parent and hasattr(parent, 'parent') and parent.parent() is not None:
+            parent_main = parent.parent()
+            if hasattr(parent_main, 'crs') and parent_main.crs is not None:
+                self._fetch_dac_scales(parent_main.crs)
+        
+    def _fetch_dac_scales(self, crs):
+        """Fetch DAC scales for all modules."""
+        # Create a fetcher thread
+        self.fetcher = DACScaleFetcher(crs)
+        self.fetcher.dac_scales_ready.connect(self._on_dac_scales_ready)
+        self.fetcher.start()
+    
+    def _on_dac_scales_ready(self, scales):
+        """Handle fetched DAC scales."""
+        self.dac_scales = scales
+        self._update_dac_scale_info()
+        self._update_dbm_from_normalized()
+    
     def _setup_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
         
@@ -1695,12 +2192,8 @@ class NetworkAnalysisParamsDialog(QtWidgets.QDialog):
         form.addRow("Min Frequency (MHz):", self.fmin_edit)
         form.addRow("Max Frequency (MHz):", self.fmax_edit)
         
-        # Amplitude - handle both 'amps' list and 'amp' single value
-        amps = self.params.get('amps', [self.params.get('amp', 0.001)])
-        amp_str = ','.join(str(a) for a in amps)  # Convert list to comma-separated string
-        self.amp_edit = QtWidgets.QLineEdit(amp_str)
-        self.amp_edit.setToolTip("Enter a single value or comma-separated list (e.g., 0.001,0.01,0.1)")
-        form.addRow("Amplitude (Normalized Units):", self.amp_edit)
+        # Add amplitude settings group
+        self.setup_amplitude_group(form)
         
         # Number of points
         self.points_edit = QtWidgets.QLineEdit(str(self.params.get('npoints', '5000')))
@@ -1720,8 +2213,7 @@ class NetworkAnalysisParamsDialog(QtWidgets.QDialog):
         
         # Add checkbox for clearing channels
         self.clear_channels_cb = QtWidgets.QCheckBox("Clear all channels first")
-        self.clear_channels_cb.setToolTip("Clear all channels on the selected module(s) before starting analysis")
-        self.clear_channels_cb.setChecked(self.params.get('clear_channels', True))  # Use existing value or default to True
+        self.clear_channels_cb.setChecked(self.params.get('clear_channels', True))
         form.addRow("", self.clear_channels_cb)
         
         layout.addLayout(form)
@@ -1738,6 +2230,25 @@ class NetworkAnalysisParamsDialog(QtWidgets.QDialog):
         self.ok_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
         
+        # Initialize dBm field based on default normalized value
+        self._update_dbm_from_normalized()
+
+        self.setMinimumSize(500, 600)  # Width, height in pixels
+
+    def _get_selected_modules(self):
+        """Get selected modules from params."""
+        # Get selected modules from params
+        selected_module = self.params.get('module')
+        if selected_module is None:
+            # Using all modules
+            return list(range(1, 9))
+        elif isinstance(selected_module, list):
+            # Multiple specific modules
+            return selected_module
+        else:
+            # Single module
+            return [selected_module]
+    
     def get_parameters(self):
         """Get the updated parameters."""
         try:
@@ -1960,7 +2471,7 @@ class Periscope(QtWidgets.QMainWindow):
             cb.toggled.connect(self._build_layout)
 
         # Network Analysis button
-        self.btn_netanal = QtWidgets.QPushButton("Network Analysis")
+        self.btn_netanal = QtWidgets.QPushButton("Network Analyzer")
         self.btn_netanal.setToolTip("Open network analysis configuration window.")
         self.btn_netanal.clicked.connect(self._show_netanal_dialog)
         if self.crs is None:
@@ -2166,12 +2677,25 @@ class Periscope(QtWidgets.QMainWindow):
             msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
             msg.exec()
         
-
     def _show_netanal_dialog(self):
         """Show the network analysis configuration dialog."""
-        dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)))
-        # Set the default module to the one periscope was launched with
+        if self.crs is None:
+            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
+            return
+        
+        # Create a dialog with default DAC scales
+        default_dac_scales = {m: -0.5 for m in range(1, 9)}
+        dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
         dialog.module_entry.setText(str(self.module))
+        
+        # Start fetching DAC scales in background
+        fetcher = DACScaleFetcher(self.crs)
+        fetcher.dac_scales_ready.connect(lambda scales: dialog.dac_scales.update(scales))
+        fetcher.dac_scales_ready.connect(dialog._update_dac_scale_info)
+        fetcher.dac_scales_ready.connect(dialog._update_dbm_from_normalized)
+        fetcher.start()
+        
+        # Show dialog
         if dialog.exec():
             params = dialog.get_parameters()
             if params:
@@ -2239,8 +2763,6 @@ class Periscope(QtWidgets.QMainWindow):
             
     def _netanal_completed(self, module: int):
         """Handle network analysis completion."""
-
-
         if self.netanal_window:
             self.netanal_window.complete_analysis(module)
         
@@ -2270,6 +2792,10 @@ class Periscope(QtWidgets.QMainWindow):
             # Reset the progress bar to 0 for the next amplitude
             if self.netanal_window and module in self.netanal_window.progress_bars:
                 self.netanal_window.progress_bars[module].setValue(0)
+                
+                # Make sure progress group is visible for next amplitude
+                if self.netanal_window.progress_group:
+                    self.netanal_window.progress_group.setVisible(True)
             
             # Start the next amplitude task
             self._start_next_amplitude_task(module, self.netanal_window.original_params)
@@ -2279,7 +2805,7 @@ class Periscope(QtWidgets.QMainWindow):
         if self.crs is None:
             QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
             return
-            
+                
         if hasattr(self, 'netanal_window') and self.netanal_window is not None:
             # Clear existing data and reset progress bars
             self.netanal_window.data.clear()
@@ -2291,7 +2817,7 @@ class Periscope(QtWidgets.QMainWindow):
             self.netanal_window.clear_plots()
             
             # Update the parameters in the window
-            self.netanal_window.set_params(params)  # Will rename this in next section
+            self.netanal_window.set_params(params)
         
         # Determine which modules to run
         selected_module = params.get('module')
@@ -2314,6 +2840,10 @@ class Periscope(QtWidgets.QMainWindow):
         # Set up amplitude queues for each module
         self.amplitude_queues = {}
         self.current_amp_index = {}
+        
+        # Make progress group visible again
+        if self.netanal_window and self.netanal_window.progress_group:
+            self.netanal_window.progress_group.setVisible(True)
         
         for module in modules:
             # Create queue of amplitudes for this module

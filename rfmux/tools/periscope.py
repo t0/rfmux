@@ -1842,9 +1842,9 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 # Enable auto range to fit new data
                 self.plots[module]['amp_plot'].autoRange()
         
-    def _convert_amplitude(self, amps, iq_data):
+    def _convert_amplitude(self, amps, iq_data, unit_mode=None, normalize=False):
         """
-        Convert amplitude values to the selected unit, with optional normalization.
+        Convert amplitude values to the specified unit, with optional normalization.
         
         Parameters
         ----------
@@ -1852,32 +1852,40 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             Raw amplitude values (magnitude of complex data)
         iq_data : ndarray
             Complex IQ data from network analysis
+        unit_mode : str, optional
+            Unit mode to convert to: "counts", "volts", or "dbm"
+            If None, uses self.unit_mode
+        normalize : bool, optional
+            Whether to normalize the values (default: False)
                 
         Returns
         -------
         ndarray
-            Converted amplitude values in the selected unit, optionally normalized
+            Converted amplitude values in the selected unit
         """
         from ..core.transferfunctions import (
             convert_roc_to_volts,
             convert_roc_to_dbm,
         )
         
+        # Use specified unit_mode or fall back to instance unit_mode
+        mode = unit_mode if unit_mode is not None else self.unit_mode
+        
         # First convert to the right units
-        if self.unit_mode == "counts":
-            result = amps  # Raw counts
-        elif self.unit_mode == "volts":
+        if mode == "counts":
+            result = amps.copy()  # Raw counts
+        elif mode == "volts":
             result = convert_roc_to_volts(amps)
-        elif self.unit_mode == "dbm":
+        elif mode == "dbm":
             # For network analysis, amp values are already magnitudes
             result = convert_roc_to_dbm(amps)
         else:
-            result = amps  # Default fallback
+            result = amps.copy()  # Default fallback
             
         # Then normalize if requested (and if there's data)
-        if self.normalize_magnitudes and len(result) > 0:
+        if normalize and len(result) > 0:
             # For dBm, we subtract the first value instead of dividing
-            if self.unit_mode == "dbm":
+            if mode == "dbm":
                 # Handle cases where the first value might be invalid (inf or nan)
                 ref_val = result[0]
                 if np.isfinite(ref_val):
@@ -2099,7 +2107,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             self._check_all_complete()
     
     def _export_data(self):
-        """Export the collected data."""
+        """Export the collected data with all unit conversions and metadata."""
         if not self.data:
             QtWidgets.QMessageBox.warning(self, "No Data", "No data to export yet.")
             return
@@ -2118,60 +2126,168 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             
             try:
                 if filename.endswith('.pkl'):
-                    # Export as pickle
+                    # Create comprehensive data structure with all units and metadata
+                    export_data = {
+                        'timestamp': datetime.datetime.now().isoformat(),
+                        'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
+                        'modules': {}
+                    }
+                    
+                    # Process each module's data
+                    for module, data_dict in self.raw_data.items():
+                        export_data['modules'][module] = {}
+                        
+                        # Track measurement index for each module
+                        meas_idx = 0
+                        
+                        for key, data_tuple in data_dict.items():
+                            # Extract data based on tuple format
+                            if key != 'default':
+                                if len(data_tuple) >= 5:  # New format with amplitude included
+                                    freqs, amps, phases, iq_data, amplitude = data_tuple
+                                else:
+                                    # Try to extract amplitude from key format "module_amp"
+                                    try:
+                                        amplitude = float(key.split('_')[-1])
+                                    except (ValueError, IndexError):
+                                        amplitude = 0.001  # Default
+                                    freqs, amps, phases, iq_data = data_tuple
+                            else:
+                                amplitude = 0.001  # Default for non-amplitude-specific data
+                                freqs, amps, phases, iq_data = data_tuple
+                            
+                            # Convert to all unit types (without normalization)
+                            counts = amps  # Already in counts
+                            volts = self._convert_amplitude(amps, iq_data, unit_mode="volts", normalize=False)
+                            dbm = self._convert_amplitude(amps, iq_data, unit_mode="dbm", normalize=False)
+                            
+                            # Also include normalized versions for convenience
+                            counts_norm = self._convert_amplitude(amps, iq_data, unit_mode="counts", normalize=True)
+                            volts_norm = self._convert_amplitude(amps, iq_data, unit_mode="volts", normalize=True)
+                            dbm_norm = self._convert_amplitude(amps, iq_data, unit_mode="dbm", normalize=True)
+                            
+                            # Use iteration number as key instead of formatted amplitude
+                            export_data['modules'][module][meas_idx] = {
+                                'sweep_amplitude': amplitude,  # Direct parameter instead of in metadata
+                                'frequency': {
+                                    'values': freqs.tolist(),
+                                    'unit': 'Hz'
+                                },
+                                'magnitude': {
+                                    'counts': {
+                                        'raw': counts.tolist(),
+                                        'normalized': counts_norm.tolist(),
+                                        'unit': 'counts'
+                                    },
+                                    'volts': {
+                                        'raw': volts.tolist(),
+                                        'normalized': volts_norm.tolist(),
+                                        'unit': 'V'
+                                    },
+                                    'dbm': {
+                                        'raw': dbm.tolist(),
+                                        'normalized': dbm_norm.tolist(),
+                                        'unit': 'dBm'
+                                    }
+                                },
+                                'phase': {
+                                    'values': phases.tolist(),
+                                    'unit': 'degrees'
+                                },
+                                'complex': {
+                                    'real': iq_data.real.tolist(),
+                                    'imag': iq_data.imag.tolist()
+                                }
+                            }
+                            meas_idx += 1
+                    
+                    # Save the enhanced data structure
                     with open(filename, 'wb') as f:
-                        data_to_save = {
-                            'timestamp': datetime.datetime.now().isoformat(),
-                            'data': self.data,
-                            'unit_mode': self.unit_mode
-                        }
-                        pickle.dump(data_to_save, f)
+                        pickle.dump(export_data, f)
                         
                 elif filename.endswith('.csv'):
-                    # Export as CSV (one file per module)
+                    # Export as CSV (one file per module and amplitude)
                     base, ext = os.path.splitext(filename)
-                    for module, data_dict in self.data.items():
-                        # Get default data if available
-                        if 'default' in data_dict:
-                            freqs, amps, phases = data_dict['default']
+                    
+                    # First create a metadata CSV with the parameters
+                    meta_filename = f"{base}_metadata{ext}"
+                    with open(meta_filename, 'w', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(['Parameter', 'Value'])
+                        writer.writerow(['Export Date', datetime.datetime.now().isoformat()])
+                        
+                        # Add all parameters
+                        if hasattr(self, 'current_params'):
+                            writer.writerow(['', ''])
+                            writer.writerow(['Measurement Parameters', ''])
+                            for param, value in self.current_params.items():
+                                # Convert Hz to MHz for frequency parameters
+                                if param in ['fmin', 'fmax', 'max_span'] and isinstance(value, (int, float)):
+                                    writer.writerow([param, f"{value/1e6} MHz"])
+                                else:
+                                    writer.writerow([param, value])
+                    
+                    # Now export each module's data
+                    for module, data_dict in self.raw_data.items():
+                        idx = 0  # Track measurement index
+                        for key, data_tuple in data_dict.items():
+                            # Extract amplitude and data
+                            if key != 'default':
+                                if len(data_tuple) >= 5:
+                                    freqs, amps, phases, iq_data, amplitude = data_tuple
+                                    amplitude_str = f"_amp{amplitude:.6f}"
+                                else:
+                                    freqs, amps, phases, iq_data = data_tuple
+                                    try:
+                                        amplitude = float(key.split('_')[-1])
+                                        amplitude_str = f"_amp{amplitude:.6f}"
+                                    except (ValueError, IndexError):
+                                        amplitude_str = ""
+                            else:
+                                freqs, amps, phases, iq_data = data_tuple
+                                amplitude_str = ""
                             
-                            # Get corresponding raw data for conversion
-                            if module in self.raw_data and 'default' in self.raw_data[module]:
-                                iq_data = self.raw_data[module]['default'][3]
-                                converted_amps = self._convert_amplitude(amps, iq_data)
+                            # Export for each unit type
+                            for unit_mode in ["counts", "volts", "dbm"]:
+                                converted_amps = self._convert_amplitude(amps, iq_data, unit_mode=unit_mode)
                                 
-                                module_filename = f"{base}_module{module}{ext}"
-                                with open(module_filename, 'w', newline='') as f:
+                                unit_label = unit_mode
+                                if unit_mode == "dbm":
+                                    unit_label = "dBm"
+                                elif unit_mode == "volts":
+                                    unit_label = "V"
+                                
+                                csv_filename = f"{base}_module{module}_idx{idx}_{unit_mode}{ext}"
+                                with open(csv_filename, 'w', newline='') as f:
                                     writer = csv.writer(f)
-                                    unit_label = self.unit_mode
-                                    if self.unit_mode == "dbm":
-                                        unit_label = "dBm"
+                                    writer.writerow(['# Amplitude:', f"{amplitude}" if 'amplitude' in locals() else "Unknown"])
+                                    if unit_mode == "dbm":
                                         writer.writerow(['Frequency (Hz)', f'Power ({unit_label})', 'Phase (deg)'])
-                                    elif self.unit_mode == "volts":
-                                        unit_label = "V"
-                                        writer.writerow(['Frequency (Hz)', f'Amplitude ({unit_label})', 'Phase (deg)'])
                                     else:
                                         writer.writerow(['Frequency (Hz)', f'Amplitude ({unit_label})', 'Phase (deg)'])
+                                    
                                     for freq, amp, phase in zip(freqs, converted_amps, phases):
                                         writer.writerow([freq, amp, phase])
-                                
+                            idx += 1
                 else:
-                    # Default to pickle
+                    # Default to pickle with same comprehensive format
                     with open(filename, 'wb') as f:
-                        data_to_save = {
+                        export_data = {
                             'timestamp': datetime.datetime.now().isoformat(),
+                            'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
                             'data': self.data,
+                            'raw_data': self.raw_data,
                             'unit_mode': self.unit_mode
                         }
-                        pickle.dump(data_to_save, f)
+                        pickle.dump(export_data, f)
                         
                 QtWidgets.QMessageBox.information(self, "Export Complete", 
-                                                  f"Data exported to {filename}")
+                                                f"Data exported to {filename}")
                 
             except Exception as e:
                 traceback.print_exc()  # Print stack trace to console
                 QtWidgets.QMessageBox.critical(self, "Export Error", 
-                                               f"Error exporting data: {str(e)}")
+                                            f"Error exporting data: {str(e)}")
                 
 class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
     """Dialog for editing network analysis parameters with dBm support."""
@@ -2628,7 +2744,8 @@ class Periscope(QtWidgets.QMainWindow):
             "  - Multi-channel grouping: use '&' to display multiple channels in one row.\n"
             "    e.g., \"3&5\" for channels 3 and 5 in one row, \"3&5,7\" for that row plus a row with channel 7.\n\n"
             "**Standard PyQtGraph Interactions:**\n"
-            "  - Pan: Left-click and drag.\n"
+            "  - Pan: Left-click and drag (when Zoom Box Mode is disabled).\n"
+            "  - Zoom Box: Left-click and drag to create a selection rectangle (when enabled).\n"
             "  - Zoom: Right-click/drag or mouse-wheel in most plots.\n"
             "  - Axis scaling (log vs lin) and auto-zooming: Individually configurable by right-clicking any plot.\n"
             "  - Double-click within a plot: Show the coordinates of the clicked position.\n"
@@ -2637,14 +2754,18 @@ class Periscope(QtWidgets.QMainWindow):
             "**Network Analysis:**\n"
             "  - Click the 'Network Analysis' button to open the configuration dialog.\n"
             "  - Configure parameters like frequency range, amplitude, and number of points.\n"
+            "  - Multiple amplitudes: Enter comma-separated values to run analysis at multiple power levels.\n"
+            "  - Unit conversion: Configure amplitudes in normalized values or dBm power.\n"
+            "  - Cable length: Compensate for phase due to cables by estimating cable lengths.\n"
             "  - Analysis runs in a separate window with real-time updates.\n"
-            "  - Export results as pickle or CSV files.\n\n"
+            "  - Use the Unit selector to view data in Counts, Volts, or dBm, or normalized versions to compare relative responses.\n"
+            "  - Export data from Network Analysis with the 'Export Data' button. Pickle and CSV exports available.\n\n"
             "**Performance tips for higher FPS:**\n"
-            "  - Disable auto-scaling in the configuration pain\n"
-            "  - Use the density mode for IQ, smaller buffers, or enable a subset of I,Q,M.\n"            
+            "  - Disable auto-scaling in the configuration panel\n"
+            "  - Use the density mode for IQ, smaller buffers, or enable only a subset of I,Q,M.\n"            
             "  - Periscope is limited by the single-thread renderer. Launching multiple instances can improve performance for viewing many channels.\n\n"
             "**Command-Line Examples:**\n"
-            "  - `$ periscope rfmux0022.local --module 2 --channels \"3&5,7`\n\n"
+            "  - `$ periscope rfmux0022.local --module 2 --channels \"3&5,7\"`\n\n"
             "**IPython / Jupyter:** invoke directly from CRS object\n"
             "  - `>>> crs.raise_periscope(module=2, channels=\"3&5\")`\n"
             "  - If in a non-blocking mode, you can still interact with your session concurrently.\n\n"

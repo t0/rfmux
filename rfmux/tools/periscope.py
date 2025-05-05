@@ -1672,7 +1672,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             
             # Create amplitude and phase plots with ClickableViewBox
             vb_amp = ClickableViewBox()
-            amp_plot = pg.PlotWidget(viewBox=vb_amp, title=f"Module {module} - Amplitude")
+            amp_plot = pg.PlotWidget(viewBox=vb_amp, title=f"Module {module} - Magnitude")
             self._update_amplitude_labels(amp_plot)
             amp_plot.setLabel('bottom', 'Frequency', units='GHz')
             amp_plot.showGrid(x=True, y=True, alpha=0.3)
@@ -1793,11 +1793,11 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 plot.setLabel('left', 'Normalized Magnitude', units='')
         else:
             if self.unit_mode == "counts":
-                plot.setLabel('left', 'Amplitude', units='Counts')
+                plot.setLabel('left', 'Magnitude', units='Counts')
             elif self.unit_mode == "dbm":
                 plot.setLabel('left', 'Power', units='dBm')
             elif self.unit_mode == "volts":
-                plot.setLabel('left', 'Amplitude', units='V')
+                plot.setLabel('left', 'Magnitude', units='V')
 
     def _redraw_all_plots(self):
         """Redraw all plots with current unit mode."""
@@ -1891,45 +1891,64 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         return result
 
     def closeEvent(self, event):
-        """Handle window close event by informing parent and stopping tasks."""
+        """Handle window close event by cleaning up resources."""
         parent = self.parent()
         
-        # Stop all associated network analysis tasks from parent
-        if parent and hasattr(parent, 'netanal_tasks'):
-            for module, task in list(parent.netanal_tasks.items()):
-                task.stop()
-                # Give tasks time to clean up
-                time.sleep(0.1)
-                parent.netanal_tasks.pop(module, None)
+        if parent and hasattr(parent, 'netanal_windows'):
+            # Find our window ID
+            window_id = None
+            for w_id, w_data in parent.netanal_windows.items():
+                if w_data['window'] == self:
+                    window_id = w_id
+                    break
+            
+            if window_id:
+                # Stop all tasks for this window
+                if hasattr(parent, 'netanal_tasks'):
+                    for task_key in list(parent.netanal_tasks.keys()):
+                        if task_key.startswith(f"{window_id}_"):
+                            task = parent.netanal_tasks.pop(task_key)
+                            task.stop()
+                
+                # Remove from windows dictionary
+                parent.netanal_windows.pop(window_id, None)
         
-        # Inform parent that window is closing
-        if parent and hasattr(parent, 'netanal_window'):
-            parent.netanal_window = None
-        
-        # Call the parent class's closeEvent method
+        # Call parent implementation
         super().closeEvent(event)
 
     def _check_all_complete(self):
         """
         Check if all progress bars are at 100% and hide the progress group 
-        only if all amplitudes have completed for all modules.
+        when all analyses are complete.
         """
         if not self.progress_group:
             return
             
-        # Only hide if there are no pending amplitudes for any module
-        no_pending_amplitudes = True
+        # Find our window data in the parent
+        parent = self.parent()
+        window_id = None
         
-        for module in self.parent().amplitude_queues:
-            if self.parent().amplitude_queues[module]:
-                # If any module has pending amplitudes, don't hide
+        if parent and hasattr(parent, 'netanal_windows'):
+            for w_id, w_data in parent.netanal_windows.items():
+                if w_data['window'] == self:
+                    window_id = w_id
+                    break
+        
+        if not window_id:
+            return
+            
+        window_data = parent.netanal_windows[window_id]
+        
+        # Check if there are any pending amplitudes
+        no_pending_amplitudes = True
+        for module in window_data['amplitude_queues']:
+            if window_data['amplitude_queues'][module]:
                 no_pending_amplitudes = False
                 break
         
-        # Only hide progress bars if all are complete AND there are no pending amplitudes
+        # Hide progress when all bars are at 100% and no pending amplitudes
         all_complete = all(pbar.value() == 100 for pbar in self.progress_bars.values())
         if all_complete and no_pending_amplitudes:
-            # Hide the progress group only when truly everything is done
             self.progress_group.setVisible(False)
 
     def _edit_parameters(self):
@@ -2370,8 +2389,10 @@ class Periscope(QtWidgets.QMainWindow):
         self.netanal_signals.data_update_with_amp.connect(self._netanal_data_update_with_amp)
         self.netanal_signals.completed.connect(self._netanal_completed)
         self.netanal_signals.error.connect(self._netanal_error)
-        self.netanal_window = None
-        self.netanal_tasks: Dict[str, NetworkAnalysisTask] = {}  # Changed to str key to support multiple amplitudes
+        # Network analysis tracking
+        self.netanal_windows = {}  # Dictionary of windows indexed by unique ID
+        self.netanal_window_count = 0  # Counter for window IDs
+        self.netanal_tasks = {}  # Tasks dictionary with window-specific keys
 
         # Density LUT
         cmap = pg.colormap.get("turbo")
@@ -2703,63 +2724,149 @@ class Periscope(QtWidgets.QMainWindow):
 
     def _start_network_analysis(self, params: dict):
         """Start network analysis on selected modules."""
-        if self.crs is None:
-            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
-            return
-            
-        # Determine which modules to run
-        selected_module = params.get('module')
-        if selected_module is None:
-            modules = list(range(1, 9))  # All modules
-        elif isinstance(selected_module, list):
-            modules = selected_module
-        else:
-            modules = [selected_module]
+        try:
+            if self.crs is None:
+                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
+                return
+                
+            # Determine which modules to run
+            selected_module = params.get('module')
+            if selected_module is None:
+                modules = list(range(1, 9))  # All modules
+            elif isinstance(selected_module, list):
+                modules = selected_module
+            else:
+                modules = [selected_module]
 
-        # Always create a new window for "Start Analysis"
-        self.netanal_window = NetworkAnalysisWindow(self, modules)
-        self.netanal_window.set_params(params)
-        self.netanal_window.show()
-        
-        # Get amplitudes from params
-        amplitudes = params.get('amps', [params.get('amp', 0.001)])
-        
-        # Set up amplitude queues for each module
-        self.amplitude_queues = {}
-        self.current_amp_index = {}
-        
-        for module in modules:
-            # Create queue of amplitudes for this module
-            self.amplitude_queues[module] = list(amplitudes)
-            self.current_amp_index[module] = 0
+            # Create a unique window ID
+            window_id = f"window_{self.netanal_window_count}"
+            self.netanal_window_count += 1
             
-            # Update the amplitude progress display
-            if self.netanal_window:
-                self.netanal_window.update_amplitude_progress(
-                    module, 1, len(amplitudes), amplitudes[0]
-                )
+            # Create window-specific signal handlers
+            window_signals = NetworkAnalysisSignals()
             
-            # Start the first amplitude task
-            self._start_next_amplitude_task(module, params)
+            # Create a new window
+            window = NetworkAnalysisWindow(self, modules)
+            window.set_params(params)
+            window.window_id = window_id  # Attach ID to window
+            
+            # Store window in dictionary
+            self.netanal_windows[window_id] = {
+                'window': window,
+                'signals': window_signals,
+                'amplitude_queues': {},
+                'current_amp_index': {}
+            }
+            
+            # Connect signals for this specific window
+            window_signals.progress.connect(
+                lambda module, progress: window.update_progress(module, progress))
+            window_signals.data_update.connect(
+                lambda module, freqs, amps, phases: window.update_data(module, freqs, amps, phases))
+            window_signals.data_update_with_amp.connect(
+                lambda module, freqs, amps, phases, amplitude: 
+                window.update_data_with_amp(module, freqs, amps, phases, amplitude))
+            window_signals.completed.connect(
+                lambda module: self._handle_analysis_completed(module, window_id))
+            window_signals.error.connect(
+                lambda error_msg: QtWidgets.QMessageBox.critical(window, "Network Analysis Error", error_msg))
+            
+            # Get amplitudes from params
+            amplitudes = params.get('amps', [params.get('amp', 0.001)])
+            
+            # Set up amplitude queues for this window
+            window_data = self.netanal_windows[window_id]
+            window_data['amplitude_queues'] = {module: list(amplitudes) for module in modules}
+            window_data['current_amp_index'] = {module: 0 for module in modules}
+            
+            # Update progress displays
+            for module in modules:
+                window.update_amplitude_progress(module, 1, len(amplitudes), amplitudes[0])
+                
+                # Start the first amplitude task
+                self._start_next_amplitude_task(module, params, window_id)
+            
+            # Show the window
+            window.show()
+        except Exception as e:
+            print(f"Error in _start_network_analysis: {e}")
+            traceback.print_exc()
     
-    def _start_next_amplitude_task(self, module: int, params: dict):
-        """Start the next amplitude task for a module."""
-        if module not in self.amplitude_queues or not self.amplitude_queues[module]:
-            return  # No more amplitudes to process
-        
-        # Get the next amplitude
-        amplitude = self.amplitude_queues[module][0]
-        self.amplitude_queues[module].pop(0)  # Remove it from the queue
-        
-        # Create and start the task
-        task_params = params.copy()
-        task_params['module'] = module
-        
-        # Use a unique key that includes the amplitude value
-        task_key = f"{module}_amp_{amplitude}"  # Changed from f"{module}_amp"
-        task = NetworkAnalysisTask(self.crs, module, task_params, self.netanal_signals, amplitude=amplitude)
-        self.netanal_tasks[task_key] = task
-        self.pool.start(task)
+    def _handle_analysis_completed(self, module: int, window_id: str):
+        """Handle completion of a network analysis task for a specific window."""
+        try:
+            if window_id not in self.netanal_windows:
+                return  # Window was closed
+                
+            window_data = self.netanal_windows[window_id]
+            window = window_data['window']
+            
+            # Update window
+            window.complete_analysis(module)
+            
+            # Clean up tasks
+            for task_key in list(self.netanal_tasks.keys()):
+                if task_key.startswith(f"{window_id}_{module}_"):
+                    self.netanal_tasks.pop(task_key, None)
+            
+            # Check for more amplitudes
+            if module in window_data['amplitude_queues'] and window_data['amplitude_queues'][module]:
+                # Update index
+                window_data['current_amp_index'][module] += 1
+                
+                # Update display
+                total_amps = len(window.original_params.get('amps', []))
+                next_amp = window_data['amplitude_queues'][module][0]
+                window.update_amplitude_progress(
+                    module, 
+                    window_data['current_amp_index'][module] + 1,
+                    total_amps,
+                    next_amp
+                )
+                
+                # Reset progress bar
+                if module in window.progress_bars:
+                    window.progress_bars[module].setValue(0)
+                    if window.progress_group:
+                        window.progress_group.setVisible(True)
+                
+                # Start next task
+                self._start_next_amplitude_task(module, window.original_params, window_id)
+        except Exception as e:
+            print(f"Error in _handle_analysis_completed: {e}")
+            traceback.print_exc()    
+
+    def _start_next_amplitude_task(self, module: int, params: dict, window_id: str):
+        """Start the next amplitude task for a module in a specific window."""
+        try:
+            if window_id not in self.netanal_windows:
+                return  # Window was closed
+                
+            window_data = self.netanal_windows[window_id]
+            window = window_data['window']
+            signals = window_data['signals']
+            
+            if module not in window_data['amplitude_queues'] or not window_data['amplitude_queues'][module]:
+                return  # No more amplitudes to process
+            
+            # Get the next amplitude
+            amplitude = window_data['amplitude_queues'][module][0]
+            window_data['amplitude_queues'][module].pop(0)  # Remove it from the queue
+            
+            # Create task parameters
+            task_params = params.copy()
+            task_params['module'] = module
+            
+            # Create a unique task key
+            task_key = f"{window_id}_{module}_amp_{amplitude}"
+            
+            # Create and start the task
+            task = NetworkAnalysisTask(self.crs, module, task_params, signals, amplitude=amplitude)
+            self.netanal_tasks[task_key] = task
+            self.pool.start(task)
+        except Exception as e:
+            print(f"Error in _start_next_amplitude_task: {e}")
+            traceback.print_exc()
             
     def _netanal_completed(self, module: int):
         """Handle network analysis completion."""
@@ -2801,63 +2908,75 @@ class Periscope(QtWidgets.QMainWindow):
             self._start_next_amplitude_task(module, self.netanal_window.original_params)
     
     def _rerun_network_analysis(self, params: dict):
-        """Rerun network analysis in the existing window."""
-        if self.crs is None:
-            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
-            return
+        """Rerun network analysis in the window that triggered this call."""
+        try:
+            if self.crs is None:
+                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
+                return
+            
+            # Find which window triggered this
+            sender = self.sender()
+            source_window = None
+            window_id = None
+            
+            if sender and hasattr(sender, 'window'):
+                source_window = sender.window()
+            
+            # Find matching window in our dictionary
+            for w_id, w_data in self.netanal_windows.items():
+                if w_data['window'] == source_window:
+                    window_id = w_id
+                    break
+                    
+            if not window_id:
+                # Could not determine which window called us
+                return
                 
-        if hasattr(self, 'netanal_window') and self.netanal_window is not None:
-            # Clear existing data and reset progress bars
-            self.netanal_window.data.clear()
-            self.netanal_window.raw_data.clear()  # Also clear raw data
-            for module, pbar in self.netanal_window.progress_bars.items():
+            window_data = self.netanal_windows[window_id]
+            window = window_data['window']
+            signals = window_data['signals']
+            
+            # Update window
+            window.data.clear()
+            window.raw_data.clear()
+            for module, pbar in window.progress_bars.items():
                 pbar.setValue(0)
+            window.clear_plots()
+            window.set_params(params)
             
-            # Clear all plots and legends
-            self.netanal_window.clear_plots()
+            # Determine modules
+            selected_module = params.get('module')
+            if selected_module is None:
+                modules = list(range(1, 9))
+            elif isinstance(selected_module, list):
+                modules = selected_module
+            else:
+                modules = [selected_module]
             
-            # Update the parameters in the window
-            self.netanal_window.set_params(params)
-        
-        # Determine which modules to run
-        selected_module = params.get('module')
-        if selected_module is None:
-            modules = list(range(1, 9))  # All modules
-        elif isinstance(selected_module, list):
-            modules = selected_module
-        else:
-            modules = [selected_module]
-        
-        # Clear existing tasks
-        for key in list(self.netanal_tasks.keys()):
-            task = self.netanal_tasks[key]
-            task.stop()
-            self.netanal_tasks.pop(key)
-        
-        # Get amplitudes from params
-        amplitudes = params.get('amps', [params.get('amp', 0.001)])
-        
-        # Set up amplitude queues for each module
-        self.amplitude_queues = {}
-        self.current_amp_index = {}
-        
-        # Make progress group visible again
-        if self.netanal_window and self.netanal_window.progress_group:
-            self.netanal_window.progress_group.setVisible(True)
-        
-        for module in modules:
-            # Create queue of amplitudes for this module
-            self.amplitude_queues[module] = list(amplitudes)
-            self.current_amp_index[module] = 0
+            # Stop existing tasks for this window
+            for task_key in list(self.netanal_tasks.keys()):
+                if task_key.startswith(f"{window_id}_"):
+                    task = self.netanal_tasks.pop(task_key)
+                    task.stop()
             
-            # Update the amplitude progress display
-            if self.netanal_window:
-                self.netanal_window.update_amplitude_progress(
-                    module, 1, len(amplitudes), amplitudes[0]
-                )
+            # Get amplitudes
+            amplitudes = params.get('amps', [params.get('amp', 0.001)])
             
-            # Start the first amplitude task
-            self._start_next_amplitude_task(module, params)
+            # Reset amplitude queues
+            window_data['amplitude_queues'] = {module: list(amplitudes) for module in modules}
+            window_data['current_amp_index'] = {module: 0 for module in modules}
+            
+            # Make progress visible
+            if window.progress_group:
+                window.progress_group.setVisible(True)
+            
+            # Start new tasks
+            for module in modules:
+                window.update_amplitude_progress(module, 1, len(amplitudes), amplitudes[0])
+                self._start_next_amplitude_task(module, params, window_id)
+        except Exception as e:
+            print(f"Error in _rerun_network_analysis: {e}")
+            traceback.print_exc()
     
     def _netanal_progress(self, module: int, progress: float):
         """Handle network analysis progress updates."""

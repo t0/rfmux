@@ -62,7 +62,7 @@ import pickle
 import traceback
 import csv
 import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 import concurrent.futures
 
@@ -70,6 +70,37 @@ import concurrent.futures
 import asyncio
 from ..core.session import load_session
 from ..core.schema import CRS
+
+# ───────────────────────── Global Constants ─────────────────────────
+# Display settings
+LINE_WIDTH = 1.5
+UI_FONT_SIZE = 12
+DENSITY_GRID = 512
+DENSITY_DOT_SIZE = 1
+SMOOTH_SIGMA = 1.3
+LOG_COMPRESS = True
+SCATTER_POINTS = 1_000
+SCATTER_SIZE = 5
+
+# Network analysis defaults
+DEFAULT_MIN_FREQ = 100e6  # 100 MHz
+DEFAULT_MAX_FREQ = 2450e6  # 2.45 GHz
+DEFAULT_CABLE_LENGTH = 10  # meters
+DEFAULT_AMPLITUDE = 0.001
+DEFAULT_MAX_CHANNELS = 1023
+DEFAULT_MAX_SPAN = 500e6  # 500 MHz
+DEFAULT_NPOINTS = 5000
+DEFAULT_NSAMPLES = 10
+
+# Sampling settings
+BASE_SAMPLING = 625e6 / 256.0 / 64.0  # ≈38 147.46 Hz base for dec=0
+DEFAULT_BUFFER_SIZE = 5_000
+DEFAULT_REFRESH_MS = 33
+
+# GUI update intervals
+NETANAL_UPDATE_INTERVAL = 0.1  # seconds
+
+# ───────────────────────── Utility Functions ─────────────────────────
 
 def _check_xcb_cursor_runtime() -> bool:
     """
@@ -100,6 +131,7 @@ def _check_xcb_cursor_runtime() -> bool:
 
 _check_xcb_cursor_runtime()
 
+# Import PyQt only after checking XCB dependencies
 from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, Qt
 from PyQt6.QtGui import QFont, QIntValidator
@@ -110,24 +142,15 @@ from .. import streamer
 from ..core.transferfunctions import (
     spectrum_from_slow_tod,
     convert_roc_to_volts,
+    convert_roc_to_dbm,
 )
 from ..core.hardware_map import macro
 from ..core.schema import CRS
 
-
-# ───────────────────────── Global Settings ─────────────────────────
+# Configure PyQtGraph
 pg.setConfigOptions(useOpenGL=False, antialias=False)
 
-LINE_WIDTH       = 1.5
-UI_FONT_SIZE     = 12
-DENSITY_GRID     = 512
-DENSITY_DOT_SIZE = 1
-SMOOTH_SIGMA     = 1.3
-LOG_COMPRESS     = True
-
-SCATTER_POINTS   = 1_000
-SCATTER_SIZE     = 5
-
+# Try to import optional SciPy features
 try:
     from scipy.ndimage import gaussian_filter, convolve
 except ImportError:  # SciPy not installed – graceful degradation
@@ -135,12 +158,6 @@ except ImportError:  # SciPy not installed – graceful degradation
     convolve = None
     SMOOTH_SIGMA = 0.0
 
-BASE_SAMPLING = 625e6 / 256.0 / 64.0  # ≈38 147.46 Hz base for dec=0
-
-
-# ───────────────────────── Utility helpers ─────────────────────────
-
-# Helper function: pin current (calling) thread to core_id on Linux only.
 def _pin_current_thread_to_core():
     """
     Pins the calling thread to a randomly selected CPU core from the set of
@@ -156,7 +173,6 @@ def _pin_current_thread_to_core():
     - If permission is denied or the environment doesn't support thread affinity,
       it emits a warning but continues.
     """
-
     if platform.system() != "Linux":
         warnings.warn(
             "Warning: Thread pinning is only supported on Linux. "
@@ -204,7 +220,6 @@ def _get_ipython():
     except ImportError:
         return None
 
-
 def _is_qt_event_loop_running() -> bool:
     """
     Check if a Qt event loop is active in IPython.
@@ -217,7 +232,6 @@ def _is_qt_event_loop_running() -> bool:
     ip = _get_ipython()
     return bool(ip and getattr(ip, "active_eventloop", None) == "qt")
 
-
 def _is_running_inside_ipython() -> bool:
     """
     Check if the current environment is an IPython shell.
@@ -228,7 +242,6 @@ def _is_running_inside_ipython() -> bool:
         True if running in IPython, otherwise False.
     """
     return _get_ipython() is not None
-
 
 def infer_dec_stage(fs: float) -> int:
     """
@@ -255,7 +268,6 @@ def infer_dec_stage(fs: float) -> int:
     dec_rounded = int(round(dec_approx))
     return max(0, min(15, dec_rounded))
 
-# ───────────────────────── Multi-Channel Parsing ─────────────────────────
 def _parse_channels_multich(txt: str) -> List[List[int]]:
     """
     Parse a comma-separated string of channel specifications, supporting '&'
@@ -303,7 +315,6 @@ def _parse_channels_multich(txt: str) -> List[List[int]]:
         return [[1]]
     return out
 
-
 def _mode_title(mode: str) -> str:
     """
     Provide a more user-friendly label for each plot mode.
@@ -318,65 +329,155 @@ def _mode_title(mode: str) -> str:
     str
         A human-readable title segment for that mode.
     """
-    if mode == "T":
-        return "Time"
-    if mode == "IQ":
-        return "IQ"
-    if mode == "F":
-        return "Raw FFT"
-    if mode == "S":
-        return "SSB PSD"
-    if mode == "D":
-        return "DSB PSD"
-    if mode == "NA":
-        return "Network Analysis"
-    return mode
+    mode_titles = {
+        "T": "Time",
+        "IQ": "IQ",
+        "F": "Raw FFT",
+        "S": "SSB PSD",
+        "D": "DSB PSD",
+        "NA": "Network Analysis"
+    }
+    return mode_titles.get(mode, mode)
 
-
-def normalize_to_dbm(normalized_amplitude, dac_scale_dbm, resistance=50.0):
-    """Convert normalized amplitude (0-1) to dBm power."""
-    if normalized_amplitude <= 0:
-        return float('-inf')  # -infinity dBm for zero amplitude
+# ───────────────────────── Unit Conversion ─────────────────────────
+class UnitConverter:
+    """
+    Utility class for converting between different units.
+    """
+    
+    @staticmethod
+    def normalize_to_dbm(normalized_amplitude: float, dac_scale_dbm: float, resistance: float = 50.0) -> float:
+        """
+        Convert normalized amplitude (0-1) to dBm power.
         
-    # Calculate maximum voltage from dac_scale_dbm (peak voltage)
-    power_max_mw = 10**(dac_scale_dbm/10)
-    power_max_w = power_max_mw / 1000
-    v_rms_max = np.sqrt(power_max_w * resistance)
-    v_peak_max = v_rms_max * np.sqrt(2.0)
-    
-    # Calculate peak voltage from normalized amplitude
-    v_peak = normalized_amplitude * v_peak_max
-    
-    # Convert to RMS for power calculation
-    v_rms = v_peak / np.sqrt(2.0)
-    
-    # Calculate power and convert to dBm
-    power_w = v_rms**2 / resistance
-    power_mw = power_w * 1000
-    dbm = 10 * np.log10(power_mw)
-    
-    return dbm
+        Parameters
+        ----------
+        normalized_amplitude : float
+            Normalized amplitude value (0-1)
+        dac_scale_dbm : float
+            DAC scale in dBm
+        resistance : float, optional
+            Load resistance in ohms, default is 50.0
+            
+        Returns
+        -------
+        float
+            Power in dBm
+        """
+        if normalized_amplitude <= 0:
+            return float('-inf')  # -infinity dBm for zero amplitude
+            
+        # Calculate maximum voltage from dac_scale_dbm (peak voltage)
+        power_max_mw = 10**(dac_scale_dbm/10)
+        power_max_w = power_max_mw / 1000
+        v_rms_max = np.sqrt(power_max_w * resistance)
+        v_peak_max = v_rms_max * np.sqrt(2.0)
+        
+        # Calculate peak voltage from normalized amplitude
+        v_peak = normalized_amplitude * v_peak_max
+        
+        # Convert to RMS for power calculation
+        v_rms = v_peak / np.sqrt(2.0)
+        
+        # Calculate power and convert to dBm
+        power_w = v_rms**2 / resistance
+        power_mw = power_w * 1000
+        dbm = 10 * np.log10(power_mw)
+        
+        return dbm
 
-def dbm_to_normalize(dbm, dac_scale_dbm, resistance=50.0):
-    """Convert dBm power to normalized amplitude (0-1)."""
-    # Convert dBm to RMS voltage
-    power_mw = 10**(dbm/10)
-    power_w = power_mw / 1000
-    v_rms = np.sqrt(power_w * resistance)
-    
-    # Convert RMS to peak voltage
-    v_peak = v_rms * np.sqrt(2.0)
-    
-    # Calculate maximum peak voltage from dac_scale_dbm
-    power_max_mw = 10**(dac_scale_dbm/10)
-    power_max_w = power_max_mw / 1000
-    v_rms_max = np.sqrt(power_max_w * resistance)
-    v_peak_max = v_rms_max * np.sqrt(2.0)
-    
-    # Calculate normalized amplitude
-    normalized_amplitude = v_peak / v_peak_max
-    
-    return normalized_amplitude
+    @staticmethod
+    def dbm_to_normalize(dbm: float, dac_scale_dbm: float, resistance: float = 50.0) -> float:
+        """
+        Convert dBm power to normalized amplitude (0-1).
+        
+        Parameters
+        ----------
+        dbm : float
+            Power in dBm
+        dac_scale_dbm : float
+            DAC scale in dBm
+        resistance : float, optional
+            Load resistance in ohms, default is 50.0
+            
+        Returns
+        -------
+        float
+            Normalized amplitude (0-1)
+        """
+        # Convert dBm to RMS voltage
+        power_mw = 10**(dbm/10)
+        power_w = power_mw / 1000
+        v_rms = np.sqrt(power_w * resistance)
+        
+        # Convert RMS to peak voltage
+        v_peak = v_rms * np.sqrt(2.0)
+        
+        # Calculate maximum peak voltage from dac_scale_dbm
+        power_max_mw = 10**(dac_scale_dbm/10)
+        power_max_w = power_max_mw / 1000
+        v_rms_max = np.sqrt(power_max_w * resistance)
+        v_peak_max = v_rms_max * np.sqrt(2.0)
+        
+        # Calculate normalized amplitude
+        normalized_amplitude = v_peak / v_peak_max
+        
+        return normalized_amplitude
+
+    @staticmethod
+    def convert_amplitude(amps: np.ndarray, iq_data: np.ndarray, unit_mode: str = None, 
+                          current_mode: str = "counts", normalize: bool = False) -> np.ndarray:
+        """
+        Convert amplitude values to the specified unit, with optional normalization.
+        
+        Parameters
+        ----------
+        amps : ndarray
+            Raw amplitude values (magnitude of complex data)
+        iq_data : ndarray
+            Complex IQ data for additional conversions
+        unit_mode : str, optional
+            Unit mode to convert to: "counts", "volts", or "dbm"
+            If None, uses current_mode
+        current_mode : str, optional
+            Current unit mode if no target is specified
+        normalize : bool, optional
+            Whether to normalize the values (default: False)
+                
+        Returns
+        -------
+        ndarray
+            Converted amplitude values in the selected unit
+        """
+        # Use specified unit_mode or fall back to current_mode
+        mode = unit_mode if unit_mode is not None else current_mode
+        
+        # First convert to the right units
+        if mode == "counts":
+            result = amps.copy()  # Raw counts
+        elif mode == "volts":
+            result = convert_roc_to_volts(amps)
+        elif mode == "dbm":
+            # For network analysis, amp values are already magnitudes
+            result = convert_roc_to_dbm(amps)
+        else:
+            result = amps.copy()  # Default fallback
+            
+        # Then normalize if requested (and if there's data)
+        if normalize and len(result) > 0:
+            # For dBm, we subtract the first value instead of dividing
+            if mode == "dbm":
+                # Handle cases where the first value might be invalid (inf or nan)
+                ref_val = result[0]
+                if np.isfinite(ref_val):
+                    result = result - ref_val
+            else:
+                # For counts or volts, we divide by the first value
+                ref_val = result[0]
+                if ref_val != 0 and np.isfinite(ref_val):
+                    result = result / ref_val
+        
+        return result
 
 # ───────────────────────── Lock‑Free Ring Buffer ─────────────────────────
 class Circular:
@@ -424,7 +525,7 @@ class Circular:
             return self.buf[: self.count]
         return self.buf[self.ptr : self.ptr + self.N]
 
-
+# ───────────────────────── Custom Plot Controls ─────────────────────────
 class ClickableViewBox(pg.ViewBox):
     """
     A custom ViewBox that opens a coordinate readout dialog when double-clicked
@@ -437,7 +538,14 @@ class ClickableViewBox(pg.ViewBox):
         self.setMouseMode(pg.ViewBox.RectMode)  
 
     def enableZoomBoxMode(self, enable=True):
-        """Enable or disable zoom box mode."""
+        """
+        Enable or disable zoom box mode.
+        
+        Parameters
+        ----------
+        enable : bool
+            If True, enables rectangle selection zooming. If False, returns to pan mode.
+        """
         self.setMouseMode(pg.ViewBox.RectMode if enable else pg.ViewBox.PanMode)
 
     def mouseDoubleClickEvent(self, ev):
@@ -478,22 +586,8 @@ class ClickableViewBox(pg.ViewBox):
         box.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         box.show()
         ev.accept()
-    
-    def enableZoomBoxMode(self, enable=True):
-        """
-        Enable or disable zoom box mode.
-        
-        Parameters
-        ----------
-        enable : bool
-            If True, enables rectangle selection zooming. If False, returns to pan mode.
-        """
-        if enable:
-            self.setMouseMode(pg.ViewBox.RectMode)
-        else:
-            self.setMouseMode(pg.ViewBox.PanMode)
 
-
+# ───────────────────────── Network Data Processing ─────────────────────────
 class UDPReceiver(QtCore.QThread):
     """
     Receives multicast packets in a dedicated QThread and pushes them
@@ -552,7 +646,6 @@ class IQSignals(QObject):
     #   mode_string: "density" or "scatter"
     #   payload: data from the computation
 
-
 class IQTask(QRunnable):
     """
     Off-thread worker for computing IQ scatter or density histograms.
@@ -591,76 +684,88 @@ class IQTask(QRunnable):
         via self.signals.done.
         """
         if len(self.I) < 2:
-            # Edge case: not enough data
-            if self.mode == "density":
-                empty = np.zeros((DENSITY_GRID, DENSITY_GRID), np.uint8)
-                payload = (empty, (0, 1, 0, 1))
-            else:
-                payload = ([], [], [])
-            self.signals.done.emit(self.row, self.mode, payload)
+            self._handle_insufficient_data()
             return
 
         if self.mode == "density":
-            g = DENSITY_GRID
-            hist = np.zeros((g, g), np.uint32)
-
-            Imin, Imax = self.I.min(), self.I.max()
-            Qmin, Qmax = self.Q.min(), self.Q.max()
-            if Imin == Imax or Qmin == Qmax:
-                payload = (hist.astype(np.uint8), (Imin, Imax, Qmin, Qmax))
-                self.signals.done.emit(self.row, self.mode, payload)
-                return
-
-            # Map I/Q data to pixel indices
-            ix = ((self.I - Imin) * (g - 1) / (Imax - Imin)).astype(np.intp)
-            qy = ((self.Q - Qmin) * (g - 1) / (Qmax - Qmin)).astype(np.intp)
-
-            # Base histogram
-            np.add.at(hist, (qy, ix), 1)
-
-            # Optional dot dilation
-            if self.dot_px > 1:
-                r = self.dot_px // 2
-                if convolve is not None:
-                    # Faster path if SciPy is available
-                    k = 2 * r + 1
-                    kernel = np.ones((k, k), dtype=np.uint8)
-                    hist = convolve(hist, kernel, mode="constant", cval=0)
-                else:
-                    # Fallback
-                    for dy in range(-r, r + 1):
-                        for dx in range(-r, r + 1):
-                            ys, xs = qy + dy, ix + dx
-                            mask = ((0 <= ys) & (ys < g) &
-                                    (0 <= xs) & (xs < g))
-                            np.add.at(hist, (ys[mask], xs[mask]), 1)
-
-            # Optional smoothing & log-compression
-            if gaussian_filter is not None and SMOOTH_SIGMA > 0:
-                hist = gaussian_filter(hist.astype(np.float32), SMOOTH_SIGMA, mode="nearest")
-            if LOG_COMPRESS:
-                hist = np.log1p(hist, out=hist.astype(np.float32))
-
-            # 8-bit normalization
-            if hist.max() > 0:
-                hist = (hist * (255.0 / hist.max())).astype(np.uint8)
-
-            payload = (hist, (Imin, Imax, Qmin, Qmax))
-
-        else:  # "scatter" mode
-            N = len(self.I)
-            if N > SCATTER_POINTS:
-                idx = np.linspace(0, N - 1, SCATTER_POINTS, dtype=np.intp)
-            else:
-                idx = np.arange(N, dtype=np.intp)
-            xs, ys = self.I[idx], self.Q[idx]
-            rel = idx / (idx.max() if idx.size else 1)
-            colors = pg.colormap.get("turbo").map(
-                rel.astype(np.float32), mode="byte"
-            )
-            payload = (xs, ys, colors)
+            payload = self._compute_density()
+        else:  # scatter mode
+            payload = self._compute_scatter()
 
         self.signals.done.emit(self.row, self.mode, payload)
+        
+    def _handle_insufficient_data(self):
+        """Handle the edge case of insufficient data."""
+        if self.mode == "density":
+            empty = np.zeros((DENSITY_GRID, DENSITY_GRID), np.uint8)
+            payload = (empty, (0, 1, 0, 1))
+        else:
+            payload = ([], [], [])
+        self.signals.done.emit(self.row, self.mode, payload)
+        
+    def _compute_density(self):
+        """Compute IQ density histogram."""
+        g = DENSITY_GRID
+        hist = np.zeros((g, g), np.uint32)
+
+        Imin, Imax = self.I.min(), self.I.max()
+        Qmin, Qmax = self.Q.min(), self.Q.max()
+        if Imin == Imax or Qmin == Qmax:
+            return (hist.astype(np.uint8), (Imin, Imax, Qmin, Qmax))
+
+        # Map I/Q data to pixel indices
+        ix = ((self.I - Imin) * (g - 1) / (Imax - Imin)).astype(np.intp)
+        qy = ((self.Q - Qmin) * (g - 1) / (Qmax - Qmin)).astype(np.intp)
+
+        # Base histogram
+        np.add.at(hist, (qy, ix), 1)
+
+        # Optional dot dilation
+        if self.dot_px > 1:
+            self._apply_dot_dilation(hist, ix, qy, g)
+
+        # Optional smoothing & log-compression
+        if gaussian_filter is not None and SMOOTH_SIGMA > 0:
+            hist = gaussian_filter(hist.astype(np.float32), SMOOTH_SIGMA, mode="nearest")
+        if LOG_COMPRESS:
+            hist = np.log1p(hist, out=hist.astype(np.float32))
+
+        # 8-bit normalization
+        if hist.max() > 0:
+            hist = (hist * (255.0 / hist.max())).astype(np.uint8)
+
+        return (hist, (Imin, Imax, Qmin, Qmax))
+        
+    def _apply_dot_dilation(self, hist, ix, qy, g):
+        """Apply dot dilation to the histogram."""
+        r = self.dot_px // 2
+        if convolve is not None:
+            # Faster path if SciPy is available
+            k = 2 * r + 1
+            kernel = np.ones((k, k), dtype=np.uint8)
+            hist = convolve(hist, kernel, mode="constant", cval=0)
+        else:
+            # Fallback
+            for dy in range(-r, r + 1):
+                for dx in range(-r, r + 1):
+                    ys, xs = qy + dy, ix + dx
+                    mask = ((0 <= ys) & (ys < g) &
+                            (0 <= xs) & (xs < g))
+                    np.add.at(hist, (ys[mask], xs[mask]), 1)
+                    
+    def _compute_scatter(self):
+        """Compute IQ scatter points."""
+        N = len(self.I)
+        if N > SCATTER_POINTS:
+            idx = np.linspace(0, N - 1, SCATTER_POINTS, dtype=np.intp)
+        else:
+            idx = np.arange(N, dtype=np.intp)
+        xs, ys = self.I[idx], self.Q[idx]
+        rel = idx / (idx.max() if idx.size else 1)
+        colors = pg.colormap.get("turbo").map(
+            rel.astype(np.float32), mode="byte"
+        )
+        return (xs, ys, colors)
 
 # ───────────────────────── PSD Task & Signals ─────────────────────────
 class PSDSignals(QObject):
@@ -669,7 +774,6 @@ class PSDSignals(QObject):
     """
     done = pyqtSignal(int, str, int, object)
     # Emitted with arguments: (row, mode_string, channel, payload)
-
 
 class PSDTask(QRunnable):
     """
@@ -731,21 +835,40 @@ class PSDTask(QRunnable):
         """
         data_len = len(self.I)
         if data_len < 2:
-            # Not enough data
-            if self.mode == "SSB":
-                payload = ([], [], [], [], [], [], 0.0)
-            else:
-                payload = ([], [])
-            self.signals.done.emit(self.row, self.mode, self.ch, payload)
+            self._handle_insufficient_data()
             return
 
-        ref = (
-            "counts"
-            if not self.real_units
-            else ("absolute" if self.psd_absolute else "relative")
-        )
+        # Determine reference type
+        ref = self._get_reference_type()
+        
+        # Calculate segment size
         nper = max(1, data_len // max(1, self.segments))
 
+        # Compute spectrum based on mode
+        if self.mode == "SSB":
+            payload = self._compute_ssb_psd(ref, nper)
+        else:  # "DSB"
+            payload = self._compute_dsb_psd(ref, nper)
+
+        self.signals.done.emit(self.row, self.mode, self.ch, payload)
+
+    def _handle_insufficient_data(self):
+        """Handle the edge case of insufficient data."""
+        if self.mode == "SSB":
+            payload = ([], [], [], [], [], [], 0.0)
+        else:
+            payload = ([], [])
+        self.signals.done.emit(self.row, self.mode, self.ch, payload)
+        
+    def _get_reference_type(self) -> str:
+        """Determine the reference type for the spectrum computation."""
+        if not self.real_units:
+            return "counts"
+        return "absolute" if self.psd_absolute else "relative"
+        
+    def _compute_ssb_psd(self, ref, nper):
+        """Compute single-sideband PSD."""
+        # First compute IQ spectrum
         spec_iq = spectrum_from_slow_tod(
             i_data=self.I,
             q_data=self.Q,
@@ -755,36 +878,51 @@ class PSDTask(QRunnable):
             nperseg=nper,
             spectrum_cutoff=0.9,
         )
+        
+        # Then compute magnitude spectrum
+        M_data = np.sqrt(self.I**2 + self.Q**2)
+        spec_m = spectrum_from_slow_tod(
+            i_data=M_data,
+            q_data=np.zeros_like(M_data),
+            dec_stage=self.dec_stage,
+            scaling="psd",
+            reference=ref,
+            nperseg=nper,
+            spectrum_cutoff=0.9,
+        )
+        
+        # Return combined results
+        return (
+            spec_iq["freq_iq"],
+            spec_iq["psd_i"],
+            spec_iq["psd_q"],
+            spec_m["psd_i"],
+            spec_m["freq_iq"],
+            spec_m["psd_i"],
+            float(self.dec_stage),
+        )
+        
+    def _compute_dsb_psd(self, ref, nper):
+        """Compute dual-sideband PSD."""
+        # Compute IQ spectrum
+        spec_iq = spectrum_from_slow_tod(
+            i_data=self.I,
+            q_data=self.Q,
+            dec_stage=self.dec_stage,
+            scaling="psd",
+            reference=ref,
+            nperseg=nper,
+            spectrum_cutoff=0.9,
+        )
+        
+        # Extract dual-sideband spectrum and sort by frequency
+        freq_dsb = spec_iq["freq_dsb"]
+        psd_dsb = spec_iq["psd_dual_sideband"]
+        order = np.argsort(freq_dsb)
+        
+        return (freq_dsb[order], psd_dsb[order])
 
-        if self.mode == "SSB":
-            M_data = np.sqrt(self.I**2 + self.Q**2)
-            spec_m = spectrum_from_slow_tod(
-                i_data=M_data,
-                q_data=np.zeros_like(M_data),
-                dec_stage=self.dec_stage,
-                scaling="psd",
-                reference=ref,
-                nperseg=nper,
-                spectrum_cutoff=0.9,
-            )
-            payload = (
-                spec_iq["freq_iq"],
-                spec_iq["psd_i"],
-                spec_iq["psd_q"],
-                spec_m["psd_i"],
-                spec_m["freq_iq"],
-                spec_m["psd_i"],
-                float(self.dec_stage),
-            )
-        else:  # "DSB"
-            freq_dsb = spec_iq["freq_dsb"]
-            psd_dsb = spec_iq["psd_dual_sideband"]
-            order = np.argsort(freq_dsb)
-            payload = (freq_dsb[order], psd_dsb[order])
-
-        self.signals.done.emit(self.row, self.mode, self.ch, payload)
-
-# ───────────────────────── Network Analysis Task & Signals ─────────────────────────
+# ───────────────────────── Network Analysis ─────────────────────────
 class NetworkAnalysisSignals(QObject):
     """
     Holds custom signals emitted by network analysis tasks.
@@ -804,31 +942,36 @@ class DACScaleFetcher(QtCore.QThread):
         self.crs = crs
         
     def run(self):
+        """Fetch DAC scales for all modules."""
         dac_scales = {}
         # Create a new event loop for this thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
         try:
-            for module in range(1, 9):
-                try:
-                    dac_scale = loop.run_until_complete(
-                        self.crs.get_dac_scale('DBM', module=module)
-                    )
-                    dac_scales[module] = dac_scale - 1.5  # Compensation for the balun
-                except Exception as e:
-                    # Silently handle the expected "Can't access module X with low analog banking" error
-                    if "Can't access module" in str(e) and "analog banking" in str(e):
-                        # Just set to None without printing error
-                        dac_scales[module] = None
-                    else:
-                        # Still print unexpected ValueErrors
-                        print(f"Error fetching DAC scale for module {module}: {e}")
-                        dac_scales[module] = None
+            self._fetch_all_dac_scales(loop, dac_scales)
         finally:
             loop.close()
             
         self.dac_scales_ready.emit(dac_scales)
+        
+    def _fetch_all_dac_scales(self, loop, dac_scales):
+        """Fetch DAC scales for all modules using the provided event loop."""
+        for module in range(1, 9):
+            try:
+                dac_scale = loop.run_until_complete(
+                    self.crs.get_dac_scale('DBM', module=module)
+                )
+                dac_scales[module] = dac_scale - 1.5  # Compensation for the balun
+            except Exception as e:
+                # Silently handle the expected "Can't access module X with low analog banking" error
+                if "Can't access module" in str(e) and "analog banking" in str(e):
+                    # Just set to None without printing error
+                    dac_scales[module] = None
+                else:
+                    # Still print unexpected ValueErrors
+                    print(f"Error fetching DAC scale for module {module}: {e}")
+                    dac_scales[module] = None
 
 class NetworkAnalysisTask(QRunnable):
     """
@@ -854,10 +997,10 @@ class NetworkAnalysisTask(QRunnable):
         self.module = module
         self.params = params
         self.signals = signals
-        self.amplitude = amplitude if amplitude is not None else params.get('amp', 0.001)
+        self.amplitude = amplitude if amplitude is not None else params.get('amp', DEFAULT_AMPLITUDE)
         self._running = True
         self._last_update_time = 0
-        self._update_interval = 0.1  # Update every 100ms
+        self._update_interval = NETANAL_UPDATE_INTERVAL  # seconds
         self._task = None
         self._loop = None
         
@@ -898,104 +1041,134 @@ class NetworkAnalysisTask(QRunnable):
     
     def run(self):
         """Execute the network analysis using the take_netanal macro."""
-        
         # Create event loop for async operations
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         
         try:
-            # Create callbacks that emit signals
-            def progress_cb(module, progress):
-                if self._running:
-                    self.signals.progress.emit(module, progress)
-            
-            def data_cb(module, freqs_raw, amps_raw, phases_raw):
-                if self._running:
-                    # Sort data by frequency before displaying
-                    sort_idx = np.argsort(freqs_raw)
-                    freqs = freqs_raw[sort_idx]
-                    amps = amps_raw[sort_idx]
-                    phases = phases_raw[sort_idx]
-                    
-                    # Throttle updates to prevent GUI lag
-                    current_time = time.time()
-                    if current_time - self._last_update_time >= self._update_interval:
-                        self._last_update_time = current_time                    
-                    
-                    # Emit standard update and amplitude-specific update
-                    self.signals.data_update.emit(module, freqs, amps, phases)
-                    self.signals.data_update_with_amp.emit(module, freqs, amps, phases, self.amplitude)
-            
-            # Extract parameters
-            fmin = self.params.get('fmin', 100e6)
-            fmax = self.params.get('fmax', 2450e6)
-            nsamps = self.params.get('nsamps', 10)
-            npoints = self.params.get('npoints', 5000)
-            max_chans = self.params.get('max_chans', 1023)
-            max_span = self.params.get('max_span', 500e6)
-            cable_length = self.params.get('cable_length', 0.75)
-            clear_channels = self.params.get('clear_channels', True)
-
-            # Clear channels if requested
-            if clear_channels and self._running:
-                self._loop.run_until_complete(self.crs.clear_channels(module=self.module))
-
-            # Set cable length before running the analysis
-            if self._running:
-                self._loop.run_until_complete(self.crs.set_cable_length(length=cable_length, module=self.module))
-
-            # Create a task for the netanal operation
-            if self._running:
-                netanal_coro = self.crs.take_netanal(
-                    amp=self.amplitude,  # Use the specific amplitude for this task
-                    fmin=fmin,
-                    fmax=fmax,
-                    nsamps=nsamps,
-                    npoints=npoints,
-                    max_chans=max_chans,
-                    max_span=max_span,
-                    module=self.module,
-                    progress_callback=progress_cb,
-                    data_callback=data_cb
-                )
-                
-                # Create and store the task so it can be canceled
-                self._task = self._loop.create_task(netanal_coro)
-                
-                try:
-                    # Run the task and get the result
-                    result = self._loop.run_until_complete(self._task)
-                    
-                    # Extract and emit final data if task completed successfully
-                    if self._running and result:
-                        fs_sorted, iq_sorted, phase_sorted = result
-                        amp_sorted = np.abs(iq_sorted)
-                        
-                        # Emit final data update
-                        self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
-                        self.signals.data_update_with_amp.emit(self.module, fs_sorted, amp_sorted, phase_sorted, self.amplitude)
-                        self.signals.completed.emit(self.module)
-                except asyncio.CancelledError:
-                    # Task was canceled, emit error signal
-                    self.signals.error.emit(f"Analysis canceled for module {self.module}")
-                    
-                    # Make sure to clean up channels
-                    self._loop.run_until_complete(self._cleanup_channels())
-            
+            self._execute_network_analysis()
         except Exception as e:
             self.signals.error.emit(str(e))
         finally:
             # Clean up resources
-            if self._task and not self._task.done():
-                self._task.cancel()
-                
-            # Clean up the event loop
-            if self._loop and self._loop.is_running():
-                self._loop.stop()
-            if self._loop:
-                self._loop.close()
-                self._loop = None
+            self._cleanup_resources()
+            
+    def _execute_network_analysis(self):
+        """Run the network analysis operation."""
+        # Create callbacks that emit signals
+        progress_cb = self._create_progress_callback()
+        data_cb = self._create_data_callback()
+        
+        # Extract parameters
+        params = self._extract_parameters()
 
+        # Clear channels if requested
+        if params['clear_channels'] and self._running:
+            self._loop.run_until_complete(self.crs.clear_channels(module=self.module))
+
+        # Set cable length before running the analysis
+        if self._running:
+            self._loop.run_until_complete(
+                self.crs.set_cable_length(length=params['cable_length'], module=self.module)
+            )
+
+        # Create a task for the netanal operation
+        if self._running:
+            self._execute_netanal_task(params, progress_cb, data_cb)
+            
+    def _create_progress_callback(self):
+        """Create a callback for progress updates."""
+        def progress_cb(module, progress):
+            if self._running:
+                self.signals.progress.emit(module, progress)
+        return progress_cb
+        
+    def _create_data_callback(self):
+        """Create a callback for data updates."""
+        def data_cb(module, freqs_raw, amps_raw, phases_raw):
+            if self._running:
+                # Sort data by frequency before displaying
+                sort_idx = np.argsort(freqs_raw)
+                freqs = freqs_raw[sort_idx]
+                amps = amps_raw[sort_idx]
+                phases = phases_raw[sort_idx]
+                
+                # Throttle updates to prevent GUI lag
+                current_time = time.time()
+                if current_time - self._last_update_time >= self._update_interval:
+                    self._last_update_time = current_time                    
+                
+                # Emit standard update and amplitude-specific update
+                self.signals.data_update.emit(module, freqs, amps, phases)
+                self.signals.data_update_with_amp.emit(module, freqs, amps, phases, self.amplitude)
+        return data_cb
+    
+    def _extract_parameters(self):
+        """Extract parameters from the params dictionary with defaults."""
+        return {
+            'fmin': self.params.get('fmin', DEFAULT_MIN_FREQ),
+            'fmax': self.params.get('fmax', DEFAULT_MAX_FREQ),
+            'nsamps': self.params.get('nsamps', DEFAULT_NSAMPLES),
+            'npoints': self.params.get('npoints', DEFAULT_NPOINTS),
+            'max_chans': self.params.get('max_chans', DEFAULT_MAX_CHANNELS),
+            'max_span': self.params.get('max_span', DEFAULT_MAX_SPAN),
+            'cable_length': self.params.get('cable_length', DEFAULT_CABLE_LENGTH),
+            'clear_channels': self.params.get('clear_channels', True)
+        }
+        
+    def _execute_netanal_task(self, params, progress_cb, data_cb):
+        """Execute the network analysis task and handle results."""
+        netanal_coro = self.crs.take_netanal(
+            amp=self.amplitude,  # Use the specific amplitude for this task
+            fmin=params['fmin'],
+            fmax=params['fmax'],
+            nsamps=params['nsamps'],
+            npoints=params['npoints'],
+            max_chans=params['max_chans'],
+            max_span=params['max_span'],
+            module=self.module,
+            progress_callback=progress_cb,
+            data_callback=data_cb
+        )
+        
+        # Create and store the task so it can be canceled
+        self._task = self._loop.create_task(netanal_coro)
+        
+        try:
+            # Run the task and get the result
+            result = self._loop.run_until_complete(self._task)
+            
+            # Extract and emit final data if task completed successfully
+            if self._running and result:
+                fs_sorted, iq_sorted, phase_sorted = result
+                amp_sorted = np.abs(iq_sorted)
+                
+                # Emit final data update
+                self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
+                self.signals.data_update_with_amp.emit(
+                    self.module, fs_sorted, amp_sorted, phase_sorted, self.amplitude
+                )
+                self.signals.completed.emit(self.module)
+        except asyncio.CancelledError:
+            # Task was canceled, emit error signal
+            self.signals.error.emit(f"Analysis canceled for module {self.module}")
+            
+            # Make sure to clean up channels
+            self._loop.run_until_complete(self._cleanup_channels())
+            
+    def _cleanup_resources(self):
+        """Clean up task and event loop resources."""
+        if self._task and not self._task.done():
+            self._task.cancel()
+            
+        # Clean up the event loop
+        if self._loop and self._loop.is_running():
+            self._loop.stop()
+        if self._loop:
+            self._loop.close()
+            self._loop = None
+
+# ───────────────────────── Network Analysis UI ─────────────────────────
 class NetworkAnalysisDialogBase(QtWidgets.QDialog):
     """Base class for network analysis dialogs with shared functionality."""
     def __init__(self, parent=None, params=None, modules=None, dac_scales=None):
@@ -1012,8 +1185,8 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         amp_layout = QtWidgets.QFormLayout(amp_group)
         
         # Get amplitude values
-        amps = self.params.get('amps', [self.params.get('amp', 0.001)])
-        amp_str = ','.join(str(a) for a in amps) if amps else "0.001"
+        amps = self.params.get('amps', [self.params.get('amp', DEFAULT_AMPLITUDE)])
+        amp_str = ','.join(str(a) for a in amps) if amps else str(DEFAULT_AMPLITUDE)
         
         # Normalized amplitude input
         self.amp_edit = QtWidgets.QLineEdit(amp_str)
@@ -1069,21 +1242,13 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
                 self.dbm_edit.clear()
                 return
                 
-            normalized_values = []
-            # Parse comma-separated values
-            for part in amp_text.split(','):
-                part = part.strip()
-                if part:
-                    try:
-                        value = float(eval(part))
-                        normalized_values.append(value)
-                    except (ValueError, SyntaxError, NameError):
-                        continue
+            # Parse normalized values
+            normalized_values = self._parse_amplitude_values(amp_text)
             
             # Convert to dBm
             dbm_values = []
             for norm in normalized_values:
-                dbm = normalize_to_dbm(norm, dac_scale)
+                dbm = UnitConverter.normalize_to_dbm(norm, dac_scale)
                 dbm_values.append(f"{dbm:.2f}")
             
             # Update dBm field
@@ -1116,21 +1281,13 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
                 self.dbm_edit.clear()
                 return
                 
-            dbm_values = []
-            # Parse comma-separated values
-            for part in dbm_text.split(','):
-                part = part.strip()
-                if part:
-                    try:
-                        value = float(eval(part))
-                        dbm_values.append(value)
-                    except (ValueError, SyntaxError, NameError):
-                        continue
+            # Parse dBm values
+            dbm_values = self._parse_dbm_values(dbm_text)
             
             # Convert to normalized amplitude
             normalized_values = []
             for dbm in dbm_values:
-                norm = dbm_to_normalize(dbm, dac_scale)
+                norm = UnitConverter.dbm_to_normalize(dbm, dac_scale)
                 normalized_values.append(f"{norm:.6f}")
             
             # Update normalized field
@@ -1148,15 +1305,7 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         if dac_scale is None:
             return
             
-        normalized_values = []
-        for part in amp_text.split(','):
-            part = part.strip()
-            if part:
-                try:
-                    value = float(eval(part))
-                    normalized_values.append(value)
-                except (ValueError, SyntaxError, NameError):
-                    continue
+        normalized_values = self._parse_amplitude_values(amp_text)
         
         warnings = []
         for norm in normalized_values:
@@ -1166,7 +1315,7 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
                 warnings.append(f"Warning: Normalized amplitude {norm:.6f} < 1e-4 (minimum recommended)")
         
         if warnings:
-            QtWidgets.QMessageBox.warning(self, "Amplitude Warning", "\n".join(warnings))
+            self._show_warning_dialog("Amplitude Warning", warnings)
 
     def _validate_dbm_values(self):
         """Validate dBm values when editing is finished."""
@@ -1178,6 +1327,41 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         if dac_scale is None:
             return
             
+        dbm_values = self._parse_dbm_values(dbm_text)
+        
+        warnings = []
+        for dbm in dbm_values:
+            if dbm > dac_scale:
+                warnings.append(f"Warning: {dbm:.2f} dBm > {dac_scale:+.2f} dBm (DAC max)")
+            
+            norm = UnitConverter.dbm_to_normalize(dbm, dac_scale)
+            if norm > 1.0:
+                warnings.append(f"Warning: {dbm:.2f} dBm gives normalized amplitude > 1.0")
+            elif norm < 1e-4:
+                warnings.append(f"Warning: {dbm:.2f} dBm gives normalized amplitude < 1e-4")
+        
+        if warnings:
+            self._show_warning_dialog("Amplitude Warning", warnings)
+
+    def _show_warning_dialog(self, title, warnings):
+        """Show a warning dialog with the given messages."""
+        QtWidgets.QMessageBox.warning(self, title, "\n".join(warnings))
+            
+    def _parse_amplitude_values(self, amp_text):
+        """Parse comma-separated amplitude values."""
+        normalized_values = []
+        for part in amp_text.split(','):
+            part = part.strip()
+            if part:
+                try:
+                    value = float(eval(part))
+                    normalized_values.append(value)
+                except (ValueError, SyntaxError, NameError):
+                    continue
+        return normalized_values
+        
+    def _parse_dbm_values(self, dbm_text):
+        """Parse comma-separated dBm values."""
         dbm_values = []
         for part in dbm_text.split(','):
             part = part.strip()
@@ -1187,20 +1371,7 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
                     dbm_values.append(value)
                 except (ValueError, SyntaxError, NameError):
                     continue
-        
-        warnings = []
-        for dbm in dbm_values:
-            if dbm > dac_scale:
-                warnings.append(f"Warning: {dbm:.2f} dBm > {dac_scale:+.2f} dBm (DAC max)")
-            
-            norm = dbm_to_normalize(dbm, dac_scale)
-            if norm > 1.0:
-                warnings.append(f"Warning: {dbm:.2f} dBm gives normalized amplitude > 1.0")
-            elif norm < 1e-4:
-                warnings.append(f"Warning: {dbm:.2f} dBm gives normalized amplitude < 1e-4")
-        
-        if warnings:
-            QtWidgets.QMessageBox.warning(self, "Amplitude Warning", "\n".join(warnings))
+        return dbm_values
 
     def _update_dac_scale_info(self):
         """Update the DAC scale information label based on selected modules."""
@@ -1284,16 +1455,8 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
                 self.dbm_edit.clear()
                 return
                 
-            normalized_values = []
-            # Parse comma-separated values
-            for part in amp_text.split(','):
-                part = part.strip()
-                if part:
-                    try:
-                        value = float(eval(part))
-                        normalized_values.append(value)
-                    except (ValueError, SyntaxError, NameError):
-                        continue
+            # Parse normalized values
+            normalized_values = self._parse_amplitude_values(amp_text)
             
             # Convert to dBm
             dbm_values = []
@@ -1305,7 +1468,7 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
                 elif norm < 1e-4:
                     warnings.append(f"Warning: Normalized amplitude {norm:.6f} < 1e-4 (minimum recommended)")
                     
-                dbm = normalize_to_dbm(norm, dac_scale)
+                dbm = UnitConverter.normalize_to_dbm(norm, dac_scale)
                 dbm_values.append(f"{dbm:.2f}")
             
             # Update dBm field
@@ -1313,8 +1476,7 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
             
             # Show warnings if any
             if warnings:
-                QtWidgets.QMessageBox.warning(self, "Amplitude Warning", 
-                                            "\n".join(warnings))
+                self._show_warning_dialog("Amplitude Warning", warnings)
         finally:
             self.currently_updating = False
     
@@ -1343,16 +1505,8 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
                 self.dbm_edit.clear()
                 return
                 
-            dbm_values = []
-            # Parse comma-separated values
-            for part in dbm_text.split(','):
-                part = part.strip()
-                if part:
-                    try:
-                        value = float(eval(part))
-                        dbm_values.append(value)
-                    except (ValueError, SyntaxError, NameError):
-                        continue
+            # Parse dBm values
+            dbm_values = self._parse_dbm_values(dbm_text)
             
             # Convert to normalized amplitude
             normalized_values = []
@@ -1362,7 +1516,7 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
                 if dbm > dac_scale:
                     warnings.append(f"Warning: {dbm:.2f} dBm > {dac_scale:.2f} dBm (DAC max)")
                 
-                norm = dbm_to_normalize(dbm, dac_scale)
+                norm = UnitConverter.dbm_to_normalize(dbm, dac_scale)
                 
                 if norm > 1.0:
                     warnings.append(f"Warning: {dbm:.2f} dBm gives normalized amplitude > 1.0")
@@ -1376,8 +1530,7 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
             
             # Show warnings if any
             if warnings:
-                QtWidgets.QMessageBox.warning(self, "Amplitude Warning", 
-                                            "\n".join(warnings))
+                self._show_warning_dialog("Amplitude Warning", warnings)
         finally:
             self.currently_updating = False
 
@@ -1390,6 +1543,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         self._setup_ui()
         
     def _setup_ui(self):
+        """Set up the user interface for the dialog."""
         layout = QtWidgets.QVBoxLayout(self)
         
         # Parameters group
@@ -1403,29 +1557,29 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         param_layout.addRow("Modules:", self.module_entry)
         
         # Frequency range (in MHz instead of Hz)
-        self.fmin_edit = QtWidgets.QLineEdit("100")
-        self.fmax_edit = QtWidgets.QLineEdit("2450")
+        self.fmin_edit = QtWidgets.QLineEdit(str(DEFAULT_MIN_FREQ / 1e6))
+        self.fmax_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_FREQ / 1e6))
         param_layout.addRow("Min Frequency (MHz):", self.fmin_edit)
         param_layout.addRow("Max Frequency (MHz):", self.fmax_edit)
 
         # Cable length
-        self.cable_length_edit = QtWidgets.QLineEdit("0.75")
+        self.cable_length_edit = QtWidgets.QLineEdit(str(DEFAULT_CABLE_LENGTH))
         param_layout.addRow("Cable Length (m):", self.cable_length_edit)        
         
         # Add amplitude settings group
         self.setup_amplitude_group(param_layout)
         
         # Remainder of the original UI
-        self.points_edit = QtWidgets.QLineEdit("5000")
+        self.points_edit = QtWidgets.QLineEdit(str(DEFAULT_NPOINTS))
         param_layout.addRow("Number of Points:", self.points_edit)
         
-        self.samples_edit = QtWidgets.QLineEdit("10")
+        self.samples_edit = QtWidgets.QLineEdit(str(DEFAULT_NSAMPLES))
         param_layout.addRow("Samples to Average:", self.samples_edit)
         
-        self.max_chans_edit = QtWidgets.QLineEdit("1023")
+        self.max_chans_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_CHANNELS))
         param_layout.addRow("Max Channels:", self.max_chans_edit)
         
-        self.max_span_edit = QtWidgets.QLineEdit("500")
+        self.max_span_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_SPAN / 1e6))
         param_layout.addRow("Max Span (MHz):", self.max_span_edit)
         
         self.clear_channels_cb = QtWidgets.QCheckBox("Clear all channels first")
@@ -1488,13 +1642,9 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             
             # Parse amplitude values
             amp_text = self.amp_edit.text().strip()
-            amps = []
-            for part in amp_text.split(','):
-                part = part.strip()
-                if part:
-                    amps.append(float(eval(part)))
+            amps = self._parse_amplitude_values(amp_text)
             if not amps:
-                amps = [0.001]  # Default amplitude if none provided
+                amps = [DEFAULT_AMPLITUDE]  # Default amplitude if none provided
             
             params = {
                 'amps': amps,
@@ -1514,23 +1664,149 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             QtWidgets.QMessageBox.critical(self, "Error", f"Invalid parameter: {str(e)}")
             return None
 
+class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
+    """Dialog for editing network analysis parameters with dBm support."""
+    def __init__(self, parent=None, params=None):
+        super().__init__(parent, params)
+        self.setWindowTitle("Edit Network Analysis Parameters")
+        self.setModal(True)
+        self._setup_ui()
+        
+        if parent and hasattr(parent, 'parent') and parent.parent() is not None:
+            parent_main = parent.parent()
+            if hasattr(parent_main, 'crs') and parent_main.crs is not None:
+                self._fetch_dac_scales(parent_main.crs)
+        
+    def _fetch_dac_scales(self, crs):
+        """Fetch DAC scales for all modules."""
+        # Create a fetcher thread
+        self.fetcher = DACScaleFetcher(crs)
+        self.fetcher.dac_scales_ready.connect(self._on_dac_scales_ready)
+        self.fetcher.start()
+    
+    def _on_dac_scales_ready(self, scales):
+        """Handle fetched DAC scales."""
+        self.dac_scales = scales
+        self._update_dac_scale_info()
+        self._update_dbm_from_normalized()
+    
+    def _setup_ui(self):
+        """Set up the user interface for the dialog."""
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Parameters form
+        form = QtWidgets.QFormLayout()
+        
+        # Frequency range (in MHz instead of Hz)
+        fmin_mhz = str(self.params.get('fmin', DEFAULT_MIN_FREQ) / 1e6)
+        fmax_mhz = str(self.params.get('fmax', DEFAULT_MAX_FREQ) / 1e6)
+        self.fmin_edit = QtWidgets.QLineEdit(fmin_mhz)
+        self.fmax_edit = QtWidgets.QLineEdit(fmax_mhz)
+        form.addRow("Min Frequency (MHz):", self.fmin_edit)
+        form.addRow("Max Frequency (MHz):", self.fmax_edit)
+        
+        # Add amplitude settings group
+        self.setup_amplitude_group(form)
+        
+        # Number of points
+        self.points_edit = QtWidgets.QLineEdit(str(self.params.get('npoints', DEFAULT_NPOINTS)))
+        form.addRow("Number of Points:", self.points_edit)
+        
+        # Number of samples to average
+        self.samples_edit = QtWidgets.QLineEdit(str(self.params.get('nsamps', DEFAULT_NSAMPLES)))
+        form.addRow("Samples to Average:", self.samples_edit)
+        
+        # Max channels
+        self.max_chans_edit = QtWidgets.QLineEdit(str(self.params.get('max_chans', DEFAULT_MAX_CHANNELS)))
+        form.addRow("Max Channels:", self.max_chans_edit)
+        
+        # Max span
+        max_span_mhz = str(self.params.get('max_span', DEFAULT_MAX_SPAN) / 1e6)
+        self.max_span_edit = QtWidgets.QLineEdit(max_span_mhz)
+        form.addRow("Max Span (MHz):", self.max_span_edit)
+        
+        # Add checkbox for clearing channels
+        self.clear_channels_cb = QtWidgets.QCheckBox("Clear all channels first")
+        self.clear_channels_cb.setChecked(self.params.get('clear_channels', True))
+        form.addRow("", self.clear_channels_cb)
+        
+        layout.addLayout(form)
+        
+        # Buttons
+        btn_layout = QtWidgets.QHBoxLayout()
+        self.ok_btn = QtWidgets.QPushButton("OK")
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        btn_layout.addWidget(self.ok_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+        
+        # Connect buttons
+        self.ok_btn.clicked.connect(self.accept)
+        self.cancel_btn.clicked.connect(self.reject)
+        
+        # Initialize dBm field based on default normalized value
+        self._update_dbm_from_normalized()
+
+        self.setMinimumSize(500, 600)  # Width, height in pixels
+
+    def _get_selected_modules(self):
+        """Get selected modules from params."""
+        # Get selected modules from params
+        selected_module = self.params.get('module')
+        if selected_module is None:
+            # Using all modules
+            return list(range(1, 9))
+        elif isinstance(selected_module, list):
+            # Multiple specific modules
+            return selected_module
+        else:
+            # Single module
+            return [selected_module]
+    
+    def get_parameters(self):
+        """Get the updated parameters."""
+        try:
+            # Parse amplitude values
+            amp_text = self.amp_edit.text().strip()
+            amps = self._parse_amplitude_values(amp_text)
+            if not amps:
+                amps = [DEFAULT_AMPLITUDE]  # Default amplitude if none provided
+            
+            params = self.params.copy()
+            params.update({
+                'amps': amps,  # Store as list in 'amps'
+                'amp': amps[0],  # Also store first value in 'amp' for backward compatibility
+                'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
+                'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
+                'npoints': int(self.points_edit.text()),
+                'nsamps': int(self.samples_edit.text()),
+                'max_chans': int(self.max_chans_edit.text()),
+                'max_span': float(eval(self.max_span_edit.text())) * 1e6,  # Convert MHz to Hz
+                'clear_channels': self.clear_channels_cb.isChecked()
+            })
+            return params
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Invalid parameter: {str(e)}")
+            return None
+
 class NetworkAnalysisWindow(QtWidgets.QMainWindow):
     """
     Window for displaying network analysis results with real units support.
     """
-    def __init__(self, parent=None, modules=None):
+    def __init__(self, parent=None, modules=None, dac_scales=None):
         super().__init__(parent)
         self.setWindowTitle("Network Analysis Results")
         self.modules = modules or []
         self.data = {}  # module -> amplitude data dictionary
         self.raw_data = {}  # Store the raw IQ data for unit conversion
-        self.unit_mode = "counts"  # Default: counts, alternatives: "dbm", "volts"
+        self.unit_mode = "dbm"  # Default to dBm instead of counts
         self.normalize_magnitudes = False  # Add this flag to track normalization state
         self.first_setup = True  # Flag to track initial setup
         self.zoom_box_mode = True  # Default to zoom box mode ON
         self.plots = {}  # Initialize plots dictionary early
         self.original_params = {}  # Initial parameters
         self.current_params = {}   # Most recently used parameters
+        self.dac_scales = dac_scales or {}  # Store DAC scales
         
         # Setup the UI components
         self._setup_ui()
@@ -1538,11 +1814,22 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.resize(1000, 800)
 
     def _setup_ui(self):
+        """Set up the user interface for the window."""
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
         
-        # Toolbar
+        # Create toolbar
+        self._setup_toolbar(layout)
+        
+        # Create progress bars
+        self._setup_progress_bars(layout)
+        
+        # Create plot area
+        self._setup_plot_area(layout)
+
+    def _setup_toolbar(self, layout):
+        """Set up the toolbar with controls."""
         toolbar = QtWidgets.QToolBar()
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
@@ -1550,8 +1837,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         # Cable length control for quick adjustments
         self.cable_length_label = QtWidgets.QLabel("Cable Length (m):")
         self.cable_length_spin = QtWidgets.QDoubleSpinBox()
-        self.cable_length_spin.setRange(0.0, 10.0)
-        self.cable_length_spin.setValue(0.75)
+        self.cable_length_spin.setRange(0.0, 1000.0)
+        self.cable_length_spin.setValue(DEFAULT_CABLE_LENGTH)
         self.cable_length_spin.setSingleStep(0.05)
         toolbar.addWidget(self.cable_length_label)
         toolbar.addWidget(self.cable_length_spin)        
@@ -1576,9 +1863,22 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         spacer.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, 
                             QtWidgets.QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
-               
+        
+        # Normalize Magnitudes checkbox
+        self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Magnitudes")
+        self.normalize_checkbox.setChecked(False)
+        self.normalize_checkbox.setToolTip("Normalize all magnitude curves to their first data point")
+        self.normalize_checkbox.toggled.connect(self._toggle_normalization)
+        toolbar.addWidget(self.normalize_checkbox)
 
-        # Create Real Units controls (will add to toolbar at the end)
+        # Add unit controls
+        self._setup_unit_controls(toolbar)
+        
+        # Add zoom box mode checkbox
+        self._setup_zoom_box_control(toolbar)
+
+    def _setup_unit_controls(self, toolbar):
+        """Set up the unit selection controls."""
         unit_group = QtWidgets.QWidget()
         unit_layout = QtWidgets.QHBoxLayout(unit_group)
         unit_layout.setContentsMargins(0, 0, 0, 0)
@@ -1587,7 +1887,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.rb_counts = QtWidgets.QRadioButton("Counts")
         self.rb_dbm = QtWidgets.QRadioButton("dBm")
         self.rb_volts = QtWidgets.QRadioButton("Volts")
-        self.rb_counts.setChecked(True)
+        self.rb_dbm.setChecked(True)  # Changed from rb_counts to rb_dbm
         
         unit_layout.addWidget(QtWidgets.QLabel("Units:"))
         unit_layout.addWidget(self.rb_counts)
@@ -1598,35 +1898,29 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.rb_counts.toggled.connect(lambda: self._update_unit_mode("counts"))
         self.rb_dbm.toggled.connect(lambda: self._update_unit_mode("dbm"))
         self.rb_volts.toggled.connect(lambda: self._update_unit_mode("volts"))
-
-        # Zoom box
-        zoom_box_cb = QtWidgets.QCheckBox("Zoom Box Mode")
-        zoom_box_cb.setChecked(self.zoom_box_mode)  # Default to ON
-        zoom_box_cb.setToolTip("When enabled, left-click drag creates a zoom box. When disabled, left-click drag pans.")
-        zoom_box_cb.toggled.connect(self._toggle_zoom_box)        
-        
-        # Store reference to the checkbox
-        self.zoom_box_cb = zoom_box_cb        
         
         # Set fixed size policy to make alignment more predictable
         unit_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, 
                                 QtWidgets.QSizePolicy.Policy.Preferred)
         
-        # Normalize Magnitudes checkbox
-        self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Magnitudes")
-        self.normalize_checkbox.setChecked(False)
-        self.normalize_checkbox.setToolTip("Normalize all magnitude curves to their first data point")
-        self.normalize_checkbox.toggled.connect(self._toggle_normalization)
-        toolbar.addWidget(self.normalize_checkbox)
-
         # Now add the unit controls at the far right
         toolbar.addSeparator()
         toolbar.addWidget(unit_group)
+        
+    def _setup_zoom_box_control(self, toolbar):
+        """Set up the zoom box mode control."""
+        zoom_box_cb = QtWidgets.QCheckBox("Zoom Box Mode")
+        zoom_box_cb.setChecked(self.zoom_box_mode)  # Default to ON
+        zoom_box_cb.setToolTip("When enabled, left-click drag creates a zoom box. When disabled, left-click drag pans.")
+        zoom_box_cb.toggled.connect(self._toggle_zoom_box)
+        
+        # Store reference to the checkbox
+        self.zoom_box_cb = zoom_box_cb
+        
+        toolbar.addWidget(zoom_box_cb)
 
-        # Add zoom box mode checkbox
-        toolbar.addWidget(zoom_box_cb)        
-
-        # Progress bars group with hide capability
+    def _setup_progress_bars(self, layout):
+        """Set up progress bars for each module."""
         self.progress_group = None
         if self.modules:
             self.progress_group = QtWidgets.QGroupBox("Analysis Progress")
@@ -1660,8 +1954,9 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         else:
             self.progress_bars = {}
             self.progress_labels = {}
-        
-        # Plot area
+
+    def _setup_plot_area(self, layout):
+        """Set up the plot area with tabs for each module."""
         self.tabs = QtWidgets.QTabWidget()
         layout.addWidget(self.tabs)
         
@@ -1674,13 +1969,13 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             vb_amp = ClickableViewBox()
             amp_plot = pg.PlotWidget(viewBox=vb_amp, title=f"Module {module} - Magnitude")
             self._update_amplitude_labels(amp_plot)
-            amp_plot.setLabel('bottom', 'Frequency', units='GHz')
+            amp_plot.setLabel('bottom', 'Frequency', units='Hz')
             amp_plot.showGrid(x=True, y=True, alpha=0.3)
             
             vb_phase = ClickableViewBox()
             phase_plot = pg.PlotWidget(viewBox=vb_phase, title=f"Module {module} - Phase")
             phase_plot.setLabel('left', 'Phase', units='deg')
-            phase_plot.setLabel('bottom', 'Frequency', units='GHz')
+            phase_plot.setLabel('bottom', 'Frequency', units='Hz')
             phase_plot.showGrid(x=True, y=True, alpha=0.3)
             
             # Add legends for multiple amplitude plots
@@ -1783,6 +2078,62 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             
             # Redraw with new units
             self._redraw_all_plots()
+
+    def _update_legends_for_unit_mode(self):
+        """Update the legend entries to reflect the current unit mode."""
+        for module in self.plots:
+            # Clear existing legends
+            self.plots[module]['amp_legend'].clear()
+            self.plots[module]['phase_legend'].clear()
+            
+            # Re-add curves with updated labels
+            for amplitude, curve in self.plots[module]['amp_curves'].items():
+                # Format amplitude according to current unit mode
+                if self.unit_mode == "dbm":
+                    # Check if we have a DAC scale for this module
+                    if module not in self.dac_scales:
+                        # Issue warning and switch to counts mode
+                        print(f"Warning: No DAC scale available for module {module}, cannot display accurate probe power in dBm.")
+                        self.rb_counts.setChecked(True)  # Switch to counts mode
+                        return  # Exit and let _update_unit_mode call us again
+                    
+                    # Use the actual DAC scale without fallback
+                    dac_scale = self.dac_scales[module]
+                    dbm_value = UnitConverter.normalize_to_dbm(amplitude, dac_scale)
+                    label = f"Probe: {dbm_value:.2f} dBm"
+                elif self.unit_mode == "volts":
+                    # Properly convert normalized amplitude to voltage through power calculation
+                    # First get dBm value
+                    if module not in self.dac_scales:
+                        print(f"Warning: No DAC scale available for module {module}, cannot display accurate probe amplitude in Volts.")
+                        self.rb_counts.setChecked(True)  # Switch to counts mode
+                        return  # Exit and let _update_unit_mode call us again
+                    else:
+                        dac_scale = self.dac_scales[module]
+                        dbm_value = UnitConverter.normalize_to_dbm(amplitude, dac_scale)
+                        
+                        # Convert dBm to watts: P = 10^((dBm - 30)/10)
+                        power_watts = 10**((dbm_value - 30)/10)
+                        
+                        # Convert watts to peak voltage: V = sqrt(P * R)
+                        resistance = 50.0  # Ohms
+                        voltage_rms = np.sqrt(power_watts * resistance)
+                        
+                        # Convert RMS to peak voltage
+                        voltage_peak = voltage_rms * np.sqrt(2)
+                        voltage_peak = voltage_peak*1e6
+                        
+                        label = f"Probe: {voltage_peak:.1f} uV (peak)"
+                else:  # "counts"
+                    label = f"Probe: {amplitude} Normalized Units"
+                
+                # Add to legend with new label
+                self.plots[module]['amp_legend'].addItem(curve, label)
+                
+                # Also update the phase legend for consistency
+                phase_curve = self.plots[module]['phase_curves'].get(amplitude)
+                if phase_curve:
+                    self.plots[module]['phase_legend'].addItem(phase_curve, label)         
     
     def _update_amplitude_labels(self, plot):
         """Update plot labels based on current unit mode and normalization state."""
@@ -1809,20 +2160,13 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 # Update amplitude-specific curves first
                 for amp_key, data_tuple in self.raw_data[module].items():
                     if amp_key != 'default':
-                        # Handle the case where data_tuple has 5 elements (amplitude-specific)
-                        if len(data_tuple) == 5:
-                            freqs, amps, phases, iq_data, amplitude = data_tuple
-                        else:
-                            # This shouldn't typically happen, but just in case
-                            freqs, amps, phases, iq_data = data_tuple
-                            # Try to extract amplitude from key
-                            try:
-                                amplitude = float(amp_key.split('_')[-1])
-                            except (ValueError, IndexError):
-                                continue  # Skip this entry if we can't determine the amplitude
+                        # Extract amplitude and data
+                        amplitude, freqs, amps, phases, iq_data = self._extract_data_from_tuple(amp_key, data_tuple)
                         
+                        # Update the curve if it exists
                         if amplitude in self.plots[module]['amp_curves']:
-                            converted_amps = self._convert_amplitude(amps, iq_data)
+                            converted_amps = UnitConverter.convert_amplitude(
+                                amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
                             freq_ghz = freqs / 1e9
                             self.plots[module]['amp_curves'][amplitude].setData(freq_ghz, converted_amps)
                             self.plots[module]['phase_curves'][amplitude].setData(freq_ghz, phases)
@@ -1830,7 +2174,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 # Now handle the default curve - ONLY if there are no amplitude-specific curves
                 if 'default' in self.raw_data[module] and not has_amp_curves:
                     freqs, amps, phases, iq_data = self.raw_data[module]['default']
-                    converted_amps = self._convert_amplitude(amps, iq_data)
+                    converted_amps = UnitConverter.convert_amplitude(
+                        amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
                     freq_ghz = freqs / 1e9
                     self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
                     self.plots[module]['phase_curve'].setData(freq_ghz, phases)
@@ -1842,61 +2187,22 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 # Enable auto range to fit new data
                 self.plots[module]['amp_plot'].autoRange()
         
-    def _convert_amplitude(self, amps, iq_data, unit_mode=None, normalize=False):
-        """
-        Convert amplitude values to the specified unit, with optional normalization.
-        
-        Parameters
-        ----------
-        amps : ndarray
-            Raw amplitude values (magnitude of complex data)
-        iq_data : ndarray
-            Complex IQ data from network analysis
-        unit_mode : str, optional
-            Unit mode to convert to: "counts", "volts", or "dbm"
-            If None, uses self.unit_mode
-        normalize : bool, optional
-            Whether to normalize the values (default: False)
-                
-        Returns
-        -------
-        ndarray
-            Converted amplitude values in the selected unit
-        """
-        from ..core.transferfunctions import (
-            convert_roc_to_volts,
-            convert_roc_to_dbm,
-        )
-        
-        # Use specified unit_mode or fall back to instance unit_mode
-        mode = unit_mode if unit_mode is not None else self.unit_mode
-        
-        # First convert to the right units
-        if mode == "counts":
-            result = amps.copy()  # Raw counts
-        elif mode == "volts":
-            result = convert_roc_to_volts(amps)
-        elif mode == "dbm":
-            # For network analysis, amp values are already magnitudes
-            result = convert_roc_to_dbm(amps)
+        # Update legends after redrawing curves
+        self._update_legends_for_unit_mode()              
+    
+    def _extract_data_from_tuple(self, amp_key, data_tuple):
+        """Extract amplitude and data from a data tuple."""
+        if len(data_tuple) == 5:
+            # New format with amplitude included
+            freqs, amps, phases, iq_data, amplitude = data_tuple
         else:
-            result = amps.copy()  # Default fallback
-            
-        # Then normalize if requested (and if there's data)
-        if normalize and len(result) > 0:
-            # For dBm, we subtract the first value instead of dividing
-            if mode == "dbm":
-                # Handle cases where the first value might be invalid (inf or nan)
-                ref_val = result[0]
-                if np.isfinite(ref_val):
-                    result = result - ref_val
-            else:
-                # For counts or volts, we divide by the first value
-                ref_val = result[0]
-                if ref_val != 0 and np.isfinite(ref_val):
-                    result = result / ref_val
-        
-        return result
+            # Old format, extract amplitude from key
+            freqs, amps, phases, iq_data = data_tuple
+            try:
+                amplitude = float(amp_key.split('_')[-1])
+            except (ValueError, IndexError):
+                amplitude = DEFAULT_AMPLITUDE
+        return amplitude, freqs, amps, phases, iq_data
 
     def closeEvent(self, event):
         """Handle window close event by cleaning up resources."""
@@ -1992,18 +2298,18 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.current_params = params.copy()   # Keep current for dialog
         
         # Set cable length spinner to match value
-        self.cable_length_spin.setValue(params.get('cable_length', 0.75))
+        self.cable_length_spin.setValue(params.get('cable_length', DEFAULT_CABLE_LENGTH))
         
         # Only try to set plot ranges if plots exist
         if not hasattr(self, 'plots') or not self.plots:
             return
             
         # Set initial plot ranges based on frequency parameters
-        fmin = params.get('fmin', 100e6)
-        fmax = params.get('fmax', 2450e6)
+        fmin = params.get('fmin', DEFAULT_MIN_FREQ)
+        fmax = params.get('fmax', DEFAULT_MAX_FREQ)
         for module in self.plots:
-            self.plots[module]['amp_plot'].setXRange(fmin/1e9, fmax/1e9)
-            self.plots[module]['phase_plot'].setXRange(fmin/1e9, fmax/1e9)
+            self.plots[module]['amp_plot'].setXRange(fmin, fmax)
+            self.plots[module]['phase_plot'].setXRange(fmin, fmax)
             # Disable auto range on X axis but keep Y auto range
             self.plots[module]['amp_plot'].enableAutoRange(pg.ViewBox.XAxis, False)
             self.plots[module]['phase_plot'].enableAutoRange(pg.ViewBox.XAxis, False)
@@ -2036,10 +2342,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 self.plots[module]['phase_curve'].setData([], [])
             
             # Convert amplitude to selected units
-            converted_amps = self._convert_amplitude(amps, iq_data)
-            
-            # Convert frequency to GHz for display
-            freq_ghz = freqs / 1e9
+            converted_amps = UnitConverter.convert_amplitude(
+                amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
             
             # Generate a color based on the amplitude index in the list of amplitudes
             amps_list = self.original_params.get('amps', [amplitude])
@@ -2056,15 +2360,21 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             color = channel_families[amp_index % len(channel_families)]
             
             # Create or update curves for this amplitude
+            is_new_curve = False
             if amplitude not in self.plots[module]['amp_curves']:
+                is_new_curve = True
                 self.plots[module]['amp_curves'][amplitude] = self.plots[module]['amp_plot'].plot(
                     pen=pg.mkPen(color, width=LINE_WIDTH), name=f"Amp: {amplitude}")
                 self.plots[module]['phase_curves'][amplitude] = self.plots[module]['phase_plot'].plot(
                     pen=pg.mkPen(color, width=LINE_WIDTH), name=f"Amp: {amplitude}")
             
             # Update the curves
-            self.plots[module]['amp_curves'][amplitude].setData(freq_ghz, converted_amps)
-            self.plots[module]['phase_curves'][amplitude].setData(freq_ghz, phases)
+            self.plots[module]['amp_curves'][amplitude].setData(freqs, converted_amps)
+            self.plots[module]['phase_curves'][amplitude].setData(freqs, phases)
+            
+            # If this is a new curve, update legends for proper unit display
+            if is_new_curve:
+                self._update_legends_for_unit_mode()
 
     def update_data(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
         """Update the plot data for a specific module."""
@@ -2085,10 +2395,11 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             # Only show default curve if no amplitude-specific curves exist yet
             if len(self.plots[module]['amp_curves']) == 0:
                 # Convert amplitude to selected units
-                converted_amps = self._convert_amplitude(amps, iq_data)
+                converted_amps = UnitConverter.convert_amplitude(
+                    amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
                 
                 # Convert frequency to GHz for display
-                freq_ghz = freqs / 1e9
+                freq_ghz = freqs
                 
                 # Update plots
                 self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
@@ -2126,161 +2437,13 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             
             try:
                 if filename.endswith('.pkl'):
-                    # Create comprehensive data structure with all units and metadata
-                    export_data = {
-                        'timestamp': datetime.datetime.now().isoformat(),
-                        'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
-                        'modules': {}
-                    }
-                    
-                    # Process each module's data
-                    for module, data_dict in self.raw_data.items():
-                        export_data['modules'][module] = {}
-                        
-                        # Track measurement index for each module
-                        meas_idx = 0
-                        
-                        for key, data_tuple in data_dict.items():
-                            # Extract data based on tuple format
-                            if key != 'default':
-                                if len(data_tuple) >= 5:  # New format with amplitude included
-                                    freqs, amps, phases, iq_data, amplitude = data_tuple
-                                else:
-                                    # Try to extract amplitude from key format "module_amp"
-                                    try:
-                                        amplitude = float(key.split('_')[-1])
-                                    except (ValueError, IndexError):
-                                        amplitude = 0.001  # Default
-                                    freqs, amps, phases, iq_data = data_tuple
-                            else:
-                                amplitude = 0.001  # Default for non-amplitude-specific data
-                                freqs, amps, phases, iq_data = data_tuple
-                            
-                            # Convert to all unit types (without normalization)
-                            counts = amps  # Already in counts
-                            volts = self._convert_amplitude(amps, iq_data, unit_mode="volts", normalize=False)
-                            dbm = self._convert_amplitude(amps, iq_data, unit_mode="dbm", normalize=False)
-                            
-                            # Also include normalized versions for convenience
-                            counts_norm = self._convert_amplitude(amps, iq_data, unit_mode="counts", normalize=True)
-                            volts_norm = self._convert_amplitude(amps, iq_data, unit_mode="volts", normalize=True)
-                            dbm_norm = self._convert_amplitude(amps, iq_data, unit_mode="dbm", normalize=True)
-                            
-                            # Use iteration number as key instead of formatted amplitude
-                            export_data['modules'][module][meas_idx] = {
-                                'sweep_amplitude': amplitude,  # Direct parameter instead of in metadata
-                                'frequency': {
-                                    'values': freqs.tolist(),
-                                    'unit': 'Hz'
-                                },
-                                'magnitude': {
-                                    'counts': {
-                                        'raw': counts.tolist(),
-                                        'normalized': counts_norm.tolist(),
-                                        'unit': 'counts'
-                                    },
-                                    'volts': {
-                                        'raw': volts.tolist(),
-                                        'normalized': volts_norm.tolist(),
-                                        'unit': 'V'
-                                    },
-                                    'dbm': {
-                                        'raw': dbm.tolist(),
-                                        'normalized': dbm_norm.tolist(),
-                                        'unit': 'dBm'
-                                    }
-                                },
-                                'phase': {
-                                    'values': phases.tolist(),
-                                    'unit': 'degrees'
-                                },
-                                'complex': {
-                                    'real': iq_data.real.tolist(),
-                                    'imag': iq_data.imag.tolist()
-                                }
-                            }
-                            meas_idx += 1
-                    
-                    # Save the enhanced data structure
-                    with open(filename, 'wb') as f:
-                        pickle.dump(export_data, f)
-                        
+                    self._export_to_pickle(filename)
                 elif filename.endswith('.csv'):
-                    # Export as CSV (one file per module and amplitude)
-                    base, ext = os.path.splitext(filename)
-                    
-                    # First create a metadata CSV with the parameters
-                    meta_filename = f"{base}_metadata{ext}"
-                    with open(meta_filename, 'w', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerow(['Parameter', 'Value'])
-                        writer.writerow(['Export Date', datetime.datetime.now().isoformat()])
-                        
-                        # Add all parameters
-                        if hasattr(self, 'current_params'):
-                            writer.writerow(['', ''])
-                            writer.writerow(['Measurement Parameters', ''])
-                            for param, value in self.current_params.items():
-                                # Convert Hz to MHz for frequency parameters
-                                if param in ['fmin', 'fmax', 'max_span'] and isinstance(value, (int, float)):
-                                    writer.writerow([param, f"{value/1e6} MHz"])
-                                else:
-                                    writer.writerow([param, value])
-                    
-                    # Now export each module's data
-                    for module, data_dict in self.raw_data.items():
-                        idx = 0  # Track measurement index
-                        for key, data_tuple in data_dict.items():
-                            # Extract amplitude and data
-                            if key != 'default':
-                                if len(data_tuple) >= 5:
-                                    freqs, amps, phases, iq_data, amplitude = data_tuple
-                                    amplitude_str = f"_amp{amplitude:.6f}"
-                                else:
-                                    freqs, amps, phases, iq_data = data_tuple
-                                    try:
-                                        amplitude = float(key.split('_')[-1])
-                                        amplitude_str = f"_amp{amplitude:.6f}"
-                                    except (ValueError, IndexError):
-                                        amplitude_str = ""
-                            else:
-                                freqs, amps, phases, iq_data = data_tuple
-                                amplitude_str = ""
-                            
-                            # Export for each unit type
-                            for unit_mode in ["counts", "volts", "dbm"]:
-                                converted_amps = self._convert_amplitude(amps, iq_data, unit_mode=unit_mode)
-                                
-                                unit_label = unit_mode
-                                if unit_mode == "dbm":
-                                    unit_label = "dBm"
-                                elif unit_mode == "volts":
-                                    unit_label = "V"
-                                
-                                csv_filename = f"{base}_module{module}_idx{idx}_{unit_mode}{ext}"
-                                with open(csv_filename, 'w', newline='') as f:
-                                    writer = csv.writer(f)
-                                    writer.writerow(['# Amplitude:', f"{amplitude}" if 'amplitude' in locals() else "Unknown"])
-                                    if unit_mode == "dbm":
-                                        writer.writerow(['Frequency (Hz)', f'Power ({unit_label})', 'Phase (deg)'])
-                                    else:
-                                        writer.writerow(['Frequency (Hz)', f'Amplitude ({unit_label})', 'Phase (deg)'])
-                                    
-                                    for freq, amp, phase in zip(freqs, converted_amps, phases):
-                                        writer.writerow([freq, amp, phase])
-                            idx += 1
+                    self._export_to_csv(filename)
                 else:
                     # Default to pickle with same comprehensive format
-                    with open(filename, 'wb') as f:
-                        export_data = {
-                            'timestamp': datetime.datetime.now().isoformat(),
-                            'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
-                            'data': self.data,
-                            'raw_data': self.raw_data,
-                            'unit_mode': self.unit_mode
-                        }
-                        pickle.dump(export_data, f)
-                        
+                    self._export_to_pickle(filename)
+                    
                 QtWidgets.QMessageBox.information(self, "Export Complete", 
                                                 f"Data exported to {filename}")
                 
@@ -2288,132 +2451,147 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 traceback.print_exc()  # Print stack trace to console
                 QtWidgets.QMessageBox.critical(self, "Export Error", 
                                             f"Error exporting data: {str(e)}")
-                
-class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
-    """Dialog for editing network analysis parameters with dBm support."""
-    def __init__(self, parent=None, params=None):
-        super().__init__(parent, params)
-        self.setWindowTitle("Edit Network Analysis Parameters")
-        self.setModal(True)
-        self._setup_ui()
-        
-        if parent and hasattr(parent, 'parent') and parent.parent() is not None:
-            parent_main = parent.parent()
-            if hasattr(parent_main, 'crs') and parent_main.crs is not None:
-                self._fetch_dac_scales(parent_main.crs)
-        
-    def _fetch_dac_scales(self, crs):
-        """Fetch DAC scales for all modules."""
-        # Create a fetcher thread
-        self.fetcher = DACScaleFetcher(crs)
-        self.fetcher.dac_scales_ready.connect(self._on_dac_scales_ready)
-        self.fetcher.start()
     
-    def _on_dac_scales_ready(self, scales):
-        """Handle fetched DAC scales."""
-        self.dac_scales = scales
-        self._update_dac_scale_info()
-        self._update_dbm_from_normalized()
-    
-    def _setup_ui(self):
-        layout = QtWidgets.QVBoxLayout(self)
+    def _export_to_pickle(self, filename):
+        """Export data to a pickle file."""
+        # Create comprehensive data structure with all units and metadata
+        export_data = {
+            'timestamp': datetime.datetime.now().isoformat(),
+            'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
+            'modules': {}
+        }
         
-        # Parameters form
-        form = QtWidgets.QFormLayout()
-        
-        # Frequency range (in MHz instead of Hz)
-        self.fmin_edit = QtWidgets.QLineEdit(str(self.params.get('fmin', 100e6) / 1e6))  # Convert Hz to MHz
-        self.fmax_edit = QtWidgets.QLineEdit(str(self.params.get('fmax', 2450e6) / 1e6))  # Convert Hz to MHz
-        form.addRow("Min Frequency (MHz):", self.fmin_edit)
-        form.addRow("Max Frequency (MHz):", self.fmax_edit)
-        
-        # Add amplitude settings group
-        self.setup_amplitude_group(form)
-        
-        # Number of points
-        self.points_edit = QtWidgets.QLineEdit(str(self.params.get('npoints', '5000')))
-        form.addRow("Number of Points:", self.points_edit)
-        
-        # Number of samples to average
-        self.samples_edit = QtWidgets.QLineEdit(str(self.params.get('nsamps', '10')))
-        form.addRow("Samples to Average:", self.samples_edit)
-        
-        # Max channels
-        self.max_chans_edit = QtWidgets.QLineEdit(str(self.params.get('max_chans', '1023')))
-        form.addRow("Max Channels:", self.max_chans_edit)
-        
-        # Max span
-        self.max_span_edit = QtWidgets.QLineEdit(str(self.params.get('max_span', 500e6) / 1e6))
-        form.addRow("Max Span (MHz):", self.max_span_edit)
-        
-        # Add checkbox for clearing channels
-        self.clear_channels_cb = QtWidgets.QCheckBox("Clear all channels first")
-        self.clear_channels_cb.setChecked(self.params.get('clear_channels', True))
-        form.addRow("", self.clear_channels_cb)
-        
-        layout.addLayout(form)
-        
-        # Buttons
-        btn_layout = QtWidgets.QHBoxLayout()
-        self.ok_btn = QtWidgets.QPushButton("OK")
-        self.cancel_btn = QtWidgets.QPushButton("Cancel")
-        btn_layout.addWidget(self.ok_btn)
-        btn_layout.addWidget(self.cancel_btn)
-        layout.addLayout(btn_layout)
-        
-        # Connect buttons
-        self.ok_btn.clicked.connect(self.accept)
-        self.cancel_btn.clicked.connect(self.reject)
-        
-        # Initialize dBm field based on default normalized value
-        self._update_dbm_from_normalized()
-
-        self.setMinimumSize(500, 600)  # Width, height in pixels
-
-    def _get_selected_modules(self):
-        """Get selected modules from params."""
-        # Get selected modules from params
-        selected_module = self.params.get('module')
-        if selected_module is None:
-            # Using all modules
-            return list(range(1, 9))
-        elif isinstance(selected_module, list):
-            # Multiple specific modules
-            return selected_module
-        else:
-            # Single module
-            return [selected_module]
-    
-    def get_parameters(self):
-        """Get the updated parameters."""
-        try:
-            # Parse amplitude values
-            amp_text = self.amp_edit.text().strip()
-            amps = []
-            for part in amp_text.split(','):
-                part = part.strip()
-                if part:
-                    amps.append(float(eval(part)))
-            if not amps:
-                amps = [0.001]  # Default amplitude if none provided
+        # Process each module's data
+        for module, data_dict in self.raw_data.items():
+            export_data['modules'][module] = {}
             
-            params = self.params.copy()
-            params.update({
-                'amps': amps,  # Store as list in 'amps'
-                'amp': amps[0],  # Also store first value in 'amp' for backward compatibility
-                'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
-                'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
-                'npoints': int(self.points_edit.text()),
-                'nsamps': int(self.samples_edit.text()),
-                'max_chans': int(self.max_chans_edit.text()),
-                'max_span': float(eval(self.max_span_edit.text())) * 1e6,  # Convert MHz to Hz
-                'clear_channels': self.clear_channels_cb.isChecked()
-            })
-            return params
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Error", f"Invalid parameter: {str(e)}")
-            return None
+            # Track measurement index for each module
+            meas_idx = 0
+            
+            for key, data_tuple in data_dict.items():
+                # Extract data and amplitude
+                amplitude, freqs, amps, phases, iq_data = self._extract_data_for_export(key, data_tuple)
+                
+                # Convert to all unit types
+                counts = amps  # Already in counts
+                volts = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="volts")
+                dbm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="dbm")
+                
+                # Also include normalized versions
+                counts_norm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="counts", normalize=True)
+                volts_norm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="volts", normalize=True)
+                dbm_norm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="dbm", normalize=True)
+                
+                # Use iteration number as key instead of formatted amplitude
+                export_data['modules'][module][meas_idx] = {
+                    'sweep_amplitude': amplitude,
+                    'frequency': {
+                        'values': freqs.tolist(),
+                        'unit': 'Hz'
+                    },
+                    'magnitude': {
+                        'counts': {
+                            'raw': counts.tolist(),
+                            'normalized': counts_norm.tolist(),
+                            'unit': 'counts'
+                        },
+                        'volts': {
+                            'raw': volts.tolist(),
+                            'normalized': volts_norm.tolist(),
+                            'unit': 'V'
+                        },
+                        'dbm': {
+                            'raw': dbm.tolist(),
+                            'normalized': dbm_norm.tolist(),
+                            'unit': 'dBm'
+                        }
+                    },
+                    'phase': {
+                        'values': phases.tolist(),
+                        'unit': 'degrees'
+                    },
+                    'complex': {
+                        'real': iq_data.real.tolist(),
+                        'imag': iq_data.imag.tolist()
+                    }
+                }
+                meas_idx += 1
+        
+        # Save the enhanced data structure
+        with open(filename, 'wb') as f:
+            pickle.dump(export_data, f)
+    
+    def _export_to_csv(self, filename):
+        """Export data to CSV files."""
+        base, ext = os.path.splitext(filename)
+        
+        # First create a metadata CSV with the parameters
+        meta_filename = f"{base}_metadata{ext}"
+        with open(meta_filename, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Parameter', 'Value'])
+            writer.writerow(['Export Date', datetime.datetime.now().isoformat()])
+            
+            # Add all parameters
+            if hasattr(self, 'current_params'):
+                writer.writerow(['', ''])
+                writer.writerow(['Measurement Parameters', ''])
+                for param, value in self.current_params.items():
+                    # Convert Hz to MHz for frequency parameters
+                    if param in ['fmin', 'fmax', 'max_span'] and isinstance(value, (int, float)):
+                        writer.writerow([param, f"{value/1e6} MHz"])
+                    else:
+                        writer.writerow([param, value])
+        
+        # Now export each module's data
+        for module, data_dict in self.raw_data.items():
+            idx = 0  # Track measurement index
+            for key, data_tuple in data_dict.items():
+                # Extract data and amplitude
+                amplitude, freqs, amps, phases, iq_data = self._extract_data_for_export(key, data_tuple)
+                
+                # Export for each unit type
+                for unit_mode in ["counts", "volts", "dbm"]:
+                    converted_amps = UnitConverter.convert_amplitude(amps, iq_data, unit_mode=unit_mode)
+                    
+                    unit_label = unit_mode
+                    if unit_mode == "dbm":
+                        unit_label = "dBm"
+                    elif unit_mode == "volts":
+                        unit_label = "V"
+                    
+                    csv_filename = f"{base}_module{module}_idx{idx}_{unit_mode}{ext}"
+                    with open(csv_filename, 'w', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(['# Amplitude:', f"{amplitude}" if 'amplitude' in locals() else "Unknown"])
+                        if unit_mode == "dbm":
+                            writer.writerow(['Frequency (Hz)', f'Power ({unit_label})', 'Phase (deg)'])
+                        else:
+                            writer.writerow(['Frequency (Hz)', f'Amplitude ({unit_label})', 'Phase (deg)'])
+                        
+                        for freq, amp, phase in zip(freqs, converted_amps, phases):
+                            writer.writerow([freq, amp, phase])
+                idx += 1
+    
+    def _extract_data_for_export(self, key, data_tuple):
+        """Extract and prepare data for export from a data tuple."""
+        if key != 'default':
+            if len(data_tuple) >= 5:  # New format with amplitude included
+                freqs, amps, phases, iq_data, amplitude = data_tuple
+            else:
+                # Try to extract amplitude from key format "module_amp"
+                freqs, amps, phases, iq_data = data_tuple
+                try:
+                    amplitude = float(key.split('_')[-1])
+                except (ValueError, IndexError):
+                    amplitude = DEFAULT_AMPLITUDE
+        else:
+            amplitude = DEFAULT_AMPLITUDE  # Default for non-amplitude-specific data
+            freqs, amps, phases, iq_data = data_tuple
+            
+        return amplitude, freqs, amps, phases, iq_data
 
+# ───────────────────────── Main Application ─────────────────────────
 class Periscope(QtWidgets.QMainWindow):
     """
     Multi‑pane PyQt application for real-time data visualization of:
@@ -2456,8 +2634,8 @@ class Periscope(QtWidgets.QMainWindow):
         host: str,
         module: int,
         chan_str="1",
-        buf_size=5_000,
-        refresh_ms=33,
+        buf_size=DEFAULT_BUFFER_SIZE,
+        refresh_ms=DEFAULT_REFRESH_MS,
         dot_px=DENSITY_DOT_SIZE,
         crs=None,
     ):
@@ -2472,6 +2650,7 @@ class Periscope(QtWidgets.QMainWindow):
         # Parse multi-channel format
         self.channel_list = _parse_channels_multich(chan_str)
 
+        # State variables
         self.paused = False
         self.start_time = None
         self.frame_cnt = 0
@@ -2482,6 +2661,38 @@ class Periscope(QtWidgets.QMainWindow):
         self.dec_stage = 6
         self.last_dec_update = 0.0
 
+        # Display settings
+        self.dark_mode = True
+        self.real_units = False
+        self.psd_absolute = True
+        self.auto_scale_plots = True
+        self.show_i = True
+        self.show_q = True
+        self.show_m = True
+
+        # Initialize worker tracking
+        self._init_workers()
+
+        # Create color map
+        self._init_colormap()
+
+        # Start UDP receiver
+        self._init_receiver()
+
+        # Initialize thread pool
+        self.pool = QThreadPool()
+        self.pool.setMaxThreadCount(4)  # Allow multiple network analyses
+
+        # Build UI
+        self._build_ui(chan_str)
+        self._init_buffers()
+        self._build_layout()
+
+        # Start the GUI update timer
+        self._start_timer()
+
+    def _init_workers(self):
+        """Initialize worker tracking structures."""
         # IQ concurrency tracking
         self.iq_workers: Dict[int, bool] = {}
         self.iq_signals = IQSignals()
@@ -2505,12 +2716,14 @@ class Periscope(QtWidgets.QMainWindow):
         self.netanal_signals.data_update_with_amp.connect(self._netanal_data_update_with_amp)
         self.netanal_signals.completed.connect(self._netanal_completed)
         self.netanal_signals.error.connect(self._netanal_error)
-        # Network analysis tracking
+        
+        # Network analysis window tracking
         self.netanal_windows = {}  # Dictionary of windows indexed by unique ID
         self.netanal_window_count = 0  # Counter for window IDs
         self.netanal_tasks = {}  # Tasks dictionary with window-specific keys
 
-        # Density LUT
+    def _init_colormap(self):
+        """Initialize the colormap for IQ density plots."""
         cmap = pg.colormap.get("turbo")
         lut_rgb = cmap.getLookupTable(0.0, 1.0, 255)
         self.lut = np.vstack([
@@ -2518,45 +2731,23 @@ class Periscope(QtWidgets.QMainWindow):
             np.hstack([lut_rgb, 255 * np.ones((255, 1), np.uint8)])
         ])
 
-        # Start UDP receiver
+    def _init_receiver(self):
+        """Initialize the UDP receiver."""
         self.receiver = UDPReceiver(self.host, self.module)
         self.receiver.start()
 
-        # Thread pool
-        self.pool = QThreadPool()
-        self.pool.setMaxThreadCount(4)  # Allow multiple network analyses
-
-        # Display settings
-        self.dark_mode = True
-        self.real_units = False
-        self.psd_absolute = True
-
-        # Auto Scale
-        self.auto_scale_plots = True
-
-        # Show I, Q, Mag lines
-        self.show_i = True
-        self.show_q = True
-        self.show_m = True
-
-        # Build UI
-        self._build_ui(chan_str)
-        self._init_buffers()
-        self._build_layout()
-
-        # Timer for periodic GUI updates
+    def _start_timer(self):
+        """Start the periodic GUI update timer."""
         self.timer = QtCore.QTimer(singleShot=False)
         self.timer.timeout.connect(self._update_gui)
         self.timer.start(self.refresh_ms)
-
         self.setWindowTitle("Periscope")
 
     # ───────────────────────── UI Construction ─────────────────────────
     def _build_ui(self, chan_str: str):
         """
-        Create and configure all top-level widgets and layouts,
-        preserving the original style, plus the new Help button and Network Analysis button.
-
+        Create and configure all top-level widgets and layouts.
+        
         Parameters
         ----------
         chan_str : str
@@ -2566,43 +2757,57 @@ class Periscope(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
         main_vbox = QtWidgets.QVBoxLayout(central)
 
-        # Title
+        self._add_title(main_vbox)
+        self._add_toolbar(main_vbox, chan_str)
+        self._add_config_panel(main_vbox)
+        self._add_plot_container(main_vbox)
+        self._add_status_bar()
+
+    def _add_title(self, layout):
+        """Add the title to the layout."""
         title = QtWidgets.QLabel(f"CRS: {self.host}    Module: {self.module}")
         title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         ft = title.font()
         ft.setPointSize(16)
         title.setFont(ft)
-        main_vbox.addWidget(title)
+        layout.addWidget(title)
 
-        # Top bar
+    def _add_toolbar(self, layout, chan_str):
+        """Add the toolbar to the layout."""
         top_bar = QtWidgets.QWidget()
         top_h = QtWidgets.QHBoxLayout(top_bar)
 
+        # Config toggle button
         self.btn_toggle_cfg = QtWidgets.QPushButton("Show Configuration")
         self.btn_toggle_cfg.setCheckable(True)
         self.btn_toggle_cfg.toggled.connect(self._toggle_config)
 
+        # Channel input
         self.e_ch = QtWidgets.QLineEdit(chan_str)
         self.e_ch.setToolTip("Enter comma-separated channels or use '&' to group in one row.")
         self.e_ch.returnPressed.connect(self._update_channels)
 
+        # Buffer size input
         self.e_buf = QtWidgets.QLineEdit(str(self.N))
         self.e_buf.setValidator(QIntValidator(10, 1_000_000, self))
         self.e_buf.setMaximumWidth(80)
         self.e_buf.setToolTip("Size of the ring buffer for each channel.")
         self.e_buf.editingFinished.connect(self._change_buffer)
 
+        # Pause button
         self.b_pause = QtWidgets.QPushButton("Pause", clicked=self._toggle_pause)
         self.b_pause.setToolTip("Pause/resume real-time data.")
 
+        # Real units checkbox
         self.cb_real = QtWidgets.QCheckBox("Real Units", checked=self.real_units)
         self.cb_real.setToolTip("Toggle raw 'counts' vs. real-voltage/dBm units.")
         self.cb_real.toggled.connect(self._toggle_real_units)
 
+        # Mode checkboxes
         self.cb_time = QtWidgets.QCheckBox("TOD", checked=True)
-        self.cb_iq = QtWidgets.QCheckBox("IQ", checked=True)
-        self.cb_fft = QtWidgets.QCheckBox("FFT", checked=True)
-        self.cb_ssb = QtWidgets.QCheckBox("Single Sideband PSD", checked=False)
+        self.cb_iq = QtWidgets.QCheckBox("IQ", checked=False)
+        self.cb_fft = QtWidgets.QCheckBox("FFT", checked=False)
+        self.cb_ssb = QtWidgets.QCheckBox("Single Sideband PSD", checked=True)
         self.cb_dsb = QtWidgets.QCheckBox("Dual Sideband PSD", checked=False)
         for cb in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
             cb.toggled.connect(self._build_layout)
@@ -2615,11 +2820,12 @@ class Periscope(QtWidgets.QMainWindow):
             self.btn_netanal.setEnabled(False)
             self.btn_netanal.setToolTip("CRS object not available - cannot run network analysis.")
 
-        # The new Help button
+        # Help button
         self.btn_help = QtWidgets.QPushButton("Help")
         self.btn_help.setToolTip("Show usage, interaction details, and examples.")
         self.btn_help.clicked.connect(self._show_help)
 
+        # Add widgets to toolbar
         top_h.addWidget(QtWidgets.QLabel("Channels:"))
         top_h.addWidget(self.e_ch)
         top_h.addSpacing(20)
@@ -2632,72 +2838,101 @@ class Periscope(QtWidgets.QMainWindow):
         for cb in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
             top_h.addWidget(cb)
         top_h.addStretch(1)
-        # Insert the Network Analysis and Help buttons
         top_h.addWidget(self.btn_netanal)
         top_h.addWidget(self.btn_help)
 
-        main_vbox.addWidget(top_bar)
+        layout.addWidget(top_bar)
 
-        # Show/hide config
-        main_vbox.addWidget(self.btn_toggle_cfg, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+    def _add_config_panel(self, layout):
+        """Add the configuration panel to the layout."""
+        layout.addWidget(self.btn_toggle_cfg, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
         self.ctrl_panel = QtWidgets.QGroupBox("Configuration")
         self.ctrl_panel.setVisible(False)
         cfg_hbox = QtWidgets.QHBoxLayout(self.ctrl_panel)
 
-        # Show Curves
+        # Show Curves group
+        cfg_hbox.addWidget(self._create_show_curves_group())
+
+        # IQ Mode group
+        cfg_hbox.addWidget(self._create_iq_mode_group())
+
+        # PSD Mode group
+        cfg_hbox.addWidget(self._create_psd_mode_group())
+
+        # General Display group
+        cfg_hbox.addWidget(self._create_display_group())
+
+        layout.addWidget(self.ctrl_panel)
+
+    def _create_show_curves_group(self):
+        """Create the Show Curves configuration group."""
         show_curves_g = QtWidgets.QGroupBox("Show Curves")
         show_curves_h = QtWidgets.QHBoxLayout(show_curves_g)
+        
         self.cb_show_i = QtWidgets.QCheckBox("I", checked=True)
         self.cb_show_q = QtWidgets.QCheckBox("Q", checked=True)
         self.cb_show_m = QtWidgets.QCheckBox("Magnitude", checked=True)
+        
         self.cb_show_i.toggled.connect(self._toggle_iqmag)
         self.cb_show_q.toggled.connect(self._toggle_iqmag)
         self.cb_show_m.toggled.connect(self._toggle_iqmag)
+        
         show_curves_h.addWidget(self.cb_show_i)
         show_curves_h.addWidget(self.cb_show_q)
         show_curves_h.addWidget(self.cb_show_m)
-        cfg_hbox.addWidget(show_curves_g)
+        
+        return show_curves_g
 
-        # IQ Mode
+    def _create_iq_mode_group(self):
+        """Create the IQ Mode configuration group."""
+        iq_g = QtWidgets.QGroupBox("IQ Mode")
+        iq_h = QtWidgets.QHBoxLayout(iq_g)
+        
         self.rb_density = QtWidgets.QRadioButton("Density", checked=True)
         self.rb_density.setToolTip("2D histogram of I/Q values.")
         self.rb_scatter = QtWidgets.QRadioButton("Scatter")
         self.rb_scatter.setToolTip("Scatter of up to 1,000 I/Q points. CPU intensive.")
-        rb_group = QtWidgets.QButtonGroup(self)
+        
+        rb_group = QtWidgets.QButtonGroup(iq_g)
         rb_group.addButton(self.rb_density)
         rb_group.addButton(self.rb_scatter)
+        
         for rb in (self.rb_density, self.rb_scatter):
             rb.toggled.connect(self._build_layout)
-
-        iq_g = QtWidgets.QGroupBox("IQ Mode")
-        iq_h = QtWidgets.QHBoxLayout(iq_g)
+            
         iq_h.addWidget(self.rb_density)
         iq_h.addWidget(self.rb_scatter)
-        cfg_hbox.addWidget(iq_g)
+        
+        return iq_g
 
-        # PSD Mode
+    def _create_psd_mode_group(self):
+        """Create the PSD Mode configuration group."""
+        psd_g = QtWidgets.QGroupBox("PSD Mode")
+        psd_grid = QtWidgets.QGridLayout(psd_g)
+        
         self.lbl_psd_scale = QtWidgets.QLabel("PSD Scale:")
         self.rb_psd_abs = QtWidgets.QRadioButton("Absolute (dBm)", checked=True)
         self.rb_psd_rel = QtWidgets.QRadioButton("Relative (dBc)")
+        
         for rb in (self.rb_psd_abs, self.rb_psd_rel):
             rb.toggled.connect(self._psd_ref_changed)
-
+        
         self.spin_segments = QtWidgets.QSpinBox()
         self.spin_segments.setRange(1, 256)
         self.spin_segments.setValue(1)
         self.spin_segments.setMaximumWidth(80)
         self.spin_segments.setToolTip("Number of segments for Welch PSD averaging.")
-
-        psd_g = QtWidgets.QGroupBox("PSD Mode")
-        psd_grid = QtWidgets.QGridLayout(psd_g)
+        
         psd_grid.addWidget(self.lbl_psd_scale, 0, 0)
         psd_grid.addWidget(self.rb_psd_abs, 0, 1)
         psd_grid.addWidget(self.rb_psd_rel, 0, 2)
         psd_grid.addWidget(QtWidgets.QLabel("Segments:"), 1, 0)
         psd_grid.addWidget(self.spin_segments, 1, 1)
-        cfg_hbox.addWidget(psd_g)
+        
+        return psd_g
 
-        # General Display
+    def _create_display_group(self):
+        """Create the General Display configuration group."""
         disp_g = QtWidgets.QGroupBox("General Display")
         disp_h = QtWidgets.QHBoxLayout(disp_g)
 
@@ -2717,18 +2952,18 @@ class Periscope(QtWidgets.QMainWindow):
         self.cb_auto_scale = QtWidgets.QCheckBox("Auto Scale", checked=self.auto_scale_plots)
         self.cb_auto_scale.setToolTip("Enable/disable auto-range for IQ/FFT/SSB/DSB. Can improve display performance.")
         self.cb_auto_scale.toggled.connect(self._toggle_auto_scale)
-        disp_h.addWidget(self.cb_auto_scale)        
+        disp_h.addWidget(self.cb_auto_scale)
+        
+        return disp_g
 
-        cfg_hbox.addWidget(disp_g)
-
-        main_vbox.addWidget(self.ctrl_panel)
-
-        # Plot container
+    def _add_plot_container(self, layout):
+        """Add the plot container to the layout."""
         self.container = QtWidgets.QWidget()
-        main_vbox.addWidget(self.container)
+        layout.addWidget(self.container)
         self.grid = QtWidgets.QGridLayout(self.container)
 
-        # Status bar
+    def _add_status_bar(self):
+        """Add the status bar."""
         self.setStatusBar(QtWidgets.QStatusBar())
 
     def _show_help(self):
@@ -2794,16 +3029,18 @@ class Periscope(QtWidgets.QMainWindow):
                     viewbox.enableZoomBoxMode(enable)
         
         # Also update any network analysis plots if they exist
-        if hasattr(self, "netanal_window") and self.netanal_window:
-            for module in self.netanal_window.plots:
-                for plot_type in ['amp_plot', 'phase_plot']:
-                    viewbox = self.netanal_window.plots[module][plot_type].getViewBox()
-                    if isinstance(viewbox, ClickableViewBox):
-                        viewbox.enableZoomBoxMode(enable)
+        for window_id, window_data in self.netanal_windows.items():
+            window = window_data.get('window')
+            if window:
+                for module in window.plots:
+                    for plot_type in ['amp_plot', 'phase_plot']:
+                        viewbox = window.plots[module][plot_type].getViewBox()
+                        if isinstance(viewbox, ClickableViewBox):
+                            viewbox.enableZoomBoxMode(enable)
 
-            # Also update the Network Analysis window's zoom box checkbox if it exists
-            if hasattr(self.netanal_window, 'zoom_box_cb'):
-                self.netanal_window.zoom_box_cb.setChecked(enable)                        
+                # Also update the Network Analysis window's zoom box checkbox if it exists
+                if hasattr(window, 'zoom_box_cb'):
+                    window.zoom_box_cb.setChecked(enable)                        
                         
         # Show help message if enabling
         if enable:
@@ -2835,10 +3072,17 @@ class Periscope(QtWidgets.QMainWindow):
         fetcher.dac_scales_ready.connect(lambda scales: dialog.dac_scales.update(scales))
         fetcher.dac_scales_ready.connect(dialog._update_dac_scale_info)
         fetcher.dac_scales_ready.connect(dialog._update_dbm_from_normalized)
+        
+        # Store DAC scales in our main class when they're ready
+        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
+        
         fetcher.start()
         
         # Show dialog
         if dialog.exec():
+            # Store the dialog's DAC scales in our class when dialog is accepted
+            self.dac_scales = dialog.dac_scales.copy()
+            
             params = dialog.get_parameters()
             if params:
                 self._start_network_analysis(params)
@@ -2849,7 +3093,7 @@ class Periscope(QtWidgets.QMainWindow):
             if self.crs is None:
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
-                
+                    
             # Determine which modules to run
             selected_module = params.get('module')
             if selected_module is None:
@@ -2859,6 +3103,12 @@ class Periscope(QtWidgets.QMainWindow):
             else:
                 modules = [selected_module]
 
+            # Verify DAC scales are available
+            if not hasattr(self, 'dac_scales'):
+                QtWidgets.QMessageBox.critical(self, "Error", 
+                    "DAC scales are not available. Please run the network analysis configuration again.")
+                return
+            
             # Create a unique window ID
             window_id = f"window_{self.netanal_window_count}"
             self.netanal_window_count += 1
@@ -2866,8 +3116,11 @@ class Periscope(QtWidgets.QMainWindow):
             # Create window-specific signal handlers
             window_signals = NetworkAnalysisSignals()
             
-            # Create a new window
-            window = NetworkAnalysisWindow(self, modules)
+            # Use actual DAC scales, no defaults
+            dac_scales = self.dac_scales.copy()
+            
+            # Create a new window with DAC scales
+            window = NetworkAnalysisWindow(self, modules, dac_scales)
             window.set_params(params)
             window.window_id = window_id  # Attach ID to window
             
@@ -2893,7 +3146,7 @@ class Periscope(QtWidgets.QMainWindow):
                 lambda error_msg: QtWidgets.QMessageBox.critical(window, "Network Analysis Error", error_msg))
             
             # Get amplitudes from params
-            amplitudes = params.get('amps', [params.get('amp', 0.001)])
+            amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)])
             
             # Set up amplitude queues for this window
             window_data = self.netanal_windows[window_id]
@@ -2903,7 +3156,7 @@ class Periscope(QtWidgets.QMainWindow):
             # Update progress displays
             for module in modules:
                 window.update_amplitude_progress(module, 1, len(amplitudes), amplitudes[0])
-                
+                    
                 # Start the first amplitude task
                 self._start_next_amplitude_task(module, params, window_id)
             
@@ -2988,45 +3241,6 @@ class Periscope(QtWidgets.QMainWindow):
         except Exception as e:
             print(f"Error in _start_next_amplitude_task: {e}")
             traceback.print_exc()
-            
-    def _netanal_completed(self, module: int):
-        """Handle network analysis completion."""
-        if self.netanal_window:
-            self.netanal_window.complete_analysis(module)
-        
-        # Look for any task for this module and clean it up
-        # This is safer than assuming a specific key format
-        for task_key in list(self.netanal_tasks.keys()):
-            if task_key.startswith(f"{module}_amp"):
-                del self.netanal_tasks[task_key]
-                break
-        
-        # Start the next amplitude task if there are more in the queue
-        if module in self.amplitude_queues and self.amplitude_queues[module]:
-            # Update the current amplitude index
-            self.current_amp_index[module] += 1
-            
-            # Update the amplitude progress display
-            if self.netanal_window:
-                total_amps = len(self.netanal_window.original_params.get('amps', []))
-                next_amp = self.amplitude_queues[module][0]
-                self.netanal_window.update_amplitude_progress(
-                    module, 
-                    self.current_amp_index[module] + 1,  # +1 for 1-based counting
-                    total_amps,
-                    next_amp
-                )
-            
-            # Reset the progress bar to 0 for the next amplitude
-            if self.netanal_window and module in self.netanal_window.progress_bars:
-                self.netanal_window.progress_bars[module].setValue(0)
-                
-                # Make sure progress group is visible for next amplitude
-                if self.netanal_window.progress_group:
-                    self.netanal_window.progress_group.setVisible(True)
-            
-            # Start the next amplitude task
-            self._start_next_amplitude_task(module, self.netanal_window.original_params)
     
     def _rerun_network_analysis(self, params: dict):
         """Rerun network analysis in the window that triggered this call."""
@@ -3081,7 +3295,7 @@ class Periscope(QtWidgets.QMainWindow):
                     task.stop()
             
             # Get amplitudes
-            amplitudes = params.get('amps', [params.get('amp', 0.001)])
+            amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)])
             
             # Reset amplitude queues
             window_data['amplitude_queues'] = {module: list(amplitudes) for module in modules}
@@ -3101,24 +3315,23 @@ class Periscope(QtWidgets.QMainWindow):
     
     def _netanal_progress(self, module: int, progress: float):
         """Handle network analysis progress updates."""
-        if self.netanal_window:
-            self.netanal_window.update_progress(module, progress)
+        # This function is not used directly, as we route signals to specific windows
+        pass
     
     def _netanal_data_update(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
         """Handle network analysis data updates."""
-        if self.netanal_window:
-            # Reconstruct the complex IQ data for proper unit conversion
-            iq_data = np.array(amps) * np.exp(1j * np.radians(phases))
-            
-            # Keep the window's update_data method signature the same
-            # but store raw complex data internally for unit conversion
-            self.netanal_window.update_data(module, freqs, amps, phases)
-            
+        # This function is not used directly, as we route signals to specific windows
+        pass
+    
     def _netanal_data_update_with_amp(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray, amplitude: float):
         """Handle network analysis data updates with amplitude information."""
-        if self.netanal_window:
-            self.netanal_window.update_data_with_amp(module, freqs, amps, phases, amplitude)
-
+        # This function is not used directly, as we route signals to specific windows
+        pass
+    
+    def _netanal_completed(self, module: int):
+        """Handle network analysis completion."""
+        # This function is not used directly, as we route signals to specific windows
+        pass
     
     def _netanal_error(self, error_msg: str):
         """Handle network analysis errors."""
@@ -3192,14 +3405,46 @@ class Periscope(QtWidgets.QMainWindow):
     def _build_layout(self):
         """
         Construct the layout grid for each row in self.channel_list and each enabled mode.
-        This version supports multi-channel rows via &-grouping, auto scaling, and line toggles.
         """
+        self._clear_current_layout()
+        modes = self._get_active_modes()
+        self.plots = []
+        self.curves = []
+
+        # Create font for labels
+        font = QFont()
+        font.setPointSize(UI_FONT_SIZE)
+
+        # Define color configurations
+        single_colors = self._get_single_channel_colors()
+        channel_families = self._get_channel_color_families()
+
+        # Build the layout for each row
+        for row_i, group in enumerate(self.channel_list):
+            rowPlots, rowCurves = self._create_row_plots_and_curves(row_i, group, modes, font, single_colors, channel_families)
+            self.plots.append(rowPlots)
+            self.curves.append(rowCurves)
+
+        # Re-enable auto-range after building
+        self._restore_auto_range_settings()
+
+        # Apply "Show Curves" toggles
+        self._toggle_iqmag()
+
+        # Apply zoom box mode to all plots
+        if hasattr(self, "zoom_box_mode"):
+            self._toggle_zoom_box_mode(self.zoom_box_mode)
+
+    def _clear_current_layout(self):
+        """Clear the current layout."""
         while self.grid.count():
             item = self.grid.takeAt(0)
             w = item.widget()
             if w:
                 w.deleteLater()
 
+    def _get_active_modes(self):
+        """Get the list of active visualization modes."""
         modes = []
         if self.cb_time.isChecked():
             modes.append("T")
@@ -3211,23 +3456,20 @@ class Periscope(QtWidgets.QMainWindow):
             modes.append("S")
         if self.cb_dsb.isChecked():
             modes.append("D")
+        return modes
 
-        self.plots = []
-        self.curves = []
-
-        font = QFont()
-        font.setPointSize(UI_FONT_SIZE)
-
-        # Single-channel color set
-        single_colors = {
+    def _get_single_channel_colors(self):
+        """Get color definitions for single-channel plots."""
+        return {
             "I": "#1f77b4",
             "Q": "#ff7f0e",
             "Mag": "#2ca02c",
             "DSB": "#bcbd22",
         }
 
-        # Families for multi-ch lines (I, Q, M)
-        channel_families = [
+    def _get_channel_color_families(self):
+        """Get color families for multi-channel plots."""
+        return [
             ("#1f77b4", "#4a8cc5", "#90bce0"),
             ("#ff7f0e", "#ffa64d", "#ffd2a3"),
             ("#2ca02c", "#63c063", "#a1d9a1"),
@@ -3240,168 +3482,184 @@ class Periscope(QtWidgets.QMainWindow):
             ("#17becf", "#51d2de", "#9ae8f2"),
         ]
 
-        for row_i, group in enumerate(self.channel_list):
-            rowPlots = {}
-            rowCurves = {}
+    def _create_row_plots_and_curves(self, row_i, group, modes, font, single_colors, channel_families):
+        """Create plots and curves for a single row."""
+        rowPlots = {}
+        rowCurves = {}
 
-            row_title = (
-                f"Ch {group[0]}" if len(group) == 1
-                else "Ch " + "&".join(map(str, group))
-            )
+        row_title = "Ch " + ("&".join(map(str, group)) if len(group) > 1 else str(group[0]))
 
-            for col, mode in enumerate(modes):
-                vb = ClickableViewBox()
-                pw = pg.PlotWidget(viewBox=vb, title=f"{_mode_title(mode)} – {row_title}")
+        for col, mode in enumerate(modes):
+            vb = ClickableViewBox()
+            pw = pg.PlotWidget(viewBox=vb, title=f"{_mode_title(mode)} – {row_title}")
 
-                if mode == "T":
-                    pw.enableAutoRange(pg.ViewBox.XYAxes, True)
+            # Configure auto-range based on mode
+            self._configure_plot_auto_range(pw, mode)
+            
+            # Set up plot labels and axes
+            self._configure_plot_axes(pw, mode)
+
+            # Apply theme and grid
+            self._apply_plot_theme(pw)
+            pw.showGrid(x=True, y=True, alpha=0.3)
+            self.grid.addWidget(pw, row_i, col)
+            rowPlots[mode] = pw
+
+            # Apply font to axes
+            self._configure_plot_fonts(pw, font)
+
+            # Create curves or image items based on mode
+            if mode == "IQ":
+                rowCurves["IQ"] = self._create_iq_plot_item(pw)
+            else:
+                # Add legend
+                legend = pw.addLegend(offset=(30, 10))
+                
+                # Create curves based on channel count
+                if len(group) == 1:
+                    ch = group[0]
+                    rowCurves[mode] = self._create_single_channel_curves(pw, mode, ch, single_colors, legend)
                 else:
-                    pw.enableAutoRange(pg.ViewBox.XYAxes, self.auto_scale_plots)
+                    rowCurves[mode] = self._create_multi_channel_curves(pw, mode, group, channel_families, legend)
+                
+                # Make legend entries clickable
+                self._make_legend_clickable(legend)
 
-                # Labeling
-                if mode == "T":
-                    if not self.real_units:
-                        pw.setLabel("left", "Amplitude", units="Counts")
-                    else:
-                        pw.setLabel("left", "Amplitude", units="V")
-                elif mode == "IQ":
-                    pw.getViewBox().setAspectLocked(True)
-                    if not self.real_units:
-                        pw.setLabel("bottom", "I", units="Counts")
-                        pw.setLabel("left",   "Q", units="Counts")
-                    else:
-                        pw.setLabel("bottom", "I", units="V")
-                        pw.setLabel("left",   "Q", units="V")
-                elif mode == "F":
-                    pw.setLogMode(x=True, y=True)
-                    pw.setLabel("bottom", "Freq", units="Hz")
-                    if not self.real_units:
-                        pw.setLabel("left", "Amplitude", units="Counts")
-                    else:
-                        pw.setLabel("left", "Amplitude", units="V")
-                elif mode == "S":
-                    pw.setLogMode(x=True, y=not self.real_units)
-                    pw.setLabel("bottom", "Freq", units="Hz")
-                    if not self.real_units:
-                        pw.setLabel("left", "PSD (Counts²/Hz)")
-                    else:
-                        lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
-                        pw.setLabel("left", f"PSD ({lbl})")
-                else:  # "D"
-                    pw.setLogMode(x=False, y=not self.real_units)
-                    pw.setLabel("bottom", "Freq", units="Hz")
-                    if not self.real_units:
-                        pw.setLabel("left", "PSD (Counts²/Hz)")
-                    else:
-                        lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
-                        pw.setLabel("left", f"PSD ({lbl})")
+        return rowPlots, rowCurves
 
-                # Theme & grid
-                self._apply_plot_theme(pw)
-                pw.showGrid(x=True, y=True, alpha=0.3)
-                self.grid.addWidget(pw, row_i, col)
-                rowPlots[mode] = pw
+    def _configure_plot_auto_range(self, pw, mode):
+        """Configure plot auto-range behavior based on mode."""
+        if mode == "T":
+            pw.enableAutoRange(pg.ViewBox.XYAxes, True)
+        else:
+            pw.enableAutoRange(pg.ViewBox.XYAxes, self.auto_scale_plots)
 
-                # Font
-                pi = pw.getPlotItem()
-                for axis_name in ("left", "bottom", "right", "top"):
-                    axis = pi.getAxis(axis_name)
-                    if axis:
-                        axis.setTickFont(font)
-                        if axis.label:
-                            axis.label.setFont(font)
-                pi.titleLabel.setFont(font)
+    def _configure_plot_axes(self, pw, mode):
+        """Configure plot axes based on mode."""
+        if mode == "T":
+            if not self.real_units:
+                pw.setLabel("left", "Amplitude", units="Counts")
+            else:
+                pw.setLabel("left", "Amplitude", units="V")
+        elif mode == "IQ":
+            pw.getViewBox().setAspectLocked(True)
+            if not self.real_units:
+                pw.setLabel("bottom", "I", units="Counts")
+                pw.setLabel("left",   "Q", units="Counts")
+            else:
+                pw.setLabel("bottom", "I", units="V")
+                pw.setLabel("left",   "Q", units="V")
+        elif mode == "F":
+            pw.setLogMode(x=True, y=True)
+            pw.setLabel("bottom", "Freq", units="Hz")
+            if not self.real_units:
+                pw.setLabel("left", "Amplitude", units="Counts")
+            else:
+                pw.setLabel("left", "Amplitude", units="V")
+        elif mode == "S":
+            pw.setLogMode(x=True, y=not self.real_units)
+            pw.setLabel("bottom", "Freq", units="Hz")
+            if not self.real_units:
+                pw.setLabel("left", "PSD (Counts²/Hz)")
+            else:
+                lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
+                pw.setLabel("left", f"PSD ({lbl})")
+        else:  # "D"
+            pw.setLogMode(x=False, y=not self.real_units)
+            pw.setLabel("bottom", "Freq", units="Hz")
+            if not self.real_units:
+                pw.setLabel("left", "PSD (Counts²/Hz)")
+            else:
+                lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
+                pw.setLabel("left", f"PSD ({lbl})")
 
-                # If IQ mode
-                if mode == "IQ":
-                    if self.rb_scatter.isChecked():
-                        sp = pg.ScatterPlotItem(pen=None, size=SCATTER_SIZE)
-                        pw.addItem(sp)
-                        rowCurves["IQ"] = {"mode": "scatter", "item": sp}
-                    else:
-                        img = pg.ImageItem(axisOrder="row-major")
-                        img.setLookupTable(self.lut)
-                        pw.addItem(img)
-                        rowCurves["IQ"] = {"mode": "density", "item": img}
-                else:
-                    # For T, F, S, D => lines + legend
-                    legend = pw.addLegend(offset=(30, 10))
+    def _configure_plot_fonts(self, pw, font):
+        """Configure plot font settings."""
+        pi = pw.getPlotItem()
+        for axis_name in ("left", "bottom", "right", "top"):
+            axis = pi.getAxis(axis_name)
+            if axis:
+                axis.setTickFont(font)
+                if axis.label:
+                    axis.label.setFont(font)
+        pi.titleLabel.setFont(font)
 
-                    if len(group) == 1:
-                        # Single channel => the original triple lines for T, F, S or single line for D
-                        ch = group[0]
-                        if mode == "T":
-                            cI = pw.plot(pen=pg.mkPen(single_colors["I"],   width=LINE_WIDTH), name="I")
-                            cQ = pw.plot(pen=pg.mkPen(single_colors["Q"],   width=LINE_WIDTH), name="Q")
-                            cM = pw.plot(pen=pg.mkPen(single_colors["Mag"], width=LINE_WIDTH), name="Mag")
-                            rowCurves["T"] = {ch: {"I": cI, "Q": cQ, "Mag": cM}}
-                            self._fade_hidden_entries(legend, ("I", "Q"))
-                        elif mode == "F":
-                            cI = pw.plot(pen=pg.mkPen(single_colors["I"],   width=LINE_WIDTH), name="I")
-                            cI.setFftMode(True)
-                            cQ = pw.plot(pen=pg.mkPen(single_colors["Q"],   width=LINE_WIDTH), name="Q")
-                            cQ.setFftMode(True)
-                            cM = pw.plot(pen=pg.mkPen(single_colors["Mag"], width=LINE_WIDTH), name="Mag")
-                            cM.setFftMode(True)
-                            rowCurves["F"] = {ch: {"I": cI, "Q": cQ, "Mag": cM}}
-                            self._fade_hidden_entries(legend, ("I", "Q"))
-                        elif mode == "S":
-                            cI = pw.plot(pen=pg.mkPen(single_colors["I"],   width=LINE_WIDTH), name="I")
-                            cQ = pw.plot(pen=pg.mkPen(single_colors["Q"],   width=LINE_WIDTH), name="Q")
-                            cM = pw.plot(pen=pg.mkPen(single_colors["Mag"], width=LINE_WIDTH), name="Mag")
-                            rowCurves["S"] = {ch: {"I": cI, "Q": cQ, "Mag": cM}}
-                        else:  # "D"
-                            cD = pw.plot(pen=pg.mkPen(single_colors["DSB"], width=LINE_WIDTH),
-                                         name="Complex DSB")
-                            rowCurves["D"] = {ch: {"Cmplx": cD}}
-                        self._make_legend_clickable(legend)
-                    else:
-                        # Multi-channel => color families
-                        mode_dict = {}
-                        for i, ch in enumerate(group):
-                            (colI, colQ, colM) = channel_families[i % len(channel_families)]
-                            if mode == "T":
-                                cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH),   name=f"ch{ch}-I")
-                                cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH),   name=f"ch{ch}-Q")
-                                cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH),   name=f"ch{ch}-Mag")
-                                mode_dict[ch] = {"I": cI, "Q": cQ, "Mag": cM}
-                            elif mode == "F":
-                                cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH),   name=f"ch{ch}-I")
-                                cI.setFftMode(True)
-                                cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH),   name=f"ch{ch}-Q")
-                                cQ.setFftMode(True)
-                                cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH),   name=f"ch{ch}-Mag")
-                                cM.setFftMode(True)
-                                mode_dict[ch] = {"I": cI, "Q": cQ, "Mag": cM}
-                            elif mode == "S":
-                                cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH),   name=f"ch{ch}-I")
-                                cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH),   name=f"ch{ch}-Q")
-                                cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH),   name=f"ch{ch}-Mag")
-                                mode_dict[ch] = {"I": cI, "Q": cQ, "Mag": cM}
-                            else:  # "D"
-                                cD = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH),
-                                             name=f"ch{ch}-DSB")
-                                mode_dict[ch] = {"Cmplx": cD}
-                        rowCurves[mode] = mode_dict
-                        self._make_legend_clickable(legend)
+    def _create_iq_plot_item(self, pw):
+        """Create an IQ plot item based on selected mode."""
+        if self.rb_scatter.isChecked():
+            sp = pg.ScatterPlotItem(pen=None, size=SCATTER_SIZE)
+            pw.addItem(sp)
+            return {"mode": "scatter", "item": sp}
+        else:
+            img = pg.ImageItem(axisOrder="row-major")
+            img.setLookupTable(self.lut)
+            pw.addItem(img)
+            return {"mode": "density", "item": img}
 
-            self.plots.append(rowPlots)
-            self.curves.append(rowCurves)
+    def _create_single_channel_curves(self, pw, mode, ch, single_colors, legend):
+        """Create curves for a single-channel plot."""
+        if mode == "T":
+            cI = pw.plot(pen=pg.mkPen(single_colors["I"],   width=LINE_WIDTH), name="I")
+            cQ = pw.plot(pen=pg.mkPen(single_colors["Q"],   width=LINE_WIDTH), name="Q")
+            cM = pw.plot(pen=pg.mkPen(single_colors["Mag"], width=LINE_WIDTH), name="Mag")
+            self._fade_hidden_entries(legend, ("I", "Q"))
+            return {ch: {"I": cI, "Q": cQ, "Mag": cM}}
+        elif mode == "F":
+            cI = pw.plot(pen=pg.mkPen(single_colors["I"],   width=LINE_WIDTH), name="I")
+            cI.setFftMode(True)
+            cQ = pw.plot(pen=pg.mkPen(single_colors["Q"],   width=LINE_WIDTH), name="Q")
+            cQ.setFftMode(True)
+            cM = pw.plot(pen=pg.mkPen(single_colors["Mag"], width=LINE_WIDTH), name="Mag")
+            cM.setFftMode(True)
+            self._fade_hidden_entries(legend, ("I", "Q"))
+            return {ch: {"I": cI, "Q": cQ, "Mag": cM}}
+        elif mode == "S":
+            cI = pw.plot(pen=pg.mkPen(single_colors["I"],   width=LINE_WIDTH), name="I")
+            cQ = pw.plot(pen=pg.mkPen(single_colors["Q"],   width=LINE_WIDTH), name="Q")
+            cM = pw.plot(pen=pg.mkPen(single_colors["Mag"], width=LINE_WIDTH), name="Mag")
+            return {ch: {"I": cI, "Q": cQ, "Mag": cM}}
+        else:  # "D"
+            cD = pw.plot(pen=pg.mkPen(single_colors["DSB"], width=LINE_WIDTH), name="Complex DSB")
+            return {ch: {"Cmplx": cD}}
 
-        # Re-enable auto-range after building
+    def _create_multi_channel_curves(self, pw, mode, group, channel_families, legend):
+        """Create curves for a multi-channel plot."""
+        mode_dict = {}
+        for i, ch in enumerate(group):
+            (colI, colQ, colM) = channel_families[i % len(channel_families)]
+            
+            if mode == "T":
+                cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH), name=f"ch{ch}-I")
+                cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH), name=f"ch{ch}-Q")
+                cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH), name=f"ch{ch}-Mag")
+                mode_dict[ch] = {"I": cI, "Q": cQ, "Mag": cM}
+            elif mode == "F":
+                cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH), name=f"ch{ch}-I")
+                cI.setFftMode(True)
+                cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH), name=f"ch{ch}-Q")
+                cQ.setFftMode(True)
+                cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH), name=f"ch{ch}-Mag")
+                cM.setFftMode(True)
+                mode_dict[ch] = {"I": cI, "Q": cQ, "Mag": cM}
+            elif mode == "S":
+                cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH), name=f"ch{ch}-I")
+                cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH), name=f"ch{ch}-Q")
+                cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH), name=f"ch{ch}-Mag")
+                mode_dict[ch] = {"I": cI, "Q": cQ, "Mag": cM}
+            else:  # "D"
+                cD = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH), name=f"ch{ch}-DSB")
+                mode_dict[ch] = {"Cmplx": cD}
+                
+        return mode_dict
+
+    def _restore_auto_range_settings(self):
+        """Restore auto-range settings after building layout."""
         self.auto_scale_plots = True
         self.cb_auto_scale.setChecked(True)
         for rowPlots in self.plots:
             for mode, pw in rowPlots.items():
                 if mode != "T":
                     pw.enableAutoRange(pg.ViewBox.XYAxes, True)
-
-        # Apply "Show Curves" toggles
-        self._toggle_iqmag()
-
-        # Apply zoom box mode to all plots
-        if hasattr(self, "zoom_box_mode"):
-            self._toggle_zoom_box_mode(self.zoom_box_mode)        
 
     def _apply_plot_theme(self, pw: pg.PlotWidget):
         """
@@ -3462,293 +3720,6 @@ class Periscope(QtWidgets.QMainWindow):
 
             label.mousePressEvent = toggle
             sample.mousePressEvent = toggle
-
-    # ───────────────────────── Main GUI Update ─────────────────────────
-    def _update_gui(self):
-        """
-        Periodic GUI update method (via QTimer):
-          - Reads UDP packets into ring buffers
-          - Updates decimation stage
-          - Spawns background tasks (IQ, PSD)
-          - Updates displayed lines/images
-          - Logs FPS and PPS to status bar
-        """
-        if self.paused:
-            while not self.receiver.queue.empty():
-                self.receiver.queue.get()
-            return
-
-        # Collect new packets
-        while not self.receiver.queue.empty():
-            pkt = self.receiver.queue.get()
-            self.pkt_cnt += 1
-
-            # Basic timestamp alignment
-            ts = pkt.ts
-            if ts.recent:
-                ts.ss += int(0.02 * streamer.SS_PER_SECOND)
-                ts.renormalize()
-                t_now = ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND
-                if self.start_time is None:
-                    self.start_time = t_now
-                t_rel = t_now - self.start_time
-            else:
-                t_rel = None
-
-            # Fill ring buffers
-            for ch in self.all_chs:
-                Ival = pkt.s[2 * (ch - 1)] / 256.0
-                Qval = pkt.s[2 * (ch - 1) + 1] / 256.0
-                self.buf[ch]["I"].add(Ival)
-                self.buf[ch]["Q"].add(Qval)
-                self.buf[ch]["M"].add(math.hypot(Ival, Qval))
-                self.tbuf[ch].add(t_rel)
-
-        self.frame_cnt += 1
-        now = time.time()
-
-        # Recompute dec_stage once per second
-        if (now - self.last_dec_update) > 1.0:
-            self._update_dec_stage()
-            self.last_dec_update = now
-
-        # Update row data
-        for row_i, group in enumerate(self.channel_list):
-            rowCurves = self.curves[row_i]
-            for ch in group:
-                # Grab ring buffer data
-                rawI = self.buf[ch]["I"].data()
-                rawQ = self.buf[ch]["Q"].data()
-                rawM = self.buf[ch]["M"].data()
-                tarr = self.tbuf[ch].data()
-
-                # Real units if enabled
-                if self.real_units:
-                    I = convert_roc_to_volts(rawI)
-                    Q = convert_roc_to_volts(rawQ)
-                    M = convert_roc_to_volts(rawM)
-                else:
-                    I, Q, M = rawI, rawQ, rawM
-
-                # TOD
-                if "T" in rowCurves and ch in rowCurves["T"]:
-                    cset = rowCurves["T"][ch]
-                    if cset["I"].isVisible():
-                        cset["I"].setData(tarr, I)
-                    if cset["Q"].isVisible():
-                        cset["Q"].setData(tarr, Q)
-                    if cset["Mag"].isVisible():
-                        cset["Mag"].setData(tarr, M)
-
-                # FFT
-                if "F" in rowCurves and ch in rowCurves["F"]:
-                    cset = rowCurves["F"][ch]
-                    if cset["I"].isVisible():
-                        cset["I"].setData(tarr, I, fftMode=True)
-                    if cset["Q"].isVisible():
-                        cset["Q"].setData(tarr, Q, fftMode=True)
-                    if cset["Mag"].isVisible():
-                        cset["Mag"].setData(tarr, M, fftMode=True)
-
-            # IQ tasks
-            if "IQ" in rowCurves and not self.iq_workers.get(row_i, False):
-                mode = rowCurves["IQ"]["mode"]
-                if len(group) == 1:
-                    c = group[0]
-                    rawI = self.buf[c]["I"].data()
-                    rawQ = self.buf[c]["Q"].data()
-                    self.iq_workers[row_i] = True
-                    task = IQTask(row_i, c, rawI, rawQ, self.dot_px, mode, self.iq_signals)
-                    self.pool.start(task)
-                else:
-                    # Combine data from multiple channels
-                    concatI = np.concatenate([self.buf[ch]["I"].data() for ch in group])
-                    concatQ = np.concatenate([self.buf[ch]["Q"].data() for ch in group])
-                    big_size = concatI.size
-                    if big_size > 50000:
-                        stride = max(1, big_size // 50000)
-                        concatI = concatI[::stride]
-                        concatQ = concatQ[::stride]
-                    if concatI.size > 1:
-                        self.iq_workers[row_i] = True
-                        task = IQTask(row_i, 0, concatI, concatQ, self.dot_px, mode, self.iq_signals)
-                        self.pool.start(task)
-
-            # PSD tasks
-            if "S" in rowCurves:
-                for ch in group:
-                    if not self.psd_workers[row_i]["S"][ch]:
-                        rawI = self.buf[ch]["I"].data()
-                        rawQ = self.buf[ch]["Q"].data()
-                        self.psd_workers[row_i]["S"][ch] = True
-                        task = PSDTask(
-                            row=row_i,
-                            ch=ch,
-                            I=rawI,
-                            Q=rawQ,
-                            mode="SSB",
-                            dec_stage=self.dec_stage,
-                            real_units=self.real_units,
-                            psd_absolute=self.psd_absolute,
-                            segments=self.spin_segments.value(),
-                            signals=self.psd_signals,
-                        )
-                        self.pool.start(task)
-
-            if "D" in rowCurves:
-                for ch in group:
-                    if not self.psd_workers[row_i]["D"][ch]:
-                        rawI = self.buf[ch]["I"].data()
-                        rawQ = self.buf[ch]["Q"].data()
-                        self.psd_workers[row_i]["D"][ch] = True
-                        task = PSDTask(
-                            row=row_i,
-                            ch=ch,
-                            I=rawI,
-                            Q=rawQ,
-                            mode="DSB",
-                            dec_stage=self.dec_stage,
-                            real_units=self.real_units,
-                            psd_absolute=self.psd_absolute,
-                            segments=self.spin_segments.value(),
-                            signals=self.psd_signals,
-                        )
-                        self.pool.start(task)
-
-        # FPS / PPS
-        if (now - self.t_last) >= 1.0:
-            fps = self.frame_cnt / (now - self.t_last)
-            pps = self.pkt_cnt / (now - self.t_last)
-            self.statusBar().showMessage(f"FPS {fps:.1f} | Packets/s {pps:.1f}")
-            self.frame_cnt = 0
-            self.pkt_cnt = 0
-            self.t_last = now
-
-    def _update_dec_stage(self):
-        """
-        Update the global decimation stage by measuring the sample rate
-        from the first row's first channel.
-        """
-        if not self.channel_list:
-            return
-        first_group = self.channel_list[0]
-        if not first_group:
-            return
-        ch = first_group[0]
-        tarr = self.tbuf[ch]        
-        ch = first_group[0]
-        tarr = self.tbuf[ch].data()
-        if len(tarr) < 2:
-            return
-        dt = (tarr[-1] - tarr[0]) / max(1, (len(tarr) - 1))
-        fs = 1.0 / dt if dt > 0 else 1.0
-        self.dec_stage = infer_dec_stage(fs)
-
-    # ───────────────────────── IQ & PSD Slots ─────────────────────────
-    @QtCore.pyqtSlot(int, str, object)
-    def _iq_done(self, row: int, task_mode: str, payload):
-        """
-        Slot called when an off-thread IQTask finishes.
-
-        Parameters
-        ----------
-        row : int
-            Row index within self.channel_list.
-        task_mode : {"density", "scatter"}
-            The IQ plot mode for which data was computed.
-        payload : object
-            The result data. For density: (hist, (Imin,Imax,Qmin,Qmax)).
-            For scatter: (xs, ys, colors).
-        """
-        self.iq_workers[row] = False
-        if row >= len(self.curves) or "IQ" not in self.curves[row]:
-            return
-        pane = self.curves[row]["IQ"]
-        if pane["mode"] != task_mode:
-            return
-
-        item = pane["item"]
-        if task_mode == "density":
-            hist, (Imin, Imax, Qmin, Qmax) = payload
-            if self.real_units:
-                Imin, Imax = convert_roc_to_volts(np.array([Imin, Imax], dtype=float))
-                Qmin, Qmax = convert_roc_to_volts(np.array([Qmin, Qmax], dtype=float))
-            item.setImage(hist, levels=(0, 255), autoLevels=False)
-            item.setRect(
-                QtCore.QRectF(
-                    float(Imin),
-                    float(Qmin),
-                    float(Imax - Imin),
-                    float(Qmax - Qmin),
-                )
-            )
-        else:  # scatter
-            xs, ys, colors = payload
-            if self.real_units:
-                xs = convert_roc_to_volts(xs)
-                ys = convert_roc_to_volts(ys)
-            item.setData(xs, ys, brush=colors, pen=None, size=SCATTER_SIZE)
-
-    @QtCore.pyqtSlot(int, str, int, object)
-    def _psd_done(self, row: int, psd_mode: str, ch: int, payload):
-        """
-        Slot called when an off-thread PSDTask finishes for a particular channel.
-
-        Parameters
-        ----------
-        row : int
-            Row index in self.channel_list.
-        psd_mode : {"SSB", "DSB"}
-            The PSD mode that was computed.
-        ch : int
-            Which channel (within that row) was computed.
-        payload : object
-            For "SSB": (freq_i, psd_i, psd_q, psd_m, freq_m, psd_m, dec_stage_float).
-            For "DSB": (freq_dsb, psd_dsb).
-        """
-        if row not in self.psd_workers:
-            return
-        key = psd_mode[0]  # 'S' or 'D'
-        if key not in self.psd_workers[row]:
-            return
-        if ch not in self.psd_workers[row][key]:
-            return
-
-        self.psd_workers[row][key][ch] = False
-        if row >= len(self.curves):
-            return
-
-        if psd_mode == "SSB":
-            if "S" not in self.curves[row]:
-                return
-            sdict = self.curves[row]["S"]
-            if ch not in sdict:
-                return
-            freq_i, psd_i, psd_q, psd_m, _, _, _ = payload
-            if sdict[ch]["I"].isVisible():
-                sdict[ch]["I"].setData(freq_i, psd_i)
-            if sdict[ch]["Q"].isVisible():
-                sdict[ch]["Q"].setData(freq_i, psd_q)
-            if sdict[ch]["Mag"].isVisible():
-                sdict[ch]["Mag"].setData(freq_i, psd_m)
-        else:  # DSB
-            if "D" not in self.curves[row]:
-                return
-            ddict = self.curves[row]["D"]
-            if ch not in ddict:
-                return
-            freq_dsb, psd_dsb = payload
-            if ddict[ch]["Cmplx"].isVisible():
-                ddict[ch]["Cmplx"].setData(freq_dsb, psd_dsb)
-
-    # ───────────────────────── UI callbacks ─────────────────────────
-    def _toggle_pause(self):
-        """
-        Pause or resume real-time data updates. When paused, new packets
-        are discarded to avoid stale accumulation.
-        """
-        self.paused = not self.paused
-        self.b_pause.setText("Resume" if self.paused else "Pause")
 
     def _toggle_dark_mode(self, checked: bool):
         """
@@ -3823,13 +3794,380 @@ class Periscope(QtWidgets.QMainWindow):
             self.N = n
             self._init_buffers()
 
-    def closeEvent(self, ev):
+    def _toggle_pause(self):
+        """
+        Pause or resume real-time data updates. When paused, new packets
+        are discarded to avoid stale accumulation.
+        """
+        self.paused = not self.paused
+        self.b_pause.setText("Resume" if self.paused else "Pause")
+
+    # ───────────────────────── Main GUI Update ─────────────────────────
+    def _update_gui(self):
+        """
+        Periodic GUI update method (via QTimer):
+          - Reads UDP packets into ring buffers
+          - Updates decimation stage
+          - Spawns background tasks (IQ, PSD)
+          - Updates displayed lines/images
+          - Logs FPS and PPS to status bar
+        """
+        if self.paused:
+            self._discard_packets()
+            return
+
+        # Collect new packets and update buffers
+        self._process_incoming_packets()
+
+        # Update frame counter and time tracking
+        self.frame_cnt += 1
+        now = time.time()
+
+        # Recompute dec_stage once per second
+        if (now - self.last_dec_update) > 1.0:
+            self._update_dec_stage()
+            self.last_dec_update = now
+
+        # Update plot data for each row
+        self._update_plot_data()
+
+        # Update FPS / PPS display
+        self._update_performance_stats(now)
+
+    def _discard_packets(self):
+        """Discard all pending packets while paused."""
+        while not self.receiver.queue.empty():
+            self.receiver.queue.get()
+
+    def _process_incoming_packets(self):
+        """Process incoming data packets and update buffers."""
+        while not self.receiver.queue.empty():
+            pkt = self.receiver.queue.get()
+            self.pkt_cnt += 1
+
+            # Calculate relative timestamp
+            t_rel = self._calculate_relative_timestamp(pkt)
+
+            # Update ring buffers for all channels
+            self._update_buffers(pkt, t_rel)
+
+    def _calculate_relative_timestamp(self, pkt):
+        """Calculate relative timestamp from packet timestamp."""
+        ts = pkt.ts
+        if ts.recent:
+            ts.ss += int(0.02 * streamer.SS_PER_SECOND)
+            ts.renormalize()
+            t_now = ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND
+            if self.start_time is None:
+                self.start_time = t_now
+            t_rel = t_now - self.start_time
+        else:
+            t_rel = None
+        return t_rel
+
+    def _update_buffers(self, pkt, t_rel):
+        """Update ring buffers with packet data."""
+        for ch in self.all_chs:
+            Ival = pkt.s[2 * (ch - 1)] / 256.0
+            Qval = pkt.s[2 * (ch - 1) + 1] / 256.0
+            self.buf[ch]["I"].add(Ival)
+            self.buf[ch]["Q"].add(Qval)
+            self.buf[ch]["M"].add(math.hypot(Ival, Qval))
+            self.tbuf[ch].add(t_rel)
+
+    def _update_plot_data(self):
+        """Update plot data for all rows and channels."""
+        for row_i, group in enumerate(self.channel_list):
+            rowCurves = self.curves[row_i]
+            
+            # Update time-domain and FFT data for each channel
+            for ch in group:
+                self._update_channel_plot_data(ch, rowCurves)
+            
+            # Dispatch IQ computation tasks
+            if "IQ" in rowCurves and not self.iq_workers.get(row_i, False):
+                self._dispatch_iq_task(row_i, group, rowCurves)
+            
+            # Dispatch PSD computation tasks
+            self._dispatch_psd_tasks(row_i, group)
+
+    def _update_channel_plot_data(self, ch, rowCurves):
+        """Update plot data for a specific channel."""
+        # Grab ring buffer data
+        rawI = self.buf[ch]["I"].data()
+        rawQ = self.buf[ch]["Q"].data()
+        rawM = self.buf[ch]["M"].data()
+        tarr = self.tbuf[ch].data()
+
+        # Apply unit conversion if enabled
+        if self.real_units:
+            I = convert_roc_to_volts(rawI)
+            Q = convert_roc_to_volts(rawQ)
+            M = convert_roc_to_volts(rawM)
+        else:
+            I, Q, M = rawI, rawQ, rawM
+
+        # Update time-domain plots
+        if "T" in rowCurves and ch in rowCurves["T"]:
+            cset = rowCurves["T"][ch]
+            if cset["I"].isVisible():
+                cset["I"].setData(tarr, I)
+            if cset["Q"].isVisible():
+                cset["Q"].setData(tarr, Q)
+            if cset["Mag"].isVisible():
+                cset["Mag"].setData(tarr, M)
+
+        # Update FFT plots
+        if "F" in rowCurves and ch in rowCurves["F"]:
+            cset = rowCurves["F"][ch]
+            if cset["I"].isVisible():
+                cset["I"].setData(tarr, I, fftMode=True)
+            if cset["Q"].isVisible():
+                cset["Q"].setData(tarr, Q, fftMode=True)
+            if cset["Mag"].isVisible():
+                cset["Mag"].setData(tarr, M, fftMode=True)
+
+    def _dispatch_iq_task(self, row_i, group, rowCurves):
+        """Dispatch an IQ computation task for a row."""
+        mode = rowCurves["IQ"]["mode"]
+        
+        if len(group) == 1:
+            # Single channel case
+            c = group[0]
+            rawI = self.buf[c]["I"].data()
+            rawQ = self.buf[c]["Q"].data()
+            self.iq_workers[row_i] = True
+            task = IQTask(row_i, c, rawI, rawQ, self.dot_px, mode, self.iq_signals)
+            self.pool.start(task)
+        else:
+            # Multi-channel case - combine data
+            concatI = np.concatenate([self.buf[ch]["I"].data() for ch in group])
+            concatQ = np.concatenate([self.buf[ch]["Q"].data() for ch in group])
+            
+            # Limit data size to avoid excessive processing
+            big_size = concatI.size
+            if big_size > 50000:
+                stride = max(1, big_size // 50000)
+                concatI = concatI[::stride]
+                concatQ = concatQ[::stride]
+            
+            if concatI.size > 1:
+                self.iq_workers[row_i] = True
+                task = IQTask(row_i, 0, concatI, concatQ, self.dot_px, mode, self.iq_signals)
+                self.pool.start(task)
+
+    def _dispatch_psd_tasks(self, row_i, group):
+        """Dispatch PSD computation tasks for a row."""
+        # Single-sideband PSD tasks
+        if "S" in self.curves[row_i]:
+            for ch in group:
+                if not self.psd_workers[row_i]["S"][ch]:
+                    rawI = self.buf[ch]["I"].data()
+                    rawQ = self.buf[ch]["Q"].data()
+                    
+                    # Apply voltage conversion if real units are enabled
+                    if self.real_units:
+                        I = convert_roc_to_volts(rawI)
+                        Q = convert_roc_to_volts(rawQ)
+                    else:
+                        I, Q = rawI, rawQ
+                    
+                    self.psd_workers[row_i]["S"][ch] = True
+                    task = PSDTask(
+                        row=row_i,
+                        ch=ch,
+                        I=I,  # Use the converted values
+                        Q=Q,  # Use the converted values
+                        mode="SSB",
+                        dec_stage=self.dec_stage,
+                        real_units=self.real_units,
+                        psd_absolute=self.psd_absolute,
+                        segments=self.spin_segments.value(),
+                        signals=self.psd_signals,
+                    )
+                    self.pool.start(task)
+
+        # Dual-sideband PSD tasks
+        if "D" in self.curves[row_i]:
+            for ch in group:
+                if not self.psd_workers[row_i]["D"][ch]:
+                    rawI = self.buf[ch]["I"].data()
+                    rawQ = self.buf[ch]["Q"].data()
+                    
+                    # Apply voltage conversion if real units are enabled
+                    if self.real_units:
+                        I = convert_roc_to_volts(rawI)
+                        Q = convert_roc_to_volts(rawQ)
+                    else:
+                        I, Q = rawI, rawQ
+                    
+                    self.psd_workers[row_i]["D"][ch] = True
+                    task = PSDTask(
+                        row=row_i,
+                        ch=ch,
+                        I=I,  # Use the converted values
+                        Q=Q,  # Use the converted values
+                        mode="DSB",
+                        dec_stage=self.dec_stage,
+                        real_units=self.real_units,
+                        psd_absolute=self.psd_absolute,
+                        segments=self.spin_segments.value(),
+                        signals=self.psd_signals,
+                    )
+                    self.pool.start(task)
+
+    def _update_performance_stats(self, now):
+        """Update FPS and packets-per-second display."""
+        if (now - self.t_last) >= 1.0:
+            fps = self.frame_cnt / (now - self.t_last)
+            pps = self.pkt_cnt / (now - self.t_last)
+            self.statusBar().showMessage(f"FPS {fps:.1f} | Packets/s {pps:.1f}")
+            self.frame_cnt = 0
+            self.pkt_cnt = 0
+            self.t_last = now
+
+    def _update_dec_stage(self):
+        """
+        Update the global decimation stage by measuring the sample rate
+        from the first row's first channel.
+        """
+        if not self.channel_list:
+            return
+        first_group = self.channel_list[0]
+        if not first_group:
+            return
+        ch = first_group[0]
+        tarr = self.tbuf[ch].data()
+        if len(tarr) < 2:
+            return
+        dt = (tarr[-1] - tarr[0]) / max(1, (len(tarr) - 1))
+        fs = 1.0 / dt if dt > 0 else 1.0
+        self.dec_stage = infer_dec_stage(fs)
+
+    # ───────────────────────── IQ & PSD Slots ─────────────────────────
+    @QtCore.pyqtSlot(int, str, object)
+    def _iq_done(self, row: int, task_mode: str, payload):
+        """
+        Slot called when an off-thread IQTask finishes.
+
+        Parameters
+        ----------
+        row : int
+            Row index within self.channel_list.
+        task_mode : {"density", "scatter"}
+            The IQ plot mode for which data was computed.
+        payload : object
+            The result data. For density: (hist, (Imin,Imax,Qmin,Qmax)).
+            For scatter: (xs, ys, colors).
+        """
+        self.iq_workers[row] = False
+        if row >= len(self.curves) or "IQ" not in self.curves[row]:
+            return
+        pane = self.curves[row]["IQ"]
+        if pane["mode"] != task_mode:
+            return
+
+        item = pane["item"]
+        if task_mode == "density":
+            self._update_density_image(item, payload)
+        else:  # scatter
+            self._update_scatter_plot(item, payload)
+
+    def _update_density_image(self, item, payload):
+        """Update a density image with new data."""
+        hist, (Imin, Imax, Qmin, Qmax) = payload
+        if self.real_units:
+            Imin, Imax = convert_roc_to_volts(np.array([Imin, Imax], dtype=float))
+            Qmin, Qmax = convert_roc_to_volts(np.array([Qmin, Qmax], dtype=float))
+        item.setImage(hist, levels=(0, 255), autoLevels=False)
+        item.setRect(
+            QtCore.QRectF(
+                float(Imin),
+                float(Qmin),
+                float(Imax - Imin),
+                float(Qmax - Qmin),
+            )
+        )
+
+    def _update_scatter_plot(self, item, payload):
+        """Update a scatter plot with new data."""
+        xs, ys, colors = payload
+        if self.real_units:
+            xs = convert_roc_to_volts(xs)
+            ys = convert_roc_to_volts(ys)
+        item.setData(xs, ys, brush=colors, pen=None, size=SCATTER_SIZE)
+
+    @QtCore.pyqtSlot(int, str, int, object)
+    def _psd_done(self, row: int, psd_mode: str, ch: int, payload):
+        """
+        Slot called when an off-thread PSDTask finishes for a particular channel.
+
+        Parameters
+        ----------
+        row : int
+            Row index in self.channel_list.
+        psd_mode : {"SSB", "DSB"}
+            The PSD mode that was computed.
+        ch : int
+            Which channel (within that row) was computed.
+        payload : object
+            For "SSB": (freq_i, psd_i, psd_q, psd_m, freq_m, psd_m, dec_stage_float).
+            For "DSB": (freq_dsb, psd_dsb).
+        """
+        if row not in self.psd_workers:
+            return
+        key = psd_mode[0]  # 'S' or 'D'
+        if key not in self.psd_workers[row]:
+            return
+        if ch not in self.psd_workers[row][key]:
+            return
+
+        self.psd_workers[row][key][ch] = False
+        if row >= len(self.curves):
+            return
+
+        if psd_mode == "SSB":
+            self._update_ssb_curves(row, ch, payload)
+        else:  # DSB
+            self._update_dsb_curve(row, ch, payload)
+
+    def _update_ssb_curves(self, row, ch, payload):
+        """Update single-sideband PSD curves."""
+        if "S" not in self.curves[row]:
+            return
+        sdict = self.curves[row]["S"]
+        if ch not in sdict:
+            return
+        
+        freq_i, psd_i, psd_q, psd_m, _, _, _ = payload
+        
+        if sdict[ch]["I"].isVisible():
+            sdict[ch]["I"].setData(freq_i, psd_i)
+        if sdict[ch]["Q"].isVisible():
+            sdict[ch]["Q"].setData(freq_i, psd_q)
+        if sdict[ch]["Mag"].isVisible():
+            sdict[ch]["Mag"].setData(freq_i, psd_m)
+
+    def _update_dsb_curve(self, row, ch, payload):
+        """Update dual-sideband PSD curve."""
+        if "D" not in self.curves[row]:
+            return
+        ddict = self.curves[row]["D"]
+        if ch not in ddict:
+            return
+        
+        freq_dsb, psd_dsb = payload
+        
+        if ddict[ch]["Cmplx"].isVisible():
+            ddict[ch]["Cmplx"].setData(freq_dsb, psd_dsb)
+
+    def closeEvent(self, event):
         """
         Cleanly shut down the background receiver and stop the timer before closing.
 
         Parameters
         ----------
-        ev : QCloseEvent
+        event : QCloseEvent
             The close event instance.
         """
         self.timer.stop()
@@ -3842,8 +4180,8 @@ class Periscope(QtWidgets.QMainWindow):
             task.stop()
             self.netanal_tasks.pop(task_key, None)
         
-        super().closeEvent(ev)
-        ev.accept()
+        super().closeEvent(event)
+        event.accept()
 
 
 def main():
@@ -3891,7 +4229,7 @@ def main():
     ap.add_argument("hostname")
     ap.add_argument("-m", "--module", type=int, default=1)
     ap.add_argument("-c", "--channels", default="1")
-    ap.add_argument("-n", "--num-samples", type=int, default=5_000)
+    ap.add_argument("-n", "--num-samples", type=int, default=DEFAULT_BUFFER_SIZE)
     ap.add_argument("-f", "--fps", type=float, default=30.0)
     ap.add_argument("-d", "--density-dot", type=int, default=DENSITY_DOT_SIZE)
     args = ap.parse_args()
@@ -3951,9 +4289,9 @@ async def raise_periscope(
     *,
     module: int = 1,
     channels: str = "1",
-    buf_size: int = 5_000,
+    buf_size: int = DEFAULT_BUFFER_SIZE,
     fps: float = 30.0,
-    density_dot: int = 1,
+    density_dot: int = DENSITY_DOT_SIZE,
     blocking: bool | None = None,
 ):
     """

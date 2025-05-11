@@ -143,6 +143,10 @@ from ..core.transferfunctions import (
     spectrum_from_slow_tod,
     convert_roc_to_volts,
     convert_roc_to_dbm,
+    fit_cable_delay,
+    calculate_new_cable_length,
+    recalculate_displayed_phase,
+    EFFECTIVE_PROPAGATION_SPEED, # For direct use if needed, though functions encapsulate it
 )
 from ..core.hardware_map import macro
 from ..core.schema import CRS
@@ -922,6 +926,12 @@ class PSDTask(QRunnable):
         
         return (freq_dsb[order], psd_dsb[order])
 
+# ───────────────────────── CRS Initialization Task & Signals ─────────────────────────
+class CRSInitializeSignals(QObject):
+    """Holds custom signals emitted by CRS initialization tasks."""
+    success = pyqtSignal(str)  # success message
+    error = pyqtSignal(str)    # error message
+
 # ───────────────────────── Network Analysis ─────────────────────────
 class NetworkAnalysisSignals(QObject):
     """
@@ -1167,6 +1177,46 @@ class NetworkAnalysisTask(QRunnable):
         if self._loop:
             self._loop.close()
             self._loop = None
+
+class CRSInitializeTask(QRunnable):
+    """
+    Off-thread worker for initializing the CRS board.
+    """
+    def __init__(self, crs: "CRS", module: int, irig_source: Any, clear_channels: bool, signals: CRSInitializeSignals):
+        super().__init__()
+        self.crs = crs
+        self.module = module
+        self.irig_source = irig_source
+        self.clear_channels = clear_channels
+        self.signals = signals
+        self._loop = None
+
+    def run(self):
+        """Execute the CRS initialization."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        
+        try:
+            self._loop.run_until_complete(self._initialize_c_r_s())
+            self.signals.success.emit("CRS board initialized successfully.")
+        except Exception as e:
+            detailed_error = f"Error during CRS initialization: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+            self.signals.error.emit(detailed_error)
+        finally:
+            if self._loop and self._loop.is_running():
+                self._loop.stop()
+            if self._loop:
+                self._loop.close()
+                self._loop = None
+
+    async def _initialize_c_r_s(self):
+        """Perform the asynchronous CRS initialization steps."""
+        # It's assumed crs.TIMESTAMP_PORT.BACKPLANE, .TEST, .SMA are accessible
+        # and are the actual enum members to be passed.
+        await self.crs.set_timestamp_port(self.irig_source)
+        
+        if self.clear_channels:
+            await self.crs.clear_channels(module=self.module)
 
 # ───────────────────────── Network Analysis UI ─────────────────────────
 class NetworkAnalysisDialogBase(QtWidgets.QDialog):
@@ -1841,7 +1891,13 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.cable_length_spin.setValue(DEFAULT_CABLE_LENGTH)
         self.cable_length_spin.setSingleStep(0.05)
         toolbar.addWidget(self.cable_length_label)
-        toolbar.addWidget(self.cable_length_spin)        
+        toolbar.addWidget(self.cable_length_spin)
+
+        # Add Unwrap Cable Delay button
+        unwrap_button = QtWidgets.QPushButton("Unwrap Cable Delay")
+        unwrap_button.setToolTip("Fit phase slope, calculate cable length, and apply compensation.")
+        unwrap_button.clicked.connect(self._unwrap_cable_delay_action)
+        toolbar.addWidget(unwrap_button)
 
         # Add edit parameters button to toolbar
         edit_params_btn = QtWidgets.QPushButton("Edit Other Parameters")
@@ -2591,6 +2647,190 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             
         return amplitude, freqs, amps, phases, iq_data
 
+    def _unwrap_cable_delay_action(self):
+        """
+        Fits the phase data of the first curve in the active module's plot,
+        calculates the corresponding cable length, updates the phase curves,
+        and adjusts the cable length spinner.
+        """
+        if not self.raw_data:
+            QtWidgets.QMessageBox.information(self, "No Data", "No network analysis data available to process.")
+            return
+
+        current_tab_index = self.tabs.currentIndex()
+        if current_tab_index < 0:
+            QtWidgets.QMessageBox.warning(self, "No Module Selected", "Please select a module tab.")
+            return
+        
+        active_module_text = self.tabs.tabText(current_tab_index)
+        try:
+            active_module = int(active_module_text.split(" ")[1])
+        except (IndexError, ValueError):
+            QtWidgets.QMessageBox.critical(self, "Error", f"Could not determine active module from tab: {active_module_text}")
+            return
+
+        if active_module not in self.raw_data or not self.raw_data[active_module]:
+            QtWidgets.QMessageBox.information(self, "No Data", f"No data for Module {active_module}.")
+            return
+        
+        module_data_dict = self.raw_data[active_module]
+        
+        target_key = None
+        if 'amps' in self.original_params and self.original_params['amps']:
+            first_amplitude_setting = self.original_params['amps'][0]
+            potential_key = f"{active_module}_{first_amplitude_setting}"
+            if potential_key in module_data_dict:
+                target_key = potential_key
+        
+        if target_key is None and 'default' in module_data_dict:
+            target_key = 'default'
+        
+        if target_key is None:
+            if module_data_dict:
+                target_key = next(iter(module_data_dict))
+            else:
+                QtWidgets.QMessageBox.information(self, "No Data", f"No sweep data found for Module {active_module} to process.")
+                return
+
+        # --- Extract data for the chosen key ---
+        # data_tuple: (freqs, amps, phases_displayed_deg, iq_data, amplitude_setting) OR (freqs, amps, phases_displayed_deg, iq_data)
+        data_tuple = module_data_dict[target_key]
+        
+        if len(data_tuple) == 5:
+            freqs_active, _, phases_displayed_active_deg, _, _ = data_tuple
+        elif len(data_tuple) == 4:
+            freqs_active, _, phases_displayed_active_deg, _ = data_tuple
+        else:
+            QtWidgets.QMessageBox.critical(self, "Error", "Unexpected data format for selected sweep.")
+            return
+
+        if len(freqs_active) == 0:
+            QtWidgets.QMessageBox.information(self, "No Data", "Selected sweep has no frequency data.")
+            return
+
+        # --- Determine the old cable length used for this specific sweep ---
+        # This is tricky. For now, assume current_params['cable_length'] was used for the "first" sweep.
+        # A more robust solution would store the cable_length with each sweep in self.raw_data.
+        L_old_physical = self.current_params.get('cable_length', DEFAULT_CABLE_LENGTH)
+
+        # --- Perform Fit and Calculation ---
+        try:
+            tau_additional = fit_cable_delay(freqs_active, phases_displayed_active_deg)
+            L_new_physical = calculate_new_cable_length(L_old_physical, tau_additional)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Calculation Error", f"Error during cable delay calculation: {str(e)}")
+            traceback.print_exc()
+            return
+
+        # --- Update All Phase Curves for the Active Module ---
+        if active_module in self.plots:
+            plot_info = self.plots[active_module]
+            
+            # Update amplitude-specific phase curves
+            for amp_key_iter, curve_item in plot_info['phase_curves'].items():
+                # amp_key_iter is the amplitude value (float)
+                # We need to find the corresponding full key in raw_data to get original displayed phases
+                raw_data_key_for_curve = f"{active_module}_{amp_key_iter}"
+                if raw_data_key_for_curve in module_data_dict:
+                    data_tuple_curve = module_data_dict[raw_data_key_for_curve]
+                    if len(data_tuple_curve) == 5:
+                        freqs_curve, _, phases_deg_current_display_curve, _, _ = data_tuple_curve
+                    elif len(data_tuple_curve) == 4: # Should not happen for amp_specific curves but handle
+                        freqs_curve, _, phases_deg_current_display_curve, _ = data_tuple_curve
+                    else:
+                        continue # Skip malformed data
+
+                    if len(freqs_curve) > 0:
+                        # Assume this curve was also compensated with L_old_physical.
+                        # This is an approximation if the user changed cable length between sweeps
+                        # without a full re-run.
+                        new_phases_deg_for_curve = recalculate_displayed_phase(
+                            freqs_curve, phases_deg_current_display_curve, L_old_physical, L_new_physical
+                        )
+                        curve_item.setData(freqs_curve, new_phases_deg_for_curve)
+            
+            # Update the main/default phase curve (if it holds data)
+            # The main curve 'phase_curve' should only have data if no amp-specific curves exist.
+            if not plot_info['phase_curves'] and 'default' in module_data_dict:
+                main_curve_item = plot_info['phase_curve']
+                data_tuple_main = module_data_dict['default']
+                if len(data_tuple_main) == 4:
+                    freqs_main, _, phases_deg_current_display_main, _ = data_tuple_main
+                    if len(freqs_main) > 0:
+                        new_phases_deg_for_main = recalculate_displayed_phase(
+                            freqs_main, phases_deg_current_display_main, L_old_physical, L_new_physical
+                        )
+                        main_curve_item.setData(freqs_main, new_phases_deg_for_main)
+
+            plot_info['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
+
+
+        # --- Update Cable Length Spinner and Stored Parameters ---
+        self.cable_length_spin.setValue(L_new_physical)
+        self.current_params['cable_length'] = L_new_physical
+        
+        QtWidgets.QMessageBox.information(self, "Cable Delay Updated", 
+                                          f"Cable length updated to {L_new_physical:.3f} m based on phase fit.")
+
+class InitializeCRSDialog(QtWidgets.QDialog):
+    """Dialog for CRS initialization options."""
+    def __init__(self, parent=None, crs_obj=None):
+        super().__init__(parent)
+        self.crs = crs_obj 
+        self.setWindowTitle("Initialize CRS Board")
+        self.setModal(True)
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # IRIG Time Source Group
+        irig_group = QtWidgets.QGroupBox("IRIG Time Source")
+        irig_layout = QtWidgets.QVBoxLayout(irig_group)
+        
+        self.rb_backplane = QtWidgets.QRadioButton("BACKPLANE")
+        self.rb_test = QtWidgets.QRadioButton("TEST")
+        self.rb_sma = QtWidgets.QRadioButton("SMA")
+        
+        # Default selection (e.g., TEST)
+        self.rb_test.setChecked(True) 
+        
+        irig_layout.addWidget(self.rb_backplane)
+        irig_layout.addWidget(self.rb_test)
+        irig_layout.addWidget(self.rb_sma)
+        layout.addWidget(irig_group)
+        
+        # Clear Channels Checkbox
+        self.cb_clear_channels = QtWidgets.QCheckBox("Clear all channels on this module")
+        self.cb_clear_channels.setChecked(True) # Default to checked
+        layout.addWidget(self.cb_clear_channels)
+        
+        # Buttons
+        btn_layout = QtWidgets.QHBoxLayout()
+        self.ok_btn = QtWidgets.QPushButton("OK")
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.ok_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        self.ok_btn.clicked.connect(self.accept)
+        self.cancel_btn.clicked.connect(self.reject)
+
+    def get_selected_irig_source(self):
+        if self.crs is None: # Should not happen if button is disabled correctly
+            return None 
+            
+        if self.rb_backplane.isChecked():
+            return self.crs.TIMESTAMP_PORT.BACKPLANE
+        elif self.rb_test.isChecked():
+            return self.crs.TIMESTAMP_PORT.TEST
+        elif self.rb_sma.isChecked():
+            return self.crs.TIMESTAMP_PORT.SMA
+        return None # Should have one selected
+
+    def get_clear_channels_state(self) -> bool:
+        return self.cb_clear_channels.isChecked()
+
 # ───────────────────────── Main Application ─────────────────────────
 class Periscope(QtWidgets.QMainWindow):
     """
@@ -2716,6 +2956,11 @@ class Periscope(QtWidgets.QMainWindow):
         self.netanal_signals.data_update_with_amp.connect(self._netanal_data_update_with_amp)
         self.netanal_signals.completed.connect(self._netanal_completed)
         self.netanal_signals.error.connect(self._netanal_error)
+
+        # CRS Initialization signals
+        self.crs_init_signals = CRSInitializeSignals()
+        self.crs_init_signals.success.connect(self._crs_init_success)
+        self.crs_init_signals.error.connect(self._crs_init_error)
         
         # Network analysis window tracking
         self.netanal_windows = {}  # Dictionary of windows indexed by unique ID
@@ -2812,6 +3057,14 @@ class Periscope(QtWidgets.QMainWindow):
         for cb in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
             cb.toggled.connect(self._build_layout)
 
+        # Initialize CRS Board button
+        self.btn_init_crs = QtWidgets.QPushButton("Initialize CRS Board")
+        self.btn_init_crs.setToolTip("Open dialog to initialize CRS board.")
+        self.btn_init_crs.clicked.connect(self._show_initialize_crs_dialog)
+        if self.crs is None:
+            self.btn_init_crs.setEnabled(False)
+            self.btn_init_crs.setToolTip("CRS object not available - cannot initialize.")
+
         # Network Analysis button
         self.btn_netanal = QtWidgets.QPushButton("Network Analyzer")
         self.btn_netanal.setToolTip("Open network analysis configuration window.")
@@ -2838,6 +3091,7 @@ class Periscope(QtWidgets.QMainWindow):
         for cb in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
             top_h.addWidget(cb)
         top_h.addStretch(1)
+        # self.btn_init_crs removed from here
         top_h.addWidget(self.btn_netanal)
         top_h.addWidget(self.btn_help)
 
@@ -2845,7 +3099,15 @@ class Periscope(QtWidgets.QMainWindow):
 
     def _add_config_panel(self, layout):
         """Add the configuration panel to the layout."""
-        layout.addWidget(self.btn_toggle_cfg, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+        
+        # Create a new HBox for the buttons above the config panel
+        config_header_layout = QtWidgets.QHBoxLayout()
+        config_header_layout.addStretch() # Push buttons to the right
+        config_header_layout.addWidget(self.btn_init_crs) # Add Initialize CRS button
+        config_header_layout.addWidget(self.btn_toggle_cfg) # Add Show/Hide Config button
+        
+        layout.addLayout(config_header_layout) # Add this HBox to main_vbox
+
         self.ctrl_panel = QtWidgets.QGroupBox("Configuration")
         self.ctrl_panel.setVisible(False)
         cfg_hbox = QtWidgets.QHBoxLayout(self.ctrl_panel)
@@ -3056,6 +3318,35 @@ class Periscope(QtWidgets.QMainWindow):
             msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
             msg.exec()
         
+    def _show_initialize_crs_dialog(self):
+        """Show the CRS initialization dialog."""
+        if self.crs is None:
+            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for initialization.")
+            return
+
+        # Check if TIMESTAMP_PORT is available
+        if not hasattr(self.crs, 'TIMESTAMP_PORT') or \
+           not hasattr(self.crs.TIMESTAMP_PORT, 'BACKPLANE') or \
+           not hasattr(self.crs.TIMESTAMP_PORT, 'TEST') or \
+           not hasattr(self.crs.TIMESTAMP_PORT, 'SMA'):
+            QtWidgets.QMessageBox.critical(self, "Error", 
+                                           "CRS.TIMESTAMP_PORT enum not available or incomplete. Cannot initialize.")
+            return
+
+        dialog = InitializeCRSDialog(self, self.crs)
+        if dialog.exec():
+            irig_source = dialog.get_selected_irig_source()
+            clear_channels = dialog.get_clear_channels_state()
+            
+            if irig_source is None:
+                QtWidgets.QMessageBox.warning(self, "Selection Error", "No IRIG source selected.")
+                return
+
+            # Prepare and run the initialization task
+            task = CRSInitializeTask(self.crs, self.module, irig_source, clear_channels, self.crs_init_signals)
+            self.pool.start(task)
+
+
     def _show_netanal_dialog(self):
         """Show the network analysis configuration dialog."""
         if self.crs is None:
@@ -3336,6 +3627,14 @@ class Periscope(QtWidgets.QMainWindow):
     def _netanal_error(self, error_msg: str):
         """Handle network analysis errors."""
         QtWidgets.QMessageBox.critical(self, "Network Analysis Error", error_msg)
+
+    def _crs_init_success(self, message: str):
+        """Handle successful CRS initialization."""
+        QtWidgets.QMessageBox.information(self, "CRS Initialization Success", message)
+
+    def _crs_init_error(self, error_msg: str):
+        """Handle CRS initialization errors."""
+        QtWidgets.QMessageBox.critical(self, "CRS Initialization Error", error_msg)
 
     def _toggle_config(self, visible: bool):
         """
@@ -4139,7 +4438,13 @@ class Periscope(QtWidgets.QMainWindow):
         if ch not in sdict:
             return
         
-        freq_i, psd_i, psd_q, psd_m, _, _, _ = payload
+        freq_i_data, psd_i_data, psd_q_data, psd_m_data, _, _, _ = payload
+        
+        # Ensure data is numpy array of floats
+        freq_i = np.asarray(freq_i_data, dtype=float)
+        psd_i = np.asarray(psd_i_data, dtype=float)
+        psd_q = np.asarray(psd_q_data, dtype=float)
+        psd_m = np.asarray(psd_m_data, dtype=float)
         
         if sdict[ch]["I"].isVisible():
             sdict[ch]["I"].setData(freq_i, psd_i)
@@ -4156,7 +4461,11 @@ class Periscope(QtWidgets.QMainWindow):
         if ch not in ddict:
             return
         
-        freq_dsb, psd_dsb = payload
+        freq_dsb_data, psd_dsb_data = payload
+        
+        # Ensure data is numpy array of floats
+        freq_dsb = np.asarray(freq_dsb_data, dtype=float)
+        psd_dsb = np.asarray(psd_dsb_data, dtype=float)
         
         if ddict[ch]["Cmplx"].isVisible():
             ddict[ch]["Cmplx"].setData(freq_dsb, psd_dsb)

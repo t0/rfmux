@@ -137,8 +137,23 @@ from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, Qt
 from PyQt6.QtGui import QFont, QIntValidator
 import pyqtgraph as pg
 
+# Imports for embedded iPython console
+try:
+    from qtconsole.rich_jupyter_widget import RichJupyterWidget
+    from qtconsole.inprocess import QtInProcessKernelManager
+    QTCONSOLE_AVAILABLE = True
+except ImportError:
+    QTCONSOLE_AVAILABLE = False
+    warnings.warn(
+        "qtconsole or ipykernel not found. Interactive session feature will be disabled.\n"
+        "Install them with: pip install qtconsole ipykernel",
+        RuntimeWarning,
+    )
+
 # Local imports
+import rfmux # Ensure rfmux is available for the console
 from .. import streamer
+from ..awaitless import load_ipython_extension as load_awaitless_extension
 from ..core.transferfunctions import (
     spectrum_from_slow_tod,
     convert_roc_to_volts,
@@ -2967,6 +2982,12 @@ class Periscope(QtWidgets.QMainWindow):
         self.netanal_window_count = 0  # Counter for window IDs
         self.netanal_tasks = {}  # Tasks dictionary with window-specific keys
 
+        # Embedded iPython console attributes
+        self.kernel_manager = None
+        self.jupyter_widget = None
+        self.console_dock_widget = None
+        self.btn_interactive_session = None
+
     def _init_colormap(self):
         """Initialize the colormap for IQ density plots."""
         cmap = pg.colormap.get("turbo")
@@ -3007,6 +3028,7 @@ class Periscope(QtWidgets.QMainWindow):
         self._add_config_panel(main_vbox)
         self._add_plot_container(main_vbox)
         self._add_status_bar()
+        self._add_interactive_console_dock() # Add dock for console
 
     def _add_title(self, layout):
         """Add the title to the layout."""
@@ -3102,7 +3124,20 @@ class Periscope(QtWidgets.QMainWindow):
         action_buttons_widget = QtWidgets.QWidget()
         action_buttons_layout = QtWidgets.QHBoxLayout(action_buttons_widget)
         action_buttons_layout.setContentsMargins(0,0,0,0) # Remove margins for tighter packing
-        action_buttons_layout.addStretch(1) 
+        action_buttons_layout.addStretch(1)
+        
+        # Interactive Session Button
+        self.btn_interactive_session = QtWidgets.QPushButton("Interactive Session")
+        self.btn_interactive_session.setToolTip("Toggle an embedded iPython interactive session.")
+        self.btn_interactive_session.clicked.connect(self._toggle_interactive_session)
+        if not QTCONSOLE_AVAILABLE or self.crs is None:
+            self.btn_interactive_session.setEnabled(False)
+            if not QTCONSOLE_AVAILABLE:
+                self.btn_interactive_session.setToolTip("Interactive session disabled: qtconsole/ipykernel not installed.")
+            else:
+                self.btn_interactive_session.setToolTip("Interactive session disabled: CRS object not available.")
+        action_buttons_layout.addWidget(self.btn_interactive_session)
+
         action_buttons_layout.addWidget(self.btn_init_crs)
         action_buttons_layout.addWidget(self.btn_netanal) # Add Network Analyzer button
         action_buttons_layout.addWidget(self.btn_toggle_cfg)
@@ -3210,6 +3245,7 @@ class Periscope(QtWidgets.QMainWindow):
         self.cb_dark = QtWidgets.QCheckBox("Dark Mode", checked=self.dark_mode)
         self.cb_dark.setToolTip("Switch between dark/light themes.")
         self.cb_dark.toggled.connect(self._toggle_dark_mode)
+        self.cb_dark.toggled.connect(self._update_console_style) # Connect to console style update
         disp_h.addWidget(self.cb_dark)
 
         # Autoscale button
@@ -3237,7 +3273,6 @@ class Periscope(QtWidgets.QMainWindow):
         """
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle("Periscope Help")
-        msg.setTextFormat(QtCore.Qt.TextFormat.MarkdownText)
         help_text = (
             "**Usage:**\n"
             "  - Multi-channel grouping: use '&' to display multiple channels in one row.\n"
@@ -3259,9 +3294,19 @@ class Periscope(QtWidgets.QMainWindow):
             "  - Analysis runs in a separate window with real-time updates.\n"
             "  - Use the Unit selector to view data in Counts, Volts, or dBm, or normalized versions to compare relative responses.\n"
             "  - Export data from Network Analysis with the 'Export Data' button. Pickle and CSV exports available.\n\n"
+            "**Interactive Session (Embedded Console):**\n"
+            "  - Click the 'Interactive Session' button to toggle a drop-down iPython console.\n"
+            "  - Requires `qtconsole` and `ipykernel` (`pip install qtconsole ipykernel`).\n"
+            "  - The console has access to:\n"
+            "    - `crs`: The current CRS object used by Periscope.\n"
+            "    - `rfmux`: The rfmux module.\n"
+            "    - `periscope`: The Periscope application instance itself.\n"
+            "  - 'Awaitless' mode is enabled, so `await` is often not needed for async CRS calls.\n"
+            "  - The console theme (dark/light) syncs with Periscope's Dark Mode setting.\n"
+            "  - The console panel can be resized by dragging its top border.\n\n"
             "**Performance tips for higher FPS:**\n"
             "  - Disable auto-scaling in the configuration panel\n"
-            "  - Use the density mode for IQ, smaller buffers, or enable only a subset of I,Q,M.\n"            
+            "  - Use the density mode for IQ, smaller buffers, or enable only a subset of I,Q,M.\n"
             "  - Periscope is limited by the single-thread renderer. Launching multiple instances can improve performance for viewing many channels.\n\n"
             "**Command-Line Examples:**\n"
             "  - `$ periscope rfmux0022.local --module 2 --channels \"3&5,7\"`\n\n"
@@ -3269,9 +3314,38 @@ class Periscope(QtWidgets.QMainWindow):
             "  - `>>> crs.raise_periscope(module=2, channels=\"3&5\")`\n"
             "  - If in a non-blocking mode, you can still interact with your session concurrently.\n\n"
         )
-        msg.setText(help_text)
-        msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Close)
-        msg.exec()
+
+        help_dialog = QtWidgets.QDialog(self)
+        help_dialog.setWindowTitle("Periscope Help")
+        
+        layout = QtWidgets.QVBoxLayout(help_dialog)
+        
+        scroll_area = QtWidgets.QScrollArea(help_dialog)
+        scroll_area.setWidgetResizable(True)
+        
+        help_label = QtWidgets.QLabel(scroll_area)
+        help_label.setTextFormat(QtCore.Qt.TextFormat.MarkdownText)
+        help_label.setWordWrap(True)
+        help_label.setText(help_text)
+        help_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        help_label.setOpenExternalLinks(True) # Allow opening links if any in markdown
+        
+        scroll_area.setWidget(help_label)
+        layout.addWidget(scroll_area)
+        
+        close_button = QtWidgets.QPushButton("Close")
+        close_button.clicked.connect(help_dialog.accept)
+        
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch()
+        button_layout.addWidget(close_button)
+        layout.addLayout(button_layout)
+
+        help_dialog.setLayout(layout)
+        # Set a reasonable default size for the help dialog, making it large enough
+        # for typical content but allowing scrollbars for smaller screens or very long text.
+        help_dialog.resize(700, 500) 
+        help_dialog.exec()
 
     def _toggle_zoom_box_mode(self, enable: bool):
         """
@@ -4490,9 +4564,104 @@ class Periscope(QtWidgets.QMainWindow):
             task = self.netanal_tasks[task_key]
             task.stop()
             self.netanal_tasks.pop(task_key, None)
+
+        # Shutdown iPython kernel if it exists
+        if self.kernel_manager and self.kernel_manager.has_kernel:
+            try:
+                self.kernel_manager.shutdown_kernel()
+            except Exception as e:
+                warnings.warn(f"Error shutting down iPython kernel: {e}", RuntimeWarning)
         
         super().closeEvent(event)
         event.accept()
+
+    def _add_interactive_console_dock(self):
+        """Create and add the QDockWidget for the iPython console."""
+        if not QTCONSOLE_AVAILABLE:
+            return
+
+        self.console_dock_widget = QtWidgets.QDockWidget("Interactive iPython Session", self)
+        self.console_dock_widget.setObjectName("InteractiveSessionDock")
+        self.console_dock_widget.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
+        self.console_dock_widget.setVisible(False) # Initially hidden
+        # We don't set a widget here yet; it will be created lazily.
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.console_dock_widget)
+
+    def _toggle_interactive_session(self):
+        """Toggle the visibility of the interactive iPython console."""
+        if not QTCONSOLE_AVAILABLE or self.crs is None:
+            # Should not happen if button is disabled, but good to check
+            return
+
+        if self.console_dock_widget is None: # Should have been created by _add_interactive_console_dock
+            return
+
+        if self.kernel_manager is None:
+            # First time: Initialize kernel and widget
+            try:
+                self.kernel_manager = QtInProcessKernelManager()
+                self.kernel_manager.start_kernel()
+                
+                kernel = self.kernel_manager.kernel
+                # Push relevant variables to the iPython shell
+                # Note: rfmux module is already imported at the top of the file
+                kernel.shell.push({
+                    'crs': self.crs, 
+                    'rfmux': rfmux, 
+                    'periscope': self  # Provide access to the Periscope app instance
+                })
+
+                self.jupyter_widget = RichJupyterWidget()
+                self.jupyter_widget.kernel_client = self.kernel_manager.client()
+                self.jupyter_widget.kernel_client.start_channels() # Start communication channels
+
+                # Load awaitless extension
+                try:
+                    load_awaitless_extension(ipython=kernel.shell)
+                except Exception as e_awaitless:
+                    warnings.warn(f"Could not load awaitless extension: {e_awaitless}", RuntimeWarning)
+                    traceback.print_exc()
+
+                self.console_dock_widget.setWidget(self.jupyter_widget)
+                self._update_console_style(self.dark_mode) # Set initial theme
+                
+                # Give focus to the console when it's first shown
+                self.jupyter_widget.setFocus()
+
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Error Initializing Console",
+                                               f"Could not initialize iPython console: {e}")
+                traceback.print_exc()
+                if self.kernel_manager and self.kernel_manager.has_kernel:
+                    self.kernel_manager.shutdown_kernel()
+                self.kernel_manager = None
+                self.jupyter_widget = None
+                self.console_dock_widget.setVisible(False) # Ensure it's hidden on error
+                return
+        
+        # Toggle visibility
+        is_visible = self.console_dock_widget.isVisible()
+        self.console_dock_widget.setVisible(not is_visible)
+        if not is_visible and self.jupyter_widget: # If showing
+            self.jupyter_widget.setFocus()
+
+    def _update_console_style(self, dark_mode_enabled: bool):
+        """Update the iPython console style based on dark mode."""
+        if self.jupyter_widget and QTCONSOLE_AVAILABLE:
+            if dark_mode_enabled:
+                # For dark mode, 'native' often works well, or 'monokai'.
+                # QtConsole also has its own stylesheet mechanism if more control is needed.
+                self.jupyter_widget.syntax_style = 'monokai'
+                # A more explicit stylesheet could be:
+                self.jupyter_widget.setStyleSheet("QWidget { background-color: #222222; color: #DDDDDD; }")
+            else:
+                # For light mode, 'default' is standard.
+                self.jupyter_widget.syntax_style = 'default'
+                self.jupyter_widget.setStyleSheet("") # Clear custom stylesheet
+            
+            # RichJupyterWidget might need a nudge to re-render with the new style.
+            # Calling update or repaint might be necessary if changes don't appear immediately.
+            self.jupyter_widget.update()
 
 
 def main():

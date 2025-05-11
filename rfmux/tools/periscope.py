@@ -3091,22 +3091,24 @@ class Periscope(QtWidgets.QMainWindow):
         for cb in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
             top_h.addWidget(cb)
         top_h.addStretch(1)
-        # self.btn_init_crs removed from here
-        top_h.addWidget(self.btn_netanal)
-        top_h.addWidget(self.btn_help)
+        # self.btn_init_crs, self.btn_netanal and self.btn_help will be moved to the config_header_layout
 
         layout.addWidget(top_bar)
 
     def _add_config_panel(self, layout):
-        """Add the configuration panel to the layout."""
+        """Add the configuration panel and the row with config/netanal/help buttons."""
         
         # Create a new HBox for the buttons above the config panel
-        config_header_layout = QtWidgets.QHBoxLayout()
-        config_header_layout.addStretch() # Push buttons to the right
-        config_header_layout.addWidget(self.btn_init_crs) # Add Initialize CRS button
-        config_header_layout.addWidget(self.btn_toggle_cfg) # Add Show/Hide Config button
+        action_buttons_widget = QtWidgets.QWidget()
+        action_buttons_layout = QtWidgets.QHBoxLayout(action_buttons_widget)
+        action_buttons_layout.setContentsMargins(0,0,0,0) # Remove margins for tighter packing
+        action_buttons_layout.addStretch(1) 
+        action_buttons_layout.addWidget(self.btn_init_crs)
+        action_buttons_layout.addWidget(self.btn_netanal) # Add Network Analyzer button
+        action_buttons_layout.addWidget(self.btn_toggle_cfg)
+        action_buttons_layout.addWidget(self.btn_help)    # Add Help button
         
-        layout.addLayout(config_header_layout) # Add this HBox to main_vbox
+        layout.addWidget(action_buttons_widget)
 
         self.ctrl_panel = QtWidgets.QGroupBox("Configuration")
         self.ctrl_panel.setVisible(False)

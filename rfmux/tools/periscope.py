@@ -2762,6 +2762,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                         new_phases_deg_for_curve = recalculate_displayed_phase(
                             freqs_curve, phases_deg_current_display_curve, L_old_physical, L_new_physical
                         )
+                        # re-wrap phases to [-180, 180] range
+                        new_phases_deg_for_curve = ((new_phases_deg_for_curve + 180) % 360) - 180
                         curve_item.setData(freqs_curve, new_phases_deg_for_curve)
             
             # Update the main/default phase curve (if it holds data)
@@ -4624,6 +4626,20 @@ class Periscope(QtWidgets.QMainWindow):
 
                 self.console_dock_widget.setWidget(self.jupyter_widget)
                 self._update_console_style(self.dark_mode) # Set initial theme
+
+                # Be forceful about the color overrides
+                if self.dark_mode:
+                    # For dark mode
+                    self.jupyter_widget._control.document().setDefaultStyleSheet("""
+                        .in-prompt { color: #00FF00 !important; }
+                        .out-prompt { color: #00DD00 !important; }
+                    """)
+                else:
+                    # For light mode
+                    self.jupyter_widget._control.document().setDefaultStyleSheet("""
+                        .in-prompt { color: #008800 !important; }
+                        .out-prompt { color: #006600 !important; }
+                    """)                
                 
                 # Give focus to the console when it's first shown
                 self.jupyter_widget.setFocus()
@@ -4649,19 +4665,36 @@ class Periscope(QtWidgets.QMainWindow):
         """Update the iPython console style based on dark mode."""
         if self.jupyter_widget and QTCONSOLE_AVAILABLE:
             if dark_mode_enabled:
-                # For dark mode, 'native' often works well, or 'monokai'.
-                # QtConsole also has its own stylesheet mechanism if more control is needed.
+                # Set the syntax highlighting style
                 self.jupyter_widget.syntax_style = 'monokai'
-                # A more explicit stylesheet could be:
-                self.jupyter_widget.setStyleSheet("QWidget { background-color: #222222; color: #DDDDDD; }")
+                
+                # Custom stylesheet with green prompts
+                self.jupyter_widget.setStyleSheet("""
+                    QWidget { background-color: #1C1C1C; color: #DDDDDD; }
+                    
+                    /* Change input prompt to bright green */
+                    .in-prompt { color: #00FF00 !important; }
+                    
+                    /* Change output prompt to a lighter green */
+                    .out-prompt { color: #00DD00 !important; }
+                    
+                    /* Make sure these styles are applied to the internal console widget */
+                    QPlainTextEdit { background-color: #1C1C1C; color: #DDDDDD; }
+                """)
             else:
-                # For light mode, 'default' is standard.
+                # Light mode
                 self.jupyter_widget.syntax_style = 'default'
-                self.jupyter_widget.setStyleSheet("") # Clear custom stylesheet
-            
-            # RichJupyterWidget might need a nudge to re-render with the new style.
-            # Calling update or repaint might be necessary if changes don't appear immediately.
+                
+                # Custom stylesheet with green prompts for light mode too
+                self.jupyter_widget.setStyleSheet("""
+                    /* Green prompts for light mode */
+                    .in-prompt { color: #008800 !important; }
+                    .out-prompt { color: #006600 !important; }
+                """)
+                
+            # Force a complete refresh
             self.jupyter_widget.update()
+            self.jupyter_widget.repaint()
 
 
 def main():

@@ -475,7 +475,7 @@ def fit_cable_delay(freqs: np.ndarray, phases_deg: np.ndarray) -> float:
 
     # The phase slope d(phase_rad)/d(freq_hz) = 2 * pi * tau
     # So, tau_additional = slope / (2 * pi)
-    tau_additional = slope / (2 * np.pi)
+    tau_additional = -slope / (2 * np.pi)
     
     return tau_additional
 
@@ -506,41 +506,19 @@ def recalculate_displayed_phase(
     new_physical_length_m: float
 ) -> np.ndarray:
     """
-    Recalculates the phase data to be displayed after applying a new cable length compensation.
-
-    Parameters
-    ----------
-    freqs : np.ndarray
-        Array of frequencies in Hz.
-    phases_deg_currently_displayed : np.ndarray
-        Array of phases in degrees, as currently displayed (compensated by old_physical_length_m).
-    old_physical_length_m : float
-        The physical cable length (in meters) used for the current compensation of phases_deg_currently_displayed.
-    new_physical_length_m : float
-        The new physical cable length (in meters) to apply for compensation.
-
-    Returns
-    -------
-    np.ndarray
-        Array of newly compensated phases in degrees to be displayed.
+    Recalculates the phase data with only the delta compensation.
     """
     if len(freqs) == 0:
         return np.array([])
 
-    # Phase contribution from old cable length (in radians)
-    # Δφ_old = 2π * f * L_old / v_eff
-    comp_old_rad = (2 * np.pi * freqs * old_physical_length_m) / EFFECTIVE_PROPAGATION_SPEED
+    # Calculate the delta length
+    delta_length_m = new_physical_length_m - old_physical_length_m
     
-    # Phase contribution from new cable length (in radians)
-    # Δφ_new = 2π * f * L_new / v_eff
-    comp_new_rad = (2 * np.pi * freqs * new_physical_length_m) / EFFECTIVE_PROPAGATION_SPEED
+    # Calculate phase shift from delta length
+    # A positive delta_length means more cable, which creates positive phase shift
+    delta_phase_rad = (2 * np.pi * freqs * delta_length_m) / EFFECTIVE_PROPAGATION_SPEED
     
-    # Original instrument phase (before any compensation) in radians
-    # P_instrument = P_displayed + Δφ_old
-    phases_instrument_rad = np.deg2rad(phases_deg_currently_displayed) + comp_old_rad
-    
-    # New displayed phase (after new compensation) in radians
-    # P_new_displayed = P_instrument - Δφ_new
-    phases_new_displayed_rad = phases_instrument_rad - comp_new_rad
+    # Apply the delta compensation directly
+    phases_new_displayed_rad = np.deg2rad(phases_deg_currently_displayed) + delta_phase_rad
     
     return np.rad2deg(phases_new_displayed_rad)

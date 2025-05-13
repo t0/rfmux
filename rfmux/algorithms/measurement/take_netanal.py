@@ -6,6 +6,7 @@ pairings in order to measure the complex S21 across a large bandwidth. Often use
 import warnings
 import asyncio
 import numpy as np
+import scipy.signal as signal
 from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
 
@@ -21,6 +22,13 @@ async def take_netanal(
     max_chans: int = 1023,
     max_span: float = 500e6,
     rotate_phase_to_0: bool = True,
+    find_resonances: bool = False,
+    expected_resonances: int | None = None,
+    min_dip_depth_db: float = 1.0,
+    min_Q: float = 1e4,
+    max_Q: float = 1e7,
+    min_resonance_separation_hz: float = 100e3,
+    data_exponent: float = 2.0,
     *,
     module,
     progress_callback=None,
@@ -59,6 +67,25 @@ async def take_netanal(
         If True, applies an arbitrary global phase rotation to make the first point 
         have zero phase. This makes it easier to compare phase responses across 
         different measurements, by default True.
+    find_resonances : bool, optional
+        Master switch to enable/disable peak finding, by default False.
+    expected_resonances : int | None, optional
+        Optional target number of resonances for resilience logic, by default None.
+    min_dip_depth_db : float, optional
+        Minimum depth (prominence) a dip must have in dB to be considered a peak.
+        Corresponds to `prominence` in `scipy.signal.find_peaks`, by default 1.0.
+    min_Q : float, optional
+        Minimum estimated quality factor. Used to calculate the maximum allowed width
+        of a resonance feature, by default 1e4.
+    max_Q : float, optional
+        Maximum estimated quality factor. Used to calculate the minimum allowed width
+        of a resonance feature, by default 1e7.
+    min_resonance_separation_hz : float, optional
+        Minimum frequency separation between identified peaks. Corresponds to `distance`
+        in `scipy.signal.find_peaks`, by default 10e3.
+    data_exponent : float, optional
+        Exponent applied to the magnitude data before dB conversion to potentially
+        enhance peak visibility, by default 2.0.
     module : int or list of int
         - If an integer, run one measurement on that module.
         - If a list, e.g. [1, 2, 3], run concurrently for each module in the list
@@ -71,13 +98,21 @@ async def take_netanal(
 
     Returns
     -------
-    If `module` is a list:
-        list
-            A list where each value is a tuple corresponding to the modules in the list:
-            (fs_sorted, iq_sorted, phase_sorted).
-    Otherwise:
-        fs_sorted, iq_sorted, phase_sorted : np.ndarray
-        Frequency, I/Q, and phase arrays for the single measurement.
+    dict
+        A dictionary containing the measurement results.
+        Keys:
+        - 'frequencies': numpy.ndarray - Sorted frequency points (Hz). Always present.
+        - 'iq_complex': numpy.ndarray - Complex I/Q data corresponding to 'frequencies'. Always present.
+        - 'phase_degrees': numpy.ndarray - Phase in degrees corresponding to 'frequencies'. Always present.
+        - 'resonance_frequencies': list[float] - List of identified resonance peak frequencies (Hz).
+                                                 Present only if `find_resonances` is True and peaks are found. Defaults to empty list otherwise.
+        - 'resonances_details': list[dict] - List of dictionaries, each detailing an identified resonance.
+                                             Present only if `find_resonances` is True and peaks are found. Defaults to empty list otherwise.
+                                             Each dictionary contains:
+                                                 - 'frequency': float (Hz)
+                                                 - 'prominence_db': float (dB)
+                                                 - 'width_hz': float (Hz)
+                                                 - 'q_estimated': float
     """
 
     # If user passed modules as a list, run in parallel across those modules
@@ -107,6 +142,13 @@ async def take_netanal(
                 max_chans=max_chans,
                 max_span=max_span,
                 rotate_phase_to_0=rotate_phase_to_0,
+                find_resonances=find_resonances,
+                expected_resonances=expected_resonances,
+                min_dip_depth_db=min_dip_depth_db,
+                min_Q=min_Q,
+                max_Q=max_Q,
+                min_resonance_separation_hz=min_resonance_separation_hz,
+                data_exponent=data_exponent,
                 module=m,
                 progress_callback=progress_callback,
                 data_callback=data_callback,
@@ -284,15 +326,127 @@ async def take_netanal(
             ctx.set_amplitude(0, channel=j+1, module=module)
         await ctx()
 
-    fs_all = np.array(fs_all)
-    iq_all = np.array(iq_all)
-    phase_all = np.degrees(np.angle(iq_all))
+    fs_all_np = np.array(fs_all)
+    iq_all_np = np.array(iq_all)
 
-    # Sort all interleaved and chunked data by ascending frequency.
-    combined = sorted(zip(fs_all, iq_all, phase_all), key=lambda x: x[0])
-    fs_sorted, iq_sorted, phase_sorted = zip(*combined)
+    if len(fs_all_np) == 0: # Handle empty data
+        # Return empty arrays in the expected dictionary structure
+        return {
+            'frequencies': np.array([]),
+            'iq_complex': np.array([]),
+            'phase_degrees': np.array([]),
+            'resonance_frequencies': [],
+            'resonances_details': []
+        }
 
-    return np.array(fs_sorted), np.array(iq_sorted), np.array(phase_sorted)
+    sort_indices = np.argsort(fs_all_np)
+    fs_sorted = fs_all_np[sort_indices]
+    iq_sorted = iq_all_np[sort_indices]
+    phase_sorted = np.degrees(np.angle(iq_sorted))
+
+    result_dict = {
+        'frequencies': fs_sorted,
+        'iq_complex': iq_sorted,
+        'phase_degrees': phase_sorted,
+        'resonance_frequencies': [],
+        'resonances_details': []
+    }
+
+    if find_resonances and len(fs_sorted) > 1:
+        try:
+            # --- Peak Finding Implementation Start ---
+
+            # a. Preprocessing:
+            magnitude = np.abs(iq_sorted)
+            # Handle non-positive values robustly before log10:
+            if np.any(magnitude <= 1e-18):
+                min_positive = np.min(magnitude[magnitude > 1e-18]) if np.any(magnitude > 1e-18) else 1e-9
+                magnitude = np.maximum(magnitude, min_positive * 0.1) # Replace non-positive with small fraction of min positive
+
+            # Use a robust reference (e.g., median or mean of end points)
+            ref_mag = np.median(magnitude[-min(10, len(magnitude)):]) # Median of last up to 10 points
+            if ref_mag <= 1e-18: ref_mag = 1.0 # Fallback if reference is too small
+
+            shifted_mag = magnitude**data_exponent
+            ref_shifted = ref_mag**data_exponent
+            mag_db = 20 * np.log10(shifted_mag / ref_shifted) # Calculate dB relative to reference
+
+            # b. Calculate find_peaks Parameters:
+            pt_spacing = np.mean(np.diff(fs_sorted))
+            # Handle edge case of non-uniform spacing or single point
+            if not np.isfinite(pt_spacing) or pt_spacing <= 0:
+                pt_spacing = (fs_sorted[-1] - fs_sorted[0]) / (len(fs_sorted) - 1) if len(fs_sorted) > 1 else 1e6 # Estimate average spacing
+
+            median_freq = np.median(fs_sorted) # Use median freq for Q calculations
+            max_width_hz = median_freq / min_Q if min_Q > 0 else np.inf
+            min_width_hz = median_freq / max_Q if max_Q > 0 else 0
+
+            # Convert widths to points, ensuring they are valid
+            max_width_pts = np.ceil(max_width_hz / pt_spacing) if pt_spacing > 0 and np.isfinite(max_width_hz) else len(fs_sorted)
+            min_width_pts = np.ceil(min_width_hz / pt_spacing) if pt_spacing > 0 and np.isfinite(min_width_hz) else 0
+            max_width_pts = max(1, max_width_pts) # Width must be at least 1 point
+            min_width_pts = max(0, min(min_width_pts, max_width_pts)) # Min width cannot exceed max width
+
+            # Convert separation to points
+            min_separation_pts = np.ceil(min_resonance_separation_hz / pt_spacing) if pt_spacing > 0 else 1
+            min_separation_pts = max(1, min_separation_pts) # Distance must be at least 1 point
+
+            # c. Call find_peaks:
+            peaks, properties = signal.find_peaks(
+                -mag_db, # Find peaks in the negative dB data (dips in original)
+                prominence=min_dip_depth_db,
+                width=(min_width_pts, max_width_pts),
+                distance=min_separation_pts
+            )
+
+            # d. Apply Resilience Logic:
+            if expected_resonances is not None and len(peaks) != expected_resonances:
+                if len(peaks) > expected_resonances:
+                    # Too many peaks found, select the most prominent
+                    prominences = properties['prominences']
+                    # Get indices that would sort prominences descending
+                    sorted_prominence_indices = np.argsort(prominences)[::-1]
+                    # Select the indices of the top N peaks
+                    top_indices_unsorted = sorted_prominence_indices[:expected_resonances]
+                    # Sort these top indices by their original position for consistency
+                    top_indices_sorted = np.sort(top_indices_unsorted)
+
+                    peaks = peaks[top_indices_sorted]
+                    # Filter properties dictionary to keep only selected peaks
+                    properties = {key: val[top_indices_sorted] for key, val in properties.items()}
+                    warnings.warn(f"Found {len(prominences)} peaks, selected top {expected_resonances} most prominent for module {module}.")
+                else:
+                    # Too few peaks found
+                    warnings.warn(f"Found {len(peaks)} peaks, expected {expected_resonances} for module {module}. Consider adjusting parameters (e.g., min_dip_depth_db).")
+
+            # e. Format Results:
+            found_frequencies = fs_sorted[peaks]
+            result_dict['resonance_frequencies'] = found_frequencies.tolist()
+
+            resonances_details = []
+            for i, peak_idx in enumerate(peaks):
+                freq_hz = found_frequencies[i]
+                # Get width in points from properties, convert to Hz
+                width_pts = properties['widths'][i]
+                width_hz = width_pts * pt_spacing
+                # Estimate Q
+                q_est = freq_hz / width_hz if width_hz > 0 else np.inf
+                resonances_details.append({
+                    'frequency': freq_hz,
+                    'prominence_db': properties['prominences'][i],
+                    'width_hz': width_hz,
+                    'q_estimated': q_est
+                })
+            result_dict['resonances_details'] = resonances_details
+
+            # --- Peak Finding Implementation End ---
+        except Exception as e:
+            warnings.warn(f"Resonance finding failed for module {module}: {e}. Returning empty lists for resonance results.")
+            # Ensure lists are empty if finding fails
+            result_dict['resonance_frequencies'] = []
+            result_dict['resonances_details'] = []
+            
+    return result_dict
 
 def _safe_concatenate_frequencies(comb, nco_freq):
     """

@@ -3380,21 +3380,7 @@ class Periscope(QtWidgets.QMainWindow):
 
                 # Also update the Network Analysis window's zoom box checkbox if it exists
                 if hasattr(window, 'zoom_box_cb'):
-                    window.zoom_box_cb.setChecked(enable)                        
-                        
-        # Show help message if enabling
-        if enable:
-            msg = QtWidgets.QMessageBox(self)
-            msg.setWindowTitle("Zoom Box Mode Enabled")
-            msg.setText(
-                "Zoom Box Mode is now enabled:\n\n"
-                "• Left-click and drag to draw a selection rectangle\n"
-                "• Release to zoom to that selection\n"
-                "• Right-click to zoom out\n\n"
-                "You can toggle this feature off in the configuration panel."
-            )
-            msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
-            msg.exec()
+                    window.zoom_box_cb.setChecked(enable)
         
     def _show_initialize_crs_dialog(self):
         """Show the CRS initialization dialog."""
@@ -4633,14 +4619,15 @@ class Periscope(QtWidgets.QMainWindow):
                     self.jupyter_widget._control.document().setDefaultStyleSheet("""
                         .in-prompt { color: #00FF00 !important; }
                         .out-prompt { color: #00DD00 !important; }
+                        body { background-color: #1C1C1C; color: #DDDDDD; }
                     """)
                 else:
                     # For light mode
                     self.jupyter_widget._control.document().setDefaultStyleSheet("""
                         .in-prompt { color: #008800 !important; }
                         .out-prompt { color: #006600 !important; }
-                    """)                
-                
+                        body { background-color: #FFFFFF; color: #000000; }
+                    """)
                 # Give focus to the console when it's first shown
                 self.jupyter_widget.setFocus()
 
@@ -4685,17 +4672,22 @@ class Periscope(QtWidgets.QMainWindow):
                 # Light mode
                 self.jupyter_widget.syntax_style = 'default'
                 
-                # Custom stylesheet with green prompts for light mode too
+                # Custom stylesheet with explicit white background for light mode
                 self.jupyter_widget.setStyleSheet("""
+                    /* Set explicit background and text colors */
+                    QWidget { background-color: #FFFFFF; color: #000000; }
+                    
                     /* Green prompts for light mode */
                     .in-prompt { color: #008800 !important; }
                     .out-prompt { color: #006600 !important; }
+                    
+                    /* Ensure the text editor has correct background */
+                    QPlainTextEdit { background-color: #FFFFFF; color: #000000; }
                 """)
                 
             # Force a complete refresh
             self.jupyter_widget.update()
             self.jupyter_widget.repaint()
-
 
 def main():
     """

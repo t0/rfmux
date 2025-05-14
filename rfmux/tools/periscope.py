@@ -100,6 +100,8 @@ DEFAULT_REFRESH_MS = 33
 # GUI update intervals
 NETANAL_UPDATE_INTERVAL = 0.1  # seconds
 
+ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons', 'periscope-icon.svg')
+
 # ───────────────────────── Utility Functions ─────────────────────────
 
 def _check_xcb_cursor_runtime() -> bool:
@@ -134,7 +136,7 @@ _check_xcb_cursor_runtime()
 # Import PyQt only after checking XCB dependencies
 from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, Qt
-from PyQt6.QtGui import QFont, QIntValidator
+from PyQt6.QtGui import QFont, QIntValidator, QIcon
 import pyqtgraph as pg
 
 # Imports for embedded iPython console
@@ -4748,6 +4750,8 @@ def main():
 
     refresh_ms = int(round(1000.0 / args.fps))
     app = QtWidgets.QApplication(sys.argv[:1])
+    app_icon = QIcon(ICON_PATH)
+    app.setWindowIcon(app_icon)
 
     # Bind only the main GUI (this) thread to a single CPU to reduce scheduling jitter
     _pin_current_thread_to_core()
@@ -4776,7 +4780,7 @@ def main():
         warnings.warn(f"Failed to create CRS object: {str(e)}\nNetwork analysis will be disabled.")
         crs = None
 
-    win = Periscope(
+    viewer = Periscope(
         host=args.hostname,
         module=args.module,
         chan_str=args.channels,
@@ -4785,7 +4789,9 @@ def main():
         dot_px=args.density_dot,
         crs=crs  # Pass the CRS object
     )
-    win.show()
+    # Also set icon for main window
+    viewer.setWindowIcon(app_icon)
+    viewer.show()
     sys.exit(app.exec())
 
 @macro(CRS, register=True)
@@ -4841,6 +4847,8 @@ async def raise_periscope(
         blocking = not qt_loop
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
+    app_icon = QIcon(ICON_PATH)
+    app.setWindowIcon(app_icon)
 
     # Bind only the main GUI (this) thread to a single CPU to reduce scheduling jitter
     _pin_current_thread_to_core()
@@ -4856,6 +4864,7 @@ async def raise_periscope(
         dot_px=density_dot,
         crs=crs,  # Pass the CRS object for network analysis
     )
+    viewer.setWindowIcon(app_icon)
     viewer.show()
 
     if blocking:

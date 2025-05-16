@@ -22,8 +22,8 @@ async def multisweep(
     npoints_per_sweep: int,
     amp: float,
     nsamps: int = 10,
-    # fit_resonances, approx_Q_for_fit, and center_iq_circle parameters removed
     global_phase_ref_to_zero: bool = True,
+    recalculate_center_frequencies: bool = True,
     *,
     module,
     progress_callback=None,
@@ -45,20 +45,27 @@ async def multisweep(
         nsamps (int, optional): Number of samples to average per frequency point. Defaults to 10.
         global_phase_ref_to_zero (bool, optional): If True, apply a global phase rotation so the first
                                                   measured point has zero phase. Defaults to True.
+        recalculate_center_frequencies (bool, optional): If True, the keys of the returned dictionary
+                                                       will be the recalculated center frequencies based
+                                                       on the minimum S21 magnitude point. Otherwise,
+                                                       keys are the original `center_frequencies`.
+                                                       Defaults to False.
         module (int | list[int]): The target readout module(s).
         progress_callback (callable, optional): Function called with (module, progress_percentage).
         data_callback (callable, optional): Function called with intermediate results during acquisition.
 
     Returns:
-        dict: A dictionary where keys are the original center_frequencies (float, Hz).
+        dict: A dictionary where keys are center frequencies (float, Hz). If
+              `recalculate_center_frequencies` is True, these keys are the recalculated
+              frequencies based on minimum S21 magnitude; otherwise, they are the
+              original `center_frequencies` passed as input.
               The value for each key is another dictionary containing the results for that sweep:
               {
-                  center_freq_1: {
+                  key_freq: { # key_freq is either original or recalculated center frequency
                       'frequencies': np.ndarray (Hz),
                       'iq_complex': np.ndarray (complex) - Original, stitched IQ data,
                       'phase_degrees': np.ndarray (degrees)
                   },
-                  center_freq_2: { ... },
                   ...
               }
               If running on multiple modules, returns a list of these dictionaries.
@@ -87,6 +94,7 @@ async def multisweep(
                 amp=amp,
                 nsamps=nsamps,
                 global_phase_ref_to_zero=global_phase_ref_to_zero,
+                recalculate_center_frequencies=recalculate_center_frequencies,
                 module=m, # Pass single module here
                 progress_callback=progress_callback,
                 data_callback=data_callback,
@@ -393,9 +401,27 @@ async def multisweep(
             'phase_degrees': phase_degrees
         }
         
+        current_key_for_results = cf # Default to original center frequency
+
+        if recalculate_center_frequencies:
+            if iq_complex.size > 0:
+                s21_mag = np.abs(iq_complex)
+                if np.any(s21_mag): # Check if there's any non-zero magnitude
+                    min_mag_idx = np.argmin(s21_mag)
+                    new_center_freq = frequencies[min_mag_idx]
+                    if np.isfinite(new_center_freq):
+                        current_key_for_results = new_center_freq
+                    else:
+                        warnings.warn(f"Recalculated center frequency for original cf {cf*1e-6:.3f} MHz (module {module}) is not finite. Using original cf as key.")
+                else:
+                    # All magnitudes are zero
+                    warnings.warn(f"Cannot recalculate center frequency for original cf {cf*1e-6:.3f} MHz (module {module}): all S21 magnitudes are zero. Using original cf as key.")
+            else:
+                # iq_complex is empty
+                warnings.warn(f"Cannot recalculate center frequency for original cf {cf*1e-6:.3f} MHz (module {module}): IQ data is empty. Using original cf as key.")
         
-        # Store results
-        results_by_center_freq[cf] = result_dict
+        # Store results using the determined key
+        results_by_center_freq[current_key_for_results] = result_dict
     
     # --- Hardware Cleanup ---
     try:

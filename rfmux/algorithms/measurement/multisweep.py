@@ -12,8 +12,7 @@ from collections import defaultdict
 
 from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
-# Import from the new analysis module
-from . import fitting
+# fitting import removed as it's no longer used directly here
 
 @macro(CRS, register=True)
 async def multisweep(
@@ -23,9 +22,7 @@ async def multisweep(
     npoints_per_sweep: int,
     amp: float,
     nsamps: int = 10,
-    fit_resonances: bool = False,
-    approx_Q_for_fit: float = 1e4, # Initial guess for Qr in fit_skewed
-    center_iq_circle: bool = False,
+    # fit_resonances, approx_Q_for_fit, and center_iq_circle parameters removed
     global_phase_ref_to_zero: bool = True,
     *,
     module,
@@ -46,9 +43,6 @@ async def multisweep(
         npoints_per_sweep (int): Number of points to measure within each sweep's span.
         amp (float): Amplitude (normalized DAC units) for all tones.
         nsamps (int, optional): Number of samples to average per frequency point. Defaults to 10.
-        fit_resonances (bool, optional): If True, fit a skewed Lorentzian to each sweep. Defaults to False.
-        approx_Q_for_fit (float, optional): Initial Qr guess for the skewed fit. Defaults to 1e4.
-        center_iq_circle (bool, optional): If True, center the IQ circle for each sweep. Defaults to False.
         global_phase_ref_to_zero (bool, optional): If True, apply a global phase rotation so the first
                                                   measured point has zero phase. Defaults to True.
         module (int | list[int]): The target readout module(s).
@@ -62,9 +56,7 @@ async def multisweep(
                   center_freq_1: {
                       'frequencies': np.ndarray (Hz),
                       'iq_complex': np.ndarray (complex) - Original, stitched IQ data,
-                      'phase_degrees': np.ndarray (degrees),
-                      'fit_params': dict | None - Results from fit_skewed (if fit_resonances=True),
-                      'iq_centered': np.ndarray | None - Centered IQ data (if center_iq_circle=True)
+                      'phase_degrees': np.ndarray (degrees)
                   },
                   center_freq_2: { ... },
                   ...
@@ -94,10 +86,6 @@ async def multisweep(
                 npoints_per_sweep=npoints_per_sweep,
                 amp=amp,
                 nsamps=nsamps,
-                # max_nco_span is hardcoded
-                fit_resonances=fit_resonances,
-                approx_Q_for_fit=approx_Q_for_fit,
-                center_iq_circle=center_iq_circle,
                 global_phase_ref_to_zero=global_phase_ref_to_zero,
                 module=m, # Pass single module here
                 progress_callback=progress_callback,
@@ -402,33 +390,9 @@ async def multisweep(
         result_dict = {
             'frequencies': frequencies,
             'iq_complex': iq_complex,
-            'phase_degrees': phase_degrees,
-            'fit_params': None,
-            'iq_centered': None
+            'phase_degrees': phase_degrees
         }
         
-        # Optional fitting
-        if fit_resonances:
-            try:
-                fit_params = fitting.fit_skewed(
-                    frequencies, iq_complex,
-                    approxQr=approx_Q_for_fit,
-                    normalize=True,
-                    fr_lim=None
-                )
-                result_dict['fit_params'] = fit_params
-            except Exception as e:
-                warnings.warn(f"Fitting failed for resonance at {cf*1e-6:.3f} MHz: {e}")
-                # result_dict['fit_params'] remains None
-        
-        # Optional IQ centering
-        if center_iq_circle:
-            try:
-                iq_centered = fitting.center_resonance_iq_circle(iq_complex)
-                result_dict['iq_centered'] = iq_centered
-            except Exception as e:
-                warnings.warn(f"IQ centering failed for resonance at {cf*1e-6:.3f} MHz: {e}")
-                # result_dict['iq_centered'] remains None
         
         # Store results
         results_by_center_freq[cf] = result_dict

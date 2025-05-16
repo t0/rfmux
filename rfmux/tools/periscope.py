@@ -1164,24 +1164,38 @@ class NetworkAnalysisTask(QRunnable):
         try:
             # Run the task and get the result
             result = self._loop.run_until_complete(self._task)
-            
-            # Extract and emit final data if task completed successfully
+
             if self._running and result:
-                fs_sorted, iq_sorted, phase_sorted = result
+                # Unpack the dictionary returned by take_netanal
+                fs_sorted = result['frequencies']
+                iq_sorted = result['iq_complex']
+                phase_sorted = result['phase_degrees']
                 amp_sorted = np.abs(iq_sorted)
-                
+
                 # Emit final data update
                 self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
                 self.signals.data_update_with_amp.emit(
                     self.module, fs_sorted, amp_sorted, phase_sorted, self.amplitude
                 )
                 self.signals.completed.emit(self.module)
+
         except asyncio.CancelledError:
             # Task was canceled, emit error signal
+            # No need to print traceback here as it's an expected cancellation
             self.signals.error.emit(f"Analysis canceled for module {self.module}")
-            
             # Make sure to clean up channels
-            self._loop.run_until_complete(self._cleanup_channels())
+            if self._loop and self._loop.is_running(): # Check if loop is still valid
+                self._loop.run_until_complete(self._cleanup_channels())
+        except KeyError as ke:
+            err_msg = f"KeyError accessing network analysis results for module {self.module}: {ke}. Expected keys 'frequencies', 'iq_complex', 'phase_degrees'."
+            print(f"ERROR: {err_msg}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            self.signals.error.emit(err_msg)
+        except Exception as e:
+            err_msg = f"Error processing network analysis results for module {self.module}: {type(e).__name__}: {e}"
+            print(f"ERROR: {err_msg}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr) # This will print the full stack trace
+            self.signals.error.emit(err_msg)
             
     def _cleanup_resources(self):
         """Clean up task and event loop resources."""
@@ -4753,6 +4767,19 @@ def main():
     app_icon = QIcon(ICON_PATH)
     app.setWindowIcon(app_icon)
 
+    # --- Global Exception Hook ---
+    def global_exception_hook(exctype, value, tb):
+        # Ensure traceback is imported if not already
+        import traceback as tb_module
+        print("Unhandled exception in Periscope:", file=sys.stderr)
+        tb_module.print_exception(exctype, value, tb, file=sys.stderr)
+        # Optionally, re-raise or call sys.__excepthook__ if you want Python's default handling too
+        # For a GUI app, often just logging is preferred over crashing.
+        # sys.__excepthook__(exctype, value, tb)
+
+    sys.excepthook = global_exception_hook
+    # --- End Global Exception Hook ---
+
     # Bind only the main GUI (this) thread to a single CPU to reduce scheduling jitter
     _pin_current_thread_to_core()
 
@@ -4849,6 +4876,23 @@ async def raise_periscope(
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
     app_icon = QIcon(ICON_PATH)
     app.setWindowIcon(app_icon)
+
+    # --- Global Exception Hook (also for library use) ---
+    # It's good practice to set this up if Periscope might be run programmatically
+    # where the main() function isn't the entry point.
+    # However, be cautious if the host application (e.g., Jupyter) has its own hook.
+    if not hasattr(sys, '_periscope_excepthook_installed'): # Avoid multiple installs
+        def global_exception_hook_lib(exctype, value, tb):
+            import traceback as tb_module
+            print("Unhandled exception in Periscope (library mode):", file=sys.stderr)
+            tb_module.print_exception(exctype, value, tb, file=sys.stderr)
+        
+        # Check if we are in an environment that might already have a complex hook (like IPython)
+        # A more robust check might be needed for various environments.
+        if _get_ipython() is None: # Simple check: if not in IPython, assume it's safe to set.
+            sys.excepthook = global_exception_hook_lib
+            sys._periscope_excepthook_installed = True # Mark as installed
+    # --- End Global Exception Hook ---
 
     # Bind only the main GUI (this) thread to a single CPU to reduce scheduling jitter
     _pin_current_thread_to_core()

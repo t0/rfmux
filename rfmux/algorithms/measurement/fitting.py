@@ -295,3 +295,221 @@ def center_resonance_iq_circle(s21_iq):
         return s21_iq
 
 # --- More functions will be added below ---
+
+def find_resonances(
+    frequencies: np.ndarray,
+    iq_complex: np.ndarray,
+    expected_resonances: int | None = None,
+    min_dip_depth_db: float = 1.0,
+    min_Q: float = 1e4,
+    max_Q: float = 1e7,
+    min_resonance_separation_hz: float = 100e3,
+    data_exponent: float = 2.0,
+    module_identifier: str | int | None = None,
+):
+    """
+    Finds resonances (dips) in network analysis data.
+
+    Parameters
+    ----------
+    frequencies : np.ndarray
+        Sorted frequency points (Hz).
+    iq_complex : np.ndarray
+        Complex I/Q data corresponding to 'frequencies'.
+    expected_resonances : int | None, optional
+        Optional target number of resonances for resilience logic, by default None.
+    min_dip_depth_db : float, optional
+        Minimum depth (prominence) a dip must have in dB to be considered a peak.
+        Corresponds to `prominence` in `scipy.signal.find_peaks`, by default 1.0.
+    min_Q : float, optional
+        Minimum estimated quality factor. Used to calculate the maximum allowed width
+        of a resonance feature, by default 1e4.
+    max_Q : float, optional
+        Maximum estimated quality factor. Used to calculate the minimum allowed width
+        of a resonance feature, by default 1e7.
+    min_resonance_separation_hz : float, optional
+        Minimum frequency separation between identified peaks. Corresponds to `distance`
+        in `scipy.signal.find_peaks`, by default 100e3.
+    data_exponent : float, optional
+        Exponent applied to the magnitude data before dB conversion to potentially
+        enhance peak visibility, by default 2.0.
+    module_identifier : str | int | None, optional
+        An identifier for the module/data source, used for more informative warnings.
+
+    Returns
+    -------
+    dict
+        A dictionary containing:
+        - 'resonance_frequencies': list[float] - Identified resonance peak frequencies (Hz).
+        - 'resonances_details': list[dict] - Detailed information for each resonance.
+                                             Each dict contains: 'frequency', 'prominence_db',
+                                             'width_hz', 'q_estimated'.
+        Returns empty lists if no resonances are found or an error occurs.
+    """
+    results = {
+        'resonance_frequencies': [],
+        'resonances_details': []
+    }
+    if len(frequencies) < 2 or len(iq_complex) < 2 or len(frequencies) != len(iq_complex):
+        warnings.warn(f"Resonance finding skipped for {module_identifier or 'data'}: Insufficient or mismatched data points.")
+        return results
+
+    try:
+        # a. Preprocessing:
+        magnitude = np.abs(iq_complex)
+        if np.any(magnitude <= 1e-18):
+            min_positive = np.min(magnitude[magnitude > 1e-18]) if np.any(magnitude > 1e-18) else 1e-9
+            magnitude = np.maximum(magnitude, min_positive * 0.1)
+
+        ref_mag = np.median(magnitude[-min(10, len(magnitude)):])
+        if ref_mag <= 1e-18: ref_mag = 1.0
+
+        shifted_mag = magnitude**data_exponent
+        ref_shifted = ref_mag**data_exponent
+        mag_db = 20 * np.log10(shifted_mag / ref_shifted)
+
+        # b. Calculate find_peaks Parameters:
+        pt_spacing = np.mean(np.diff(frequencies))
+        if not np.isfinite(pt_spacing) or pt_spacing <= 0:
+            pt_spacing = (frequencies[-1] - frequencies[0]) / (len(frequencies) - 1) if len(frequencies) > 1 else 1e6
+
+        median_freq = np.median(frequencies)
+        max_width_hz = median_freq / min_Q if min_Q > 0 else np.inf
+        min_width_hz = median_freq / max_Q if max_Q > 0 else 0
+
+        max_width_pts = np.ceil(max_width_hz / pt_spacing) if pt_spacing > 0 and np.isfinite(max_width_hz) else len(frequencies)
+        min_width_pts = np.ceil(min_width_hz / pt_spacing) if pt_spacing > 0 and np.isfinite(min_width_hz) else 0
+        max_width_pts = max(1, int(max_width_pts))
+        min_width_pts = max(0, int(min(min_width_pts, max_width_pts)))
+
+
+        min_separation_pts = np.ceil(min_resonance_separation_hz / pt_spacing) if pt_spacing > 0 else 1
+        min_separation_pts = max(1, int(min_separation_pts))
+
+        # c. Call find_peaks:
+        # Ensure find_peaks is imported if not already at the top of the file
+        from scipy import signal as sp_signal # Use an alias to avoid conflict if 'signal' is used elsewhere
+        peaks, properties = sp_signal.find_peaks(
+            -mag_db,
+            prominence=min_dip_depth_db,
+            width=(min_width_pts, max_width_pts),
+            distance=min_separation_pts
+        )
+
+        # d. Apply Resilience Logic:
+        if expected_resonances is not None and len(peaks) != expected_resonances:
+            if len(peaks) > expected_resonances:
+                prominences = properties['prominences']
+                sorted_prominence_indices = np.argsort(prominences)[::-1]
+                top_indices_unsorted = sorted_prominence_indices[:expected_resonances]
+                top_indices_sorted = np.sort(top_indices_unsorted)
+                peaks = peaks[top_indices_sorted]
+                properties = {key: val[top_indices_sorted] for key, val in properties.items()}
+                warnings.warn(f"Found {len(prominences)} peaks for {module_identifier or 'data'}, selected top {expected_resonances} most prominent.")
+            else:
+                warnings.warn(f"Found {len(peaks)} peaks for {module_identifier or 'data'}, expected {expected_resonances}. Consider adjusting parameters.")
+
+        # e. Format Results:
+        found_frequencies = frequencies[peaks]
+        results['resonance_frequencies'] = found_frequencies.tolist()
+
+        resonances_details_list = []
+        for i, peak_idx in enumerate(peaks):
+            freq_hz = found_frequencies[i]
+            width_pts_val = properties['widths'][i]
+            width_hz_val = width_pts_val * pt_spacing
+            q_est_val = freq_hz / width_hz_val if width_hz_val > 0 else np.inf
+            resonances_details_list.append({
+                'frequency': freq_hz,
+                'prominence_db': properties['prominences'][i],
+                'width_hz': width_hz_val,
+                'q_estimated': q_est_val
+            })
+        results['resonances_details'] = resonances_details_list
+
+    except Exception as e:
+        warnings.warn(f"Resonance finding failed for {module_identifier or 'data'}: {type(e).__name__} - {e}. Returning empty lists.")
+        results['resonance_frequencies'] = []
+        results['resonances_details'] = []
+
+    return results
+
+
+def process_multisweep_results(
+    multisweep_data_dict: dict,
+    approx_Q_for_fit: float = 1e4,
+    fit_resonances: bool = True,
+    center_iq_circle: bool = True,
+    normalize_fit: bool = True,
+    fr_lim_fit: float | None = None
+):
+    """
+    Processes the output of the multisweep measurement function to add fitting
+    and IQ centering results.
+
+    Args:
+        multisweep_data_dict (dict): The dictionary returned by the
+                                     `rfmux.algorithms.measurement.multisweep.multisweep` function.
+                                     It's expected to have center frequencies as keys, and each
+                                     value is a dict with 'frequencies' and 'iq_complex'.
+        approx_Q_for_fit (float, optional): Initial Qr guess for the skewed fit.
+                                            Defaults to 1e4.
+        fit_resonances (bool, optional): If True, perform skewed Lorentzian fitting.
+                                         Defaults to True.
+        center_iq_circle (bool, optional): If True, perform IQ circle centering.
+                                           Defaults to True.
+        normalize_fit (bool, optional): Whether to normalize S21 data before fitting in `fit_skewed`.
+                                        Defaults to True.
+        fr_lim_fit (float | None, optional): Fit fr only within +/- fr_lim Hz of the center frequency
+                                             in `fit_skewed`. Defaults to None (use full range).
+
+    Returns:
+        dict: The input `multisweep_data_dict` with 'fit_params' and 'iq_centered'
+              added to each sub-dictionary if the respective operations were performed.
+    """
+    if not isinstance(multisweep_data_dict, dict):
+        warnings.warn("process_multisweep_results: input is not a dictionary. Returning as is.")
+        return multisweep_data_dict
+
+    for cf, data in multisweep_data_dict.items():
+        if not isinstance(data, dict):
+            warnings.warn(f"process_multisweep_results: item for cf {cf} is not a dictionary. Skipping.")
+            continue
+
+        frequencies = data.get('frequencies')
+        iq_complex = data.get('iq_complex')
+
+        if frequencies is None or iq_complex is None:
+            warnings.warn(f"process_multisweep_results: 'frequencies' or 'iq_complex' missing for cf {cf}. Skipping.")
+            continue
+
+        # Initialize keys in case operations are skipped
+        data['fit_params'] = None
+        data['iq_centered'] = None
+
+        if fit_resonances:
+            try:
+                fit_params_result = fit_skewed(
+                    frequencies, iq_complex,
+                    approxQr=approx_Q_for_fit,
+                    normalize=normalize_fit,
+                    fr_lim=fr_lim_fit
+                )
+                data['fit_params'] = fit_params_result
+            except Exception as e:
+                warnings.warn(f"Fitting failed for resonance at {cf*1e-6:.3f} MHz during post-processing: {e}")
+                # data['fit_params'] remains None
+
+        if center_iq_circle:
+            try:
+                # If fitting was done and successful, and resulted in centered data,
+                # it might be preferable to center the *original* iq_complex
+                # or the one from fit_params if it's more robust.
+                # For now, always center the original iq_complex.
+                iq_centered_result = center_resonance_iq_circle(iq_complex)
+                data['iq_centered'] = iq_centered_result
+            except Exception as e:
+                warnings.warn(f"IQ centering failed for resonance at {cf*1e-6:.3f} MHz during post-processing: {e}")
+                # data['iq_centered'] remains None
+                
+    return multisweep_data_dict

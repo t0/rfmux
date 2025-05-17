@@ -144,7 +144,9 @@ def ChannelMappingCSVConstructor(loader, node):
                 )
 
             case _:
-                raise yaml.YAMLError(f"Unable to parse {_} into a ReadoutChannel")
+                raise yaml.YAMLError(
+                    f"Unable to parse {mapping['readout_channel']} into a ReadoutChannel"
+                )
 
         # Parse 'resonator' entry into a Resonator mapping
         if "resonator" not in mapping:
@@ -160,7 +162,9 @@ def ChannelMappingCSVConstructor(loader, node):
                 )
 
             case _:
-                raise yaml.YAMLError(f"Unable to parse {_} into Resonator mapping!")
+                raise yaml.YAMLError(
+                    f"Unable to parse {mapping['resonator']} into Resonator mapping!"
+                )
 
     loader.hwm.add_all([ChannelMapping(**x) for x in dr])
 

@@ -135,8 +135,8 @@ _check_xcb_cursor_runtime()
 
 # Import PyQt only after checking XCB dependencies
 from PyQt6 import QtCore, QtWidgets
-from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, Qt
-from PyQt6.QtGui import QFont, QIntValidator, QIcon
+from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, Qt, QRegularExpression
+from PyQt6.QtGui import QFont, QIntValidator, QIcon, QDoubleValidator, QRegularExpressionValidator
 import pyqtgraph as pg
 
 # Imports for embedded iPython console
@@ -165,6 +165,7 @@ from ..core.transferfunctions import (
     recalculate_displayed_phase,
     EFFECTIVE_PROPAGATION_SPEED, # For direct use if needed, though functions encapsulate it
 )
+from ..algorithms.measurement import fitting # Added for find_resonances
 from ..core.hardware_map import macro
 from ..core.schema import CRS
 
@@ -1888,6 +1889,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.original_params = {}  # Initial parameters
         self.current_params = {}   # Most recently used parameters
         self.dac_scales = dac_scales or {}  # Store DAC scales
+        self.resonance_lines_mag = {} # Store resonance lines for magnitude plots {module: [line_item, ...]}
+        self.resonance_lines_phase = {} # Store resonance lines for phase plots {module: [line_item, ...]}
         
         # Setup the UI components
         self._setup_ui()
@@ -1938,12 +1941,18 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         # Re-run analysis button
         rerun_btn = QtWidgets.QPushButton("Re-run Analysis")
         rerun_btn.clicked.connect(self._rerun_analysis)
-        toolbar.addWidget(rerun_btn)        
+        toolbar.addWidget(rerun_btn)
+
+        # Find Resonances button
+        find_res_btn = QtWidgets.QPushButton("Find Resonances")
+        find_res_btn.setToolTip("Identify resonance frequencies from the current sweep data.")
+        find_res_btn.clicked.connect(self._show_find_resonances_dialog)
+        toolbar.addWidget(find_res_btn)
 
         # Export button
         export_btn = QtWidgets.QPushButton("Export Data")
         export_btn.clicked.connect(self._export_data)
-        toolbar.addWidget(export_btn) 
+        toolbar.addWidget(export_btn)
         
         # Add spacer to push the unit controls to the far right
         spacer = QtWidgets.QWidget()
@@ -2085,7 +2094,9 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 'amp_legend': amp_legend,
                 'phase_legend': phase_legend,
                 'amp_curves': {},  # Will store multiple curves for different amplitudes
-                'phase_curves': {}  # Will store multiple curves for different amplitudes
+                'phase_curves': {},  # Will store multiple curves for different amplitudes
+                'resonance_lines_mag': [], # For storing magnitude resonance lines
+                'resonance_lines_phase': [] # For storing phase resonance lines
             }
             
             # Apply zoom box mode
@@ -2226,7 +2237,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         """Update plot labels based on current unit mode and normalization state."""
         if self.normalize_magnitudes:
             if self.unit_mode == "dbm":
-                plot.setLabel('left', 'Normalized Power', units='dBm')
+                plot.setLabel('left', 'Normalized Power', units='dB') # Corrected units to dB
             else:
                 plot.setLabel('left', 'Normalized Magnitude', units='')
         else:
@@ -2316,6 +2327,189 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         
         # Call parent implementation
         super().closeEvent(event)
+
+    def _show_find_resonances_dialog(self):
+        """Show the dialog to configure and run find_resonances."""
+        current_tab_index = self.tabs.currentIndex()
+        if current_tab_index < 0:
+            QtWidgets.QMessageBox.warning(self, "No Module Selected", "Please select a module tab to analyze.")
+            return
+        
+        active_module_text = self.tabs.tabText(current_tab_index)
+        try:
+            active_module = int(active_module_text.split(" ")[1])
+        except (IndexError, ValueError):
+            QtWidgets.QMessageBox.critical(self, "Error", f"Could not determine active module from tab: {active_module_text}")
+            return
+
+        if not self.raw_data or active_module not in self.raw_data or not self.raw_data[active_module]:
+            QtWidgets.QMessageBox.information(self, "No Data", f"No sweep data available for Module {active_module} to find resonances.")
+            return
+
+        dialog = FindResonancesDialog(self)
+        if dialog.exec():
+            params = dialog.get_parameters()
+            if params:
+                self._run_and_plot_resonances(active_module, params)
+
+    def _run_and_plot_resonances(self, active_module: int, find_resonances_params: dict):
+        """Run find_resonances and plot the results on the active module's plots."""
+        module_sweeps = self.raw_data.get(active_module)
+        if not module_sweeps:
+            QtWidgets.QMessageBox.warning(self, "No Data", f"No data found for module {active_module}.")
+            return
+
+        target_sweep_key = None
+        # Try to find the last run amplitude sweep
+        ordered_amplitudes_run = self.original_params.get('amps', [])
+        if ordered_amplitudes_run:
+            for amp_setting in reversed(ordered_amplitudes_run):
+                sweep_key = f"{active_module}_{amp_setting}"
+                if sweep_key in module_sweeps:
+                    target_sweep_key = sweep_key
+                    break
+        
+        # Fallback to 'default' if no amplitude-specific sweep found or if 'amps' was empty
+        if target_sweep_key is None and 'default' in module_sweeps:
+            target_sweep_key = 'default'
+
+        if target_sweep_key is None:
+            # Fallback to the very last key added to the dictionary if all else fails
+            if module_sweeps:
+                target_sweep_key = list(module_sweeps.keys())[-1]
+
+
+        if target_sweep_key is None:
+            QtWidgets.QMessageBox.warning(self, "No Data", f"Could not determine which sweep to analyze for module {active_module}.")
+            return
+
+        # Extract data from the chosen sweep
+        data_tuple = module_sweeps[target_sweep_key]
+        
+        if len(data_tuple) == 5: # New format with amplitude
+            frequencies, _, _, iq_complex, _ = data_tuple
+        elif len(data_tuple) == 4: # Old format or default
+            frequencies, _, _, iq_complex = data_tuple
+        else:
+            QtWidgets.QMessageBox.critical(self, "Data Error", "Unexpected data format for the selected sweep.")
+            return
+
+        if len(frequencies) == 0 or len(iq_complex) == 0:
+            QtWidgets.QMessageBox.information(self, "No Data", "Selected sweep has no frequency or IQ data.")
+            return
+            
+        # Run find_resonances
+        try:
+            resonance_results = fitting.find_resonances(
+                frequencies=frequencies,
+                iq_complex=iq_complex,
+                module_identifier=f"Module {active_module} (Sweep: {target_sweep_key})",
+                **find_resonances_params
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Resonance Finding Error", f"Error calling find_resonances: {str(e)}")
+            traceback.print_exc()
+            return
+
+        # Plot the results
+        if active_module in self.plots:
+            plot_info = self.plots[active_module]
+            amp_plot_item = plot_info['amp_plot'].getPlotItem()
+            phase_plot_item = plot_info['phase_plot'].getPlotItem()
+            amp_legend = plot_info['amp_legend']
+            phase_legend = plot_info['phase_legend']
+
+            # 1. Clear ALL previous resonance lines from plots and stored lists
+            for line in plot_info.get('resonance_lines_mag', []):
+                amp_plot_item.removeItem(line)
+            plot_info['resonance_lines_mag'] = []
+
+            for line in plot_info.get('resonance_lines_phase', []):
+                phase_plot_item.removeItem(line)
+            plot_info['resonance_lines_phase'] = []
+
+            # 2. Clear old "Identified Resonances" legend entries
+            legend_label_text_base = "Identified Resonances"
+            for legend_obj in [amp_legend, phase_legend]:
+                if legend_obj: # Check if legend exists
+                    # Iterate over a copy of items for safe removal
+                    items_to_remove_text = [label.text for _, label in list(legend_obj.items) if label.text.startswith(legend_label_text_base)]
+                    for name_text in items_to_remove_text:
+                        try:
+                            legend_obj.removeItem(name_text)
+                        except Exception: 
+                            pass # Item might have been removed by side effect or already gone
+            
+            res_freqs_hz = resonance_results.get('resonance_frequencies', [])
+
+            if not res_freqs_hz:
+                QtWidgets.QMessageBox.information(self, "No Resonances Found", 
+                                                  f"No resonances were identified for Module {active_module} with the given parameters.")
+                return # Important to return if no resonances, so no legend item is added
+
+            # 3. Add new lines (all initially visible)
+            line_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
+            for res_freq_hz in res_freqs_hz:
+                line_mag = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
+                amp_plot_item.addItem(line_mag)
+                plot_info['resonance_lines_mag'].append(line_mag)
+
+                line_phase = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
+                phase_plot_item.addItem(line_phase)
+                plot_info['resonance_lines_phase'].append(line_phase)
+
+            # 4. Add new legend entries and attach click handlers
+            legend_label_text = f"{legend_label_text_base} ({len(res_freqs_hz)})"
+
+            # Magnitude Legend
+            if amp_legend:
+                dummy_item_mag = pg.PlotDataItem(pen=line_pen)
+                dummy_item_mag.setVisible(True) 
+                amp_legend.addItem(dummy_item_mag, name=legend_label_text)
+                # Find the added legend item (sample and label) to attach custom click logic
+                # Iterate over a copy of items for safety if legend.items changes during iteration (though unlikely here)
+                for sample, label in list(amp_legend.items): 
+                    if label.text == legend_label_text:
+                        # Use a factory function to ensure correct variable capture in lambda/closure
+                        def create_click_handler(bound_sample, bound_label, lines_list):
+                            def handler(evt):
+                                is_visible = not bound_sample.isVisible() # Toggle state
+                                bound_sample.setVisible(is_visible) # Update dummy item
+                                for line_item in lines_list:
+                                    line_item.setVisible(is_visible)
+                                opacity = 1.0 if is_visible else 0.3
+                                bound_sample.setOpacity(opacity)
+                                bound_label.setOpacity(opacity)
+                            return handler
+                        
+                        clickHandler = create_click_handler(sample, label, plot_info['resonance_lines_mag'])
+                        label.mousePressEvent = clickHandler
+                        sample.mousePressEvent = clickHandler 
+                        break
+            
+            # Phase Legend
+            if phase_legend:
+                dummy_item_phase = pg.PlotDataItem(pen=line_pen)
+                dummy_item_phase.setVisible(True)
+                phase_legend.addItem(dummy_item_phase, name=legend_label_text)
+                for sample, label in list(phase_legend.items):
+                    if label.text == legend_label_text:
+                        def create_click_handler(bound_sample, bound_label, lines_list):
+                            def handler(evt):
+                                is_visible = not bound_sample.isVisible() # Toggle state
+                                bound_sample.setVisible(is_visible) # Update dummy item
+                                for line_item in lines_list:
+                                    line_item.setVisible(is_visible)
+                                opacity = 1.0 if is_visible else 0.3
+                                bound_sample.setOpacity(opacity)
+                                bound_label.setOpacity(opacity)
+                            return handler
+
+                        clickHandler = create_click_handler(sample, label, plot_info['resonance_lines_phase'])
+                        label.mousePressEvent = clickHandler
+                        sample.mousePressEvent = clickHandler
+                        break
+
 
     def _check_all_complete(self):
         """
@@ -2863,6 +3057,91 @@ class InitializeCRSDialog(QtWidgets.QDialog):
 
     def get_clear_channels_state(self) -> bool:
         return self.cb_clear_channels.isChecked()
+
+# ───────────────────────── Find Resonances Dialog ─────────────────────────
+class FindResonancesDialog(QtWidgets.QDialog):
+    """Dialog for configuring parameters for fitting.find_resonances."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Find Resonances Parameters")
+        self.setModal(True)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QtWidgets.QFormLayout(self)
+
+        # expected_resonances (int or None)
+        self.expected_resonances_edit = QtWidgets.QLineEdit()
+        self.expected_resonances_edit.setPlaceholderText("Optional (e.g., 10)")
+        # Validator for integer or empty string
+        regex_int_or_empty = QRegularExpression("^$|^[1-9][0-9]*$") # Empty or positive integer
+        self.expected_resonances_edit.setValidator(QRegularExpressionValidator(regex_int_or_empty, self))
+        layout.addRow("Expected Resonances:", self.expected_resonances_edit)
+
+        # min_dip_depth_db (float)
+        self.min_dip_depth_db_edit = QtWidgets.QLineEdit(str(1.0)) # Default from find_resonances
+        self.min_dip_depth_db_edit.setValidator(QDoubleValidator(0.01, 100.0, 2, self)) # Min, Max, Decimals
+        layout.addRow("Min Dip Depth (dB):", self.min_dip_depth_db_edit)
+
+        # min_Q (float)
+        self.min_Q_edit = QtWidgets.QLineEdit(str(1e4)) # Default
+        self.min_Q_edit.setValidator(QDoubleValidator(1.0, 1e9, 0, self))
+        layout.addRow("Min Q:", self.min_Q_edit)
+
+        # max_Q (float)
+        self.max_Q_edit = QtWidgets.QLineEdit(str(1e7)) # Default
+        self.max_Q_edit.setValidator(QDoubleValidator(1.0, 1e9, 0, self))
+        layout.addRow("Max Q:", self.max_Q_edit)
+
+        # min_resonance_separation_mhz (float, will be converted to Hz)
+        self.min_resonance_separation_mhz_edit = QtWidgets.QLineEdit(str(0.1)) # Default 100e3 Hz = 0.1 MHz
+        self.min_resonance_separation_mhz_edit.setValidator(QDoubleValidator(0.001, 1000.0, 3, self))
+        layout.addRow("Min Separation (MHz):", self.min_resonance_separation_mhz_edit)
+        
+        # data_exponent (float)
+        self.data_exponent_edit = QtWidgets.QLineEdit(str(2.0)) # Default
+        self.data_exponent_edit.setValidator(QDoubleValidator(0.1, 10.0, 2, self))
+        layout.addRow("Data Exponent:", self.data_exponent_edit)
+
+        # Buttons
+        self.button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addRow(self.button_box)
+
+    def get_parameters(self) -> dict | None:
+        params = {}
+        try:
+            # Expected Resonances (optional int)
+            expected_text = self.expected_resonances_edit.text().strip()
+            if expected_text:
+                params['expected_resonances'] = int(expected_text)
+            else:
+                params['expected_resonances'] = None
+
+            params['min_dip_depth_db'] = float(self.min_dip_depth_db_edit.text())
+            params['min_Q'] = float(self.min_Q_edit.text())
+            params['max_Q'] = float(self.max_Q_edit.text())
+            
+            min_sep_mhz = float(self.min_resonance_separation_mhz_edit.text())
+            params['min_resonance_separation_hz'] = min_sep_mhz * 1e6 # Convert MHz to Hz
+            
+            params['data_exponent'] = float(self.data_exponent_edit.text())
+            
+            # Basic validation
+            if params['min_Q'] >= params['max_Q']:
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "Min Q must be less than Max Q.")
+                return None
+            if params['min_dip_depth_db'] <=0:
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "Min Dip Depth must be positive.")
+                return None
+
+            return params
+        except ValueError as e:
+            QtWidgets.QMessageBox.critical(self, "Input Error", f"Invalid input: {str(e)}")
+            return None
 
 # ───────────────────────── Main Application ─────────────────────────
 class Periscope(QtWidgets.QMainWindow):

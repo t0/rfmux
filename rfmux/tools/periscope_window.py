@@ -1512,6 +1512,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         
         self.active_module_for_dac = self.target_module # For UnitConverter consistency
 
+        # For showing center frequency lines
+        self.show_cf_lines_cb = None
+        self.cf_lines_mag = {} # {amp_val: [line_item, ...]}
+        self.cf_lines_phase = {}
+
         self._setup_ui()
         self.resize(1200, 800)
 
@@ -1561,6 +1566,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.normalize_checkbox.setChecked(self.normalize_magnitudes)
         self.normalize_checkbox.toggled.connect(self._toggle_normalization)
         toolbar.addWidget(self.normalize_checkbox)
+
+        self.show_cf_lines_cb = QtWidgets.QCheckBox("Show Center Frequencies")
+        self.show_cf_lines_cb.setChecked(False) # Default to not showing
+        self.show_cf_lines_cb.toggled.connect(self._toggle_cf_lines_visibility)
+        toolbar.addWidget(self.show_cf_lines_cb)
 
         self._setup_unit_controls(toolbar)
         self._setup_zoom_box_control(toolbar)
@@ -1703,8 +1713,19 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         
         # self.curves_mag and self.curves_phase are not strictly needed anymore with this redraw logic,
         # but can be kept if direct curve manipulation is added later. For now, clear them.
-        self.curves_mag.clear() 
+        self.curves_mag.clear()
         self.curves_phase.clear()
+
+        # Clear existing CF lines from plots and storage
+        for amp_val_lines in self.cf_lines_mag.values():
+            for line in amp_val_lines:
+                self.combined_mag_plot.removeItem(line)
+        self.cf_lines_mag.clear()
+
+        for amp_val_lines in self.cf_lines_phase.values():
+            for line in amp_val_lines:
+                self.combined_phase_plot.removeItem(line)
+        self.cf_lines_phase.clear()
 
         num_amps = len(self.results_by_amplitude)
         if num_amps == 0:
@@ -1801,12 +1822,25 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 if amp_val not in self.curves_mag: self.curves_mag[amp_val] = {}
                 self.curves_mag[amp_val][cf] = mag_curve
 
-
                 # Plot phase curve for this (amp, cf)
                 phase_curve = self.combined_phase_plot.plot(pen=pen) # No name
                 phase_curve.setData(freqs_hz, phase_deg)
                 if amp_val not in self.curves_phase: self.curves_phase[amp_val] = {}
                 self.curves_phase[amp_val][cf] = phase_curve
+
+                # If "Show Center Frequencies" is checked, add vertical lines for each cf_key
+                if self.show_cf_lines_cb and self.show_cf_lines_cb.isChecked():
+                    # The key 'cf' here is the center frequency for this specific sweep data
+                    # (which could be original or recalculated based on how multisweep algorithm was run)
+                    cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2) # Thinner dashed line
+                    
+                    mag_cf_line = pg.InfiniteLine(pos=cf, angle=90, pen=cf_line_pen, movable=False)
+                    self.combined_mag_plot.addItem(mag_cf_line)
+                    self.cf_lines_mag.setdefault(amp_val, []).append(mag_cf_line)
+
+                    phase_cf_line = pg.InfiniteLine(pos=cf, angle=90, pen=cf_line_pen, movable=False)
+                    self.combined_phase_plot.addItem(phase_cf_line)
+                    self.cf_lines_phase.setdefault(amp_val, []).append(phase_cf_line)
         
         self.combined_mag_plot.autoRange()
         self.combined_phase_plot.autoRange()
@@ -1863,19 +1897,21 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         if not self.initial_params.get('resonance_frequencies'):
             QtWidgets.QMessageBox.warning(self, "Cannot Re-run", "Initial resonance frequencies not available for re-run.")
             return
+        
+        current_recalc_cf_state = self.initial_params.get('recalculate_center_frequencies', True)
+        current_perform_fits_state = self.initial_params.get('perform_fits', True)
 
-        # Need to import MultisweepDialog if not already.
-        # For now, assume it's available in the scope (e.g. imported at top of file)
-        # from .periscope_dialogs import MultisweepDialog # This would be needed
+        dialog_params = self.initial_params.copy()
+        dialog_params['recalculate_center_frequencies'] = current_recalc_cf_state
+        dialog_params['perform_fits'] = current_perform_fits_state
         
         dialog = MultisweepDialog(
-            parent=self, # Corrected parent argument
+            parent=self,
             resonance_frequencies=self.initial_params['resonance_frequencies'],
             dac_scales=self.dac_scales,
             current_module=self.target_module,
-            initial_params=self.initial_params.copy() # Pass current initial_params
+            initial_params=dialog_params
         )
-        # The dialog's _setup_ui will now use these initial_params
 
         if dialog.exec():
             new_params = dialog.get_parameters()
@@ -1904,3 +1940,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         if hasattr(self.parent(), 'stop_multisweep_task_for_window'):
             self.parent().stop_multisweep_task_for_window(self)
         super().closeEvent(event)
+
+    def _toggle_cf_lines_visibility(self, checked):
+        """Toggle visibility of center frequency lines or redraw plots."""
+        # Simplest is to just trigger a full redraw, which will respect the checkbox state
+        self._redraw_plots()

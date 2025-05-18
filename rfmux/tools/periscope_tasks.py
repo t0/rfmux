@@ -728,7 +728,8 @@ class MultisweepTask(QRunnable):
                     'data_callback': self._data_callback_wrapper,
                     # Pass other relevant params like global_phase_ref_to_zero if needed
                     'global_phase_ref_to_zero': self.params.get('global_phase_ref_to_zero', True),
-                    'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', False),
+                    # Use the value from dialog, defaulting to True if not specified
+                    'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', True),
                 }
 
                 multisweep_coro = self.crs.multisweep(**multisweep_params_for_call)

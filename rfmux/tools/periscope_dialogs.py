@@ -860,6 +860,15 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.perform_fits_cb = QtWidgets.QCheckBox("Perform fits after sweep")
         self.perform_fits_cb.setChecked(default_perform_fits)
         param_form_layout.addRow("", self.perform_fits_cb)
+
+        default_recalc_cf = self.params.get('recalculate_center_frequencies', True)
+        self.recalculate_cf_cb = QtWidgets.QCheckBox("Recalculate Center Frequencies (S21 min)")
+        self.recalculate_cf_cb.setChecked(default_recalc_cf)
+        self.recalculate_cf_cb.setToolTip(
+            "If checked, the actual center frequency for each sweep will be recalculated based on the S21 minimum.\n"
+            "This recalculated frequency will be used as the key in the results and for plotting center frequency markers."
+        )
+        param_form_layout.addRow("", self.recalculate_cf_cb)
         
         layout.addWidget(param_group)
 
@@ -894,6 +903,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             params['npoints_per_sweep'] = int(self.npoints_edit.text())
             params['nsamps'] = int(self.nsamps_edit.text())
             params['perform_fits'] = self.perform_fits_cb.isChecked()
+            params['recalculate_center_frequencies'] = self.recalculate_cf_cb.isChecked() # Add new param
             params['resonance_frequencies'] = self.resonance_frequencies # Pass along the target frequencies
             params['module'] = self.current_module # Pass the module
 

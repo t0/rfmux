@@ -9,8 +9,9 @@ from .periscope_dialogs import (
     NetworkAnalysisParamsDialog,
     InitializeCRSDialog,
     FindResonancesDialog,
+    MultisweepDialog, # Added MultisweepDialog
 )
-from .periscope_window import NetworkAnalysisWindow
+from .periscope_window import NetworkAnalysisWindow, MultisweepWindow # Added MultisweepWindow
 
 __all__ = [
     "NetworkAnalysisDialogBase",
@@ -19,4 +20,6 @@ __all__ = [
     "NetworkAnalysisWindow",
     "InitializeCRSDialog",
     "FindResonancesDialog",
+    "MultisweepDialog", # Added MultisweepDialog
+    "MultisweepWindow", # Added MultisweepWindow
 ]

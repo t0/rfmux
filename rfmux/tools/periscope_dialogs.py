@@ -766,3 +766,151 @@ class FindResonancesDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "Input Error", f"Invalid input: {str(e)}")
             return None
 
+# ───────────────────────── Multisweep Dialog ─────────────────────────
+class MultisweepDialog(NetworkAnalysisDialogBase):
+    """Dialog for configuring multisweep parameters."""
+    def __init__(self, parent=None, resonance_frequencies: list[float] | None = None, dac_scales=None, current_module=None, initial_params=None):
+        super().__init__(parent, params=initial_params, dac_scales=dac_scales) # Pass initial_params
+        self.resonance_frequencies = resonance_frequencies or []
+        self.current_module = current_module # Store the module this dialog is for
+
+        self.setWindowTitle("Multisweep Configuration")
+        self.setModal(True)
+        self._setup_ui()
+
+        # Fetch DAC scales if CRS is available from parent
+        # The NetworkAnalysisDialogBase expects dac_scales to be populated for dBm conversion.
+        # If parent is NetworkAnalysisWindow, it has a crs object.
+        if parent and hasattr(parent, 'parent') and parent.parent() is not None:
+            main_periscope_window = parent.parent() # This should be the Periscope main window instance
+            if hasattr(main_periscope_window, 'crs') and main_periscope_window.crs is not None:
+                # If dac_scales were not passed or are empty, fetch them.
+                if not self.dac_scales and hasattr(self, '_fetch_dac_scales_for_dialog'):
+                     self._fetch_dac_scales_for_dialog(main_periscope_window.crs)
+                elif self.dac_scales: # If passed, just update UI
+                    self._update_dac_scale_info()
+                    self._update_dbm_from_normalized()
+
+
+    def _fetch_dac_scales_for_dialog(self, crs_obj):
+        """Helper to fetch DAC scales specifically for this dialog context."""
+        self.fetcher = DACScaleFetcher(crs_obj) # DACScaleFetcher is in periscope_tasks
+        self.fetcher.dac_scales_ready.connect(self._on_dac_scales_ready_dialog)
+        self.fetcher.start()
+
+    def _on_dac_scales_ready_dialog(self, scales):
+        """Handle fetched DAC scales for the dialog."""
+        self.dac_scales = scales
+        self._update_dac_scale_info() # Update the label in the amplitude group
+        self._update_dbm_from_normalized() # Update dBm field based on current normalized
+
+
+    def _get_selected_modules(self):
+        """Override to return the current module for DAC scale calculations."""
+        if self.current_module is not None:
+            return [self.current_module]
+        return [] # Fallback, though current_module should always be set
+
+    def _setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+
+        # Resonance Info Group
+        res_info_group = QtWidgets.QGroupBox("Target Resonances")
+        res_info_layout = QtWidgets.QVBoxLayout(res_info_group)
+        
+        num_resonances = len(self.resonance_frequencies)
+        res_label_text = f"Number of resonances to sweep: {num_resonances}"
+        if num_resonances > 0:
+            res_freq_mhz_str = ", ".join([f"{f / 1e6:.3f}" for f in self.resonance_frequencies[:5]])
+            if num_resonances > 5:
+                res_freq_mhz_str += ", ..."
+            res_label_text += f"\nFrequencies (MHz): {res_freq_mhz_str}"
+        
+        self.resonances_info_label = QtWidgets.QLabel(res_label_text)
+        self.resonances_info_label.setWordWrap(True)
+        res_info_layout.addWidget(self.resonances_info_label)
+        layout.addWidget(res_info_group)
+
+        # Parameters Group
+        param_group = QtWidgets.QGroupBox("Sweep Parameters")
+        param_form_layout = QtWidgets.QFormLayout(param_group)
+
+        # Use self.params (which is initial_params from super call) to set defaults
+        default_span_khz = self.params.get('span_hz', 100000.0) / 1e3
+        self.span_khz_edit = QtWidgets.QLineEdit(str(default_span_khz))
+        self.span_khz_edit.setValidator(QDoubleValidator(0.1, 10000.0, 2, self)) # Min, Max, Decimals
+        param_form_layout.addRow("Span per Resonance (kHz):", self.span_khz_edit)
+
+        default_npoints = self.params.get('npoints_per_sweep', 101)
+        self.npoints_edit = QtWidgets.QLineEdit(str(default_npoints))
+        self.npoints_edit.setValidator(QIntValidator(2, 10000, self))
+        param_form_layout.addRow("Number of Points per Sweep:", self.npoints_edit)
+        
+        default_nsamps = self.params.get('nsamps', DEFAULT_NSAMPLES)
+        self.nsamps_edit = QtWidgets.QLineEdit(str(default_nsamps))
+        self.nsamps_edit.setValidator(QIntValidator(1, 10000, self))
+        param_form_layout.addRow("Samples to Average (nsamps):", self.nsamps_edit)
+
+        # Add amplitude settings using the base class method
+        # This will add "Normalized Amplitude", "Power (dBm)", and "DAC Scale (dBm)"
+        # setup_amplitude_group already uses self.params to get 'amps'
+        self.setup_amplitude_group(param_form_layout)
+
+        default_perform_fits = self.params.get('perform_fits', True)
+        self.perform_fits_cb = QtWidgets.QCheckBox("Perform fits after sweep")
+        self.perform_fits_cb.setChecked(default_perform_fits)
+        param_form_layout.addRow("", self.perform_fits_cb)
+        
+        layout.addWidget(param_group)
+
+        # Buttons
+        self.button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+
+        # Initialize dBm field based on default normalized value from base class
+        # This needs dac_scales to be populated.
+        if self.dac_scales:
+             self._update_dbm_from_normalized()
+        
+        self.setMinimumWidth(500)
+
+
+    def get_parameters(self) -> dict | None:
+        params = {}
+        try:
+            # Amplitudes from base class
+            amp_text = self.amp_edit.text().strip()
+            amps = self._parse_amplitude_values(amp_text)
+            if not amps:
+                # Use default from base class if not provided or invalid
+                amps = [self.params.get('amp', DEFAULT_AMPLITUDE)]
+            params['amps'] = amps
+
+            params['span_hz'] = float(self.span_khz_edit.text()) * 1e3 # Convert kHz to Hz
+            params['npoints_per_sweep'] = int(self.npoints_edit.text())
+            params['nsamps'] = int(self.nsamps_edit.text())
+            params['perform_fits'] = self.perform_fits_cb.isChecked()
+            params['resonance_frequencies'] = self.resonance_frequencies # Pass along the target frequencies
+            params['module'] = self.current_module # Pass the module
+
+            if params['span_hz'] <= 0:
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "Span must be positive.")
+                return None
+            if params['npoints_per_sweep'] < 2:
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "Number of points must be at least 2.")
+                return None
+            if params['nsamps'] < 1:
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "Samples to average must be at least 1.")
+                return None
+
+            return params
+        except ValueError as e:
+            QtWidgets.QMessageBox.critical(self, "Input Error", f"Invalid input: {str(e)}")
+            return None
+        except Exception as e: # Catch any other unexpected errors during parsing
+            QtWidgets.QMessageBox.critical(self, "Error", f"Could not parse parameters: {str(e)}")
+            return None

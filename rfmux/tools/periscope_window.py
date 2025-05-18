@@ -1,7 +1,9 @@
 """Window class for network analysis results."""
+import datetime # Added for MultisweepWindow export
+import pickle   # Added for MultisweepWindow export
 from .periscope_utils import *
 from .periscope_tasks import *
-from .periscope_dialogs import NetworkAnalysisParamsDialog, FindResonancesDialog
+from .periscope_dialogs import NetworkAnalysisParamsDialog, FindResonancesDialog, MultisweepDialog # Added MultisweepDialog
 
 class NetworkAnalysisWindow(QtWidgets.QMainWindow):
     """
@@ -131,6 +133,13 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         find_res_btn.setToolTip("Identify resonance frequencies from the current sweep data for the active module.")
         find_res_btn.clicked.connect(self._show_find_resonances_dialog)
         toolbar_module.addWidget(find_res_btn)
+
+        # Take Multisweep button
+        self.take_multisweep_btn = QtWidgets.QPushButton("Take Multisweep")
+        self.take_multisweep_btn.setToolTip("Perform a multisweep using identified resonance frequencies for the active module.")
+        self.take_multisweep_btn.clicked.connect(self._show_multisweep_dialog)
+        self.take_multisweep_btn.setEnabled(False) # Initially disabled
+        toolbar_module.addWidget(self.take_multisweep_btn)
 
     def _setup_unit_controls(self, toolbar):
         """Set up the unit selection controls and add them to the specified toolbar."""
@@ -273,8 +282,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
 
     def clear_plots(self):
         """Clear all plots, curves, and legends."""
-        for module in self.plots:
-            plot_info = self.plots[module]
+        for module_id_iter in self.plots: # Use a different variable name to avoid conflict
+            plot_info = self.plots[module_id_iter]
             amp_plot = plot_info['amp_plot']
             phase_plot = plot_info['phase_plot']
             
@@ -297,7 +306,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             plot_info['phase_curve'].setData([], [])
 
             # Clear faux resonance legend items (Requirement 3)
-            self._remove_faux_resonance_legend_entry(module)
+            self._remove_faux_resonance_legend_entry(module_id_iter)
+            self._update_multisweep_button_state(module_id_iter) # Update button state
 
 
     def update_amplitude_progress(self, module: int, current_amp: int, total_amps: int, amplitude: float):
@@ -403,6 +413,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self._update_resonance_checkbox_text(module) # Though count is removed, keep for consistency if needed later
         self._update_resonance_legend_entry(module) # Requirement 3
         self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
+        self._update_multisweep_button_state(module)
 
 
     def _remove_resonance(self, module: int, freq_hz: float):
@@ -411,6 +422,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             return
         freqs = self.resonance_freqs[module]
         if not freqs:
+            self._update_multisweep_button_state(module) # Update even if no freqs to remove
             return
         freqs_arr = np.array(freqs)
         idx = int(np.argmin(np.abs(freqs_arr - freq_hz)))
@@ -422,6 +434,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         freqs.pop(idx)
         self._update_resonance_checkbox_text(module) # Though count is removed, keep for consistency
         self._update_resonance_legend_entry(module) # Requirement 3
+        self._update_multisweep_button_state(module)
 
     def _update_unit_mode(self, mode):
         """Update unit mode and redraw only amplitude plots."""
@@ -536,40 +549,40 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
 
     def _redraw_all_plots(self):
         """Redraw all plots with current unit mode."""
-        for module in self.raw_data:
-            if module in self.plots:
+        for module_id_iter_redraw in self.raw_data: # Renamed to avoid conflict
+            if module_id_iter_redraw in self.plots:
                 # Check if we have amplitude-specific curves
-                has_amp_curves = len(self.plots[module]['amp_curves']) > 0
+                has_amp_curves = len(self.plots[module_id_iter_redraw]['amp_curves']) > 0
                 
                 # Update amplitude-specific curves first
-                for amp_key, data_tuple in self.raw_data[module].items():
+                for amp_key, data_tuple in self.raw_data[module_id_iter_redraw].items():
                     if amp_key != 'default':
                         # Extract amplitude and data
                         amplitude, freqs, amps, phases, iq_data = self._extract_data_from_tuple(amp_key, data_tuple)
                         
                         # Update the curve if it exists
-                        if amplitude in self.plots[module]['amp_curves']:
+                        if amplitude in self.plots[module_id_iter_redraw]['amp_curves']:
                             converted_amps = UnitConverter.convert_amplitude(
                                 amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
                             # Keep frequencies in Hz for plotting, as axes are in Hz
-                            self.plots[module]['amp_curves'][amplitude].setData(freqs, converted_amps)
-                            self.plots[module]['phase_curves'][amplitude].setData(freqs, phases)
+                            self.plots[module_id_iter_redraw]['amp_curves'][amplitude].setData(freqs, converted_amps)
+                            self.plots[module_id_iter_redraw]['phase_curves'][amplitude].setData(freqs, phases)
                 
                 # Now handle the default curve - ONLY if there are no amplitude-specific curves
-                if 'default' in self.raw_data[module] and not has_amp_curves:
-                    freqs, amps, phases, iq_data = self.raw_data[module]['default']
+                if 'default' in self.raw_data[module_id_iter_redraw] and not has_amp_curves:
+                    freqs, amps, phases, iq_data = self.raw_data[module_id_iter_redraw]['default']
                     converted_amps = UnitConverter.convert_amplitude(
                         amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
                     # Keep frequencies in Hz for plotting
-                    self.plots[module]['amp_curve'].setData(freqs, converted_amps)
-                    self.plots[module]['phase_curve'].setData(freqs, phases)
+                    self.plots[module_id_iter_redraw]['amp_curve'].setData(freqs, converted_amps)
+                    self.plots[module_id_iter_redraw]['phase_curve'].setData(freqs, phases)
                 else:
                     # Make sure default curves have no data if we have amplitude-specific curves
-                    self.plots[module]['amp_curve'].setData([], [])
-                    self.plots[module]['phase_curve'].setData([], [])
+                    self.plots[module_id_iter_redraw]['amp_curve'].setData([], [])
+                    self.plots[module_id_iter_redraw]['phase_curve'].setData([], [])
                 
                 # Enable auto range to fit new data
-                self.plots[module]['amp_plot'].autoRange()
+                self.plots[module_id_iter_redraw]['amp_plot'].autoRange()
         
         # Update legends after redrawing curves
         self._update_legends_for_unit_mode()              
@@ -643,6 +656,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         module_sweeps = self.raw_data.get(active_module)
         if not module_sweeps:
             QtWidgets.QMessageBox.warning(self, "No Data", f"No data found for module {active_module}.")
+            self._update_multisweep_button_state(active_module) # Update button state
             return
 
         target_sweep_key = None
@@ -667,6 +681,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
 
         if target_sweep_key is None:
             QtWidgets.QMessageBox.warning(self, "No Data", f"Could not determine which sweep to analyze for module {active_module}.")
+            self._update_multisweep_button_state(active_module) # Update button state
             return
 
         # Extract data from the chosen sweep
@@ -678,10 +693,12 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             frequencies, _, _, iq_complex = data_tuple
         else:
             QtWidgets.QMessageBox.critical(self, "Data Error", "Unexpected data format for the selected sweep.")
+            self._update_multisweep_button_state(active_module) # Update button state
             return
 
         if len(frequencies) == 0 or len(iq_complex) == 0:
             QtWidgets.QMessageBox.information(self, "No Data", "Selected sweep has no frequency or IQ data.")
+            self._update_multisweep_button_state(active_module) # Update button state
             return
             
         # Run find_resonances
@@ -695,6 +712,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Resonance Finding Error", f"Error calling find_resonances: {str(e)}")
             traceback.print_exc()
+            self._update_multisweep_button_state(active_module) # Update button state
             return
 
         # Plot the results
@@ -702,8 +720,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             plot_info = self.plots[active_module]
             amp_plot_item = plot_info['amp_plot'].getPlotItem()
             phase_plot_item = plot_info['phase_plot'].getPlotItem()
-            amp_legend = plot_info['amp_legend']
-            phase_legend = plot_info['phase_legend']
+            # amp_legend = plot_info['amp_legend'] # Not directly used here
+            # phase_legend = plot_info['phase_legend'] # Not directly used here
 
             # 1. Clear ALL previous resonance lines from plots and stored lists
             for line in plot_info.get('resonance_lines_mag', []):
@@ -722,6 +740,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             if not res_freqs_hz:
                 QtWidgets.QMessageBox.information(self, "No Resonances Found", 
                                                   f"No resonances were identified for Module {active_module} with the given parameters.")
+                self._update_multisweep_button_state(active_module) # Update button state
                 return # Important to return if no resonances, so no legend item is added
 
             # 3. Add new lines (all initially visible)
@@ -740,6 +759,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             self._update_resonance_checkbox_text(active_module) # Checkbox text itself doesn't change with count anymore
             self._update_resonance_legend_entry(active_module) # Requirement 3: Update legend
             self._toggle_resonances_visible(self.show_resonances_cb.isChecked()) # Ensure lines visibility matches checkbox
+        self._update_multisweep_button_state(active_module)
 
 
     def _remove_faux_resonance_legend_entry(self, module_id: int):
@@ -983,6 +1003,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             # If this is a new curve, update legends for proper unit display
             if is_new_curve:
                 self._update_legends_for_unit_mode()
+        self._update_multisweep_button_state(module) # Update button state when data changes
 
     def update_data(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
         """Update the plot data for a specific module."""
@@ -1012,6 +1033,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 # Update plots
                 self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
                 self.plots[module]['phase_curve'].setData(freq_ghz, phases)
+        self._update_multisweep_button_state(module) # Update button state when data changes
     
     def update_progress(self, module: int, progress: float):
         """Update the progress bar for a specific module."""
@@ -1361,6 +1383,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
     def _on_active_module_changed(self, index: int):
         """Update UI elements when the active module tab changes."""
         if index < 0 or not self.modules or index >= len(self.modules):
+            self._update_multisweep_button_state(None) # Disable if no valid tab
             return
 
         active_module_id = self.modules[index] # Assuming self.modules order matches tab order
@@ -1375,6 +1398,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             self.cable_length_spin.blockSignals(True)
             self.cable_length_spin.setValue(self.current_params.get('cable_length', DEFAULT_CABLE_LENGTH))
             self.cable_length_spin.blockSignals(False)
+        
+        self._update_multisweep_button_state(active_module_id) # Update button for new active module
 
         # Future: Update other per-module UI elements here if any
 
@@ -1389,4 +1414,493 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         # Note: This change only affects the current module's stored value.
         # A re-run or re-analysis would be needed to apply this to the plots
         # unless _unwrap_cable_delay_action is called, which re-calculates phase.
+        self._update_multisweep_button_state(active_module_id)
 
+    def _update_multisweep_button_state(self, module_id: int | None = None):
+        """Enable or disable the Take Multisweep button based on found resonances for the given module."""
+        if not hasattr(self, 'take_multisweep_btn'): # Button might not be initialized yet
+            return
+
+        if module_id is None: # If no specific module, check current tab
+            current_tab_index = self.tabs.currentIndex()
+            if current_tab_index < 0:
+                self.take_multisweep_btn.setEnabled(False)
+                return
+            active_module_text = self.tabs.tabText(current_tab_index)
+            try:
+                module_id = int(active_module_text.split(" ")[1])
+            except (IndexError, ValueError):
+                self.take_multisweep_btn.setEnabled(False)
+                return
+        
+        has_resonances = bool(self.resonance_freqs.get(module_id))
+        self.take_multisweep_btn.setEnabled(has_resonances)
+
+    def _show_multisweep_dialog(self):
+        """Show the dialog to configure and run multisweep."""
+        current_tab_index = self.tabs.currentIndex()
+        if current_tab_index < 0:
+            QtWidgets.QMessageBox.warning(self, "No Module Selected", "Please select a module tab.")
+            return
+        
+        active_module_text = self.tabs.tabText(current_tab_index)
+        try:
+            active_module = int(active_module_text.split(" ")[1])
+        except (IndexError, ValueError):
+            QtWidgets.QMessageBox.critical(self, "Error", f"Could not determine active module from tab: {active_module_text}")
+            return
+
+        resonances = self.resonance_freqs.get(active_module, [])
+        if not resonances:
+            QtWidgets.QMessageBox.information(self, "No Resonances", 
+                                              f"No resonances found for Module {active_module}. Please run 'Find Resonances' first.")
+            return
+
+        # Ensure dac_scales are available for the dialog
+        # self.parent() is the Periscope main application instance
+        dac_scales_for_dialog = {}
+        if hasattr(self.parent(), 'dac_scales'):
+            dac_scales_for_dialog = self.parent().dac_scales
+        elif hasattr(self, 'dac_scales'): # Fallback to own dac_scales if parent doesn't have them (less likely)
+             dac_scales_for_dialog = self.dac_scales
+
+
+        dialog = MultisweepDialog(
+            parent=self, 
+            resonance_frequencies=resonances,
+            dac_scales=dac_scales_for_dialog, 
+            current_module=active_module
+        )
+
+        if dialog.exec():
+            params = dialog.get_parameters()
+            if params:
+                # Parameters for MultisweepTask: crs, resonance_frequencies, params, signals
+                # The Periscope main app will handle creating the task and new window.
+                # We need to call a method on self.parent() (which is Periscope instance)
+                if hasattr(self.parent(), '_start_multisweep_analysis'):
+                    # params already includes 'module', 'resonance_frequencies', 'amps', 'span_hz', etc.
+                    self.parent()._start_multisweep_analysis(params)
+                else:
+                    QtWidgets.QMessageBox.critical(self, "Error", "Cannot start multisweep: Parent integration missing.")
+
+# ───────────────────────── Multisweep Window ─────────────────────────
+class MultisweepWindow(QtWidgets.QMainWindow):
+    """
+    Window for displaying multisweep analysis results.
+    Plots combined magnitude and phase for all resonances for each amplitude.
+    """
+    def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None):
+        super().__init__(parent)
+        self.target_module = target_module
+        self.initial_params = initial_params or {} # amps, span_hz, npoints_per_sweep, perform_fits etc.
+        self.dac_scales = dac_scales or {}
+        
+        self.setWindowTitle(f"Multisweep Results - Module {self.target_module}")
+        self.results_by_amplitude = {} # {amp: {cf: data_dict, ...}, ...}
+        self.current_amplitude_being_processed = None
+        self.unit_mode = "dbm"
+        self.normalize_magnitudes = False
+        self.zoom_box_mode = True # Default to zoom box mode ON
+
+        self.combined_mag_plot = None
+        self.combined_phase_plot = None
+        self.mag_legend = None
+        self.phase_legend = None
+        self.curves_mag = {} # {amp: {cf: curve_item}}
+        self.curves_phase = {} # {amp: {cf: curve_item}}
+        
+        self.active_module_for_dac = self.target_module # For UnitConverter consistency
+
+        self._setup_ui()
+        self.resize(1200, 800)
+
+    def _setup_ui(self):
+        central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QtWidgets.QVBoxLayout(central_widget)
+
+        self._setup_toolbar(main_layout)
+        self._setup_plot_area(main_layout)
+        self._setup_status_bar()
+
+
+    def _setup_toolbar(self, layout):
+        toolbar = QtWidgets.QToolBar("Multisweep Controls")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+
+        self.export_btn = QtWidgets.QPushButton("Export Data")
+        self.export_btn.clicked.connect(self._export_data)
+        toolbar.addWidget(self.export_btn)
+
+        self.rerun_btn = QtWidgets.QPushButton("Re-run Multisweep")
+        self.rerun_btn.clicked.connect(self._rerun_multisweep)
+        # self.rerun_btn.setEnabled(False) # Enable when all_completed
+        toolbar.addWidget(self.rerun_btn)
+        
+        toolbar.addSeparator()
+
+        # Progress bar for current amplitude
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True) # Initially visible
+        toolbar.addWidget(QtWidgets.QLabel("Current Sweep Progress:"))
+        toolbar.addWidget(self.progress_bar)
+        
+        # Label for current amplitude
+        self.current_amp_label = QtWidgets.QLabel("Current Amplitude: N/A")
+        toolbar.addWidget(self.current_amp_label)
+
+        spacer = QtWidgets.QWidget()
+        spacer.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(spacer)
+
+        self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Magnitudes")
+        self.normalize_checkbox.setChecked(self.normalize_magnitudes)
+        self.normalize_checkbox.toggled.connect(self._toggle_normalization)
+        toolbar.addWidget(self.normalize_checkbox)
+
+        self._setup_unit_controls(toolbar)
+        self._setup_zoom_box_control(toolbar)
+
+    def _setup_unit_controls(self, toolbar):
+        unit_group = QtWidgets.QWidget()
+        unit_layout = QtWidgets.QHBoxLayout(unit_group)
+        unit_layout.setContentsMargins(0, 0, 0, 0)
+        unit_layout.setAlignment(Qt.AlignmentFlag.AlignRight)
+        
+        self.rb_counts = QtWidgets.QRadioButton("Counts")
+        self.rb_dbm = QtWidgets.QRadioButton("dBm")
+        self.rb_volts = QtWidgets.QRadioButton("Volts")
+        self.rb_dbm.setChecked(True)
+        
+        unit_layout.addWidget(QtWidgets.QLabel("Units:"))
+        unit_layout.addWidget(self.rb_counts)
+        unit_layout.addWidget(self.rb_dbm)
+        unit_layout.addWidget(self.rb_volts)
+        
+        self.rb_counts.toggled.connect(lambda: self._update_unit_mode("counts"))
+        self.rb_dbm.toggled.connect(lambda: self._update_unit_mode("dbm"))
+        self.rb_volts.toggled.connect(lambda: self._update_unit_mode("volts"))
+        
+        unit_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Preferred)
+        toolbar.addSeparator()
+        toolbar.addWidget(unit_group)
+
+    def _setup_zoom_box_control(self, toolbar):
+        self.zoom_box_cb = QtWidgets.QCheckBox("Zoom Box Mode")
+        self.zoom_box_cb.setChecked(self.zoom_box_mode)
+        self.zoom_box_cb.toggled.connect(self._toggle_zoom_box_mode)
+        toolbar.addWidget(self.zoom_box_cb)
+
+    def _setup_plot_area(self, layout):
+        plot_container = QtWidgets.QWidget()
+        plot_layout = QtWidgets.QVBoxLayout(plot_container)
+
+        # Combined Magnitude Plot
+        vb_mag = ClickableViewBox() # Use ClickableViewBox for zoom/pan
+        vb_mag.parent_window = self # For click handling if needed later
+        self.combined_mag_plot = pg.PlotWidget(viewBox=vb_mag, title="Combined S21 Magnitude (All Resonances)")
+        self.combined_mag_plot.setLabel('bottom', 'Frequency', units='Hz')
+        self._update_mag_plot_label() # Set initial Y label
+        self.combined_mag_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.mag_legend = self.combined_mag_plot.addLegend(offset=(30,10))
+        plot_layout.addWidget(self.combined_mag_plot)
+
+        # Combined Phase Plot
+        vb_phase = ClickableViewBox()
+        vb_phase.parent_window = self
+        self.combined_phase_plot = pg.PlotWidget(viewBox=vb_phase, title="Combined S21 Phase (All Resonances)")
+        self.combined_phase_plot.setLabel('bottom', 'Frequency', units='Hz')
+        self.combined_phase_plot.setLabel('left', 'Phase', units='deg')
+        self.combined_phase_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.phase_legend = self.combined_phase_plot.addLegend(offset=(30,10))
+        plot_layout.addWidget(self.combined_phase_plot)
+        
+        layout.addWidget(plot_container)
+        
+        # Link X axes
+        self.combined_phase_plot.setXLink(self.combined_mag_plot)
+        self._apply_zoom_box_mode()
+
+
+    def _setup_status_bar(self):
+        self.statusBar = QtWidgets.QStatusBar()
+        self.setStatusBar(self.statusBar)
+        self.statusBar.showMessage("Ready")
+
+    def _toggle_normalization(self, checked):
+        self.normalize_magnitudes = checked
+        self._update_mag_plot_label()
+        self._redraw_plots()
+
+    def _update_unit_mode(self, mode):
+        if self.unit_mode != mode:
+            self.unit_mode = mode
+            self._update_mag_plot_label()
+            self._redraw_plots()
+            
+    def _update_mag_plot_label(self):
+        if not self.combined_mag_plot: return
+        if self.normalize_magnitudes:
+            label = "Normalized Magnitude"
+            units = "dB" if self.unit_mode == "dbm" else ""
+        else:
+            if self.unit_mode == "counts":
+                label, units = "Magnitude", "Counts"
+            elif self.unit_mode == "dbm":
+                label, units = "Power", "dBm"
+            elif self.unit_mode == "volts":
+                label, units = "Magnitude", "V"
+            else:
+                label, units = "Magnitude", ""
+        self.combined_mag_plot.setLabel('left', label, units=units)
+
+    def _toggle_zoom_box_mode(self, enable):
+        self.zoom_box_mode = enable
+        self._apply_zoom_box_mode()
+
+    def _apply_zoom_box_mode(self):
+        if self.combined_mag_plot and isinstance(self.combined_mag_plot.getViewBox(), ClickableViewBox):
+            self.combined_mag_plot.getViewBox().enableZoomBoxMode(self.zoom_box_mode)
+        if self.combined_phase_plot and isinstance(self.combined_phase_plot.getViewBox(), ClickableViewBox):
+            self.combined_phase_plot.getViewBox().enableZoomBoxMode(self.zoom_box_mode)
+
+    def update_progress(self, module, progress_percentage):
+        if module == self.target_module:
+            self.progress_bar.setValue(int(progress_percentage))
+
+    def update_intermediate_data(self, module, amplitude, intermediate_results):
+        if module != self.target_module: return
+        # intermediate_results is {cf: {'frequencies': ..., 'iq_complex': ...}}
+        # This can be used for live plotting if desired, but for now,
+        # we'll primarily update on final data_update per amplitude.
+        # For simplicity, this is a placeholder for potential live updates.
+        pass
+
+    def update_data(self, module, amplitude, final_results_for_amplitude):
+        if module != self.target_module: return
+        
+        self.current_amplitude_being_processed = amplitude
+        self.current_amp_label.setText(f"Processing Amp: {amplitude:.4f}")
+        self.results_by_amplitude[amplitude] = final_results_for_amplitude
+        self._redraw_plots()
+
+    def _redraw_plots(self):
+        if not self.combined_mag_plot or not self.combined_phase_plot:
+            return
+
+        # Clear previous plot items and legends
+        if self.mag_legend: self.mag_legend.clear()
+        if self.phase_legend: self.phase_legend.clear()
+
+        for item in self.combined_mag_plot.listDataItems():
+            self.combined_mag_plot.removeItem(item)
+        for item in self.combined_phase_plot.listDataItems():
+            self.combined_phase_plot.removeItem(item)
+        
+        # self.curves_mag and self.curves_phase are not strictly needed anymore with this redraw logic,
+        # but can be kept if direct curve manipulation is added later. For now, clear them.
+        self.curves_mag.clear() 
+        self.curves_phase.clear()
+
+        num_amps = len(self.results_by_amplitude)
+        if num_amps == 0:
+            return
+        
+        # Define the color scheme similar to NetworkAnalysisWindow for distinct colors per amplitude
+        channel_families = [
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+        ]
+        viridis_cmap = pg.colormap.get("viridis")
+        
+        sorted_amplitudes = sorted(self.results_by_amplitude.keys())
+
+        # Create legend items once per amplitude
+        legend_items_mag = {}
+        legend_items_phase = {}
+
+        for amp_idx, amp_val in enumerate(sorted_amplitudes):
+            amp_results = self.results_by_amplitude[amp_val]
+            
+            # Determine color based on the index of the amplitude and total number of amplitudes
+            if num_amps <= 5:
+                color = channel_families[amp_idx % len(channel_families)]
+            else:
+                # Use viridis for more than 5 amplitudes, mapping amp_idx to [0,1] for colormap
+                color = viridis_cmap.map(amp_idx / max(1, num_amps - 1)) # max(1, num_amps-1) to avoid div by zero for single amp
+            
+            pen = pg.mkPen(color, width=LINE_WIDTH)
+            
+            # Format legend name based on unit_mode
+            if self.unit_mode == "dbm":
+                dac_scale = self.dac_scales.get(self.active_module_for_dac)
+                if dac_scale is not None:
+                    dbm_value = UnitConverter.normalize_to_dbm(amp_val, dac_scale)
+                    legend_name_amp = f"Probe: {dbm_value:.2f} dBm"
+                else:
+                    legend_name_amp = f"Probe: {amp_val:.3e} (Norm)" # Fallback if DAC scale unknown
+            elif self.unit_mode == "volts":
+                dac_scale = self.dac_scales.get(self.active_module_for_dac)
+                if dac_scale is not None:
+                    dbm_value = UnitConverter.normalize_to_dbm(amp_val, dac_scale)
+                    power_watts = 10**((dbm_value - 30)/10)
+                    resistance = 50.0  # Ohms
+                    voltage_rms = np.sqrt(power_watts * resistance)
+                    voltage_peak_uv = voltage_rms * np.sqrt(2) * 1e6
+                    legend_name_amp = f"Probe: {voltage_peak_uv:.1f} uVpk"
+                else:
+                    legend_name_amp = f"Probe: {amp_val:.3e} (Norm)" # Fallback
+            else: # counts or other
+                legend_name_amp = f"Probe: {amp_val:.3e} Norm"
+
+            # Add to magnitude legend only once per amplitude
+            if amp_val not in legend_items_mag:
+                # Create a dummy item for the legend, or use the first curve of this amp
+                # For simplicity, we'll add the first curve and then subsequent curves of the same amp won't add to legend.
+                # This requires a flag or checking if legend item already exists.
+                # A cleaner way: add a dummy plot item just for the legend.
+                dummy_mag_curve_for_legend = pg.PlotDataItem(pen=pen) # Invisible item
+                self.mag_legend.addItem(dummy_mag_curve_for_legend, legend_name_amp)
+                legend_items_mag[amp_val] = dummy_mag_curve_for_legend # Mark as added
+
+            if amp_val not in legend_items_phase:
+                dummy_phase_curve_for_legend = pg.PlotDataItem(pen=pen) # Invisible item
+                self.phase_legend.addItem(dummy_phase_curve_for_legend, legend_name_amp)
+                legend_items_phase[amp_val] = dummy_phase_curve_for_legend
+
+
+            for cf, data in amp_results.items():
+                freqs_hz = data.get('frequencies')
+                iq_complex = data.get('iq_complex')
+                
+                if freqs_hz is None or iq_complex is None or len(freqs_hz) == 0:
+                    continue
+
+                # Magnitude
+                s21_mag_raw = np.abs(iq_complex)
+                dac_scale_val = self.dac_scales.get(self.active_module_for_dac)
+                
+                s21_mag_processed = UnitConverter.convert_amplitude(
+                    s21_mag_raw, # Pass raw magnitude
+                    iq_complex,  # Pass complex IQ for dBm/Volts conversion
+                    self.unit_mode,
+                    normalize=self.normalize_magnitudes
+                )
+
+                # Phase
+                phase_deg = data.get('phase_degrees', np.degrees(np.angle(iq_complex)))
+                
+                # Plot magnitude curve for this (amp, cf)
+                mag_curve = self.combined_mag_plot.plot(pen=pen) # No name, legend handled per-amplitude
+                mag_curve.setData(freqs_hz, s21_mag_processed)
+                # Store if needed for other interactions, though not for legend here
+                if amp_val not in self.curves_mag: self.curves_mag[amp_val] = {}
+                self.curves_mag[amp_val][cf] = mag_curve
+
+
+                # Plot phase curve for this (amp, cf)
+                phase_curve = self.combined_phase_plot.plot(pen=pen) # No name
+                phase_curve.setData(freqs_hz, phase_deg)
+                if amp_val not in self.curves_phase: self.curves_phase[amp_val] = {}
+                self.curves_phase[amp_val][cf] = phase_curve
+        
+        self.combined_mag_plot.autoRange()
+        self.combined_phase_plot.autoRange()
+
+    def completed_amplitude_sweep(self, module, amplitude):
+        if module == self.target_module:
+            self.statusBar.showMessage(f"Completed sweep for amplitude: {amplitude:.4f}")
+            self.progress_bar.setValue(100) # Mark current amp as done
+
+    def all_sweeps_completed(self):
+        self.statusBar.showMessage("All multisweep amplitudes completed.")
+        self.progress_bar.setVisible(False)
+        self.current_amp_label.setText("All Amplitudes Processed")
+        # self.rerun_btn.setEnabled(True)
+
+    def handle_error(self, module, amplitude, error_msg):
+        if module == self.target_module or module == -1: # -1 for general task error
+            amp_str = f"for amplitude {amplitude:.4f}" if amplitude != -1 else "general"
+            QtWidgets.QMessageBox.critical(self, "Multisweep Error", f"Error {amp_str} on Module {self.target_module}:\n{error_msg}")
+            self.statusBar.showMessage(f"Error during multisweep {amp_str}.")
+            self.progress_bar.setVisible(False) # Hide on error
+            # self.rerun_btn.setEnabled(True)
+
+
+    def _export_data(self):
+        if not self.results_by_amplitude:
+            QtWidgets.QMessageBox.warning(self, "No Data", "No multisweep data to export.")
+            return
+
+        dialog = QtWidgets.QFileDialog(self)
+        dialog.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
+        dialog.setNameFilters(["Pickle Files (*.pkl)", "All Files (*)"])
+        dialog.setDefaultSuffix("pkl")
+
+        if dialog.exec():
+            filename = dialog.selectedFiles()[0]
+            try:
+                export_content = {
+                    'timestamp': datetime.datetime.now().isoformat(),
+                    'target_module': self.target_module,
+                    'initial_parameters': self.initial_params,
+                    'dac_scales_used': self.dac_scales, # Store DAC scales used by the window
+                    'results_by_amplitude': self.results_by_amplitude
+                }
+                with open(filename, 'wb') as f:
+                    pickle.dump(export_content, f)
+                QtWidgets.QMessageBox.information(self, "Export Complete", f"Data exported to {filename}")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
+
+    def _rerun_multisweep(self):
+        # This would typically involve getting resonance frequencies again if they might change,
+        # or using the ones from initial_params. For now, assume initial_params has them.
+        if not self.initial_params.get('resonance_frequencies'):
+            QtWidgets.QMessageBox.warning(self, "Cannot Re-run", "Initial resonance frequencies not available for re-run.")
+            return
+
+        # Need to import MultisweepDialog if not already.
+        # For now, assume it's available in the scope (e.g. imported at top of file)
+        # from .periscope_dialogs import MultisweepDialog # This would be needed
+        
+        dialog = MultisweepDialog(
+            parent=self, # Corrected parent argument
+            resonance_frequencies=self.initial_params['resonance_frequencies'],
+            dac_scales=self.dac_scales,
+            current_module=self.target_module,
+            initial_params=self.initial_params.copy() # Pass current initial_params
+        )
+        # The dialog's _setup_ui will now use these initial_params
+
+        if dialog.exec():
+            new_params = dialog.get_parameters()
+            if new_params:
+                # Update initial_params for next potential re-run
+                self.initial_params.update(new_params) 
+                
+                # Clear old results and UI state
+                self.results_by_amplitude.clear()
+                self._redraw_plots()
+                self.progress_bar.setValue(0)
+                self.progress_bar.setVisible(True)
+                self.current_amp_label.setText("Current Amplitude: N/A")
+                self.statusBar.showMessage("Starting new multisweep...")
+                # self.rerun_btn.setEnabled(False)
+
+                # Trigger the new sweep via the parent (Periscope main window)
+                if hasattr(self.parent(), '_start_multisweep_analysis_for_window'):
+                    self.parent()._start_multisweep_analysis_for_window(self, new_params)
+                else:
+                    QtWidgets.QMessageBox.warning(self, "Error", "Cannot trigger re-run. Parent linkage missing.")
+
+
+    def closeEvent(self, event):
+        # Signal the parent (Periscope main window) to stop the task associated with this window
+        if hasattr(self.parent(), 'stop_multisweep_task_for_window'):
+            self.parent().stop_multisweep_task_for_window(self)
+        super().closeEvent(event)

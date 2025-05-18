@@ -1,6 +1,7 @@
 """Worker threads and tasks used by the Periscope viewer."""
 
 from .periscope_utils import *
+from rfmux.algorithms.measurement import fitting # Added for MultisweepTask
 
 class UDPReceiver(QtCore.QThread):
     """
@@ -643,3 +644,131 @@ class CRSInitializeTask(QRunnable):
             await self.crs.clear_channels(module=self.module)
 
 # ───────────────────────── Network Analysis UI ─────────────────────────
+
+# ───────────────────────── Multisweep Task & Signals ─────────────────────────
+class MultisweepSignals(QObject):
+    """
+    Holds custom signals emitted by multisweep tasks.
+    """
+    # Emitted by the task's progress_callback wrapper
+    progress = pyqtSignal(int, float)  # module, overall_progress_percentage (0-100 for one amp sweep)
+    
+    # Emitted by the task's data_callback wrapper during a sweep for one amplitude
+    intermediate_data_update = pyqtSignal(int, float, dict) # module, amplitude, {cf: {'freqs':..., 'iq':...}}
+    
+    # Emitted after one amplitude sweep (and optional fitting) is complete for a module
+    # The dict contains the final (possibly fitted) results for that amplitude.
+    data_update = pyqtSignal(int, float, dict)  # module, amplitude, {cf: result_dict, ...}
+    
+    # Emitted when one amplitude sweep is fully completed for a module
+    completed_amplitude = pyqtSignal(int, float) # module, amplitude
+    
+    # Emitted when all amplitudes for all modules are done
+    all_completed = pyqtSignal()
+    
+    # Emitted on error
+    error = pyqtSignal(int, float, str)  # module, amplitude (or -1 if general error), error_message
+
+class MultisweepTask(QRunnable):
+    """
+    Off-thread worker for running multisweep analysis.
+    """
+    def __init__(self, crs: "CRS", resonance_frequencies: list[float], params: dict, signals: MultisweepSignals):
+        super().__init__()
+        self.crs = crs
+        self.resonance_frequencies = resonance_frequencies
+        self.params = params # Expected: span_hz, npoints_per_sweep, amps, perform_fits, module, etc.
+        self.signals = signals
+        self._running = True
+        self._loop = None
+        self._current_async_task = None
+        self.current_amplitude = -1 # For error reporting
+
+    def stop(self):
+        self._running = False
+        if self._current_async_task and not self._current_async_task.done() and self._loop:
+            self._loop.call_soon_threadsafe(self._current_async_task.cancel)
+
+    def _progress_callback_wrapper(self, module, progress_percentage):
+        if self._running:
+            self.signals.progress.emit(module, progress_percentage)
+
+    def _data_callback_wrapper(self, module, intermediate_results):
+        if self._running:
+            # intermediate_results is {cf: {'frequencies': ..., 'iq_complex': ...}}
+            self.signals.intermediate_data_update.emit(module, self.current_amplitude, intermediate_results)
+
+    def run(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        
+        module = self.params.get('module')
+        if module is None:
+            self.signals.error.emit(-1, -1, "Module not specified in multisweep parameters.")
+            return
+
+        try:
+            amplitudes = self.params.get('amps', [DEFAULT_AMPLITUDE])
+            
+            for amp in amplitudes:
+                if not self._running:
+                    self.signals.error.emit(module, self.current_amplitude, "Multisweep canceled before starting new amplitude.")
+                    return
+                
+                self.current_amplitude = amp
+
+                multisweep_params_for_call = {
+                    'center_frequencies': self.resonance_frequencies,
+                    'span_hz': self.params['span_hz'],
+                    'npoints_per_sweep': self.params['npoints_per_sweep'],
+                    'amp': amp,
+                    'nsamps': self.params.get('nsamps', 10), # Add nsamps
+                    'module': module,
+                    'progress_callback': self._progress_callback_wrapper,
+                    'data_callback': self._data_callback_wrapper,
+                    # Pass other relevant params like global_phase_ref_to_zero if needed
+                    'global_phase_ref_to_zero': self.params.get('global_phase_ref_to_zero', True),
+                    'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', False),
+                }
+
+                multisweep_coro = self.crs.multisweep(**multisweep_params_for_call)
+                self._current_async_task = self._loop.create_task(multisweep_coro)
+                raw_results = self._loop.run_until_complete(self._current_async_task)
+
+                if not self._running: # Check after await
+                    self.signals.error.emit(module, amp, "Multisweep canceled during sweep execution.")
+                    return
+
+                processed_results = raw_results
+                if raw_results and self.params.get('perform_fits', False):
+                    try:
+                        processed_results = fitting.process_multisweep_results(
+                            raw_results,
+                            approx_Q_for_fit=self.params.get('approx_Q_for_fit', 1e4),
+                            fit_resonances=True,
+                            center_iq_circle=self.params.get('center_iq_circle', True)
+                        )
+                    except Exception as fit_e:
+                        self.signals.error.emit(module, amp, f"Fitting error: {fit_e}")
+                        # Fallback to raw results if fitting fails
+                        processed_results = raw_results
+                
+                if processed_results:
+                    self.signals.data_update.emit(module, amp, processed_results)
+                
+                self.signals.completed_amplitude.emit(module, amp)
+
+            self.signals.all_completed.emit()
+
+        except asyncio.CancelledError:
+            self.signals.error.emit(module, self.current_amplitude, "Multisweep task was canceled by user.")
+        except Exception as e:
+            detailed_error = f"Error in MultisweepTask (amp {self.current_amplitude:.4f}): {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+            self.signals.error.emit(module, self.current_amplitude, detailed_error)
+        finally:
+            if self._loop:
+                if self._loop.is_running():
+                    self._loop.stop()
+                self._loop.close()
+            self._loop = None
+            self._current_async_task = None

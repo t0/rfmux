@@ -141,10 +141,17 @@ class Periscope(QtWidgets.QMainWindow):
         self.crs_init_signals.success.connect(self._crs_init_success)
         self.crs_init_signals.error.connect(self._crs_init_error)
         
-        # Network analysis window tracking
-        self.netanal_windows = {}  # Dictionary of windows indexed by unique ID
-        self.netanal_window_count = 0  # Counter for window IDs
-        self.netanal_tasks = {}  # Tasks dictionary with window-specific keys
+        # Network analysis tracking
+        self.netanal_windows = {}
+        self.netanal_window_count = 0
+        self.netanal_tasks = {}
+
+        # Multisweep analysis tracking
+        self.multisweep_signals = MultisweepSignals()
+        # Connections will be made dynamically when a MultisweepWindow is created.
+        self.multisweep_windows = {} # Dictionary of multisweep windows indexed by unique ID
+        self.multisweep_window_count = 0 # Counter for multisweep window IDs
+        self.multisweep_tasks = {} # Tasks dictionary for multisweep
 
         # Embedded iPython console attributes
         self.kernel_manager = None
@@ -1727,6 +1734,12 @@ class Periscope(QtWidgets.QMainWindow):
             task = self.netanal_tasks[task_key]
             task.stop()
             self.netanal_tasks.pop(task_key, None)
+        
+        # Stop any running multisweep tasks
+        for task_key in list(self.multisweep_tasks.keys()):
+            task = self.multisweep_tasks[task_key]
+            task.stop()
+            self.multisweep_tasks.pop(task_key, None)
 
         # Shutdown iPython kernel if it exists
         if self.kernel_manager and self.kernel_manager.has_kernel:
@@ -1822,6 +1835,137 @@ class Periscope(QtWidgets.QMainWindow):
         self.console_dock_widget.setVisible(not is_visible)
         if not is_visible and self.jupyter_widget: # If showing
             self.jupyter_widget.setFocus()
+
+    def _start_multisweep_analysis(self, params: dict):
+        """Start multisweep analysis for the given parameters."""
+        try:
+            if self.crs is None:
+                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep.")
+                return
+
+            window_id = f"multisweep_window_{self.multisweep_window_count}"
+            self.multisweep_window_count += 1
+
+            target_module = params.get('module')
+            if target_module is None:
+                QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep.")
+                return
+
+            # Use actual DAC scales if available, otherwise empty dict
+            dac_scales_for_window = self.dac_scales if hasattr(self, 'dac_scales') else {}
+
+            window = MultisweepWindow(
+                parent=self,
+                target_module=target_module,
+                initial_params=params.copy(),
+                dac_scales=dac_scales_for_window
+            )
+            # window.window_id = window_id # Store ID if needed for direct access
+
+            # Create window-specific signals instance for multisweep
+            # This is important if we want each window to have its own signal handling context,
+            # but for now, we can use the global self.multisweep_signals and connect
+            # methods from the specific window instance.
+            
+            # Store window and prepare for task
+            self.multisweep_windows[window_id] = {
+                'window': window,
+                'params': params.copy() 
+                # 'signals': specific_multisweep_signals # If we used per-window signals
+            }
+
+            # Connect signals from the global multisweep_signals to the new window's methods
+            # Disconnect old connections first if any, to avoid multiple calls to old windows
+            try:
+                self.multisweep_signals.progress.disconnect()
+                self.multisweep_signals.intermediate_data_update.disconnect()
+                self.multisweep_signals.data_update.disconnect()
+                self.multisweep_signals.completed_amplitude.disconnect()
+                self.multisweep_signals.all_completed.disconnect()
+                self.multisweep_signals.error.disconnect()
+            except TypeError: # Thrown if no connections exist
+                pass
+
+            self.multisweep_signals.progress.connect(window.update_progress)
+            self.multisweep_signals.intermediate_data_update.connect(window.update_intermediate_data)
+            self.multisweep_signals.data_update.connect(window.update_data)
+            self.multisweep_signals.completed_amplitude.connect(window.completed_amplitude_sweep)
+            self.multisweep_signals.all_completed.connect(window.all_sweeps_completed)
+            self.multisweep_signals.error.connect(window.handle_error)
+            
+            task = MultisweepTask(
+                crs=self.crs,
+                resonance_frequencies=params['resonance_frequencies'],
+                params=params, # This includes module, amps, span_hz, npoints_per_sweep, perform_fits
+                signals=self.multisweep_signals # Use the global signals object
+            )
+            
+            task_key = f"{window_id}_module_{target_module}" # Simplified task key
+            self.multisweep_tasks[task_key] = task
+            self.pool.start(task)
+            
+            window.show()
+
+        except Exception as e:
+            error_msg = f"Error starting multisweep analysis: {type(e).__name__}: {str(e)}"
+            print(error_msg, file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
+
+    def _start_multisweep_analysis_for_window(self, window_instance: MultisweepWindow, params: dict):
+        """Re-run multisweep for an existing MultisweepWindow."""
+        window_id = None
+        for w_id, data in self.multisweep_windows.items():
+            if data['window'] == window_instance:
+                window_id = w_id
+                break
+        
+        if not window_id:
+            QtWidgets.QMessageBox.critical(window_instance, "Error", "Could not find associated window to re-run multisweep.")
+            return
+
+        target_module = params.get('module')
+        if target_module is None:
+            QtWidgets.QMessageBox.critical(window_instance, "Error", "Target module not specified for multisweep re-run.")
+            return
+
+        # Stop existing task for this window/module if any
+        old_task_key = f"{window_id}_module_{target_module}"
+        if old_task_key in self.multisweep_tasks:
+            old_task = self.multisweep_tasks.pop(old_task_key)
+            old_task.stop()
+
+        # Update stored params for the window
+        self.multisweep_windows[window_id]['params'] = params.copy()
+
+        task = MultisweepTask(
+            crs=self.crs,
+            resonance_frequencies=params['resonance_frequencies'],
+            params=params,
+            signals=self.multisweep_signals # Still use global signals, window methods are connected
+        )
+        self.multisweep_tasks[old_task_key] = task # Reuse task key
+        self.pool.start(task)
+
+
+    def stop_multisweep_task_for_window(self, window_instance: MultisweepWindow):
+        """Stop the multisweep task associated with a given window instance."""
+        window_id = None
+        target_module = None
+        for w_id, data in list(self.multisweep_windows.items()): # Iterate over a copy for safe removal
+            if data['window'] == window_instance:
+                window_id = w_id
+                target_module = data['params'].get('module')
+                break
+        
+        if window_id and target_module:
+            task_key = f"{window_id}_module_{target_module}"
+            if task_key in self.multisweep_tasks:
+                task = self.multisweep_tasks.pop(task_key)
+                task.stop()
+            # Remove window from tracking
+            self.multisweep_windows.pop(window_id, None)
+
 
     def _update_console_style(self, dark_mode_enabled: bool):
         """Update the iPython console style based on dark mode."""

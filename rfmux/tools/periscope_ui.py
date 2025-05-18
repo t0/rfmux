@@ -645,6 +645,9 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.resonance_lines_phase = {} # Store resonance lines for phase plots {module: [line_item, ...]}
         self.resonance_freqs = {}  # Store resonance frequencies per module
         self.add_subtract_mode = False
+        self.module_cable_lengths = {} # For Requirement 2
+        self.faux_resonance_legend_items_mag = {} # For Req 3
+        self.faux_resonance_legend_items_phase = {} # For Req 3
         
         # Setup the UI components
         self._setup_ui()
@@ -667,84 +670,90 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self._setup_plot_area(layout)
 
     def _setup_toolbar(self, layout):
-        """Set up the toolbar with controls."""
-        toolbar = QtWidgets.QToolBar()
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+        """Set up the toolbars with controls."""
+        # Toolbar 1: Global Controls (Top Row)
+        toolbar_global = QtWidgets.QToolBar("Global Controls")
+        toolbar_global.setMovable(False)
+        self.addToolBar(toolbar_global)
 
-        # Cable length control for quick adjustments
-        self.cable_length_label = QtWidgets.QLabel("Cable Length (m):")
-        self.cable_length_spin = QtWidgets.QDoubleSpinBox()
-        self.cable_length_spin.setRange(0.0, 1000.0)
-        self.cable_length_spin.setValue(DEFAULT_CABLE_LENGTH)
-        self.cable_length_spin.setSingleStep(0.05)
-        toolbar.addWidget(self.cable_length_label)
-        toolbar.addWidget(self.cable_length_spin)
+        # Export button
+        export_btn = QtWidgets.QPushButton("Export Data")
+        export_btn.clicked.connect(self._export_data)
+        toolbar_global.addWidget(export_btn)
 
-        # Add Unwrap Cable Delay button
-        unwrap_button = QtWidgets.QPushButton("Unwrap Cable Delay")
-        unwrap_button.setToolTip("Fit phase slope, calculate cable length, and apply compensation.")
-        unwrap_button.clicked.connect(self._unwrap_cable_delay_action)
-        toolbar.addWidget(unwrap_button)
+        # Edit Other Parameters button (renamed to Re-run Analysis)
+        edit_params_btn = QtWidgets.QPushButton("Re-run analysis") # Renamed
+        edit_params_btn.clicked.connect(self._edit_parameters) # Kept self._edit_parameters as per user
+        toolbar_global.addWidget(edit_params_btn)
 
-        # Add edit parameters button to toolbar
-        edit_params_btn = QtWidgets.QPushButton("Edit Other Parameters")
-        edit_params_btn.clicked.connect(self._edit_parameters)
-        toolbar.addWidget(edit_params_btn)
-
-        # Re-run analysis button
-        rerun_btn = QtWidgets.QPushButton("Re-run Analysis")
-        rerun_btn.clicked.connect(self._rerun_analysis)
-        toolbar.addWidget(rerun_btn)
-
-        # Find Resonances button
-        find_res_btn = QtWidgets.QPushButton("Find Resonances")
-        find_res_btn.setToolTip("Identify resonance frequencies from the current sweep data.")
-        find_res_btn.clicked.connect(self._show_find_resonances_dialog)
-        toolbar.addWidget(find_res_btn)
+        
+        toolbar_global.addSeparator()
 
         # Show/Hide resonances checkbox
-        self.show_resonances_cb = QtWidgets.QCheckBox("Show Resonances (0)")
+        self.show_resonances_cb = QtWidgets.QCheckBox("Show Resonances") # Count removed as per req 3
         self.show_resonances_cb.setChecked(True)
         self.show_resonances_cb.toggled.connect(self._toggle_resonances_visible)
-        toolbar.addWidget(self.show_resonances_cb)
+        toolbar_global.addWidget(self.show_resonances_cb)
 
-        # Add/Subtract mode and tolerance controls
+        # Add/Subtract mode
         self.edit_resonances_cb = QtWidgets.QCheckBox("Add/Subtract Resonances")
         self.edit_resonances_cb.setToolTip(
             "When enabled, double-click adds a resonance;\n"
             "Shift + double-click removes the nearest resonance."
         )
         self.edit_resonances_cb.toggled.connect(self._toggle_resonance_edit_mode)
-        toolbar.addWidget(self.edit_resonances_cb)
-
-
-        # Export button
-        export_btn = QtWidgets.QPushButton("Export Data")
-        export_btn.clicked.connect(self._export_data)
-        toolbar.addWidget(export_btn)
+        toolbar_global.addWidget(self.edit_resonances_cb)
         
-        # Add spacer to push the unit controls to the far right
-        spacer = QtWidgets.QWidget()
-        spacer.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, 
-                            QtWidgets.QSizePolicy.Policy.Preferred)
-        toolbar.addWidget(spacer)
-        
+        toolbar_global.addSeparator()
+
+        # Add spacer to push the unit controls to the far right of the global toolbar
+        spacer_global = QtWidgets.QWidget()
+        spacer_global.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
+        toolbar_global.addWidget(spacer_global)
+
         # Normalize Magnitudes checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Magnitudes")
         self.normalize_checkbox.setChecked(False)
         self.normalize_checkbox.setToolTip("Normalize all magnitude curves to their first data point")
         self.normalize_checkbox.toggled.connect(self._toggle_normalization)
-        toolbar.addWidget(self.normalize_checkbox)
+        toolbar_global.addWidget(self.normalize_checkbox)
 
         # Add unit controls
-        self._setup_unit_controls(toolbar)
-        
+        self._setup_unit_controls(toolbar_global) # Pass the global toolbar
+
         # Add zoom box mode checkbox
-        self._setup_zoom_box_control(toolbar)
+        self._setup_zoom_box_control(toolbar_global) # Pass the global toolbar
+
+        # Toolbar 2: Module-Specific Controls (Bottom Row)
+        toolbar_module = QtWidgets.QToolBar("Module Controls")
+        toolbar_module.setMovable(False)
+        self.addToolBarBreak(QtCore.Qt.ToolBarArea.TopToolBarArea) # Ensures this toolbar is on a new row
+        self.addToolBar(toolbar_module)
+
+        # Cable length control
+        self.cable_length_label = QtWidgets.QLabel("Cable Length (m):")
+        self.cable_length_spin = QtWidgets.QDoubleSpinBox()
+        self.cable_length_spin.setRange(0.0, 1000.0)
+        self.cable_length_spin.setValue(DEFAULT_CABLE_LENGTH)
+        self.cable_length_spin.setSingleStep(0.05)
+        self.cable_length_spin.valueChanged.connect(self._on_cable_length_changed)
+        toolbar_module.addWidget(self.cable_length_label)
+        toolbar_module.addWidget(self.cable_length_spin)
+
+        # Unwrap Cable Delay button
+        unwrap_button = QtWidgets.QPushButton("Unwrap Cable Delay")
+        unwrap_button.setToolTip("Fit phase slope, calculate cable length, and apply compensation for the active module.")
+        unwrap_button.clicked.connect(self._unwrap_cable_delay_action)
+        toolbar_module.addWidget(unwrap_button)
+
+        # Find Resonances button
+        find_res_btn = QtWidgets.QPushButton("Find Resonances")
+        find_res_btn.setToolTip("Identify resonance frequencies from the current sweep data for the active module.")
+        find_res_btn.clicked.connect(self._show_find_resonances_dialog)
+        toolbar_module.addWidget(find_res_btn)
 
     def _setup_unit_controls(self, toolbar):
-        """Set up the unit selection controls."""
+        """Set up the unit selection controls and add them to the specified toolbar."""
         unit_group = QtWidgets.QWidget()
         unit_layout = QtWidgets.QHBoxLayout(unit_group)
         unit_layout.setContentsMargins(0, 0, 0, 0)
@@ -824,6 +833,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
     def _setup_plot_area(self, layout):
         """Set up the plot area with tabs for each module."""
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.currentChanged.connect(self._on_active_module_changed) # For Requirement 2
         layout.addWidget(self.tabs)
         
         self.plots = {}
@@ -906,6 +916,10 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             plot_info['amp_curve'].setData([], [])
             plot_info['phase_curve'].setData([], [])
 
+            # Clear faux resonance legend items (Requirement 3)
+            self._remove_faux_resonance_legend_entry(module)
+
+
     def update_amplitude_progress(self, module: int, current_amp: int, total_amps: int, amplitude: float):
         """Update the amplitude progress display for a module."""
         if hasattr(self, 'progress_labels') and module in self.progress_labels:
@@ -926,8 +940,40 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 self.plots[module]['amp_curve'].setData([], [])
                 self.plots[module]['phase_curve'].setData([], [])
         
-        # Redraw plots with normalization applied
-        self._redraw_all_plots()
+        # Redraw only amplitude plots with normalization applied
+        for module_id in self.plots: # Iterate using module_id from self.plots.keys()
+            # Update Y-axis label of the amplitude plot
+            self._update_amplitude_labels(self.plots[module_id]['amp_plot'])
+
+            # Redraw amplitude data for this module_id
+            if module_id in self.raw_data:
+                plot_info = self.plots[module_id]
+                
+                # Update amplitude-specific curves
+                for amp_key, raw_entry_tuple in self.raw_data[module_id].items():
+                    amplitude_val, freqs, amps_raw, _, iq_data_raw = self._extract_data_from_tuple(amp_key, raw_entry_tuple)
+                    
+                    if freqs is None or amps_raw is None or iq_data_raw is None:
+                        continue
+
+                    converted_amps = UnitConverter.convert_amplitude(
+                        amps_raw, iq_data_raw, self.unit_mode, normalize=self.normalize_magnitudes
+                    )
+                    
+                    if amp_key != 'default':
+                        if amplitude_val in plot_info['amp_curves']:
+                            plot_info['amp_curves'][amplitude_val].setData(freqs, converted_amps)
+                    else: 
+                        if not plot_info['amp_curves']:
+                            plot_info['amp_curve'].setData(freqs, converted_amps)
+                
+                plot_info['amp_plot'].autoRange() # Auto-range based on enabled axes (Y is enabled)
+        
+        # Legends might need updating if normalization changes how amplitudes are displayed (e.g. if it affects units in legend)
+        # However, current legend text is based on unit_mode and absolute amplitude, not normalization state.
+        # If normalization were to change legend text (e.g. "Normalized Probe: ..."), then this would be needed:
+        # self._update_legends_for_unit_mode() 
+
 
     def _toggle_zoom_box(self, enable):
         """Toggle zoom box mode for all plots."""
@@ -944,20 +990,22 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
 
     def _toggle_resonances_visible(self, checked: bool):
         """Show or hide all resonance indicator lines."""
-        for module in self.plots:
-            for line in self.plots[module]['resonance_lines_mag']:
+        for module_id in self.plots.keys():
+            for line in self.plots[module_id]['resonance_lines_mag']:
                 line.setVisible(checked)
-            for line in self.plots[module]['resonance_lines_phase']:
+            for line in self.plots[module_id]['resonance_lines_phase']:
                 line.setVisible(checked)
+            # Update legend entry visibility (Requirement 3)
+            self._update_resonance_legend_entry(module_id)
 
     def _toggle_resonance_edit_mode(self, checked: bool):
         """Enable or disable double-click add/subtract mode."""
         self.add_subtract_mode = checked
 
     def _update_resonance_checkbox_text(self, module: int):
-        """Update the show-resonances checkbox label with count."""
-        count = len(self.resonance_freqs.get(module, []))
-        self.show_resonances_cb.setText(f"Show Resonances ({count})")
+        """Update the show-resonances checkbox label (count removed)."""
+        # count = len(self.resonance_freqs.get(module, [])) # Count is no longer displayed here
+        self.show_resonances_cb.setText("Show Resonances")
 
     def _add_resonance(self, module: int, freq_hz: float):
         """Add a resonance line at the given frequency."""
@@ -972,8 +1020,10 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         plot_info['resonance_lines_mag'].append(line_mag)
         plot_info['resonance_lines_phase'].append(line_phase)
         self.resonance_freqs.setdefault(module, []).append(freq_hz)
-        self._update_resonance_checkbox_text(module)
+        self._update_resonance_checkbox_text(module) # Though count is removed, keep for consistency if needed later
+        self._update_resonance_legend_entry(module) # Requirement 3
         self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
+
 
     def _remove_resonance(self, module: int, freq_hz: float):
         """Remove the nearest resonance line."""
@@ -990,18 +1040,48 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.plots[module]['amp_plot'].removeItem(line_mag)
         self.plots[module]['phase_plot'].removeItem(line_phase)
         freqs.pop(idx)
-        self._update_resonance_checkbox_text(module)
+        self._update_resonance_checkbox_text(module) # Though count is removed, keep for consistency
+        self._update_resonance_legend_entry(module) # Requirement 3
 
     def _update_unit_mode(self, mode):
-        """Update unit mode and redraw plots."""
+        """Update unit mode and redraw only amplitude plots."""
         if mode != self.unit_mode:
             self.unit_mode = mode
-            # Update all plot labels
-            for module in self.plots:
-                self._update_amplitude_labels(self.plots[module]['amp_plot'])
             
-            # Redraw with new units
-            self._redraw_all_plots()
+            for module_id in self.plots: # Iterate using module_id from self.plots.keys()
+                # Update Y-axis label of the amplitude plot
+                self._update_amplitude_labels(self.plots[module_id]['amp_plot'])
+
+                # Redraw amplitude data for this module_id
+                if module_id in self.raw_data:
+                    plot_info = self.plots[module_id]
+                    
+                    # Update amplitude-specific curves
+                    for amp_key, raw_entry_tuple in self.raw_data[module_id].items():
+                        # amp_key is like "module_amplitude" or "default"
+                        # raw_entry_tuple is (freqs, amps, phases, iq_data, optional_amplitude_val)
+                        
+                        amplitude_val, freqs, amps_raw, _, iq_data_raw = self._extract_data_from_tuple(amp_key, raw_entry_tuple)
+                        
+                        if freqs is None or amps_raw is None or iq_data_raw is None: # Should not happen with valid data
+                            continue
+
+                        converted_amps = UnitConverter.convert_amplitude(
+                            amps_raw, iq_data_raw, self.unit_mode, normalize=self.normalize_magnitudes
+                        )
+                        
+                        if amp_key != 'default': # Amplitude specific curve
+                            # The amplitude_val from _extract_data_from_tuple is the actual float value
+                            if amplitude_val in plot_info['amp_curves']:
+                                plot_info['amp_curves'][amplitude_val].setData(freqs, converted_amps)
+                        else: # Default curve (only if no amp-specific curves exist for this plot)
+                            if not plot_info['amp_curves']: # Check if amp_curves dict is empty
+                                plot_info['amp_curve'].setData(freqs, converted_amps)
+                    
+                    plot_info['amp_plot'].autoRange() # Auto-range based on enabled axes (Y is enabled)
+            
+            # Update legends because amplitude labels might change (e.g. "Probe: X dBm" vs "Probe: Y Norm Units")
+            self._update_legends_for_unit_mode()
 
     def _update_legends_for_unit_mode(self):
         """Update the legend entries to reflect the current unit mode."""
@@ -1091,18 +1171,18 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                         if amplitude in self.plots[module]['amp_curves']:
                             converted_amps = UnitConverter.convert_amplitude(
                                 amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
-                            freq_ghz = freqs / 1e9
-                            self.plots[module]['amp_curves'][amplitude].setData(freq_ghz, converted_amps)
-                            self.plots[module]['phase_curves'][amplitude].setData(freq_ghz, phases)
+                            # Keep frequencies in Hz for plotting, as axes are in Hz
+                            self.plots[module]['amp_curves'][amplitude].setData(freqs, converted_amps)
+                            self.plots[module]['phase_curves'][amplitude].setData(freqs, phases)
                 
                 # Now handle the default curve - ONLY if there are no amplitude-specific curves
                 if 'default' in self.raw_data[module] and not has_amp_curves:
                     freqs, amps, phases, iq_data = self.raw_data[module]['default']
                     converted_amps = UnitConverter.convert_amplitude(
                         amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
-                    freq_ghz = freqs / 1e9
-                    self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
-                    self.plots[module]['phase_curve'].setData(freq_ghz, phases)
+                    # Keep frequencies in Hz for plotting
+                    self.plots[module]['amp_curve'].setData(freqs, converted_amps)
+                    self.plots[module]['phase_curve'].setData(freqs, phases)
                 else:
                     # Make sure default curves have no data if we have amplitude-specific curves
                     self.plots[module]['amp_curve'].setData([], [])
@@ -1275,10 +1355,67 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 phase_plot_item.addItem(line_phase)
                 plot_info['resonance_lines_phase'].append(line_phase)
 
-            # 4. Store resonance frequencies and update checkbox
+            # 4. Store resonance frequencies and update checkbox/legend
             self.resonance_freqs[active_module] = res_freqs_hz
-            self._update_resonance_checkbox_text(active_module)
-            self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
+            self._update_resonance_checkbox_text(active_module) # Checkbox text itself doesn't change with count anymore
+            self._update_resonance_legend_entry(active_module) # Requirement 3: Update legend
+            self._toggle_resonances_visible(self.show_resonances_cb.isChecked()) # Ensure lines visibility matches checkbox
+
+
+    def _remove_faux_resonance_legend_entry(self, module_id: int):
+        """Removes the faux resonance legend entry for a module."""
+        if module_id in self.plots:
+            plot_info = self.plots[module_id]
+            amp_legend = plot_info['amp_legend']
+            phase_legend = plot_info['phase_legend']
+
+            if module_id in self.faux_resonance_legend_items_mag:
+                try:
+                    amp_legend.removeItem(self.faux_resonance_legend_items_mag[module_id])
+                except Exception: # Broad except as removeItem might fail if item already gone
+                    pass 
+                del self.faux_resonance_legend_items_mag[module_id]
+            
+            if module_id in self.faux_resonance_legend_items_phase:
+                try:
+                    phase_legend.removeItem(self.faux_resonance_legend_items_phase[module_id])
+                except Exception:
+                    pass
+                del self.faux_resonance_legend_items_phase[module_id]
+
+    def _update_resonance_legend_entry(self, module_id: int):
+        """Adds or updates the faux legend entry for resonance count."""
+        if module_id not in self.plots:
+            return
+
+        self._remove_faux_resonance_legend_entry(module_id) # Clear existing first
+
+        plot_info = self.plots[module_id]
+        amp_legend = plot_info['amp_legend']
+        phase_legend = plot_info['phase_legend']
+        
+        count = len(self.resonance_freqs.get(module_id, []))
+
+        if self.show_resonances_cb.isChecked() and count > 0:
+            # Create a dummy PlotDataItem to get the sample swatch in the legend
+            # This item itself won't be added to the plot, only its legend representation
+            dummy_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
+            
+            # For Magnitude Plot Legend
+            # We need to add an actual item to the legend.
+            # A simple way is to create a PlotDataItem, add it to the legend, then make it invisible
+            # or ensure it has no data.
+            # However, LegendItem.addItem takes a PlotDataItem and a name.
+            
+            # Create a new PlotDataItem for the legend entry
+            # This item will not be added to the plot itself, only to the legend.
+            legend_sample_item_mag = pg.PlotDataItem(pen=dummy_pen)
+            amp_legend.addItem(legend_sample_item_mag, f"{count} resonances")
+            self.faux_resonance_legend_items_mag[module_id] = legend_sample_item_mag # Store the item used for legend
+
+            legend_sample_item_phase = pg.PlotDataItem(pen=dummy_pen)
+            phase_legend.addItem(legend_sample_item_phase, f"{count} resonances")
+            self.faux_resonance_legend_items_phase[module_id] = legend_sample_item_phase
 
 
     def _check_all_complete(self):
@@ -1317,27 +1454,48 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             self.progress_group.setVisible(False)
 
     def _edit_parameters(self):
-        """Open dialog to edit parameters besides cable length."""
-        dialog = NetworkAnalysisParamsDialog(self, self.current_params)
+        """Open dialog to edit parameters. Re-runs analysis using per-module cable lengths."""
+        # Prepare parameters for the dialog: use current_params but exclude any cable length info,
+        # as the dialog is for other settings.
+        params_for_dialog = self.current_params.copy()
+        params_for_dialog.pop('module_cable_lengths', None)
+        params_for_dialog.pop('cable_length', None) # Ensure no single cable_length is passed to dialog context
+
+        dialog = NetworkAnalysisParamsDialog(self, params_for_dialog)
         if dialog.exec():
-            # Get updated parameters
-            params = dialog.get_parameters()
-            if params:
-                # Keep the current cable length
-                params['cable_length'] = self.cable_length_spin.value()
-                # Update current parameters
-                self.current_params = params.copy()
+            # Get updated general parameters from the dialog
+            updated_general_params = dialog.get_parameters() # These don't include cable lengths
+            
+            if updated_general_params:
+                # Start with the updated general parameters
+                params_for_rerun = updated_general_params.copy()
+
+                # Add the authoritative per-module cable lengths from the window state
+                params_for_rerun['module_cable_lengths'] = self.module_cable_lengths.copy()
+                
+                # Ensure no single 'cable_length' key conflicts; module_cable_lengths is primary
+                params_for_rerun.pop('cable_length', None)
+
+                # Update the window's current_params to reflect the full set for the new run
+                self.current_params = params_for_rerun.copy()
+                
                 # Make progress group visible again
                 if self.progress_group:
                     self.progress_group.setVisible(True)
-                self.parent()._rerun_network_analysis(params)
+                
+                # Call the parent's rerun method with the fully formed params
+                self.parent()._rerun_network_analysis(self.current_params)
 
     def _rerun_analysis(self):
         """Re-run the analysis with potentially updated parameters."""
         if hasattr(self.parent(), '_rerun_network_analysis'):
-            # Get current parameters and update cable length
+            # Get current parameters and add the per-module cable lengths
             params = self.current_params.copy()
-            params['cable_length'] = self.cable_length_spin.value()
+            # Instead of a single cable_length, pass the dictionary
+            params['module_cable_lengths'] = self.module_cable_lengths.copy()
+            # Remove the old single 'cable_length' if it exists, to avoid confusion
+            params.pop('cable_length', None)
+
             # Make progress group visible again
             if self.progress_group:
                 self.progress_group.setVisible(True)
@@ -1347,9 +1505,28 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         """Set parameters for analysis."""
         self.original_params = params.copy()  # Keep original for reference
         self.current_params = params.copy()   # Keep current for dialog
-        
-        # Set cable length spinner to match value
-        self.cable_length_spin.setValue(params.get('cable_length', DEFAULT_CABLE_LENGTH))
+
+        # Initialize per-module cable lengths (Requirement 2)
+        default_cable_length_for_all = params.get('cable_length', DEFAULT_CABLE_LENGTH)
+        # If params already contains per-module lengths (e.g. from a future advanced re-run), use it
+        # For now, assume all modules start with the same cable length from params
+        for mod_id in self.modules: # self.modules is set in __init__
+            self.module_cable_lengths[mod_id] = params.get('module_cable_lengths', {}).get(mod_id, default_cable_length_for_all)
+
+        # Update spinner for the initially active module (if any)
+        # This will be handled by _on_active_module_changed if tabs are already created,
+        # or when the first tab becomes current.
+        # If tabs exist, trigger an update for the current one.
+        if self.tabs.count() > 0:
+            self._on_active_module_changed(self.tabs.currentIndex())
+        elif self.modules: # If modules are defined but no tabs yet (e.g. during init)
+            # Set the spinner to the first module's cable length as a sensible default
+            # before any tab is explicitly selected.
+            first_module_id = self.modules[0]
+            initial_cable_length = self.module_cable_lengths.get(first_module_id, DEFAULT_CABLE_LENGTH)
+            self.cable_length_spin.blockSignals(True)
+            self.cable_length_spin.setValue(initial_cable_length)
+            self.cable_length_spin.blockSignals(False)
         
         # Only try to set plot ranges if plots exist
         if not hasattr(self, 'plots') or not self.plots:
@@ -1790,11 +1967,48 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
 
 
         # --- Update Cable Length Spinner and Stored Parameters ---
+        self.module_cable_lengths[active_module] = L_new_physical # Update specific module's length
+        self.cable_length_spin.blockSignals(True)
         self.cable_length_spin.setValue(L_new_physical)
-        self.current_params['cable_length'] = L_new_physical
+        self.cable_length_spin.blockSignals(False)
+        # self.current_params['cable_length'] will be updated if a global re-run happens,
+        # or we'll need a more sophisticated way to pass per-module lengths to re-run.
+        # For now, current_params reflects the global setting, while module_cable_lengths holds specifics.
         
         QtWidgets.QMessageBox.information(self, "Cable Delay Updated", 
-                                          f"Cable length updated to {L_new_physical:.3f} m based on phase fit.")
+                                          f"Cable length for Module {active_module} updated to {L_new_physical:.3f} m based on phase fit.")
+
+    def _on_active_module_changed(self, index: int):
+        """Update UI elements when the active module tab changes."""
+        if index < 0 or not self.modules or index >= len(self.modules):
+            return
+
+        active_module_id = self.modules[index] # Assuming self.modules order matches tab order
+
+        # Update cable length spinner (Requirement 2)
+        if active_module_id in self.module_cable_lengths:
+            self.cable_length_spin.blockSignals(True)
+            self.cable_length_spin.setValue(self.module_cable_lengths[active_module_id])
+            self.cable_length_spin.blockSignals(False)
+        else:
+            # Fallback if somehow not set, though set_params should handle it
+            self.cable_length_spin.blockSignals(True)
+            self.cable_length_spin.setValue(self.current_params.get('cable_length', DEFAULT_CABLE_LENGTH))
+            self.cable_length_spin.blockSignals(False)
+
+        # Future: Update other per-module UI elements here if any
+
+    def _on_cable_length_changed(self, new_length: float):
+        """Handle changes to the cable length spinner."""
+        current_tab_index = self.tabs.currentIndex()
+        if current_tab_index < 0 or not self.modules or current_tab_index >= len(self.modules):
+            return
+
+        active_module_id = self.modules[current_tab_index]
+        self.module_cable_lengths[active_module_id] = new_length
+        # Note: This change only affects the current module's stored value.
+        # A re-run or re-analysis would be needed to apply this to the plots
+        # unless _unwrap_cable_delay_action is called, which re-calculates phase.
 
 class InitializeCRSDialog(QtWidgets.QDialog):
     """Dialog for CRS initialization options."""

@@ -748,11 +748,24 @@ class Periscope(QtWidgets.QMainWindow):
             task_params = params.copy()
             task_params['module'] = module
             
+            # Get specific cable length for this module if provided (Requirement 2)
+            module_specific_cable_length = params.get('module_cable_lengths', {}).get(module)
+            if module_specific_cable_length is not None:
+                task_params['cable_length'] = module_specific_cable_length
+            # else, it will use the global 'cable_length' if present in params, or default in task
+            
             # Create a unique task key
             task_key = f"{window_id}_{module}_amp_{amplitude}"
             
             # Create and start the task
-            task = NetworkAnalysisTask(self.crs, module, task_params, signals, amplitude=amplitude)
+            # Pass cable_length_override to the task if it was specifically found for the module
+            task = NetworkAnalysisTask(
+                self.crs, 
+                module, 
+                task_params, # This now contains the potentially module-specific cable_length
+                signals, 
+                amplitude=amplitude
+            )
             self.netanal_tasks[task_key] = task
             self.pool.start(task)
         except Exception as e:

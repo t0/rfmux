@@ -580,10 +580,22 @@ class ClickableViewBox(pg.ViewBox):
         ev : QMouseEvent
             The mouse event instance.
         """
+        window = getattr(self, 'parent_window', None)
+        log_x, log_y = self.state["logMode"]
+        pt_view = self.mapSceneToView(ev.scenePos())
+        x_val = 10 ** pt_view.x() if log_x else pt_view.x()
+
+        if window and getattr(window, 'add_subtract_mode', False):
+            freq = x_val
+            if ev.button() == QtCore.Qt.MouseButton.RightButton or ev.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                window._remove_resonance(self.module_id, freq)
+            else:
+                window._add_resonance(self.module_id, freq)
+            ev.accept()
+            return
         if ev.button() != QtCore.Qt.MouseButton.LeftButton:
             super().mouseDoubleClickEvent(ev)
             return
-        pt_view = self.mapSceneToView(ev.scenePos())
         plot_item = self.parentItem()
         x_label = y_label = ""
         if isinstance(plot_item, pg.PlotItem):
@@ -596,8 +608,6 @@ class ClickableViewBox(pg.ViewBox):
         x_label = x_label or "X"
         y_label = y_label or "Y"
 
-        log_x, log_y = self.state["logMode"]
-        x_val = 10 ** pt_view.x() if log_x else pt_view.x()
         y_val = 10 ** pt_view.y() if log_y else pt_view.y()
 
         parent_widget = self.scene().views()[0].window()
@@ -1891,6 +1901,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         self.dac_scales = dac_scales or {}  # Store DAC scales
         self.resonance_lines_mag = {} # Store resonance lines for magnitude plots {module: [line_item, ...]}
         self.resonance_lines_phase = {} # Store resonance lines for phase plots {module: [line_item, ...]}
+        self.resonance_freqs = {}  # Store resonance frequencies per module
+        self.add_subtract_mode = False
         
         # Setup the UI components
         self._setup_ui()
@@ -1948,6 +1960,22 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         find_res_btn.setToolTip("Identify resonance frequencies from the current sweep data.")
         find_res_btn.clicked.connect(self._show_find_resonances_dialog)
         toolbar.addWidget(find_res_btn)
+
+        # Show/Hide resonances checkbox
+        self.show_resonances_cb = QtWidgets.QCheckBox("Show Resonances (0)")
+        self.show_resonances_cb.setChecked(True)
+        self.show_resonances_cb.toggled.connect(self._toggle_resonances_visible)
+        toolbar.addWidget(self.show_resonances_cb)
+
+        # Add/Subtract mode and tolerance controls
+        self.edit_resonances_cb = QtWidgets.QCheckBox("Add/Subtract Resonances")
+        self.edit_resonances_cb.setToolTip(
+            "When enabled, double-click adds a resonance;\n"
+            "Shift + double-click removes the nearest resonance."
+        )
+        self.edit_resonances_cb.toggled.connect(self._toggle_resonance_edit_mode)
+        toolbar.addWidget(self.edit_resonances_cb)
+
 
         # Export button
         export_btn = QtWidgets.QPushButton("Export Data")
@@ -2060,15 +2088,21 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         for module in self.modules:
             tab = QtWidgets.QWidget()
             tab_layout = QtWidgets.QVBoxLayout(tab)
-            
+
             # Create amplitude and phase plots with ClickableViewBox
             vb_amp = ClickableViewBox()
+            vb_amp.parent_window = self
+            vb_amp.module_id = module
+            vb_amp.plot_role = 'amp'
             amp_plot = pg.PlotWidget(viewBox=vb_amp, title=f"Module {module} - Magnitude")
             self._update_amplitude_labels(amp_plot)
             amp_plot.setLabel('bottom', 'Frequency', units='Hz')
             amp_plot.showGrid(x=True, y=True, alpha=0.3)
-            
+
             vb_phase = ClickableViewBox()
+            vb_phase.parent_window = self
+            vb_phase.module_id = module
+            vb_phase.plot_role = 'phase'
             phase_plot = pg.PlotWidget(viewBox=vb_phase, title=f"Module {module} - Phase")
             phase_plot.setLabel('left', 'Phase', units='deg')
             phase_plot.setLabel('bottom', 'Frequency', units='Hz')
@@ -2164,7 +2198,57 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             for plot_type in ['amp_plot', 'phase_plot']:
                 viewbox = self.plots[module][plot_type].getViewBox()
                 if isinstance(viewbox, ClickableViewBox):
-                    viewbox.enableZoomBoxMode(self.zoom_box_mode)            
+                    viewbox.enableZoomBoxMode(self.zoom_box_mode)
+
+    def _toggle_resonances_visible(self, checked: bool):
+        """Show or hide all resonance indicator lines."""
+        for module in self.plots:
+            for line in self.plots[module]['resonance_lines_mag']:
+                line.setVisible(checked)
+            for line in self.plots[module]['resonance_lines_phase']:
+                line.setVisible(checked)
+
+    def _toggle_resonance_edit_mode(self, checked: bool):
+        """Enable or disable double-click add/subtract mode."""
+        self.add_subtract_mode = checked
+
+    def _update_resonance_checkbox_text(self, module: int):
+        """Update the show-resonances checkbox label with count."""
+        count = len(self.resonance_freqs.get(module, []))
+        self.show_resonances_cb.setText(f"Show Resonances ({count})")
+
+    def _add_resonance(self, module: int, freq_hz: float):
+        """Add a resonance line at the given frequency."""
+        if module not in self.plots:
+            return
+        plot_info = self.plots[module]
+        line_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
+        line_mag = pg.InfiniteLine(pos=freq_hz, angle=90, movable=False, pen=line_pen)
+        line_phase = pg.InfiniteLine(pos=freq_hz, angle=90, movable=False, pen=line_pen)
+        plot_info['amp_plot'].addItem(line_mag)
+        plot_info['phase_plot'].addItem(line_phase)
+        plot_info['resonance_lines_mag'].append(line_mag)
+        plot_info['resonance_lines_phase'].append(line_phase)
+        self.resonance_freqs.setdefault(module, []).append(freq_hz)
+        self._update_resonance_checkbox_text(module)
+        self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
+
+    def _remove_resonance(self, module: int, freq_hz: float):
+        """Remove the nearest resonance line."""
+        if module not in self.plots or module not in self.resonance_freqs:
+            return
+        freqs = self.resonance_freqs[module]
+        if not freqs:
+            return
+        freqs_arr = np.array(freqs)
+        idx = int(np.argmin(np.abs(freqs_arr - freq_hz)))
+        # Remove lines
+        line_mag = self.plots[module]['resonance_lines_mag'].pop(idx)
+        line_phase = self.plots[module]['resonance_lines_phase'].pop(idx)
+        self.plots[module]['amp_plot'].removeItem(line_mag)
+        self.plots[module]['phase_plot'].removeItem(line_phase)
+        freqs.pop(idx)
+        self._update_resonance_checkbox_text(module)
 
     def _update_unit_mode(self, mode):
         """Update unit mode and redraw plots."""
@@ -2428,17 +2512,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 phase_plot_item.removeItem(line)
             plot_info['resonance_lines_phase'] = []
 
-            # 2. Clear old "Identified Resonances" legend entries
-            legend_label_text_base = "Identified Resonances"
-            for legend_obj in [amp_legend, phase_legend]:
-                if legend_obj: # Check if legend exists
-                    # Iterate over a copy of items for safe removal
-                    items_to_remove_text = [label.text for _, label in list(legend_obj.items) if label.text.startswith(legend_label_text_base)]
-                    for name_text in items_to_remove_text:
-                        try:
-                            legend_obj.removeItem(name_text)
-                        except Exception: 
-                            pass # Item might have been removed by side effect or already gone
+            # 2. Clear old resonance frequency data
+            self.resonance_freqs[active_module] = []
             
             res_freqs_hz = resonance_results.get('resonance_frequencies', [])
 
@@ -2458,57 +2533,10 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 phase_plot_item.addItem(line_phase)
                 plot_info['resonance_lines_phase'].append(line_phase)
 
-            # 4. Add new legend entries and attach click handlers
-            legend_label_text = f"{legend_label_text_base} ({len(res_freqs_hz)})"
-
-            # Magnitude Legend
-            if amp_legend:
-                dummy_item_mag = pg.PlotDataItem(pen=line_pen)
-                dummy_item_mag.setVisible(True) 
-                amp_legend.addItem(dummy_item_mag, name=legend_label_text)
-                # Find the added legend item (sample and label) to attach custom click logic
-                # Iterate over a copy of items for safety if legend.items changes during iteration (though unlikely here)
-                for sample, label in list(amp_legend.items): 
-                    if label.text == legend_label_text:
-                        # Use a factory function to ensure correct variable capture in lambda/closure
-                        def create_click_handler(bound_sample, bound_label, lines_list):
-                            def handler(evt):
-                                is_visible = not bound_sample.isVisible() # Toggle state
-                                bound_sample.setVisible(is_visible) # Update dummy item
-                                for line_item in lines_list:
-                                    line_item.setVisible(is_visible)
-                                opacity = 1.0 if is_visible else 0.3
-                                bound_sample.setOpacity(opacity)
-                                bound_label.setOpacity(opacity)
-                            return handler
-                        
-                        clickHandler = create_click_handler(sample, label, plot_info['resonance_lines_mag'])
-                        label.mousePressEvent = clickHandler
-                        sample.mousePressEvent = clickHandler 
-                        break
-            
-            # Phase Legend
-            if phase_legend:
-                dummy_item_phase = pg.PlotDataItem(pen=line_pen)
-                dummy_item_phase.setVisible(True)
-                phase_legend.addItem(dummy_item_phase, name=legend_label_text)
-                for sample, label in list(phase_legend.items):
-                    if label.text == legend_label_text:
-                        def create_click_handler(bound_sample, bound_label, lines_list):
-                            def handler(evt):
-                                is_visible = not bound_sample.isVisible() # Toggle state
-                                bound_sample.setVisible(is_visible) # Update dummy item
-                                for line_item in lines_list:
-                                    line_item.setVisible(is_visible)
-                                opacity = 1.0 if is_visible else 0.3
-                                bound_sample.setOpacity(opacity)
-                                bound_label.setOpacity(opacity)
-                            return handler
-
-                        clickHandler = create_click_handler(sample, label, plot_info['resonance_lines_phase'])
-                        label.mousePressEvent = clickHandler
-                        sample.mousePressEvent = clickHandler
-                        break
+            # 4. Store resonance frequencies and update checkbox
+            self.resonance_freqs[active_module] = res_freqs_hz
+            self._update_resonance_checkbox_text(active_module)
+            self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
 
 
     def _check_all_complete(self):
@@ -2797,6 +2825,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                     }
                 }
                 meas_idx += 1
+
+            export_data['modules'][module]['resonances_hz'] = self.resonance_freqs.get(module, [])
         
         # Save the enhanced data structure
         with open(filename, 'wb') as f:
@@ -2823,6 +2853,13 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                         writer.writerow([param, f"{value/1e6} MHz"])
                     else:
                         writer.writerow([param, value])
+
+            if self.resonance_freqs:
+                writer.writerow(['', ''])
+                writer.writerow(['Resonances (Hz)', ''])
+                for module, freqs in self.resonance_freqs.items():
+                    freq_str = ','.join(str(f) for f in freqs)
+                    writer.writerow([f'Module {module}', freq_str])
         
         # Now export each module's data
         for module, data_dict in self.raw_data.items():
@@ -2969,11 +3006,19 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                         # Assume this curve was also compensated with L_old_physical.
                         # This is an approximation if the user changed cable length between sweeps
                         # without a full re-run.
+                        # First get the unwrapped phase data
                         new_phases_deg_for_curve = recalculate_displayed_phase(
                             freqs_curve, phases_deg_current_display_curve, L_old_physical, L_new_physical
                         )
-                        # re-wrap phases to [-180, 180] range
+                        
+                        # Recenter the unwrapped phase data so the first point begins at 0 phase
+                        if len(new_phases_deg_for_curve) > 0:
+                            first_point_phase = new_phases_deg_for_curve[0]
+                            new_phases_deg_for_curve = new_phases_deg_for_curve - first_point_phase
+                            
+                        # Now re-wrap phases to [-180, 180] range
                         new_phases_deg_for_curve = ((new_phases_deg_for_curve + 180) % 360) - 180
+                            
                         curve_item.setData(freqs_curve, new_phases_deg_for_curve)
             
             # Update the main/default phase curve (if it holds data)
@@ -2984,9 +3029,19 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 if len(data_tuple_main) == 4:
                     freqs_main, _, phases_deg_current_display_main, _ = data_tuple_main
                     if len(freqs_main) > 0:
+                        # First get the unwrapped phase data
                         new_phases_deg_for_main = recalculate_displayed_phase(
                             freqs_main, phases_deg_current_display_main, L_old_physical, L_new_physical
                         )
+                        
+                        # Recenter the unwrapped phase data so the first point begins at 0 phase
+                        if len(new_phases_deg_for_main) > 0:
+                            first_point_phase = new_phases_deg_for_main[0]
+                            new_phases_deg_for_main = new_phases_deg_for_main - first_point_phase
+                            
+                        # Now re-wrap phases to [-180, 180] range
+                        new_phases_deg_for_main = ((new_phases_deg_for_main + 180) % 360) - 180
+                        
                         main_curve_item.setData(freqs_main, new_phases_deg_for_main)
 
             plot_info['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)

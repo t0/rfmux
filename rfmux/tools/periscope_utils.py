@@ -131,7 +131,7 @@ except ImportError:  # SciPy not installed – graceful degradation
     convolve = None
     SMOOTH_SIGMA = 0.0
 
-def _pin_current_thread_to_core():
+def pin_current_thread_to_core():
     """
     Pins the calling thread to a randomly selected CPU core from the set of
     cores this process is allowed to run on (Linux only). On other platforms
@@ -178,7 +178,7 @@ def _pin_current_thread_to_core():
     except Exception as ex:
         warnings.warn(f"Warning: Unexpected error pinning thread to single CPU: {ex}\n")
 
-def _get_ipython():
+def get_ipython():
     """
     Attempt to import and return IPython's get_ipython() if available.
 
@@ -193,7 +193,7 @@ def _get_ipython():
     except ImportError:
         return None
 
-def _is_qt_event_loop_running() -> bool:
+def is_qt_event_loop_running() -> bool:
     """
     Check if a Qt event loop is active in IPython.
 
@@ -202,10 +202,10 @@ def _is_qt_event_loop_running() -> bool:
     bool
         True if a Qt event loop is running, False otherwise.
     """
-    ip = _get_ipython()
+    ip = get_ipython()
     return bool(ip and getattr(ip, "active_eventloop", None) == "qt")
 
-def _is_running_inside_ipython() -> bool:
+def is_running_inside_ipython() -> bool:
     """
     Check if the current environment is an IPython shell.
 
@@ -214,7 +214,7 @@ def _is_running_inside_ipython() -> bool:
     bool
         True if running in IPython, otherwise False.
     """
-    return _get_ipython() is not None
+    return get_ipython() is not None
 
 def infer_dec_stage(fs: float) -> int:
     """
@@ -241,7 +241,7 @@ def infer_dec_stage(fs: float) -> int:
     dec_rounded = int(round(dec_approx))
     return max(0, min(15, dec_rounded))
 
-def _parse_channels_multich(txt: str) -> List[List[int]]:
+def parse_channels_multich(txt: str) -> List[List[int]]:
     """
     Parse a comma-separated string of channel specifications, supporting '&'
     to group multiple channels on a single row.
@@ -288,7 +288,7 @@ def _parse_channels_multich(txt: str) -> List[List[int]]:
         return [[1]]
     return out
 
-def _mode_title(mode: str) -> str:
+def mode_title(mode: str) -> str:
     """
     Provide a more user-friendly label for each plot mode.
 

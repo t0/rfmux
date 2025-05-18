@@ -67,7 +67,7 @@ class Periscope(QtWidgets.QMainWindow):
         self.crs = crs
 
         # Parse multi-channel format
-        self.channel_list = _parse_channels_multich(chan_str)
+        self.channel_list = parse_channels_multich(chan_str)
 
         # State variables
         self.paused = False
@@ -1016,7 +1016,7 @@ class Periscope(QtWidgets.QMainWindow):
 
         for col, mode in enumerate(modes):
             vb = ClickableViewBox()
-            pw = pg.PlotWidget(viewBox=vb, title=f"{_mode_title(mode)} – {row_title}")
+            pw = pg.PlotWidget(viewBox=vb, title=f"{mode_title(mode)} – {row_title}")
 
             # Configure auto-range based on mode
             self._configure_plot_auto_range(pw, mode)
@@ -1293,7 +1293,7 @@ class Periscope(QtWidgets.QMainWindow):
         Parse the channel specification string from self.e_ch, supporting '&'
         to group multiple channels in one row. Re-init buffers/layout if changed.
         """
-        new_parsed = _parse_channels_multich(self.e_ch.text())
+        new_parsed = parse_channels_multich(self.e_ch.text())
         if new_parsed != self.channel_list:
             self.channel_list = new_parsed
             self.iq_workers.clear()
@@ -1927,7 +1927,7 @@ def main():
     # --- End Global Exception Hook ---
 
     # Bind only the main GUI (this) thread to a single CPU to reduce scheduling jitter
-    _pin_current_thread_to_core()
+    pin_current_thread_to_core()
 
     # Create CRS object so we can tell it what to do
     crs = None
@@ -2009,8 +2009,8 @@ async def raise_periscope(
     Periscope or (Periscope, QApplication)
         The Periscope instance, or (instance, QApplication) if non-blocking.
     """
-    ip = _get_ipython()
-    qt_loop = _is_qt_event_loop_running()
+    ip = get_ipython()
+    qt_loop = is_qt_event_loop_running()
 
     if ip and not qt_loop:
         ip.run_line_magic("gui", "qt")
@@ -2035,13 +2035,13 @@ async def raise_periscope(
         
         # Check if we are in an environment that might already have a complex hook (like IPython)
         # A more robust check might be needed for various environments.
-        if _get_ipython() is None: # Simple check: if not in IPython, assume it's safe to set.
+        if get_ipython() is None: # Simple check: if not in IPython, assume it's safe to set.
             sys.excepthook = global_exception_hook_lib
             sys._periscope_excepthook_installed = True # Mark as installed
     # --- End Global Exception Hook ---
 
     # Bind only the main GUI (this) thread to a single CPU to reduce scheduling jitter
-    _pin_current_thread_to_core()
+    pin_current_thread_to_core()
 
     refresh_ms = int(round(1000.0 / fps))
 
@@ -2058,7 +2058,7 @@ async def raise_periscope(
     viewer.show()
 
     if blocking:
-        if _is_running_inside_ipython():
+        if is_running_inside_ipython():
             app.exec()
         else:
             sys.exit(app.exec())

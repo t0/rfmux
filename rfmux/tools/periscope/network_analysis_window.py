@@ -1075,7 +1075,6 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             plot_info['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
         self.module_cable_lengths[active_module] = L_new_physical
         self.cable_length_spin.blockSignals(True); self.cable_length_spin.setValue(L_new_physical); self.cable_length_spin.blockSignals(False)
-        QtWidgets.QMessageBox.information(self, "Cable Delay Updated", f"Cable length for Module {active_module} updated to {L_new_physical:.3f} m.")
 
     def _on_active_module_changed(self, index: int):
         """Update UI elements when the active module tab changes."""

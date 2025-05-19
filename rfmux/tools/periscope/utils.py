@@ -88,7 +88,8 @@ _check_xcb_cursor_runtime()
 
 # Import PyQt only after checking XCB dependencies
 from PyQt6 import QtCore, QtWidgets
-from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, Qt, QRegularExpression
+from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, Qt, QRegularExpression 
+# pyqtSignal is already imported, no need for alias unless it's shadowed, which it isn't here.
 from PyQt6.QtGui import QFont, QIntValidator, QIcon, QDoubleValidator, QRegularExpressionValidator
 import pyqtgraph as pg
 
@@ -296,42 +297,85 @@ class Circular:
 
 # ───────────────────────── Custom Plot Controls ─────────────────────────
 class ClickableViewBox(pg.ViewBox):
+    # Signal to emit the mouse event on double click, allowing connected slots to accept it.
+    doubleClickedEvent = pyqtSignal(object) 
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setMouseMode(pg.ViewBox.RectMode)  
+
     def enableZoomBoxMode(self, enable=True):
         self.setMouseMode(pg.ViewBox.RectMode if enable else pg.ViewBox.PanMode)
+
     def mouseDoubleClickEvent(self, ev):
         window = getattr(self, 'parent_window', None)
         log_x, log_y = self.state["logMode"]
-        pt_view = self.mapSceneToView(ev.scenePos())
+        # scenePos() is from the event 'ev', map it to view coordinates
+        pt_view = self.mapSceneToView(ev.scenePos()) 
         x_val = 10 ** pt_view.x() if log_x else pt_view.x()
+        y_val = 10 ** pt_view.y() if log_y else pt_view.y() # y_val needed for QMessageBox
+
+        # 1. Handle window-specific modes first (e.g., add_subtract_mode for NetworkAnalysisWindow)
         if window and getattr(window, 'add_subtract_mode', False):
             freq = x_val
-            # QtCore from PyQt6
-            if ev.button() == QtCore.Qt.MouseButton.RightButton or ev.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
-                window._remove_resonance(self.module_id, freq)
-            else:
-                window._add_resonance(self.module_id, freq)
-            ev.accept(); return
-        if ev.button() != QtCore.Qt.MouseButton.LeftButton:
-            super().mouseDoubleClickEvent(ev); return
-        plot_item = self.parentItem()
-        x_label = y_label = ""
-        if isinstance(plot_item, pg.PlotItem):
-            x_axis = plot_item.getAxis("bottom"); y_axis = plot_item.getAxis("left")
-            if x_axis and x_axis.label: x_label = x_axis.label.toPlainText().strip()
-            if y_axis and y_axis.label: y_label = y_axis.label.toPlainText().strip()
-        x_label = x_label or "X"; y_label = y_label or "Y"
-        y_val = 10 ** pt_view.y() if log_y else pt_view.y()
-        parent_widget = self.scene().views()[0].window()
-        # QtWidgets from PyQt6
-        box = QtWidgets.QMessageBox(parent_widget)
-        box.setWindowTitle("Coordinates")
-        box.setText(f"{y_label}: {y_val:.6g}\n{x_label}: {x_val:.6g}")
-        box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Close)
-        box.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose); box.show()
-        ev.accept()
+            # module_id should be set on the ViewBox instance by its parent window if needed
+            module_id_to_use = getattr(self, 'module_id', None)
+            # Fallback for NetworkAnalysisWindow if module_id isn't directly on ViewBox,
+            # but NetworkAnalysisWindow itself has an active_module_for_dac.
+            if module_id_to_use is None and hasattr(window, 'active_module_for_dac'):
+                 module_id_to_use = window.active_module_for_dac
+            
+            # Original logic for add/remove: Right-click or Shift+Left-click for remove
+            if ev.button() == QtCore.Qt.MouseButton.RightButton or \
+               (ev.button() == QtCore.Qt.MouseButton.LeftButton and ev.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier):
+                if hasattr(window, '_remove_resonance'):
+                     window._remove_resonance(module_id_to_use, freq)
+                ev.accept()
+                return
+            elif ev.button() == QtCore.Qt.MouseButton.LeftButton: # Normal left click for add
+                if hasattr(window, '_add_resonance'):
+                    window._add_resonance(module_id_to_use, freq)
+                ev.accept()
+                return
+        
+        # 2. Emit the generic doubleClickedEvent signal.
+        #    This is intended for features like the Detector Digest in MultisweepWindow.
+        if ev.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.doubleClickedEvent.emit(ev) # Pass the original event object
+            if ev.isAccepted():
+                # If a slot connected to doubleClickedEvent accepted the event,
+                # we assume it's fully handled.
+                return
+
+        # 3. Default behavior for left double-click: show coordinates QMessageBox
+        #    This executes if not in add_subtract_mode and no slot accepted doubleClickedEvent.
+        if ev.button() == QtCore.Qt.MouseButton.LeftButton and not ev.isAccepted():
+            plot_item = self.parentItem()
+            x_label_text = y_label_text = "" # Renamed to avoid conflict with x_val, y_val
+            if isinstance(plot_item, pg.PlotItem):
+                x_axis = plot_item.getAxis("bottom"); y_axis = plot_item.getAxis("left")
+                if x_axis and x_axis.label: x_label_text = x_axis.label.toPlainText().strip()
+                if y_axis and y_axis.label: y_label_text = y_axis.label.toPlainText().strip()
+            x_label_text = x_label_text or "X"; y_label_text = y_label_text or "Y"
+            
+            parent_widget = None
+            if self.scene() and self.scene().views(): # Ensure scene and views exist
+                parent_widget = self.scene().views()[0].window()
+
+            if parent_widget: # Only show if we have a valid parent widget
+                box = QtWidgets.QMessageBox(parent_widget)
+                box.setWindowTitle("Coordinates")
+                box.setText(f"{y_label_text}: {y_val:.6g}\n{x_label_text}: {x_val:.6g}")
+                box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Close)
+                box.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+                box.show()
+            ev.accept() # Accept the event after showing the message box
+            return
+
+        # 4. If not a left button double click and not handled by any of the above,
+        #    pass to superclass for any other default ViewBox handling.
+        if not ev.isAccepted():
+            super().mouseDoubleClickEvent(ev)
 
 # ───────────────────────── Network Data Processing ─────────────────────────
 # (No functions here in the original, so nothing to adjust)

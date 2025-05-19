@@ -8,6 +8,7 @@ import pyqtgraph as pg
 
 # Imports from within the 'periscope' subpackage
 from .utils import LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg # Ensure these are available
+from .detector_digest_dialog import DetectorDigestDialog
 
 class MultisweepWindow(QtWidgets.QMainWindow):
     """
@@ -175,6 +176,10 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # Link X-axes of magnitude and phase plots for synchronized zooming/panning
         self.combined_phase_plot.setXLink(self.combined_mag_plot)
         self._apply_zoom_box_mode() # Apply initial zoom box mode state
+
+        # Connect double click signal from magnitude plot's viewbox
+        if isinstance(self.combined_mag_plot.getViewBox(), ClickableViewBox):
+            self.combined_mag_plot.getViewBox().doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
 
 
     def _toggle_normalization(self, checked):
@@ -374,7 +379,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # Use a distinct color family for few amplitudes, switch to a colormap for many
         channel_families = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
                             "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"] # Tableau10
-        viridis_cmap = pg.colormap.get("viridis")
+        use_cmap = pg.colormap.get("inferno")
         
         sorted_amplitudes = sorted(self.results_by_amplitude.keys())
         legend_items_mag = {} # To avoid duplicate legend entries for the same amplitude
@@ -388,7 +393,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             if num_amps <= len(channel_families): # Use distinct colors if few amplitudes
                 color = channel_families[amp_idx % len(channel_families)]
             else: # Use a colormap for many amplitudes
-                color = viridis_cmap.map(amp_idx / max(1, num_amps - 1)) # Normalize index for colormap
+                color = use_cmap.map(amp_idx / max(1, num_amps - 1)) # Normalize index for colormap
             pen = pg.mkPen(color, width=LINE_WIDTH)
             
             # --- Prepare Legend Entry for this Amplitude ---
@@ -661,7 +666,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             # Color definitions (consistent with _redraw_plots)
             channel_families = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
                                 "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
-            viridis_cmap = pg.colormap.get("viridis")
+            use_cmap = pg.colormap.get("inferno")
             sorted_amplitudes = sorted(self.results_by_amplitude.keys())
 
             for amp_idx, amp_val in enumerate(sorted_amplitudes):
@@ -671,7 +676,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 if num_amps <= len(channel_families):
                     color = channel_families[amp_idx % len(channel_families)]
                 else:
-                    color = viridis_cmap.map(amp_idx / max(1, num_amps - 1))
+                    color = use_cmap.map(amp_idx / max(1, num_amps - 1))
                 
                 # Define pen for CF lines (consistent with _redraw_plots)
                 # Note: LINE_WIDTH should be available from 'from .utils import LINE_WIDTH'
@@ -717,3 +722,138 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # The _redraw_plots method will still handle full reconstruction of lines
         # if it's called for other reasons (data update, unit change, etc.),
         # respecting the checkbox state at that time.
+
+    @QtCore.pyqtSlot(object)
+    def _handle_multisweep_plot_double_click(self, ev):
+        """
+        Handles a double-click event on the multisweep magnitude plot.
+        Identifies the clicked resonance and prepares data for the DetectorDigestDialog.
+        """
+        if not self.results_by_amplitude:
+            return
+
+        # Get click coordinates in view space from the event's scenePos
+        # The event 'ev' is a QGraphicsSceneMouseEvent from pyqtgraph
+        view_box = self.combined_mag_plot.getViewBox()
+        if not view_box: return
+
+        mouse_point = view_box.mapSceneToView(ev.scenePos())
+        x_coord = mouse_point.x()
+        y_coord = mouse_point.y()
+
+        closest_curve_info = None
+        min_dist_sq = float('inf')
+
+        # Iterate through all plotted curves to find the one closest to the click
+        # self.curves_mag is {amplitude: {cf: PlotDataItem_mag}}
+        for amp_val, cf_map in self.curves_mag.items():
+            for cf, curve_item in cf_map.items():
+                if not curve_item.isVisible(): # Skip invisible curves
+                    continue
+                
+                x_data, y_data = curve_item.getData()
+                if x_data is None or y_data is None or len(x_data) == 0:
+                    continue
+
+                # Simple distance check: find nearest x point, then check y distance.
+                # More sophisticated point-to-curve distance could be used if needed.
+                # For now, check if x_coord is within the curve's x-range.
+                if not (x_data.min() <= x_coord <= x_data.max()):
+                    continue
+
+                # Find index of x_data closest to x_coord
+                idx = np.abs(x_data - x_coord).argmin()
+                
+                dist_sq = (x_data[idx] - x_coord)**2 + (y_data[idx] - y_coord)**2
+                
+                if dist_sq < min_dist_sq:
+                    min_dist_sq = dist_sq
+                    closest_curve_info = {
+                        "amplitude_raw": amp_val,
+                        "cf_hz": cf,
+                        "curve_item": curve_item
+                    }
+        
+        if closest_curve_info:
+            clicked_cf_hz = closest_curve_info["cf_hz"] # The actual CF of the clicked trace point
+
+            # --- Determine the conceptual resonance and its ID ---
+            target_resonance_frequencies = self.initial_params.get('resonance_frequencies', [])
+            if not target_resonance_frequencies:
+                print("Warning: Initial target resonance frequencies not available. Cannot reliably determine conceptual resonance for digest.")
+                # Fallback: use clicked_cf_hz as the conceptual base, Detector ID might be less meaningful
+                conceptual_resonance_base_freq_hz = clicked_cf_hz
+                # Try to make a somewhat stable ID if possible
+                all_actual_cfs = sorted(list(set(cf for amp_data in self.results_by_amplitude.values() for cf in amp_data.keys())))
+                try:
+                    detector_id = all_actual_cfs.index(clicked_cf_hz)
+                except ValueError:
+                    detector_id = -1 # Should not happen if clicked_cf_hz came from the data
+            else:
+                # Find which target_resonance_freq is closest to clicked_cf_hz
+                closest_target_idx = np.abs(np.array(target_resonance_frequencies) - clicked_cf_hz).argmin()
+                conceptual_resonance_base_freq_hz = target_resonance_frequencies[closest_target_idx]
+                detector_id = closest_target_idx # This is the "Detector ID"
+
+            # --- Gather all data for this conceptual resonance across all amplitudes ---
+            # For each amplitude, find the CF in its data that is closest to conceptual_resonance_base_freq_hz
+            resonance_data_for_digest = {}
+            for amp_key, cf_map_at_amp in self.results_by_amplitude.items():
+                if not cf_map_at_amp: # No CFs measured for this amplitude
+                    continue
+                
+                # Find the CF in cf_map_at_amp closest to conceptual_resonance_base_freq_hz
+                available_cfs_at_amp = np.array(list(cf_map_at_amp.keys()))
+                closest_cf_idx_at_amp = np.abs(available_cfs_at_amp - conceptual_resonance_base_freq_hz).argmin()
+                actual_cf_for_this_amp = available_cfs_at_amp[closest_cf_idx_at_amp]
+                
+                # Optional: Add a threshold if the closest found CF is too far from the conceptual base
+                # For now, assume the closest is the correct one for this conceptual resonance.
+                resonance_data_for_digest[amp_key] = {
+                    'data': cf_map_at_amp[actual_cf_for_this_amp],
+                    'actual_cf_hz': actual_cf_for_this_amp # Store the actual CF for this sweep
+                }
+
+            if not resonance_data_for_digest:
+                print(f"Warning: No data gathered for conceptual resonance near {conceptual_resonance_base_freq_hz / 1e9:.6f} GHz for digest.")
+                return
+
+            # At this point, we have:
+            # - clicked_cf_hz
+            # - detector_id
+            # - resonance_data_for_digest (dict of {amp_raw: sweep_data_dict})
+            # - self.dac_scales
+            # - self.zoom_box_mode
+
+            # Accept the event to prevent further processing (e.g., ClickableViewBox's own message box)
+            ev.accept()
+
+            # TODO: Instantiate and show DetectorDigestDialog here
+            # For now, print the gathered info:
+            print(f"--- Detector Digest Triggered ---")
+            print(f"  Detector ID: {detector_id}")
+            print(f"  Resonance Freq (Hz): {clicked_cf_hz}")
+            print(f"  Num. Amplitudes for this CF: {len(resonance_data_for_digest)}")
+            print(f"  DAC Scales available: {'Yes' if self.dac_scales else 'No'}")
+            print(f"  Zoom Box Mode: {self.zoom_box_mode}")
+            # Example of accessing specific sweep data:
+            # first_amp = list(resonance_data_for_digest.keys())[0]
+            # print(f"  Data for first amp ({first_amp}): {resonance_data_for_digest[first_amp].keys()}")
+            
+            # Launch the DetectorDigestDialog
+            digest_dialog = DetectorDigestDialog(
+                parent=self,
+                resonance_data_for_digest=resonance_data_for_digest,
+                detector_id=detector_id,
+                # Use the conceptual_resonance_base_freq_hz for the title.
+                # The f_active_bias for plots will be dynamic inside the dialog.
+                resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
+                dac_scales=self.dac_scales,
+                zoom_box_mode=self.zoom_box_mode,
+                target_module=self.target_module,
+                normalize_plot3=self.normalize_magnitudes # Pass normalization state
+            )
+            digest_dialog.show()
+        else:
+            # No curve found near click, event not accepted, default ClickableViewBox behavior might occur
+            pass

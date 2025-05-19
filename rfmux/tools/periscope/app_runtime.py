@@ -655,7 +655,9 @@ class PeriscopeRuntime:
         if self.kernel_manager and self.kernel_manager.has_kernel:
             try: self.kernel_manager.shutdown_kernel()
             except Exception as e: warnings.warn(f"Error shutting down iPython kernel: {e}", RuntimeWarning) # warnings from .utils
-        super().closeEvent(event); event.accept()
+        # The super().closeEvent() call should be handled by the class that inherits this mixin
+        # and also inherits from a QWidget (e.g., Periscope class itself).
+        event.accept()
 
     def _add_interactive_console_dock(self):
         """Add the dock widget for the embedded iPython console (if qtconsole is available)."""

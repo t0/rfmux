@@ -12,7 +12,61 @@ from collections import defaultdict
 
 from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
+from typing import Optional, Tuple, Dict, Any # Added for type hinting
+
 # fitting import removed as it's no longer used directly here
+
+def _get_recalculated_center_freq(
+    original_cf_hz: float,
+    sweep_freqs_hz: np.ndarray,
+    sweep_iq: np.ndarray,
+    method: Optional[str]
+) -> Tuple[float, str]:
+    """
+    Helper to recalculate center frequency based on sweep data and method.
+    Returns the new frequency and the method string actually applied.
+    """
+    if sweep_iq.size == 0 or sweep_freqs_hz.size == 0:
+        return original_cf_hz, "none"
+
+    actual_method_applied = "none"
+    new_frequency_hz = original_cf_hz
+
+    if method == "min-s21":
+        s21_mag = np.abs(sweep_iq)
+        if np.any(s21_mag):
+            min_mag_idx = np.argmin(s21_mag)
+            recalculated_freq = sweep_freqs_hz[min_mag_idx]
+            if np.isfinite(recalculated_freq):
+                new_frequency_hz = recalculated_freq
+                actual_method_applied = "min-s21"
+            else:
+                warnings.warn(f"Recalculated 'min-s21' frequency for original_cf {original_cf_hz*1e-6:.3f} MHz is not finite. Using original.")
+        else:
+            warnings.warn(f"Cannot recalculate 'min-s21' for original_cf {original_cf_hz*1e-6:.3f} MHz: all S21 magnitudes are zero.")
+    elif method == "max-dq":
+        if sweep_iq.size < 2 or sweep_freqs_hz.size < 2: # Need at least 2 points for gradient
+             warnings.warn(f"Cannot recalculate 'max-dq' for original_cf {original_cf_hz*1e-6:.3f} MHz: not enough sweep points ({sweep_iq.size}).")
+             return original_cf_hz, "none"
+        phase_rad = np.angle(sweep_iq)
+        unwrapped_phase_rad = np.unwrap(phase_rad)
+        # Ensure frequencies are sorted for gradient, though linspace should ensure this.
+        # If frequencies might not be monotonic, sort them and corresponding unwrapped_phase_rad.
+        dq_df = np.gradient(unwrapped_phase_rad, sweep_freqs_hz)
+        if np.any(dq_df):
+            max_abs_dq_df_idx = np.argmax(np.abs(dq_df))
+            recalculated_freq = sweep_freqs_hz[max_abs_dq_df_idx]
+            if np.isfinite(recalculated_freq):
+                new_frequency_hz = recalculated_freq
+                actual_method_applied = "max-dq"
+            else:
+                warnings.warn(f"Recalculated 'max-dq' frequency for original_cf {original_cf_hz*1e-6:.3f} MHz is not finite. Using original.")
+        else:
+            warnings.warn(f"Cannot recalculate 'max-dq' for original_cf {original_cf_hz*1e-6:.3f} MHz: dQ/df is zero everywhere.")
+    elif method is not None:
+        warnings.warn(f"Unknown recalculate_center_frequencies method: '{method}'. No recalculation performed.")
+
+    return new_frequency_hz, actual_method_applied
 
 @macro(CRS, register=True)
 async def multisweep(
@@ -22,8 +76,7 @@ async def multisweep(
     npoints_per_sweep: int,
     amp: float,
     nsamps: int = 10,
-    global_phase_ref_to_zero: bool = True,
-    recalculate_center_frequencies: bool = True,
+    recalculate_center_frequencies: Optional[str] = None, # Options: "min-s21", "max-dq", or None
     *,
     module,
     progress_callback=None,
@@ -33,8 +86,11 @@ async def multisweep(
     Perform simultaneous, high-resolution frequency sweeps around multiple center frequencies.
 
     This algorithm dedicates one channel per resonance and sweeps all resonances in parallel.
-    Each iteration adjusts all channel frequencies according to the sweep parameters.
-    Phase stitching is applied across NCO region boundaries when necessary.
+    The NCO is re-tuned for different groups of resonances (NCO regions) if their
+    combined span exceeds the NCO's instantaneous bandwidth. No phase stitching
+    is performed between data collected from different NCO regions.
+    This version allows for advanced recalculation of center frequencies and
+    TOD-based rotation of the sweep data.
 
     Args:
         crs (CRS): The CRS object (injected by macro).
@@ -42,29 +98,36 @@ async def multisweep(
         span_hz (float): Total frequency width (Hz) of each sweep.
         npoints_per_sweep (int): Number of points to measure within each sweep's span.
         amp (float): Amplitude (normalized DAC units) for all tones.
-        nsamps (int, optional): Number of samples to average per frequency point. Defaults to 10.
-        global_phase_ref_to_zero (bool, optional): If True, apply a global phase rotation so the first
-                                                  measured point has zero phase. Defaults to True.
-        recalculate_center_frequencies (bool, optional): If True, the keys of the returned dictionary
-                                                       will be the recalculated center frequencies based
-                                                       on the minimum S21 magnitude point. Otherwise,
-                                                       keys are the original `center_frequencies`.
-                                                       Defaults to False.
+        nsamps (int, optional): Number of samples to average per frequency point for the main sweep.
+                                Defaults to 10. The TOD acquisition for rotation uses 1000 samples.
+        recalculate_center_frequencies (Optional[str], optional):
+            Determines how/if center frequencies are recalculated and how sweep data is rotated.
+            - "min-s21": Recalculates center frequency to the point of minimum |S21| in the sweep.
+                         Acquires a TOD at this new frequency. Rotates sweep data to minimize
+                         the I component of this TOD's mean.
+            - "max-dq": Recalculates center frequency to the point of maximum |d(phase)/df| in the sweep.
+                        Acquires a TOD at this new frequency. Rotates sweep data to align the
+                        principal component of this TOD (maximizing variance) with the I-axis.
+            - None: No recalculation. No TOD-based rotation is performed.
+            Defaults to None.
         module (int | list[int]): The target readout module(s).
         progress_callback (callable, optional): Function called with (module, progress_percentage).
         data_callback (callable, optional): Function called with intermediate results during acquisition.
 
     Returns:
-        dict: A dictionary where keys are center frequencies (float, Hz). If
-              `recalculate_center_frequencies` is True, these keys are the recalculated
-              frequencies based on minimum S21 magnitude; otherwise, they are the
-              original `center_frequencies` passed as input.
-              The value for each key is another dictionary containing the results for that sweep:
+        dict: A dictionary where keys are the final center frequencies (float, Hz).
+              The nature of this key (original or recalculated) is indicated within the value.
+              The value for each key is another dictionary containing:
               {
-                  key_freq: { # key_freq is either original or recalculated center frequency
-                      'frequencies': np.ndarray (Hz),
-                      'iq_complex': np.ndarray (complex) - Original, stitched IQ data,
-                      'phase_degrees': np.ndarray (degrees)
+                  key_freq: {
+                      'frequencies': np.ndarray (Hz), # Original sweep frequencies
+                      'iq_complex': np.ndarray (complex), # Final, possibly rotated, sweep IQ data
+                      'phase_degrees': np.ndarray (degrees), # Derived from final iq_complex
+                      'original_center_frequency': float,
+                      'recalculation_method_applied': str, # "min-s21", "max-dq", or "none"
+                      'key_frequency_is_recalculated': bool,
+                      'rotation_tod': Optional[np.ndarray], # 1000-sample IQ TOD, if acquired
+                      'applied_rotation_degrees': Optional[float] # Rotation applied to sweep data
                   },
                   ...
               }
@@ -93,7 +156,6 @@ async def multisweep(
                 npoints_per_sweep=npoints_per_sweep,
                 amp=amp,
                 nsamps=nsamps,
-                global_phase_ref_to_zero=global_phase_ref_to_zero,
                 recalculate_center_frequencies=recalculate_center_frequencies,
                 module=m, # Pass single module here
                 progress_callback=progress_callback,
@@ -110,7 +172,7 @@ async def multisweep(
         return {}
     
     # Check if number of resonances exceeds maximum channels
-    max_channels = 1023  # Standard max channels per module
+    max_channels = 1024  # Standard max channels per module
     if len(center_frequencies) > max_channels:
         raise ValueError(f"Number of resonances ({len(center_frequencies)}) exceeds maximum channels ({max_channels})")
     
@@ -124,13 +186,9 @@ async def multisweep(
 
     # --- Define Constants ---
     MAX_NCO_SPAN_HZ = 500e6
-    STITCH_CHANNEL = 1024 # Use the last channel for NCO stitching reference
 
-    # --- Generate sweep frequencies and find global minimum frequency ---
+    # --- Generate sweep frequencies ---
     resonance_data = {}
-    abs_min_freq = float('inf')
-    ref_cf = None
-    ref_point_idx = -1
 
     for cf in center_frequencies:
         # Generate points for this sweep
@@ -140,18 +198,10 @@ async def multisweep(
             npoints_per_sweep,
             endpoint=True
         )
-        # Find the absolute minimum frequency across all sweeps
-        current_min_freq = sweep_points[0]
-        if current_min_freq < abs_min_freq:
-            abs_min_freq = current_min_freq
-            ref_cf = cf
-            ref_point_idx = 0 # The minimum is always the first point
 
         resonance_data[cf] = {
             'frequencies': sweep_points,
             'iq_complex': np.zeros(npoints_per_sweep, dtype=np.complex128), # Pre-allocate array
-            # 'last_point_for_stitching': None, # No longer used per-resonance
-            'is_rotated': np.zeros(npoints_per_sweep, dtype=bool) # Track global rotation status
         }
 
     # --- Group resonances by NCO regions ---
@@ -187,22 +237,8 @@ async def multisweep(
         if current_region:
             nco_regions.append(current_region)
 
-    # --- Check channel limit if stitching is needed ---
-    if len(nco_regions) > 1 and len(center_frequencies) > max_channels - 1:
-         raise ValueError(
-             f"Cannot perform NCO stitching: {len(center_frequencies)} resonances requested, "
-             f"but channel {STITCH_CHANNEL} is required for stitching, leaving {max_channels - 1} available."
-         )
-
-    # Initialize global phase rotation factor
-    global_rotation = None # Will be calculated based on the point at abs_min_freq
-    # Initialize stitching factors (Region 0 needs no stitching)
-    region_stitch_rotations = {0: 1.0 + 0j}
-    # Store the IQ value measured by the stitch channel at the end of the previous region
-    iq_stitch_prev_rotated = None
 
     # --- Calculate all NCO frequencies upfront ---
-    # nco_frequencies was already initialized before the loop in the previous step
     for region_cfs_calc in nco_regions:
         region_min_f = min(cf - span_hz/2 for cf in region_cfs_calc)
         region_max_f = max(cf + span_hz/2 for cf in region_cfs_calc)
@@ -216,54 +252,10 @@ async def multisweep(
         current_nco_freq = nco_frequencies[region_idx]
         await crs.set_nco_frequency(current_nco_freq, module=module)
 
-        # --- Calculate Stitching Rotation (Start of Region > 0) ---
-        if region_idx > 0:
-            # Stitch frequency is midpoint between previous and current NCO
-            stitch_freq = (nco_frequencies[region_idx - 1] + current_nco_freq) / 2
-            stitch_freq_rel = stitch_freq - current_nco_freq
-
-            # Measure stitch frequency with current NCO using dedicated channel
-            async with crs.tuber_context() as ctx:
-                ctx.set_frequency(stitch_freq_rel, channel=STITCH_CHANNEL, module=module)
-                # Use a fixed amplitude for stitching? Or the sweep amp? Using 'amp' for now.
-                ctx.set_amplitude(amp, channel=STITCH_CHANNEL, module=module)
-                # Zero out all other channels
-                for ch in range(1, max_channels + 1):
-                    if ch != STITCH_CHANNEL:
-                        ctx.set_amplitude(0, channel=ch, module=module)
-                await ctx()
-
-            # Use specific channel argument for get_samples
-            samples_stitch_current = await crs.get_samples(nsamps, average=True, channel=STITCH_CHANNEL, module=module)
-            # Samples for single channel might be structured differently, assume index 0
-            # Check CRS.get_samples documentation if this fails.
-            if hasattr(samples_stitch_current.mean, 'i') and samples_stitch_current.mean.i.size > 0:
-                 iq_stitch_current_raw = samples_stitch_current.mean.i[0] + 1j * samples_stitch_current.mean.q[0]
-            else:
-                 warnings.warn(f"No data received from stitch channel {STITCH_CHANNEL} at start of region {region_idx+1}. Cannot calculate stitch factor.")
-                 iq_stitch_current_raw = 0 + 0j # Avoid error below
-
-            # Apply global rotation if defined
-            iq_stitch_current_rotated = iq_stitch_current_raw * global_rotation if global_rotation is not None else iq_stitch_current_raw
-
-            # Calculate stitch factor using previous region's rotated stitch measurement
-            if iq_stitch_prev_rotated is not None and abs(iq_stitch_current_rotated) > 1e-15:
-                stitch_rotation = iq_stitch_prev_rotated / iq_stitch_current_rotated
-                region_stitch_rotations[region_idx] = stitch_rotation
-            else:
-                # Only warn if previous IQ was expected (i.e., not None)
-                if iq_stitch_prev_rotated is not None:
-                    warnings.warn(f"Cannot calculate NCO stitch factor for region {region_idx+1}. "
-                                  f"Prev IQ: {iq_stitch_prev_rotated}, Current IQ: {iq_stitch_current_rotated}. Using unity rotation.")
-                # If prev_iq was None (e.g. first stitch attempt failed), silently use unity.
-                region_stitch_rotations[region_idx] = 1.0 + 0j
-        # Else: region_idx == 0, stitch_rotation remains 1.0 (from initialization)
 
         # --- Sweep Points within the Region ---
         # Create channel mapping for this region's resonances
         channel_mapping = {cf: i+1 for i, cf in enumerate(region_cfs)}
-        # Get the stitch rotation factor for this region
-        current_stitch_rotation = region_stitch_rotations[region_idx]
 
         # Loop through sweep points
         for point_idx in range(npoints_per_sweep):
@@ -277,9 +269,9 @@ async def multisweep(
                     ctx.set_frequency(freq_rel, channel=channel, module=module)
                     ctx.set_amplitude(amp, channel=channel, module=module)
 
-                # Zero out unused resonance channels AND the stitch channel
+                # Zero out unused resonance channels
                 active_res_channels = set(channel_mapping.values())
-                for ch in range(1, max_channels + 1):
+                for ch in range(1, max_channels + 1): # max_channels still relevant for general channel count
                      if ch not in active_res_channels:
                           ctx.set_amplitude(0, channel=ch, module=module) # Zeros freq implicitly if amp=0
                 await ctx()
@@ -294,34 +286,9 @@ async def multisweep(
                 i_val = samples.mean.i[channel_idx]
                 q_val = samples.mean.q[channel_idx]
                 raw_iq_val = i_val + 1j * q_val
-                iq_val_globally_rotated = raw_iq_val # Start with raw value
-                rotated_this_step = False # Tracks global rotation application
-
-                # --- Global Phase Rotation Handling ---
-                is_reference_point = (cf == ref_cf and point_idx == ref_point_idx)
-                if global_phase_ref_to_zero:
-                    if is_reference_point:
-                        if abs(raw_iq_val) > 1e-15:
-                            global_rotation = abs(raw_iq_val) / raw_iq_val
-                            iq_val_globally_rotated = raw_iq_val * global_rotation
-                            rotated_this_step = True
-                        else:
-                            global_rotation = 1.0 # Cannot rotate, use unity
-                            iq_val_globally_rotated = raw_iq_val
-                            warnings.warn(f"Reference point for global phase rotation (freq={abs_min_freq*1e-6:.3f} MHz) has near-zero amplitude. Skipping rotation.")
-                    elif global_rotation is not None:
-                        # Apply previously calculated global rotation
-                        iq_val_globally_rotated = raw_iq_val * global_rotation
-                        rotated_this_step = True
-                    # Else: global_rotation not yet calculated, keep raw_iq_val for now (will be rotated in post-processing)
-
-                # --- Apply NCO Stitching Rotation ---
-                # Apply the rotation factor calculated at the start of this region
-                final_iq = iq_val_globally_rotated * current_stitch_rotation
-
-                # Store final processed IQ value
-                resonance_data[cf]['iq_complex'][point_idx] = final_iq
-                resonance_data[cf]['is_rotated'][point_idx] = rotated_this_step # Mark if globally rotated *in this step*
+                
+                # Store raw IQ value directly
+                resonance_data[cf]['iq_complex'][point_idx] = raw_iq_val
 
             # --- Progress update ---
             if progress_callback:
@@ -333,94 +300,148 @@ async def multisweep(
             
             # Call data callback with intermediate results if provided
             if data_callback:
-                 # Create intermediate results dictionary (using final processed IQ for this point)
+                 # Create intermediate results dictionary (using raw IQ for this point)
                  intermediate_results = {}
-                 for cb_cf in center_frequencies:
-                     current_point_count = point_idx + 1 # Include current point
-                     frequencies = resonance_data[cb_cf]['frequencies'][:current_point_count]
-                     # Need to handle potential post-processing rotation for points before ref point
-                     # For simplicity, callback sends data as processed *so far*.
-                     # A more accurate callback would require applying pending global rotation here too.
-                     iq_data = resonance_data[cb_cf]['iq_complex'][:current_point_count]
-                     intermediate_results[cb_cf] = {
-                         'frequencies': frequencies,
-                         'iq_complex': iq_data
-                     }
-                 data_callback(module, intermediate_results)
+                 for cb_cf in center_frequencies: # Iterate over all original center_frequencies
+                     # Check if this cf is part of the current region_cfs
+                     # and if data has been populated up to point_idx
+                     if cb_cf in resonance_data and resonance_data[cb_cf]['iq_complex'].size >= point_idx + 1:
+                         current_point_count = point_idx + 1 # Include current point
+                         frequencies_cb = resonance_data[cb_cf]['frequencies'][:current_point_count]
+                         iq_data_cb = resonance_data[cb_cf]['iq_complex'][:current_point_count]
+                         intermediate_results[cb_cf] = {
+                             'frequencies': frequencies_cb,
+                             'iq_complex': iq_data_cb
+                         }
+                 if intermediate_results: # Only call if there's data to send
+                    data_callback(module, intermediate_results)
+        
+        # --- Post-Sweep Processing for this NCO Region (TOD acquisition and rotation) ---
+        if recalculate_center_frequencies is not None: # Only proceed if a method is specified
+            # Step 1: Determine all final_center_freq and methods for this region
+            resonances_needing_tod = [] # List of (cf_original, final_center_freq, channel_hw)
+            for cf_original in region_cfs:
+                res_data_entry = resonance_data[cf_original]
+                final_center_freq, recalc_method_used = _get_recalculated_center_freq(
+                    original_cf_hz=cf_original,
+                    sweep_freqs_hz=res_data_entry['frequencies'],
+                    sweep_iq=res_data_entry['iq_complex'], # Use raw sweep IQ for recalc
+                    method=recalculate_center_frequencies
+                )
+                res_data_entry['final_center_frequency'] = final_center_freq
+                res_data_entry['recalculation_method_applied'] = recalc_method_used
+                res_data_entry['rotation_tod'] = None # Initialize
+                res_data_entry['applied_rotation_degrees'] = 0.0 # Initialize
 
-        # --- Measure Stitch Point for Next Region (End of Current Region) ---
-        if region_idx < total_nco_regions - 1:
-            # Stitch frequency is midpoint between current and next NCO
-            next_nco_freq = nco_frequencies[region_idx + 1]
-            stitch_freq = (current_nco_freq + next_nco_freq) / 2
-            stitch_freq_rel = stitch_freq - current_nco_freq
+                if recalc_method_used in ["min-s21", "max-dq"]:
+                    resonances_needing_tod.append({
+                        "original_cf": cf_original,
+                        "final_cf": final_center_freq,
+                        "channel_hw": channel_mapping[cf_original], # 1-based hardware channel
+                        "recalc_method": recalc_method_used
+                    })
+            
+            # Step 2: Acquire TODs in batch if any are needed
+            if resonances_needing_tod:
+                async with crs.tuber_context() as ctx:
+                    # Turn off all channels first
+                    for ch_iter in range(1, max_channels + 1):
+                        ctx.set_amplitude(0, channel=ch_iter, module=module)
+                    
+                    # Set up channels that need TOD
+                    for res_info in resonances_needing_tod:
+                        freq_for_tod_rel = res_info["final_cf"] - current_nco_freq
+                        ctx.set_frequency(freq_for_tod_rel, channel=res_info["channel_hw"], module=module)
+                        ctx.set_amplitude(amp, channel=res_info["channel_hw"], module=module)
+                    await ctx()
 
-            # Measure stitch frequency with current NCO using dedicated channel
-            async with crs.tuber_context() as ctx:
-                ctx.set_frequency(stitch_freq_rel, channel=STITCH_CHANNEL, module=module)
-                ctx.set_amplitude(amp, channel=STITCH_CHANNEL, module=module)
-                # Zero out all other channels
-                for ch in range(1, max_channels + 1):
-                    if ch != STITCH_CHANNEL:
-                        ctx.set_amplitude(0, channel=ch, module=module)
-                await ctx()
+                try:
+                    # Acquire all TODs simultaneously
+                    all_tod_samples = await crs.get_samples(50, average=False, channel=None, module=module)
+                    
+                    # Distribute TODs to respective resonance_data entries
+                    for res_info in resonances_needing_tod:
+                        channel_idx_0based = res_info["channel_hw"] - 1
+                        tod_i_channel_data = np.array(all_tod_samples.i[channel_idx_0based])
+                        tod_q_channel_data = np.array(all_tod_samples.q[channel_idx_0based])
+                        resonance_data[res_info["original_cf"]]['rotation_tod'] = tod_i_channel_data + 1j * tod_q_channel_data
+                except Exception as e:
+                    warnings.warn(f"Batch TOD acquisition failed for NCO region {region_idx} (module {module}): {e}")
+                    # Mark all relevant TODs as None if batch failed
+                    for res_info in resonances_needing_tod:
+                        resonance_data[res_info["original_cf"]]['rotation_tod'] = None
+            
+            # Step 3: Calculate and apply rotations using the (now populated) TODs
+            for cf_original in region_cfs: # Iterate again to apply rotations
+                res_data_entry = resonance_data[cf_original]
+                recalc_method_used = res_data_entry['recalculation_method_applied']
+                
+                if recalc_method_used not in ["min-s21", "max-dq"] or res_data_entry['rotation_tod'] is None:
+                    # Ensure these are set if no TOD-based rotation happens
+                    if res_data_entry.get('final_center_frequency') is None : # Should have been set in step 1
+                         res_data_entry['final_center_frequency'] = cf_original
+                    if res_data_entry.get('recalculation_method_applied') is None:
+                         res_data_entry['recalculation_method_applied'] = "none"
+                    res_data_entry['rotation_tod'] = None # Ensure it's None
+                    res_data_entry['applied_rotation_degrees'] = 0.0
+                    continue # Skip to next resonance if no valid method or no TOD
 
-            samples_stitch_prev = await crs.get_samples(nsamps, average=True, channel=STITCH_CHANNEL, module=module)
-            if hasattr(samples_stitch_prev.mean, 'i') and samples_stitch_prev.mean.i.size > 0:
-                 iq_stitch_prev_raw = samples_stitch_prev.mean.i[0] + 1j * samples_stitch_prev.mean.q[0]
-            else:
-                 warnings.warn(f"No data received from stitch channel {STITCH_CHANNEL} at end of region {region_idx+1}. Stitching to next region may fail.")
-                 iq_stitch_prev_raw = 0 + 0j
+                rotation_angle_rad = 0.0
+                tod_iq = res_data_entry['rotation_tod']
 
-            # Apply global rotation if defined (use the rotation potentially defined *during* this region)
-            iq_stitch_prev_rotated = iq_stitch_prev_raw * global_rotation if global_rotation is not None else iq_stitch_prev_raw
-            # This value (iq_stitch_prev_rotated) will be used at the start of the next region loop iteration
-
-    # --- Post-processing: Apply global rotation to points measured *before* the reference point ---
-    if global_phase_ref_to_zero and global_rotation is not None:
-        for cf in center_frequencies:
-            for point_idx in range(npoints_per_sweep):
-                # If this point wasn't rotated during the main loop AND rotation is defined
-                if not resonance_data[cf]['is_rotated'][point_idx]:
-                    resonance_data[cf]['iq_complex'][point_idx] *= global_rotation
-                    # No need to update 'is_rotated' here, it's only for the loop logic
+                if tod_iq.size > 0: # Check if TOD has data
+                    if recalc_method_used == "min-s21":
+                        mean_tod = np.mean(tod_iq)
+                        rotation_angle_rad = (np.pi / 2) - np.angle(mean_tod)
+                    elif recalc_method_used == "max-dq":
+                        if tod_iq.size > 1:
+                            data_matrix = np.vstack((tod_iq.real, tod_iq.imag))
+                            try:
+                                covariance_matrix = np.cov(data_matrix)
+                                if np.all(np.isfinite(covariance_matrix)):
+                                    eigenvalues, eigenvectors = np.linalg.eig(covariance_matrix)
+                                    # Eigenvectors are columns, eigenvector corresponding to largest eigenvalue is pc1
+                                    pc1_idx = np.argmax(eigenvalues)
+                                    pc1_vector_complex = eigenvectors[0, pc1_idx] + 1j * eigenvectors[1, pc1_idx]
+                                    rotation_angle_rad = -np.angle(pc1_vector_complex)
+                                else:
+                                    warnings.warn(f"Covariance matrix for 'max-dq' rotation of cf {cf_original*1e-6:.3f} MHz contains non-finite values. Skipping rotation.")
+                            except np.linalg.LinAlgError:
+                                 warnings.warn(f"PCA failed for 'max-dq' rotation of cf {cf_original*1e-6:.3f} MHz. Skipping rotation.")
+                        else:
+                            warnings.warn(f"Not enough TOD points for 'max-dq' PCA rotation for cf {cf_original*1e-6:.3f} MHz ({tod_iq.size} points). Skipping rotation.")
+                
+                if rotation_angle_rad != 0.0:
+                    rotation_factor = np.exp(1j * rotation_angle_rad)
+                    res_data_entry['iq_complex'] *= rotation_factor
+                    
+                    # Also rotate the TOD if it exists and is not empty
+                    if res_data_entry['rotation_tod'] is not None and res_data_entry['rotation_tod'].size > 0:
+                        res_data_entry['rotation_tod'] *= rotation_factor
+                        
+                    res_data_entry['applied_rotation_degrees'] = np.degrees(rotation_angle_rad)
+                # If no rotation was calculated (e.g. TOD was empty or issues), applied_rotation_degrees remains 0.0
 
     # --- Format final results for each resonance ---
     results_by_center_freq = {}
-    for cf, data in resonance_data.items():
-        frequencies = data['frequencies']
-        iq_complex = data['iq_complex'] # Already a numpy array
-
-        # Calculate phase in degrees
-        phase_degrees = np.degrees(np.angle(iq_complex))
+    for original_cf, data_entry in resonance_data.items():
+        final_iq_complex = data_entry['iq_complex']
         
-        # Initialize result dictionary
+        # Determine the key for the output dictionary
+        current_key_for_results = data_entry.get('final_center_frequency', original_cf)
+        recalc_method_applied = data_entry.get('recalculation_method_applied', "none")
+        key_is_recalculated = (current_key_for_results != original_cf) and (recalc_method_applied != "none")
+
         result_dict = {
-            'frequencies': frequencies,
-            'iq_complex': iq_complex,
-            'phase_degrees': phase_degrees
+            'frequencies': data_entry['frequencies'],
+            'iq_complex': final_iq_complex,
+            'phase_degrees': np.degrees(np.angle(final_iq_complex)),
+            'original_center_frequency': original_cf,
+            'recalculation_method_applied': recalc_method_applied,
+            'key_frequency_is_recalculated': key_is_recalculated,
+            'rotation_tod': data_entry.get('rotation_tod'),
+            'applied_rotation_degrees': data_entry.get('applied_rotation_degrees')
         }
-        
-        current_key_for_results = cf # Default to original center frequency
-
-        if recalculate_center_frequencies:
-            if iq_complex.size > 0:
-                s21_mag = np.abs(iq_complex)
-                if np.any(s21_mag): # Check if there's any non-zero magnitude
-                    min_mag_idx = np.argmin(s21_mag)
-                    new_center_freq = frequencies[min_mag_idx]
-                    if np.isfinite(new_center_freq):
-                        current_key_for_results = new_center_freq
-                    else:
-                        warnings.warn(f"Recalculated center frequency for original cf {cf*1e-6:.3f} MHz (module {module}) is not finite. Using original cf as key.")
-                else:
-                    # All magnitudes are zero
-                    warnings.warn(f"Cannot recalculate center frequency for original cf {cf*1e-6:.3f} MHz (module {module}): all S21 magnitudes are zero. Using original cf as key.")
-            else:
-                # iq_complex is empty
-                warnings.warn(f"Cannot recalculate center frequency for original cf {cf*1e-6:.3f} MHz (module {module}): IQ data is empty. Using original cf as key.")
-        
-        # Store results using the determined key
         results_by_center_freq[current_key_for_results] = result_dict
     
     # --- Hardware Cleanup ---

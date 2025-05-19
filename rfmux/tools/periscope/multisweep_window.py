@@ -377,8 +377,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         
         # Define color schemes for plotting multiple amplitudes
         # Use a distinct color family for few amplitudes, switch to a colormap for many
-        channel_families = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-                            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"] # Tableau10
+        channel_families = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+                            #"#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"] # Tableau10
         use_cmap = pg.colormap.get("inferno")
         
         sorted_amplitudes = sorted(self.results_by_amplitude.keys())
@@ -739,43 +739,35 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
         mouse_point = view_box.mapSceneToView(ev.scenePos())
         x_coord = mouse_point.x()
-        y_coord = mouse_point.y()
+        # y_coord = mouse_point.y() # y_coord is not used for selecting the CF
 
-        closest_curve_info = None
-        min_dist_sq = float('inf')
+        # --- Find the conceptual resonance closest to the click's X-coordinate ---
+        min_horizontal_dist = float('inf')
+        # This will be the CF of an actual measured trace that is horizontally closest to the click's X.
+        # It serves as the initial seed to find the conceptual resonance.
+        seed_cf_hz_for_conceptual_match = None
 
-        # Iterate through all plotted curves to find the one closest to the click
-        # self.curves_mag is {amplitude: {cf: PlotDataItem_mag}}
-        for amp_val, cf_map in self.curves_mag.items():
-            for cf, curve_item in cf_map.items():
-                if not curve_item.isVisible(): # Skip invisible curves
-                    continue
-                
-                x_data, y_data = curve_item.getData()
-                if x_data is None or y_data is None or len(x_data) == 0:
-                    continue
+        # Iterate through all known center frequencies from all measurements
+        # to find which one is horizontally closest to the click.
+        all_measured_cfs = set()
+        if self.results_by_amplitude: # Ensure there's data
+            for cf_map_at_amp in self.results_by_amplitude.values(): # Iterate through dicts of {cf: data}
+                all_measured_cfs.update(cf_map_at_amp.keys())
 
-                # Simple distance check: find nearest x point, then check y distance.
-                # More sophisticated point-to-curve distance could be used if needed.
-                # For now, check if x_coord is within the curve's x-range.
-                if not (x_data.min() <= x_coord <= x_data.max()):
-                    continue
+        if not all_measured_cfs: # No CFs to check against
+            return # Or handle error appropriately
 
-                # Find index of x_data closest to x_coord
-                idx = np.abs(x_data - x_coord).argmin()
-                
-                dist_sq = (x_data[idx] - x_coord)**2 + (y_data[idx] - y_coord)**2
-                
-                if dist_sq < min_dist_sq:
-                    min_dist_sq = dist_sq
-                    closest_curve_info = {
-                        "amplitude_raw": amp_val,
-                        "cf_hz": cf,
-                        "curve_item": curve_item
-                    }
+        for cf_candidate in all_measured_cfs:
+            horizontal_dist = abs(cf_candidate - x_coord)
+            if horizontal_dist < min_horizontal_dist:
+                min_horizontal_dist = horizontal_dist
+                seed_cf_hz_for_conceptual_match = cf_candidate
         
-        if closest_curve_info:
-            clicked_cf_hz = closest_curve_info["cf_hz"] # The actual CF of the clicked trace point
+        if seed_cf_hz_for_conceptual_match is not None:
+            # Now, seed_cf_hz_for_conceptual_match is the CF of an actual trace
+            # that is horizontally closest to the click. Use this as 'clicked_cf_hz'
+            # for the subsequent logic that finds the 'conceptual_resonance_base_freq_hz'.
+            clicked_cf_hz = seed_cf_hz_for_conceptual_match
 
             # --- Determine the conceptual resonance and its ID ---
             target_resonance_frequencies = self.initial_params.get('resonance_frequencies', [])
@@ -828,19 +820,6 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             # Accept the event to prevent further processing (e.g., ClickableViewBox's own message box)
             ev.accept()
 
-            # TODO: Instantiate and show DetectorDigestDialog here
-            # For now, print the gathered info:
-            print(f"--- Detector Digest Triggered ---")
-            print(f"  Detector ID: {detector_id}")
-            print(f"  Resonance Freq (Hz): {clicked_cf_hz}")
-            print(f"  Num. Amplitudes for this CF: {len(resonance_data_for_digest)}")
-            print(f"  DAC Scales available: {'Yes' if self.dac_scales else 'No'}")
-            print(f"  Zoom Box Mode: {self.zoom_box_mode}")
-            # Example of accessing specific sweep data:
-            # first_amp = list(resonance_data_for_digest.keys())[0]
-            # print(f"  Data for first amp ({first_amp}): {resonance_data_for_digest[first_amp].keys()}")
-            
-            # Launch the DetectorDigestDialog
             digest_dialog = DetectorDigestDialog(
                 parent=self,
                 resonance_data_for_digest=resonance_data_for_digest,

@@ -131,22 +131,29 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         self.setup_amplitude_group(param_form_layout) # Shared amplitude settings
 
-        # Option to perform fits
-        default_perform_fits = self.params.get('perform_fits', True)
-        self.perform_fits_cb = QtWidgets.QCheckBox("Perform fits after sweep")
-        self.perform_fits_cb.setChecked(default_perform_fits)
-        param_form_layout.addRow("", self.perform_fits_cb)
+        # Option to recalculate center frequencies and rotate
+        self.recalc_cf_combo = QtWidgets.QComboBox()
+        self.recalc_cf_combo.addItems(["None", "min-S21", "max-dQ"])
+        
+        # Set initial value for recalculate_center_frequencies
+        # The old parameter was a boolean, True mapping to "min-s21" effectively
+        # New parameter is a string or None.
+        default_recalc_setting = self.params.get('recalculate_center_frequencies', None)
 
-        # Option to recalculate center frequencies
-        default_recalc_cf = self.params.get('recalculate_center_frequencies', True)
-        self.recalculate_cf_cb = QtWidgets.QCheckBox("Recalculate Center Frequencies (S21 min)")
-        self.recalculate_cf_cb.setChecked(default_recalc_cf)
-        self.recalculate_cf_cb.setToolTip(
-            "If checked, the minimum of S21 magnitude will be used as the center "
-            "frequency for subsequent results display and plotting, potentially "
-            "overriding the initially provided resonance frequency for that sweep."
+        if default_recalc_setting == "min-s21":
+            self.recalc_cf_combo.setCurrentText("min-S21")
+        elif default_recalc_setting == "max-dq":
+            self.recalc_cf_combo.setCurrentText("max-dQ")
+        else: # Covers None or any other unexpected string
+            self.recalc_cf_combo.setCurrentText("None")
+            
+        self.recalc_cf_combo.setToolTip(
+            "Determines how/if center frequencies are recalculated and sweep data is rotated:\n"
+            "- None: No recalculation or TOD-based rotation.\n"
+            "- min-S21: Recalculates to min |S21|. Acquires TOD. Rotates sweep to minimize TOD's I component.\n"
+            "- max-dQ: Recalculates to max |d(phase)/df|. Acquires TOD. Rotates sweep to align TOD's PCA with I-axis."
         )
-        param_form_layout.addRow("", self.recalculate_cf_cb)
+        param_form_layout.addRow("Recalculate/Rotate Method:", self.recalc_cf_combo)
         layout.addWidget(param_group)
 
         # Standard OK and Cancel buttons
@@ -175,16 +182,46 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         params_dict = {}
         try:
             amp_text = self.amp_edit.text().strip()
-            # Use parsed amplitude values, or default from initial params or global default
-            default_amp_val = self.params.get('amp', DEFAULT_AMPLITUDE) if self.params else DEFAULT_AMPLITUDE
-            amps_list = self._parse_amplitude_values(amp_text) or [default_amp_val]
-            
+            # Parse the text from the amplitude edit field.
+            # _parse_amplitude_values returns a list of floats.
+            amps_list = self._parse_amplitude_values(amp_text) 
+
+            # If amp_text was empty or unparsable, _parse_amplitude_values returns an empty list.
+            # In this case, we must provide a default list of amplitudes for the task.
+            if not amps_list:
+                # Use a list containing a single default amplitude.
+                # Prioritize default from initial params if available, else global default.
+                initial_amp_setting = self.params.get('amp', DEFAULT_AMPLITUDE) # Could be from 'amp' or 'amps'[0] via setup_amplitude_group
+                
+                # Ensure initial_amp_setting is a single float value
+                if isinstance(initial_amp_setting, list):
+                    single_default = initial_amp_setting[0] if initial_amp_setting else DEFAULT_AMPLITUDE
+                else:
+                    single_default = initial_amp_setting
+
+                amps_list = [single_default]
+
+            # Store the full list of amplitudes (parsed or defaulted) for the MultisweepTask.
             params_dict['amps'] = amps_list
+
+            # Store the first amplitude under the singular 'amp' key for potential compatibility
+            # or for display purposes elsewhere. The MultisweepTask itself iterates over 'amps'.
+            # This assumes amps_list is now guaranteed to be non-empty.
+            params_dict['amp'] = amps_list[0]
+            
             params_dict['span_hz'] = float(self.span_khz_edit.text()) * 1e3 # Convert kHz to Hz
             params_dict['npoints_per_sweep'] = int(self.npoints_edit.text())
             params_dict['nsamps'] = int(self.nsamps_edit.text())
-            params_dict['perform_fits'] = self.perform_fits_cb.isChecked()
-            params_dict['recalculate_center_frequencies'] = self.recalculate_cf_cb.isChecked()
+            
+            recalc_method_text = self.recalc_cf_combo.currentText()
+            if recalc_method_text == "None":
+                params_dict['recalculate_center_frequencies'] = None
+            elif recalc_method_text == "min-S21":
+                params_dict['recalculate_center_frequencies'] = "min-s21"
+            elif recalc_method_text == "max-dQ":
+                params_dict['recalculate_center_frequencies'] = "max-dq"
+            else: # Should not happen with QComboBox
+                params_dict['recalculate_center_frequencies'] = None
             
             # Include the essential context for the multisweep
             params_dict['resonance_frequencies'] = self.resonance_frequencies

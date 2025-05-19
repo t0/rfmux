@@ -153,14 +153,24 @@ class DetectorDigestDialog(QtWidgets.QDialog):
             if iq_complex_active is not None:
                 s21_i_volts = convert_roc_to_volts(iq_complex_active.real)
                 s21_q_volts = convert_roc_to_volts(iq_complex_active.imag)
-                self.plot2_iq_plane.plot(s21_i_volts, s21_q_volts, pen=None, symbol='o', symbolBrush='b', symbolSize=5, name="sweep (rotated I,Q)")
-                self.plot2_iq_plane.autoRange()
+                self.plot2_iq_plane.plot(s21_i_volts, s21_q_volts, pen=None, symbol='o', symbolBrush='b', symbolSize=5, name="Sweep IQ")
+
+            # Plot rotation_tod if available
+            rotation_tod_iq = self.active_sweep_data.get('rotation_tod')
+            if rotation_tod_iq is not None and rotation_tod_iq.size > 0:
+                tod_i_volts = convert_roc_to_volts(rotation_tod_iq.real)
+                tod_q_volts = convert_roc_to_volts(rotation_tod_iq.imag)
+                self.plot2_iq_plane.plot(tod_i_volts, tod_q_volts, pen=None, symbol='o', symbolBrush='w', symbolSize=3, name="Noise TOD")
+            
+            self.plot2_iq_plane.autoRange()
         
         # --- Plot 3: Bias amplitude optimization ---
         if self.current_plot_offset_hz is not None:
             num_amps = len(self.resonance_data_for_digest)
-            cmap = pg.colormap.get('inferno') # Or 'magma'
 
+            # Define distinct colors for <= 4 lines
+            DISTINCT_PLOT_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"] # Blue, Orange, Green, Red
+            
             # Sort amplitudes for consistent coloring
             sorted_amp_keys = sorted(self.resonance_data_for_digest.keys())
 
@@ -182,23 +192,30 @@ class DetectorDigestDialog(QtWidgets.QDialog):
                     
                     x_axis_hz_offset = freqs_hz - self.current_plot_offset_hz
                     
-                    # Adjust colormap: map [0,1] to [0.3, 1]
-                    norm_idx = idx / max(1, num_amps - 1)
-                    color_val_in_map = 0.3 + norm_idx * 0.7
-                    color = cmap.map(color_val_in_map)
-                    pen = pg.mkPen(color, width=LINE_WIDTH)
+                    current_pen = None # Initialize pen variable
+                    if num_amps <= 4:
+                        color_str = DISTINCT_PLOT_COLORS[idx % len(DISTINCT_PLOT_COLORS)]
+                        current_pen = pg.mkPen(color_str, width=LINE_WIDTH)
+                    else: # num_amps > 4
+                        cmap = pg.colormap.get('inferno') # Or 'magma'
+                        # Adjust colormap: map [0,1] to [0.3, 1]
+                        norm_idx = idx / max(1, num_amps - 1)
+                        color_val_in_map = 0.3 + norm_idx * 0.7
+                        color_from_map = cmap.map(color_val_in_map) 
+                        current_pen = pg.mkPen(color_from_map, width=LINE_WIDTH)
                 
-                # Legend name: Bias amplitude [dBm]
-                dac_scale_for_module = self.dac_scales.get(self.target_module) # Use target_module
-                legend_name = f"{amp_raw:.2e} Norm" # Fallback
-                if dac_scale_for_module is not None:
-                    try:
-                        dbm_val = UnitConverter.normalize_to_dbm(amp_raw, dac_scale_for_module)
-                        legend_name = f"{dbm_val:.2f} dBm"
-                    except Exception: # Catch potential math errors with bad inputs
-                        pass # Stick to fallback
+                    # Legend name: Bias amplitude [dBm]
+                    dac_scale_for_module = self.dac_scales.get(self.target_module) # Use target_module
+                    legend_name = f"{amp_raw:.2e} Norm" # Fallback
+                    if dac_scale_for_module is not None:
+                        try:
+                            dbm_val = UnitConverter.normalize_to_dbm(amp_raw, dac_scale_for_module)
+                            legend_name = f"{dbm_val:.2f} dBm"
+                        except Exception: # Catch potential math errors with bad inputs
+                            pass # Stick to fallback
 
-                self.plot3_bias_opt.plot(x_axis_hz_offset, s21_mag_db, pen=pen, name=legend_name)
+                    if current_pen: # Ensure pen is set before plotting
+                        self.plot3_bias_opt.plot(x_axis_hz_offset, s21_mag_db, pen=current_pen, name=legend_name)
         self.plot3_bias_opt.autoRange()
 
     @QtCore.pyqtSlot(object)

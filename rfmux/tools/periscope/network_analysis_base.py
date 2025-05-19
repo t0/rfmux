@@ -20,6 +20,7 @@ from .utils import (
     UnitConverter, traceback # Added traceback
 )
 from .tasks import DACScaleFetcher # For fetching DAC scales
+import numpy as np # For linspace
 
 class NetworkAnalysisDialogBase(QtWidgets.QDialog):
     """
@@ -83,9 +84,78 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         self.dbm_edit.textChanged.connect(self._update_normalized_from_dbm_no_validate) # Live update normalized amp field
         self.amp_edit.editingFinished.connect(self._validate_normalized_values) # Validate on finishing edit
         self.dbm_edit.editingFinished.connect(self._validate_dbm_values)       # Validate on finishing edit
+
+        # Linspace generator UI
+        linspace_group = QtWidgets.QGroupBox("Generate Amplitude List")
+        linspace_layout = QtWidgets.QFormLayout(linspace_group)
+
+        self.start_amp_edit = QtWidgets.QLineEdit("0.0")
+        self.start_amp_edit.setValidator(QDoubleValidator(self))
+        self.start_amp_edit.setToolTip("Start value for linspace generation.")
+        linspace_layout.addRow("Start:", self.start_amp_edit)
+
+        self.stop_amp_edit = QtWidgets.QLineEdit("0.1")
+        self.stop_amp_edit.setValidator(QDoubleValidator(self))
+        self.stop_amp_edit.setToolTip("Stop value for linspace generation.")
+        linspace_layout.addRow("Stop:", self.stop_amp_edit)
+
+        self.iterations_amp_edit = QtWidgets.QLineEdit("11")
+        self.iterations_amp_edit.setValidator(QIntValidator(2, 1000, self)) # Min 2 points for linspace
+        self.iterations_amp_edit.setToolTip("Number of points for linspace generation (min 2).")
+        linspace_layout.addRow("Iterations:", self.iterations_amp_edit)
+        
+        button_layout = QtWidgets.QHBoxLayout()
+        self.fill_amp_button = QtWidgets.QPushButton("Fill Normalized Amplitude")
+        self.fill_amp_button.clicked.connect(self._on_fill_amplitude_clicked)
+        button_layout.addWidget(self.fill_amp_button)
+
+        self.fill_dbm_button = QtWidgets.QPushButton("Fill Power (dBm)")
+        self.fill_dbm_button.clicked.connect(self._on_fill_dbm_clicked)
+        button_layout.addWidget(self.fill_dbm_button)
+        
+        linspace_layout.addRow(button_layout)
+        amp_layout.addRow(linspace_group) # Add this subgroup to the main amplitude layout
         
         layout.addRow("Amplitude Settings:", amp_group)
         return amp_group
+
+    def _on_fill_amplitude_clicked(self):
+        """Handles the 'Fill Amplitude' button click."""
+        try:
+            start = float(self.start_amp_edit.text())
+            stop = float(self.stop_amp_edit.text())
+            iterations = int(self.iterations_amp_edit.text())
+
+            if iterations < 2:
+                QtWidgets.QMessageBox.warning(self, "Input Error", "Iterations must be at least 2.")
+                return
+
+            values = np.linspace(start, stop, iterations)
+            # Use a general format, good for typical normalized amplitudes
+            self.amp_edit.setText(", ".join([f"{v:.6g}" for v in values])) 
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "Input Error", "Invalid input for Start, Stop, or Iterations.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Could not generate amplitude list: {str(e)}")
+
+    def _on_fill_dbm_clicked(self):
+        """Handles the 'Fill dBm' button click."""
+        try:
+            start = float(self.start_amp_edit.text())
+            stop = float(self.stop_amp_edit.text())
+            iterations = int(self.iterations_amp_edit.text())
+
+            if iterations < 2:
+                QtWidgets.QMessageBox.warning(self, "Input Error", "Iterations must be at least 2.")
+                return
+
+            values = np.linspace(start, stop, iterations)
+            # Use a format suitable for dBm values
+            self.dbm_edit.setText(", ".join([f"{v:.2f}" for v in values]))
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "Input Error", "Invalid input for Start, Stop, or Iterations.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Could not generate dBm list: {str(e)}")
         
     def _update_dbm_from_normalized_no_validate(self):
         """

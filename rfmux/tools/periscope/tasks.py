@@ -330,8 +330,7 @@ class MultisweepTask(QRunnable):
                                      'nsamps': self.params.get('nsamps', 10), 'module': module_idx,
                                      'progress_callback': self._progress_callback_wrapper,
                                      'data_callback': self._data_callback_wrapper,
-                                     'global_phase_ref_to_zero': self.params.get('global_phase_ref_to_zero', True),
-                                     'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', True)}
+                                     'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', None)} 
                 multisweep_coro = self.crs.multisweep(**multisweep_params)
                 self._current_async_task = self._loop.create_task(multisweep_coro)
                 raw_results = self._loop.run_until_complete(self._current_async_task)

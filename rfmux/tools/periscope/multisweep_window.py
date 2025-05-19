@@ -643,12 +643,77 @@ class MultisweepWindow(QtWidgets.QMainWindow):
     def _toggle_cf_lines_visibility(self, checked):
         """
         Slot for the 'Show Center Frequencies' checkbox.
-        Redraws plots to show or hide CF lines.
+        Shows or hides CF lines without a full redraw.
+        Creates lines if they don't exist when showing.
 
         Args:
             checked (bool): The new state of the checkbox.
         """
-        # The actual logic for showing/hiding lines is within _redraw_plots,
-        # which checks self.show_cf_lines_cb.isChecked().
-        # We just need to trigger a redraw.
-        self._redraw_plots()
+        if not self.combined_mag_plot or not self.combined_phase_plot:
+            return # Plots not ready
+
+        if checked:
+            # Show lines. Create them if they don't exist.
+            num_amps = len(self.results_by_amplitude)
+            if num_amps == 0:
+                return
+
+            # Color definitions (consistent with _redraw_plots)
+            channel_families = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+                                "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+            viridis_cmap = pg.colormap.get("viridis")
+            sorted_amplitudes = sorted(self.results_by_amplitude.keys())
+
+            for amp_idx, amp_val in enumerate(sorted_amplitudes):
+                amp_results = self.results_by_amplitude.get(amp_val, {})
+                
+                # Determine color for this amplitude's lines
+                if num_amps <= len(channel_families):
+                    color = channel_families[amp_idx % len(channel_families)]
+                else:
+                    color = viridis_cmap.map(amp_idx / max(1, num_amps - 1))
+                
+                # Define pen for CF lines (consistent with _redraw_plots)
+                # Note: LINE_WIDTH should be available from 'from .utils import LINE_WIDTH'
+                cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2)
+
+                # Ensure lists for this amplitude exist in cf_lines_mag/phase
+                self.cf_lines_mag.setdefault(amp_val, [])
+                self.cf_lines_phase.setdefault(amp_val, [])
+
+                # Create dictionaries for quick lookup of existing lines by their X-position (CF)
+                # This avoids iterating through the list of lines repeatedly for each CF.
+                existing_mag_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_mag[amp_val]}
+                existing_phase_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_phase[amp_val]}
+
+                for cf in amp_results.keys(): # Iterate through center frequencies for this amplitude
+                    # Magnitude plot CF line
+                    if cf in existing_mag_lines_for_amp:
+                        existing_mag_lines_for_amp[cf].setVisible(True)
+                    else:
+                        mag_cf_line = pg.InfiniteLine(pos=cf, angle=90, pen=cf_line_pen, movable=False)
+                        self.combined_mag_plot.addItem(mag_cf_line)
+                        self.cf_lines_mag[amp_val].append(mag_cf_line)
+                        # mag_cf_line.setVisible(True) # Already visible by default when added
+
+                    # Phase plot CF line
+                    if cf in existing_phase_lines_for_amp:
+                        existing_phase_lines_for_amp[cf].setVisible(True)
+                    else:
+                        phase_cf_line = pg.InfiniteLine(pos=cf, angle=90, pen=cf_line_pen, movable=False)
+                        self.combined_phase_plot.addItem(phase_cf_line)
+                        self.cf_lines_phase[amp_val].append(phase_cf_line)
+                        # phase_cf_line.setVisible(True) # Already visible by default when added
+        else:
+            # Hide all existing CF lines
+            for amp_lines_list in self.cf_lines_mag.values():
+                for line in amp_lines_list:
+                    line.setVisible(False)
+            for amp_lines_list in self.cf_lines_phase.values():
+                for line in amp_lines_list:
+                    line.setVisible(False)
+        
+        # Note: No call to self._redraw_plots() here, to preserve zoom.
+        # The _redraw_plots method will still handle full reconstruction of lines
+        # if it's called for other reasons (data update, unit change, etc.),
+        # respecting the checkbox state at that time.

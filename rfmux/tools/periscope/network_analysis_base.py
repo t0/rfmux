@@ -1,0 +1,410 @@
+"""Base dialog for network analysis parameter entry."""
+
+from .utils import (
+    QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator,
+    QDoubleValidator, QIntValidator,
+    DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
+    DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
+    UnitConverter, traceback
+)
+from .tasks import DACScaleFetcher
+
+"""Dialog classes for Periscope."""
+
+# Imports from within the 'periscope' subpackage
+from .utils import (
+    QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator,
+    QDoubleValidator, QIntValidator,
+    DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
+    DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
+    UnitConverter, traceback # Added traceback
+)
+from .tasks import DACScaleFetcher # For fetching DAC scales
+
+class NetworkAnalysisDialogBase(QtWidgets.QDialog):
+    """
+    Base class for network analysis dialogs, providing shared functionality
+    for amplitude input (normalized and dBm), DAC scale handling, and
+    parameter parsing.
+    """
+    def __init__(self, parent: QtWidgets.QWidget = None, params: dict = None,
+                 modules: list[int] = None, dac_scales: dict[int, float] = None):
+        """
+        Initializes the base dialog.
+
+        Args:
+            parent: The parent widget.
+            params: Dictionary of existing parameters to populate fields.
+            modules: List of module numbers relevant to this dialog.
+            dac_scales: Dictionary mapping module numbers to their DAC scales in dBm.
+        """
+        super().__init__(parent)
+        self.params = params or {}  # Store initial parameters, default to empty dict
+        self.modules = modules or [1, 2, 3, 4] # Default or passed-in modules
+        # Initialize DAC scales for relevant modules, defaulting to None (unknown)
+        self.dac_scales = dac_scales or {module_idx: None for module_idx in self.modules}
+        self.currently_updating = False # Flag to prevent recursive updates between amp/dBm fields
+        
+    def setup_amplitude_group(self, layout: QtWidgets.QFormLayout) -> QtWidgets.QGroupBox:
+        """
+        Sets up the QGroupBox for amplitude settings (Normalized and dBm).
+
+        This includes input fields for normalized amplitude and power in dBm,
+        and a display for DAC scale information. Connections are made to
+        synchronize and validate these fields.
+
+        Args:
+            layout: The QFormLayout to add the amplitude group to.
+
+        Returns:
+            The created QGroupBox containing amplitude settings.
+        """
+        amp_group = QtWidgets.QGroupBox("Amplitude Settings") # Group box title
+        amp_layout = QtWidgets.QFormLayout(amp_group)
+        
+        # Determine initial amplitude: use 'amps' list if available, else 'amp', else default.
+        amps_list = self.params.get('amps', [self.params.get('amp', DEFAULT_AMPLITUDE)])
+        amp_str = ','.join(map(str, amps_list)) if amps_list else str(DEFAULT_AMPLITUDE)
+        
+        self.amp_edit = QtWidgets.QLineEdit(amp_str)
+        self.amp_edit.setToolTip("Enter a single value or comma-separated list of normalized amplitudes (e.g., 0.001,0.01,0.1). Expressions like '1/1000' are allowed.")
+        amp_layout.addRow("Normalized Amplitude:", self.amp_edit)
+        
+        self.dbm_edit = QtWidgets.QLineEdit()
+        self.dbm_edit.setToolTip("Enter a single value or comma-separated list of power in dBm (e.g., -30,-20,-10). Expressions are allowed.")
+        amp_layout.addRow("Power (dBm):", self.dbm_edit)
+        
+        self.dac_scale_info = QtWidgets.QLabel("Fetching DAC scales...")
+        self.dac_scale_info.setWordWrap(True)
+        amp_layout.addRow("DAC Scale (dBm):", self.dac_scale_info)
+        
+        # Connect signals for live updates and validation
+        self.amp_edit.textChanged.connect(self._update_dbm_from_normalized_no_validate) # Live update dBm field
+        self.dbm_edit.textChanged.connect(self._update_normalized_from_dbm_no_validate) # Live update normalized amp field
+        self.amp_edit.editingFinished.connect(self._validate_normalized_values) # Validate on finishing edit
+        self.dbm_edit.editingFinished.connect(self._validate_dbm_values)       # Validate on finishing edit
+        
+        layout.addRow("Amplitude Settings:", amp_group)
+        return amp_group
+        
+    def _update_dbm_from_normalized_no_validate(self):
+        """
+        Updates the dBm field based on the normalized amplitude field during text input.
+        This version does not trigger immediate pop-up validation warnings.
+        It relies on a known DAC scale for conversion.
+        """
+        if self.currently_updating or not self.dbm_edit.isEnabled():
+            return # Avoid recursion or updates if dBm field is disabled
+        self.currently_updating = True
+        try:
+            amp_text = self.amp_edit.text().strip()
+            if not amp_text:
+                self.dbm_edit.setText("")
+                return
+            
+            dac_scale = self._get_selected_dac_scale()
+            if dac_scale is None:
+                # Disable dBm editing if DAC scale is unknown
+                self.dbm_edit.setEnabled(False)
+                self.dbm_edit.setToolTip("Unable to query DAC scale for conversion.")
+                self.dbm_edit.clear()
+                return
+            
+            normalized_values = self._parse_amplitude_values(amp_text)
+            dbm_values = [f"{UnitConverter.normalize_to_dbm(norm_val, dac_scale):.2f}" for norm_val in normalized_values]
+            self.dbm_edit.setText(", ".join(dbm_values))
+        finally:
+            self.currently_updating = False
+
+    def _update_normalized_from_dbm_no_validate(self):
+        """
+        Updates the normalized amplitude field based on the dBm field during text input.
+        This version does not trigger immediate pop-up validation warnings.
+        It relies on a known DAC scale for conversion.
+        """
+        if self.currently_updating or not self.dbm_edit.isEnabled(): # Check dbm_edit's enabled state as it's the source
+            return # Avoid recursion or updates if dBm field is disabled (e.g. no DAC scale)
+        self.currently_updating = True
+        try:
+            dbm_text = self.dbm_edit.text().strip()
+            if not dbm_text:
+                self.amp_edit.setText("")
+                return
+
+            dac_scale = self._get_selected_dac_scale()
+            if dac_scale is None:
+                # This case should ideally be handled by disabling dbm_edit,
+                # but as a safeguard:
+                self.amp_edit.setToolTip("Unable to query DAC scale for conversion.")
+                # self.amp_edit.clear() # Don't clear amp_edit if dBm is being typed without DAC scale
+                return
+
+            dbm_values = self._parse_dbm_values(dbm_text)
+            normalized_values = [f"{UnitConverter.dbm_to_normalize(dbm_val, dac_scale):.6f}" for dbm_val in dbm_values]
+            self.amp_edit.setText(", ".join(normalized_values))
+        finally:
+            self.currently_updating = False
+
+    def _validate_normalized_values(self):
+        """
+        Validates the entered normalized amplitude values after editing is finished.
+        Shows a warning dialog if values are outside typical ranges (e.g., > 1.0 or < 1e-4).
+        """
+        amp_text = self.amp_edit.text().strip()
+        if not amp_text:
+            return
+
+        # DAC scale is not strictly needed for validating normalized amplitude against 0-1 range,
+        # but good to have for consistency if other checks were dac_scale dependent.
+        # dac_scale = self._get_selected_dac_scale()
+        # if dac_scale is None: return # Or proceed with partial validation
+
+        warnings_list = []
+        normalized_values = self._parse_amplitude_values(amp_text)
+        for norm_val in normalized_values:
+            if norm_val > 1.0:
+                warnings_list.append(f"Warning: Normalized amplitude {norm_val:.6f} > 1.0 (maximum)")
+            elif norm_val < 1e-4: # Arbitrary small value warning threshold
+                warnings_list.append(f"Warning: Normalized amplitude {norm_val:.6f} < 1e-4 (minimum recommended)")
+        
+        if warnings_list:
+            self._show_warning_dialog("Normalized Amplitude Warning", warnings_list)
+
+    def _validate_dbm_values(self):
+        """
+        Validates the entered dBm values after editing is finished.
+        Shows a warning dialog if values exceed DAC scale or result in problematic
+        normalized amplitudes.
+        """
+        dbm_text = self.dbm_edit.text().strip()
+        if not dbm_text:
+            return
+
+        dac_scale = self._get_selected_dac_scale()
+        if dac_scale is None:
+            # Cannot validate dBm against DAC scale if unknown
+            self._show_warning_dialog("DAC Scale Unknown", ["Cannot validate dBm values without a known DAC scale."])
+            return
+
+        warnings_list = []
+        dbm_values = self._parse_dbm_values(dbm_text)
+        for dbm_val in dbm_values:
+            if dbm_val > dac_scale:
+                warnings_list.append(f"Warning: {dbm_val:.2f} dBm > {dac_scale:+.2f} dBm (DAC maximum)")
+            
+            # Check corresponding normalized amplitude
+            norm_val = UnitConverter.dbm_to_normalize(dbm_val, dac_scale)
+            if norm_val > 1.0:
+                warnings_list.append(f"Warning: {dbm_val:.2f} dBm results in normalized amplitude > 1.0 ({norm_val:.6f})")
+            elif norm_val < 1e-4: # Arbitrary small value warning threshold
+                warnings_list.append(f"Warning: {dbm_val:.2f} dBm results in normalized amplitude < 1e-4 ({norm_val:.6f})")
+        
+        if warnings_list:
+            self._show_warning_dialog("dBm Amplitude Warning", warnings_list)
+
+    def _show_warning_dialog(self, title: str, warnings_list: list[str]):
+        """Displays a warning message box with a list of warnings."""
+        QtWidgets.QMessageBox.warning(self, title, "\n".join(warnings_list))
+            
+    def _parse_amplitude_values(self, amp_text: str) -> list[float]:
+        """
+        Parses a comma-separated string of amplitude values.
+        Each part can be an expression evaluatable by `eval()`.
+        Invalid parts are silently skipped.
+
+        Args:
+            amp_text: The string containing amplitude values.
+
+        Returns:
+            A list of parsed float values.
+        """
+        values = []
+        for part in amp_text.split(','):
+            part = part.strip()
+            if part:
+                try:
+                    # Using eval allows for simple expressions like "1/1000".
+                    # Caution: eval can execute arbitrary code if input is not controlled.
+                    # In this GUI context, user inputs values for their own use.
+                    values.append(float(eval(part)))
+                except (ValueError, SyntaxError, NameError, TypeError): # Added TypeError
+                    # Silently skip parts that cannot be evaluated to a float
+                    continue
+        return values
+        
+    def _parse_dbm_values(self, dbm_text: str) -> list[float]:
+        """
+        Parses a comma-separated string of dBm values.
+        Each part can be an expression evaluatable by `eval()`.
+        Invalid parts are silently skipped.
+
+        Args:
+            dbm_text: The string containing dBm values.
+
+        Returns:
+            A list of parsed float values.
+        """
+        values = []
+        for part in dbm_text.split(','):
+            part = part.strip()
+            if part:
+                try:
+                    # Using eval allows for simple expressions.
+                    # Caution: eval can execute arbitrary code if input is not controlled.
+                    values.append(float(eval(part)))
+                except (ValueError, SyntaxError, NameError, TypeError): # Added TypeError
+                    # Silently skip parts that cannot be evaluated to a float
+                    continue
+        return values
+
+    def _update_dac_scale_info(self):
+        """
+        Updates the DAC scale information label based on selected modules
+        and their known DAC scales. Also enables/disables the dBm input field
+        accordingly and triggers an update of dBm from normalized amplitude.
+        """
+        selected_modules = self._get_selected_modules()
+        has_known_scale = False
+        scales_text_list = []
+
+        for module_idx in selected_modules:
+            dac_scale = self.dac_scales.get(module_idx)
+            if dac_scale is not None:
+                has_known_scale = True
+                scales_text_list.append(f"Module {module_idx}: {dac_scale:+.2f} dBm")
+            else:
+                scales_text_list.append(f"Module {module_idx}: Unknown")
+        
+        text_to_display = "\n".join(scales_text_list) if selected_modules else "Unknown (no modules selected)"
+        self.dac_scale_info.setText(text_to_display)
+        
+        if has_known_scale:
+            self.dbm_edit.setEnabled(True)
+            self.dbm_edit.setToolTip("Enter dBm values (e.g., -30,-20,-10). Expressions are allowed.")
+            self._update_dbm_from_normalized() # Update dBm field now that scale might be known/changed
+        else:
+            self.dbm_edit.setEnabled(False)
+            self.dbm_edit.setToolTip("DAC scale unknown for selected module(s) - dBm input disabled.")
+            self.dbm_edit.clear()
+    
+    def _get_selected_modules(self) -> list[int]:
+        """
+        Placeholder method to get the list of currently selected modules.
+        Subclasses must override this to provide actual module selection logic.
+
+        Returns:
+            An empty list. Subclasses should return a list of integer module IDs.
+        """
+        # This method must be implemented by subclasses
+        return [] 
+        
+    def _get_selected_dac_scale(self) -> float | None:
+        """
+        Retrieves the DAC scale for the currently selected module(s).
+        If multiple modules are selected, it returns the DAC scale of the first
+        module in the selection that has a known DAC scale.
+
+        Returns:
+            The DAC scale in dBm as a float, or None if no scale is known
+            for any selected module or if no modules are selected.
+        """
+        selected_modules = self._get_selected_modules()
+        if not selected_modules:
+            return None
+        
+        for module_idx in selected_modules:
+            dac_scale = self.dac_scales.get(module_idx)
+            if dac_scale is not None:
+                return dac_scale # Return the first known DAC scale
+        return None # No known DAC scale for any of the selected modules
+    
+    def _update_dbm_from_normalized(self):
+        """
+        Updates the dBm field based on the normalized amplitude field.
+        This version is typically called when DAC scales change or UI is initialized.
+        It performs validation and may show a warning dialog if values are problematic
+        and the normalized amplitude field does not have focus.
+        """
+        if self.currently_updating or not self.dbm_edit.isEnabled():
+            return
+        self.currently_updating = True
+        try:
+            amp_text = self.amp_edit.text().strip()
+            warnings_list = []
+            if not amp_text:
+                self.dbm_edit.setText("")
+                return
+
+            dac_scale = self._get_selected_dac_scale()
+            if dac_scale is None:
+                self.dbm_edit.setEnabled(False)
+                self.dbm_edit.setToolTip("Unable to query DAC scale for conversion.")
+                self.dbm_edit.clear()
+                return
+
+            normalized_values = self._parse_amplitude_values(amp_text)
+            dbm_values = []
+            for norm_val in normalized_values:
+                # Validate normalized amplitude
+                if norm_val > 1.0:
+                    warnings_list.append(f"Warning: Normalized amplitude {norm_val:.6f} > 1.0 (maximum)")
+                elif norm_val < 1e-4:
+                    warnings_list.append(f"Warning: Normalized amplitude {norm_val:.6f} < 1e-4 (minimum recommended)")
+                dbm_values.append(f"{UnitConverter.normalize_to_dbm(norm_val, dac_scale):.2f}")
+            
+            self.dbm_edit.setText(", ".join(dbm_values))
+            
+            # Show warnings only if the source field (amp_edit) is not currently being edited,
+            # to avoid interrupting user input.
+            if warnings_list and not self.amp_edit.hasFocus():
+                self._show_warning_dialog("Normalized Amplitude Warning", warnings_list)
+        finally:
+            self.currently_updating = False
+    
+    def _update_normalized_from_dbm(self):
+        """
+        Updates the normalized amplitude field based on the dBm field.
+        This version is typically called when DAC scales change or UI is initialized.
+        It performs validation and may show a warning dialog if values are problematic
+        and the dBm field does not have focus.
+        """
+        if self.currently_updating or not self.dbm_edit.isEnabled():
+            return
+        self.currently_updating = True
+        try:
+            dbm_text = self.dbm_edit.text().strip()
+            warnings_list = []
+            if not dbm_text:
+                self.amp_edit.setText("")
+                return
+
+            dac_scale = self._get_selected_dac_scale()
+            if dac_scale is None:
+                # This state should ideally be prevented by disabling dbm_edit.
+                # If somehow reached, cannot convert.
+                self.amp_edit.setToolTip("Unable to query DAC scale for conversion.")
+                # self.amp_edit.clear() # Avoid clearing if user is typing in dBm field
+                return
+
+            dbm_values = self._parse_dbm_values(dbm_text)
+            normalized_values = []
+            for dbm_val in dbm_values:
+                # Validate dBm value against DAC scale
+                if dbm_val > dac_scale:
+                    warnings_list.append(f"Warning: {dbm_val:.2f} dBm > {dac_scale:+.2f} dBm (DAC maximum)")
+                
+                norm_val = UnitConverter.dbm_to_normalize(dbm_val, dac_scale)
+                # Validate resulting normalized amplitude
+                if norm_val > 1.0:
+                    warnings_list.append(f"Warning: {dbm_val:.2f} dBm results in normalized amplitude > 1.0 ({norm_val:.6f})")
+                elif norm_val < 1e-4:
+                    warnings_list.append(f"Warning: {dbm_val:.2f} dBm results in normalized amplitude < 1e-4 ({norm_val:.6f})")
+                normalized_values.append(f"{norm_val:.6f}")
+            
+            self.amp_edit.setText(", ".join(normalized_values))
+
+            # Show warnings only if the source field (dbm_edit) is not currently being edited.
+            if warnings_list and not self.dbm_edit.hasFocus():
+                self._show_warning_dialog("dBm Amplitude Warning", warnings_list)
+        finally:
+            self.currently_updating = False

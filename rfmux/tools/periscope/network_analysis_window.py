@@ -1,9 +1,15 @@
 """Window class for network analysis results."""
 import datetime # Added for MultisweepWindow export
 import pickle   # Added for MultisweepWindow export
-from .periscope_utils import *
-from .periscope_tasks import *
-from .periscope_dialogs import NetworkAnalysisParamsDialog, FindResonancesDialog, MultisweepDialog # Added MultisweepDialog
+import os 
+import csv
+
+# Imports from within the 'periscope' subpackage
+from .utils import * # This will bring in QtWidgets, QtCore, pg, np, ClickableViewBox, UnitConverter, fitting, etc.
+# from .tasks import * # Not directly used by this class, dialogs will import what they need.
+
+# Dialogs are now imported from .dialogs within the same package
+from .dialogs import NetworkAnalysisParamsDialog, FindResonancesDialog, MultisweepDialog
 
 class NetworkAnalysisWindow(QtWidgets.QMainWindow):
     """
@@ -282,32 +288,27 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
 
     def clear_plots(self):
         """Clear all plots, curves, and legends."""
-        for module_id_iter in self.plots: # Use a different variable name to avoid conflict
+        for module_id_iter in self.plots: 
             plot_info = self.plots[module_id_iter]
             amp_plot = plot_info['amp_plot']
             phase_plot = plot_info['phase_plot']
             
-            # Clear legends
             plot_info['amp_legend'].clear()
             plot_info['phase_legend'].clear()
             
-            # Remove all amplitude-specific curves from plots
             for amp, curve in list(plot_info['amp_curves'].items()):
                 amp_plot.removeItem(curve)
             for amp, curve in list(plot_info['phase_curves'].items()):
                 phase_plot.removeItem(curve)
             
-            # Clear curve dictionaries
             plot_info['amp_curves'].clear()
             plot_info['phase_curves'].clear()
             
-            # Make sure main curves have no data 
             plot_info['amp_curve'].setData([], [])
             plot_info['phase_curve'].setData([], [])
 
-            # Clear faux resonance legend items (Requirement 3)
             self._remove_faux_resonance_legend_entry(module_id_iter)
-            self._update_multisweep_button_state(module_id_iter) # Update button state
+            self._update_multisweep_button_state(module_id_iter) 
 
 
     def update_amplitude_progress(self, module: int, current_amp: int, total_amps: int, amplitude: float):
@@ -319,27 +320,20 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         """Toggle normalization of magnitude plots."""
         self.normalize_magnitudes = checked
         
-        # Update axis labels
         for module in self.plots:
             self._update_amplitude_labels(self.plots[module]['amp_plot'])
         
-        # Make sure main curves are cleared if we have amplitude-specific curves
         for module in self.plots:
             if len(self.plots[module]['amp_curves']) > 0:
-                # Clear main curves if we have amplitude-specific curves
                 self.plots[module]['amp_curve'].setData([], [])
                 self.plots[module]['phase_curve'].setData([], [])
         
-        # Redraw only amplitude plots with normalization applied
-        for module_id in self.plots: # Iterate using module_id from self.plots.keys()
-            # Update Y-axis label of the amplitude plot
+        for module_id in self.plots: 
             self._update_amplitude_labels(self.plots[module_id]['amp_plot'])
 
-            # Redraw amplitude data for this module_id
             if module_id in self.raw_data:
                 plot_info = self.plots[module_id]
                 
-                # Update amplitude-specific curves
                 for amp_key, raw_entry_tuple in self.raw_data[module_id].items():
                     amplitude_val, freqs, amps_raw, _, iq_data_raw = self._extract_data_from_tuple(amp_key, raw_entry_tuple)
                     
@@ -357,13 +351,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                         if not plot_info['amp_curves']:
                             plot_info['amp_curve'].setData(freqs, converted_amps)
                 
-                plot_info['amp_plot'].autoRange() # Auto-range based on enabled axes (Y is enabled)
+                plot_info['amp_plot'].autoRange() 
         
-        # Legends might need updating if normalization changes how amplitudes are displayed (e.g. if it affects units in legend)
-        # However, current legend text is based on unit_mode and absolute amplitude, not normalization state.
-        # If normalization were to change legend text (e.g. "Normalized Probe: ..."), then this would be needed:
-        # self._update_legends_for_unit_mode() 
-
 
     def _toggle_zoom_box(self, enable):
         """Toggle zoom box mode for all plots."""
@@ -385,7 +374,6 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 line.setVisible(checked)
             for line in self.plots[module_id]['resonance_lines_phase']:
                 line.setVisible(checked)
-            # Update legend entry visibility (Requirement 3)
             self._update_resonance_legend_entry(module_id)
 
     def _toggle_resonance_edit_mode(self, checked: bool):
@@ -394,7 +382,6 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
 
     def _update_resonance_checkbox_text(self, module: int):
         """Update the show-resonances checkbox label (count removed)."""
-        # count = len(self.resonance_freqs.get(module, [])) # Count is no longer displayed here
         self.show_resonances_cb.setText("Show Resonances")
 
     def _add_resonance(self, module: int, freq_hz: float):
@@ -410,8 +397,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         plot_info['resonance_lines_mag'].append(line_mag)
         plot_info['resonance_lines_phase'].append(line_phase)
         self.resonance_freqs.setdefault(module, []).append(freq_hz)
-        self._update_resonance_checkbox_text(module) # Though count is removed, keep for consistency if needed later
-        self._update_resonance_legend_entry(module) # Requirement 3
+        self._update_resonance_checkbox_text(module) 
+        self._update_resonance_legend_entry(module) 
         self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
         self._update_multisweep_button_state(module)
 
@@ -422,18 +409,17 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             return
         freqs = self.resonance_freqs[module]
         if not freqs:
-            self._update_multisweep_button_state(module) # Update even if no freqs to remove
+            self._update_multisweep_button_state(module) 
             return
         freqs_arr = np.array(freqs)
         idx = int(np.argmin(np.abs(freqs_arr - freq_hz)))
-        # Remove lines
         line_mag = self.plots[module]['resonance_lines_mag'].pop(idx)
         line_phase = self.plots[module]['resonance_lines_phase'].pop(idx)
         self.plots[module]['amp_plot'].removeItem(line_mag)
         self.plots[module]['phase_plot'].removeItem(line_phase)
         freqs.pop(idx)
-        self._update_resonance_checkbox_text(module) # Though count is removed, keep for consistency
-        self._update_resonance_legend_entry(module) # Requirement 3
+        self._update_resonance_checkbox_text(module) 
+        self._update_resonance_legend_entry(module) 
         self._update_multisweep_button_state(module)
 
     def _update_unit_mode(self, mode):
@@ -441,82 +427,62 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         if mode != self.unit_mode:
             self.unit_mode = mode
             
-            for module_id in self.plots: # Iterate using module_id from self.plots.keys()
-                # Update Y-axis label of the amplitude plot
+            for module_id in self.plots: 
                 self._update_amplitude_labels(self.plots[module_id]['amp_plot'])
 
-                # Redraw amplitude data for this module_id
                 if module_id in self.raw_data:
                     plot_info = self.plots[module_id]
                     
-                    # Update amplitude-specific curves
                     for amp_key, raw_entry_tuple in self.raw_data[module_id].items():
-                        # amp_key is like "module_amplitude" or "default"
-                        # raw_entry_tuple is (freqs, amps, phases, iq_data, optional_amplitude_val)
-                        
                         amplitude_val, freqs, amps_raw, _, iq_data_raw = self._extract_data_from_tuple(amp_key, raw_entry_tuple)
                         
-                        if freqs is None or amps_raw is None or iq_data_raw is None: # Should not happen with valid data
+                        if freqs is None or amps_raw is None or iq_data_raw is None: 
                             continue
 
                         converted_amps = UnitConverter.convert_amplitude(
                             amps_raw, iq_data_raw, self.unit_mode, normalize=self.normalize_magnitudes
                         )
                         
-                        if amp_key != 'default': # Amplitude specific curve
-                            # The amplitude_val from _extract_data_from_tuple is the actual float value
+                        if amp_key != 'default': 
                             if amplitude_val in plot_info['amp_curves']:
                                 plot_info['amp_curves'][amplitude_val].setData(freqs, converted_amps)
-                        else: # Default curve (only if no amp-specific curves exist for this plot)
-                            if not plot_info['amp_curves']: # Check if amp_curves dict is empty
+                        else: 
+                            if not plot_info['amp_curves']: 
                                 plot_info['amp_curve'].setData(freqs, converted_amps)
                     
-                    plot_info['amp_plot'].autoRange() # Auto-range based on enabled axes (Y is enabled)
+                    plot_info['amp_plot'].autoRange() 
             
-            # Update legends because amplitude labels might change (e.g. "Probe: X dBm" vs "Probe: Y Norm Units")
             self._update_legends_for_unit_mode()
 
     def _update_legends_for_unit_mode(self):
         """Update the legend entries to reflect the current unit mode."""
         for module in self.plots:
-            # Clear existing legends
             self.plots[module]['amp_legend'].clear()
             self.plots[module]['phase_legend'].clear()
             
-            # Re-add curves with updated labels
             for amplitude, curve in self.plots[module]['amp_curves'].items():
-                # Format amplitude according to current unit mode
+                label = "" 
                 if self.unit_mode == "dbm":
-                    # Check if we have a DAC scale for this module
                     if module not in self.dac_scales:
-                        # Issue warning and switch to counts mode
                         print(f"Warning: No DAC scale available for module {module}, cannot display accurate probe power in dBm.")
-                        self.rb_counts.setChecked(True)  # Switch to counts mode
-                        return  # Exit and let _update_unit_mode call us again
+                        self.rb_counts.setChecked(True)  
+                        return  
                     
-                    # Use the actual DAC scale without fallback
                     dac_scale = self.dac_scales[module]
                     dbm_value = UnitConverter.normalize_to_dbm(amplitude, dac_scale)
                     label = f"Probe: {dbm_value:.2f} dBm"
                 elif self.unit_mode == "volts":
-                    # Properly convert normalized amplitude to voltage through power calculation
-                    # First get dBm value
                     if module not in self.dac_scales:
                         print(f"Warning: No DAC scale available for module {module}, cannot display accurate probe amplitude in Volts.")
-                        self.rb_counts.setChecked(True)  # Switch to counts mode
-                        return  # Exit and let _update_unit_mode call us again
+                        self.rb_counts.setChecked(True)  
+                        return  
                     else:
                         dac_scale = self.dac_scales[module]
                         dbm_value = UnitConverter.normalize_to_dbm(amplitude, dac_scale)
                         
-                        # Convert dBm to watts: P = 10^((dBm - 30)/10)
                         power_watts = 10**((dbm_value - 30)/10)
-                        
-                        # Convert watts to peak voltage: V = sqrt(P * R)
-                        resistance = 50.0  # Ohms
+                        resistance = 50.0  
                         voltage_rms = np.sqrt(power_watts * resistance)
-                        
-                        # Convert RMS to peak voltage
                         voltage_peak = voltage_rms * np.sqrt(2)
                         voltage_peak = voltage_peak*1e6
                         
@@ -524,10 +490,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 else:  # "counts"
                     label = f"Probe: {amplitude} Normalized Units"
                 
-                # Add to legend with new label
                 self.plots[module]['amp_legend'].addItem(curve, label)
                 
-                # Also update the phase legend for consistency
                 phase_curve = self.plots[module]['phase_curves'].get(amplitude)
                 if phase_curve:
                     self.plots[module]['phase_legend'].addItem(phase_curve, label)         
@@ -536,7 +500,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         """Update plot labels based on current unit mode and normalization state."""
         if self.normalize_magnitudes:
             if self.unit_mode == "dbm":
-                plot.setLabel('left', 'Normalized Power', units='dB') # Corrected units to dB
+                plot.setLabel('left', 'Normalized Power', units='dB') 
             else:
                 plot.setLabel('left', 'Normalized Magnitude', units='')
         else:
@@ -549,51 +513,39 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
 
     def _redraw_all_plots(self):
         """Redraw all plots with current unit mode."""
-        for module_id_iter_redraw in self.raw_data: # Renamed to avoid conflict
+        for module_id_iter_redraw in self.raw_data: 
             if module_id_iter_redraw in self.plots:
-                # Check if we have amplitude-specific curves
                 has_amp_curves = len(self.plots[module_id_iter_redraw]['amp_curves']) > 0
                 
-                # Update amplitude-specific curves first
                 for amp_key, data_tuple in self.raw_data[module_id_iter_redraw].items():
                     if amp_key != 'default':
-                        # Extract amplitude and data
                         amplitude, freqs, amps, phases, iq_data = self._extract_data_from_tuple(amp_key, data_tuple)
                         
-                        # Update the curve if it exists
                         if amplitude in self.plots[module_id_iter_redraw]['amp_curves']:
                             converted_amps = UnitConverter.convert_amplitude(
                                 amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
-                            # Keep frequencies in Hz for plotting, as axes are in Hz
                             self.plots[module_id_iter_redraw]['amp_curves'][amplitude].setData(freqs, converted_amps)
                             self.plots[module_id_iter_redraw]['phase_curves'][amplitude].setData(freqs, phases)
                 
-                # Now handle the default curve - ONLY if there are no amplitude-specific curves
                 if 'default' in self.raw_data[module_id_iter_redraw] and not has_amp_curves:
                     freqs, amps, phases, iq_data = self.raw_data[module_id_iter_redraw]['default']
                     converted_amps = UnitConverter.convert_amplitude(
                         amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
-                    # Keep frequencies in Hz for plotting
                     self.plots[module_id_iter_redraw]['amp_curve'].setData(freqs, converted_amps)
                     self.plots[module_id_iter_redraw]['phase_curve'].setData(freqs, phases)
                 else:
-                    # Make sure default curves have no data if we have amplitude-specific curves
                     self.plots[module_id_iter_redraw]['amp_curve'].setData([], [])
                     self.plots[module_id_iter_redraw]['phase_curve'].setData([], [])
                 
-                # Enable auto range to fit new data
                 self.plots[module_id_iter_redraw]['amp_plot'].autoRange()
         
-        # Update legends after redrawing curves
         self._update_legends_for_unit_mode()              
     
     def _extract_data_from_tuple(self, amp_key, data_tuple):
         """Extract amplitude and data from a data tuple."""
         if len(data_tuple) == 5:
-            # New format with amplitude included
             freqs, amps, phases, iq_data, amplitude = data_tuple
         else:
-            # Old format, extract amplitude from key
             freqs, amps, phases, iq_data = data_tuple
             try:
                 amplitude = float(amp_key.split('_')[-1])
@@ -606,7 +558,6 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         parent = self.parent()
         
         if parent and hasattr(parent, 'netanal_windows'):
-            # Find our window ID
             window_id = None
             for w_id, w_data in parent.netanal_windows.items():
                 if w_data['window'] == self:
@@ -614,17 +565,14 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                     break
             
             if window_id:
-                # Stop all tasks for this window
                 if hasattr(parent, 'netanal_tasks'):
                     for task_key in list(parent.netanal_tasks.keys()):
                         if task_key.startswith(f"{window_id}_"):
                             task = parent.netanal_tasks.pop(task_key)
                             task.stop()
                 
-                # Remove from windows dictionary
                 parent.netanal_windows.pop(window_id, None)
         
-        # Call parent implementation
         super().closeEvent(event)
 
     def _show_find_resonances_dialog(self):
@@ -656,11 +604,10 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         module_sweeps = self.raw_data.get(active_module)
         if not module_sweeps:
             QtWidgets.QMessageBox.warning(self, "No Data", f"No data found for module {active_module}.")
-            self._update_multisweep_button_state(active_module) # Update button state
+            self._update_multisweep_button_state(active_module) 
             return
 
         target_sweep_key = None
-        # Try to find the last run amplitude sweep
         ordered_amplitudes_run = self.original_params.get('amps', [])
         if ordered_amplitudes_run:
             for amp_setting in reversed(ordered_amplitudes_run):
@@ -669,39 +616,35 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                     target_sweep_key = sweep_key
                     break
         
-        # Fallback to 'default' if no amplitude-specific sweep found or if 'amps' was empty
         if target_sweep_key is None and 'default' in module_sweeps:
             target_sweep_key = 'default'
 
         if target_sweep_key is None:
-            # Fallback to the very last key added to the dictionary if all else fails
             if module_sweeps:
                 target_sweep_key = list(module_sweeps.keys())[-1]
 
 
         if target_sweep_key is None:
             QtWidgets.QMessageBox.warning(self, "No Data", f"Could not determine which sweep to analyze for module {active_module}.")
-            self._update_multisweep_button_state(active_module) # Update button state
+            self._update_multisweep_button_state(active_module) 
             return
 
-        # Extract data from the chosen sweep
         data_tuple = module_sweeps[target_sweep_key]
         
-        if len(data_tuple) == 5: # New format with amplitude
+        if len(data_tuple) == 5: 
             frequencies, _, _, iq_complex, _ = data_tuple
-        elif len(data_tuple) == 4: # Old format or default
+        elif len(data_tuple) == 4: 
             frequencies, _, _, iq_complex = data_tuple
         else:
             QtWidgets.QMessageBox.critical(self, "Data Error", "Unexpected data format for the selected sweep.")
-            self._update_multisweep_button_state(active_module) # Update button state
+            self._update_multisweep_button_state(active_module) 
             return
 
         if len(frequencies) == 0 or len(iq_complex) == 0:
             QtWidgets.QMessageBox.information(self, "No Data", "Selected sweep has no frequency or IQ data.")
-            self._update_multisweep_button_state(active_module) # Update button state
+            self._update_multisweep_button_state(active_module) 
             return
             
-        # Run find_resonances
         try:
             resonance_results = fitting.find_resonances(
                 frequencies=frequencies,
@@ -712,18 +655,14 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Resonance Finding Error", f"Error calling find_resonances: {str(e)}")
             traceback.print_exc()
-            self._update_multisweep_button_state(active_module) # Update button state
+            self._update_multisweep_button_state(active_module) 
             return
 
-        # Plot the results
         if active_module in self.plots:
             plot_info = self.plots[active_module]
             amp_plot_item = plot_info['amp_plot'].getPlotItem()
             phase_plot_item = plot_info['phase_plot'].getPlotItem()
-            # amp_legend = plot_info['amp_legend'] # Not directly used here
-            # phase_legend = plot_info['phase_legend'] # Not directly used here
 
-            # 1. Clear ALL previous resonance lines from plots and stored lists
             for line in plot_info.get('resonance_lines_mag', []):
                 amp_plot_item.removeItem(line)
             plot_info['resonance_lines_mag'] = []
@@ -732,7 +671,6 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 phase_plot_item.removeItem(line)
             plot_info['resonance_lines_phase'] = []
 
-            # 2. Clear old resonance frequency data
             self.resonance_freqs[active_module] = []
             
             res_freqs_hz = resonance_results.get('resonance_frequencies', [])
@@ -740,10 +678,9 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             if not res_freqs_hz:
                 QtWidgets.QMessageBox.information(self, "No Resonances Found", 
                                                   f"No resonances were identified for Module {active_module} with the given parameters.")
-                self._update_multisweep_button_state(active_module) # Update button state
-                return # Important to return if no resonances, so no legend item is added
+                self._update_multisweep_button_state(active_module) 
+                return 
 
-            # 3. Add new lines (all initially visible)
             line_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
             for res_freq_hz in res_freqs_hz:
                 line_mag = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
@@ -754,11 +691,10 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 phase_plot_item.addItem(line_phase)
                 plot_info['resonance_lines_phase'].append(line_phase)
 
-            # 4. Store resonance frequencies and update checkbox/legend
             self.resonance_freqs[active_module] = res_freqs_hz
-            self._update_resonance_checkbox_text(active_module) # Checkbox text itself doesn't change with count anymore
-            self._update_resonance_legend_entry(active_module) # Requirement 3: Update legend
-            self._toggle_resonances_visible(self.show_resonances_cb.isChecked()) # Ensure lines visibility matches checkbox
+            self._update_resonance_checkbox_text(active_module) 
+            self._update_resonance_legend_entry(active_module) 
+            self._toggle_resonances_visible(self.show_resonances_cb.isChecked()) 
         self._update_multisweep_button_state(active_module)
 
 
@@ -772,7 +708,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             if module_id in self.faux_resonance_legend_items_mag:
                 try:
                     amp_legend.removeItem(self.faux_resonance_legend_items_mag[module_id])
-                except Exception: # Broad except as removeItem might fail if item already gone
+                except Exception: 
                     pass 
                 del self.faux_resonance_legend_items_mag[module_id]
             
@@ -788,7 +724,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         if module_id not in self.plots:
             return
 
-        self._remove_faux_resonance_legend_entry(module_id) # Clear existing first
+        self._remove_faux_resonance_legend_entry(module_id) 
 
         plot_info = self.plots[module_id]
         amp_legend = plot_info['amp_legend']
@@ -797,21 +733,11 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         count = len(self.resonance_freqs.get(module_id, []))
 
         if self.show_resonances_cb.isChecked() and count > 0:
-            # Create a dummy PlotDataItem to get the sample swatch in the legend
-            # This item itself won't be added to the plot, only its legend representation
             dummy_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
             
-            # For Magnitude Plot Legend
-            # We need to add an actual item to the legend.
-            # A simple way is to create a PlotDataItem, add it to the legend, then make it invisible
-            # or ensure it has no data.
-            # However, LegendItem.addItem takes a PlotDataItem and a name.
-            
-            # Create a new PlotDataItem for the legend entry
-            # This item will not be added to the plot itself, only to the legend.
             legend_sample_item_mag = pg.PlotDataItem(pen=dummy_pen)
             amp_legend.addItem(legend_sample_item_mag, f"{count} resonances")
-            self.faux_resonance_legend_items_mag[module_id] = legend_sample_item_mag # Store the item used for legend
+            self.faux_resonance_legend_items_mag[module_id] = legend_sample_item_mag 
 
             legend_sample_item_phase = pg.PlotDataItem(pen=dummy_pen)
             phase_legend.addItem(legend_sample_item_phase, f"{count} resonances")
@@ -826,7 +752,6 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         if not self.progress_group:
             return
             
-        # Find our window data in the parent
         parent = self.parent()
         window_id = None
         
@@ -841,104 +766,74 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
             
         window_data = parent.netanal_windows[window_id]
         
-        # Check if there are any pending amplitudes
         no_pending_amplitudes = True
         for module in window_data['amplitude_queues']:
             if window_data['amplitude_queues'][module]:
                 no_pending_amplitudes = False
                 break
         
-        # Hide progress when all bars are at 100% and no pending amplitudes
         all_complete = all(pbar.value() == 100 for pbar in self.progress_bars.values())
         if all_complete and no_pending_amplitudes:
             self.progress_group.setVisible(False)
 
     def _edit_parameters(self):
         """Open dialog to edit parameters. Re-runs analysis using per-module cable lengths."""
-        # Prepare parameters for the dialog: use current_params but exclude any cable length info,
-        # as the dialog is for other settings.
         params_for_dialog = self.current_params.copy()
         params_for_dialog.pop('module_cable_lengths', None)
-        params_for_dialog.pop('cable_length', None) # Ensure no single cable_length is passed to dialog context
+        params_for_dialog.pop('cable_length', None) 
 
         dialog = NetworkAnalysisParamsDialog(self, params_for_dialog)
         if dialog.exec():
-            # Get updated general parameters from the dialog
-            updated_general_params = dialog.get_parameters() # These don't include cable lengths
+            updated_general_params = dialog.get_parameters() 
             
             if updated_general_params:
-                # Start with the updated general parameters
                 params_for_rerun = updated_general_params.copy()
-
-                # Add the authoritative per-module cable lengths from the window state
                 params_for_rerun['module_cable_lengths'] = self.module_cable_lengths.copy()
-                
-                # Ensure no single 'cable_length' key conflicts; module_cable_lengths is primary
                 params_for_rerun.pop('cable_length', None)
-
-                # Update the window's current_params to reflect the full set for the new run
                 self.current_params = params_for_rerun.copy()
                 
-                # Make progress group visible again
                 if self.progress_group:
                     self.progress_group.setVisible(True)
                 
-                # Call the parent's rerun method with the fully formed params
                 self.parent()._rerun_network_analysis(self.current_params)
 
     def _rerun_analysis(self):
         """Re-run the analysis with potentially updated parameters."""
         if hasattr(self.parent(), '_rerun_network_analysis'):
-            # Get current parameters and add the per-module cable lengths
             params = self.current_params.copy()
-            # Instead of a single cable_length, pass the dictionary
             params['module_cable_lengths'] = self.module_cable_lengths.copy()
-            # Remove the old single 'cable_length' if it exists, to avoid confusion
             params.pop('cable_length', None)
 
-            # Make progress group visible again
             if self.progress_group:
                 self.progress_group.setVisible(True)
             self.parent()._rerun_network_analysis(params)
     
     def set_params(self, params):
         """Set parameters for analysis."""
-        self.original_params = params.copy()  # Keep original for reference
-        self.current_params = params.copy()   # Keep current for dialog
+        self.original_params = params.copy()  
+        self.current_params = params.copy()   
 
-        # Initialize per-module cable lengths (Requirement 2)
         default_cable_length_for_all = params.get('cable_length', DEFAULT_CABLE_LENGTH)
-        # If params already contains per-module lengths (e.g. from a future advanced re-run), use it
-        # For now, assume all modules start with the same cable length from params
-        for mod_id in self.modules: # self.modules is set in __init__
+        for mod_id in self.modules: 
             self.module_cable_lengths[mod_id] = params.get('module_cable_lengths', {}).get(mod_id, default_cable_length_for_all)
 
-        # Update spinner for the initially active module (if any)
-        # This will be handled by _on_active_module_changed if tabs are already created,
-        # or when the first tab becomes current.
-        # If tabs exist, trigger an update for the current one.
         if self.tabs.count() > 0:
             self._on_active_module_changed(self.tabs.currentIndex())
-        elif self.modules: # If modules are defined but no tabs yet (e.g. during init)
-            # Set the spinner to the first module's cable length as a sensible default
-            # before any tab is explicitly selected.
+        elif self.modules: 
             first_module_id = self.modules[0]
             initial_cable_length = self.module_cable_lengths.get(first_module_id, DEFAULT_CABLE_LENGTH)
             self.cable_length_spin.blockSignals(True)
             self.cable_length_spin.setValue(initial_cable_length)
             self.cable_length_spin.blockSignals(False)
         
-        # Only try to set plot ranges if plots exist
         if not hasattr(self, 'plots') or not self.plots:
             return
             
-        # Set initial plot ranges based on frequency parameters
         fmin = params.get('fmin', DEFAULT_MIN_FREQ)
         fmax = params.get('fmax', DEFAULT_MAX_FREQ)
         for module in self.plots:
             self.plots[module]['amp_plot'].setXRange(fmin, fmax)
             self.plots[module]['phase_plot'].setXRange(fmin, fmax)
-            # Disable auto range on X axis but keep Y auto range
             self.plots[module]['amp_plot'].enableAutoRange(pg.ViewBox.XAxis, False)
             self.plots[module]['phase_plot'].enableAutoRange(pg.ViewBox.XAxis, False)
             self.plots[module]['amp_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
@@ -946,48 +841,31 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
     
     def update_data_with_amp(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray, amplitude: float):
         """Update the plot data for a specific module and amplitude."""
-        # Store the raw data for unit conversion
-        iq_data = amps * np.exp(1j * np.radians(phases))  # Reconstruct complex data
-        
-        # Use a unique key that includes the amplitude
+        iq_data = amps * np.exp(1j * np.radians(phases))  
         key = f"{module}_{amplitude}"
         
-        # Initialize dictionaries if needed
-        if module not in self.raw_data:
-            self.raw_data[module] = {}
-        if module not in self.data:
-            self.data[module] = {}
+        if module not in self.raw_data: self.raw_data[module] = {}
+        if module not in self.data: self.data[module] = {}
         
-        # Store the data with amplitude
         self.raw_data[module][key] = (freqs, amps, phases, iq_data, amplitude)
         self.data[module][key] = (freqs, amps, phases)
         
         if module in self.plots:
-            # Hide the main curve if this is the first amplitude-specific curve
             if len(self.plots[module]['amp_curves']) == 0:
-                # Set main curves to empty data to effectively hide them
                 self.plots[module]['amp_curve'].setData([], [])
                 self.plots[module]['phase_curve'].setData([], [])
             
-            # Convert amplitude to selected units
             converted_amps = UnitConverter.convert_amplitude(
                 amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
             
-            # Generate a color based on the amplitude index in the list of amplitudes
             amps_list = self.original_params.get('amps', [amplitude])
-            if amplitude in amps_list:
-                amp_index = amps_list.index(amplitude)
-            else:
-                amp_index = 0
+            if amplitude in amps_list: amp_index = amps_list.index(amplitude)
+            else: amp_index = 0
                 
-            # Use the same color families as the main application
-            channel_families = [
-                "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-                "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
-            ]
+            channel_families = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+                                "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
             color = channel_families[amp_index % len(channel_families)]
             
-            # Create or update curves for this amplitude
             is_new_curve = False
             if amplitude not in self.plots[module]['amp_curves']:
                 is_new_curve = True
@@ -996,44 +874,32 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
                 self.plots[module]['phase_curves'][amplitude] = self.plots[module]['phase_plot'].plot(
                     pen=pg.mkPen(color, width=LINE_WIDTH), name=f"Amp: {amplitude}")
             
-            # Update the curves
             self.plots[module]['amp_curves'][amplitude].setData(freqs, converted_amps)
             self.plots[module]['phase_curves'][amplitude].setData(freqs, phases)
             
-            # If this is a new curve, update legends for proper unit display
-            if is_new_curve:
-                self._update_legends_for_unit_mode()
-        self._update_multisweep_button_state(module) # Update button state when data changes
+            if is_new_curve: self._update_legends_for_unit_mode()
+        self._update_multisweep_button_state(module) 
 
     def update_data(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
         """Update the plot data for a specific module."""
-        # Store the raw data for unit conversion
-        iq_data = amps * np.exp(1j * np.radians(phases))  # Reconstruct complex data
+        iq_data = amps * np.exp(1j * np.radians(phases))  
         
-        # Initialize dictionaries if needed
-        if module not in self.raw_data:
-            self.raw_data[module] = {}
-        if module not in self.data:
-            self.data[module] = {}
+        if module not in self.raw_data: self.raw_data[module] = {}
+        if module not in self.data: self.data[module] = {}
         
-        # Store under 'default' key
         self.raw_data[module]['default'] = (freqs, amps, phases, iq_data)
         self.data[module]['default'] = (freqs, amps, phases)
         
         if module in self.plots:
-            # Only show default curve if no amplitude-specific curves exist yet
             if len(self.plots[module]['amp_curves']) == 0:
-                # Convert amplitude to selected units
                 converted_amps = UnitConverter.convert_amplitude(
                     amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
                 
-                # Convert frequency to GHz for display
-                freq_ghz = freqs
+                freq_ghz = freqs # Keep as freqs, units are handled by axis label
                 
-                # Update plots
                 self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
                 self.plots[module]['phase_curve'].setData(freq_ghz, phases)
-        self._update_multisweep_button_state(module) # Update button state when data changes
+        self._update_multisweep_button_state(module) 
     
     def update_progress(self, module: int, progress: float):
         """Update the progress bar for a specific module."""
@@ -1044,7 +910,6 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         """Mark analysis as complete for a module."""
         if module in self.progress_bars:
             self.progress_bars[module].setValue(100)
-            # Check if all modules are complete to hide progress bars
             self._check_all_complete()
     
     def _export_data(self):
@@ -1055,179 +920,95 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         
         dialog = QtWidgets.QFileDialog(self)
         dialog.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
-        dialog.setNameFilters([
-            "Pickle Files (*.pkl)",
-            "CSV Files (*.csv)",
-            "All Files (*)"
-        ])
+        dialog.setNameFilters(["Pickle Files (*.pkl)", "CSV Files (*.csv)", "All Files (*)"])
         dialog.setDefaultSuffix("pkl")
         
         if dialog.exec():
             filename = dialog.selectedFiles()[0]
             
             try:
-                if filename.endswith('.pkl'):
-                    self._export_to_pickle(filename)
-                elif filename.endswith('.csv'):
-                    self._export_to_csv(filename)
-                else:
-                    # Default to pickle with same comprehensive format
-                    self._export_to_pickle(filename)
-                    
-                QtWidgets.QMessageBox.information(self, "Export Complete", 
-                                                f"Data exported to {filename}")
-                
+                if filename.endswith('.pkl'): self._export_to_pickle(filename)
+                elif filename.endswith('.csv'): self._export_to_csv(filename)
+                else: self._export_to_pickle(filename)
+                QtWidgets.QMessageBox.information(self, "Export Complete", f"Data exported to {filename}")
             except Exception as e:
-                traceback.print_exc()  # Print stack trace to console
-                QtWidgets.QMessageBox.critical(self, "Export Error", 
-                                            f"Error exporting data: {str(e)}")
+                traceback.print_exc() 
+                QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
     
     def _export_to_pickle(self, filename):
         """Export data to a pickle file."""
-        # Create comprehensive data structure with all units and metadata
-        export_data = {
-            'timestamp': datetime.datetime.now().isoformat(),
-            'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
-            'modules': {}
-        }
+        export_data = {'timestamp': datetime.datetime.now().isoformat(),
+                       'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
+                       'modules': {}}
         
-        # Process each module's data
         for module, data_dict in self.raw_data.items():
-            export_data['modules'][module] = {}
-            
-            # Track measurement index for each module
-            meas_idx = 0
-            
+            export_data['modules'][module] = {}; meas_idx = 0
             for key, data_tuple in data_dict.items():
-                # Extract data and amplitude
                 amplitude, freqs, amps, phases, iq_data = self._extract_data_for_export(key, data_tuple)
-                
-                # Convert to all unit types
-                counts = amps  # Already in counts
-                volts = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="volts")
+                counts = amps; volts = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="volts")
                 dbm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="dbm")
-                
-                # Also include normalized versions
                 counts_norm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="counts", normalize=True)
                 volts_norm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="volts", normalize=True)
                 dbm_norm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="dbm", normalize=True)
                 
-                # Use iteration number as key instead of formatted amplitude
                 export_data['modules'][module][meas_idx] = {
                     'sweep_amplitude': amplitude,
-                    'frequency': {
-                        'values': freqs.tolist(),
-                        'unit': 'Hz'
-                    },
-                    'magnitude': {
-                        'counts': {
-                            'raw': counts.tolist(),
-                            'normalized': counts_norm.tolist(),
-                            'unit': 'counts'
-                        },
-                        'volts': {
-                            'raw': volts.tolist(),
-                            'normalized': volts_norm.tolist(),
-                            'unit': 'V'
-                        },
-                        'dbm': {
-                            'raw': dbm.tolist(),
-                            'normalized': dbm_norm.tolist(),
-                            'unit': 'dBm'
-                        }
-                    },
-                    'phase': {
-                        'values': phases.tolist(),
-                        'unit': 'degrees'
-                    },
-                    'complex': {
-                        'real': iq_data.real.tolist(),
-                        'imag': iq_data.imag.tolist()
-                    }
-                }
+                    'frequency': {'values': freqs.tolist(), 'unit': 'Hz'},
+                    'magnitude': {'counts': {'raw': counts.tolist(), 'normalized': counts_norm.tolist(), 'unit': 'counts'},
+                                  'volts': {'raw': volts.tolist(), 'normalized': volts_norm.tolist(), 'unit': 'V'},
+                                  'dbm': {'raw': dbm.tolist(), 'normalized': dbm_norm.tolist(), 'unit': 'dBm'}},
+                    'phase': {'values': phases.tolist(), 'unit': 'degrees'},
+                    'complex': {'real': iq_data.real.tolist(), 'imag': iq_data.imag.tolist()}}
                 meas_idx += 1
-
             export_data['modules'][module]['resonances_hz'] = self.resonance_freqs.get(module, [])
         
-        # Save the enhanced data structure
-        with open(filename, 'wb') as f:
-            pickle.dump(export_data, f)
+        with open(filename, 'wb') as f: pickle.dump(export_data, f)
     
     def _export_to_csv(self, filename):
         """Export data to CSV files."""
         base, ext = os.path.splitext(filename)
-        
-        # First create a metadata CSV with the parameters
         meta_filename = f"{base}_metadata{ext}"
         with open(meta_filename, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Parameter', 'Value'])
-            writer.writerow(['Export Date', datetime.datetime.now().isoformat()])
-            
-            # Add all parameters
+            writer.writerow(['Parameter', 'Value']); writer.writerow(['Export Date', datetime.datetime.now().isoformat()])
             if hasattr(self, 'current_params'):
-                writer.writerow(['', ''])
-                writer.writerow(['Measurement Parameters', ''])
+                writer.writerow(['', '']); writer.writerow(['Measurement Parameters', ''])
                 for param, value in self.current_params.items():
-                    # Convert Hz to MHz for frequency parameters
                     if param in ['fmin', 'fmax', 'max_span'] and isinstance(value, (int, float)):
                         writer.writerow([param, f"{value/1e6} MHz"])
-                    else:
-                        writer.writerow([param, value])
-
+                    else: writer.writerow([param, value])
             if self.resonance_freqs:
-                writer.writerow(['', ''])
-                writer.writerow(['Resonances (Hz)', ''])
+                writer.writerow(['', '']); writer.writerow(['Resonances (Hz)', ''])
                 for module, freqs in self.resonance_freqs.items():
-                    freq_str = ','.join(str(f) for f in freqs)
-                    writer.writerow([f'Module {module}', freq_str])
+                    writer.writerow([f'Module {module}', ','.join(map(str, freqs))])
         
-        # Now export each module's data
         for module, data_dict in self.raw_data.items():
-            idx = 0  # Track measurement index
+            idx = 0 
             for key, data_tuple in data_dict.items():
-                # Extract data and amplitude
                 amplitude, freqs, amps, phases, iq_data = self._extract_data_for_export(key, data_tuple)
-                
-                # Export for each unit type
                 for unit_mode in ["counts", "volts", "dbm"]:
                     converted_amps = UnitConverter.convert_amplitude(amps, iq_data, unit_mode=unit_mode)
-                    
-                    unit_label = unit_mode
-                    if unit_mode == "dbm":
-                        unit_label = "dBm"
-                    elif unit_mode == "volts":
-                        unit_label = "V"
-                    
+                    unit_label = "dBm" if unit_mode == "dbm" else ("V" if unit_mode == "volts" else unit_mode)
                     csv_filename = f"{base}_module{module}_idx{idx}_{unit_mode}{ext}"
                     with open(csv_filename, 'w', newline='') as f:
                         writer = csv.writer(f)
                         writer.writerow(['# Amplitude:', f"{amplitude}" if 'amplitude' in locals() else "Unknown"])
-                        if unit_mode == "dbm":
-                            writer.writerow(['Frequency (Hz)', f'Power ({unit_label})', 'Phase (deg)'])
-                        else:
-                            writer.writerow(['Frequency (Hz)', f'Amplitude ({unit_label})', 'Phase (deg)'])
-                        
+                        header = ['Frequency (Hz)', f'Power ({unit_label})' if unit_mode == "dbm" else f'Amplitude ({unit_label})', 'Phase (deg)']
+                        writer.writerow(header)
                         for freq, amp, phase in zip(freqs, converted_amps, phases):
                             writer.writerow([freq, amp, phase])
                 idx += 1
     
     def _extract_data_for_export(self, key, data_tuple):
         """Extract and prepare data for export from a data tuple."""
+        amplitude = DEFAULT_AMPLITUDE 
         if key != 'default':
-            if len(data_tuple) >= 5:  # New format with amplitude included
-                freqs, amps, phases, iq_data, amplitude = data_tuple
+            if len(data_tuple) >= 5: freqs, amps, phases, iq_data, amplitude = data_tuple
             else:
-                # Try to extract amplitude from key format "module_amp"
                 freqs, amps, phases, iq_data = data_tuple
-                try:
-                    amplitude = float(key.split('_')[-1])
-                except (ValueError, IndexError):
-                    amplitude = DEFAULT_AMPLITUDE
-        else:
-            amplitude = DEFAULT_AMPLITUDE  # Default for non-amplitude-specific data
-            freqs, amps, phases, iq_data = data_tuple
-            
+                try: amplitude = float(key.split('_')[-1])
+                except (ValueError, IndexError): pass
+        else: freqs, amps, phases, iq_data = data_tuple
         return amplitude, freqs, amps, phases, iq_data
 
     def _unwrap_cable_delay_action(self):
@@ -1236,251 +1017,113 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow):
         calculates the corresponding cable length, updates the phase curves,
         and adjusts the cable length spinner.
         """
-        if not self.raw_data:
-            QtWidgets.QMessageBox.information(self, "No Data", "No network analysis data available to process.")
-            return
-
+        if not self.raw_data: QtWidgets.QMessageBox.information(self, "No Data", "No data to process."); return
         current_tab_index = self.tabs.currentIndex()
-        if current_tab_index < 0:
-            QtWidgets.QMessageBox.warning(self, "No Module Selected", "Please select a module tab.")
-            return
-        
+        if current_tab_index < 0: QtWidgets.QMessageBox.warning(self, "No Module", "Select a module tab."); return
         active_module_text = self.tabs.tabText(current_tab_index)
-        try:
-            active_module = int(active_module_text.split(" ")[1])
-        except (IndexError, ValueError):
-            QtWidgets.QMessageBox.critical(self, "Error", f"Could not determine active module from tab: {active_module_text}")
-            return
-
+        try: active_module = int(active_module_text.split(" ")[1])
+        except (IndexError, ValueError): QtWidgets.QMessageBox.critical(self, "Error", f"Invalid module tab: {active_module_text}"); return
         if active_module not in self.raw_data or not self.raw_data[active_module]:
-            QtWidgets.QMessageBox.information(self, "No Data", f"No data for Module {active_module}.")
-            return
-        
-        module_data_dict = self.raw_data[active_module]
-        
-        target_key = None
+            QtWidgets.QMessageBox.information(self, "No Data", f"No data for Module {active_module}."); return
+        module_data_dict = self.raw_data[active_module]; target_key = None
         if 'amps' in self.original_params and self.original_params['amps']:
             first_amplitude_setting = self.original_params['amps'][0]
             potential_key = f"{active_module}_{first_amplitude_setting}"
-            if potential_key in module_data_dict:
-                target_key = potential_key
-        
-        if target_key is None and 'default' in module_data_dict:
-            target_key = 'default'
-        
+            if potential_key in module_data_dict: target_key = potential_key
+        if target_key is None and 'default' in module_data_dict: target_key = 'default'
         if target_key is None:
-            if module_data_dict:
-                target_key = next(iter(module_data_dict))
-            else:
-                QtWidgets.QMessageBox.information(self, "No Data", f"No sweep data found for Module {active_module} to process.")
-                return
-
-        # --- Extract data for the chosen key ---
-        # data_tuple: (freqs, amps, phases_displayed_deg, iq_data, amplitude_setting) OR (freqs, amps, phases_displayed_deg, iq_data)
+            if module_data_dict: target_key = next(iter(module_data_dict))
+            else: QtWidgets.QMessageBox.information(self, "No Data", f"No sweep data for Module {active_module}."); return
         data_tuple = module_data_dict[target_key]
-        
-        if len(data_tuple) == 5:
-            freqs_active, _, phases_displayed_active_deg, _, _ = data_tuple
-        elif len(data_tuple) == 4:
-            freqs_active, _, phases_displayed_active_deg, _ = data_tuple
-        else:
-            QtWidgets.QMessageBox.critical(self, "Error", "Unexpected data format for selected sweep.")
-            return
-
-        if len(freqs_active) == 0:
-            QtWidgets.QMessageBox.information(self, "No Data", "Selected sweep has no frequency data.")
-            return
-
-        # --- Determine the old cable length used for this specific sweep ---
-        # This is tricky. For now, assume current_params['cable_length'] was used for the "first" sweep.
-        # A more robust solution would store the cable_length with each sweep in self.raw_data.
+        if len(data_tuple) == 5: freqs_active, _, phases_displayed_active_deg, _, _ = data_tuple
+        elif len(data_tuple) == 4: freqs_active, _, phases_displayed_active_deg, _ = data_tuple
+        else: QtWidgets.QMessageBox.critical(self, "Error", "Unexpected data format."); return
+        if len(freqs_active) == 0: QtWidgets.QMessageBox.information(self, "No Data", "Selected sweep has no frequency data."); return
         L_old_physical = self.current_params.get('cable_length', DEFAULT_CABLE_LENGTH)
-
-        # --- Perform Fit and Calculation ---
         try:
             tau_additional = fit_cable_delay(freqs_active, phases_displayed_active_deg)
             L_new_physical = calculate_new_cable_length(L_old_physical, tau_additional)
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Calculation Error", f"Error during cable delay calculation: {str(e)}")
-            traceback.print_exc()
-            return
-
-        # --- Update All Phase Curves for the Active Module ---
+        except Exception as e: QtWidgets.QMessageBox.critical(self, "Calc Error", f"Cable delay calc error: {str(e)}"); traceback.print_exc(); return
         if active_module in self.plots:
             plot_info = self.plots[active_module]
-            
-            # Update amplitude-specific phase curves
             for amp_key_iter, curve_item in plot_info['phase_curves'].items():
-                # amp_key_iter is the amplitude value (float)
-                # We need to find the corresponding full key in raw_data to get original displayed phases
                 raw_data_key_for_curve = f"{active_module}_{amp_key_iter}"
                 if raw_data_key_for_curve in module_data_dict:
                     data_tuple_curve = module_data_dict[raw_data_key_for_curve]
-                    if len(data_tuple_curve) == 5:
-                        freqs_curve, _, phases_deg_current_display_curve, _, _ = data_tuple_curve
-                    elif len(data_tuple_curve) == 4: # Should not happen for amp_specific curves but handle
-                        freqs_curve, _, phases_deg_current_display_curve, _ = data_tuple_curve
-                    else:
-                        continue # Skip malformed data
-
+                    if len(data_tuple_curve) == 5: freqs_curve, _, phases_deg_current_display_curve, _, _ = data_tuple_curve
+                    elif len(data_tuple_curve) == 4: freqs_curve, _, phases_deg_current_display_curve, _ = data_tuple_curve
+                    else: continue
                     if len(freqs_curve) > 0:
-                        # Assume this curve was also compensated with L_old_physical.
-                        # This is an approximation if the user changed cable length between sweeps
-                        # without a full re-run.
-                        # First get the unwrapped phase data
-                        new_phases_deg_for_curve = recalculate_displayed_phase(
-                            freqs_curve, phases_deg_current_display_curve, L_old_physical, L_new_physical
-                        )
-                        
-                        # Recenter the unwrapped phase data so the first point begins at 0 phase
+                        new_phases_deg_for_curve = recalculate_displayed_phase(freqs_curve, phases_deg_current_display_curve, L_old_physical, L_new_physical)
                         if len(new_phases_deg_for_curve) > 0:
                             first_point_phase = new_phases_deg_for_curve[0]
                             new_phases_deg_for_curve = new_phases_deg_for_curve - first_point_phase
-                            
-                        # Now re-wrap phases to [-180, 180] range
                         new_phases_deg_for_curve = ((new_phases_deg_for_curve + 180) % 360) - 180
-                            
                         curve_item.setData(freqs_curve, new_phases_deg_for_curve)
-            
-            # Update the main/default phase curve (if it holds data)
-            # The main curve 'phase_curve' should only have data if no amp-specific curves exist.
             if not plot_info['phase_curves'] and 'default' in module_data_dict:
                 main_curve_item = plot_info['phase_curve']
                 data_tuple_main = module_data_dict['default']
                 if len(data_tuple_main) == 4:
                     freqs_main, _, phases_deg_current_display_main, _ = data_tuple_main
                     if len(freqs_main) > 0:
-                        # First get the unwrapped phase data
-                        new_phases_deg_for_main = recalculate_displayed_phase(
-                            freqs_main, phases_deg_current_display_main, L_old_physical, L_new_physical
-                        )
-                        
-                        # Recenter the unwrapped phase data so the first point begins at 0 phase
+                        new_phases_deg_for_main = recalculate_displayed_phase(freqs_main, phases_deg_current_display_main, L_old_physical, L_new_physical)
                         if len(new_phases_deg_for_main) > 0:
                             first_point_phase = new_phases_deg_for_main[0]
                             new_phases_deg_for_main = new_phases_deg_for_main - first_point_phase
-                            
-                        # Now re-wrap phases to [-180, 180] range
                         new_phases_deg_for_main = ((new_phases_deg_for_main + 180) % 360) - 180
-                        
                         main_curve_item.setData(freqs_main, new_phases_deg_for_main)
-
             plot_info['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
-
-
-        # --- Update Cable Length Spinner and Stored Parameters ---
-        self.module_cable_lengths[active_module] = L_new_physical # Update specific module's length
-        self.cable_length_spin.blockSignals(True)
-        self.cable_length_spin.setValue(L_new_physical)
-        self.cable_length_spin.blockSignals(False)
-        # self.current_params['cable_length'] will be updated if a global re-run happens,
-        # or we'll need a more sophisticated way to pass per-module lengths to re-run.
-        # For now, current_params reflects the global setting, while module_cable_lengths holds specifics.
-        
-        QtWidgets.QMessageBox.information(self, "Cable Delay Updated", 
-                                          f"Cable length for Module {active_module} updated to {L_new_physical:.3f} m based on phase fit.")
+        self.module_cable_lengths[active_module] = L_new_physical
+        self.cable_length_spin.blockSignals(True); self.cable_length_spin.setValue(L_new_physical); self.cable_length_spin.blockSignals(False)
+        QtWidgets.QMessageBox.information(self, "Cable Delay Updated", f"Cable length for Module {active_module} updated to {L_new_physical:.3f} m.")
 
     def _on_active_module_changed(self, index: int):
         """Update UI elements when the active module tab changes."""
-        if index < 0 or not self.modules or index >= len(self.modules):
-            self._update_multisweep_button_state(None) # Disable if no valid tab
-            return
-
-        active_module_id = self.modules[index] # Assuming self.modules order matches tab order
-
-        # Update cable length spinner (Requirement 2)
+        if index < 0 or not self.modules or index >= len(self.modules): self._update_multisweep_button_state(None); return
+        active_module_id = self.modules[index]
         if active_module_id in self.module_cable_lengths:
-            self.cable_length_spin.blockSignals(True)
-            self.cable_length_spin.setValue(self.module_cable_lengths[active_module_id])
-            self.cable_length_spin.blockSignals(False)
+            self.cable_length_spin.blockSignals(True); self.cable_length_spin.setValue(self.module_cable_lengths[active_module_id]); self.cable_length_spin.blockSignals(False)
         else:
-            # Fallback if somehow not set, though set_params should handle it
-            self.cable_length_spin.blockSignals(True)
-            self.cable_length_spin.setValue(self.current_params.get('cable_length', DEFAULT_CABLE_LENGTH))
-            self.cable_length_spin.blockSignals(False)
-        
-        self._update_multisweep_button_state(active_module_id) # Update button for new active module
-
-        # Future: Update other per-module UI elements here if any
+            self.cable_length_spin.blockSignals(True); self.cable_length_spin.setValue(self.current_params.get('cable_length', DEFAULT_CABLE_LENGTH)); self.cable_length_spin.blockSignals(False)
+        self._update_multisweep_button_state(active_module_id)
 
     def _on_cable_length_changed(self, new_length: float):
         """Handle changes to the cable length spinner."""
         current_tab_index = self.tabs.currentIndex()
-        if current_tab_index < 0 or not self.modules or current_tab_index >= len(self.modules):
-            return
-
+        if current_tab_index < 0 or not self.modules or current_tab_index >= len(self.modules): return
         active_module_id = self.modules[current_tab_index]
         self.module_cable_lengths[active_module_id] = new_length
-        # Note: This change only affects the current module's stored value.
-        # A re-run or re-analysis would be needed to apply this to the plots
-        # unless _unwrap_cable_delay_action is called, which re-calculates phase.
         self._update_multisweep_button_state(active_module_id)
 
     def _update_multisweep_button_state(self, module_id: int | None = None):
         """Enable or disable the Take Multisweep button based on found resonances for the given module."""
-        if not hasattr(self, 'take_multisweep_btn'): # Button might not be initialized yet
-            return
-
-        if module_id is None: # If no specific module, check current tab
+        if not hasattr(self, 'take_multisweep_btn'): return
+        if module_id is None:
             current_tab_index = self.tabs.currentIndex()
-            if current_tab_index < 0:
-                self.take_multisweep_btn.setEnabled(False)
-                return
+            if current_tab_index < 0: self.take_multisweep_btn.setEnabled(False); return
             active_module_text = self.tabs.tabText(current_tab_index)
-            try:
-                module_id = int(active_module_text.split(" ")[1])
-            except (IndexError, ValueError):
-                self.take_multisweep_btn.setEnabled(False)
-                return
-        
+            try: module_id = int(active_module_text.split(" ")[1])
+            except (IndexError, ValueError): self.take_multisweep_btn.setEnabled(False); return
         has_resonances = bool(self.resonance_freqs.get(module_id))
         self.take_multisweep_btn.setEnabled(has_resonances)
 
     def _show_multisweep_dialog(self):
         """Show the dialog to configure and run multisweep."""
         current_tab_index = self.tabs.currentIndex()
-        if current_tab_index < 0:
-            QtWidgets.QMessageBox.warning(self, "No Module Selected", "Please select a module tab.")
-            return
-        
+        if current_tab_index < 0: QtWidgets.QMessageBox.warning(self, "No Module", "Select a module tab."); return
         active_module_text = self.tabs.tabText(current_tab_index)
-        try:
-            active_module = int(active_module_text.split(" ")[1])
-        except (IndexError, ValueError):
-            QtWidgets.QMessageBox.critical(self, "Error", f"Could not determine active module from tab: {active_module_text}")
-            return
-
+        try: active_module = int(active_module_text.split(" ")[1])
+        except (IndexError, ValueError): QtWidgets.QMessageBox.critical(self, "Error", f"Invalid module tab: {active_module_text}"); return
         resonances = self.resonance_freqs.get(active_module, [])
-        if not resonances:
-            QtWidgets.QMessageBox.information(self, "No Resonances", 
-                                              f"No resonances found for Module {active_module}. Please run 'Find Resonances' first.")
-            return
-
-        # Ensure dac_scales are available for the dialog
-        # self.parent() is the Periscope main application instance
+        if not resonances: QtWidgets.QMessageBox.information(self, "No Resonances", f"No resonances for Module {active_module}. Run 'Find Resonances'."); return
         dac_scales_for_dialog = {}
-        if hasattr(self.parent(), 'dac_scales'):
-            dac_scales_for_dialog = self.parent().dac_scales
-        elif hasattr(self, 'dac_scales'): # Fallback to own dac_scales if parent doesn't have them (less likely)
-             dac_scales_for_dialog = self.dac_scales
-
-
-        dialog = MultisweepDialog(
-            parent=self, 
-            resonance_frequencies=resonances,
-            dac_scales=dac_scales_for_dialog, 
-            current_module=active_module
-        )
-
+        if hasattr(self.parent(), 'dac_scales'): dac_scales_for_dialog = self.parent().dac_scales
+        elif hasattr(self, 'dac_scales'): dac_scales_for_dialog = self.dac_scales
+        
+        dialog = MultisweepDialog(parent=self, resonance_frequencies=resonances, dac_scales=dac_scales_for_dialog, current_module=active_module)
         if dialog.exec():
             params = dialog.get_parameters()
-            if params:
-                # Parameters for MultisweepTask: crs, resonance_frequencies, params, signals
-                # The Periscope main app will handle creating the task and new window.
-                # We need to call a method on self.parent() (which is Periscope instance)
-                if hasattr(self.parent(), '_start_multisweep_analysis'):
-                    # params already includes 'module', 'resonance_frequencies', 'amps', 'span_hz', etc.
-                    self.parent()._start_multisweep_analysis(params)
-                else:
-                    QtWidgets.QMessageBox.critical(self, "Error", "Cannot start multisweep: Parent integration missing.")
-
+            if params and hasattr(self.parent(), '_start_multisweep_analysis'):
+                self.parent()._start_multisweep_analysis(params)
+            elif not hasattr(self.parent(), '_start_multisweep_analysis'):
+                 QtWidgets.QMessageBox.critical(self, "Error", "Cannot start multisweep: Parent integration missing.")

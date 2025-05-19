@@ -33,7 +33,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.target_module = target_module
         self.initial_params = initial_params or {}  # Store initial parameters for potential re-runs
         self.dac_scales = dac_scales or {}          # DAC scales for unit conversions
-        self.probe_amplitudes = self.initial_params.get('probe_amplitudes', []) # Store for progress display
+        self.probe_amplitudes = self.initial_params.get('amps', []) # Store for progress display
 
         self.setWindowTitle(f"Multisweep Results - Module {self.target_module}")
 
@@ -249,7 +249,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # Current amplitude label below progress bar
         self.current_amp_label = QtWidgets.QLabel()
         total_sweeps = len(self.probe_amplitudes)
-        self.current_amp_label.setText(f"Amplitude 0/{total_sweeps} (Waiting...)")
+        if total_sweeps > 0:
+            first_amplitude = self.probe_amplitudes[0]
+            self.current_amp_label.setText(f"Amplitude 1/{total_sweeps} ({first_amplitude:.4f})")
+        else:
+            self.current_amp_label.setText("No sweeps defined. (Waiting...)")
         self.current_amp_label.setAlignment(Qt.AlignmentFlag.AlignCenter) # Center the text
         progress_layout.addWidget(self.current_amp_label)
         
@@ -298,27 +302,40 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         """
         if module != self.target_module: return
         
-        self.current_amplitude_being_processed = amplitude
-        
-        total_sweeps = len(self.probe_amplitudes)
-        current_sweep_idx_display = "?" # Default for display if not found or list empty
-
-        if self.probe_amplitudes: # If the list is not empty
-            try:
-                # .index() is 0-based, add 1 for 1-based display
-                current_sweep_idx_display = str(self.probe_amplitudes.index(amplitude) + 1)
-            except ValueError:
-                # This means 'amplitude' was not found in 'self.probe_amplitudes'
-                # This is an unexpected state if sweeps are driven by this list.
-                # Consider logging an error or warning here.
-                print(f"Warning: Amplitude {amplitude} not found in the expected list of probe amplitudes for Module {self.target_module}.")
-                # current_sweep_idx_display remains "?"
-        # else: self.probe_amplitudes is empty, current_sweep_idx_display remains "?"
-
-        self.current_amp_label.setText(f"Amplitude {current_sweep_idx_display}/{total_sweeps} ({amplitude:.4f})")
-            
+        self.current_amplitude_being_processed = amplitude # This is the one whose data we just received
         self.results_by_amplitude[amplitude] = final_results_for_amplitude
         self._redraw_plots() # Refresh plots with the new data
+
+        # Now, update the label for the *next* anticipated sweep
+        total_sweeps = len(self.probe_amplitudes)
+        if not self.probe_amplitudes:
+            self.current_amp_label.setText("No sweeps defined.") # Should not happen if update_data is called
+            return
+
+        try:
+            current_amp_index_in_list = self.probe_amplitudes.index(amplitude)
+        except ValueError:
+            # This amplitude wasn't in our list, which is unexpected.
+            # Fallback to a generic message or log an error.
+            print(f"Error: Processed amplitude {amplitude} not found in configured probe_amplitudes for Module {self.target_module}.")
+            self.current_amp_label.setText(f"Processed: {amplitude:.4f} (Error finding next)")
+            return
+
+        if current_amp_index_in_list + 1 < total_sweeps:
+            # There are more sweeps to go
+            next_amplitude_index_in_list = current_amp_index_in_list + 1
+            next_amplitude_value = self.probe_amplitudes[next_amplitude_index_in_list]
+            # Display index is 1-based
+            self.current_amp_label.setText(f"Amplitude {next_amplitude_index_in_list + 1}/{total_sweeps} ({next_amplitude_value:.4f})")
+        else:
+            # This was the last amplitude in the list
+            # The all_sweeps_completed signal should handle the final message,
+            # but we can set it here too as a fallback or intermediate state.
+            # self.current_amp_label.setText(f"All {total_sweeps} Amplitudes Processed")
+            # Let all_sweeps_completed handle the final message for clarity.
+            # If this is the last one, the progress bar for this amp sweep should be 100%.
+            # The overall "All Amplitudes Processed" will be set by all_sweeps_completed.
+            pass
 
     def _redraw_plots(self):
         """
@@ -594,9 +611,13 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 self.progress_group.setVisible(True)
                 
                 # Update probe_amplitudes list and reset label
-                self.probe_amplitudes = self.initial_params.get('probe_amplitudes', [])
+                self.probe_amplitudes = self.initial_params.get('amps', [])
                 total_sweeps = len(self.probe_amplitudes)
-                self.current_amp_label.setText(f"Amplitude 0/{total_sweeps} (Waiting...)")
+                if total_sweeps > 0:
+                    first_amplitude = self.probe_amplitudes[0]
+                    self.current_amp_label.setText(f"Amplitude 1/{total_sweeps} ({first_amplitude:.4f})")
+                else:
+                    self.current_amp_label.setText("No sweeps defined. (Waiting...)")
                 
                 # Trigger the new multisweep analysis via the parent window/controller
                 # This assumes the parent object (likely the main application window)

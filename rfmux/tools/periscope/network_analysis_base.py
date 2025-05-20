@@ -5,6 +5,7 @@ from .utils import (
     QDoubleValidator, QIntValidator,
     DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
     DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
+    DEFAULT_AMP_START, DEFAULT_AMP_STOP, DEFAULT_AMP_ITERATIONS,
     UnitConverter, traceback
 )
 from .tasks import DACScaleFetcher
@@ -89,17 +90,17 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         linspace_group = QtWidgets.QGroupBox("Generate Amplitude List")
         linspace_layout = QtWidgets.QFormLayout(linspace_group)
 
-        self.start_amp_edit = QtWidgets.QLineEdit("0.0")
+        self.start_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_START}")
         self.start_amp_edit.setValidator(QDoubleValidator(self))
         self.start_amp_edit.setToolTip("Start value for linspace generation.")
         linspace_layout.addRow("Start:", self.start_amp_edit)
 
-        self.stop_amp_edit = QtWidgets.QLineEdit("0.1")
+        self.stop_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_STOP}")
         self.stop_amp_edit.setValidator(QDoubleValidator(self))
         self.stop_amp_edit.setToolTip("Stop value for linspace generation.")
         linspace_layout.addRow("Stop:", self.stop_amp_edit)
 
-        self.iterations_amp_edit = QtWidgets.QLineEdit("11")
+        self.iterations_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_ITERATIONS}")
         self.iterations_amp_edit.setValidator(QIntValidator(2, 1000, self)) # Min 2 points for linspace
         self.iterations_amp_edit.setToolTip("Number of points for linspace generation (min 2).")
         linspace_layout.addRow("Iterations:", self.iterations_amp_edit)

@@ -1,4 +1,4 @@
-"""Dialog for displaying a detailed digest of a single detector resonance."""
+"""Window for displaying a detailed digest of a single detector resonance."""
 
 import numpy as np
 import pyqtgraph as pg
@@ -7,9 +7,9 @@ from PyQt6 import QtCore, QtWidgets
 from .utils import ClickableViewBox, UnitConverter, LINE_WIDTH # Assuming these are relevant
 from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm # For direct use if needed
 
-class DetectorDigestDialog(QtWidgets.QDialog):
+class DetectorDigestWindow(QtWidgets.QMainWindow):
     """
-    A dialog window that displays a detailed "digest" of a single detector resonance,
+    A window that displays a detailed "digest" of a single detector resonance,
     including three plots: Sweep (vs freq.), Sweep (IQ plane), and Bias amplitude optimization.
     """
     def __init__(self, parent: QtWidgets.QWidget = None,
@@ -29,6 +29,9 @@ class DetectorDigestDialog(QtWidgets.QDialog):
         self.zoom_box_mode = zoom_box_mode
         self.target_module = target_module
         self.normalize_plot3 = normalize_plot3
+        
+        # Store reference to parent to ensure proper behavior
+        self.parent_window = parent
 
         self.active_amplitude_raw = None
         self.active_sweep_info = None # Will store {'data': data_dict, 'actual_cf_hz': float}
@@ -48,13 +51,34 @@ class DetectorDigestDialog(QtWidgets.QDialog):
         self._setup_ui()
         self._update_plots()
 
-        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  $f_r$= {self.resonance_frequency_ghz_title:.6f} GHz")
-        self.setModal(True)
+        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title:.6f} GHz)")
+        # Set window flags to ensure proper behavior as a standalone window
+        self.setWindowFlags(QtCore.Qt.WindowType.Window)
         self.resize(1200, 450) # Adjusted initial size
 
     def _setup_ui(self):
         """Sets up the UI layout with three plots."""
-        main_layout = QtWidgets.QHBoxLayout(self)
+        # Create a central widget for the QMainWindow
+        central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(central_widget)
+        
+        # Create a vertical layout for title and plots
+        outer_layout = QtWidgets.QVBoxLayout(central_widget)
+        
+        # Add a title label at the top
+        title_text = f"Detector {self.detector_id}  ({self.resonance_frequency_ghz_title:.6f} GHz)"
+        title_label = QtWidgets.QLabel(title_text)
+        title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        font = title_label.font()
+        font.setPointSize(font.pointSize() + 2)
+        font.setBold(False)
+        title_label.setFont(font)
+        title_label.setStyleSheet("margin-bottom: 10px;")
+        outer_layout.addWidget(title_label)
+        
+        # Create horizontal layout for the three plots
+        plots_layout = QtWidgets.QHBoxLayout()
+        outer_layout.addLayout(plots_layout)
 
         # Plot 1: Sweep (vs freq.)
         vb1 = ClickableViewBox() # Use ClickableViewBox for consistency, though no specific click action here
@@ -65,7 +89,7 @@ class DetectorDigestDialog(QtWidgets.QDialog):
         self.plot1_sweep_vs_freq.setLabel('bottom', "f - f_bias", units="Hz") # pyqtgraph will show kHz
         self.plot1_sweep_vs_freq.showGrid(x=True, y=True, alpha=0.3)
         self.plot1_legend = self.plot1_sweep_vs_freq.addLegend(offset=(30,10))
-        main_layout.addWidget(self.plot1_sweep_vs_freq)
+        plots_layout.addWidget(self.plot1_sweep_vs_freq)
 
         # Plot 2: Sweep (IQ plane)
         vb2 = ClickableViewBox()
@@ -77,7 +101,7 @@ class DetectorDigestDialog(QtWidgets.QDialog):
         self.plot2_iq_plane.setAspectLocked(True)
         self.plot2_iq_plane.showGrid(x=True, y=True, alpha=0.3)
         self.plot2_legend = self.plot2_iq_plane.addLegend(offset=(30,10))
-        main_layout.addWidget(self.plot2_iq_plane)
+        plots_layout.addWidget(self.plot2_iq_plane)
 
         # Plot 3: Bias amplitude optimization
         vb3 = ClickableViewBox() # Double-click interaction needed here
@@ -88,7 +112,7 @@ class DetectorDigestDialog(QtWidgets.QDialog):
         self.plot3_bias_opt.setLabel('bottom', "f - f_bias", units="Hz") # pyqtgraph will show kHz
         self.plot3_bias_opt.showGrid(x=True, y=True, alpha=0.3)
         self.plot3_legend = self.plot3_bias_opt.addLegend(offset=(30,10))
-        main_layout.addWidget(self.plot3_bias_opt)
+        plots_layout.addWidget(self.plot3_bias_opt)
         
         # Connect double-click for Plot 3
         vb3.doubleClickedEvent.connect(self._handle_plot3_double_click)

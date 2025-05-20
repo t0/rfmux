@@ -5,6 +5,8 @@ from .utils import (
     QDoubleValidator, QIntValidator,
     DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
     DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
+    MULTISWEEP_DEFAULT_AMPLITUDE, MULTISWEEP_DEFAULT_SPAN_HZ, MULTISWEEP_DEFAULT_NPOINTS, 
+    MULTISWEEP_DEFAULT_NSAMPLES, DEFAULT_AMP_START, DEFAULT_AMP_STOP, DEFAULT_AMP_ITERATIONS,
     UnitConverter, traceback
 )
 from .network_analysis_base import NetworkAnalysisDialogBase
@@ -112,19 +114,19 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         param_form_layout = QtWidgets.QFormLayout(param_group)
 
         # Span per resonance (kHz)
-        default_span_khz = self.params.get('span_hz', 100000.0) / 1e3 # Default 100 kHz
+        default_span_khz = self.params.get('span_hz', MULTISWEEP_DEFAULT_SPAN_HZ) / 1e3
         self.span_khz_edit = QtWidgets.QLineEdit(str(default_span_khz))
         self.span_khz_edit.setValidator(QDoubleValidator(0.1, 10000.0, 2, self)) # Min 0.1 kHz, Max 10 MHz
         param_form_layout.addRow("Span per Resonance (kHz):", self.span_khz_edit)
 
         # Number of points per sweep
-        default_npoints = self.params.get('npoints_per_sweep', 101) # Default 101 points
+        default_npoints = self.params.get('npoints_per_sweep', MULTISWEEP_DEFAULT_NPOINTS)
         self.npoints_edit = QtWidgets.QLineEdit(str(default_npoints))
         self.npoints_edit.setValidator(QIntValidator(2, 10000, self)) # Min 2 points
         param_form_layout.addRow("Number of Points per Sweep:", self.npoints_edit)
 
         # Samples to average (nsamps)
-        default_nsamps = self.params.get('nsamps', DEFAULT_NSAMPLES)
+        default_nsamps = self.params.get('nsamps', MULTISWEEP_DEFAULT_NSAMPLES)
         self.nsamps_edit = QtWidgets.QLineEdit(str(default_nsamps))
         self.nsamps_edit.setValidator(QIntValidator(1, 10000, self)) # Min 1 sample
         param_form_layout.addRow("Samples to Average (nsamps):", self.nsamps_edit)

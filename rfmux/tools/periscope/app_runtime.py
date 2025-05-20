@@ -751,13 +751,13 @@ class PeriscopeRuntime:
             
             # Connect signals from the MultisweepTask to the new window's slots
             self.multisweep_signals.progress.connect(window.update_progress)
-            self.multisweep_signals.intermediate_data_update.connect(window.update_intermediate_data)
             self.multisweep_signals.data_update.connect(window.update_data)
             self.multisweep_signals.completed_amplitude.connect(window.completed_amplitude_sweep)
             self.multisweep_signals.all_completed.connect(window.all_sweeps_completed)
             self.multisweep_signals.error.connect(window.handle_error)
             
-            task = MultisweepTask(crs=self.crs, resonance_frequencies=params['resonance_frequencies'], params=params, signals=self.multisweep_signals)
+            # Pass the window instance to the task
+            task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window)
             task_key = f"{window_id}_module_{target_module}"
             self.multisweep_tasks[task_key] = task; self.pool.start(task)
             window.show()
@@ -790,7 +790,8 @@ class PeriscopeRuntime:
             old_task = self.multisweep_tasks.pop(old_task_key); old_task.stop()
             
         self.multisweep_windows[window_id]['params'] = params.copy() # Update stored params
-        task = MultisweepTask(crs=self.crs, resonance_frequencies=params['resonance_frequencies'], params=params, signals=self.multisweep_signals)
+        # Pass the window_instance to the task
+        task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window_instance)
         self.multisweep_tasks[old_task_key] = task; self.pool.start(task) # Start new task with the same key
 
     def stop_multisweep_task_for_window(self, window_instance: 'MultisweepWindow'):

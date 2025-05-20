@@ -1,14 +1,14 @@
-"""Window for displaying multisweep analysis results.""" # Simplified docstring to match others
+"""Window for displaying multisweep analysis results."""
 import datetime
 import pickle
 import numpy as np
-from PyQt6 import QtCore, QtWidgets # Keep direct Qt imports if used directly and not via utils.*
+from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtCore import Qt
 import pyqtgraph as pg
 
 # Imports from within the 'periscope' subpackage
-from .utils import LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg # Ensure these are available
-from .detector_digest_dialog import DetectorDigestDialog
+from .utils import LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg
+from .detector_digest_dialog import DetectorDigestWindow
 
 class MultisweepWindow(QtWidgets.QMainWindow):
     """
@@ -34,7 +34,18 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.target_module = target_module
         self.initial_params = initial_params or {}  # Store initial parameters for potential re-runs
         self.dac_scales = dac_scales or {}          # DAC scales for unit conversions
-        self.probe_amplitudes = self.initial_params.get('amps', []) # Store for progress display
+        
+        # Track open detector digest windows to prevent garbage collection
+        self.detector_digest_windows = []
+        
+        # Stores the initial/base CFs for detector ID and fallback. Order is important.
+        self.conceptual_resonance_frequencies: list[float] = list(self.initial_params.get('resonance_frequencies', []))
+        # Stores {amp: {conceptual_idx: output_cf}}
+        self.last_output_cfs_by_amp_and_conceptual_idx: dict[float, dict[int, float]] = {}
+        # Amps used for the last configured/completed run, to compare if settings changed.
+        self.current_run_amps: list[float] = list(self.initial_params.get('amps', []))
+        # probe_amplitudes is used for progress display, should reflect current_run_amps
+        self.probe_amplitudes = list(self.current_run_amps) # Ensure it's a copy and reflects current run
 
         self.setWindowTitle(f"Multisweep Results - Module {self.target_module}")
 
@@ -278,37 +289,26 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             if hasattr(self, 'progress_group') and not self.progress_group.isVisible():
                 self.progress_group.setVisible(True)
 
-    def update_intermediate_data(self, module, amplitude, intermediate_results):
-        """
-        Placeholder for handling intermediate data during a sweep.
-        Currently does nothing. Could be used for live plotting of partial results.
-
-        Args:
-            module (int): The module reporting data.
-            amplitude (float): The current probe amplitude.
-            intermediate_results: The intermediate data.
-        """
-        if module != self.target_module: return
-        # This method is a placeholder. If intermediate data needs to be processed
-        # (e.g., for live plotting during a long sweep for a single amplitude),
-        # the logic would go here. For now, it's a no-op.
-        pass
-
-    def update_data(self, module, amplitude, final_results_for_amplitude):
+    def update_data(self, module: int, amplitude: float, results_for_plotting: dict, results_for_history: dict):
         """
         Receives final data for a completed amplitude sweep for the target module.
-        Stores the data and triggers a plot redraw.
+        Stores the data for plotting and updates the CF history.
 
         Args:
             module (int): The module reporting data.
             amplitude (float): The probe amplitude for which data is provided.
-            final_results_for_amplitude (dict): The processed S21 data for this amplitude.
-                                                Expected format: {center_freq: data_dict}
+            results_for_plotting (dict): Data for plotting, format: {output_cf: data_dict_val}.
+            results_for_history (dict): Data for history, format: {conceptual_idx: output_cf_key}.
         """
         if module != self.target_module: return
         
-        self.current_amplitude_being_processed = amplitude # This is the one whose data we just received
-        self.results_by_amplitude[amplitude] = final_results_for_amplitude
+        self.current_amplitude_being_processed = amplitude
+        self.results_by_amplitude[amplitude] = results_for_plotting # Store for plotting
+
+        # --- Update CF history using the pre-mapped results_for_history ---
+        if results_for_history:
+            self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {}).update(results_for_history)
+
         self._redraw_plots() # Refresh plots with the new data
 
         # Now, update the label for the *next* anticipated sweep
@@ -580,59 +580,103 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         Opens a MultisweepDialog to gather new parameters.
         """
         # Ensure MultisweepDialog is available (local import to avoid circular dependencies if any)
-        from .dialogs import MultisweepDialog 
+        from .dialogs import MultisweepDialog
 
-        if not self.initial_params.get('resonance_frequencies'):
-            QtWidgets.QMessageBox.warning(self, "Cannot Re-run", 
-                                          "Initial resonance frequencies not available for re-run.")
+        if not self.conceptual_resonance_frequencies: # Check conceptual frequencies
+            QtWidgets.QMessageBox.warning(self, "Cannot Re-run",
+                                          "Conceptual resonance frequencies not available for re-run.")
             return
+
+        # --- Determine frequencies to seed the dialog ---
+        dialog_seed_frequencies = list(self.conceptual_resonance_frequencies) # Start with conceptual
+        if self.current_run_amps: # If there was a previous/current run configuration
+            # Use a representative amplitude from the current/last run to seed the dialog
+            # For simplicity, let's use the first amplitude from the current_run_amps.
+            representative_amp_for_seeding = self.current_run_amps[0]
+            for idx, conceptual_cf in enumerate(self.conceptual_resonance_frequencies):
+                remembered_cf = self._get_closest_remembered_cf(idx, representative_amp_for_seeding)
+                if remembered_cf is not None:
+                    dialog_seed_frequencies[idx] = remembered_cf
         
-        # Prepare parameters for the dialog, preserving current user choices if possible
-        current_recalc_cf_state = self.initial_params.get('recalculate_center_frequencies', True)
-        current_perform_fits_state = self.initial_params.get('perform_fits', True)
-        
-        dialog_params = self.initial_params.copy() # Start with a copy of original params
-        dialog_params['recalculate_center_frequencies'] = current_recalc_cf_state
-        dialog_params['perform_fits'] = current_perform_fits_state
-        
-        # Create and show the dialog
+        # Prepare other parameters for the dialog
+        dialog_initial_params = self.initial_params.copy() # Use a copy of the window's last run parameters
+        # The 'resonance_frequencies' in dialog_initial_params will be overwritten by dialog_seed_frequencies
+        # when creating the dialog instance if MultisweepDialog uses its 'initial_params' argument
+        # to populate its own 'resonance_frequencies' field.
+        # However, MultisweepDialog takes 'resonance_frequencies' as a direct argument.
+
         dialog = MultisweepDialog(
-            parent=self, 
-            resonance_frequencies=self.initial_params['resonance_frequencies'],
-            dac_scales=self.dac_scales, 
-            current_module=self.target_module, 
-            initial_params=dialog_params # Pass potentially modified params to dialog
+            parent=self,
+            resonance_frequencies=dialog_seed_frequencies, # Seed with potentially updated CFs
+            dac_scales=self.dac_scales,
+            current_module=self.target_module,
+            initial_params=dialog_initial_params # Pass other existing params
         )
-        
-        if dialog.exec(): # True if user clicked OK in the dialog
-            new_params = dialog.get_parameters()
-            if new_params:
-                self.initial_params.update(new_params) # Store the new parameters
-                
-                # Reset window state for the new sweep
-                self.results_by_amplitude.clear()
-                self._redraw_plots() # Clear plots
-                self.progress_bar.setValue(0)
-                self.progress_group.setVisible(True)
-                
-                # Update probe_amplitudes list and reset label
-                self.probe_amplitudes = self.initial_params.get('amps', [])
-                total_sweeps = len(self.probe_amplitudes)
-                if total_sweeps > 0:
-                    first_amplitude = self.probe_amplitudes[0]
-                    self.current_amp_label.setText(f"Amplitude 1/{total_sweeps} ({first_amplitude:.4f})")
-                else:
-                    self.current_amp_label.setText("No sweeps defined. (Waiting...)")
-                
-                # Trigger the new multisweep analysis via the parent window/controller
-                # This assumes the parent object (likely the main application window)
-                # has a method to start/restart the analysis for this specific window.
-                if hasattr(self.parent(), '_start_multisweep_analysis_for_window'):
-                    self.parent()._start_multisweep_analysis_for_window(self, new_params)
-                else: 
-                    # This case should ideally not be reached if the application is structured correctly.
-                    QtWidgets.QMessageBox.warning(self, "Error", 
-                                                  "Cannot trigger re-run. Parent linkage or method missing.")
+
+        if dialog.exec(): # True if user clicked OK
+            new_params_from_dialog = dialog.get_parameters()
+            if not new_params_from_dialog:
+                return # Dialog returned None, likely due to validation error
+
+            new_amps_for_this_run = list(new_params_from_dialog.get('amps', []))
+            # resonance_frequencies_from_dialog are the ones dialog was seeded with, as it doesn't change them.
+            resonance_frequencies_from_dialog = list(new_params_from_dialog.get('resonance_frequencies', []))
+
+            # --- Determine the final input CFs for the new sweep task ---
+            # This list will be passed to the MultisweepTask as its baseline.
+            # The task itself will then refine this per amplitude.
+            final_baseline_cfs_for_new_task = list(self.conceptual_resonance_frequencies)
+
+            if not new_amps_for_this_run: # No amplitudes specified, fall back or warn
+                 QtWidgets.QMessageBox.warning(self, "Configuration Error", "No amplitudes specified for the new sweep.")
+                 # Default to conceptual, or could use resonance_frequencies_from_dialog
+                 final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog
+            elif new_amps_for_this_run == self.current_run_amps:
+                # Amplitudes haven't changed from the last run configuration.
+                # Use the frequencies that were in the dialog (which were seeded from history).
+                final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog
+            else:
+                # Amplitudes have changed. For each conceptual resonance,
+                # find the best historical CF based on the *new* representative amplitude.
+                # If no history, use what was in the dialog (which was seeded based on old rep. amp or conceptual).
+                representative_new_amp = new_amps_for_this_run[0]
+                for idx, conceptual_cf in enumerate(self.conceptual_resonance_frequencies):
+                    remembered_cf = self._get_closest_remembered_cf(idx, representative_new_amp)
+                    if remembered_cf is not None:
+                        final_baseline_cfs_for_new_task[idx] = remembered_cf
+                    else:
+                        # Fallback to what was in the dialog for this index if no better history for new amp
+                        if idx < len(resonance_frequencies_from_dialog):
+                             final_baseline_cfs_for_new_task[idx] = resonance_frequencies_from_dialog[idx]
+                        # Else it remains the conceptual_cf (already initialized)
+
+            # Update the 'resonance_frequencies' in new_params_from_dialog to be this chosen baseline
+            new_params_from_dialog['resonance_frequencies'] = final_baseline_cfs_for_new_task
+            
+            # Store the parameters that will actually be used for this run
+            self.initial_params.update(new_params_from_dialog)
+            self.current_run_amps = new_amps_for_this_run # Update current run amps
+            self.probe_amplitudes = list(self.current_run_amps) # For progress display
+
+            # Reset window state for the new sweep
+            self.results_by_amplitude.clear()
+            self._redraw_plots() # Clear plots
+            self.progress_bar.setValue(0)
+            self.progress_group.setVisible(True)
+            
+            total_sweeps = len(self.probe_amplitudes)
+            if total_sweeps > 0:
+                first_amplitude = self.probe_amplitudes[0]
+                self.current_amp_label.setText(f"Amplitude 1/{total_sweeps} ({first_amplitude:.4f})")
+            else:
+                self.current_amp_label.setText("No sweeps defined. (Waiting...)")
+            
+            if hasattr(self.parent(), '_start_multisweep_analysis_for_window'):
+                # Pass self.initial_params which now contains the correctly determined baseline CFs
+                self.parent()._start_multisweep_analysis_for_window(self, self.initial_params)
+            else:
+                QtWidgets.QMessageBox.warning(self, "Error",
+                                              "Cannot trigger re-run. Parent linkage or method missing.")
 
     def closeEvent(self, event):
         """
@@ -752,7 +796,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         all_measured_cfs = set()
         if self.results_by_amplitude: # Ensure there's data
             for cf_map_at_amp in self.results_by_amplitude.values(): # Iterate through dicts of {cf: data}
-                all_measured_cfs.update(cf_map_at_amp.keys())
+                all_measured_cfs.update(cf_map_at_amp.keys()) # These keys are the output CFs
 
         if not all_measured_cfs: # No CFs to check against
             return # Or handle error appropriately
@@ -764,31 +808,28 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 seed_cf_hz_for_conceptual_match = cf_candidate
         
         if seed_cf_hz_for_conceptual_match is not None:
-            # Now, seed_cf_hz_for_conceptual_match is the CF of an actual trace
-            # that is horizontally closest to the click. Use this as 'clicked_cf_hz'
-            # for the subsequent logic that finds the 'conceptual_resonance_base_freq_hz'.
-            clicked_cf_hz = seed_cf_hz_for_conceptual_match
+            # Now, seed_cf_hz_for_conceptual_match is the CF of an actual trace's *output key*
+            # that is horizontally closest to the click.
+            clicked_output_cf_hz = seed_cf_hz_for_conceptual_match
 
             # --- Determine the conceptual resonance and its ID ---
-            target_resonance_frequencies = self.initial_params.get('resonance_frequencies', [])
-            if not target_resonance_frequencies:
-                print("Warning: Initial target resonance frequencies not available. Cannot reliably determine conceptual resonance for digest.")
-                # Fallback: use clicked_cf_hz as the conceptual base, Detector ID might be less meaningful
-                conceptual_resonance_base_freq_hz = clicked_cf_hz
-                # Try to make a somewhat stable ID if possible
-                all_actual_cfs = sorted(list(set(cf for amp_data in self.results_by_amplitude.values() for cf in amp_data.keys())))
-                try:
-                    detector_id = all_actual_cfs.index(clicked_cf_hz)
-                except ValueError:
-                    detector_id = -1 # Should not happen if clicked_cf_hz came from the data
+            # Use self.conceptual_resonance_frequencies for stable identification
+            if not self.conceptual_resonance_frequencies:
+                print("Warning: Conceptual resonance frequencies not available. Cannot reliably determine conceptual resonance for digest.")
+                # Fallback: use clicked_output_cf_hz as the conceptual base, Detector ID might be less meaningful
+                conceptual_resonance_base_freq_hz = clicked_output_cf_hz
+                detector_id = -1 # Cannot reliably determine ID
             else:
-                # Find which target_resonance_freq is closest to clicked_cf_hz
-                closest_target_idx = np.abs(np.array(target_resonance_frequencies) - clicked_cf_hz).argmin()
-                conceptual_resonance_base_freq_hz = target_resonance_frequencies[closest_target_idx]
-                detector_id = closest_target_idx # This is the "Detector ID"
+                # Find which conceptual_resonance_frequency is "responsible" for the clicked_output_cf_hz.
+                # This requires checking which conceptual resonance, when processed, resulted in clicked_output_cf_hz.
+                # This is complex if multiple conceptual resonances map to similar output CFs.
+                # A simpler approach: find the conceptual_resonance_frequency closest to the clicked_output_cf_hz.
+                closest_conceptual_idx = np.abs(np.array(self.conceptual_resonance_frequencies) - clicked_output_cf_hz).argmin()
+                conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[closest_conceptual_idx]
+                detector_id = closest_conceptual_idx # This is the "Detector ID"
 
             # --- Gather all data for this conceptual resonance across all amplitudes ---
-            # For each amplitude, find the CF in its data that is closest to conceptual_resonance_base_freq_hz
+            # For each amplitude, find the data that corresponds to this conceptual_resonance_base_freq_hz (or its conceptual_idx)
             resonance_data_for_digest = {}
             for amp_key, cf_map_at_amp in self.results_by_amplitude.items():
                 if not cf_map_at_amp: # No CFs measured for this amplitude
@@ -820,19 +861,55 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             # Accept the event to prevent further processing (e.g., ClickableViewBox's own message box)
             ev.accept()
 
-            digest_dialog = DetectorDigestDialog(
+            # Create a non-modal window for the detector digest
+            digest_window = DetectorDigestWindow(
                 parent=self,
-                resonance_data_for_digest=resonance_data_for_digest,
+                resonance_data_for_digest=resonance_data_for_digest, # This needs to be {amp: {'data': data_dict, 'actual_cf_hz': output_cf_for_this_amp}}
+                                                                    # where data_dict is the full value from self.results_by_amplitude[amp_key][output_cf_for_this_amp]
                 detector_id=detector_id,
-                # Use the conceptual_resonance_base_freq_hz for the title.
-                # The f_active_bias for plots will be dynamic inside the dialog.
-                resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
+                resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9, # Use conceptual for title
                 dac_scales=self.dac_scales,
                 zoom_box_mode=self.zoom_box_mode,
                 target_module=self.target_module,
-                normalize_plot3=self.normalize_magnitudes # Pass normalization state
+                normalize_plot3=self.normalize_magnitudes
             )
-            digest_dialog.show()
+            
+            # Add to tracking list to prevent garbage collection
+            self.detector_digest_windows.append(digest_window)
+            
+            # Show the window
+            digest_window.show()
         else:
             # No curve found near click, event not accepted, default ClickableViewBox behavior might occur
             pass
+
+    def _get_closest_remembered_cf(self, conceptual_idx: int, target_amp: float) -> float | None:
+        """
+        Finds the remembered output CF for a given conceptual resonance index,
+        for the amplitude in history closest to target_amp.
+
+        Args:
+            conceptual_idx: Index in self.conceptual_resonance_frequencies.
+            target_amp: The amplitude we are trying to find a historical match for.
+
+        Returns:
+            The remembered output CF (float) or None if no suitable history found.
+        """
+        min_abs_amp_diff = float('inf')
+        best_cf_found = None
+
+        if not self.last_output_cfs_by_amp_and_conceptual_idx:
+            return None
+
+        for amp_in_history, cfs_at_this_amp in self.last_output_cfs_by_amp_and_conceptual_idx.items():
+            if conceptual_idx in cfs_at_this_amp:
+                remembered_cf = cfs_at_this_amp[conceptual_idx]
+                current_diff = abs(amp_in_history - target_amp)
+
+                if current_diff < min_abs_amp_diff:
+                    min_abs_amp_diff = current_diff
+                    best_cf_found = remembered_cf
+                elif current_diff == min_abs_amp_diff:
+                    pass
+        
+        return best_cf_found

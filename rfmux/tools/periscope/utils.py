@@ -39,10 +39,19 @@ DEFAULT_MIN_FREQ = 100e6  # 100 MHz
 DEFAULT_MAX_FREQ = 2450e6  # 2.45 GHz
 DEFAULT_CABLE_LENGTH = 10  # meters
 DEFAULT_AMPLITUDE = 0.001
-DEFAULT_MAX_CHANNELS = 1023
+DEFAULT_MAX_CHANNELS = 1024
 DEFAULT_MAX_SPAN = 500e6  # 500 MHz
 DEFAULT_NPOINTS = 5000
 DEFAULT_NSAMPLES = 10
+DEFAULT_AMP_START = 0.001  # Default start for amplitude linspace
+DEFAULT_AMP_STOP = 0.01     # Default stop for amplitude linspace
+DEFAULT_AMP_ITERATIONS = 10  # Default number of iterations for linspace
+
+# Multisweep defaults
+MULTISWEEP_DEFAULT_AMPLITUDE = DEFAULT_AMPLITUDE  # Same as network analysis default
+MULTISWEEP_DEFAULT_SPAN_HZ = 100000.0  # 100 kHz span per resonance
+MULTISWEEP_DEFAULT_NPOINTS = 101  # Points per sweep
+MULTISWEEP_DEFAULT_NSAMPLES = DEFAULT_NSAMPLES  # Samples to average (10)
 
 # Sampling settings
 BASE_SAMPLING = 625e6 / 256.0 / 64.0  # ≈38 147.46 Hz base for dec=0

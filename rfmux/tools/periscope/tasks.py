@@ -291,15 +291,25 @@ class CRSInitializeTask(QRunnable):
 
 class MultisweepSignals(QObject):
     progress = pyqtSignal(int, float)
-    intermediate_data_update = pyqtSignal(int, float, dict)
-    data_update = pyqtSignal(int, float, dict)
+    intermediate_data_update = pyqtSignal(int, float, dict) # module, amplitude, intermediate_results_dict
+    # data_update now sends two dictionaries:
+    # 1. results_for_plotting: {output_cf: data_dict_val} - original structure from crs.multisweep
+    # 2. results_for_history: {conceptual_idx: output_cf_key} - for easy history update
+    data_update = pyqtSignal(int, float, dict, dict) # module, amplitude, results_for_plotting, results_for_history
     completed_amplitude = pyqtSignal(int, float)
     all_completed = pyqtSignal()
     error = pyqtSignal(int, float, str)
 
 class MultisweepTask(QRunnable):
-    def __init__(self, crs: "CRS", resonance_frequencies: list[float], params: dict, signals: MultisweepSignals):
-        super().__init__(); self.crs, self.resonance_frequencies, self.params, self.signals = crs, resonance_frequencies, params, signals
+    # Added 'window' parameter, removed 'resonance_frequencies' as it's in params and window
+    def __init__(self, crs: "CRS", params: dict, signals: MultisweepSignals, window: "MultisweepWindow"):
+        super().__init__()
+        self.crs = crs
+        self.params = params
+        self.signals = signals
+        self.window = window # Store the MultisweepWindow instance
+        # Baseline frequencies are from the params passed by the window, reflecting its current configuration
+        self.baseline_resonance_frequencies = list(params.get('resonance_frequencies', []))
         self._running, self._loop, self._current_async_task = True, None, None
         self.current_amplitude = -1
 
@@ -318,34 +328,72 @@ class MultisweepTask(QRunnable):
         # traceback from .utils, DEFAULT_AMPLITUDE from .utils
         # fitting_module_direct is the aliased import
         self._loop = asyncio.new_event_loop(); asyncio.set_event_loop(self._loop)
-        module_idx = self.params.get('module') # Renamed module
+        module_idx = self.params.get('module')
         if module_idx is None: self.signals.error.emit(-1, -1, "Module not specified in multisweep parameters."); return
+        
         try:
             amplitudes = self.params.get('amps', [DEFAULT_AMPLITUDE])
-            for amp_val in amplitudes: # Renamed amp
+            conceptual_frequencies_from_window = self.window.conceptual_resonance_frequencies
+
+            for amp_val in amplitudes:
                 if not self._running: self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep canceled."); return
                 self.current_amplitude = amp_val
-                multisweep_params = {'center_frequencies': self.resonance_frequencies, 'span_hz': self.params['span_hz'],
-                                     'npoints_per_sweep': self.params['npoints_per_sweep'], 'amp': amp_val,
-                                     'nsamps': self.params.get('nsamps', 10), 'module': module_idx,
-                                     'progress_callback': self._progress_callback_wrapper,
-                                     'data_callback': self._data_callback_wrapper,
-                                     'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', None)} 
+
+                # Dynamically determine input CFs for this specific amplitude
+                current_sweep_cfs_for_this_amp = []
+                # To map results back: conceptual_idx -> input_cf_chosen_for_this_amp
+                conceptual_idx_to_input_cf_map = {}
+
+                if not conceptual_frequencies_from_window: # Should not happen if window is configured
+                    self.signals.error.emit(module_idx, amp_val, "Conceptual frequencies not available from window.")
+                    return
+
+                for idx, conceptual_cf in enumerate(conceptual_frequencies_from_window):
+                    remembered_cf = self.window._get_closest_remembered_cf(idx, amp_val)
+                    chosen_input_cf = remembered_cf if remembered_cf is not None else self.baseline_resonance_frequencies[idx]
+                    current_sweep_cfs_for_this_amp.append(chosen_input_cf)
+                    conceptual_idx_to_input_cf_map[idx] = chosen_input_cf
+                
+                multisweep_params = {
+                    'center_frequencies': current_sweep_cfs_for_this_amp, # Use dynamically determined CFs
+                    'span_hz': self.params['span_hz'],
+                    'npoints_per_sweep': self.params['npoints_per_sweep'],
+                    'amp': amp_val,
+                    'nsamps': self.params.get('nsamps', 10),
+                    'module': module_idx,
+                    'progress_callback': self._progress_callback_wrapper,
+                    'data_callback': self._data_callback_wrapper,
+                    'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', None)
+                }
+                
                 multisweep_coro = self.crs.multisweep(**multisweep_params)
                 self._current_async_task = self._loop.create_task(multisweep_coro)
-                raw_results = self._loop.run_until_complete(self._current_async_task)
+                raw_results_from_crs = self._loop.run_until_complete(self._current_async_task) # This is {output_cf: data_dict}
+
                 if not self._running: self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution."); return
-                processed_results = raw_results
-                if raw_results and self.params.get('perform_fits', False):
-                    try:
-                        processed_results = fitting_module_direct.process_multisweep_results(
-                            raw_results, approx_Q_for_fit=self.params.get('approx_Q_for_fit', 1e4),
-                            fit_resonances=True, center_iq_circle=self.params.get('center_iq_circle', True))
-                    except Exception as fit_e:
-                        self.signals.error.emit(module_idx, amp_val, f"Fitting error: {fit_e}")
-                        processed_results = raw_results
-                if processed_results: self.signals.data_update.emit(module_idx, amp_val, processed_results)
+                
+                results_for_plotting = raw_results_from_crs # For plotting, use the direct structure
+                results_for_history = {} # For history: {conceptual_idx: output_cf_key}
+
+                if raw_results_from_crs:
+                    # Map results back to conceptual_idx for history
+                    for output_cf_key, data_dict_val in raw_results_from_crs.items():
+                        input_cf_this_result_was_for = data_dict_val['original_center_frequency']
+                        found_conceptual_idx = -1
+                        for c_idx, mapped_input_cf in conceptual_idx_to_input_cf_map.items():
+                            if abs(mapped_input_cf - input_cf_this_result_was_for) < 1e-3: # Tolerance for float comparison
+                                found_conceptual_idx = c_idx
+                                break
+                        if found_conceptual_idx != -1:
+                            results_for_history[found_conceptual_idx] = output_cf_key
+                        else:
+                            print(f"Warning (MultisweepTask): Could not map result for input_cf {input_cf_this_result_was_for} back to conceptual_idx for amp {amp_val}", file=sys.stderr)
+                
+                if results_for_plotting is not None: # Can be None if crs.multisweep had issues
+                     self.signals.data_update.emit(module_idx, amp_val, results_for_plotting, results_for_history)
+                
                 self.signals.completed_amplitude.emit(module_idx, amp_val)
+            
             self.signals.all_completed.emit()
         except asyncio.CancelledError:
             self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep task canceled by user.")

@@ -168,21 +168,26 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # Magnitude Plot
         vb_mag = ClickableViewBox() # Custom viewbox for potential extra click interactions
         vb_mag.parent_window = self # Link back to this window if needed by viewbox
-        self.combined_mag_plot = pg.PlotWidget(viewBox=vb_mag, title="Combined S21 Magnitude (All Resonances)")
+        self.combined_mag_plot = pg.PlotWidget(viewBox=vb_mag)
+        # Set title with explicit color
+        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        self.combined_mag_plot.getPlotItem().setTitle("Combined S21 Magnitude (All Resonances)", color=pen_color)
         self.combined_mag_plot.setLabel('bottom', 'Frequency', units='Hz')
         self._update_mag_plot_label() # Set initial Y-axis label based on unit mode
         self.combined_mag_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.mag_legend = self.combined_mag_plot.addLegend(offset=(30,10))
+        self.mag_legend = self.combined_mag_plot.addLegend(offset=(30,10),labelTextColor=pen_color)
         plot_layout.addWidget(self.combined_mag_plot)
 
         # Phase Plot
         vb_phase = ClickableViewBox()
         vb_phase.parent_window = self
-        self.combined_phase_plot = pg.PlotWidget(viewBox=vb_phase, title="Combined S21 Phase (All Resonances)")
+        self.combined_phase_plot = pg.PlotWidget(viewBox=vb_phase)
+        # Set title with explicit color
+        self.combined_phase_plot.getPlotItem().setTitle("Combined S21 Phase (All Resonances)", color=pen_color)
         self.combined_phase_plot.setLabel('bottom', 'Frequency', units='Hz')
         self.combined_phase_plot.setLabel('left', 'Phase', units='deg')
         self.combined_phase_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.phase_legend = self.combined_phase_plot.addLegend(offset=(30,10))
+        self.phase_legend = self.combined_phase_plot.addLegend(offset=(30,10), labelTextColor=pen_color)
         plot_layout.addWidget(self.combined_phase_plot)
         
         layout.addWidget(plot_container)
@@ -941,26 +946,47 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         """Apply the dark/light theme to all plots in this window."""
         self.dark_mode = dark_mode
         
-        # Apply to magnitude plot
         bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
         
+        # Apply to magnitude plot
         if self.combined_mag_plot:
             self.combined_mag_plot.setBackground(bg_color)
-            for axis_name in ("left", "bottom", "right", "top"):
-                ax = self.combined_mag_plot.getPlotItem().getAxis(axis_name)
-                if ax:
-                    ax.setPen(pen_color)
-                    ax.setTextPen(pen_color)
-                    
+            plot_item_mag = self.combined_mag_plot.getPlotItem()
+            if plot_item_mag:
+                title_text_mag = plot_item_mag.titleLabel.text if plot_item_mag.titleLabel else "Combined S21 Magnitude (All Resonances)"
+                plot_item_mag.setTitle(title_text_mag, color=pen_color)
+                for axis_name in ("left", "bottom", "right", "top"):
+                    ax = plot_item_mag.getAxis(axis_name)
+                    if ax:
+                        ax.setPen(pen_color)
+                        ax.setTextPen(pen_color)
+            if self.mag_legend:
+                try:
+                    self.mag_legend.setLabelTextColor(pen_color)
+                except Exception as e:
+                    print(f"Error updating magnitude legend text color: {e}")
+
         # Apply to phase plot
         if self.combined_phase_plot:
             self.combined_phase_plot.setBackground(bg_color)
-            for axis_name in ("left", "bottom", "right", "top"):
-                ax = self.combined_phase_plot.getPlotItem().getAxis(axis_name)
-                if ax:
-                    ax.setPen(pen_color)
-                    ax.setTextPen(pen_color)
+            plot_item_phase = self.combined_phase_plot.getPlotItem()
+            if plot_item_phase:
+                title_text_phase = plot_item_phase.titleLabel.text if plot_item_phase.titleLabel else "Combined S21 Phase (All Resonances)"
+                plot_item_phase.setTitle(title_text_phase, color=pen_color)
+                for axis_name in ("left", "bottom", "right", "top"):
+                    ax = plot_item_phase.getAxis(axis_name)
+                    if ax:
+                        ax.setPen(pen_color)
+                        ax.setTextPen(pen_color)
+            if self.phase_legend:
+                try:
+                    self.phase_legend.setLabelTextColor(pen_color)
+                except Exception as e:
+                    print(f"Error updating phase legend text color: {e}")
         
+        # Redraw plots which will now use the updated legend text colors
+        self._redraw_plots()
+            
         # Also propagate dark mode to any open detector digest windows
         for digest_window in self.detector_digest_windows:
             if hasattr(digest_window, 'apply_theme'):

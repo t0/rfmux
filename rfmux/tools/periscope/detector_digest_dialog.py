@@ -86,6 +86,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         plots_layout = QtWidgets.QHBoxLayout()
         outer_layout.addLayout(plots_layout)
 
+        # Define colors based on dark mode
+        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+
         # Plot 1: Sweep (vs freq.)
         vb1 = ClickableViewBox() # Use ClickableViewBox for consistency, though no specific click action here
         vb1.parent_window = self # For zoom_box_mode
@@ -94,7 +97,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.plot1_sweep_vs_freq.setLabel('left', "Amplitude", units="V") # pyqtgraph will show mV
         self.plot1_sweep_vs_freq.setLabel('bottom', "f - f_bias", units="Hz") # pyqtgraph will show kHz
         self.plot1_sweep_vs_freq.showGrid(x=True, y=True, alpha=0.3)
-        self.plot1_legend = self.plot1_sweep_vs_freq.addLegend(offset=(30,10))
+        self.plot1_legend = self.plot1_sweep_vs_freq.addLegend(offset=(30,10), labelTextColor=pen_color)
         plots_layout.addWidget(self.plot1_sweep_vs_freq)
 
         # Plot 2: Sweep (IQ plane)
@@ -106,18 +109,17 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.plot2_iq_plane.setLabel('bottom', "I", units="V") # pyqtgraph will show mV
         self.plot2_iq_plane.setAspectLocked(True)
         self.plot2_iq_plane.showGrid(x=True, y=True, alpha=0.3)
-        self.plot2_legend = self.plot2_iq_plane.addLegend(offset=(30,10))
+        self.plot2_legend = self.plot2_iq_plane.addLegend(offset=(30,10), labelTextColor=pen_color)
         plots_layout.addWidget(self.plot2_iq_plane)
 
         # Plot 3: Bias amplitude optimization
         vb3 = ClickableViewBox() # Double-click interaction needed here
         vb3.parent_window = self
         self.plot3_bias_opt = pg.PlotWidget(viewBox=vb3, name="BiasOpt")
-        self.plot3_bias_opt.setTitle("Bias amplitude optimization")
         self.plot3_bias_opt.setLabel('left', "|S21|", units="dB")
         self.plot3_bias_opt.setLabel('bottom', "f - f_bias", units="Hz") # pyqtgraph will show kHz
         self.plot3_bias_opt.showGrid(x=True, y=True, alpha=0.3)
-        self.plot3_legend = self.plot3_bias_opt.addLegend(offset=(30,10))
+        self.plot3_legend = self.plot3_bias_opt.addLegend(offset=(30,10), labelTextColor=pen_color)
         plots_layout.addWidget(self.plot3_bias_opt)
         
         # Connect double-click for Plot 3
@@ -127,28 +129,43 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self._apply_zoom_box_mode_to_all()
         
         # Apply initial theme to plots
-        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
         
         # Apply to Plot 1: Sweep vs freq
         self.plot1_sweep_vs_freq.setBackground(bg_color)
+        plot_item = self.plot1_sweep_vs_freq.getPlotItem()
+        # Initialize with correct colored title
+        active_power_dbm_str = "N/A"
+        if self.active_amplitude_raw is not None and self.target_module in self.dac_scales:
+            try:
+                active_power_dbm = UnitConverter.normalize_to_dbm(self.active_amplitude_raw, self.dac_scales[self.target_module])
+                active_power_dbm_str = f"{active_power_dbm:.2f} dBm"
+            except Exception:
+                pass  # Keep "N/A" or raw value if conversion fails
+        plot_item.setTitle(f"Sweep (Probe Power {active_power_dbm_str})", color=pen_color)
         for axis_name in ("left", "bottom", "right", "top"):
-            ax = self.plot1_sweep_vs_freq.getPlotItem().getAxis(axis_name)
+            ax = plot_item.getAxis(axis_name)
             if ax:
                 ax.setPen(pen_color)
                 ax.setTextPen(pen_color)
         
         # Apply to Plot 2: IQ plane
         self.plot2_iq_plane.setBackground(bg_color)
+        plot_item = self.plot2_iq_plane.getPlotItem()
+        # Initialize with correct colored title
+        plot_item.setTitle(f"IQ (Probe Power {active_power_dbm_str})", color=pen_color)
         for axis_name in ("left", "bottom", "right", "top"):
-            ax = self.plot2_iq_plane.getPlotItem().getAxis(axis_name)
+            ax = plot_item.getAxis(axis_name)
             if ax:
                 ax.setPen(pen_color)
                 ax.setTextPen(pen_color)
         
         # Apply to Plot 3: Bias amplitude optimization
         self.plot3_bias_opt.setBackground(bg_color)
+        plot_item = self.plot3_bias_opt.getPlotItem()
+        # Initialize with correct colored title
+        plot_item.setTitle("Bias amplitude optimization", color=pen_color)
         for axis_name in ("left", "bottom", "right", "top"):
-            ax = self.plot3_bias_opt.getPlotItem().getAxis(axis_name)
+            ax = plot_item.getAxis(axis_name)
             if ax:
                 ax.setPen(pen_color)
                 ax.setTextPen(pen_color)
@@ -348,32 +365,77 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         # Apply theme to all plots
         bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
         
-        # Apply to Plot 1: Sweep vs freq
-        if self.plot1_sweep_vs_freq:
-            self.plot1_sweep_vs_freq.setBackground(bg_color)
-            for axis_name in ("left", "bottom", "right", "top"):
-                ax = self.plot1_sweep_vs_freq.getPlotItem().getAxis(axis_name)
-                if ax:
-                    ax.setPen(pen_color)
-                    ax.setTextPen(pen_color)
-        
-        # Apply to Plot 2: IQ plane
-        if self.plot2_iq_plane:
-            self.plot2_iq_plane.setBackground(bg_color)
-            for axis_name in ("left", "bottom", "right", "top"):
-                ax = self.plot2_iq_plane.getPlotItem().getAxis(axis_name)
-                if ax:
-                    ax.setPen(pen_color)
-                    ax.setTextPen(pen_color)
-        
-        # Apply to Plot 3: Bias amplitude optimization
-        if self.plot3_bias_opt:
-            self.plot3_bias_opt.setBackground(bg_color)
-            for axis_name in ("left", "bottom", "right", "top"):
-                ax = self.plot3_bias_opt.getPlotItem().getAxis(axis_name)
-                if ax:
-                    ax.setPen(pen_color)
-                    ax.setTextPen(pen_color)
-        
-        # Redraw all plots to update curve colors based on dark mode setting
-        self._update_plots()
+        try:
+            # Apply to Plot 1: Sweep vs freq
+            if self.plot1_sweep_vs_freq:
+                self.plot1_sweep_vs_freq.setBackground(bg_color)
+                # Update plot title color - use a more direct approach
+                plot_item = self.plot1_sweep_vs_freq.getPlotItem()
+                if plot_item:
+                    # Set the title explicitly with the color parameter
+                    title_text = plot_item.titleLabel.text if plot_item.titleLabel else "Sweep"
+                    plot_item.setTitle(title_text, color=pen_color)
+                # Update axes colors
+                for axis_name in ("left", "bottom", "right", "top"):
+                    ax = plot_item.getAxis(axis_name) if plot_item else None
+                    if ax:
+                        ax.setPen(pen_color)
+                        ax.setTextPen(pen_color)
+                        
+                # Update legend text color using the proper API
+                if self.plot1_legend:
+                    try:
+                        self.plot1_legend.setLabelTextColor(pen_color)
+                    except Exception as e:
+                        print(f"Error updating plot1_legend colors: {e}")
+            
+            # Apply to Plot 2: IQ plane
+            if self.plot2_iq_plane:
+                self.plot2_iq_plane.setBackground(bg_color)
+                # Update plot title color - use a more direct approach
+                plot_item = self.plot2_iq_plane.getPlotItem()
+                if plot_item:
+                    # Set the title explicitly with the color parameter
+                    title_text = plot_item.titleLabel.text if plot_item.titleLabel else "IQ"
+                    plot_item.setTitle(title_text, color=pen_color)
+                # Update axes colors
+                for axis_name in ("left", "bottom", "right", "top"):
+                    ax = plot_item.getAxis(axis_name) if plot_item else None
+                    if ax:
+                        ax.setPen(pen_color)
+                        ax.setTextPen(pen_color)
+                        
+                # Update legend text color using the proper API
+                if self.plot2_legend:
+                    try:
+                        self.plot2_legend.setLabelTextColor(pen_color)
+                    except Exception as e:
+                        print(f"Error updating plot2_legend colors: {e}")
+            
+            # Apply to Plot 3: Bias amplitude optimization
+            if self.plot3_bias_opt:
+                self.plot3_bias_opt.setBackground(bg_color)
+                # Update plot title color - use a more direct approach
+                plot_item = self.plot3_bias_opt.getPlotItem()
+                if plot_item:
+                    # Set the title explicitly with the color parameter
+                    title_text = plot_item.titleLabel.text if plot_item.titleLabel else "Bias amplitude optimization"
+                    plot_item.setTitle(title_text, color=pen_color)
+                # Update axes colors
+                for axis_name in ("left", "bottom", "right", "top"):
+                    ax = plot_item.getAxis(axis_name) if plot_item else None
+                    if ax:
+                        ax.setPen(pen_color)
+                        ax.setTextPen(pen_color)
+                        
+                # Update legend text color using the proper API
+                if self.plot3_legend:
+                    try:
+                        self.plot3_legend.setLabelTextColor(pen_color)
+                    except Exception as e:
+                        print(f"Error updating plot3_legend colors: {e}")
+            
+            # Redraw all plots to update curve colors based on dark mode setting
+            self._update_plots()
+        except Exception as e:
+            print(f"Error applying theme: {e}")

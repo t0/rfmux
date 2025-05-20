@@ -130,7 +130,9 @@ class PeriscopeRuntime:
             if mode_key == "IQ":
                 rowCurves["IQ"] = self._create_iq_plot_item(pw)
             else:
-                legend = pw.addLegend(offset=(30, 10))
+                # Define colors based on dark mode
+                bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+                legend = pw.addLegend(offset=(30, 10), labelTextColor=pen_color)
                 if len(group) == 1:
                     ch_val = group[0] # Renamed ch
                     rowCurves[mode_key] = self._create_single_channel_curves(pw, mode_key, ch_val, single_colors, legend)
@@ -286,9 +288,26 @@ class PeriscopeRuntime:
         """Apply the current theme (dark/light) to a plot widget."""
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
         pw.setBackground(bg_color)
+        
+        # Update plot title color directly
+        plot_item = pw.getPlotItem()
+        if plot_item and plot_item.titleLabel:
+            current_title = plot_item.titleLabel.text
+            plot_item.setTitle(current_title, color=pen_color)
+            
+        # Update axis colors
         for axis_name in ("left", "bottom", "right", "top"):
             ax = pw.getPlotItem().getAxis(axis_name)
             if ax: ax.setPen(pen_color); ax.setTextPen(pen_color)
+            
+        # Update legend text color directly using the proper API
+        legend = pw.getPlotItem().legend
+        if legend:
+            try:
+                # Use the proper API method to update all label colors at once
+                legend.setLabelTextColor(pen_color)
+            except Exception as e:
+                print(f"Error updating legend colors: {e}")
 
     @staticmethod
     def _fade_hidden_entries(legend: pg.LegendItem, hide_labels: tuple[str, ...]):

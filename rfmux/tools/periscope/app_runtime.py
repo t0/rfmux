@@ -785,11 +785,16 @@ class PeriscopeRuntime:
             except TypeError: pass # Raised if signals were not previously connected
             
             # Connect signals from the MultisweepTask to the new window's slots
-            self.multisweep_signals.progress.connect(window.update_progress)
-            self.multisweep_signals.data_update.connect(window.update_data)
-            self.multisweep_signals.completed_amplitude.connect(window.completed_amplitude_sweep)
-            self.multisweep_signals.all_completed.connect(window.all_sweeps_completed)
-            self.multisweep_signals.error.connect(window.handle_error)
+            self.multisweep_signals.progress.connect(window.update_progress,
+                                                   QtCore.Qt.ConnectionType.QueuedConnection)
+            self.multisweep_signals.data_update.connect(window.update_data,
+                                                      QtCore.Qt.ConnectionType.QueuedConnection)
+            self.multisweep_signals.completed_amplitude.connect(window.completed_amplitude_sweep,
+                                                              QtCore.Qt.ConnectionType.QueuedConnection)
+            self.multisweep_signals.all_completed.connect(window.all_sweeps_completed,
+                                                        QtCore.Qt.ConnectionType.QueuedConnection)
+            self.multisweep_signals.error.connect(window.handle_error,
+                                                QtCore.Qt.ConnectionType.QueuedConnection)
             
             # Pass the window instance to the task
             task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window)

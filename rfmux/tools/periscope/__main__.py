@@ -142,14 +142,15 @@ def main():
         hostname = args.hostname
         if "rfmux" in hostname and ".local" in hostname:
             serial = hostname.replace("rfmux", "").replace(".local", "")
+            # Create a session and query for the CRS object based on the serial number.
+            # This is done synchronously for the CLI startup.
+            s = load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')            
         else:
             # If hostname doesn't match expected pattern, use it directly as serial.
             # This might be relevant for direct IP connections or other naming schemes.
             serial = hostname
-        
-        # Create a session and query for the CRS object based on the serial number.
-        # This is done synchronously for the CLI startup.
-        s = load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')
+            s = load_session(f'!HardwareMap [ !CRS {{ hostname: "{serial}" }} ]')        
+
         crs_obj = s.query(CRS).one() # Expecting one CRS object.
         
         # Resolve the CRS object to establish connection and prepare it for use.

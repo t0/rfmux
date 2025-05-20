@@ -572,34 +572,65 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
     def _export_data(self):
         """
-        Exports the collected multisweep results to a pickle file.
-        Opens a file dialog for the user to choose the save location.
+        Exports the collected multisweep results to a pickle file using a non-blocking dialog.
         """
+        # Thread marshalling - ensure we're on the main GUI thread
+        if QtCore.QThread.currentThread() != QtWidgets.QApplication.instance().thread():
+            QtCore.QMetaObject.invokeMethod(self, "_export_data", 
+                                        QtCore.Qt.ConnectionType.QueuedConnection)
+            return
+            
         if not self.results_by_amplitude:
             QtWidgets.QMessageBox.warning(self, "No Data", "No data to export.")
             return
-
-        dialog = QtWidgets.QFileDialog(self)
-        dialog.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
-        dialog.setNameFilters(["Pickle Files (*.pkl)", "All Files (*)"])
-        dialog.setDefaultSuffix("pkl")
         
-        if dialog.exec(): # True if user selected a file and clicked Save
-            filename = dialog.selectedFiles()[0]
-            try:
-                # Prepare data for export
-                export_content = {
-                    'timestamp': datetime.datetime.now().isoformat(),
-                    'target_module': self.target_module,
-                    'initial_parameters': self.initial_params,
-                    'dac_scales_used': self.dac_scales,
-                    'results_by_amplitude': self.results_by_amplitude
-                }
-                with open(filename, 'wb') as f: # Write in binary mode for pickle
-                    pickle.dump(export_content, f)
-                QtWidgets.QMessageBox.information(self, "Export Complete", f"Data exported to {filename}")
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
+        # 1. Disable updates on graphics views
+        if hasattr(self, 'combined_mag_plot') and self.combined_mag_plot:
+            self.combined_mag_plot.setUpdatesEnabled(False)
+        if hasattr(self, 'combined_phase_plot') and self.combined_phase_plot:
+            self.combined_phase_plot.setUpdatesEnabled(False)
+            
+        # 2. Create a non-blocking file dialog
+        dlg = QtWidgets.QFileDialog(self, "Export Multisweep Data")
+        dlg.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
+        dlg.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
+        dlg.setNameFilters(["Pickle Files (*.pkl)", "All Files (*)"])
+        dlg.setDefaultSuffix("pkl")
+        
+        # 3. Connect signals for handling dialog completion
+        dlg.fileSelected.connect(self._handle_export_file_selected)
+        dlg.finished.connect(self._resume_updates_after_export_dialog)
+        
+        # 4. Show the dialog non-modally
+        dlg.open()  # Returns immediately, doesn't block
+    
+    def _resume_updates_after_export_dialog(self, result):
+        """Resume updates after export dialog closes, regardless of the result."""
+        # Re-enable updates on graphics views
+        if hasattr(self, 'combined_mag_plot') and self.combined_mag_plot:
+            self.combined_mag_plot.setUpdatesEnabled(True)
+        if hasattr(self, 'combined_phase_plot') and self.combined_phase_plot:
+            self.combined_phase_plot.setUpdatesEnabled(True)
+    
+    def _handle_export_file_selected(self, filename):
+        """Handle the file selection from the non-blocking dialog."""
+        if not filename:
+            return
+            
+        try:
+            # Prepare data for export
+            export_content = {
+                'timestamp': datetime.datetime.now().isoformat(),
+                'target_module': self.target_module,
+                'initial_parameters': self.initial_params,
+                'dac_scales_used': self.dac_scales,
+                'results_by_amplitude': self.results_by_amplitude
+            }
+            with open(filename, 'wb') as f: # Write in binary mode for pickle
+                pickle.dump(export_content, f)
+            QtWidgets.QMessageBox.information(self, "Export Complete", f"Data exported to {filename}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
 
     def _rerun_multisweep(self):
         """

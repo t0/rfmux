@@ -7,26 +7,72 @@ class NetworkAnalysisExportMixin:
     """Mixin providing export and cable-delay logic."""
     def _export_data(self):
         """Export the collected data with all unit conversions and metadata."""
+        # Thread marshalling - ensure we're on the main GUI thread
+        if QtCore.QThread.currentThread() != QtWidgets.QApplication.instance().thread():
+            QtCore.QMetaObject.invokeMethod(self, "_export_data", 
+                                        QtCore.Qt.ConnectionType.QueuedConnection)
+            return
+            
         if not self.data:
             QtWidgets.QMessageBox.warning(self, "No Data", "No data to export yet.")
             return
         
-        dialog = QtWidgets.QFileDialog(self)
-        dialog.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
-        dialog.setNameFilters(["Pickle Files (*.pkl)", "CSV Files (*.csv)", "All Files (*)"])
-        dialog.setDefaultSuffix("pkl")
-        
-        if dialog.exec():
-            filename = dialog.selectedFiles()[0]
+        # 1. Pause any live updates - pause the parent's timer if it exists
+        if hasattr(self.parent(), 'timer') and self.parent().timer.isActive():
+            self.parent().timer.stop()
+            self._timer_was_active = True
+        else:
+            self._timer_was_active = False
             
-            try:
-                if filename.endswith('.pkl'): self._export_to_pickle(filename)
-                elif filename.endswith('.csv'): self._export_to_csv(filename)
-                else: self._export_to_pickle(filename)
-                QtWidgets.QMessageBox.information(self, "Export Complete", f"Data exported to {filename}")
-            except Exception as e:
-                traceback.print_exc() 
-                QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
+        # 2. Disable updates on graphics views if they exist
+        if hasattr(self, 'plots'):
+            for module_plots in self.plots.values():
+                if 'mag_plot' in module_plots and hasattr(module_plots['mag_plot'], 'setUpdatesEnabled'):
+                    module_plots['mag_plot'].setUpdatesEnabled(False)
+                if 'phase_plot' in module_plots and hasattr(module_plots['phase_plot'], 'setUpdatesEnabled'):
+                    module_plots['phase_plot'].setUpdatesEnabled(False)
+        
+        # 3. Create a non-blocking file dialog
+        dlg = QtWidgets.QFileDialog(self, "Export Data")
+        dlg.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
+        dlg.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
+        dlg.setNameFilters(["Pickle Files (*.pkl)", "CSV Files (*.csv)", "All Files (*)"])
+        dlg.setDefaultSuffix("pkl")
+        
+        # 4. Connect signals for handling dialog completion
+        dlg.fileSelected.connect(self._handle_export_file_selected)
+        dlg.finished.connect(self._resume_updates_after_export_dialog)
+        
+        # 5. Show the dialog non-modally
+        dlg.open()  # Returns immediately, doesn't block
+    
+    def _resume_updates_after_export_dialog(self, result):
+        """Resume updates after export dialog closes, regardless of whether a file was selected."""
+        # Re-enable updates on graphics views
+        if hasattr(self, 'plots'):
+            for module_plots in self.plots.values():
+                if 'mag_plot' in module_plots and hasattr(module_plots['mag_plot'], 'setUpdatesEnabled'):
+                    module_plots['mag_plot'].setUpdatesEnabled(True)
+                if 'phase_plot' in module_plots and hasattr(module_plots['phase_plot'], 'setUpdatesEnabled'):
+                    module_plots['phase_plot'].setUpdatesEnabled(True)
+        
+        # Restart the timer if it was active
+        if hasattr(self, '_timer_was_active') and self._timer_was_active and hasattr(self.parent(), 'timer'):
+            self.parent().timer.start()
+    
+    def _handle_export_file_selected(self, filename):
+        """Handle the file selection from the non-blocking dialog."""
+        if not filename:
+            return
+            
+        try:
+            if filename.endswith('.pkl'): self._export_to_pickle(filename)
+            elif filename.endswith('.csv'): self._export_to_csv(filename)
+            else: self._export_to_pickle(filename)
+            QtWidgets.QMessageBox.information(self, "Export Complete", f"Data exported to {filename}")
+        except Exception as e:
+            traceback.print_exc() 
+            QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
     
     def _export_to_pickle(self, filename):
         """Export data to a pickle file."""

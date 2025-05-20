@@ -775,16 +775,21 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 'current_amp_index': {}
             }
             window_signals.progress.connect(
-                lambda mod, prog: window_instance.update_progress(mod, prog)) # mod, prog to avoid conflict
+                lambda mod, prog: window_instance.update_progress(mod, prog), # mod, prog to avoid conflict
+                QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update.connect(
-                lambda mod, freqs, amps, phases: window_instance.update_data(mod, freqs, amps, phases))
+                lambda mod, freqs, amps, phases: window_instance.update_data(mod, freqs, amps, phases),
+                QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update_with_amp.connect(
                 lambda mod, freqs, amps, phases, amp_val:  # amp_val to avoid conflict
-                window_instance.update_data_with_amp(mod, freqs, amps, phases, amp_val))
+                window_instance.update_data_with_amp(mod, freqs, amps, phases, amp_val),
+                QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.completed.connect(
-                lambda mod: self._handle_analysis_completed(mod, window_id))
+                lambda mod: self._handle_analysis_completed(mod, window_id),
+                QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.error.connect(
-                lambda error_msg: QtWidgets.QMessageBox.critical(window_instance, "Network Analysis Error", error_msg))
+                lambda error_msg: QtWidgets.QMessageBox.critical(window_instance, "Network Analysis Error", error_msg),
+                QtCore.Qt.ConnectionType.QueuedConnection)
             amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)]) # DEFAULT_AMPLITUDE from .utils
             window_data = self.netanal_windows[window_id]
             window_data['amplitude_queues'] = {mod: list(amplitudes) for mod in modules_to_run}

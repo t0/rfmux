@@ -25,7 +25,7 @@ from rfmux.core.schema import CRS
 
 # ───────────────────────── Global Constants ─────────────────────────
 # Display settings
-LINE_WIDTH = 1.5
+LINE_WIDTH = 2
 UI_FONT_SIZE = 12
 DENSITY_GRID = 512
 DENSITY_DOT_SIZE = 1

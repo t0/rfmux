@@ -18,7 +18,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
     across various probe amplitudes. It provides controls for data export,
     re-running sweeps, unit conversion, normalization, and plot interaction.
     """
-    def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None):
+    def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None, dark_mode=False):
         """
         Initializes the MultisweepWindow.
 
@@ -29,11 +29,14 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                                              Defaults to an empty dict.
             dac_scales (dict, optional): DAC scaling factors for unit conversion.
                                          Defaults to an empty dict.
+            dark_mode (bool, optional): Whether to use dark mode for plots.
+                                         Defaults to False.
         """
         super().__init__(parent)
         self.target_module = target_module
         self.initial_params = initial_params or {}  # Store initial parameters for potential re-runs
         self.dac_scales = dac_scales or {}          # DAC scales for unit conversions
+        self.dark_mode = dark_mode                 # Store dark mode setting
         
         # Track open detector digest windows to prevent garbage collection
         self.detector_digest_windows = []
@@ -187,6 +190,25 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # Link X-axes of magnitude and phase plots for synchronized zooming/panning
         self.combined_phase_plot.setXLink(self.combined_mag_plot)
         self._apply_zoom_box_mode() # Apply initial zoom box mode state
+        
+        # Apply initial theme based on dark_mode setting
+        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        
+        if self.combined_mag_plot:
+            self.combined_mag_plot.setBackground(bg_color)
+            for axis_name in ("left", "bottom", "right", "top"):
+                ax = self.combined_mag_plot.getPlotItem().getAxis(axis_name)
+                if ax:
+                    ax.setPen(pen_color)
+                    ax.setTextPen(pen_color)
+                    
+        if self.combined_phase_plot:
+            self.combined_phase_plot.setBackground(bg_color)
+            for axis_name in ("left", "bottom", "right", "top"):
+                ax = self.combined_phase_plot.getPlotItem().getAxis(axis_name)
+                if ax:
+                    ax.setPen(pen_color)
+                    ax.setTextPen(pen_color)
 
         # Connect double click signal from magnitude plot's viewbox
         if isinstance(self.combined_mag_plot.getViewBox(), ClickableViewBox):
@@ -322,8 +344,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         except ValueError:
             # This amplitude wasn't in our list, which is unexpected.
             # Fallback to a generic message or log an error.
-            print(f"Error: Processed amplitude {amplitude} not found in configured probe_amplitudes for Module {self.target_module}.")
-            self.current_amp_label.setText(f"Processed: {amplitude:.4f} (Error finding next)")
+            #print(f"Error: Processed amplitude {amplitude} not found in configured probe_amplitudes for Module {self.target_module}.")
+            self.current_amp_label.setText(f"Processed: {amplitude:.4f}")
             return
 
         if current_amp_index_in_list + 1 < total_sweeps:
@@ -871,7 +893,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 dac_scales=self.dac_scales,
                 zoom_box_mode=self.zoom_box_mode,
                 target_module=self.target_module,
-                normalize_plot3=self.normalize_magnitudes
+                normalize_plot3=self.normalize_magnitudes,
+                dark_mode=self.dark_mode
             )
             
             # Add to tracking list to prevent garbage collection
@@ -913,3 +936,32 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                     pass
         
         return best_cf_found
+        
+    def apply_theme(self, dark_mode: bool):
+        """Apply the dark/light theme to all plots in this window."""
+        self.dark_mode = dark_mode
+        
+        # Apply to magnitude plot
+        bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
+        
+        if self.combined_mag_plot:
+            self.combined_mag_plot.setBackground(bg_color)
+            for axis_name in ("left", "bottom", "right", "top"):
+                ax = self.combined_mag_plot.getPlotItem().getAxis(axis_name)
+                if ax:
+                    ax.setPen(pen_color)
+                    ax.setTextPen(pen_color)
+                    
+        # Apply to phase plot
+        if self.combined_phase_plot:
+            self.combined_phase_plot.setBackground(bg_color)
+            for axis_name in ("left", "bottom", "right", "top"):
+                ax = self.combined_phase_plot.getPlotItem().getAxis(axis_name)
+                if ax:
+                    ax.setPen(pen_color)
+                    ax.setTextPen(pen_color)
+        
+        # Also propagate dark mode to any open detector digest windows
+        for digest_window in self.detector_digest_windows:
+            if hasattr(digest_window, 'apply_theme'):
+                digest_window.apply_theme(dark_mode)

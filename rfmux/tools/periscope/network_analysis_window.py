@@ -16,7 +16,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
     """
     Window for displaying network analysis results with real units support.
     """
-    def __init__(self, parent=None, modules=None, dac_scales=None):
+    def __init__(self, parent=None, modules=None, dac_scales=None, dark_mode=False):
         super().__init__(parent)
         self.setWindowTitle("Network Analysis Results")
         self.modules = modules or []
@@ -37,6 +37,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
         self.module_cable_lengths = {} # For Requirement 2
         self.faux_resonance_legend_items_mag = {} # For Req 3
         self.faux_resonance_legend_items_phase = {} # For Req 3
+        self.dark_mode = dark_mode  # Store dark mode setting
         
         # Setup the UI components
         self._setup_ui()
@@ -281,11 +282,25 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
                 'resonance_lines_phase': [] # For storing phase resonance lines
             }
             
-            # Apply zoom box mode
-            self._apply_zoom_box_mode()            
+        # Apply zoom box mode
+        self._apply_zoom_box_mode()            
 
-            # Link the x-axis of amplitude and phase plots for synchronized zooming
-            phase_plot.setXLink(amp_plot)
+        # Link the x-axis of amplitude and phase plots for synchronized zooming
+        phase_plot.setXLink(amp_plot)
+        
+        # Apply initial theme based on dark_mode setting
+        self._apply_theme_to_plot(amp_plot)
+        self._apply_theme_to_plot(phase_plot)
+        
+    def _apply_theme_to_plot(self, plot_widget):
+        """Apply the current theme to a specific plot widget."""
+        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        plot_widget.setBackground(bg_color)
+        for axis_name in ("left", "bottom", "right", "top"):
+            ax = plot_widget.getPlotItem().getAxis(axis_name)
+            if ax:
+                ax.setPen(pen_color)
+                ax.setTextPen(pen_color)
 
     def clear_plots(self):
         """Clear all plots, curves, and legends."""
@@ -912,4 +927,30 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
         if module in self.progress_bars:
             self.progress_bars[module].setValue(100)
             self._check_all_complete()
-    
+            
+    def apply_theme(self, dark_mode: bool):
+        """Apply the dark/light theme to all plots in this window."""
+        self.dark_mode = dark_mode
+        
+        # Apply theme to all plots
+        for module in self.plots:
+            plot_info = self.plots[module]
+            
+            # Apply to amplitude plot
+            bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
+            amp_plot = plot_info['amp_plot']
+            amp_plot.setBackground(bg_color)
+            for axis_name in ("left", "bottom", "right", "top"):
+                ax = amp_plot.getPlotItem().getAxis(axis_name)
+                if ax: 
+                    ax.setPen(pen_color)
+                    ax.setTextPen(pen_color)
+            
+            # Apply to phase plot
+            phase_plot = plot_info['phase_plot']
+            phase_plot.setBackground(bg_color)
+            for axis_name in ("left", "bottom", "right", "top"):
+                ax = phase_plot.getPlotItem().getAxis(axis_name)
+                if ax: 
+                    ax.setPen(pen_color)
+                    ax.setTextPen(pen_color)

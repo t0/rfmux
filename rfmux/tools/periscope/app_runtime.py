@@ -310,6 +310,21 @@ class PeriscopeRuntime:
     def _toggle_dark_mode(self, checked: bool):
         """Toggle dark mode theme and rebuild the layout."""
         self.dark_mode = checked; self._build_layout()
+        self._update_dark_mode_in_child_windows()
+        
+    def _update_dark_mode_in_child_windows(self):
+        """Propagate dark mode setting to all open child windows."""
+        # Update NetworkAnalysis windows
+        if hasattr(self, 'netanal_windows'):
+            for window_data in self.netanal_windows.values():
+                if 'window' in window_data and hasattr(window_data['window'], 'apply_theme'):
+                    window_data['window'].apply_theme(self.dark_mode)
+        
+        # Update Multisweep windows
+        if hasattr(self, 'multisweep_windows'):
+            for window_data in self.multisweep_windows.values():
+                if 'window' in window_data and hasattr(window_data['window'], 'apply_theme'):
+                    window_data['window'].apply_theme(self.dark_mode)
 
     def _toggle_real_units(self, checked: bool):
         """
@@ -736,7 +751,8 @@ class PeriscopeRuntime:
             if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep."); return
             
             dac_scales_for_window = self.dac_scales if hasattr(self, 'dac_scales') else {}
-            window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), dac_scales=dac_scales_for_window)
+            window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), 
+                                     dac_scales=dac_scales_for_window, dark_mode=self.dark_mode)
             self.multisweep_windows[window_id] = {'window': window, 'params': params.copy()}
             
             # Disconnect any previous signal connections to avoid multiple calls

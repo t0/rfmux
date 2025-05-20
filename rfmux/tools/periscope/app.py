@@ -765,7 +765,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             window_signals = NetworkAnalysisSignals() # From .tasks
             dac_scales_local = self.dac_scales.copy() # Renamed
             # NetworkAnalysisWindow from .ui
-            window_instance = NetworkAnalysisWindow(self, modules_to_run, dac_scales_local) # Renamed
+            window_instance = NetworkAnalysisWindow(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode) # Renamed
             window_instance.set_params(params)
             window_instance.window_id = window_id
             self.netanal_windows[window_id] = {
@@ -987,4 +987,3 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                         if "I" in cset: cset["I"].setVisible(self.show_i)
                         if "Q" in cset: cset["Q"].setVisible(self.show_q)
                         if "Mag" in cset: cset["Mag"].setVisible(self.show_m)
-

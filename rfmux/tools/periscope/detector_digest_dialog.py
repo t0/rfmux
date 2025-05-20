@@ -19,7 +19,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                  dac_scales: dict = None, # {module_id: scale_dbm}
                  zoom_box_mode: bool = True,
                  target_module: int = None,
-                 normalize_plot3: bool = False): # Added for Plot 3 normalization
+                 normalize_plot3: bool = False, # Added for Plot 3 normalization
+                 dark_mode: bool = False): # Added dark mode parameter
         super().__init__(parent)
         self.resonance_data_for_digest = resonance_data_for_digest or {} # {amp_raw: {'data': sweep_data_dict, 'actual_cf_hz': float}}
         self.detector_id = detector_id
@@ -29,6 +30,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.zoom_box_mode = zoom_box_mode
         self.target_module = target_module
         self.normalize_plot3 = normalize_plot3
+        self.dark_mode = dark_mode # Store dark mode setting
         
         # Store reference to parent to ensure proper behavior
         self.parent_window = parent
@@ -51,7 +53,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self._setup_ui()
         self._update_plots()
 
-        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title:.6f} GHz)")
+        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id+1}  ({self.resonance_frequency_ghz_title:.6f} GHz)")
         # Set window flags to ensure proper behavior as a standalone window
         self.setWindowFlags(QtCore.Qt.WindowType.Window)
         self.resize(1200, 450) # Adjusted initial size
@@ -65,8 +67,12 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         # Create a vertical layout for title and plots
         outer_layout = QtWidgets.QVBoxLayout(central_widget)
         
+        # Set the background color of the dialog based on dark mode
+        bg_color = "#1C1C1C" if self.dark_mode else "#FFFFFF"
+        central_widget.setStyleSheet(f"background-color: {bg_color};")
+        
         # Add a title label at the top
-        title_text = f"Detector {self.detector_id}  ({self.resonance_frequency_ghz_title:.6f} GHz)"
+        title_text = f"Detector {self.detector_id+1} ({self.resonance_frequency_ghz_title:.6f} GHz)"
         title_label = QtWidgets.QLabel(title_text)
         title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         font = title_label.font()
@@ -119,6 +125,33 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         # Apply zoom box mode
         self._apply_zoom_box_mode_to_all()
+        
+        # Apply initial theme to plots
+        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        
+        # Apply to Plot 1: Sweep vs freq
+        self.plot1_sweep_vs_freq.setBackground(bg_color)
+        for axis_name in ("left", "bottom", "right", "top"):
+            ax = self.plot1_sweep_vs_freq.getPlotItem().getAxis(axis_name)
+            if ax:
+                ax.setPen(pen_color)
+                ax.setTextPen(pen_color)
+        
+        # Apply to Plot 2: IQ plane
+        self.plot2_iq_plane.setBackground(bg_color)
+        for axis_name in ("left", "bottom", "right", "top"):
+            ax = self.plot2_iq_plane.getPlotItem().getAxis(axis_name)
+            if ax:
+                ax.setPen(pen_color)
+                ax.setTextPen(pen_color)
+        
+        # Apply to Plot 3: Bias amplitude optimization
+        self.plot3_bias_opt.setBackground(bg_color)
+        for axis_name in ("left", "bottom", "right", "top"):
+            ax = self.plot3_bias_opt.getPlotItem().getAxis(axis_name)
+            if ax:
+                ax.setPen(pen_color)
+                ax.setTextPen(pen_color)
 
     def _apply_zoom_box_mode_to_all(self):
         for plot_widget in [self.plot1_sweep_vs_freq, self.plot2_iq_plane, self.plot3_bias_opt]:
@@ -166,7 +199,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 
                 x_axis_hz_offset = freqs_hz_active - self.current_plot_offset_hz
 
-                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_mag_volts, pen=pg.mkPen('w', width=LINE_WIDTH), name="|I + iQ|")
+                # Use white for dark mode, black for light mode for the magnitude curve
+                mag_color = 'w' if self.dark_mode else 'k'
+                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_mag_volts, pen=pg.mkPen(mag_color, width=LINE_WIDTH), name="|I + iQ|")
                 self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_i_volts, pen=pg.mkPen('b', style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH), name="I")
                 self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_q_volts, pen=pg.mkPen('b', width=LINE_WIDTH), name="Q")
                 self.plot1_sweep_vs_freq.autoRange()
@@ -184,7 +219,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             if rotation_tod_iq is not None and rotation_tod_iq.size > 0:
                 tod_i_volts = convert_roc_to_volts(rotation_tod_iq.real)
                 tod_q_volts = convert_roc_to_volts(rotation_tod_iq.imag)
-                self.plot2_iq_plane.plot(tod_i_volts, tod_q_volts, pen=None, symbol='o', symbolBrush='w', symbolSize=3, name="Noise TOD")
+                # Use white for dark mode, black for light mode for the noise points
+                noise_color = 'w' if self.dark_mode else 'k'
+                self.plot2_iq_plane.plot(tod_i_volts, tod_q_volts, pen=None, symbol='o', symbolBrush=noise_color, symbolSize=3, name="Noise TOD")
             
             self.plot2_iq_plane.autoRange()
         
@@ -222,9 +259,12 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                         current_pen = pg.mkPen(color_str, width=LINE_WIDTH)
                     else: # num_amps > 4
                         cmap = pg.colormap.get('inferno') # Or 'magma'
-                        # Adjust colormap: map [0,1] to [0.3, 1]
+                        # Adjust colormap: map [0,1] to [0.3, 1] if dark mode
                         norm_idx = idx / max(1, num_amps - 1)
-                        color_val_in_map = 0.3 + norm_idx * 0.7
+                        if self.dark_mode:
+                            color_val_in_map = 0.3 + norm_idx * 0.7
+                        else:
+                            color_val_in_map = norm_idx * 0.9
                         color_from_map = cmap.map(color_val_in_map) 
                         current_pen = pg.mkPen(color_from_map, width=LINE_WIDTH)
                 
@@ -294,3 +334,46 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             
             self._update_plots() # Redraw all plots with new active sweep and new x-axis offset
             ev.accept() # Event handled
+            
+    def apply_theme(self, dark_mode: bool):
+        """Apply the dark/light theme to all plots in this window."""
+        self.dark_mode = dark_mode
+        
+        # Set the background color of the central widget
+        central_widget = self.centralWidget()
+        if central_widget:
+            bg_color_hex = "#1C1C1C" if dark_mode else "#FFFFFF"
+            central_widget.setStyleSheet(f"background-color: {bg_color_hex};")
+        
+        # Apply theme to all plots
+        bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
+        
+        # Apply to Plot 1: Sweep vs freq
+        if self.plot1_sweep_vs_freq:
+            self.plot1_sweep_vs_freq.setBackground(bg_color)
+            for axis_name in ("left", "bottom", "right", "top"):
+                ax = self.plot1_sweep_vs_freq.getPlotItem().getAxis(axis_name)
+                if ax:
+                    ax.setPen(pen_color)
+                    ax.setTextPen(pen_color)
+        
+        # Apply to Plot 2: IQ plane
+        if self.plot2_iq_plane:
+            self.plot2_iq_plane.setBackground(bg_color)
+            for axis_name in ("left", "bottom", "right", "top"):
+                ax = self.plot2_iq_plane.getPlotItem().getAxis(axis_name)
+                if ax:
+                    ax.setPen(pen_color)
+                    ax.setTextPen(pen_color)
+        
+        # Apply to Plot 3: Bias amplitude optimization
+        if self.plot3_bias_opt:
+            self.plot3_bias_opt.setBackground(bg_color)
+            for axis_name in ("left", "bottom", "right", "top"):
+                ax = self.plot3_bias_opt.getPlotItem().getAxis(axis_name)
+                if ax:
+                    ax.setPen(pen_color)
+                    ax.setTextPen(pen_color)
+        
+        # Redraw all plots to update curve colors based on dark mode setting
+        self._update_plots()

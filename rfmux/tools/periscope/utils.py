@@ -86,7 +86,7 @@ DEFAULT_AMP_ITERATIONS = 10  # Default number of iterations for linspace
 
 # Multisweep defaults
 MULTISWEEP_DEFAULT_AMPLITUDE = DEFAULT_AMPLITUDE  # Same as network analysis default
-MULTISWEEP_DEFAULT_SPAN_HZ = 100000.0  # 100 kHz span per resonance
+MULTISWEEP_DEFAULT_SPAN_HZ = 50000.0  # 100 kHz span per resonance
 MULTISWEEP_DEFAULT_NPOINTS = 101  # Points per sweep
 MULTISWEEP_DEFAULT_NSAMPLES = DEFAULT_NSAMPLES  # Samples to average (10)
 
@@ -119,7 +119,7 @@ def _check_xcb_cursor_runtime() -> bool:
     if platform.system() != "Linux":        # macOS/Windows ship Qt plugins that do not need it
         return True
 
-    libname = ctypes.util.find_library("xcb-cursor")   # returns None if not found
+    libname = ctypes.util.find_library("xcb-cursor")
     if libname is None:
         warnings.warn(
             "System library 'libxcb-cursor0' is missing.\n"
@@ -129,8 +129,12 @@ def _check_xcb_cursor_runtime() -> bool:
         )
         return False
     try:
-        ctypes.CDLL(libname)    # will raise OSError on broken symlink
-        return True
+        # Ensure libname is not None before passing to CDLL
+        if libname:
+            ctypes.CDLL(libname)    # will raise OSError on broken symlink
+            return True
+        else: # Should have been caught by the earlier check, but as a safeguard
+            return False 
     except OSError as exc:
         warnings.warn(
             f"libxcb-cursor was found ({libname}) but cannot be loaded: {exc}. Try reinstalling it.",
@@ -352,11 +356,15 @@ class Circular:
 # ───────────────────────── Custom Plot Controls ─────────────────────────
 class ClickableViewBox(pg.ViewBox):
     # Signal to emit the mouse event on double click, allowing connected slots to accept it.
-    doubleClickedEvent = pyqtSignal(object) 
+    doubleClickedEvent = pyqtSignal(object)
+    # Declare attributes that are dynamically assigned elsewhere to satisfy Pylance
+    parent_window: Optional[QtWidgets.QWidget] = None
+    module_id: Optional[int] = None
+    plot_role: Optional[str] = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.setMouseMode(pg.ViewBox.RectMode)  
+        self.setMouseMode(pg.ViewBox.RectMode)
 
     def enableZoomBoxMode(self, enable=True):
         self.setMouseMode(pg.ViewBox.RectMode if enable else pg.ViewBox.PanMode)

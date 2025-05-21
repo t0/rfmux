@@ -5,11 +5,7 @@ import os
 import csv
 
 # Imports from within the 'periscope' subpackage
-from .utils import (
-    QtWidgets, QtCore, pg, np, ClickableViewBox, UnitConverter, fitting, 
-    LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ,
-    DEFAULT_CABLE_LENGTH, DEFAULT_AMPLITUDE, RESONANCE_LINE_COLOR
-)
+from .utils import *
 # from .tasks import * # Not directly used by this class, dialogs will import what they need.
 
 # Dialogs are now imported from .dialogs within the same package
@@ -238,6 +234,11 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
         layout.addWidget(self.tabs)
         
         self.plots = {}
+        # Initialize amp_plot and phase_plot to None or a default PlotWidget
+        # to ensure they are bound before setXLink is called.
+        last_amp_plot: Optional[pg.PlotWidget] = None
+        last_phase_plot: Optional[pg.PlotWidget] = None
+
         for module in self.modules:
             tab = QtWidgets.QWidget()
             tab_layout = QtWidgets.QVBoxLayout(tab)
@@ -248,35 +249,39 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             vb_amp.module_id = module
             vb_amp.plot_role = 'amp'
             amp_plot = pg.PlotWidget(viewBox=vb_amp, title=f"Module {module} - Magnitude")
-            self._update_amplitude_labels(amp_plot)
-            amp_plot.setLabel('bottom', 'Frequency', units='Hz')
-            amp_plot.showGrid(x=True, y=True, alpha=0.3)
+            plot_item_amp = amp_plot.getPlotItem()
+            if plot_item_amp:
+                self._update_amplitude_labels(amp_plot) # amp_plot is PlotWidget, _update_amplitude_labels expects PlotWidget
+                plot_item_amp.setLabel('bottom', 'Frequency', units='Hz')
+                plot_item_amp.showGrid(x=True, y=True, alpha=0.3)
 
             vb_phase = ClickableViewBox()
             vb_phase.parent_window = self
             vb_phase.module_id = module
             vb_phase.plot_role = 'phase'
             phase_plot = pg.PlotWidget(viewBox=vb_phase, title=f"Module {module} - Phase")
-            phase_plot.setLabel('left', 'Phase', units='deg')
-            phase_plot.setLabel('bottom', 'Frequency', units='Hz')
-            phase_plot.showGrid(x=True, y=True, alpha=0.3)
+            plot_item_phase = phase_plot.getPlotItem()
+            if plot_item_phase:
+                plot_item_phase.setLabel('left', 'Phase', units='deg')
+                plot_item_phase.setLabel('bottom', 'Frequency', units='Hz')
+                plot_item_phase.showGrid(x=True, y=True, alpha=0.3)
             
             # Add legends for multiple amplitude plots with proper text color
             bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-            amp_legend = amp_plot.addLegend(offset=(30, 10), labelTextColor=pen_color)
-            phase_legend = phase_plot.addLegend(offset=(30, 10), labelTextColor=pen_color)
+            amp_legend = plot_item_amp.addLegend(offset=(30, 10), labelTextColor=pen_color) if plot_item_amp else None
+            phase_legend = plot_item_phase.addLegend(offset=(30, 10), labelTextColor=pen_color) if plot_item_phase else None
 
             # Create curves with periscope color scheme - but don't add data yet
-            amp_curve = amp_plot.plot([], [], pen=pg.mkPen(TABLEAU10_COLORS[1], width=LINE_WIDTH))  # Empty data
-            phase_curve = phase_plot.plot([], [], pen=pg.mkPen(TABLEAU10_COLORS[0], width=LINE_WIDTH))  # Empty data
+            amp_curve = plot_item_amp.plot([], [], pen=pg.mkPen(TABLEAU10_COLORS[1], width=LINE_WIDTH)) if plot_item_amp else None
+            phase_curve = plot_item_phase.plot([], [], pen=pg.mkPen(TABLEAU10_COLORS[0], width=LINE_WIDTH)) if plot_item_phase else None
 
             tab_layout.addWidget(amp_plot)
             tab_layout.addWidget(phase_plot)
             self.tabs.addTab(tab, f"Module {module}")
             
             self.plots[module] = {
-                'amp_plot': amp_plot,
-                'phase_plot': phase_plot,
+                'amp_plot': amp_plot, # amp_plot is PlotWidget here
+                'phase_plot': phase_plot, # phase_plot is PlotWidget here
                 'amp_curve': amp_curve,
                 'phase_curve': phase_curve,
                 'amp_legend': amp_legend,
@@ -286,16 +291,19 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
                 'resonance_lines_mag': [], # For storing magnitude resonance lines
                 'resonance_lines_phase': [] # For storing phase resonance lines
             }
+            last_amp_plot = amp_plot
+            last_phase_plot = phase_plot
             
         # Apply zoom box mode
-        self._apply_zoom_box_mode()            
+        self._apply_zoom_box_mode()
 
-        # Link the x-axis of amplitude and phase plots for synchronized zooming
-        phase_plot.setXLink(amp_plot)
+        # Link the x-axis of the last created amplitude and phase plots for synchronized zooming
+        if last_phase_plot and last_amp_plot:
+            last_phase_plot.setXLink(last_amp_plot)
         
         # Apply initial theme based on dark_mode setting
-        self._apply_theme_to_plot(amp_plot)
-        self._apply_theme_to_plot(phase_plot)
+        if last_amp_plot: self._apply_theme_to_plot(last_amp_plot)
+        if last_phase_plot: self._apply_theme_to_plot(last_phase_plot)
         
     def _apply_theme_to_plot(self, plot_widget):
         """Apply the current theme to a specific plot widget."""
@@ -583,25 +591,27 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
                 amplitude = DEFAULT_AMPLITUDE
         return amplitude, freqs, amps, phases, iq_data
 
-    def closeEvent(self, event):
+    def closeEvent(self, event: pg.QtGui.QCloseEvent): # Corrected signature
         """Handle window close event by cleaning up resources."""
-        parent = self.parent()
+        parent_widget = self.parent()
         
-        if parent and hasattr(parent, 'netanal_windows'):
+        if parent_widget and hasattr(parent_widget, 'netanal_windows'):
             window_id = None
-            for w_id, w_data in parent.netanal_windows.items():
+            for w_id, w_data in parent_widget.netanal_windows.items(): # type: ignore
                 if w_data['window'] == self:
                     window_id = w_id
                     break
             
             if window_id:
-                if hasattr(parent, 'netanal_tasks'):
-                    for task_key in list(parent.netanal_tasks.keys()):
+                if hasattr(parent_widget, 'netanal_tasks'):
+                    # Assuming netanal_tasks is a dict
+                    for task_key in list(parent_widget.netanal_tasks.keys()): # type: ignore
                         if task_key.startswith(f"{window_id}_"):
-                            task = parent.netanal_tasks.pop(task_key)
-                            task.stop()
+                            task = parent_widget.netanal_tasks.pop(task_key) # type: ignore
+                            if hasattr(task, 'stop'): 
+                                task.stop() # type: ignore
                 
-                parent.netanal_windows.pop(window_id, None)
+                parent_widget.netanal_windows.pop(window_id, None) # type: ignore
         
         super().closeEvent(event)
 
@@ -825,18 +835,20 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
                 if self.progress_group:
                     self.progress_group.setVisible(True)
                 
-                self.parent()._rerun_network_analysis(self.current_params)
+                if self.parent() and hasattr(self.parent(), '_rerun_network_analysis'):
+                    self.parent()._rerun_network_analysis(self.current_params) # type: ignore
 
     def _rerun_analysis(self):
         """Re-run the analysis with potentially updated parameters."""
-        if hasattr(self.parent(), '_rerun_network_analysis'):
+        parent_widget = self.parent()
+        if parent_widget and hasattr(parent_widget, '_rerun_network_analysis'):
             params = self.current_params.copy()
             params['module_cable_lengths'] = self.module_cable_lengths.copy()
             params.pop('cable_length', None)
 
             if self.progress_group:
                 self.progress_group.setVisible(True)
-            self.parent()._rerun_network_analysis(params)
+            parent_widget._rerun_network_analysis(params) # type: ignore
     
     def set_params(self, params):
         """Set parameters for analysis."""
@@ -889,10 +901,32 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
                 amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
             
             amps_list = self.original_params.get('amps', [amplitude])
-            if amplitude in amps_list: amp_index = amps_list.index(amplitude)
-            else: amp_index = 0
-                
-            color = TABLEAU10_COLORS[amp_index % len(TABLEAU10_COLORS)]
+            if amplitude in amps_list:
+                amp_index = amps_list.index(amplitude)
+            else:
+                # Fallback if amplitude is not in the predefined list (should ideally not happen if params are consistent)
+                # Treat as a new, distinct amplitude for color indexing if it's an unexpected one.
+                # This might happen if data is updated with an amplitude not in original_params.
+                # For simplicity, let's use a modulo of existing curves if this case is hit,
+                # or default to the first color if it's the very first one.
+                amp_index = len(self.plots[module]['amp_curves']) % len(TABLEAU10_COLORS)
+
+            num_amps_total = len(amps_list)
+            color = None
+
+            if num_amps_total <= 5:
+                color = TABLEAU10_COLORS[amp_index % len(TABLEAU10_COLORS)]
+            else:
+                use_cmap = pg.colormap.get(COLORMAP_CHOICES["AMPLITUDE_SWEEP"])
+                # Ensure amp_index is valid for normalization if num_amps_total is 1
+                normalized_idx = amp_index / max(1, num_amps_total - 1) if num_amps_total > 1 else 0.0
+                if self.dark_mode:
+                    # For dark mode, map to [0.3, 1.0]
+                    map_value = 0.3 + normalized_idx * 0.7
+                else:
+                    # For light mode, map to [0.0, 0.75]
+                    map_value = normalized_idx * 0.75
+                color = use_cmap.map(map_value) if use_cmap else TABLEAU10_COLORS[amp_index % len(TABLEAU10_COLORS)] # Fallback
             
             is_new_curve = False
             if amplitude not in self.plots[module]['amp_curves']:

@@ -172,55 +172,64 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         vb_mag = ClickableViewBox() # Custom viewbox for potential extra click interactions
         vb_mag.parent_window = self # Link back to this window if needed by viewbox
         self.combined_mag_plot = pg.PlotWidget(viewBox=vb_mag)
-        # Set title with explicit color
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-        self.combined_mag_plot.getPlotItem().setTitle("Combined S21 Magnitude (All Resonances)", color=pen_color)
-        self.combined_mag_plot.setLabel('bottom', 'Frequency', units='Hz')
+        plot_item_mag = self.combined_mag_plot.getPlotItem()
+        if plot_item_mag: # Add check for None
+            plot_item_mag.setTitle("Combined S21 Magnitude (All Resonances)", color=pen_color)
+            plot_item_mag.setLabel('bottom', 'Frequency', units='Hz')
+            plot_item_mag.showGrid(x=True, y=True, alpha=0.3)
+            self.mag_legend = plot_item_mag.addLegend(offset=(30,10),labelTextColor=pen_color)
         self._update_mag_plot_label() # Set initial Y-axis label based on unit mode
-        self.combined_mag_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.mag_legend = self.combined_mag_plot.addLegend(offset=(30,10),labelTextColor=pen_color)
         plot_layout.addWidget(self.combined_mag_plot)
 
         # Phase Plot
         vb_phase = ClickableViewBox()
         vb_phase.parent_window = self
         self.combined_phase_plot = pg.PlotWidget(viewBox=vb_phase)
-        # Set title with explicit color
-        self.combined_phase_plot.getPlotItem().setTitle("Combined S21 Phase (All Resonances)", color=pen_color)
-        self.combined_phase_plot.setLabel('bottom', 'Frequency', units='Hz')
-        self.combined_phase_plot.setLabel('left', 'Phase', units='deg')
-        self.combined_phase_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.phase_legend = self.combined_phase_plot.addLegend(offset=(30,10), labelTextColor=pen_color)
+        plot_item_phase = self.combined_phase_plot.getPlotItem()
+        if plot_item_phase: # Add check for None
+            plot_item_phase.setTitle("Combined S21 Phase (All Resonances)", color=pen_color)
+            plot_item_phase.setLabel('bottom', 'Frequency', units='Hz')
+            plot_item_phase.setLabel('left', 'Phase', units='deg')
+            plot_item_phase.showGrid(x=True, y=True, alpha=0.3)
+            self.phase_legend = plot_item_phase.addLegend(offset=(30,10), labelTextColor=pen_color)
         plot_layout.addWidget(self.combined_phase_plot)
         
         layout.addWidget(plot_container)
         
         # Link X-axes of magnitude and phase plots for synchronized zooming/panning
-        self.combined_phase_plot.setXLink(self.combined_mag_plot)
+        if self.combined_phase_plot and self.combined_mag_plot: # Add check for None
+            self.combined_phase_plot.setXLink(self.combined_mag_plot)
         self._apply_zoom_box_mode() # Apply initial zoom box mode state
         
         # Apply initial theme based on dark_mode setting
-        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        # bg_color, pen_color are already defined
         
         if self.combined_mag_plot:
             self.combined_mag_plot.setBackground(bg_color)
-            for axis_name in ("left", "bottom", "right", "top"):
-                ax = self.combined_mag_plot.getPlotItem().getAxis(axis_name)
-                if ax:
-                    ax.setPen(pen_color)
-                    ax.setTextPen(pen_color)
+            plot_item_mag_for_axes = self.combined_mag_plot.getPlotItem()
+            if plot_item_mag_for_axes: # Add check for None
+                for axis_name in ("left", "bottom", "right", "top"):
+                    ax = plot_item_mag_for_axes.getAxis(axis_name)
+                    if ax:
+                        ax.setPen(pen_color)
+                        ax.setTextPen(pen_color)
                     
         if self.combined_phase_plot:
             self.combined_phase_plot.setBackground(bg_color)
-            for axis_name in ("left", "bottom", "right", "top"):
-                ax = self.combined_phase_plot.getPlotItem().getAxis(axis_name)
-                if ax:
-                    ax.setPen(pen_color)
-                    ax.setTextPen(pen_color)
+            plot_item_phase_for_axes = self.combined_phase_plot.getPlotItem()
+            if plot_item_phase_for_axes: # Add check for None
+                for axis_name in ("left", "bottom", "right", "top"):
+                    ax = plot_item_phase_for_axes.getAxis(axis_name)
+                    if ax:
+                        ax.setPen(pen_color)
+                        ax.setTextPen(pen_color)
 
         # Connect double click signal from magnitude plot's viewbox
-        if isinstance(self.combined_mag_plot.getViewBox(), ClickableViewBox):
-            self.combined_mag_plot.getViewBox().doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
+        if self.combined_mag_plot: # Add check for None
+            view_box_mag = self.combined_mag_plot.getViewBox()
+            if isinstance(view_box_mag, ClickableViewBox):
+                view_box_mag.doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
 
 
     def _toggle_trace_normalization(self, checked):
@@ -407,7 +416,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         
         # Define color schemes for plotting multiple amplitudes
         # Use a distinct color family for few amplitudes, switch to a colormap for many
-        use_cmap = pg.colormap.get(COLORMAP_CHOICES["AMPLITUDE_SWEEP"])
+        cmap_name = COLORMAP_CHOICES.get("AMPLITUDE_SWEEP", "inferno") # Fallback if key missing
+        use_cmap = pg.colormap.get(cmap_name) if cmap_name else None
         
         sorted_amplitudes = sorted(self.results_by_amplitude.keys())
         legend_items_mag = {} # To avoid duplicate legend entries for the same amplitude
@@ -418,10 +428,20 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             amp_results = self.results_by_amplitude[amp_val]
             
             # Determine color for this amplitude's curves
-            if num_amps <= len(TABLEAU10_COLORS): # Use distinct colors if few amplitudes
+            if num_amps <= 5: # Use distinct colors if few amplitudes
                 color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
             else: # Use a colormap for many amplitudes
-                color = use_cmap.map(amp_idx / max(1, num_amps - 1)) # Normalize index for colormap
+                if use_cmap:
+                    normalized_idx = amp_idx / max(1, num_amps - 1) # Normalize index for colormap base [0,1]
+                    if self.dark_mode:
+                        # For dark mode, map to [0.3, 1.0]
+                        map_value = 0.3 + normalized_idx * 0.7
+                    else:
+                        # For light mode, map to [0.0, 0.75]
+                        map_value = normalized_idx * 0.75
+                    color = use_cmap.map(map_value)
+                else: # Fallback if colormap is somehow None
+                    color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
             pen = pg.mkPen(color, width=LINE_WIDTH)
             
             # --- Prepare Legend Entry for this Amplitude ---
@@ -448,12 +468,12 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 legend_name_amp = f"Probe: {amp_val:.3e} Norm"
 
             # Add legend item only once per amplitude
-            if amp_val not in legend_items_mag:
+            if amp_val not in legend_items_mag and self.mag_legend:
                 # Create a dummy item for the legend (actual curves are added later)
                 dummy_mag_curve_for_legend = pg.PlotDataItem(pen=pen) 
                 self.mag_legend.addItem(dummy_mag_curve_for_legend, legend_name_amp)
                 legend_items_mag[amp_val] = dummy_mag_curve_for_legend # Mark as added
-            if amp_val not in legend_items_phase:
+            if amp_val not in legend_items_phase and self.phase_legend:
                 dummy_phase_curve_for_legend = pg.PlotDataItem(pen=pen)
                 self.phase_legend.addItem(dummy_phase_curve_for_legend, legend_name_amp)
                 legend_items_phase[amp_val] = dummy_phase_curve_for_legend
@@ -547,7 +567,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         
         # If parent has multisweep_tasks, check if any are for this window
         if hasattr(parent, 'multisweep_tasks'):
-            for task_key, task in parent.multisweep_tasks.items():
+            for task_key, task in parent.multisweep_tasks.items(): # type: ignore
                 if hasattr(task, 'target_window') and task.target_window == self:
                     if not task.is_completed():
                         window_has_active_tasks = True
@@ -581,8 +601,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         Exports the collected multisweep results to a pickle file using a non-blocking dialog.
         """
         # Thread marshalling - ensure we're on the main GUI thread
-        if QtCore.QThread.currentThread() != QtWidgets.QApplication.instance().thread():
-            QtCore.QMetaObject.invokeMethod(self, "_export_data", 
+        app_instance = QtWidgets.QApplication.instance()
+        if app_instance and QtCore.QThread.currentThread() != app_instance.thread():
+            QtCore.QMetaObject.invokeMethod(self, "_export_data",
                                         QtCore.Qt.ConnectionType.QueuedConnection)
             return
             
@@ -694,25 +715,29 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             if not new_amps_for_this_run: # No amplitudes specified, fall back or warn
                  QtWidgets.QMessageBox.warning(self, "Configuration Error", "No amplitudes specified for the new sweep.")
                  # Default to conceptual, or could use resonance_frequencies_from_dialog
-                 final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog
+                 final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog if resonance_frequencies_from_dialog else list(self.conceptual_resonance_frequencies)
             elif new_amps_for_this_run == self.current_run_amps:
                 # Amplitudes haven't changed from the last run configuration.
                 # Use the frequencies that were in the dialog (which were seeded from history).
-                final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog
+                final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog if resonance_frequencies_from_dialog else list(self.conceptual_resonance_frequencies)
             else:
                 # Amplitudes have changed. For each conceptual resonance,
                 # find the best historical CF based on the *new* representative amplitude.
                 # If no history, use what was in the dialog (which was seeded based on old rep. amp or conceptual).
-                representative_new_amp = new_amps_for_this_run[0]
-                for idx, conceptual_cf in enumerate(self.conceptual_resonance_frequencies):
-                    remembered_cf = self._get_closest_remembered_cf(idx, representative_new_amp)
-                    if remembered_cf is not None:
-                        final_baseline_cfs_for_new_task[idx] = remembered_cf
-                    else:
-                        # Fallback to what was in the dialog for this index if no better history for new amp
-                        if idx < len(resonance_frequencies_from_dialog):
-                             final_baseline_cfs_for_new_task[idx] = resonance_frequencies_from_dialog[idx]
-                        # Else it remains the conceptual_cf (already initialized)
+                if new_amps_for_this_run: # Ensure there's at least one new amp
+                    representative_new_amp = new_amps_for_this_run[0]
+                    for idx, conceptual_cf in enumerate(self.conceptual_resonance_frequencies):
+                        remembered_cf = self._get_closest_remembered_cf(idx, representative_new_amp)
+                        if remembered_cf is not None:
+                            final_baseline_cfs_for_new_task[idx] = remembered_cf
+                        else:
+                            # Fallback to what was in the dialog for this index if no better history for new amp
+                            if idx < len(resonance_frequencies_from_dialog):
+                                 final_baseline_cfs_for_new_task[idx] = resonance_frequencies_from_dialog[idx]
+                            # Else it remains the conceptual_cf (already initialized)
+                else: # Should be caught by the "No amplitudes specified" case, but as a safeguard
+                    final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog if resonance_frequencies_from_dialog else list(self.conceptual_resonance_frequencies)
+
 
             # Update the 'resonance_frequencies' in new_params_from_dialog to be this chosen baseline
             new_params_from_dialog['resonance_frequencies'] = final_baseline_cfs_for_new_task
@@ -725,32 +750,36 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             # Reset window state for the new sweep
             self.results_by_amplitude.clear()
             self._redraw_plots() # Clear plots
-            self.progress_bar.setValue(0)
-            self.progress_group.setVisible(True)
+            if self.progress_bar: self.progress_bar.setValue(0)
+            if self.progress_group: self.progress_group.setVisible(True)
             
             total_sweeps = len(self.probe_amplitudes)
-            if total_sweeps > 0:
-                first_amplitude = self.probe_amplitudes[0]
-                self.current_amp_label.setText(f"Amplitude 1/{total_sweeps} ({first_amplitude:.4f})")
-            else:
-                self.current_amp_label.setText("No sweeps defined. (Waiting...)")
+            if self.current_amp_label:
+                if total_sweeps > 0:
+                    first_amplitude = self.probe_amplitudes[0]
+                    self.current_amp_label.setText(f"Amplitude 1/{total_sweeps} ({first_amplitude:.4f})")
+                else:
+                    self.current_amp_label.setText("No sweeps defined. (Waiting...)")
             
-            if hasattr(self.parent(), '_start_multisweep_analysis_for_window'):
+            parent_widget = self.parent()
+            parent_widget = self.parent()
+            if parent_widget and hasattr(parent_widget, '_start_multisweep_analysis_for_window'):
                 # Pass self.initial_params which now contains the correctly determined baseline CFs
-                self.parent()._start_multisweep_analysis_for_window(self, self.initial_params)
+                parent_widget._start_multisweep_analysis_for_window(self, self.initial_params) # type: ignore
             else:
                 QtWidgets.QMessageBox.warning(self, "Error",
                                               "Cannot trigger re-run. Parent linkage or method missing.")
 
-    def closeEvent(self, event):
+    def closeEvent(self, event: pg.QtGui.QCloseEvent):
         """
         Overrides QWidget.closeEvent.
         Notifies the parent/controller to stop any ongoing tasks associated with this window
         before closing.
         """
+        parent_widget = self.parent()
         # Check if the parent object has a method to stop tasks for this window
-        if hasattr(self.parent(), 'stop_multisweep_task_for_window'):
-            self.parent().stop_multisweep_task_for_window(self)
+        if parent_widget and hasattr(parent_widget, 'stop_multisweep_task_for_window'):
+            parent_widget.stop_multisweep_task_for_window(self) # type: ignore
         super().closeEvent(event) # Proceed with the standard close event handling
 
     def _toggle_cf_lines_visibility(self, checked):
@@ -772,17 +801,28 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 return
 
             # Color definitions (consistent with _redraw_plots)
-            use_cmap = pg.colormap.get(COLORMAP_CHOICES["AMPLITUDE_SWEEP"])
+            cmap_name = COLORMAP_CHOICES.get("AMPLITUDE_SWEEP", "inferno")
+            use_cmap = pg.colormap.get(cmap_name) if cmap_name else None
             sorted_amplitudes = sorted(self.results_by_amplitude.keys())
 
             for amp_idx, amp_val in enumerate(sorted_amplitudes):
                 amp_results = self.results_by_amplitude.get(amp_val, {})
                 
                 # Determine color for this amplitude's lines
-                if num_amps <= len(TABLEAU10_COLORS): # Use distinct colors if few amplitudes
+                if num_amps <= 5: # Use distinct colors if few amplitudes
                     color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
                 else: # Use a colormap for many amplitudes
-                    color = use_cmap.map(amp_idx / max(1, num_amps - 1)) # Normalize index for colormap
+                    if use_cmap:
+                        normalized_idx = amp_idx / max(1, num_amps - 1) # Normalize index for colormap base [0,1]
+                        if self.dark_mode:
+                            # For dark mode, map to [0.3, 1.0]
+                            map_value = 0.3 + normalized_idx * 0.7
+                        else:
+                            # For light mode, map to [0.0, 0.75]
+                            map_value = normalized_idx * 0.75
+                        color = use_cmap.map(map_value)
+                    else: # Fallback if colormap is somehow None
+                        color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
                 
                 # Define pen for CF lines (consistent with _redraw_plots)
                 # Note: LINE_WIDTH should be available from 'from .utils import LINE_WIDTH'
@@ -840,6 +880,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
         # Get click coordinates in view space from the event's scenePos
         # The event 'ev' is a QGraphicsSceneMouseEvent from pyqtgraph
+        if not self.combined_mag_plot: return
         view_box = self.combined_mag_plot.getViewBox()
         if not view_box: return
 
@@ -925,14 +966,13 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
             # Create a non-modal window for the detector digest
             digest_window = DetectorDigestWindow(
-                parent=self,
-                resonance_data_for_digest=resonance_data_for_digest, # This needs to be {amp: {'data': data_dict, 'actual_cf_hz': output_cf_for_this_amp}}
-                                                                    # where data_dict is the full value from self.results_by_amplitude[amp_key][output_cf_for_this_amp]
+                parent=self, # type: ignore # parent is QWidget, DetectorDigestWindow expects QWidget
+                resonance_data_for_digest=resonance_data_for_digest,
                 detector_id=detector_id,
-                resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9, # Use conceptual for title
+                resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
                 dac_scales=self.dac_scales,
                 zoom_box_mode=self.zoom_box_mode,
-                target_module=self.target_module,
+                target_module=self.target_module, # type: ignore # target_module is int | None, DetectorDigestWindow expects int
                 normalize_plot3=self.normalize_traces,
                 dark_mode=self.dark_mode
             )

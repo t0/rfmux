@@ -609,13 +609,74 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle("Periscope Help")
         help_text = (
-            "**Usage:**\n"
-            "  - Multi-channel grouping: use '&' to display multiple channels in one row.\n"
-            "    e.g., \"3&5\" for channels 3 and 5 in one row, \"3&5,7\" for that row plus a row with channel 7.\n\n"
-            # ... (rest of help text remains the same)
-            "**IPython / Jupyter:** invoke directly from CRS object\n"
-            "  - `>>> crs.raise_periscope(module=2, channels=\"3&5\")`\n"
-            "  - If in a non-blocking mode, you can still interact with your session concurrently.\n\n"
+            "# Periscope Help\n\n"
+            
+            "## Basic Usage\n"
+            "- **Channel Specification:** Specify channels using comma-separated values\n"
+            "  - Use `&` to group multiple channels in one row\n"
+            "  - Example: `3&5,7` displays channels 3 and 5 in one row, channel 7 in another row\n"
+            "- **Buffer Size:** Controls the amount of data stored for each channel, affecting FFT resolution\n"
+            "- **Pause/Resume:** Temporarily stop data acquisition while examining plots or settings\n\n"
+            
+            "## Plot Types\n"
+            "- **TOD (Time-Domain):** Raw time series data showing I, Q, and Magnitude components\n"
+            "- **IQ:** Complex plane visualization (density or scatter plot)\n"
+            "- **FFT:** Raw frequency spectrum\n"
+            "- **Single Sideband PSD:** Power spectrum with proper normalization for single-sideband analysis\n"
+            "- **Dual Sideband PSD:** Power spectrum optimized for dual-sideband analysis\n\n"
+            
+            "## Network Analysis Features\n"
+            "1. Click **Network Analyzer** to configure and launch a frequency sweep\n"
+            "2. Set frequency range, sweep resolution, and amplitude parameters\n"
+            "3. View amplitude and phase response vs. frequency\n"
+            "4. Use **Find Resonances** to automatically identify resonance frequencies\n"
+            "5. Use **Unwrap Cable Delay** to compensate for cable length effects\n"
+            "6. Click **Take Multisweep** to perform detailed analysis around resonances\n"
+            "7. Export data in various formats using the **Export Data** button\n\n"
+            
+            "## Multisweep Analysis\n"
+            "- Provides high-resolution frequency sweeps around identified resonances\n"
+            "- Allows amplitude-dependent characterization of resonators\n"
+            "- Extracts detector parameters like Q-factor, resonant frequency, and more\n\n"
+            
+            "## Display Options\n"
+            "- **Show Configuration:** Toggle to access advanced display settings\n"
+            "- **Show Curves:** Select which components (I, Q, Magnitude) to display\n"
+            "- **Real Units:** Toggle between raw counts and calibrated units (V, dBm)\n"
+            "- **IQ Mode:** Choose between density (2D histogram) and scatter display\n"
+            "- **PSD Mode:** Select absolute (dBm/Hz) or relative (dBc/Hz) scaling\n"
+            "- **Auto Scale:** Enable/disable automatic y-axis scaling\n"
+            "- **Zoom Box Mode:** When enabled, left-click drag creates a zoom box; when disabled, pans the plot\n"
+            "- **Dark Mode:** Toggle between light and dark UI themes\n\n"
+            
+            "## Interactive Features\n"
+            "- **Mouse Operations:**\n"
+            "  - Left-click drag: Zoom into region (when Zoom Box enabled) or pan (when disabled)\n"
+            "  - Mouse wheel: Zoom in/out around cursor position\n"
+            "  - Right-click: Access context menu with plot controls\n"
+            "  - Double-click: Show point coordinates\n"
+            "- **Interactive Session:** Open an embedded iPython console for direct data access\n"
+            "- **Initialize CRS:** Configure the CRS board settings (IRIG source, etc.)\n\n"
+            
+            "## Programmatic Usage\n"
+            "**From IPython/Jupyter:**\n"
+            "```python\n"
+            ">>> crs.raise_periscope(module=2, channels=\"3&5\")\n"
+            "```\n"
+            "- In non-blocking mode, you can still interact with your session concurrently\n\n"
+            
+            "## Command-Line Usage\n"
+            "```bash\n"
+            "$ cd rfmux\n"
+            "$ pip install . # Installs the commandline tool\n"
+            " periscope <hostname> [options]\n"
+            "```\n"
+            "Options:\n"
+            "- `--module <num>`: Specify module number (default: 1)\n"
+            "- `--channels <spec>`: Channel specification (default: \"1\")\n"
+            "- `--buffer <size>`: Buffer size (default: 5000)\n"
+            "- `--refresh <ms>`: GUI refresh rate in ms (default: 33)\n"
+            "- `--dot-px <size>`: Dot size for IQ density display (default: 1)\n"
         )
         help_dialog = QtWidgets.QDialog(self)
         help_dialog.setWindowTitle("Periscope Help")

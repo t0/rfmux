@@ -290,8 +290,8 @@ def mode_title(mode: str) -> str:
     Provide a more user-friendly label for each plot mode.
     """
     mode_titles = {
-        "T": "Time", "IQ": "IQ", "F": "Raw FFT",
-        "S": "SSB PSD", "D": "DSB PSD", "NA": "Network Analysis"
+        "T": "Timestream", "IQ": "IQ", "F": "Raw FFT",
+        "S": "Single Sideband PSD", "D": "Dual Sideband PSD", "NA": "Network Analysis"
     }
     return mode_titles.get(mode, mode)
 

@@ -10,6 +10,10 @@ It handles command-line argument parsing for launching Periscope from a terminal
 and provides a programmatic function (`raise_periscope`) for embedding or
 launching Periscope from other Python scripts or interactive sessions (e.g., IPython).
 
+The application can be run in two ways:
+1. Directly as a command after installation: `periscope <crs_board> [options]`
+2. As a Python module: `python -m rfmux.tools.periscope <crs_board> [options]`
+
 The core application logic and the main `Periscope` class are defined in the
 `app.py` module, with UI elements in `ui.py`, utility functions in `utils.py`,
 and background tasks in `tasks.py`.
@@ -44,6 +48,15 @@ def main():
     Periscope GUI. It supports features like multi-channel grouping,
     custom buffer sizes, frame rate control, and enabling network analysis.
     The application runs in a blocking mode until the GUI is closed.
+
+    The application can be launched in two ways:
+    - After installation with pip: `periscope <crs_board> [options]`
+    - As a Python module: `python -m rfmux.tools.periscope <crs_board> [options]`
+
+    The CRS board identifier can be specified in three formats:
+    - A hostname in the format rfmux####.local (e.g., "rfmux0042.local")
+    - Just the serial number (e.g., "0042") 
+    - A direct IP address (e.g., "192.168.2.100")
     """
     # --- Argument Parsing ---
     # Set up command-line argument parsing with a detailed description and examples.
@@ -79,12 +92,20 @@ def main():
 
         Example
         -------
-          $ python -m rfmux.tools.periscope rfmux0022.local --module 2 --channels "3&5,7" --enable-netanal
+          After installing with `pip install .` in the repository:
+          $ periscope rfmux0022.local --module 2 --channels "3&5,7"
+          $ periscope 0022 --module 2 --channels "3&5,7"
+          $ periscope 192.168.2.100 --module 2 --channels "3&5,7"
+          
+          Or directly as a Python module:
+          $ python -m rfmux.tools.periscope rfmux0022.local --module 2 --channels "3&5,7"
 
         Run with -h / --help for the full option list.
     """))
 
-    ap.add_argument("hostname")
+    ap.add_argument("crs_board", metavar="CRS_BOARD", 
+                    help="CRS board identifier: can be a hostname (rfmux####.local), "
+                         "a serial number (####), or an IP address")
     ap.add_argument("-m", "--module", type=int, default=1)
     ap.add_argument("-c", "--channels", default="1")
     ap.add_argument("-n", "--num-samples", type=int, default=DEFAULT_BUFFER_SIZE)
@@ -137,19 +158,23 @@ def main():
     # load_session and CRS are expected to be imported from .utils.
     crs_obj = None  # Initialize to None; will be set if successful.
     try:
-        # Attempt to extract a serial number from the provided hostname
-        # (e.g., "rfmux0022.local" -> "0022").
-        hostname = args.hostname
-        if "rfmux" in hostname and ".local" in hostname:
-            serial = hostname.replace("rfmux", "").replace(".local", "")
-            # Create a session and query for the CRS object based on the serial number.
-            # This is done synchronously for the CLI startup.
-            s = load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')            
+        # Parse the CRS board identifier - can be in three formats:
+        # 1. rfmux####.local (hostname with serial number)
+        # 2. #### (just the serial number)
+        # 3. Any other string (treated as direct hostname or IP address)
+        crs_board = args.crs_board
+        
+        # Check if it's a hostname in the format rfmux####.local
+        if "rfmux" in crs_board and ".local" in crs_board:
+            serial = crs_board.replace("rfmux", "").replace(".local", "")
+            s = load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')
+        # Check if it's just a serial number (all digits, possibly with leading zeros)
+        elif crs_board.isdigit() or (crs_board.startswith("0") and crs_board[1:].isdigit()):
+            serial = crs_board
+            s = load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')
         else:
-            # If hostname doesn't match expected pattern, use it directly as serial.
-            # This might be relevant for direct IP connections or other naming schemes.
-            serial = hostname
-            s = load_session(f'!HardwareMap [ !CRS {{ hostname: "{serial}" }} ]')        
+            # Treat as direct hostname or IP address
+            s = load_session(f'!HardwareMap [ !CRS {{ hostname: "{crs_board}" }} ]')
 
         crs_obj = s.query(CRS).one() # Expecting one CRS object.
         
@@ -169,9 +194,15 @@ def main():
         crs_obj = None  # Ensure crs_obj remains None.
 
     # --- Periscope Application Instantiation and Launch ---
+    # For the UDP Receiver, we need a valid hostname, not just a serial number
+    udp_hostname = args.crs_board
+    if args.crs_board.isdigit() or (args.crs_board.startswith("0") and args.crs_board[1:].isdigit()):
+        # If it's just a serial number, construct the proper hostname
+        udp_hostname = f"rfmux{args.crs_board}.local"
+        
     # Create the main Periscope window instance with configured parameters.
     viewer = Periscope(
-        host=args.hostname,
+        host=udp_hostname,
         module=args.module,
         chan_str=args.channels,
         buf_size=args.num_samples,
@@ -273,8 +304,17 @@ async def raise_periscope(
 
     refresh_ms = int(round(1000.0 / fps))  # Calculate refresh interval in milliseconds.
 
+    # For the UDP Receiver, we need a valid hostname, not just a serial number
+    # Get the hostname from the CRS object's tuber_hostname
+    udp_hostname = crs_param.tuber_hostname
+    
+    # Check if it's just a serial number without rfmux prefix and .local suffix
+    if (udp_hostname.isdigit() or (udp_hostname.startswith("0") and udp_hostname[1:].isdigit())):
+        # If it's just a serial number, construct the proper hostname
+        udp_hostname = f"rfmux{udp_hostname}.local"
+    
     viewer = Periscope(
-        host=crs_param.tuber_hostname,
+        host=udp_hostname,
         module=module,
         chan_str=channels,
         buf_size=buf_size,

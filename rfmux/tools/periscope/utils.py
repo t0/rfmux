@@ -53,6 +53,14 @@ MULTISWEEP_DEFAULT_SPAN_HZ = 100000.0  # 100 kHz span per resonance
 MULTISWEEP_DEFAULT_NPOINTS = 101  # Points per sweep
 MULTISWEEP_DEFAULT_NSAMPLES = DEFAULT_NSAMPLES  # Samples to average (10)
 
+# Find Resonances defaults
+DEFAULT_EXPECTED_RESONANCES = None  # Optional
+DEFAULT_MIN_DIP_DEPTH_DB = 2.0  # dB
+DEFAULT_MIN_Q = 1e4
+DEFAULT_MAX_Q = 1e7
+DEFAULT_MIN_RESONANCE_SEPARATION_HZ = 1e4  # 10 KHz
+DEFAULT_DATA_EXPONENT = 2.0
+
 # Sampling settings
 BASE_SAMPLING = 625e6 / 256.0 / 64.0  # ≈38 147.46 Hz base for dec=0
 DEFAULT_BUFFER_SIZE = 5_000
@@ -176,7 +184,7 @@ def get_ipython():
     Attempt to import and return IPython's get_ipython() if available.
     """
     try:
-        from IPython import get_ipython
+        from IPython.core.getipython import get_ipython # Corrected import path
         return get_ipython()
     except ImportError:
         return None
@@ -316,11 +324,15 @@ class ClickableViewBox(pg.ViewBox):
     def enableZoomBoxMode(self, enable=True):
         self.setMouseMode(pg.ViewBox.RectMode if enable else pg.ViewBox.PanMode)
 
-    def mouseDoubleClickEvent(self, ev):
+    def mouseDoubleClickEvent(self, event: Optional[QtWidgets.QGraphicsSceneMouseEvent]): # Matched base class type hint
+        if event is None: # Handle None case if event can be None
+            super().mouseDoubleClickEvent(event)
+            return
+            
         window = getattr(self, 'parent_window', None)
         log_x, log_y = self.state["logMode"]
-        # scenePos() is from the event 'ev', map it to view coordinates
-        pt_view = self.mapSceneToView(ev.scenePos()) 
+        # scenePos() is from the event 'event', map it to view coordinates
+        pt_view = self.mapSceneToView(event.scenePos()) 
         x_val = 10 ** pt_view.x() if log_x else pt_view.x()
         y_val = 10 ** pt_view.y() if log_y else pt_view.y() # y_val needed for QMessageBox
 
@@ -335,30 +347,30 @@ class ClickableViewBox(pg.ViewBox):
                  module_id_to_use = window.active_module_for_dac
             
             # Original logic for add/remove: Right-click or Shift+Left-click for remove
-            if ev.button() == QtCore.Qt.MouseButton.RightButton or \
-               (ev.button() == QtCore.Qt.MouseButton.LeftButton and ev.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier):
+            if event.button() == QtCore.Qt.MouseButton.RightButton or \
+               (event.button() == QtCore.Qt.MouseButton.LeftButton and event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier):
                 if hasattr(window, '_remove_resonance'):
                      window._remove_resonance(module_id_to_use, freq)
-                ev.accept()
+                event.accept()
                 return
-            elif ev.button() == QtCore.Qt.MouseButton.LeftButton: # Normal left click for add
+            elif event.button() == QtCore.Qt.MouseButton.LeftButton: # Normal left click for add
                 if hasattr(window, '_add_resonance'):
                     window._add_resonance(module_id_to_use, freq)
-                ev.accept()
+                event.accept()
                 return
         
         # 2. Emit the generic doubleClickedEvent signal.
         #    This is intended for features like the Detector Digest in MultisweepWindow.
-        if ev.button() == QtCore.Qt.MouseButton.LeftButton:
-            self.doubleClickedEvent.emit(ev) # Pass the original event object
-            if ev.isAccepted():
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.doubleClickedEvent.emit(event) # Pass the original event object
+            if event.isAccepted():
                 # If a slot connected to doubleClickedEvent accepted the event,
                 # we assume it's fully handled.
                 return
 
         # 3. Default behavior for left double-click: show coordinates QMessageBox
         #    This executes if not in add_subtract_mode and no slot accepted doubleClickedEvent.
-        if ev.button() == QtCore.Qt.MouseButton.LeftButton and not ev.isAccepted():
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and not event.isAccepted():
             plot_item = self.parentItem()
             x_label_text = y_label_text = "" # Renamed to avoid conflict with x_val, y_val
             if isinstance(plot_item, pg.PlotItem):
@@ -368,8 +380,9 @@ class ClickableViewBox(pg.ViewBox):
             x_label_text = x_label_text or "X"; y_label_text = y_label_text or "Y"
             
             parent_widget = None
-            if self.scene() and self.scene().views(): # Ensure scene and views exist
-                parent_widget = self.scene().views()[0].window()
+            current_scene = self.scene() # Store scene in a variable
+            if current_scene and current_scene.views(): # Ensure scene and views exist
+                parent_widget = current_scene.views()[0].window()
 
             if parent_widget: # Only show if we have a valid parent widget
                 box = QtWidgets.QMessageBox(parent_widget)
@@ -378,13 +391,13 @@ class ClickableViewBox(pg.ViewBox):
                 box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Close)
                 box.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
                 box.show()
-            ev.accept() # Accept the event after showing the message box
+            event.accept() # Accept the event after showing the message box
             return
 
         # 4. If not a left button double click and not handled by any of the above,
         #    pass to superclass for any other default ViewBox handling.
-        if not ev.isAccepted():
-            super().mouseDoubleClickEvent(ev)
+        if not event.isAccepted():
+            super().mouseDoubleClickEvent(event)
 
 # ───────────────────────── Network Data Processing ─────────────────────────
 # (No functions here in the original, so nothing to adjust)

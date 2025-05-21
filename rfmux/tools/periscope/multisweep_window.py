@@ -56,7 +56,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.results_by_amplitude = {}  # Stores {amplitude: {cf: data_dict}}
         self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed
         self.unit_mode = "dbm"  # Current unit for magnitude display ("counts", "dbm", "volts")
-        self.normalize_magnitudes = False  # Flag to normalize magnitude plots
+        self.normalize_traces = False  # Flag to normalize trace plots (magnitude and phase)
         self.zoom_box_mode = True  # Flag for enabling/disabling pyqtgraph's zoom box
 
         # Plot objects and related attributes
@@ -113,9 +113,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         toolbar.addWidget(spacer)
 
         # Normalization Checkbox
-        self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Magnitudes")
-        self.normalize_checkbox.setChecked(self.normalize_magnitudes)
-        self.normalize_checkbox.toggled.connect(self._toggle_normalization)
+        self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
+        self.normalize_checkbox.setChecked(self.normalize_traces)
+        self.normalize_checkbox.toggled.connect(self._toggle_trace_normalization)
         toolbar.addWidget(self.normalize_checkbox)
 
         # Show Center Frequencies Checkbox
@@ -220,12 +220,12 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             self.combined_mag_plot.getViewBox().doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
 
 
-    def _toggle_normalization(self, checked):
+    def _toggle_trace_normalization(self, checked):
         """
-        Slot for the 'Normalize Magnitudes' checkbox.
-        Updates normalization state and redraws plots.
+        Slot for the 'Normalize Traces' checkbox.
+        Updates normalization state for both magnitude and phase, and redraws plots.
         """
-        self.normalize_magnitudes = checked
+        self.normalize_traces = checked
         self._update_mag_plot_label() # Y-axis label might change
         self._redraw_plots()
 
@@ -243,8 +243,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         """Updates the Y-axis label of the magnitude plot based on current unit and normalization settings."""
         if not self.combined_mag_plot: return
 
-        if self.normalize_magnitudes:
-            label = "Normalized Magnitude"
+        if self.normalize_traces:
+            label = "Normalized Magnitude" # Label for magnitude part of the trace
             # Normalized dBm is still in dB, other normalized units are unitless or relative.
             units = "dB" if self.unit_mode == "dbm" else "" 
         else:
@@ -470,10 +470,15 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 s21_mag_raw = np.abs(iq_complex)
                 s21_mag_processed = UnitConverter.convert_amplitude(
                     s21_mag_raw, iq_complex, self.unit_mode, 
-                    normalize=self.normalize_magnitudes
+                    normalize=self.normalize_traces
                 )
                 # Use pre-calculated phase if available, otherwise calculate from IQ
                 phase_deg = data.get('phase_degrees', np.degrees(np.angle(iq_complex))) 
+                
+                if self.normalize_traces and len(phase_deg) > 0: # New phase normalization
+                    first_phase_val = phase_deg[0]
+                    if np.isfinite(first_phase_val): # Avoid issues with NaN/inf
+                        phase_deg = phase_deg - first_phase_val
                 
                 # Plot magnitude curve
                 mag_curve = self.combined_mag_plot.plot(pen=pen)
@@ -929,7 +934,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 dac_scales=self.dac_scales,
                 zoom_box_mode=self.zoom_box_mode,
                 target_module=self.target_module,
-                normalize_plot3=self.normalize_magnitudes,
+                normalize_plot3=self.normalize_traces,
                 dark_mode=self.dark_mode
             )
             

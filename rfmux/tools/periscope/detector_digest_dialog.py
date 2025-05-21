@@ -53,7 +53,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self._setup_ui()
         self._update_plots()
 
-        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id+1}  ({self.resonance_frequency_ghz_title:.6f} GHz)")
+        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id+1}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
         # Set window flags to ensure proper behavior as a standalone window
         self.setWindowFlags(QtCore.Qt.WindowType.Window)
         self.resize(1200, 450) # Adjusted initial size

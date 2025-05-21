@@ -4,7 +4,10 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtWidgets
 
-from .utils import ClickableViewBox, UnitConverter, LINE_WIDTH # Assuming these are relevant
+from .utils import (
+    ClickableViewBox, UnitConverter, LINE_WIDTH,
+    IQ_COLORS, SCATTER_COLORS, DISTINCT_PLOT_COLORS, COLORMAP_CHOICES
+)
 from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm # For direct use if needed
 
 class DetectorDigestWindow(QtWidgets.QMainWindow):
@@ -218,9 +221,11 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
                 # Use white for dark mode, black for light mode for the magnitude curve
                 mag_color = 'w' if self.dark_mode else 'k'
-                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_mag_volts, pen=pg.mkPen(mag_color, width=LINE_WIDTH), name="|I + iQ|")
-                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_i_volts, pen=pg.mkPen('b', style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH), name="I")
-                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_q_volts, pen=pg.mkPen('b', width=LINE_WIDTH), name="Q")
+                # Store the theme-dependent color in IQ_COLORS
+                IQ_COLORS["MAGNITUDE"] = mag_color
+                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_mag_volts, pen=pg.mkPen(IQ_COLORS["MAGNITUDE"], width=LINE_WIDTH), name="|I + iQ|")
+                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_i_volts, pen=pg.mkPen(IQ_COLORS["I"], style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH), name="I")
+                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
                 self.plot1_sweep_vs_freq.autoRange()
 
         # --- Plot 2: Sweep (IQ plane) ---
@@ -229,7 +234,10 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             if iq_complex_active is not None:
                 s21_i_volts = convert_roc_to_volts(iq_complex_active.real)
                 s21_q_volts = convert_roc_to_volts(iq_complex_active.imag)
-                self.plot2_iq_plane.plot(s21_i_volts, s21_q_volts, pen=None, symbol='o', symbolBrush='b', symbolSize=5, name="Sweep IQ")
+                # Use SCATTER_COLORS for consistency rather than IQ_COLORS
+                self.plot2_iq_plane.plot(s21_i_volts, s21_q_volts, pen=None, symbol='o', 
+                                        symbolBrush=SCATTER_COLORS["DEFAULT"], symbolPen=SCATTER_COLORS["DEFAULT"], 
+                                        symbolSize=5, name="Sweep IQ")
 
             # Plot rotation_tod if available
             rotation_tod_iq = self.active_sweep_data.get('rotation_tod')
@@ -238,7 +246,12 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 tod_q_volts = convert_roc_to_volts(rotation_tod_iq.imag)
                 # Use white for dark mode, black for light mode for the noise points
                 noise_color = 'w' if self.dark_mode else 'k'
-                self.plot2_iq_plane.plot(tod_i_volts, tod_q_volts, pen=None, symbol='o', symbolBrush=noise_color, symbolSize=3, name="Noise TOD")
+                # Store the theme-dependent color in SCATTER_COLORS
+                SCATTER_COLORS["NOISE"] = noise_color
+                # Use consistent styling with both brush and pen for scatter points
+                self.plot2_iq_plane.plot(tod_i_volts, tod_q_volts, pen=None, symbol='o', 
+                                        symbolBrush=SCATTER_COLORS["NOISE"], symbolPen=SCATTER_COLORS["NOISE"], 
+                                        symbolSize=3, name="Noise at f_bias")
             
             self.plot2_iq_plane.autoRange()
         
@@ -246,8 +259,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         if self.current_plot_offset_hz is not None:
             num_amps = len(self.resonance_data_for_digest)
 
-            # Define distinct colors for <= 4 lines
-            DISTINCT_PLOT_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"] # Blue, Orange, Green, Red
+            # Use centralized DISTINCT_PLOT_COLORS for <= 4 lines
             
             # Sort amplitudes for consistent coloring
             sorted_amp_keys = sorted(self.resonance_data_for_digest.keys())
@@ -275,7 +287,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                         color_str = DISTINCT_PLOT_COLORS[idx % len(DISTINCT_PLOT_COLORS)]
                         current_pen = pg.mkPen(color_str, width=LINE_WIDTH)
                     else: # num_amps > 4
-                        cmap = pg.colormap.get('inferno') # Or 'magma'
+                        cmap = pg.colormap.get(COLORMAP_CHOICES["AMPLITUDE_SWEEP"])
                         # Adjust colormap: map [0,1] to [0.3, 1] if dark mode
                         norm_idx = idx / max(1, num_amps - 1)
                         if self.dark_mode:

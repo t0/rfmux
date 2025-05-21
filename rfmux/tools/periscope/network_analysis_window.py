@@ -5,7 +5,11 @@ import os
 import csv
 
 # Imports from within the 'periscope' subpackage
-from .utils import * # This will bring in QtWidgets, QtCore, pg, np, ClickableViewBox, UnitConverter, fitting, etc.
+from .utils import (
+    QtWidgets, QtCore, pg, np, ClickableViewBox, UnitConverter, fitting, 
+    LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ,
+    DEFAULT_CABLE_LENGTH, DEFAULT_AMPLITUDE, RESONANCE_LINE_COLOR
+)
 # from .tasks import * # Not directly used by this class, dialogs will import what they need.
 
 # Dialogs are now imported from .dialogs within the same package
@@ -263,8 +267,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             phase_legend = phase_plot.addLegend(offset=(30, 10), labelTextColor=pen_color)
 
             # Create curves with periscope color scheme - but don't add data yet
-            amp_curve = amp_plot.plot([], [], pen=pg.mkPen('#ff7f0e', width=LINE_WIDTH))  # Empty data
-            phase_curve = phase_plot.plot([], [], pen=pg.mkPen('#1f77b4', width=LINE_WIDTH))  # Empty data
+            amp_curve = amp_plot.plot([], [], pen=pg.mkPen(TABLEAU10_COLORS[1], width=LINE_WIDTH))  # Empty data
+            phase_curve = phase_plot.plot([], [], pen=pg.mkPen(TABLEAU10_COLORS[0], width=LINE_WIDTH))  # Empty data
 
             tab_layout.addWidget(amp_plot)
             tab_layout.addWidget(phase_plot)
@@ -415,7 +419,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
         if module not in self.plots:
             return
         plot_info = self.plots[module]
-        line_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
+        line_pen = pg.mkPen(RESONANCE_LINE_COLOR, style=QtCore.Qt.PenStyle.DashLine)
         line_mag = pg.InfiniteLine(pos=freq_hz, angle=90, movable=False, pen=line_pen)
         line_phase = pg.InfiniteLine(pos=freq_hz, angle=90, movable=False, pen=line_pen)
         plot_info['amp_plot'].addItem(line_mag)
@@ -888,9 +892,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             if amplitude in amps_list: amp_index = amps_list.index(amplitude)
             else: amp_index = 0
                 
-            channel_families = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-                                "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
-            color = channel_families[amp_index % len(channel_families)]
+            color = TABLEAU10_COLORS[amp_index % len(TABLEAU10_COLORS)]
             
             is_new_curve = False
             if amplitude not in self.plots[module]['amp_curves']:

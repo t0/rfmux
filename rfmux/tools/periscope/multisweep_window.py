@@ -7,7 +7,10 @@ from PyQt6.QtCore import Qt
 import pyqtgraph as pg
 
 # Imports from within the 'periscope' subpackage
-from .utils import LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg
+from .utils import (
+    LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
+    TABLEAU10_COLORS, COLORMAP_CHOICES
+)
 from .detector_digest_dialog import DetectorDigestWindow
 
 class MultisweepWindow(QtWidgets.QMainWindow):
@@ -404,9 +407,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         
         # Define color schemes for plotting multiple amplitudes
         # Use a distinct color family for few amplitudes, switch to a colormap for many
-        channel_families = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
-                            #"#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"] # Tableau10
-        use_cmap = pg.colormap.get("inferno")
+        use_cmap = pg.colormap.get(COLORMAP_CHOICES["AMPLITUDE_SWEEP"])
         
         sorted_amplitudes = sorted(self.results_by_amplitude.keys())
         legend_items_mag = {} # To avoid duplicate legend entries for the same amplitude
@@ -417,8 +418,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             amp_results = self.results_by_amplitude[amp_val]
             
             # Determine color for this amplitude's curves
-            if num_amps <= len(channel_families): # Use distinct colors if few amplitudes
-                color = channel_families[amp_idx % len(channel_families)]
+            if num_amps <= len(TABLEAU10_COLORS): # Use distinct colors if few amplitudes
+                color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
             else: # Use a colormap for many amplitudes
                 color = use_cmap.map(amp_idx / max(1, num_amps - 1)) # Normalize index for colormap
             pen = pg.mkPen(color, width=LINE_WIDTH)
@@ -647,7 +648,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
         if not self.conceptual_resonance_frequencies: # Check conceptual frequencies
             QtWidgets.QMessageBox.warning(self, "Cannot Re-run",
-                                          "Conceptual resonance frequencies not available for re-run.")
+                                          "No center frequencies are known to periscope to run on.")
             return
 
         # --- Determine frequencies to seed the dialog ---
@@ -771,19 +772,17 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 return
 
             # Color definitions (consistent with _redraw_plots)
-            channel_families = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-                                "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
-            use_cmap = pg.colormap.get("inferno")
+            use_cmap = pg.colormap.get(COLORMAP_CHOICES["AMPLITUDE_SWEEP"])
             sorted_amplitudes = sorted(self.results_by_amplitude.keys())
 
             for amp_idx, amp_val in enumerate(sorted_amplitudes):
                 amp_results = self.results_by_amplitude.get(amp_val, {})
                 
                 # Determine color for this amplitude's lines
-                if num_amps <= len(channel_families):
-                    color = channel_families[amp_idx % len(channel_families)]
-                else:
-                    color = use_cmap.map(amp_idx / max(1, num_amps - 1))
+                if num_amps <= len(TABLEAU10_COLORS): # Use distinct colors if few amplitudes
+                    color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
+                else: # Use a colormap for many amplitudes
+                    color = use_cmap.map(amp_idx / max(1, num_amps - 1)) # Normalize index for colormap
                 
                 # Define pen for CF lines (consistent with _redraw_plots)
                 # Note: LINE_WIDTH should be available from 'from .utils import LINE_WIDTH'

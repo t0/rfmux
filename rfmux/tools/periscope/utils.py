@@ -34,6 +34,43 @@ LOG_COMPRESS = True
 SCATTER_POINTS = 1_000
 SCATTER_SIZE = 5
 
+# ───────────────────────── Plot Color Constants ─────────────────────────
+# Core color palettes that work well in both dark and light themes
+TABLEAU10_COLORS = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+]
+
+# Rich color scheme for I/Q plotting - selected for contrast and accessibility
+IQ_COLORS = {
+    "I": "#3366CC",       # Clear blue
+    "Q": "#CC6633",       # Burnt orange
+    "MAGNITUDE": None     # None will be replaced with theme-appropriate default
+}
+
+# Standard colors for scatter plots
+SCATTER_COLORS = {
+    "DEFAULT": "#1f77b4",  # Blue
+    "HIGHLIGHT": "#d62728", # Red 
+    "SELECTION": "#2ca02c", # Green
+    "NOISE": None          # None will be replaced with theme-appropriate default
+}
+
+# Default colormaps for various plot types
+COLORMAP_CHOICES = {
+    "SEQUENTIAL": "viridis",    # Good for sequential data
+    "AMPLITUDE_SWEEP": "inferno", # Preserving current colormap for amplitude sweeps
+    "SPECTRAL": "plasma",        # Good for spectral data
+    "DIVERGENT": "coolwarm",     # Good for data with positive/negative values
+    "CATEGORICAL": "tab10"       # Good for categorical data
+}
+
+# Colors for distinct plot series (limited set - when we need distinct colors)
+DISTINCT_PLOT_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+
+# Utility colors
+RESONANCE_LINE_COLOR = "#d62728"  # Red color for resonance lines
+
 # Network analysis defaults
 DEFAULT_MIN_FREQ = 100e6  # 100 MHz
 DEFAULT_MAX_FREQ = 2450e6  # 2.45 GHz
@@ -398,6 +435,3 @@ class ClickableViewBox(pg.ViewBox):
         #    pass to superclass for any other default ViewBox handling.
         if not event.isAccepted():
             super().mouseDoubleClickEvent(event)
-
-# ───────────────────────── Network Data Processing ─────────────────────────
-# (No functions here in the original, so nothing to adjust)

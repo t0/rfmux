@@ -289,6 +289,40 @@ class CRSInitializeTask(QRunnable):
         await self.crs.set_timestamp_port(self.irig_source)
         if self.clear_channels: await self.crs.clear_channels(module=self.module)
 
+class SetCableLengthSignals(QObject):
+    """Signals for SetCableLengthTask."""
+    success = pyqtSignal(int, float)  # module_id, length_set
+    error = pyqtSignal(int, str)    # module_id, error_message
+
+class SetCableLengthTask(QRunnable):
+    """A QRunnable task to set the cable length on the CRS asynchronously."""
+    def __init__(self, crs: "CRS", module_id: int, length: float, signals: SetCableLengthSignals):
+        super().__init__()
+        self.crs = crs
+        self.module_id = module_id
+        self.length = length
+        self.signals = signals
+        self._loop = None
+
+    def run(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self.crs.set_cable_length(length=self.length, module=self.module_id))
+            self.signals.success.emit(self.module_id, self.length)
+        except Exception as e:
+            # traceback, sys are imported from .utils
+            err_msg = f"Error setting cable length for module {self.module_id} to {self.length}m: {type(e).__name__}: {str(e)}"
+            print(f"ERROR: {err_msg}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            self.signals.error.emit(self.module_id, err_msg)
+        finally:
+            if self._loop:
+                if self._loop.is_running():
+                    self._loop.stop()
+                self._loop.close()
+            self._loop = None
+
 class MultisweepSignals(QObject):
     progress = pyqtSignal(int, float)
     intermediate_data_update = pyqtSignal(int, float, dict) # module, amplitude, intermediate_results_dict

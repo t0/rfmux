@@ -6,6 +6,7 @@ import csv
 
 # Imports from within the 'periscope' subpackage
 from .utils import *
+from .tasks import SetCableLengthSignals # Added import
 # from .tasks import * # Not directly used by this class, dialogs will import what they need.
 
 # Dialogs are now imported from .dialogs within the same package
@@ -38,6 +39,11 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
         self.faux_resonance_legend_items_mag = {} # For Req 3
         self.faux_resonance_legend_items_phase = {} # For Req 3
         self.dark_mode = dark_mode  # Store dark mode setting
+
+        # Initialize signals for SetCableLengthTask
+        self.set_cable_length_signals = SetCableLengthSignals()
+        # Optionally, connect these signals to handlers for user feedback
+        self.set_cable_length_signals.error.connect(self._handle_set_cable_length_error)
         
         # Setup the UI components
         self._setup_ui()
@@ -1037,3 +1043,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             
             # Redraw plots to ensure all legend items are updated correctly
             self._redraw_all_plots()
+
+    def _handle_set_cable_length_error(self, module_id: int, error_message: str):
+        """Handles error during setting of cable length."""
+        QtWidgets.QMessageBox.warning(self, "Set Cable Length Error", 
+                                      f"Module {module_id}: {error_message}")

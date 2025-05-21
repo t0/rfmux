@@ -2,6 +2,7 @@
 
 from .utils import *
 from .dialogs import MultisweepDialog
+from .tasks import SetCableLengthTask, SetCableLengthSignals # Added import
 
 class NetworkAnalysisExportMixin:
     """Mixin providing export and cable-delay logic."""
@@ -214,6 +215,29 @@ class NetworkAnalysisExportMixin:
             plot_info['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
         self.module_cable_lengths[active_module] = L_new_physical
         self.cable_length_spin.blockSignals(True); self.cable_length_spin.setValue(L_new_physical); self.cable_length_spin.blockSignals(False)
+
+        # --- Directly set cable length on CRS ---
+        # Ensure the main application (parent) has the crs object and thread pool
+        main_app = self.parent()
+        if hasattr(main_app, 'crs') and main_app.crs is not None and \
+           hasattr(main_app, 'pool') and main_app.pool is not None:
+            
+            # Ensure signals for this task are initialized in the main window class
+            # (e.g., NetworkAnalysisWindow.__init__)
+            if not hasattr(self, 'set_cable_length_signals'):
+                # This is a fallback, ideally signals are initialized once in the window's __init__
+                self.set_cable_length_signals = SetCableLengthSignals()
+
+            set_length_task = SetCableLengthTask(
+                crs=main_app.crs,
+                module_id=active_module,
+                length=L_new_physical,
+                signals=self.set_cable_length_signals 
+            )
+            main_app.pool.start(set_length_task)
+        else:
+            QtWidgets.QMessageBox.warning(self, "CRS Error", 
+                                          "Could not send set_cable_length command: CRS or thread pool not available from parent.")
 
     def _on_active_module_changed(self, index: int):
         """Update UI elements when the active module tab changes."""

@@ -60,7 +60,6 @@ SCATTER_COLORS = {
 COLORMAP_CHOICES = {
     "SEQUENTIAL": "viridis",    # Good for sequential data
     "AMPLITUDE_SWEEP": "inferno", # Preserving current colormap for amplitude sweeps
-    "SPECTRAL": "plasma",        # Good for spectral data
     "DIVERGENT": "coolwarm",     # Good for data with positive/negative values
     "CATEGORICAL": "tab10"       # Good for categorical data
 }
@@ -70,6 +69,9 @@ DISTINCT_PLOT_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
 
 # Utility colors
 RESONANCE_LINE_COLOR = "#d62728"  # Red color for resonance lines
+
+# Threshold for using distinct colors vs. colormap in amplitude sweeps
+AMPLITUDE_COLORMAP_THRESHOLD = 3  # Use distinct colors if num_amps <= this value
 
 # Network analysis defaults
 DEFAULT_MIN_FREQ = 100e6  # 100 MHz

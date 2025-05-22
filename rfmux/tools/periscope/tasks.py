@@ -171,7 +171,8 @@ class DACScaleFetcher(QtCore.QThread):
                     print(f"Error fetching DAC scale for module {module_idx}: {e}", file=sys.stderr) # Print to stderr
                     dac_scales[module_idx] = None
 
-class NetworkAnalysisTask(QRunnable):
+class NetworkAnalysisTask(QtCore.QThread):
+    """QThread subclass for performing network analysis operations without blocking the GUI."""
     def __init__(self, crs: "CRS", module: int, params: dict, signals: NetworkAnalysisSignals, amplitude=None):
         super().__init__()
         self.crs, self.module, self.params, self.signals = crs, module, params, signals
@@ -182,37 +183,81 @@ class NetworkAnalysisTask(QRunnable):
         self._task, self._loop = None, None
         
     def stop(self):
+        """Stop the network analysis task and cancel any ongoing async operation."""
         self._running = False
-        if self._task and not self._task.done() and self._loop:
-            self._loop.call_soon_threadsafe(self._task.cancel)
-            if self._loop.is_running():
-                try:
-                    # concurrent from .utils
-                    cleanup_future = asyncio.run_coroutine_threadsafe(self._cleanup_channels(), self._loop)
-                    cleanup_future.result(timeout=2.0)
-                except (asyncio.CancelledError, concurrent.futures.TimeoutError, Exception): pass
+        self.requestInterruption()
     
     async def _cleanup_channels(self):
         try:
-            async with self.crs.tuber_context() as ctx:
-                for j in range(1, 1024): ctx.set_amplitude(0, channel=j, module=self.module)
-                await ctx()
-        except Exception: pass
+            # Direct approach to set amplitudes to zero without using async with
+            for j in range(1, 1024):
+                await self.crs.set_amplitude(0, channel=j, module=self.module)
+        except Exception as e:
+            print(f"Error in _cleanup_channels: {e}", file=sys.stderr)
+            pass
     
     def run(self):
-        self._loop = asyncio.new_event_loop(); asyncio.set_event_loop(self._loop)
-        try: self._execute_network_analysis()
-        except Exception as e: self.signals.error.emit(str(e))
-        finally: self._cleanup_resources()
+        """QThread entry point - runs in a separate thread."""
+        # Create asyncio loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            progress_cb, data_cb = self._create_progress_callback(), self._create_data_callback()
+            task_params = self._extract_parameters()
             
-    def _execute_network_analysis(self):
-        progress_cb, data_cb = self._create_progress_callback(), self._create_data_callback()
-        task_params = self._extract_parameters() # Renamed params to task_params
-        if task_params['clear_channels'] and self._running:
-            self._loop.run_until_complete(self.crs.clear_channels(module=self.module))
-        if self._running:
-            self._loop.run_until_complete(self.crs.set_cable_length(length=task_params['cable_length'], module=self.module))
-        if self._running: self._execute_netanal_task(task_params, progress_cb, data_cb)
+            # Setup phase: Clear channels and set cable length
+            if task_params['clear_channels'] and not self.isInterruptionRequested():
+                loop.run_until_complete(self.crs.clear_channels(module=self.module))
+                
+            if not self.isInterruptionRequested():
+                loop.run_until_complete(self.crs.set_cable_length(length=task_params['cable_length'], module=self.module))
+            
+            # Main analysis phase
+            if not self.isInterruptionRequested():
+                # Combine parameters for the take_netanal call
+                netanal_params = {
+                    'amp': self.amplitude,
+                    'fmin': task_params['fmin'],
+                    'fmax': task_params['fmax'],
+                    'nsamps': task_params['nsamps'],
+                    'npoints': task_params['npoints'],
+                    'max_chans': task_params['max_chans'],
+                    'max_span': task_params['max_span'],
+                    'module': self.module,
+                    'progress_callback': progress_cb,
+                    'data_callback': data_cb
+                }
+                
+                # Process the network analysis asynchronously without blocking
+                result = loop.run_until_complete(self._process_network_analysis(loop, netanal_params))
+                
+                # Process results if available and task wasn't interrupted
+                if not self.isInterruptionRequested() and result:
+                    fs_sorted, iq_sorted = result['frequencies'], result['iq_complex']
+                    phase_sorted, amp_sorted = result['phase_degrees'], np.abs(iq_sorted)
+                    self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
+                    self.signals.data_update_with_amp.emit(self.module, fs_sorted, amp_sorted, phase_sorted, self.amplitude)
+                    self.signals.completed.emit(self.module)
+            
+        except asyncio.CancelledError:
+            self.signals.error.emit(f"Analysis canceled for module {self.module}")
+            if loop.is_running():
+                loop.run_until_complete(self._cleanup_channels())
+        except KeyError as ke:
+            err_msg = f"KeyError accessing results for module {self.module}: {ke}. Expected 'frequencies', 'iq_complex', 'phase_degrees'."
+            print(f"ERROR: {err_msg}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            self.signals.error.emit(err_msg)
+        except Exception as e:
+            err_msg = f"Error processing results for module {self.module}: {type(e).__name__}: {e}"
+            print(f"ERROR: {err_msg}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            self.signals.error.emit(err_msg)
+        finally:
+            if loop.is_running():
+                loop.stop()
+            loop.close()
             
     def _create_progress_callback(self):
         return lambda module_idx, prog: self.signals.progress.emit(module_idx, prog) if self._running else None # Renamed module, progress
@@ -236,38 +281,30 @@ class NetworkAnalysisTask(QRunnable):
                 'max_chans': self.params.get('max_chans', DEFAULT_MAX_CHANNELS), 'max_span': self.params.get('max_span', DEFAULT_MAX_SPAN),
                 'cable_length': self.params.get('cable_length', DEFAULT_CABLE_LENGTH), 'clear_channels': self.params.get('clear_channels', True)}
         
-    def _execute_netanal_task(self, task_params, progress_cb, data_cb): # Renamed params
-        # traceback, sys from .utils
-        netanal_coro = self.crs.take_netanal(amp=self.amplitude, fmin=task_params['fmin'], fmax=task_params['fmax'],
-                                             nsamps=task_params['nsamps'], npoints=task_params['npoints'],
-                                             max_chans=task_params['max_chans'], max_span=task_params['max_span'],
-                                             module=self.module, progress_callback=progress_cb, data_callback=data_cb)
-        self._task = self._loop.create_task(netanal_coro)
-        try:
-            result = self._loop.run_until_complete(self._task)
-            if self._running and result:
-                fs_sorted, iq_sorted = result['frequencies'], result['iq_complex']
-                phase_sorted, amp_sorted = result['phase_degrees'], np.abs(iq_sorted)
-                self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
-                self.signals.data_update_with_amp.emit(self.module, fs_sorted, amp_sorted, phase_sorted, self.amplitude)
-                self.signals.completed.emit(self.module)
-        except asyncio.CancelledError:
-            self.signals.error.emit(f"Analysis canceled for module {self.module}")
-            if self._loop and self._loop.is_running(): self._loop.run_until_complete(self._cleanup_channels())
-        except KeyError as ke:
-            err_msg = f"KeyError accessing results for module {self.module}: {ke}. Expected 'frequencies', 'iq_complex', 'phase_degrees'."
-            print(f"ERROR: {err_msg}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
-            self.signals.error.emit(err_msg)
-        except Exception as e:
-            err_msg = f"Error processing results for module {self.module}: {type(e).__name__}: {e}"
-            print(f"ERROR: {err_msg}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
-            self.signals.error.emit(err_msg)
-            
-    def _cleanup_resources(self):
-        if self._task and not self._task.done(): self._task.cancel()
-        if self._loop:
-            if self._loop.is_running(): self._loop.stop()
-            self._loop.close(); self._loop = None
+    async def _process_network_analysis(self, loop, netanal_params):
+        """Process a single network analysis operation asynchronously.
+        
+        This method periodically yields control back to the event loop to keep the GUI responsive.
+        """
+        netanal_coro = self.crs.take_netanal(**netanal_params)
+        task = loop.create_task(netanal_coro)
+        
+        # Check for interruption while the task is running
+        while not task.done():
+            if self.isInterruptionRequested():
+                task.cancel()
+                await asyncio.sleep(0.01)  # Give the cancellation a chance to process
+                return None
+            await asyncio.sleep(0.1)  # Short sleep to yield control back to the event loop - this is crucial for preventing GUI freezing
+        
+        # Get the result when the task is done
+        if not task.cancelled():
+            try:
+                return await task
+            except Exception as e:
+                print(f"Error in _process_network_analysis: {e}", file=sys.stderr)
+                raise
+        return None
 
 class CRSInitializeTask(QRunnable):
     def __init__(self, crs: "CRS", module: int, irig_source: Any, clear_channels: bool, signals: CRSInitializeSignals):
@@ -334,9 +371,18 @@ class MultisweepSignals(QObject):
     all_completed = pyqtSignal()
     error = pyqtSignal(int, float, str)
 
-class MultisweepTask(QRunnable):
-    # Added 'window' parameter, removed 'resonance_frequencies' as it's in params and window
-    def __init__(self, crs: "CRS", params: dict, signals: MultisweepSignals, window: "MultisweepWindow"):
+class MultisweepTask(QtCore.QThread):
+    """QThread subclass for performing multisweep operations without blocking the GUI."""
+    def __init__(self, crs: "CRS", params: dict, signals: MultisweepSignals, window: Any):
+        """
+        Initialize the MultisweepTask.
+        
+        Args:
+            crs: Control and Readout System object
+            params: Dictionary of parameters for the multisweep
+            signals: Signal object for communication with GUI
+            window: MultisweepWindow instance that will display the results
+        """
         super().__init__()
         self.crs = crs
         self.params = params
@@ -344,33 +390,43 @@ class MultisweepTask(QRunnable):
         self.window = window # Store the MultisweepWindow instance
         # Baseline frequencies are from the params passed by the window, reflecting its current configuration
         self.baseline_resonance_frequencies = list(params.get('resonance_frequencies', []))
-        self._running, self._loop, self._current_async_task = True, None, None
+        self._running = True
         self.current_amplitude = -1
+        self._task_completed = asyncio.Event()
 
     def stop(self):
+        """Stop the multisweep task and cancel any ongoing async operation."""
         self._running = False
-        if self._current_async_task and not self._current_async_task.done() and self._loop:
-            self._loop.call_soon_threadsafe(self._current_async_task.cancel)
+        self.requestInterruption()
 
-    def _progress_callback_wrapper(self, module_idx, progress_percentage): # Renamed module
+    def _progress_callback_wrapper(self, module_idx, progress_percentage):
+        """Wrapper for progress callback to emit signals."""
         if self._running: self.signals.progress.emit(module_idx, progress_percentage)
 
-    def _data_callback_wrapper(self, module_idx, intermediate_results): # Renamed module
+    def _data_callback_wrapper(self, module_idx, intermediate_results):
+        """Wrapper for data callback to emit signals."""
         if self._running: self.signals.intermediate_data_update.emit(module_idx, self.current_amplitude, intermediate_results)
 
     def run(self):
-        # traceback from .utils, DEFAULT_AMPLITUDE from .utils
-        # fitting_module_direct is the aliased import
-        self._loop = asyncio.new_event_loop(); asyncio.set_event_loop(self._loop)
+        """QThread entry point - runs in a separate thread."""
+        # Create asyncio loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         module_idx = self.params.get('module')
-        if module_idx is None: self.signals.error.emit(-1, -1, "Module not specified in multisweep parameters."); return
+        if module_idx is None:
+            self.signals.error.emit(-1, -1, "Module not specified in multisweep parameters.")
+            return
         
         try:
             amplitudes = self.params.get('amps', [DEFAULT_AMPLITUDE])
             conceptual_frequencies_from_window = self.window.conceptual_resonance_frequencies
 
             for amp_val in amplitudes:
-                if not self._running: self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep canceled."); return
+                if self.isInterruptionRequested():
+                    self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep canceled.")
+                    return
+                
                 self.current_amplitude = amp_val
 
                 # Dynamically determine input CFs for this specific amplitude
@@ -400,11 +456,12 @@ class MultisweepTask(QRunnable):
                     'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', None)
                 }
                 
-                multisweep_coro = self.crs.multisweep(**multisweep_params)
-                self._current_async_task = self._loop.create_task(multisweep_coro)
-                raw_results_from_crs = self._loop.run_until_complete(self._current_async_task) # This is {output_cf: data_dict}
-
-                if not self._running: self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution."); return
+                # Process the multisweep asynchronously without blocking
+                raw_results_from_crs = loop.run_until_complete(self._process_multisweep(loop, multisweep_params))
+                
+                if self.isInterruptionRequested():
+                    self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution.")
+                    return
                 
                 results_for_plotting = raw_results_from_crs # For plotting, use the direct structure
                 results_for_history = {} # For history: {conceptual_idx: output_cf_key}
@@ -435,7 +492,32 @@ class MultisweepTask(QRunnable):
             detailed_error = f"Error in MultisweepTask (amp {self.current_amplitude:.4f}): {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
             self.signals.error.emit(module_idx, self.current_amplitude, detailed_error)
         finally:
-            if self._loop:
-                if self._loop.is_running(): self._loop.stop()
-                self._loop.close()
-            self._loop = None; self._current_async_task = None
+            if loop.is_running():
+                loop.stop()
+            loop.close()
+
+    async def _process_multisweep(self, loop, multisweep_params):
+        """Process a single multisweep operation asynchronously.
+        
+        This method periodically yields control back to the event loop to keep the GUI responsive.
+        """
+        self._task_completed.clear()
+        multisweep_coro = self.crs.multisweep(**multisweep_params)
+        task = loop.create_task(multisweep_coro)
+        
+        # Check for interruption while the task is running
+        while not task.done():
+            if self.isInterruptionRequested():
+                task.cancel()
+                await asyncio.sleep(0.01)  # Give the cancellation a chance to process
+                return None
+            await asyncio.sleep(0.1)  # Short sleep to yield control back to the event loop
+        
+        # Get the result when the task is done
+        if not task.cancelled():
+            try:
+                return await task
+            except Exception as e:
+                print(f"Error in _process_multisweep: {e}", file=sys.stderr)
+                raise
+        return None

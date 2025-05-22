@@ -75,7 +75,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         central_widget.setStyleSheet(f"background-color: {bg_color};")
         
         # Add a title label at the top
-        title_text = f"Detector {self.detector_id+1} ({self.resonance_frequency_ghz_title:.6f} GHz)"
+        title_text = f"Detector {self.detector_id+1} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
         title_label = QtWidgets.QLabel(title_text)
         title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         font = title_label.font()
@@ -283,10 +283,10 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     x_axis_hz_offset = freqs_hz - self.current_plot_offset_hz
                     
                     current_pen = None # Initialize pen variable
-                    if num_amps <= 4:
+                    if num_amps <= 3:
                         color_str = DISTINCT_PLOT_COLORS[idx % len(DISTINCT_PLOT_COLORS)]
                         current_pen = pg.mkPen(color_str, width=LINE_WIDTH)
-                    else: # num_amps > 4
+                    else: # num_amps > 3
                         cmap = pg.colormap.get(COLORMAP_CHOICES["AMPLITUDE_SWEEP"])
                         # Adjust colormap: map [0,1] to [0.3, 1] if dark mode
                         norm_idx = idx / max(1, num_amps - 1)

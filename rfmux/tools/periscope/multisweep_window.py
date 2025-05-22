@@ -9,7 +9,7 @@ import pyqtgraph as pg
 # Imports from within the 'periscope' subpackage
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
-    TABLEAU10_COLORS, COLORMAP_CHOICES
+    TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD
 )
 from .detector_digest_dialog import DetectorDigestWindow
 
@@ -225,11 +225,17 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                         ax.setPen(pen_color)
                         ax.setTextPen(pen_color)
 
-        # Connect double click signal from magnitude plot's viewbox
+        # Connect double click signal from both magnitude and phase plot viewboxes
         if self.combined_mag_plot: # Add check for None
             view_box_mag = self.combined_mag_plot.getViewBox()
             if isinstance(view_box_mag, ClickableViewBox):
                 view_box_mag.doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
+                
+        # Also connect the phase plot's viewbox to the same handler
+        if self.combined_phase_plot: # Add check for None
+            view_box_phase = self.combined_phase_plot.getViewBox()
+            if isinstance(view_box_phase, ClickableViewBox):
+                view_box_phase.doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
 
 
     def _toggle_trace_normalization(self, checked):
@@ -428,7 +434,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             amp_results = self.results_by_amplitude[amp_val]
             
             # Determine color for this amplitude's curves
-            if num_amps <= 5: # Use distinct colors if few amplitudes
+            if num_amps <= AMPLITUDE_COLORMAP_THRESHOLD: # Use distinct colors if few amplitudes
                 color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
             else: # Use a colormap for many amplitudes
                 if use_cmap:
@@ -809,7 +815,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 amp_results = self.results_by_amplitude.get(amp_val, {})
                 
                 # Determine color for this amplitude's lines
-                if num_amps <= 5: # Use distinct colors if few amplitudes
+                if num_amps <= AMPLITUDE_COLORMAP_THRESHOLD: # Use consistent threshold from utils.py
                     color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
                 else: # Use a colormap for many amplitudes
                     if use_cmap:

@@ -679,12 +679,18 @@ class PeriscopeRuntime:
     def closeEvent(self, event: QtCore.QEvent):
         """Handle the main window close event. Stops timers and worker threads."""
         self.timer.stop(); self.receiver.stop(); self.receiver.wait()
-        # Stop any active network analysis tasks
+        # Stop any active network analysis tasks (QThread needs proper termination)
         for task_key in list(self.netanal_tasks.keys()):
-            task = self.netanal_tasks[task_key]; task.stop(); self.netanal_tasks.pop(task_key, None)
-        # Stop any active multisweep tasks
+            task = self.netanal_tasks[task_key]
+            task.stop()  # Request interruption
+            task.wait(2000)  # Wait up to 2 seconds for thread to finish
+            self.netanal_tasks.pop(task_key, None)
+        # Stop any active multisweep tasks (QThread now, needs proper termination)
         for task_key in list(self.multisweep_tasks.keys()):
-            task = self.multisweep_tasks[task_key]; task.stop(); self.multisweep_tasks.pop(task_key, None)
+            task = self.multisweep_tasks[task_key]
+            task.stop()  # Request interruption
+            task.wait(2000)  # Wait up to 2 seconds for thread to finish
+            self.multisweep_tasks.pop(task_key, None)
         # Shutdown iPython kernel if active
         if self.kernel_manager and self.kernel_manager.has_kernel:
             try: self.kernel_manager.shutdown_kernel()
@@ -796,10 +802,11 @@ class PeriscopeRuntime:
             self.multisweep_signals.error.connect(window.handle_error,
                                                 QtCore.Qt.ConnectionType.QueuedConnection)
             
-            # Pass the window instance to the task
+            # Pass the window instance to the task (now starts automatically since it's a QThread)
             task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window)
             task_key = f"{window_id}_module_{target_module}"
-            self.multisweep_tasks[task_key] = task; self.pool.start(task)
+            self.multisweep_tasks[task_key] = task
+            task.start()  # Start the QThread directly
             window.show()
         except Exception as e:
             error_msg = f"Error starting multisweep analysis: {type(e).__name__}: {str(e)}"
@@ -830,9 +837,10 @@ class PeriscopeRuntime:
             old_task = self.multisweep_tasks.pop(old_task_key); old_task.stop()
             
         self.multisweep_windows[window_id]['params'] = params.copy() # Update stored params
-        # Pass the window_instance to the task
+        # Pass the window_instance to the task (now starts automatically since it's a QThread)
         task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window_instance)
-        self.multisweep_tasks[old_task_key] = task; self.pool.start(task) # Start new task with the same key
+        self.multisweep_tasks[old_task_key] = task
+        task.start()  # Start the QThread directly
 
     def stop_multisweep_task_for_window(self, window_instance: 'MultisweepWindow'):
         """
@@ -850,7 +858,9 @@ class PeriscopeRuntime:
         if window_id and target_module:
             task_key = f"{window_id}_module_{target_module}"
             if task_key in self.multisweep_tasks:
-                task = self.multisweep_tasks.pop(task_key); task.stop()
+                task = self.multisweep_tasks.pop(task_key)
+                task.stop()  # Request interruption
+                task.wait(2000)  # Wait up to 2 seconds for thread to finish
             self.multisweep_windows.pop(window_id, None) # Remove window tracking
 
     def _update_console_style(self, dark_mode_enabled: bool):

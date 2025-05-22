@@ -938,7 +938,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 self.crs, module_param, task_params, signals, amplitude=amplitude
             )
             self.netanal_tasks[task_key] = task
-            self.pool.start(task)
+            task.start()  # Start the QThread directly since NetworkAnalysisTask is now a QThread
         except Exception as e:
             print(f"Error in _start_next_amplitude_task: {e}")
             traceback.print_exc()

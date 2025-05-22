@@ -6,7 +6,8 @@ from PyQt6 import QtCore, QtWidgets
 
 from .utils import (
     ClickableViewBox, UnitConverter, LINE_WIDTH,
-    IQ_COLORS, SCATTER_COLORS, DISTINCT_PLOT_COLORS, COLORMAP_CHOICES
+    IQ_COLORS, SCATTER_COLORS, DISTINCT_PLOT_COLORS, COLORMAP_CHOICES,
+    UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE
 )
 from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm # For direct use if needed
 
@@ -16,7 +17,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     including three plots: Sweep (vs freq.), Sweep (IQ plane), and Bias amplitude optimization.
     """
     def __init__(self, parent: QtWidgets.QWidget = None,
-                 resonance_data_for_digest: dict = None, # {amp_raw: sweep_data_dict}
+                 resonance_data_for_digest: dict = None, # {amp_raw: {'data': sweep_data_dict, 'actual_cf_hz': float, 'direction': str}}
                  detector_id: int = -1,
                  resonance_frequency_ghz: float = 0.0,
                  dac_scales: dict = None, # {module_id: scale_dbm}
@@ -76,14 +77,18 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         
         # Add a title label at the top
         title_text = f"Detector {self.detector_id+1} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
-        title_label = QtWidgets.QLabel(title_text)
-        title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        font = title_label.font()
+        self.title_label = QtWidgets.QLabel(title_text)
+        self.title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        font = self.title_label.font()
         font.setPointSize(font.pointSize() + 2)
         font.setBold(False)
-        title_label.setFont(font)
-        title_label.setStyleSheet("margin-bottom: 10px;")
-        outer_layout.addWidget(title_label)
+        self.title_label.setFont(font)
+        
+        # Set title label color based on dark mode
+        title_color = "white" if self.dark_mode else "black"
+        self.title_label.setStyleSheet(f"margin-bottom: 10px; color: {title_color};")
+        
+        outer_layout.addWidget(self.title_label)
         
         # Create horizontal layout for the three plots
         plots_layout = QtWidgets.QHBoxLayout()
@@ -196,10 +201,19 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         active_power_dbm_str = "N/A"
         if self.active_amplitude_raw is not None:
+            # Extract the actual amplitude from the composite key if needed
+            if isinstance(self.active_amplitude_raw, str) and ":" in self.active_amplitude_raw:
+                # Format is "amp_val:direction"
+                amp_part = self.active_amplitude_raw.split(":")[0]
+                active_amp_val = float(amp_part)
+            else:
+                # Legacy format - direct amplitude value
+                active_amp_val = self.active_amplitude_raw
+                
             dac_scale = self.dac_scales.get(self.target_module)
             if dac_scale is not None:
                 try:
-                    active_power_dbm = UnitConverter.normalize_to_dbm(self.active_amplitude_raw, dac_scale)
+                    active_power_dbm = UnitConverter.normalize_to_dbm(active_amp_val, dac_scale)
                     active_power_dbm_str = f"{active_power_dbm:.2f} dBm"
                 except Exception:
                     pass # Keep "N/A" or raw value if conversion fails
@@ -257,22 +271,62 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         
         # --- Plot 3: Bias amplitude optimization ---
         if self.current_plot_offset_hz is not None:
-            num_amps = len(self.resonance_data_for_digest)
-
-            # Use centralized DISTINCT_PLOT_COLORS for <= 4 lines
+            # Group data by amplitude (without direction) for proper color assignment
+            data_by_amplitude = {}
+            
+            for key, sweep_info in self.resonance_data_for_digest.items():
+                # Extract amplitude from composite key or from the 'amplitude' field
+                if isinstance(key, str) and ":" in key:
+                    # New format: "amp_val:direction"
+                    amp_parts = key.split(":")
+                    amp_val = float(amp_parts[0])
+                    direction = amp_parts[1]
+                else:
+                    # Legacy format or direct amplitude value
+                    amp_val = sweep_info.get('amplitude', key)
+                    direction = sweep_info.get('direction', 'upward')
+                
+                if amp_val not in data_by_amplitude:
+                    data_by_amplitude[amp_val] = []
+                
+                # Store sweep info with explicit direction
+                data_entry = {
+                    'sweep_info': sweep_info,
+                    'direction': direction,
+                    'key': key
+                }
+                data_by_amplitude[amp_val].append(data_entry)
             
             # Sort amplitudes for consistent coloring
-            sorted_amp_keys = sorted(self.resonance_data_for_digest.keys())
-
-            for idx, amp_raw in enumerate(sorted_amp_keys):
-                sweep_info = self.resonance_data_for_digest[amp_raw]
-                sweep_data = sweep_info['data']
-                # actual_cf_hz_this_sweep = sweep_info['actual_cf_hz'] # Not used for plotting if x-axis is relative to active sweep's CF
-
-                freqs_hz = sweep_data.get('frequencies')
-                iq_complex = sweep_data.get('iq_complex')
-
-                if freqs_hz is not None and iq_complex is not None:
+            sorted_amplitudes = sorted(data_by_amplitude.keys())
+            num_unique_amps = len(sorted_amplitudes)
+            
+            # Process each amplitude group
+            for amp_idx, amp_val in enumerate(sorted_amplitudes):
+                # Determine color for this amplitude group
+                if num_unique_amps <= 3:
+                    color = DISTINCT_PLOT_COLORS[amp_idx % len(DISTINCT_PLOT_COLORS)]
+                else:
+                    cmap = pg.colormap.get(COLORMAP_CHOICES["AMPLITUDE_SWEEP"])
+                    norm_idx = amp_idx / max(1, num_unique_amps - 1)
+                    if self.dark_mode:
+                        color_val_in_map = 0.3 + norm_idx * 0.7
+                    else:
+                        color_val_in_map = norm_idx * 0.9
+                    color = cmap.map(color_val_in_map)
+                
+                # Plot each direction for this amplitude
+                for data_entry in data_by_amplitude[amp_val]:
+                    sweep_info = data_entry['sweep_info']
+                    sweep_data = sweep_info['data']
+                    direction = data_entry['direction']
+                    
+                    freqs_hz = sweep_data.get('frequencies')
+                    iq_complex = sweep_data.get('iq_complex')
+                    
+                    if freqs_hz is None or iq_complex is None:
+                        continue
+                    
                     s21_mag_db = convert_roc_to_dbm(np.abs(iq_complex))
                     
                     if self.normalize_plot3 and len(s21_mag_db) > 0:
@@ -282,33 +336,26 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     
                     x_axis_hz_offset = freqs_hz - self.current_plot_offset_hz
                     
-                    current_pen = None # Initialize pen variable
-                    if num_amps <= 3:
-                        color_str = DISTINCT_PLOT_COLORS[idx % len(DISTINCT_PLOT_COLORS)]
-                        current_pen = pg.mkPen(color_str, width=LINE_WIDTH)
-                    else: # num_amps > 3
-                        cmap = pg.colormap.get(COLORMAP_CHOICES["AMPLITUDE_SWEEP"])
-                        # Adjust colormap: map [0,1] to [0.3, 1] if dark mode
-                        norm_idx = idx / max(1, num_amps - 1)
-                        if self.dark_mode:
-                            color_val_in_map = 0.3 + norm_idx * 0.7
-                        else:
-                            color_val_in_map = norm_idx * 0.9
-                        color_from_map = cmap.map(color_val_in_map) 
-                        current_pen = pg.mkPen(color_from_map, width=LINE_WIDTH)
-                
-                    # Legend name: Bias amplitude [dBm]
-                    dac_scale_for_module = self.dac_scales.get(self.target_module) # Use target_module
-                    legend_name = f"{amp_raw:.2e} Norm" # Fallback
+                    # Set line style based on direction using constants
+                    line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
+                    current_pen = pg.mkPen(color, width=LINE_WIDTH, style=line_style)
+                    
+                    # Generate legend name
+                    dac_scale_for_module = self.dac_scales.get(self.target_module)
+                    legend_name = f"{amp_val:.2e} Norm"  # Fallback
                     if dac_scale_for_module is not None:
                         try:
-                            dbm_val = UnitConverter.normalize_to_dbm(amp_raw, dac_scale_for_module)
+                            dbm_val = UnitConverter.normalize_to_dbm(amp_val, dac_scale_for_module)
                             legend_name = f"{dbm_val:.2f} dBm"
-                        except Exception: # Catch potential math errors with bad inputs
-                            pass # Stick to fallback
-
-                    if current_pen: # Ensure pen is set before plotting
-                        self.plot3_bias_opt.plot(x_axis_hz_offset, s21_mag_db, pen=current_pen, name=legend_name)
+                        except Exception:
+                            pass  # Stick to fallback
+                    
+                    # Add direction suffix to legend
+                    direction_suffix = " (Down)" if direction == "downward" else " (Up)"
+                    legend_name += direction_suffix
+                    
+                    # Plot the data
+                    self.plot3_bias_opt.plot(x_axis_hz_offset, s21_mag_db, pen=current_pen, name=legend_name)
         self.plot3_bias_opt.autoRange()
 
     @QtCore.pyqtSlot(object)
@@ -373,6 +420,11 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         if central_widget:
             bg_color_hex = "#1C1C1C" if dark_mode else "#FFFFFF"
             central_widget.setStyleSheet(f"background-color: {bg_color_hex};")
+        
+        # Update title label color
+        if hasattr(self, 'title_label'):
+            title_color = "white" if dark_mode else "black"
+            self.title_label.setStyleSheet(f"margin-bottom: 10px; color: {title_color};")
         
         # Apply theme to all plots
         bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")

@@ -153,6 +153,10 @@ from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, Qt, QRegul
 from PyQt6.QtGui import QFont, QIntValidator, QIcon, QDoubleValidator, QRegularExpressionValidator
 import pyqtgraph as pg
 
+# Multisweep line styles (for differentiating sweep directions)
+UPWARD_SWEEP_STYLE = Qt.PenStyle.SolidLine
+DOWNWARD_SWEEP_STYLE = Qt.PenStyle.DotLine  # Dotted line for downward sweeps
+
 # Imports for embedded iPython console
 try:
     from qtconsole.rich_jupyter_widget import RichJupyterWidget

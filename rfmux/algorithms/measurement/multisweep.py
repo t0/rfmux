@@ -77,6 +77,7 @@ async def multisweep(
     amp: float,
     nsamps: int = 10,
     recalculate_center_frequencies: Optional[str] = None, # Options: "min-s21", "max-dq", or None
+    sweep_direction: str = "upward", # Options: "upward", "downward"
     *,
     module,
     progress_callback=None,
@@ -191,13 +192,23 @@ async def multisweep(
     resonance_data = {}
 
     for cf in center_frequencies:
-        # Generate points for this sweep
-        sweep_points = np.linspace(
-            cf - span_hz / 2,
-            cf + span_hz / 2,
-            npoints_per_sweep,
-            endpoint=True
-        )
+        # Generate points for this sweep based on direction
+        if sweep_direction == "upward":
+            sweep_points = np.linspace(
+                cf - span_hz / 2,
+                cf + span_hz / 2,
+                npoints_per_sweep,
+                endpoint=True
+            )
+        elif sweep_direction == "downward":
+            sweep_points = np.linspace(
+                cf + span_hz / 2,
+                cf - span_hz / 2,
+                npoints_per_sweep,
+                endpoint=True
+            )
+        else:
+            raise ValueError(f"Invalid sweep_direction: {sweep_direction}. Must be 'upward' or 'downward'.")
 
         resonance_data[cf] = {
             'frequencies': sweep_points,
@@ -440,7 +451,8 @@ async def multisweep(
             'recalculation_method_applied': recalc_method_applied,
             'key_frequency_is_recalculated': key_is_recalculated,
             'rotation_tod': data_entry.get('rotation_tod'),
-            'applied_rotation_degrees': data_entry.get('applied_rotation_degrees')
+            'applied_rotation_degrees': data_entry.get('applied_rotation_degrees'),
+            'sweep_direction': sweep_direction
         }
         results_by_center_freq[current_key_for_results] = result_dict
     

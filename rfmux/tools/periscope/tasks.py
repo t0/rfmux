@@ -363,11 +363,12 @@ class SetCableLengthTask(QRunnable):
 class MultisweepSignals(QObject):
     progress = pyqtSignal(int, float)
     intermediate_data_update = pyqtSignal(int, float, dict) # module, amplitude, intermediate_results_dict
-    # data_update now sends two dictionaries:
+    # Updated data_update to include iteration and direction:
     # 1. results_for_plotting: {output_cf: data_dict_val} - original structure from crs.multisweep
     # 2. results_for_history: {conceptual_idx: output_cf_key} - for easy history update
-    data_update = pyqtSignal(int, float, dict, dict) # module, amplitude, results_for_plotting, results_for_history
-    completed_amplitude = pyqtSignal(int, float)
+    data_update = pyqtSignal(int, int, float, str, dict, dict) # module, iteration, amplitude, direction, results_for_plotting, results_for_history
+    completed_iteration = pyqtSignal(int, int, float, str) # module, iteration, amplitude, direction
+    starting_iteration = pyqtSignal(int, int, float, str) # module, iteration, amplitude, direction
     all_completed = pyqtSignal()
     error = pyqtSignal(int, float, str)
 
@@ -420,7 +421,11 @@ class MultisweepTask(QtCore.QThread):
         
         try:
             amplitudes = self.params.get('amps', [DEFAULT_AMPLITUDE])
+            sweep_direction = self.params.get('sweep_direction', 'upward')
             conceptual_frequencies_from_window = self.window.conceptual_resonance_frequencies
+            
+            # Track iterations across all sweeps
+            iteration_index = 0
 
             for amp_val in amplitudes:
                 if self.isInterruptionRequested():
@@ -444,46 +449,64 @@ class MultisweepTask(QtCore.QThread):
                     current_sweep_cfs_for_this_amp.append(chosen_input_cf)
                     conceptual_idx_to_input_cf_map[idx] = chosen_input_cf
                 
-                multisweep_params = {
-                    'center_frequencies': current_sweep_cfs_for_this_amp, # Use dynamically determined CFs
-                    'span_hz': self.params['span_hz'],
-                    'npoints_per_sweep': self.params['npoints_per_sweep'],
-                    'amp': amp_val,
-                    'nsamps': self.params.get('nsamps', 10),
-                    'module': module_idx,
-                    'progress_callback': self._progress_callback_wrapper,
-                    'data_callback': self._data_callback_wrapper,
-                    'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', None)
-                }
+                # Determine which directions to sweep
+                directions_to_sweep = []
+                if sweep_direction == "both":
+                    directions_to_sweep = ["upward","downward"]  # Perform upward sweep first, then downward
+                else:
+                    directions_to_sweep = [sweep_direction]
                 
-                # Process the multisweep asynchronously without blocking
-                raw_results_from_crs = loop.run_until_complete(self._process_multisweep(loop, multisweep_params))
-                
-                if self.isInterruptionRequested():
-                    self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution.")
-                    return
-                
-                results_for_plotting = raw_results_from_crs # For plotting, use the direct structure
-                results_for_history = {} # For history: {conceptual_idx: output_cf_key}
+                # Perform sweep(s) for each direction
+                for direction in directions_to_sweep:
+                    # Signal the start of this iteration to update the status bar BEFORE we start the sweep
+                    self.signals.starting_iteration.emit(module_idx, iteration_index, amp_val, direction)
+                    
+                    multisweep_params = {
+                        'center_frequencies': current_sweep_cfs_for_this_amp, # Use dynamically determined CFs
+                        'span_hz': self.params['span_hz'],
+                        'npoints_per_sweep': self.params['npoints_per_sweep'],
+                        'amp': amp_val,
+                        'nsamps': self.params.get('nsamps', 10),
+                        'module': module_idx,
+                        'progress_callback': self._progress_callback_wrapper,
+                        'data_callback': self._data_callback_wrapper,
+                        'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', None),
+                        'sweep_direction': direction
+                    }
+                    
+                    # Process the multisweep asynchronously without blocking
+                    raw_results_from_crs = loop.run_until_complete(self._process_multisweep(loop, multisweep_params))
+                    
+                    if self.isInterruptionRequested():
+                        self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution.")
+                        return
+                    
+                    results_for_plotting = raw_results_from_crs # For plotting, use the direct structure
+                    results_for_history = {} # For history: {conceptual_idx: output_cf_key}
 
-                if raw_results_from_crs:
-                    # Map results back to conceptual_idx for history
-                    for output_cf_key, data_dict_val in raw_results_from_crs.items():
-                        input_cf_this_result_was_for = data_dict_val['original_center_frequency']
-                        found_conceptual_idx = -1
-                        for c_idx, mapped_input_cf in conceptual_idx_to_input_cf_map.items():
-                            if abs(mapped_input_cf - input_cf_this_result_was_for) < 1e-3: # Tolerance for float comparison
-                                found_conceptual_idx = c_idx
-                                break
-                        if found_conceptual_idx != -1:
-                            results_for_history[found_conceptual_idx] = output_cf_key
-                        else:
-                            print(f"Warning (MultisweepTask): Could not map result for input_cf {input_cf_this_result_was_for} back to conceptual_idx for amp {amp_val}", file=sys.stderr)
-                
-                if results_for_plotting is not None: # Can be None if crs.multisweep had issues
-                     self.signals.data_update.emit(module_idx, amp_val, results_for_plotting, results_for_history)
-                
-                self.signals.completed_amplitude.emit(module_idx, amp_val)
+                    if raw_results_from_crs:
+                        # Map results back to conceptual_idx for history
+                        for output_cf_key, data_dict_val in raw_results_from_crs.items():
+                            input_cf_this_result_was_for = data_dict_val['original_center_frequency']
+                            found_conceptual_idx = -1
+                            for c_idx, mapped_input_cf in conceptual_idx_to_input_cf_map.items():
+                                if abs(mapped_input_cf - input_cf_this_result_was_for) < 1e-3: # Tolerance for float comparison
+                                    found_conceptual_idx = c_idx
+                                    break
+                            if found_conceptual_idx != -1:
+                                results_for_history[found_conceptual_idx] = output_cf_key
+                            else:
+                                print(f"Warning (MultisweepTask): Could not map result for input_cf {input_cf_this_result_was_for} back to conceptual_idx for amp {amp_val}", file=sys.stderr)
+                    
+                    if results_for_plotting is not None: # Can be None if crs.multisweep had issues
+                        # Use updated signal with iteration and direction information
+                        self.signals.data_update.emit(module_idx, iteration_index, amp_val, direction, results_for_plotting, results_for_history)
+                    
+                    # Signal completion of this iteration
+                    self.signals.completed_iteration.emit(module_idx, iteration_index, amp_val, direction)
+                    
+                    # Increment iteration counter for the next sweep
+                    iteration_index += 1
             
             self.signals.all_completed.emit()
         except asyncio.CancelledError:

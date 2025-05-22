@@ -156,6 +156,29 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             "- max-dQ: Recalculates to max |d(phase)/df|. Acquires TOD. Rotates sweep to align TOD's PCA with I-axis."
         )
         param_form_layout.addRow("Recalculate/Rotate Method:", self.recalc_cf_combo)
+        
+        # Sweep direction selection
+        self.sweep_direction_combo = QtWidgets.QComboBox()
+        self.sweep_direction_combo.addItems(["Upward", "Downward", "Both"])
+        
+        # Set initial value for sweep_direction
+        default_direction = self.params.get('sweep_direction', 'upward')
+        if default_direction == "upward":
+            self.sweep_direction_combo.setCurrentText("Upward")
+        elif default_direction == "downward":
+            self.sweep_direction_combo.setCurrentText("Downward")
+        elif default_direction == "both":
+            self.sweep_direction_combo.setCurrentText("Both")
+        else: # Default to Upward for any unexpected value
+            self.sweep_direction_combo.setCurrentText("Upward")
+            
+        self.sweep_direction_combo.setToolTip(
+            "Direction of frequency sweep:\n"
+            "- Upward: Sweep from lower to higher frequencies.\n"
+            "- Downward: Sweep from higher to lower frequencies.\n"
+            "- Both: Perform both sweep directions sequentially."
+        )
+        param_form_layout.addRow("Sweep Direction:", self.sweep_direction_combo)
         layout.addWidget(param_group)
 
         # Standard OK and Cancel buttons
@@ -225,6 +248,17 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             else: # Should not happen with QComboBox
                 params_dict['recalculate_center_frequencies'] = None
             
+            # Get sweep direction
+            sweep_direction_text = self.sweep_direction_combo.currentText()
+            if sweep_direction_text == "Upward":
+                params_dict['sweep_direction'] = "upward"
+            elif sweep_direction_text == "Downward":
+                params_dict['sweep_direction'] = "downward"
+            elif sweep_direction_text == "Both":
+                params_dict['sweep_direction'] = "both"
+            else: # Should not happen with QComboBox
+                params_dict['sweep_direction'] = "upward"
+                
             # Include the essential context for the multisweep
             params_dict['resonance_frequencies'] = self.resonance_frequencies
             params_dict['module'] = self.current_module

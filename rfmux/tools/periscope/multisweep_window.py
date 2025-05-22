@@ -9,7 +9,7 @@ import pyqtgraph as pg
 # Imports from within the 'periscope' subpackage
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
-    TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD
+    TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE
 )
 from .detector_digest_dialog import DetectorDigestWindow
 
@@ -56,8 +56,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(f"Multisweep Results - Module {self.target_module}")
 
         # Data storage and state
-        self.results_by_amplitude = {}  # Stores {amplitude: {cf: data_dict}}
+        self.results_by_iteration = {}  # Stores {iteration: {"amplitude": amp_val, "direction": direction, "data": {cf: data_dict}}}
         self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed
+        self.current_iteration_being_processed = None # Tracks the current iteration
         self.unit_mode = "dbm"  # Current unit for magnitude display ("counts", "dbm", "volts")
         self.normalize_traces = False  # Flag to normalize trace plots (magnitude and phase)
         self.zoom_box_mode = True  # Flag for enabling/disabling pyqtgraph's zoom box
@@ -225,7 +226,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                         ax.setPen(pen_color)
                         ax.setTextPen(pen_color)
 
-        # Connect double click signal from both magnitude and phase plot viewboxes
+        # Connect double click signal to both magnitude and phase plot viewboxes
         if self.combined_mag_plot: # Add check for None
             view_box_mag = self.combined_mag_plot.getViewBox()
             if isinstance(view_box_mag, ClickableViewBox):
@@ -309,10 +310,28 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
         # Current amplitude label below progress bar
         self.current_amp_label = QtWidgets.QLabel()
-        total_sweeps = len(self.probe_amplitudes)
-        if total_sweeps > 0:
-            first_amplitude = self.probe_amplitudes[0]
-            self.current_amp_label.setText(f"Amplitude 1/{total_sweeps} ({first_amplitude:.4f})")
+        num_amplitudes = len(self.probe_amplitudes)
+        
+        # Calculate total iterations based on sweep direction
+        sweep_direction = self.initial_params.get('sweep_direction', 'upward')
+        self.total_iterations = num_amplitudes * (2 if sweep_direction == "both" else 1)
+        
+        if num_amplitudes > 0:
+            # Initial message showing what's about to happen
+            # When sweep_direction is "both", MultisweepTask does upward first
+            # Normalize sweep_direction to handle potential case or whitespace issues
+            sweep_direction_norm = sweep_direction.lower().strip() if sweep_direction else ""
+            
+            if sweep_direction_norm == "downward":
+                direction_text = "Down"
+            elif sweep_direction_norm == "upward" or sweep_direction_norm == "both":
+                direction_text = "Up"
+            else:
+                # Fallback for unexpected sweep_direction values
+                direction_text = "Unknown"
+                print(f"WARNING: Unexpected sweep_direction value: '{sweep_direction}'")
+                
+            self.current_amp_label.setText(f"Iteration 1/{self.total_iterations}: Amplitude {self.probe_amplitudes[0]:.4f} ({direction_text})")
         else:
             self.current_amp_label.setText("No sweeps defined. (Waiting...)")
         self.current_amp_label.setAlignment(Qt.AlignmentFlag.AlignCenter) # Center the text
@@ -334,58 +353,63 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             if hasattr(self, 'progress_group') and not self.progress_group.isVisible():
                 self.progress_group.setVisible(True)
 
-    def update_data(self, module: int, amplitude: float, results_for_plotting: dict, results_for_history: dict):
+    def handle_starting_iteration(self, module: int, iteration: int, amplitude: float, direction: str):
         """
-        Receives final data for a completed amplitude sweep for the target module.
+        Handler for the starting_iteration signal. Updates the status bar at the start of a sweep.
+        
+        Args:
+            module (int): The module reporting the start.
+            iteration (int): The iteration index (0-based).
+            amplitude (float): The probe amplitude for this iteration.
+            direction (str): The sweep direction ("upward" or "downward").
+        """
+        if module != self.target_module: return
+        
+        # Convert direction to user-friendly format
+        direction_text = "Down" if direction.lower().strip() == "downward" else "Up"
+        
+        # Convert to 1-based for display
+        current_display_iteration = iteration + 1
+        
+        # Make sure total_iterations is at least as large as the current iteration
+        self.total_iterations = max(self.total_iterations, current_display_iteration)
+        
+        # Set the status message BEFORE the sweep starts
+        status_message = f"Iteration {current_display_iteration}/{self.total_iterations}: Amplitude {amplitude:.4f} ({direction_text})"
+        self.current_amp_label.setText(status_message)
+        
+    def update_data(self, module: int, iteration: int, amplitude: float, direction: str, results_for_plotting: dict, results_for_history: dict):
+        """
+        Receives final data for a completed iteration of a multisweep for the target module.
         Stores the data for plotting and updates the CF history.
 
         Args:
             module (int): The module reporting data.
+            iteration (int): The current iteration index.
             amplitude (float): The probe amplitude for which data is provided.
+            direction (str): The sweep direction ("upward" or "downward").
             results_for_plotting (dict): Data for plotting, format: {output_cf: data_dict_val}.
             results_for_history (dict): Data for history, format: {conceptual_idx: output_cf_key}.
         """
         if module != self.target_module: return
         
         self.current_amplitude_being_processed = amplitude
-        self.results_by_amplitude[amplitude] = results_for_plotting # Store for plotting
+        self.current_iteration_being_processed = iteration
+        
+        # Store data in iteration-based structure
+        self.results_by_iteration[iteration] = {
+            "amplitude": amplitude,
+            "direction": direction,
+            "data": results_for_plotting
+        }
 
         # --- Update CF history using the pre-mapped results_for_history ---
         if results_for_history:
             self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {}).update(results_for_history)
 
         self._redraw_plots() # Refresh plots with the new data
-
-        # Now, update the label for the *next* anticipated sweep
-        total_sweeps = len(self.probe_amplitudes)
-        if not self.probe_amplitudes:
-            self.current_amp_label.setText("No sweeps defined.") # Should not happen if update_data is called
-            return
-
-        try:
-            current_amp_index_in_list = self.probe_amplitudes.index(amplitude)
-        except ValueError:
-            # This amplitude wasn't in our list, which is unexpected.
-            # Fallback to a generic message or log an error.
-            #print(f"Error: Processed amplitude {amplitude} not found in configured probe_amplitudes for Module {self.target_module}.")
-            self.current_amp_label.setText(f"Processed: {amplitude:.4f}")
-            return
-
-        if current_amp_index_in_list + 1 < total_sweeps:
-            # There are more sweeps to go
-            next_amplitude_index_in_list = current_amp_index_in_list + 1
-            next_amplitude_value = self.probe_amplitudes[next_amplitude_index_in_list]
-            # Display index is 1-based
-            self.current_amp_label.setText(f"Amplitude {next_amplitude_index_in_list + 1}/{total_sweeps} ({next_amplitude_value:.4f})")
-        else:
-            # This was the last amplitude in the list
-            # The all_sweeps_completed signal should handle the final message,
-            # but we can set it here too as a fallback or intermediate state.
-            # self.current_amp_label.setText(f"All {total_sweeps} Amplitudes Processed")
-            # Let all_sweeps_completed handle the final message for clarity.
-            # If this is the last one, the progress bar for this amp sweep should be 100%.
-            # The overall "All Amplitudes Processed" will be set by all_sweeps_completed.
-            pass
+        
+        # Note: We now update the status in handle_starting_iteration() instead of here
 
     def _redraw_plots(self):
         """
@@ -415,8 +439,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             for line in amp_val_lines: self.combined_phase_plot.removeItem(line)
         self.cf_lines_phase.clear()
 
-        num_amps = len(self.results_by_amplitude)
-        if num_amps == 0: # No data to plot
+        num_iterations = len(self.results_by_iteration)
+        if num_iterations == 0: # No data to plot
             self.combined_mag_plot.autoRange(); self.combined_phase_plot.autoRange() # Ensure plots are reset
             return
         
@@ -425,14 +449,16 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         cmap_name = COLORMAP_CHOICES.get("AMPLITUDE_SWEEP", "inferno") # Fallback if key missing
         use_cmap = pg.colormap.get(cmap_name) if cmap_name else None
         
-        sorted_amplitudes = sorted(self.results_by_amplitude.keys())
-        legend_items_mag = {} # To avoid duplicate legend entries for the same amplitude
-        legend_items_phase = {}
-
-        # Iterate through each amplitude's results
-        for amp_idx, amp_val in enumerate(sorted_amplitudes):
-            amp_results = self.results_by_amplitude[amp_val]
+        # Get unique amplitudes to determine color scheme
+        amplitude_values = set()
+        for iteration_data in self.results_by_iteration.values():
+            amplitude_values.add(iteration_data["amplitude"])
+        num_amps = len(amplitude_values)
             
+        # Create a mapping for unique amplitude values to colors
+        sorted_amplitudes = sorted(amplitude_values)
+        amplitude_to_color = {}
+        for amp_idx, amp_val in enumerate(sorted_amplitudes):
             # Determine color for this amplitude's curves
             if num_amps <= AMPLITUDE_COLORMAP_THRESHOLD: # Use distinct colors if few amplitudes
                 color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
@@ -448,7 +474,23 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                     color = use_cmap.map(map_value)
                 else: # Fallback if colormap is somehow None
                     color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
-            pen = pg.mkPen(color, width=LINE_WIDTH)
+            amplitude_to_color[amp_val] = color
+        
+        legend_items_mag = {} # To avoid duplicate legend entries for the same amplitude/direction combination
+        legend_items_phase = {}
+        
+        # Iterate through each iteration's results
+        for iteration, iteration_data in self.results_by_iteration.items():
+            amp_val = iteration_data["amplitude"]
+            direction = iteration_data["direction"]
+            amp_results = iteration_data["data"]
+            
+            # Get color for this amplitude
+            color = amplitude_to_color[amp_val]
+            
+            # Set line style based on direction using constants from utils.py
+            line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
+            pen = pg.mkPen(color, width=LINE_WIDTH, style=line_style)
             
             # --- Prepare Legend Entry for this Amplitude ---
             legend_name_amp = ""
@@ -473,16 +515,23 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             else: # Counts or other modes
                 legend_name_amp = f"Probe: {amp_val:.3e} Norm"
 
-            # Add legend item only once per amplitude
-            if amp_val not in legend_items_mag and self.mag_legend:
+            # Add direction to legend name
+            direction_suffix = " (Down)" if direction == "downward" else " (Up)"
+            full_legend_name = legend_name_amp + direction_suffix
+            
+            # Create a unique key for this amplitude+direction combination
+            legend_key = (amp_val, direction)
+            
+            # Add legend item once per amplitude+direction combination
+            if legend_key not in legend_items_mag and self.mag_legend:
                 # Create a dummy item for the legend (actual curves are added later)
                 dummy_mag_curve_for_legend = pg.PlotDataItem(pen=pen) 
-                self.mag_legend.addItem(dummy_mag_curve_for_legend, legend_name_amp)
-                legend_items_mag[amp_val] = dummy_mag_curve_for_legend # Mark as added
-            if amp_val not in legend_items_phase and self.phase_legend:
+                self.mag_legend.addItem(dummy_mag_curve_for_legend, full_legend_name)
+                legend_items_mag[legend_key] = dummy_mag_curve_for_legend # Mark as added
+            if legend_key not in legend_items_phase and self.phase_legend:
                 dummy_phase_curve_for_legend = pg.PlotDataItem(pen=pen)
-                self.phase_legend.addItem(dummy_phase_curve_for_legend, legend_name_amp)
-                legend_items_phase[amp_val] = dummy_phase_curve_for_legend
+                self.phase_legend.addItem(dummy_phase_curve_for_legend, full_legend_name)
+                legend_items_phase[legend_key] = dummy_phase_curve_for_legend
 
             # --- Plot Data for Each Resonance (Center Frequency) at this Amplitude ---
             for cf, data in amp_results.items():
@@ -613,7 +662,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                                         QtCore.Qt.ConnectionType.QueuedConnection)
             return
             
-        if not self.results_by_amplitude:
+        if not self.results_by_iteration:
             QtWidgets.QMessageBox.warning(self, "No Data", "No data to export.")
             return
         
@@ -657,7 +706,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 'target_module': self.target_module,
                 'initial_parameters': self.initial_params,
                 'dac_scales_used': self.dac_scales,
-                'results_by_amplitude': self.results_by_amplitude
+                'results_by_iteration': self.results_by_iteration
             }
             with open(filename, 'wb') as f: # Write in binary mode for pickle
                 pickle.dump(export_content, f)
@@ -754,16 +803,24 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             self.probe_amplitudes = list(self.current_run_amps) # For progress display
 
             # Reset window state for the new sweep
-            self.results_by_amplitude.clear()
+            self.results_by_iteration.clear()
             self._redraw_plots() # Clear plots
             if self.progress_bar: self.progress_bar.setValue(0)
             if self.progress_group: self.progress_group.setVisible(True)
             
-            total_sweeps = len(self.probe_amplitudes)
+            # Re-calculate total iterations based on new sweep direction
+            num_amplitudes = len(self.probe_amplitudes)
+            sweep_direction = self.initial_params.get('sweep_direction', 'upward')
+            self.total_iterations = num_amplitudes * (2 if sweep_direction == "both" else 1)
+            
+            # Determine initial direction text - consistent with our other direction text logic
+            sweep_direction_norm = sweep_direction.lower().strip() if sweep_direction else ""
+            direction_text = "Down" if sweep_direction_norm == "downward" else "Up"
+            
             if self.current_amp_label:
-                if total_sweeps > 0:
+                if num_amplitudes > 0:
                     first_amplitude = self.probe_amplitudes[0]
-                    self.current_amp_label.setText(f"Amplitude 1/{total_sweeps} ({first_amplitude:.4f})")
+                    self.current_amp_label.setText(f"Iteration 1/{self.total_iterations}: Amplitude {first_amplitude:.4f} ({direction_text})")
                 else:
                     self.current_amp_label.setText("No sweeps defined. (Waiting...)")
             
@@ -802,17 +859,34 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
         if checked:
             # Show lines. Create them if they don't exist.
-            num_amps = len(self.results_by_amplitude)
+            # Get unique amplitudes from iterations
+            amplitude_values = set()
+            for iteration_data in self.results_by_iteration.values():
+                amplitude_values.add(iteration_data["amplitude"])
+            num_amps = len(amplitude_values)
+            
             if num_amps == 0:
                 return
 
             # Color definitions (consistent with _redraw_plots)
             cmap_name = COLORMAP_CHOICES.get("AMPLITUDE_SWEEP", "inferno")
             use_cmap = pg.colormap.get(cmap_name) if cmap_name else None
-            sorted_amplitudes = sorted(self.results_by_amplitude.keys())
+            sorted_amplitudes = sorted(amplitude_values)
 
             for amp_idx, amp_val in enumerate(sorted_amplitudes):
-                amp_results = self.results_by_amplitude.get(amp_val, {})
+                # Find the latest iteration for this amplitude
+                latest_iter_idx = None
+                latest_iter_data = None
+                for iter_idx, iter_data in self.results_by_iteration.items():
+                    if iter_data["amplitude"] == amp_val:
+                        if latest_iter_idx is None or iter_idx > latest_iter_idx:
+                            latest_iter_idx = iter_idx
+                            latest_iter_data = iter_data
+                
+                if latest_iter_data is None:
+                    continue
+                    
+                amp_results = latest_iter_data.get("data", {})
                 
                 # Determine color for this amplitude's lines
                 if num_amps <= AMPLITUDE_COLORMAP_THRESHOLD: # Use consistent threshold from utils.py
@@ -881,7 +955,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         Handles a double-click event on the multisweep magnitude plot.
         Identifies the clicked resonance and prepares data for the DetectorDigestDialog.
         """
-        if not self.results_by_amplitude:
+        if not self.results_by_iteration:
             return
 
         # Get click coordinates in view space from the event's scenePos
@@ -903,9 +977,10 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # Iterate through all known center frequencies from all measurements
         # to find which one is horizontally closest to the click.
         all_measured_cfs = set()
-        if self.results_by_amplitude: # Ensure there's data
-            for cf_map_at_amp in self.results_by_amplitude.values(): # Iterate through dicts of {cf: data}
-                all_measured_cfs.update(cf_map_at_amp.keys()) # These keys are the output CFs
+        if self.results_by_iteration: # Ensure there's data
+            for iteration_data in self.results_by_iteration.values():
+                cf_map = iteration_data.get("data", {})
+                all_measured_cfs.update(cf_map.keys()) # These keys are the output CFs
 
         if not all_measured_cfs: # No CFs to check against
             return # Or handle error appropriately
@@ -937,23 +1012,44 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[closest_conceptual_idx]
                 detector_id = closest_conceptual_idx # This is the "Detector ID"
 
-            # --- Gather all data for this conceptual resonance across all amplitudes ---
-            # For each amplitude, find the data that corresponds to this conceptual_resonance_base_freq_hz (or its conceptual_idx)
+            # --- Gather all data for this conceptual resonance across all amplitudes and directions ---
+            # Create a structure that preserves both amplitude and direction information
             resonance_data_for_digest = {}
-            for amp_key, cf_map_at_amp in self.results_by_amplitude.items():
-                if not cf_map_at_amp: # No CFs measured for this amplitude
+            
+            # Group iterations by amplitude and direction
+            amplitude_direction_to_iteration = {}  # Maps (amplitude, direction) to iteration
+            for iter_idx, iter_data in self.results_by_iteration.items():
+                amp_val = iter_data["amplitude"]
+                direction = iter_data["direction"]
+                key = (amp_val, direction)
+                
+                # Keep the latest iteration for each amplitude+direction combination
+                if key not in amplitude_direction_to_iteration or iter_idx > amplitude_direction_to_iteration[key]:
+                    amplitude_direction_to_iteration[key] = iter_idx
+            
+            # Now process the appropriate iteration for each amplitude+direction combination
+            for (amp_val, direction), iter_idx in amplitude_direction_to_iteration.items():
+                iter_data = self.results_by_iteration[iter_idx]
+                cf_map = iter_data["data"]
+                
+                if not cf_map:  # No CFs measured for this amplitude+direction
                     continue
                 
-                # Find the CF in cf_map_at_amp closest to conceptual_resonance_base_freq_hz
-                available_cfs_at_amp = np.array(list(cf_map_at_amp.keys()))
-                closest_cf_idx_at_amp = np.abs(available_cfs_at_amp - conceptual_resonance_base_freq_hz).argmin()
-                actual_cf_for_this_amp = available_cfs_at_amp[closest_cf_idx_at_amp]
+                # Find the CF in cf_map closest to conceptual_resonance_base_freq_hz
+                available_cfs = np.array(list(cf_map.keys()))
+                closest_cf_idx = np.abs(available_cfs - conceptual_resonance_base_freq_hz).argmin()
+                actual_cf_for_this_amp = available_cfs[closest_cf_idx]
                 
-                # Optional: Add a threshold if the closest found CF is too far from the conceptual base
-                # For now, assume the closest is the correct one for this conceptual resonance.
-                resonance_data_for_digest[amp_key] = {
-                    'data': cf_map_at_amp[actual_cf_for_this_amp],
-                    'actual_cf_hz': actual_cf_for_this_amp # Store the actual CF for this sweep
+                # Create a unique key that combines amplitude and direction
+                # Format: "amp_val:direction" (e.g., "0.5:upward")
+                combo_key = f"{amp_val}:{direction}"
+                
+                # Store with combined key to preserve both directions per amplitude
+                resonance_data_for_digest[combo_key] = {
+                    'data': cf_map[actual_cf_for_this_amp],
+                    'actual_cf_hz': actual_cf_for_this_amp,  # Store the actual CF for this sweep
+                    'direction': direction,  # Include direction information
+                    'amplitude': amp_val  # Store the raw amplitude for reference
                 }
 
             if not resonance_data_for_digest:

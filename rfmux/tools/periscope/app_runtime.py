@@ -793,10 +793,13 @@ class PeriscopeRuntime:
             # Connect signals from the MultisweepTask to the new window's slots
             self.multisweep_signals.progress.connect(window.update_progress,
                                                    QtCore.Qt.ConnectionType.QueuedConnection)
+            self.multisweep_signals.starting_iteration.connect(window.handle_starting_iteration,
+                                                             QtCore.Qt.ConnectionType.QueuedConnection)
             self.multisweep_signals.data_update.connect(window.update_data,
                                                       QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.completed_amplitude.connect(window.completed_amplitude_sweep,
-                                                              QtCore.Qt.ConnectionType.QueuedConnection)
+            self.multisweep_signals.completed_iteration.connect(
+                lambda module, iteration, amplitude, direction: window.completed_amplitude_sweep(module, amplitude),
+                QtCore.Qt.ConnectionType.QueuedConnection)
             self.multisweep_signals.all_completed.connect(window.all_sweeps_completed,
                                                         QtCore.Qt.ConnectionType.QueuedConnection)
             self.multisweep_signals.error.connect(window.handle_error,

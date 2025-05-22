@@ -1,6 +1,6 @@
 # Changelog
 
-## r1.5.6 - 2025-05-14
+## r1.5.6 - 2025-05-22
 
 - Fixes IRIG-B encoder/decoder. Timestamps previously rolled over faster than
   they should have - unfortunately, while the IRIG-B TEST-mode encoder and
@@ -19,15 +19,25 @@
 - "Streamer blanking" support, allowing you to select which readout modules are
   streamed. This is accessible via the "modules" argument to set_fir_stage.
 
+- Kernel-mode streamer support is now multi-core and can keep up with faster
+  sampling rates.
+
 Using these new features, I can now run
 
->>> await d.set_fir_stage(1, short=True, modules=[1])
+>>> await d.set_fir_stage(0, short=True, modules=[1])
 
-and stream packets at FIR stage 1 (19.073 ksps) without packet loss.
+and stream packets at FIR stage 0 (38.147 ksps) without packet loss.
 
 - set_fir_stage now also verifies that bandwidth can't exceed 1 Gbps - if this
   isn't checked, the kernel runs out of skbufs as we generate data faster than
   it can be offloaded. The result is a mod_rfmux stall.
+
+- Both get_samples() and the parser now have a limited ability to cope with UDP
+  packets that arrive out of sequence order. This is unusual in ordinary
+  conditions, but when the ARM needs more than 1 core to service multicast
+  traffic, packets aren't always transmitted in sequence. (A corresponding
+  change has already been committed to py_get_samples, but it is not as
+  comprehensive.)
 
 ## r1.5.5 - 2025-01-23
 

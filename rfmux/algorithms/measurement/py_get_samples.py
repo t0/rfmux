@@ -175,64 +175,61 @@ async def py_get_samples(crs: CRS,
         loop = asyncio.get_running_loop()
         sock.setblocking(False)
 
-        # Variable to track the previous sequence number and version for continuity checks
-        prev_seq = None
-        prev_ver = None
-
-        # Allow up to 10 packet-loss retries
-        retries = 10
-
-        packets = []
-        # Start receiving packets
-        while len(packets) < num_samples:
-            data = await asyncio.wait_for(
-                loop.sock_recv(sock, streamer.LONG_PACKET_SIZE),
-                streamer.STREAMER_TIMEOUT
-            )
-
-            # Parse the received packet
-            p = streamer.DfmuxPacket.from_bytes(data)
-
-            if p.serial != int(crs.serial):
-                warnings.warn(
-                    f"Packet serial number {p.serial} didn't match CRS serial number {crs.serial}! Two boards on the network? IGMPv3 capable router will fix this warning."
+        async def receive_attempt():
+            packets = []
+            # Start receiving packets
+            while len(packets) < num_samples:
+                data = await asyncio.wait_for(
+                    loop.sock_recv(sock, streamer.LONG_PACKET_SIZE),
+                    streamer.STREAMER_TIMEOUT,
                 )
 
-            # Filter packets by module
-            if p.module != module - 1:
-                continue  # Skip packets from other modules
+                # Parse the received packet
+                p = streamer.DfmuxPacket.from_bytes(data)
 
-            # Check if this packet is older than our "now" timestamp
-            assert ts.source == p.ts.source, f"Timestamp source changed! {ts.source} vs {p.ts.source}"
-            if ts > p.ts:
+                if p.serial != int(crs.serial):
+                    warnings.warn(
+                        f"Packet serial number {p.serial} didn't match CRS serial number {crs.serial}! Two boards on the network? IGMPv3 capable router will fix this warning."
+                    )
+
+                # Filter packets by module
+                if p.module != module - 1:
+                    continue  # Skip packets from other modules
+
+                # Check if this packet is older than our "now" timestamp
+                assert ts.source == p.ts.source, f"Timestamp source changed! {ts.source} vs {p.ts.source}"
+                if ts > p.ts:
+                    continue
+
+                packets.append(p)
+
+            # Sort packets by sequence number
+            return sorted(packets, key=lambda p: p.seq)
+
+        # Allow up to 10 packet-loss retries
+        for attempt in range(NUM_ATTEMPTS := 10):
+            packets = await receive_attempt()
+
+            sequence_steps = np.diff([p.seq for p in packets])
+            if not all(np.diff([p.seq for p in packets]) == 1):
+                warnings.warn(
+                    f"Discontinuous packet capture! Attempt {attempt+1}/{NUM_ATTEMPTS}..."
+                )
                 continue
 
-            # Update the sequence number continuity check
-            if (prev_seq is not None and prev_seq + 1 != p.seq) or \
-                    (prev_ver is not None and prev_ver != p.version):
+            versions = {p.version for p in packets}
+            if len(versions) != 1:
+                warnings.warn(
+                    f"Packet version {versions} changed! Attempt {attempt+1}/{NUM_ATTEMPTS}..."
+                )
+                continue
 
-                if retries > 0:
-                    warnings.warn(
-                        f"Discontinuous packet capture! Previous sequence {prev_seq} -> current sequence {p.seq} "
-                        f"or version switch {prev_ver} -> {p.version}. "
-                        f"Retrying capture ({retries} attempts remain.)"
-                    )
-                    retries -= 1
-                    packets = []
-                    prev_seq = None
-                    prev_ver = None
-                    continue
-                else:
-                    raise RuntimeError(
-                        f"Discontinuous packet capture! Previous sequence {prev_seq} -> current sequence {p.seq}"
-                    )
-
-            # Update the previous sequence number and version
-            prev_seq = p.seq
-            prev_ver = p.version
-
-            # Append the valid packet to the list
-            packets.append(p)
+            # passed our tests - break out of the loop
+            break
+        else:
+            raise RuntimeError(
+                f"Failed to retrieve contiguous, consistent packet capture in {NUM_ATTEMPTS} attempts!"
+            )
 
     num_channels = packets[0].get_num_channels()
     if channel is not None and channel > num_channels:

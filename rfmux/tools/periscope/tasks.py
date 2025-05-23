@@ -362,7 +362,7 @@ class SetCableLengthTask(QRunnable):
 
 class MultisweepSignals(QObject):
     progress = pyqtSignal(int, float)
-    intermediate_data_update = pyqtSignal(int, float, dict) # module, amplitude, intermediate_results_dict
+    intermediate_data_update = pyqtSignal(int, int, float, str, dict) # module, iteration, amplitude, direction, intermediate_results_dict
     # Updated data_update to include iteration and direction:
     # 1. results_for_plotting: {output_cf: data_dict_val} - original structure from crs.multisweep
     # 2. results_for_history: {conceptual_idx: output_cf_key} - for easy history update
@@ -393,6 +393,8 @@ class MultisweepTask(QtCore.QThread):
         self.baseline_resonance_frequencies = list(params.get('resonance_frequencies', []))
         self._running = True
         self.current_amplitude = -1
+        self.current_iteration = -1
+        self.current_direction = ""
         self._task_completed = asyncio.Event()
 
     def stop(self):
@@ -406,7 +408,7 @@ class MultisweepTask(QtCore.QThread):
 
     def _data_callback_wrapper(self, module_idx, intermediate_results):
         """Wrapper for data callback to emit signals."""
-        if self._running: self.signals.intermediate_data_update.emit(module_idx, self.current_amplitude, intermediate_results)
+        if self._running: self.signals.intermediate_data_update.emit(module_idx, self.current_iteration, self.current_amplitude, self.current_direction, intermediate_results)
 
     def run(self):
         """QThread entry point - runs in a separate thread."""
@@ -458,6 +460,10 @@ class MultisweepTask(QtCore.QThread):
                 
                 # Perform sweep(s) for each direction
                 for direction in directions_to_sweep:
+                    # Update current iteration and direction for intermediate data callbacks
+                    self.current_iteration = iteration_index
+                    self.current_direction = direction
+                    
                     # Signal the start of this iteration to update the status bar BEFORE we start the sweep
                     self.signals.starting_iteration.emit(module_idx, iteration_index, amp_val, direction)
                     

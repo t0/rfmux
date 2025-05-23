@@ -795,6 +795,8 @@ class PeriscopeRuntime:
                                                    QtCore.Qt.ConnectionType.QueuedConnection)
             self.multisweep_signals.starting_iteration.connect(window.handle_starting_iteration,
                                                              QtCore.Qt.ConnectionType.QueuedConnection)
+            self.multisweep_signals.intermediate_data_update.connect(window.handle_intermediate_data_update,
+                                                                  QtCore.Qt.ConnectionType.QueuedConnection)
             self.multisweep_signals.data_update.connect(window.update_data,
                                                       QtCore.Qt.ConnectionType.QueuedConnection)
             self.multisweep_signals.completed_iteration.connect(

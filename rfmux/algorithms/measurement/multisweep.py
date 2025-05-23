@@ -14,8 +14,6 @@ from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
 from typing import Optional, Tuple, Dict, Any # Added for type hinting
 
-# fitting import removed as it's no longer used directly here
-
 def _get_recalculated_center_freq(
     original_cf_hz: float,
     sweep_freqs_hz: np.ndarray,

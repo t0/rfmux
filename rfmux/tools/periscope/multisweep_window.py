@@ -198,7 +198,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             plot_item_phase.setLabel('bottom', 'Frequency', units='Hz')
             plot_item_phase.setLabel('left', 'Phase', units='deg')
             plot_item_phase.showGrid(x=True, y=True, alpha=0.3)
-            self.phase_legend = plot_item_phase.addLegend(offset=(30,10), labelTextColor=pen_color)
+            self.phase_legend = plot_item_phase.addLegend(offset=(30,10),labelTextColor=pen_color)
         plot_layout.addWidget(self.combined_phase_plot)
         
         layout.addWidget(plot_container)
@@ -383,94 +383,6 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         status_message = f"Iteration {current_display_iteration}/{self.total_iterations}: Amplitude {amplitude:.4f} ({direction_text})"
         self.current_amp_label.setText(status_message)
         
-    def handle_intermediate_data_update(self, module: int, iteration: int, amplitude: float, direction: str, intermediate_data: dict):
-        """
-        Handler for intermediate data updates during multisweep analysis.
-        TEMPORARILY DISABLED for performance reasons - intermediate plot updates were causing severe slowdown.
-        
-        Args:
-            module (int): The module reporting the intermediate data.
-            iteration (int): The current iteration index.
-            amplitude (float): The probe amplitude for this iteration.
-            direction (str): The sweep direction ("upward" or "downward").
-            intermediate_data (dict): Intermediate data in the same format as final data.
-        """
-        if module != self.target_module: 
-            return
-            
-        # TEMPORARILY DISABLED - intermediate updates were causing 1000x slowdown
-        # Store intermediate data but don't update plots
-        self._current_intermediate_data = intermediate_data
-        # TODO: Implement throttled intermediate updates with proper performance optimization
-
-    def _update_plots_with_intermediate_data(self, amplitude: float, direction: str, intermediate_data: dict):
-        """
-        Updates plots with intermediate data during an ongoing sweep.
-        Creates semi-transparent curves to show current progress.
-        
-        Args:
-            amplitude (float): The current amplitude being swept.
-            direction (str): The sweep direction.
-            intermediate_data (dict): Intermediate sweep data.
-        """
-        if not self.combined_mag_plot or not self.combined_phase_plot:
-            return
-            
-        # Clear any existing intermediate curves
-        self._clear_intermediate_curves()
-        
-        # Choose styling for intermediate curves
-        # Make them semi-transparent and use a consistent intermediate color
-        intermediate_alpha = 0.6
-        intermediate_color = (255, 165, 0, int(255 * intermediate_alpha))  # Orange with alpha
-        
-        # Create intermediate curves for each center frequency
-        for cf, data in intermediate_data.items():
-            freqs_hz = data.get('frequencies')
-            iq_complex = data.get('iq_complex')
-            
-            if freqs_hz is None or iq_complex is None or len(freqs_hz) == 0:
-                continue
-                
-            # Calculate magnitude and phase for intermediate data
-            s21_mag_raw = np.abs(iq_complex)
-            s21_mag_processed = UnitConverter.convert_amplitude(
-                s21_mag_raw, iq_complex, self.unit_mode, 
-                normalize=self.normalize_traces
-            )
-            phase_deg = data.get('phase_degrees', np.degrees(np.angle(iq_complex)))
-            
-            if self.normalize_traces and len(phase_deg) > 0:
-                first_phase_val = phase_deg[0]
-                if np.isfinite(first_phase_val):
-                    phase_deg = phase_deg - first_phase_val
-            
-            # Create intermediate magnitude curve
-            intermediate_pen_mag = pg.mkPen(intermediate_color, width=LINE_WIDTH, style=QtCore.Qt.PenStyle.DashLine)
-            mag_curve = self.combined_mag_plot.plot(pen=intermediate_pen_mag)
-            mag_curve.setData(freqs_hz, s21_mag_processed)
-            self._intermediate_curves_mag[cf] = mag_curve
-            
-            # Create intermediate phase curve
-            intermediate_pen_phase = pg.mkPen(intermediate_color, width=LINE_WIDTH, style=QtCore.Qt.PenStyle.DashLine)
-            phase_curve = self.combined_phase_plot.plot(pen=intermediate_pen_phase)
-            phase_curve.setData(freqs_hz, phase_deg)
-            self._intermediate_curves_phase[cf] = phase_curve
-
-    def _clear_intermediate_curves(self):
-        """Clear all intermediate curves from the plots."""
-        # Remove magnitude intermediate curves
-        for curve in self._intermediate_curves_mag.values():
-            if curve and self.combined_mag_plot:
-                self.combined_mag_plot.removeItem(curve)
-        self._intermediate_curves_mag.clear()
-        
-        # Remove phase intermediate curves
-        for curve in self._intermediate_curves_phase.values():
-            if curve and self.combined_phase_plot:
-                self.combined_phase_plot.removeItem(curve)
-        self._intermediate_curves_phase.clear()
-
     def update_data(self, module: int, iteration: int, amplitude: float, direction: str, results_for_plotting: dict, results_for_history: dict):
         """
         Receives final data for a completed iteration of a multisweep for the target module.

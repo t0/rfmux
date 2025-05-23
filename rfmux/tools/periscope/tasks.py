@@ -362,7 +362,6 @@ class SetCableLengthTask(QRunnable):
 
 class MultisweepSignals(QObject):
     progress = pyqtSignal(int, float)
-    intermediate_data_update = pyqtSignal(int, int, float, str, dict) # module, iteration, amplitude, direction, intermediate_results_dict
     # Updated data_update to include iteration and direction:
     # 1. results_for_plotting: {output_cf: data_dict_val} - original structure from crs.multisweep
     # 2. results_for_history: {conceptual_idx: output_cf_key} - for easy history update
@@ -405,10 +404,6 @@ class MultisweepTask(QtCore.QThread):
     def _progress_callback_wrapper(self, module_idx, progress_percentage):
         """Wrapper for progress callback to emit signals."""
         if self._running: self.signals.progress.emit(module_idx, progress_percentage)
-
-    def _data_callback_wrapper(self, module_idx, intermediate_results):
-        """Wrapper for data callback to emit signals."""
-        if self._running: self.signals.intermediate_data_update.emit(module_idx, self.current_iteration, self.current_amplitude, self.current_direction, intermediate_results)
 
     def run(self):
         """QThread entry point - runs in a separate thread."""
@@ -460,7 +455,7 @@ class MultisweepTask(QtCore.QThread):
                 
                 # Perform sweep(s) for each direction
                 for direction in directions_to_sweep:
-                    # Update current iteration and direction for intermediate data callbacks
+                    # Update current iteration and direction
                     self.current_iteration = iteration_index
                     self.current_direction = direction
                     
@@ -475,7 +470,6 @@ class MultisweepTask(QtCore.QThread):
                         'nsamps': self.params.get('nsamps', 10),
                         'module': module_idx,
                         'progress_callback': self._progress_callback_wrapper,
-                        'data_callback': self._data_callback_wrapper,
                         'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', None),
                         'sweep_direction': direction
                     }

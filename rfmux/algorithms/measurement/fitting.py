@@ -6,6 +6,7 @@ import numpy as np
 from scipy.optimize import curve_fit
 import warnings
 from typing import Dict, Tuple, List, Optional, Union
+import pickle # Moved import pickle to top level
 
 def s21_skewed(f, f0, Qr, Qcre, Qcim, A):
     """
@@ -307,7 +308,88 @@ def center_resonance_iq_circle(s21_iq):
         warnings.warn("Circle centering failed; returning original IQ data.")
         return s21_iq
 
-# --- More functions will be added below ---
+
+def identify_bifurcation(iq_complex: np.ndarray, threshold_factor: float = 5.0, min_peak_prominence_factor: float = 0.5, min_points_for_detection: int = 10) -> bool:
+    """
+    Identifies potential bifurcations in a resonator sweep by looking for
+    sharp discontinuities (peaks) in the running difference of IQ point norms.
+
+    A bifurcation often manifests as a sudden jump in the IQ trace.
+
+    Args:
+        iq_complex (np.ndarray): Complex S21 array for a single resonance sweep.
+        threshold_factor (float): Multiplier for the standard deviation of
+                                  the diff_norms to set a peak height threshold.
+                                  Peaks must be above median + threshold_factor * std.
+        min_peak_prominence_factor (float): Factor to multiply by the median of diff_norms
+                                            to set a minimum prominence for a peak.
+                                            Helps avoid flagging noise as bifurcation.
+        min_points_for_detection (int): Minimum number of IQ points required to attempt
+                                        bifurcation detection.
+
+    Returns:
+        bool: True if a potential bifurcation is detected, False otherwise.
+    """
+    if not isinstance(iq_complex, np.ndarray) or iq_complex.ndim != 1:
+        warnings.warn("identify_bifurcation: iq_complex must be a 1D numpy array.")
+        return False
+    
+    if len(iq_complex) < min_points_for_detection:
+        # Not enough points to reliably detect bifurcation via this method
+        return False
+
+    try:
+        from scipy.signal import find_peaks # Local import to keep it self-contained if moved
+    except ImportError:
+        warnings.warn("identify_bifurcation: scipy.signal.find_peaks is required but not found. Cannot detect bifurcation.")
+        return False
+
+    norms = np.abs(iq_complex)
+    if len(norms) < 2: # Need at least two points to calculate a difference
+        return False
+        
+    diff_norms = np.abs(np.diff(norms))
+    if len(diff_norms) == 0: # Should not happen if len(norms) >= 2
+        return False
+
+    median_diff = np.median(diff_norms)
+    std_diff = np.std(diff_norms)
+
+    # Avoid issues if std_diff is zero (e.g., perfectly smooth line or very few points)
+    if std_diff < 1e-9: # Effectively zero
+        # If std is zero, any deviation is significant if median_diff is also small.
+        # If median_diff is large, then small deviations are not peaks.
+        # This case is unlikely for real data with bifurcations.
+        # We can simply check if any diff_norm is significantly larger than median_diff.
+        # A simple check: if max diff is much larger than median.
+        if median_diff < 1e-9: # All diffs are zero or near zero
+            return False 
+        # If median is non-zero but std is zero, it means all diffs are the same.
+        # No peaks possible in this scenario.
+        return False
+
+
+    # Height threshold: significantly above the typical point-to-point variation
+    height_threshold = median_diff + threshold_factor * std_diff
+    
+    # Prominence threshold: the peak must stand out relative to its surroundings
+    # by a factor of the median difference. This helps filter out noise on a
+    # generally "bumpy" trace if the bumps aren't sharp discontinuities.
+    prominence_threshold = min_peak_prominence_factor * median_diff
+    # Ensure prominence is at least a small absolute value if median_diff is tiny
+    prominence_threshold = max(prominence_threshold, 1e-5 * np.max(norms) if np.max(norms) > 0 else 1e-5)
+
+
+    peaks, properties = find_peaks(diff_norms, height=height_threshold, prominence=prominence_threshold)
+
+    if len(peaks) > 0:
+        # print(f"Bifurcation detected: {len(peaks)} peaks found. Example peak height: {properties['peak_heights'][0] if 'peak_heights' in properties else 'N/A'}, Prominence: {properties['prominences'][0] if 'prominences' in properties else 'N/A'}")
+        # print(f"Thresholds used: height > {height_threshold:.4g}, prominence > {prominence_threshold:.4g}")
+        # print(f"Diff_norms stats: median={median_diff:.4g}, std={std_diff:.4g}")
+        return True
+        
+    return False
+
 
 def find_resonances(
     frequencies: np.ndarray,
@@ -502,17 +584,27 @@ def fit_skewed_multisweep(
         return multisweep_data
     
     # Process each resonance in the multisweep data
-    for final_cf, resonance_data in multisweep_data.items():
+    for res_key, resonance_data in multisweep_data.items():
         if not isinstance(resonance_data, dict):
-            warnings.warn(f"fit_skewed_multisweep: resonance data for cf {final_cf} is not a dictionary. Skipping.")
+            warnings.warn(f"fit_skewed_multisweep: resonance data for key {res_key} is not a dictionary. Skipping.")
+            continue
+
+        # Expect index-based keys only
+        if not isinstance(res_key, (int, np.integer)):
+            warnings.warn(f"fit_skewed_multisweep: Expected integer index key, got {type(res_key)} for key {res_key}. Skipping.")
             continue
 
         frequencies = resonance_data.get('frequencies')
         iq_complex = resonance_data.get('iq_complex')
-        original_cf = resonance_data.get('original_center_frequency', final_cf)
+        original_cf = resonance_data.get('original_center_frequency')
+        bias_freq = resonance_data.get('bias_frequency', original_cf)
+        
+        if original_cf is None:
+            warnings.warn(f"fit_skewed_multisweep: 'original_center_frequency' missing for index {res_key}. Skipping.")
+            continue
 
         if frequencies is None or iq_complex is None:
-            warnings.warn(f"fit_skewed_multisweep: 'frequencies' or 'iq_complex' missing for cf {final_cf}. Skipping.")
+            warnings.warn(f"fit_skewed_multisweep: 'frequencies' or 'iq_complex' missing for index {res_key}. Skipping.")
             continue
 
         # Initialize new result keys (don't overwrite existing data)
@@ -521,8 +613,8 @@ def fit_skewed_multisweep(
 
         if fit_resonances:
             try:
-                # Use the original center frequency for better fitting constraints if available
-                fit_center_freq = original_cf if original_cf is not None else final_cf
+                # Use the bias frequency for fitting constraints
+                fit_center_freq = bias_freq if bias_freq is not None else original_cf
                 
                 # Set fr_lim based on the sweep span if not provided and we have frequency data
                 if fr_lim_fit is None and len(frequencies) > 1:
@@ -905,3 +997,103 @@ def run_all_tests():
 # Run tests if executed directly
 if __name__ == "__main__":
     run_all_tests()
+
+def add_bifurcation_flags_to_multisweep_data(
+    pickle_filepath_or_data: Union[str, Dict], 
+    output_pickle_filepath: Optional[str] = None,
+    bifurcation_threshold_factor: float = 10.0,
+    bifurcation_min_peak_prominence_factor: float = 1.5
+) -> Dict:
+    """
+    Loads multisweep data from a pickle file (or uses an existing data dictionary),
+    identifies bifurcated resonances using identify_bifurcation, adds an 
+    'is_bifurcated' flag to each resonance sweep, and optionally saves
+    the modified data to a new pickle file if an output path is provided.
+
+    Args:
+        pickle_filepath_or_data (Union[str, Dict]): Path to the input multisweep 
+                                                     pickle file or the already loaded data dictionary.
+        output_pickle_filepath (Optional[str]): Path to save the modified data.
+                                                If None, data is modified in memory.
+                                                Only used if pickle_filepath_or_data is a string path.
+        bifurcation_threshold_factor (float): Threshold factor for identify_bifurcation.
+        bifurcation_min_peak_prominence_factor (float): Min peak prominence factor for identify_bifurcation.
+
+    Returns:
+        Dict: The loaded and modified multisweep data dictionary.
+    """
+    # import pickle # No longer needed here, moved to top
+
+    if isinstance(pickle_filepath_or_data, str):
+        pickle_filepath = pickle_filepath_or_data
+        print(f"Loading data from: {pickle_filepath} for bifurcation analysis.")
+        try:
+            with open(pickle_filepath, 'rb') as f:
+                all_data = pickle.load(f)
+        except FileNotFoundError:
+            print(f"Error: File not found at {pickle_filepath}")
+            raise
+        except Exception as e:
+            print(f"Error loading pickle file {pickle_filepath}: {e}")
+            raise
+    elif isinstance(pickle_filepath_or_data, dict):
+        all_data = pickle_filepath_or_data # Use the provided dictionary
+        print("Processing provided data dictionary for bifurcation analysis.")
+    else:
+        raise TypeError("pickle_filepath_or_data must be a file path (str) or a dictionary.")
+
+
+    if not isinstance(all_data, dict) or 'results_by_iteration' not in all_data:
+        warnings.warn("Loaded data is not in the expected format or 'results_by_iteration' key is missing. Bifurcation flagging skipped.")
+        return all_data
+
+    sweep_data_container = all_data.get('results_by_iteration')
+    if not isinstance(sweep_data_container, dict):
+        warnings.warn("'results_by_iteration' does not contain a dictionary. Bifurcation flagging skipped.")
+        return all_data
+
+    print("Identifying bifurcated resonances...")
+    bifurcated_resonances_count = 0
+    total_resonances_checked = 0
+
+    for iteration_key, iteration_data in sweep_data_container.items():
+        if isinstance(iteration_data, dict) and 'data' in iteration_data:
+            resonances_in_iteration = iteration_data['data']
+            if isinstance(resonances_in_iteration, dict):
+                for res_key, res_data_dict in resonances_in_iteration.items(): # res_key should be int
+                    total_resonances_checked +=1
+                    if isinstance(res_data_dict, dict) and 'iq_complex' in res_data_dict:
+                        iq_data = res_data_dict['iq_complex']
+                        if isinstance(iq_data, np.ndarray):
+                            is_bifurcated = identify_bifurcation(
+                                iq_data,
+                                threshold_factor=bifurcation_threshold_factor,
+                                min_peak_prominence_factor=bifurcation_min_peak_prominence_factor
+                            )
+                            res_data_dict['is_bifurcated'] = is_bifurcated
+                            if is_bifurcated:
+                                bifurcated_resonances_count +=1
+                        else:
+                            res_data_dict['is_bifurcated'] = False 
+                            warnings.warn(f"IQ data for iteration {iteration_key}, res key {res_key} is not a numpy array. Flagged as not bifurcated.")
+                    else:
+                        if isinstance(res_data_dict, dict):
+                             res_data_dict['is_bifurcated'] = False
+                        warnings.warn(f"Data structure issue or missing 'iq_complex' for iteration {iteration_key}, res key {res_key}. Flagged as not bifurcated.")
+            else:
+                warnings.warn(f"Iteration {iteration_key} 'data' field is not a dictionary.")
+        else:
+            warnings.warn(f"Iteration {iteration_key} is not a dictionary or missing 'data' field.")
+
+    
+    print(f"Bifurcation analysis complete. Found {bifurcated_resonances_count} bifurcated resonances out of {total_resonances_checked} checked.")
+
+    if isinstance(pickle_filepath_or_data, str) and output_pickle_filepath:
+        try:
+            with open(output_pickle_filepath, 'wb') as f_out:
+                pickle.dump(all_data, f_out)
+            print(f"Modified data with bifurcation flags saved to: {output_pickle_filepath}")
+        except Exception as e:
+            print(f"Error saving modified pickle file to {output_pickle_filepath}: {e}")
+            
+    return all_data

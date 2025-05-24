@@ -200,6 +200,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             return
 
         active_power_dbm_str = "N/A"
+        bifurcation_indicator = ""
+        
         if self.active_amplitude_raw is not None:
             # Extract the actual amplitude from the composite key if needed
             if isinstance(self.active_amplitude_raw, str) and ":" in self.active_amplitude_raw:
@@ -217,9 +219,13 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     active_power_dbm_str = f"{active_power_dbm:.2f} dBm"
                 except Exception:
                     pass # Keep "N/A" or raw value if conversion fails
+        
+        # Check if the active sweep is bifurcated
+        if self.active_sweep_data and self.active_sweep_data.get('is_bifurcated', False):
+            bifurcation_indicator = " (bifurcated)"
 
-        self.plot1_sweep_vs_freq.setTitle(f"Sweep (Probe Power {active_power_dbm_str})")
-        self.plot2_iq_plane.setTitle(f"IQ (Probe Power {active_power_dbm_str})")
+        self.plot1_sweep_vs_freq.setTitle(f"Sweep (Probe Power {active_power_dbm_str}{bifurcation_indicator})")
+        self.plot2_iq_plane.setTitle(f"IQ (Probe Power {active_power_dbm_str}{bifurcation_indicator})")
 
         # --- Plot 1: Sweep (vs freq.) ---
         if self.active_sweep_data and self.current_plot_offset_hz is not None:
@@ -336,9 +342,20 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     
                     x_axis_hz_offset = freqs_hz - self.current_plot_offset_hz
                     
+                    # Check if this sweep is bifurcated and adjust visual appearance
+                    is_bifurcated = sweep_data.get('is_bifurcated', False)
+                    
                     # Set line style based on direction using constants
                     line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
-                    current_pen = pg.mkPen(color, width=LINE_WIDTH, style=line_style)
+                    
+                    # Reduce alpha (brightness) for bifurcated sweeps
+                    pen_color = color
+                    if is_bifurcated:
+                        # Reduce alpha to 50% for bifurcated sweeps
+                        pen_color = pg.mkColor(color)
+                        pen_color.setAlpha(128)  # 50% of 255
+                    
+                    current_pen = pg.mkPen(pen_color, width=LINE_WIDTH, style=line_style)
                     
                     # Generate legend name
                     dac_scale_for_module = self.dac_scales.get(self.target_module)
@@ -353,6 +370,10 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     # Add direction suffix to legend
                     direction_suffix = " (Down)" if direction == "downward" else " (Up)"
                     legend_name += direction_suffix
+                    
+                    # Add bifurcation indicator to legend
+                    if is_bifurcated:
+                        legend_name += " (bifurcated)"
                     
                     # Plot the data
                     self.plot3_bias_opt.plot(x_axis_hz_offset, s21_mag_db, pen=current_pen, name=legend_name)

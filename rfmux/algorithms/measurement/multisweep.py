@@ -188,8 +188,10 @@ async def multisweep(
 
     # --- Generate sweep frequencies ---
     resonance_data = {}
+    # Create a mapping from center frequency to index for later reference
+    cf_to_index = {cf: idx for idx, cf in enumerate(center_frequencies)}
 
-    for cf in center_frequencies:
+    for idx, cf in enumerate(center_frequencies):
         # Generate points for this sweep based on direction
         if sweep_direction == "upward":
             sweep_points = np.linspace(
@@ -208,9 +210,10 @@ async def multisweep(
         else:
             raise ValueError(f"Invalid sweep_direction: {sweep_direction}. Must be 'upward' or 'downward'.")
 
-        resonance_data[cf] = {
+        resonance_data[idx] = {
             'frequencies': sweep_points,
             'iq_complex': np.zeros(npoints_per_sweep, dtype=np.complex128), # Pre-allocate array
+            'original_center_frequency': cf,
         }
 
     # --- Group resonances by NCO regions ---
@@ -264,7 +267,10 @@ async def multisweep(
 
         # --- Sweep Points within the Region ---
         # Create channel mapping for this region's resonances
+        # Map from center frequency to channel number
         channel_mapping = {cf: i+1 for i, cf in enumerate(region_cfs)}
+        # Also need to map indices for this region
+        region_indices = [cf_to_index[cf] for cf in region_cfs]
 
         # Loop through sweep points
         for point_idx in range(npoints_per_sweep):
@@ -273,7 +279,8 @@ async def multisweep(
                 # Set resonance channels
                 for cf in region_cfs:
                     channel = channel_mapping[cf]
-                    freq = resonance_data[cf]['frequencies'][point_idx]
+                    idx = cf_to_index[cf]
+                    freq = resonance_data[idx]['frequencies'][point_idx]
                     freq_rel = freq - current_nco_freq # Use current_nco_freq
                     ctx.set_frequency(freq_rel, channel=channel, module=module)
                     ctx.set_amplitude(amp, channel=channel, module=module)
@@ -291,13 +298,14 @@ async def multisweep(
             # Process samples for each resonance in this region
             for cf in region_cfs:
                 channel_idx = channel_mapping[cf] - 1 # 0-based index
+                idx = cf_to_index[cf]
                 # Get raw IQ
                 i_val = samples.mean.i[channel_idx]
                 q_val = samples.mean.q[channel_idx]
                 raw_iq_val = i_val + 1j * q_val
                 
                 # Store raw IQ value directly
-                resonance_data[cf]['iq_complex'][point_idx] = raw_iq_val
+                resonance_data[idx]['iq_complex'][point_idx] = raw_iq_val
 
             # --- Progress update ---
             if progress_callback:
@@ -311,41 +319,44 @@ async def multisweep(
             if data_callback:
                  # Create intermediate results dictionary (using raw IQ for this point)
                  intermediate_results = {}
-                 for cb_cf in center_frequencies: # Iterate over all original center_frequencies
+                 for cb_idx, cb_cf in enumerate(center_frequencies): # Iterate over all original center_frequencies
                      # Check if this cf is part of the current region_cfs
                      # and if data has been populated up to point_idx
-                     if cb_cf in resonance_data and resonance_data[cb_cf]['iq_complex'].size >= point_idx + 1:
+                     if cb_idx in resonance_data and resonance_data[cb_idx]['iq_complex'].size >= point_idx + 1:
                          current_point_count = point_idx + 1 # Include current point
-                         frequencies_cb = resonance_data[cb_cf]['frequencies'][:current_point_count]
-                         iq_data_cb = resonance_data[cb_cf]['iq_complex'][:current_point_count]
-                         intermediate_results[cb_cf] = {
+                         frequencies_cb = resonance_data[cb_idx]['frequencies'][:current_point_count]
+                         iq_data_cb = resonance_data[cb_idx]['iq_complex'][:current_point_count]
+                         intermediate_results[cb_idx] = {
                              'frequencies': frequencies_cb,
-                             'iq_complex': iq_data_cb
+                             'iq_complex': iq_data_cb,
+                             'original_center_frequency': cb_cf
                          }
                  if intermediate_results: # Only call if there's data to send
                     data_callback(module, intermediate_results)
         
         # --- Post-Sweep Processing for this NCO Region (TOD acquisition and rotation) ---
         if recalculate_center_frequencies is not None: # Only proceed if a method is specified
-            # Step 1: Determine all final_center_freq and methods for this region
-            resonances_needing_tod = [] # List of (cf_original, final_center_freq, channel_hw)
+            # Step 1: Determine all bias frequencies and methods for this region
+            resonances_needing_tod = [] # List of resonances needing TOD acquisition
             for cf_original in region_cfs:
-                res_data_entry = resonance_data[cf_original]
-                final_center_freq, recalc_method_used = _get_recalculated_center_freq(
+                idx = cf_to_index[cf_original]
+                res_data_entry = resonance_data[idx]
+                bias_freq, recalc_method_used = _get_recalculated_center_freq(
                     original_cf_hz=cf_original,
                     sweep_freqs_hz=res_data_entry['frequencies'],
                     sweep_iq=res_data_entry['iq_complex'], # Use raw sweep IQ for recalc
                     method=recalculate_center_frequencies
                 )
-                res_data_entry['final_center_frequency'] = final_center_freq
+                res_data_entry['bias_frequency'] = bias_freq
                 res_data_entry['recalculation_method_applied'] = recalc_method_used
                 res_data_entry['rotation_tod'] = None # Initialize
                 res_data_entry['applied_rotation_degrees'] = 0.0 # Initialize
 
                 if recalc_method_used in ["min-s21", "max-dq"]:
                     resonances_needing_tod.append({
+                        "idx": idx,
                         "original_cf": cf_original,
-                        "final_cf": final_center_freq,
+                        "bias_freq": bias_freq,
                         "channel_hw": channel_mapping[cf_original], # 1-based hardware channel
                         "recalc_method": recalc_method_used
                     })
@@ -359,7 +370,7 @@ async def multisweep(
                     
                     # Set up channels that need TOD
                     for res_info in resonances_needing_tod:
-                        freq_for_tod_rel = res_info["final_cf"] - current_nco_freq
+                        freq_for_tod_rel = res_info["bias_freq"] - current_nco_freq
                         ctx.set_frequency(freq_for_tod_rel, channel=res_info["channel_hw"], module=module)
                         ctx.set_amplitude(amp, channel=res_info["channel_hw"], module=module)
                     await ctx()
@@ -373,22 +384,23 @@ async def multisweep(
                         channel_idx_0based = res_info["channel_hw"] - 1
                         tod_i_channel_data = np.array(all_tod_samples.i[channel_idx_0based])
                         tod_q_channel_data = np.array(all_tod_samples.q[channel_idx_0based])
-                        resonance_data[res_info["original_cf"]]['rotation_tod'] = tod_i_channel_data + 1j * tod_q_channel_data
+                        resonance_data[res_info["idx"]]['rotation_tod'] = tod_i_channel_data + 1j * tod_q_channel_data
                 except Exception as e:
                     warnings.warn(f"Batch TOD acquisition failed for NCO region {region_idx} (module {module}): {e}")
                     # Mark all relevant TODs as None if batch failed
                     for res_info in resonances_needing_tod:
-                        resonance_data[res_info["original_cf"]]['rotation_tod'] = None
+                        resonance_data[res_info["idx"]]['rotation_tod'] = None
             
             # Step 3: Calculate and apply rotations using the (now populated) TODs
             for cf_original in region_cfs: # Iterate again to apply rotations
-                res_data_entry = resonance_data[cf_original]
+                idx = cf_to_index[cf_original]
+                res_data_entry = resonance_data[idx]
                 recalc_method_used = res_data_entry['recalculation_method_applied']
                 
                 if recalc_method_used not in ["min-s21", "max-dq"] or res_data_entry['rotation_tod'] is None:
                     # Ensure these are set if no TOD-based rotation happens
-                    if res_data_entry.get('final_center_frequency') is None : # Should have been set in step 1
-                         res_data_entry['final_center_frequency'] = cf_original
+                    if res_data_entry.get('bias_frequency') is None : # Should have been set in step 1
+                         res_data_entry['bias_frequency'] = cf_original
                     if res_data_entry.get('recalculation_method_applied') is None:
                          res_data_entry['recalculation_method_applied'] = "none"
                     res_data_entry['rotation_tod'] = None # Ensure it's None
@@ -432,27 +444,28 @@ async def multisweep(
                 # If no rotation was calculated (e.g. TOD was empty or issues), applied_rotation_degrees remains 0.0
 
     # --- Format final results for each resonance ---
-    results_by_center_freq = {}
-    for original_cf, data_entry in resonance_data.items():
+    # Now keyed by index, not frequency
+    results_by_index = {}
+    for idx, data_entry in resonance_data.items():
         final_iq_complex = data_entry['iq_complex']
+        original_cf = data_entry['original_center_frequency']
         
-        # Determine the key for the output dictionary
-        current_key_for_results = data_entry.get('final_center_frequency', original_cf)
+        # Get bias frequency (either recalculated or original)
+        bias_freq = data_entry.get('bias_frequency', original_cf)
         recalc_method_applied = data_entry.get('recalculation_method_applied', "none")
-        key_is_recalculated = (current_key_for_results != original_cf) and (recalc_method_applied != "none")
 
         result_dict = {
             'frequencies': data_entry['frequencies'],
             'iq_complex': final_iq_complex,
             'phase_degrees': np.degrees(np.angle(final_iq_complex)),
             'original_center_frequency': original_cf,
+            'bias_frequency': bias_freq,
             'recalculation_method_applied': recalc_method_applied,
-            'key_frequency_is_recalculated': key_is_recalculated,
             'rotation_tod': data_entry.get('rotation_tod'),
             'applied_rotation_degrees': data_entry.get('applied_rotation_degrees'),
             'sweep_direction': sweep_direction
         }
-        results_by_center_freq[current_key_for_results] = result_dict
+        results_by_index[idx] = result_dict
     
     # --- Hardware Cleanup ---
     try:
@@ -464,4 +477,4 @@ async def multisweep(
     except Exception as e:
         warnings.warn(f"Hardware cleanup failed for module {module}: {e}")
     
-    return results_by_center_freq
+    return results_by_index

@@ -481,22 +481,41 @@ class MultisweepTask(QtCore.QThread):
                         self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution.")
                         return
                     
+                    # Add bifurcation detection to each sweep's data
+                    if raw_results_from_crs:
+                        # Results should be keyed by index
+                        for res_key, data_dict_val in raw_results_from_crs.items():
+                            if not isinstance(res_key, (int, np.integer)):
+                                print(f"Warning: Non-integer key {res_key} found in results. Expected index-based keys only.", file=sys.stderr)
+                                continue
+                                
+                            iq_data = data_dict_val.get('iq_complex')
+                            if iq_data is not None:
+                                try:
+                                    # Use fitting module to detect bifurcation
+                                    is_bifurcated = fitting_module_direct.identify_bifurcation(
+                                        iq_data
+                                    )
+                                    data_dict_val['is_bifurcated'] = is_bifurcated
+                                except Exception as e:
+                                    # If bifurcation detection fails, default to False and log warning
+                                    print(f"Warning: Bifurcation detection failed for index {res_key}: {e}", file=sys.stderr)
+                                    data_dict_val['is_bifurcated'] = False
+                            else:
+                                # No IQ data available, cannot detect bifurcation
+                                data_dict_val['is_bifurcated'] = False
+                    
                     results_for_plotting = raw_results_from_crs # For plotting, use the direct structure
-                    results_for_history = {} # For history: {conceptual_idx: output_cf_key}
+                    results_for_history = {} # For history: {conceptual_idx: key_in_results}
 
                     if raw_results_from_crs:
-                        # Map results back to conceptual_idx for history
-                        for output_cf_key, data_dict_val in raw_results_from_crs.items():
-                            input_cf_this_result_was_for = data_dict_val['original_center_frequency']
-                            found_conceptual_idx = -1
-                            for c_idx, mapped_input_cf in conceptual_idx_to_input_cf_map.items():
-                                if abs(mapped_input_cf - input_cf_this_result_was_for) < 1e-3: # Tolerance for float comparison
-                                    found_conceptual_idx = c_idx
-                                    break
-                            if found_conceptual_idx != -1:
-                                results_for_history[found_conceptual_idx] = output_cf_key
+                        # Results are keyed by index - the index should match our conceptual index directly
+                        for res_idx, data_dict_val in raw_results_from_crs.items():
+                            if isinstance(res_idx, (int, np.integer)):
+                                # The index should map directly
+                                results_for_history[res_idx] = res_idx
                             else:
-                                print(f"Warning (MultisweepTask): Could not map result for input_cf {input_cf_this_result_was_for} back to conceptual_idx for amp {amp_val}", file=sys.stderr)
+                                print(f"Warning (MultisweepTask): Non-integer key {res_idx} in results", file=sys.stderr)
                     
                     if results_for_plotting is not None: # Can be None if crs.multisweep had issues
                         # Use updated signal with iteration and direction information

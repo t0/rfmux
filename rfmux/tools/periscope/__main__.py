@@ -105,7 +105,7 @@ def main():
 
     ap.add_argument("crs_board", metavar="CRS_BOARD", 
                     help="CRS board identifier: can be a hostname (rfmux####.local), "
-                         "a serial number (####), or an IP address")
+                         "a serial number (####), an IP address, or 'MOCK' for demo mode")
     ap.add_argument("-m", "--module", type=int, default=1)
     ap.add_argument("-c", "--channels", default="1")
     ap.add_argument("-n", "--num-samples", type=int, default=DEFAULT_BUFFER_SIZE)
@@ -157,32 +157,65 @@ def main():
     # This object is necessary for network analysis functionalities.
     # load_session and CRS are expected to be imported from .utils.
     crs_obj = None  # Initialize to None; will be set if successful.
+    is_mock = False  # Track if we're using MockCRS
+    
     try:
-        # Parse the CRS board identifier - can be in three formats:
-        # 1. rfmux####.local (hostname with serial number)
-        # 2. #### (just the serial number)
-        # 3. Any other string (treated as direct hostname or IP address)
+        # Parse the CRS board identifier - can be in four formats:
+        # 1. "MOCK" - special case for demo mode
+        # 2. rfmux####.local (hostname with serial number)
+        # 3. #### (just the serial number)
+        # 4. Any other string (treated as direct hostname or IP address)
         crs_board = args.crs_board
         
+        # Special case for MOCK demo mode
+        if crs_board.upper() == "MOCK":
+            is_mock = True
+            # Use the mock flavour to create a MockCRS instance
+            s = load_session("""
+!HardwareMap
+- !flavour "rfmux.core.mock"
+- !CRS { serial: "MOCK0001", hostname: "127.0.0.1" }
+""")
+            crs_obj = s.query(CRS).one()
+            
+            # Create event loop for async operations
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Resolve the MockCRS
+            loop.run_until_complete(crs_obj.resolve())
+            
+            # Don't configure any channels - they should be unconfigured until "Initialize CRS" is clicked
+            # The UDP streamer will still send noise for all channels even if unconfigured
+            print("MockCRS initialized - channels unconfigured (streaming noise only)")
+            
+            # Start UDP streaming automatically
+            print("Starting MockCRS UDP streaming...")
+            loop.run_until_complete(crs_obj.start_udp_streaming(host='127.0.0.1', port=9876))
+            
         # Check if it's a hostname in the format rfmux####.local
-        if "rfmux" in crs_board and ".local" in crs_board:
+        elif "rfmux" in crs_board and ".local" in crs_board:
             serial = crs_board.replace("rfmux", "").replace(".local", "")
             s = load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')
+            crs_obj = s.query(CRS).one()
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(crs_obj.resolve())
         # Check if it's just a serial number (all digits, possibly with leading zeros)
         elif crs_board.isdigit() or (crs_board.startswith("0") and crs_board[1:].isdigit()):
             serial = crs_board
             s = load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')
+            crs_obj = s.query(CRS).one()
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(crs_obj.resolve())
         else:
             # Treat as direct hostname or IP address
             s = load_session(f'!HardwareMap [ !CRS {{ hostname: "{crs_board}" }} ]')
-
-        crs_obj = s.query(CRS).one() # Expecting one CRS object.
-        
-        # Resolve the CRS object to establish connection and prepare it for use.
-        # This is an asynchronous operation run synchronously here using a new event loop.
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(crs_obj.resolve())
+            crs_obj = s.query(CRS).one()
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(crs_obj.resolve())
         
     except Exception as e:
         # If CRS object creation or resolution fails, issue a warning
@@ -196,7 +229,11 @@ def main():
     # --- Periscope Application Instantiation and Launch ---
     # For the UDP Receiver, we need a valid hostname, not just a serial number
     udp_hostname = args.crs_board
-    if args.crs_board.isdigit() or (args.crs_board.startswith("0") and args.crs_board[1:].isdigit()):
+    
+    # Special handling for MOCK mode - always use localhost
+    if args.crs_board.upper() == "MOCK":
+        udp_hostname = "127.0.0.1"
+    elif args.crs_board.isdigit() or (args.crs_board.startswith("0") and args.crs_board[1:].isdigit()):
         # If it's just a serial number, construct the proper hostname
         udp_hostname = f"rfmux{args.crs_board}.local"
         

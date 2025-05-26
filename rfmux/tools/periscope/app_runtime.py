@@ -783,7 +783,6 @@ class PeriscopeRuntime:
             # Disconnect any previous signal connections to avoid multiple calls
             try:
                 self.multisweep_signals.progress.disconnect()
-                self.multisweep_signals.intermediate_data_update.disconnect()
                 self.multisweep_signals.data_update.disconnect()
                 self.multisweep_signals.completed_iteration.disconnect()
                 self.multisweep_signals.all_completed.disconnect()

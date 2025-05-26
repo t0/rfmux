@@ -401,8 +401,6 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.current_amplitude_being_processed = amplitude
         self.current_iteration_being_processed = iteration
 
-        # Clear intermediate curves when final data arrives
-        self._clear_intermediate_curves()
         
         # Store data in iteration-based structure
         self.results_by_iteration[iteration] = {

@@ -311,9 +311,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Add the main application title label to the given layout.
 
         Displays the connected CRS host and module number.
+        For mock mode, displays "EMULATED CRS BOARD" instead of the IP address.
         """
         # `QtWidgets` and `QtCore` are from .utils.
-        title_label = QtWidgets.QLabel(f"CRS: {self.host}    Module: {self.module}")
+        # Check if we're in mock mode (localhost/127.0.0.1)
+        if self.host in ["127.0.0.1", "localhost", "::1"]:
+            display_host = "EMULATED CRS BOARD"
+        else:
+            display_host = self.host
+        
+        title_label = QtWidgets.QLabel(f"CRS: {display_host}    Module: {self.module}")
         title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter) # Center the title
         font_title = title_label.font() # Get current font to modify size
         font_title.setPointSize(16)    # Set a larger font size for the title

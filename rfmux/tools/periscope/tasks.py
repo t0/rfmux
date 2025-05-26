@@ -506,14 +506,19 @@ class MultisweepTask(QtCore.QThread):
                                 data_dict_val['is_bifurcated'] = False
                     
                     results_for_plotting = raw_results_from_crs # For plotting, use the direct structure
-                    results_for_history = {} # For history: {conceptual_idx: key_in_results}
+                    results_for_history = {} # For history: {conceptual_idx: bias_frequency}
 
                     if raw_results_from_crs:
-                        # Results are keyed by index - the index should match our conceptual index directly
+                        # Results are keyed by index - extract the actual bias frequency for each resonance
                         for res_idx, data_dict_val in raw_results_from_crs.items():
                             if isinstance(res_idx, (int, np.integer)):
-                                # The index should map directly
-                                results_for_history[res_idx] = res_idx
+                                # Extract the actual bias frequency from the results
+                                bias_freq = data_dict_val.get('bias_frequency', 
+                                                             data_dict_val.get('original_center_frequency'))
+                                if bias_freq is not None:
+                                    results_for_history[res_idx] = bias_freq
+                                else:
+                                    print(f"Warning: No bias frequency found for index {res_idx}", file=sys.stderr)
                             else:
                                 print(f"Warning (MultisweepTask): Non-integer key {res_idx} in results", file=sys.stderr)
                     

@@ -539,8 +539,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 self.phase_legend.addItem(dummy_phase_curve_for_legend, full_legend_name)
                 legend_items_phase[legend_key] = dummy_phase_curve_for_legend
 
-            # --- Plot Data for Each Resonance (Center Frequency) at this Amplitude ---
-            for cf, data in amp_results.items():
+            # --- Plot Data for Each Resonance (by index) at this Amplitude ---
+            for res_idx, data in amp_results.items():
                 freqs_hz = data.get('frequencies')
                 iq_complex = data.get('iq_complex')
 
@@ -566,25 +566,28 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 mag_curve = self.combined_mag_plot.plot(pen=pen)
                 mag_curve.setData(freqs_hz, s21_mag_processed)
                 if amp_val not in self.curves_mag: self.curves_mag[amp_val] = {}
-                self.curves_mag[amp_val][cf] = mag_curve # Store reference
+                self.curves_mag[amp_val][res_idx] = mag_curve # Store reference by index
 
                 # Plot phase curve
                 phase_curve = self.combined_phase_plot.plot(pen=pen)
                 phase_curve.setData(freqs_hz, phase_deg)
                 if amp_val not in self.curves_phase: self.curves_phase[amp_val] = {}
-                self.curves_phase[amp_val][cf] = phase_curve # Store reference
+                self.curves_phase[amp_val][res_idx] = phase_curve # Store reference by index
 
                 # Add center frequency (CF) lines if enabled
                 if self.show_cf_lines_cb and self.show_cf_lines_cb.isChecked():
-                    cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2)
-                    
-                    mag_cf_line = pg.InfiniteLine(pos=cf, angle=90, pen=cf_line_pen, movable=False)
-                    self.combined_mag_plot.addItem(mag_cf_line)
-                    self.cf_lines_mag.setdefault(amp_val, []).append(mag_cf_line) # Store reference
+                    # Get the actual bias frequency for CF line
+                    bias_freq = data.get('bias_frequency', data.get('original_center_frequency'))
+                    if bias_freq is not None:
+                        cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2)
+                        
+                        mag_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
+                        self.combined_mag_plot.addItem(mag_cf_line)
+                        self.cf_lines_mag.setdefault(amp_val, []).append(mag_cf_line) # Store reference
 
-                    phase_cf_line = pg.InfiniteLine(pos=cf, angle=90, pen=cf_line_pen, movable=False)
-                    self.combined_phase_plot.addItem(phase_cf_line)
-                    self.cf_lines_phase.setdefault(amp_val, []).append(phase_cf_line) # Store reference
+                        phase_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
+                        self.combined_phase_plot.addItem(phase_cf_line)
+                        self.cf_lines_phase.setdefault(amp_val, []).append(phase_cf_line) # Store reference
         
         # Adjust plot ranges to fit all data
         self.combined_mag_plot.autoRange()
@@ -923,21 +926,26 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 existing_mag_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_mag[amp_val]}
                 existing_phase_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_phase[amp_val]}
 
-                for cf in amp_results.keys(): # Iterate through center frequencies for this amplitude
+                for res_idx, data in amp_results.items(): # Iterate through resonances by index
+                    # Get the actual bias frequency for CF line
+                    bias_freq = data.get('bias_frequency', data.get('original_center_frequency'))
+                    if bias_freq is None:
+                        continue
+                        
                     # Magnitude plot CF line
-                    if cf in existing_mag_lines_for_amp:
-                        existing_mag_lines_for_amp[cf].setVisible(True)
+                    if bias_freq in existing_mag_lines_for_amp:
+                        existing_mag_lines_for_amp[bias_freq].setVisible(True)
                     else:
-                        mag_cf_line = pg.InfiniteLine(pos=cf, angle=90, pen=cf_line_pen, movable=False)
+                        mag_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
                         self.combined_mag_plot.addItem(mag_cf_line)
                         self.cf_lines_mag[amp_val].append(mag_cf_line)
                         # mag_cf_line.setVisible(True) # Already visible by default when added
 
                     # Phase plot CF line
-                    if cf in existing_phase_lines_for_amp:
-                        existing_phase_lines_for_amp[cf].setVisible(True)
+                    if bias_freq in existing_phase_lines_for_amp:
+                        existing_phase_lines_for_amp[bias_freq].setVisible(True)
                     else:
-                        phase_cf_line = pg.InfiniteLine(pos=cf, angle=90, pen=cf_line_pen, movable=False)
+                        phase_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
                         self.combined_phase_plot.addItem(phase_cf_line)
                         self.cf_lines_phase[amp_val].append(phase_cf_line)
                         # phase_cf_line.setVisible(True) # Already visible by default when added
@@ -974,49 +982,44 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         x_coord = mouse_point.x()
         # y_coord = mouse_point.y() # y_coord is not used for selecting the CF
 
-        # --- Find the conceptual resonance closest to the click's X-coordinate ---
+        # --- Find the resonance trace closest to the click's X-coordinate ---
         min_horizontal_dist = float('inf')
-        # This will be the CF of an actual measured trace that is horizontally closest to the click's X.
-        # It serves as the initial seed to find the conceptual resonance.
-        seed_cf_hz_for_conceptual_match = None
+        clicked_res_idx = None
+        clicked_actual_cf = None
 
-        # Iterate through all known center frequencies from all measurements
-        # to find which one is horizontally closest to the click.
-        all_measured_cfs = set()
-        if self.results_by_iteration: # Ensure there's data
+        # Iterate through all resonances to find which one is horizontally closest to the click
+        if self.results_by_iteration:
             for iteration_data in self.results_by_iteration.values():
-                cf_map = iteration_data.get("data", {})
-                all_measured_cfs.update(cf_map.keys()) # These keys are the output CFs
+                res_data = iteration_data.get("data", {})
+                for res_idx, data in res_data.items():
+                    # Get the actual frequencies for this resonance
+                    freqs_hz = data.get('frequencies')
+                    if freqs_hz is None or len(freqs_hz) == 0:
+                        continue
+                    
+                    # Check if click is within frequency range of this resonance
+                    if freqs_hz.min() <= x_coord <= freqs_hz.max():
+                        # Find closest frequency point
+                        freq_dists = np.abs(freqs_hz - x_coord)
+                        min_dist = freq_dists.min()
+                        if min_dist < min_horizontal_dist:
+                            min_horizontal_dist = min_dist
+                            clicked_res_idx = res_idx
+                            # Get the bias frequency for this resonance
+                            clicked_actual_cf = data.get('bias_frequency', data.get('original_center_frequency'))
 
-        if not all_measured_cfs: # No CFs to check against
-            return # Or handle error appropriately
-
-        for cf_candidate in all_measured_cfs:
-            horizontal_dist = abs(cf_candidate - x_coord)
-            if horizontal_dist < min_horizontal_dist:
-                min_horizontal_dist = horizontal_dist
-                seed_cf_hz_for_conceptual_match = cf_candidate
-        
-        if seed_cf_hz_for_conceptual_match is not None:
-            # Now, seed_cf_hz_for_conceptual_match is the CF of an actual trace's *output key*
-            # that is horizontally closest to the click.
-            clicked_output_cf_hz = seed_cf_hz_for_conceptual_match
+        if clicked_res_idx is not None and clicked_actual_cf is not None:
 
             # --- Determine the conceptual resonance and its ID ---
-            # Use self.conceptual_resonance_frequencies for stable identification
-            if not self.conceptual_resonance_frequencies:
-                print("Warning: Conceptual resonance frequencies not available. Cannot reliably determine conceptual resonance for digest.")
-                # Fallback: use clicked_output_cf_hz as the conceptual base, Detector ID might be less meaningful
-                conceptual_resonance_base_freq_hz = clicked_output_cf_hz
-                detector_id = -1 # Cannot reliably determine ID
+            # The clicked_res_idx IS the detector ID since results are keyed by index
+            detector_id = clicked_res_idx
+            
+            # Get the conceptual frequency for this resonance index
+            if clicked_res_idx < len(self.conceptual_resonance_frequencies):
+                conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[clicked_res_idx]
             else:
-                # Find which conceptual_resonance_frequency is "responsible" for the clicked_output_cf_hz.
-                # This requires checking which conceptual resonance, when processed, resulted in clicked_output_cf_hz.
-                # This is complex if multiple conceptual resonances map to similar output CFs.
-                # A simpler approach: find the conceptual_resonance_frequency closest to the clicked_output_cf_hz.
-                closest_conceptual_idx = np.abs(np.array(self.conceptual_resonance_frequencies) - clicked_output_cf_hz).argmin()
-                conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[closest_conceptual_idx]
-                detector_id = closest_conceptual_idx # This is the "Detector ID"
+                print(f"Warning: Clicked resonance index {clicked_res_idx} exceeds conceptual frequencies list length.")
+                conceptual_resonance_base_freq_hz = clicked_actual_cf
 
             # --- Gather all data for this conceptual resonance across all amplitudes and directions ---
             # Create a structure that preserves both amplitude and direction information
@@ -1036,15 +1039,17 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             # Now process the appropriate iteration for each amplitude+direction combination
             for (amp_val, direction), iter_idx in amplitude_direction_to_iteration.items():
                 iter_data = self.results_by_iteration[iter_idx]
-                cf_map = iter_data["data"]
+                res_data = iter_data["data"]
                 
-                if not cf_map:  # No CFs measured for this amplitude+direction
-                    continue
+                if not res_data or clicked_res_idx not in res_data:
+                    continue  # No data for this resonance index
                 
-                # Find the CF in cf_map closest to conceptual_resonance_base_freq_hz
-                available_cfs = np.array(list(cf_map.keys()))
-                closest_cf_idx = np.abs(available_cfs - conceptual_resonance_base_freq_hz).argmin()
-                actual_cf_for_this_amp = available_cfs[closest_cf_idx]
+                # Get the data for the clicked resonance index
+                resonance_sweep_data = res_data[clicked_res_idx]
+                
+                # Get the actual bias frequency used for this sweep
+                actual_cf_for_this_amp = resonance_sweep_data.get('bias_frequency', 
+                                                                  resonance_sweep_data.get('original_center_frequency'))
                 
                 # Create a unique key that combines amplitude and direction
                 # Format: "amp_val:direction" (e.g., "0.5:upward")
@@ -1052,7 +1057,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 
                 # Store with combined key to preserve both directions per amplitude
                 resonance_data_for_digest[combo_key] = {
-                    'data': cf_map[actual_cf_for_this_amp],
+                    'data': resonance_sweep_data,
                     'actual_cf_hz': actual_cf_for_this_amp,  # Store the actual CF for this sweep
                     'direction': direction,  # Include direction information
                     'amplitude': amp_val  # Store the raw amplitude for reference

@@ -8,6 +8,8 @@ import struct
 import time
 import threading
 import array
+import signal
+import atexit
 from datetime import datetime
 import numpy as np # For np.clip in generate_packet
 
@@ -17,6 +19,9 @@ from ..streamer import (
     STREAMER_MAGIC, STREAMER_VERSION, NUM_CHANNELS, SS_PER_SECOND,
     STREAMER_PORT # Default port for streaming
 )
+
+# Import enhanced scaling constants
+from . import mock_constants as const
 
 def _dfmuxpacket_to_bytes(self: DfmuxPacket) -> bytes:
     """
@@ -97,6 +102,33 @@ def _dfmuxpacket_to_bytes(self: DfmuxPacket) -> bytes:
 # Monkey-patch the to_bytes method onto DfmuxPacket
 DfmuxPacket.to_bytes = _dfmuxpacket_to_bytes
 
+# Global registry to track all active UDP streamers for cleanup
+_active_streamers = []
+_cleanup_registered = False
+
+def _emergency_cleanup():
+    """Emergency cleanup function called on program exit."""
+    global _active_streamers
+    if _active_streamers:
+        #print(f"[UDP] Emergency cleanup: stopping {len(_active_streamers)} active UDP streamers")
+        for streamer in _active_streamers[:]:  # Copy list to avoid modification during iteration
+            try:
+                streamer.emergency_stop()
+            except Exception as e:
+                print(f"[UDP] Error during emergency cleanup: {e}")
+
+def _register_global_cleanup():
+    """Register global cleanup handlers (called once)."""
+    global _cleanup_registered
+    if not _cleanup_registered:
+        atexit.register(_emergency_cleanup)
+        # Register signal handlers for graceful shutdown
+        for sig in [signal.SIGTERM, signal.SIGINT]:
+            try:
+                signal.signal(sig, lambda signum, frame: _emergency_cleanup())
+            except (ValueError, OSError):
+                pass  # Signal handling may not be available in all contexts
+        _cleanup_registered = True
 
 class MockCRSUDPStreamer(threading.Thread):
     """Streams UDP packets with S21 data based on MockCRS state"""
@@ -115,14 +147,34 @@ class MockCRSUDPStreamer(threading.Thread):
         # Otherwise, we'll determine which modules to stream based on configured channels
         self.modules_to_stream = modules_to_stream  # Can be None or a list like [1] or [1,2]
         
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # SO_SNDBUF might not be necessary for local unicast but doesn't hurt
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
-        
+        self.socket = None
         self.running = False # Controlled by start/stop
         self.seq_counters = {m: 0 for m in range(1, 5)}  # Per-module sequence numbers (1-4)
         self.packets_sent = 0
-        print(f"[UDP] MockCRSUDPStreamer initialized - unicast to {self.unicast_host}:{self.unicast_port}")
+        
+        # Register this streamer for global cleanup
+        global _active_streamers
+        _active_streamers.append(self)
+        _register_global_cleanup()
+        
+        #print(f"[UDP] MockCRSUDPStreamer initialized - unicast to {self.unicast_host}:{self.unicast_port}")
+        
+    def _init_socket(self):
+        """Initialize the UDP socket."""
+        if self.socket is None:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # SO_SNDBUF might not be necessary for local unicast but doesn't hurt
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
+    
+    def _cleanup_socket(self):
+        """Clean up the UDP socket."""
+        if self.socket:
+            try:
+                self.socket.close()
+            except Exception as e:
+                print(f"[UDP] Error closing socket: {e}")
+            finally:
+                self.socket = None
         
     def _get_configured_modules(self):
         """Determine which modules have configured channels"""
@@ -146,78 +198,107 @@ class MockCRSUDPStreamer(threading.Thread):
         return modules
     
     def stop(self):
-        """Stop the streaming thread"""
+        """Stop the streaming thread gracefully."""
         print("[UDP] Stopping UDP streamer...")
         self.running = False
         
+    def emergency_stop(self):
+        """Emergency stop - force shutdown immediately."""
+        print(f"[UDP] Emergency stop for streamer {id(self)}")
+        self.running = False
+        self._cleanup_socket()
+        # Remove from global registry
+        global _active_streamers
+        if self in _active_streamers:
+            _active_streamers.remove(self)
+        
     def run(self):
-        """Stream UDP packets at the configured sample rate"""
-        print("[UDP] UDP streaming thread started")
+        """Stream UDP packets at the configured sample rate with proper cleanup."""
+        #print("[UDP] UDP streaming thread started")
         self.running = True
         packet_count_interval = 0 # Packets sent in the current 1-second interval
         last_log_time = time.time()
         
-        while self.running:
-            start_time_loop = time.perf_counter()
+        try:
+            # Initialize socket
+            self._init_socket()
             
-            # Determine which modules to stream
-            if self.modules_to_stream:
-                # Use explicitly specified modules
-                modules_to_process = self.modules_to_stream
-            else:
-                # Auto-detect: only stream modules that have configured channels
-                modules_to_process = self._get_configured_modules()
-            
-            # Generate and send packet for each active module
-            for module_num in modules_to_process:
+            while self.running:
                 try:
-                    packet_bytes = self.generate_packet_for_module(module_num, self.seq_counters[module_num])
-                    bytes_sent = self.socket.sendto(packet_bytes, (self.unicast_host, self.unicast_port))
+                    start_time_loop = time.perf_counter()
                     
-                    self.seq_counters[module_num] += 1
-                    self.packets_sent += 1
-                    packet_count_interval += 1
+                    # Determine which modules to stream
+                    if self.modules_to_stream:
+                        # Use explicitly specified modules
+                        modules_to_process = self.modules_to_stream
+                    else:
+                        # Auto-detect: only stream modules that have configured channels
+                        modules_to_process = self._get_configured_modules()
                     
-                    if self.packets_sent <= 20: # Log first few packets (e.g., 5 per module)
-                        print(f"[UDP] Sent unicast packet #{self.packets_sent}: module={module_num}, seq={self.seq_counters[module_num]-1}, size={bytes_sent} bytes to {self.unicast_host}:{self.unicast_port}")
+                    # Generate and send packet for each active module
+                    for module_num in modules_to_process:
+                        if not self.running:  # Check if we should stop
+                            break
+                            
+                        try:
+                            packet_bytes = self.generate_packet_for_module(module_num, self.seq_counters[module_num])
+                            bytes_sent = self.socket.sendto(packet_bytes, (self.unicast_host, self.unicast_port))
+                            
+                            self.seq_counters[module_num] += 1
+                            self.packets_sent += 1
+                            packet_count_interval += 1
+                            
+                            #if self.packets_sent <= 20: # Log first few packets (e.g., 5 per module)
+                                #print(f"[UDP] Sent unicast packet #{self.packets_sent}: module={module_num}, seq={self.seq_counters[module_num]-1}, size={bytes_sent} bytes to {self.unicast_host}:{self.unicast_port}")
+                            
+                        except Exception as e:
+                            if self.running:  # Only log if we're still supposed to be running
+                                print(f"[UDP] ERROR generating/sending packet for module {module_num}: {e}")
+                                import traceback
+                                traceback.print_exc()
                     
+                    current_time = time.time()
+                    if current_time - last_log_time >= 1.0:
+                        # if self.running:  # Only log if still running
+                        #     print(f"[UDP] Status: {packet_count_interval} packets sent in last second (total {self.packets_sent})")
+                        packet_count_interval = 0
+                        last_log_time = current_time
+                    
+                    # Sleep to maintain sample rate (only if still running)
+                    if self.running:
+                        fir_stage = self.mock_crs.get_fir_stage()
+                        sample_rate_per_channel = 625e6 / (256 * 64 * (2**fir_stage))
+                        frame_time = 1.0 / sample_rate_per_channel
+                        
+                        elapsed_loop = time.perf_counter() - start_time_loop
+                        sleep_duration = frame_time - elapsed_loop
+                        if sleep_duration > 0:
+                            time.sleep(sleep_duration)
+                
+                except KeyboardInterrupt:
+                    print("[UDP] Received KeyboardInterrupt, stopping...")
+                    break
                 except Exception as e:
-                    print(f"[UDP] ERROR generating/sending packet for module {module_num}: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    if self.running:
+                        print(f"[UDP] Unexpected error in main loop: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        time.sleep(0.1)  # Brief pause before retrying
             
-            current_time = time.time()
-            if current_time - last_log_time >= 1.0:
-                print(f"[UDP] Status: {packet_count_interval} packets sent in last second (total {self.packets_sent})")
-                packet_count_interval = 0
-                last_log_time = current_time
-            
-            # Sleep to maintain sample rate
-            fir_stage = self.mock_crs.get_fir_stage()
-            # sample_rate = 625e6 / (256 * 64 * (2**fir_stage)) # Original calculation
-            # This sample rate is per channel. Packet rate is per module.
-            # Assuming one packet per module per frame.
-            # If NUM_SAMPLES_PER_PACKET = 1 (as implied by DfmuxPacket structure for PFB data)
-            # then packet rate = sample_rate.
-            # Let's assume a fixed packet rate for simplicity in mock, e.g., 100 Hz per module
-            # This means each module sends a packet every 10ms.
-            # Since we send for 4 modules in a loop, the loop should run 400 times per second.
-            # Or, if packets are for *all* channels in a module at once, then it's frame rate.
-            
-            # The original mock.py used this:
-            sample_rate_per_channel = 625e6 / (256 * 64 * (2**fir_stage))
-            # This is the rate at which individual channel data is updated.
-            # A DfmuxPacket contains data for ALL channels for one module at one time instant.
-            # So, the packet rate per module is sample_rate_per_channel.
-            frame_time = 1.0 / sample_rate_per_channel
-            
-            elapsed_loop = time.perf_counter() - start_time_loop
-            sleep_duration = frame_time - elapsed_loop
-            if sleep_duration > 0:
-                time.sleep(sleep_duration)
+        except Exception as e:
+            print(f"[UDP] Fatal error in UDP streamer: {e}")
+            import traceback
+            traceback.print_exc()
         
-        self.socket.close() # Close socket when thread stops
-        print(f"[UDP] UDP streaming thread stopped. Total packets sent: {self.packets_sent}")
+        finally:
+            # ALWAYS clean up, regardless of how we exit
+            print(f"[UDP] UDP streaming thread stopped. Total packets sent: {self.packets_sent}")
+            self._cleanup_socket()
+            
+            # Remove from global registry
+            global _active_streamers
+            if self in _active_streamers:
+                _active_streamers.remove(self)
     
     def generate_packet_for_module(self, module_num, seq):
         """Generate a DfmuxPacket for a specific module."""
@@ -242,25 +323,21 @@ class MockCRSUDPStreamer(threading.Thread):
                 module_num, channel_num_1_based, total_freq, amp, phase_deg
             )
             
-            # Convert complex S21 to scaled int32 I and Q values
-            # This scaling needs to be consistent with how real hardware/parser expects it.
-            # A common approach is to scale to a fraction of the int32 range.
-            # Max int32 is 2^31 - 1. Let's use a scale factor.
-            # Original mock.py used scale = 32767 (for 16-bit idea, but stored in int32)
-            # Let's use a larger portion of int32 range for better resolution if needed.
-            # Example: scale to fill half of 24-bit range (common ADC bit depth)
-            # Max 24-bit signed is 2^23 - 1 = 8388607
-            # If s21_complex.real/imag are typically around [-1, 1], then:
-            scale_factor = 8000000.0 # Scale to roughly +/- 8 million
+            # REALISTIC SCALING: Use 10,000x enhanced scale factor from constants
+            # s21_complex now contains S21 * commanded_amplitude (from resonator model)
+            # amplitude=1.0 → 83.8 billion counts (10,000x larger than before)
+            # amplitude=0.01 → 838 million counts (typical range)
+            # This gives realistic dBm levels in Periscope
+            full_scale_counts = const.SCALE_FACTOR*2**8 #32 bit number instead of 24 bit
             
             # Add random noise even when amplitude is 0
             # This simulates ADC noise that's always present
-            noise_level = 100.0  # Base noise level (in ADC counts)
+            noise_level = const.UDP_NOISE_LEVEL  # Base noise level (in ADC counts)
             i_noise = np.random.normal(0, noise_level)
             q_noise = np.random.normal(0, noise_level)
             
-            i_val_scaled = s21_complex.real * scale_factor + i_noise
-            q_val_scaled = s21_complex.imag * scale_factor + q_noise
+            i_val_scaled = s21_complex.real * full_scale_counts + i_noise
+            q_val_scaled = s21_complex.imag * full_scale_counts + q_noise
             
             # Clip to int32 range and convert to int
             iq_data_arr[ch_idx_0_based * 2] = int(np.clip(i_val_scaled, -2147483648, 2147483647))
@@ -271,6 +348,7 @@ class MockCRSUDPStreamer(threading.Thread):
         
         if seq == 0 and module_num == 1: # Log for first packet of first module
             print(f"[UDP] First packet details (module {module_num}): {non_zero_channels_count} non-zero channels.")
+            print(f"[UDP] Using enhanced scale factor: {full_scale_counts:.2e}")
         
         now = datetime.now()
         ts = Timestamp(
@@ -301,43 +379,84 @@ class MockCRSUDPStreamer(threading.Thread):
 
 
 class MockUDPManager:
-    """Manages the lifecycle of the MockCRSUDPStreamer thread."""
+    """Manages the lifecycle of the MockCRSUDPStreamer thread with proper cleanup."""
     def __init__(self, mock_crs):
         self.mock_crs = mock_crs
         self.udp_thread = None
         self._udp_streaming_active = False # Internal flag
 
     async def start_udp_streaming(self, host='127.0.0.1', port=STREAMER_PORT):
-        if not self._udp_streaming_active:
-            self._udp_streaming_active = True
-            # Ensure host is 127.0.0.1 for mock reliability
-            self.udp_thread = MockCRSUDPStreamer(self.mock_crs, '127.0.0.1', port)
-            self.udp_thread.start()
-            await asyncio.sleep(0.1) # Give thread time to start
-            print(f"[Manager] UDP Streaming started to 127.0.0.1:{port}")
-            return True
-        print("[Manager] UDP Streaming already active.")
-        return False # Already active
+        """Start UDP streaming with proper error handling."""
+        try:
+            if not self._udp_streaming_active:
+                self._udp_streaming_active = True
+                # Ensure host is 127.0.0.1 for mock reliability
+                self.udp_thread = MockCRSUDPStreamer(self.mock_crs, '127.0.0.1', port)
+                self.udp_thread.start()
+                await asyncio.sleep(0.1) # Give thread time to start
+                print(f"[Manager] UDP Streaming started to 127.0.0.1:{port}")
+                return True
+            else:
+                print("[Manager] UDP Streaming already active.")
+                return False # Already active
+        except Exception as e:
+            print(f"[Manager] Error starting UDP streaming: {e}")
+            self._udp_streaming_active = False
+            if self.udp_thread:
+                self.udp_thread.emergency_stop()
+                self.udp_thread = None
+            raise
     
     async def stop_udp_streaming(self):
+        """Stop UDP streaming with proper cleanup and timeout."""
         if self._udp_streaming_active and self.udp_thread:
-            self._udp_streaming_active = False
-            self.udp_thread.stop() # Signal thread to stop
-            # Wait for thread to finish. Note: join() is blocking.
-            # If called from async, need to run join in executor or handle carefully.
-            # For simplicity here, assuming short join or that blocking is acceptable in mock context.
-            # A more robust async shutdown would use an event.
-            await asyncio.to_thread(self.udp_thread.join, timeout=1.0)
-            if self.udp_thread.is_alive():
-                print("[Manager] Warning: UDP thread did not stop in time.")
-            self.udp_thread = None
-            print("[Manager] UDP Streaming stopped.")
-            return True
-        print("[Manager] UDP Streaming not active or thread missing.")
-        return False # Not active or no thread
+            try:
+                self._udp_streaming_active = False
+                self.udp_thread.stop() # Signal thread to stop
+                
+                # Wait for thread to finish with timeout
+                try:
+                    await asyncio.to_thread(self.udp_thread.join, timeout=2.0)
+                except Exception as e:
+                    print(f"[Manager] Error during thread join: {e}")
+                
+                if self.udp_thread.is_alive():
+                    print("[Manager] Warning: UDP thread did not stop in time, forcing emergency stop")
+                    self.udp_thread.emergency_stop()
+                
+                self.udp_thread = None
+                print("[Manager] UDP Streaming stopped.")
+                return True
+                
+            except Exception as e:
+                print(f"[Manager] Error stopping UDP streaming: {e}")
+                # Force cleanup in case of error
+                if self.udp_thread:
+                    self.udp_thread.emergency_stop()
+                    self.udp_thread = None
+                return False
+        else:
+            print("[Manager] UDP Streaming not active or thread missing.")
+            return False # Not active or no thread
 
     def get_udp_streaming_status(self):
         return {
             "active": self._udp_streaming_active,
             "thread_alive": self.udp_thread is not None and self.udp_thread.is_alive()
         }
+    
+    def __del__(self):
+        """Destructor to ensure cleanup."""
+        if self._udp_streaming_active and self.udp_thread:
+            print("[Manager] Destructor cleanup: stopping UDP streamer")
+            self.udp_thread.emergency_stop()
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit with cleanup."""
+        if self._udp_streaming_active and self.udp_thread:
+            print("[Manager] Context exit cleanup: stopping UDP streamer")
+            self.udp_thread.emergency_stop()

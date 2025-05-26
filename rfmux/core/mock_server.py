@@ -8,6 +8,7 @@ import socket
 import multiprocessing
 from aiohttp import web
 import atexit
+import signal
 import numpy as np
 
 # Import MockCRS from its new location
@@ -60,7 +61,30 @@ def yaml_hook(hwm):
     p.start()
     l.acquire()
 
-    atexit.register(p.terminate)
+    def cleanup_server_process():
+        """Properly shutdown the MockCRS server process"""
+        if p.is_alive():
+            print("[MockCRS] Shutting down server process...")
+            # First try graceful termination
+            p.terminate()
+            try:
+                # Wait up to 5 seconds for graceful shutdown
+                p.join(timeout=2.0)
+            except:
+                pass
+            
+            # If still alive, force kill
+            if p.is_alive():
+                print("[MockCRS] Force killing server process...")
+                p.kill()
+                try:
+                    p.join(timeout=2.0)
+                except:
+                    pass
+            
+            print("[MockCRS] Server process shutdown complete")
+
+    atexit.register(cleanup_server_process)
 
     # In the client process, we do not need the sockets -- in fact, we don't
     # want a reference hanging around.
@@ -80,20 +104,73 @@ class ServerProcess(mp_ctx.Process):
 
     def run(self):
         loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Set up signal handlers for graceful shutdown
+        shutdown_event = asyncio.Event()
+        
+        def signal_handler():
+            print("[MockCRS Server] Received shutdown signal")
+            shutdown_event.set()
+        
+        # Register signal handlers
+        try:
+            loop.add_signal_handler(signal.SIGTERM, signal_handler)
+            loop.add_signal_handler(signal.SIGINT, signal_handler)
+        except (ValueError, NotImplementedError):
+            # Signal handling may not be available in all contexts
+            pass
         
         # Do NOT load algorithms on server side - they should only run on client
 
         app = web.Application()
         app.add_routes([web.post("/tuber", self.post_handler)])
 
+        runners = []
+        sites = []
+        
         for s in self.sockets:
             runner = web.AppRunner(app)
             loop.run_until_complete(runner.setup())
+            runners.append(runner)
             site = web.SockSite(runner, s)
             loop.run_until_complete(site.start())
+            sites.append(site)
 
         self.lock.release()
-        loop.run_forever()
+        
+        # Wait for shutdown signal instead of running forever
+        try:
+            loop.run_until_complete(shutdown_event.wait())
+        except KeyboardInterrupt:
+            print("[MockCRS Server] Received KeyboardInterrupt")
+        
+        # Clean shutdown
+        print("[MockCRS Server] Shutting down...")
+        
+        # Stop UDP streaming for all models
+        for model in self.models.values():
+            if hasattr(model, 'udp_manager') and model.udp_manager:
+                try:
+                    loop.run_until_complete(model.udp_manager.stop_udp_streaming())
+                except Exception as e:
+                    print(f"[MockCRS Server] Error stopping UDP streaming: {e}")
+        
+        # Clean up web sites and runners
+        for site in sites:
+            try:
+                loop.run_until_complete(site.stop())
+            except Exception as e:
+                print(f"[MockCRS Server] Error stopping site: {e}")
+        
+        for runner in runners:
+            try:
+                loop.run_until_complete(runner.cleanup())
+            except Exception as e:
+                print(f"[MockCRS Server] Error cleaning up runner: {e}")
+        
+        loop.close()
+        print("[MockCRS Server] Shutdown complete")
 
     async def post_handler(self, request):
         port = request.url.port
@@ -135,7 +212,7 @@ class ServerProcess(mp_ctx.Process):
         """Handle a single Tuber request"""
         
         # Debug logging
-        print(f"[DEBUG] Tuber request: {request}")
+        #print(f"[DEBUG] Tuber request: {request}")
         
         # Handle resolve requests first
         if request.get("resolve", False):
@@ -147,7 +224,7 @@ class ServerProcess(mp_ctx.Process):
             object_name = request.get("object")
             
             # Debug log
-            print(f"[DEBUG] Method request: method={method_name}, object={object_name}")
+            #print(f"[DEBUG] Method request: method={method_name}, object={object_name}")
             
             # List of algorithm methods that should NOT be executed on the server
             # These should only run on the client side
@@ -189,7 +266,7 @@ class ServerProcess(mp_ctx.Process):
                 prop = getattr(model, prop_name)
                 if callable(prop):
                     # Debug logging for method property requests
-                    print(f"[DEBUG] Property request for callable '{prop_name}'")
+                    #print(f"[DEBUG] Property request for callable '{prop_name}'")
                     
                     # Return metadata for methods
                     import inspect
@@ -225,7 +302,7 @@ class ServerProcess(mp_ctx.Process):
                 # Check if this is actually a method on our model
                 if hasattr(model, method_name) and callable(getattr(model, method_name)):
                     # This is actually a method call! Redirect to method handler
-                    print(f"[DEBUG] Redirecting object request {obj_name} to method call")
+                    #print(f"[DEBUG] Redirecting object request {obj_name} to method call")
                     return await self.__single_handler(model, {
                         "method": method_name,
                         "args": request.get("args", []),

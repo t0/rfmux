@@ -3,6 +3,7 @@ Mock CRS Device - Resonator Physics Model.
 Encapsulates the logic for resonator physics simulation, including S21 response.
 """
 import numpy as np
+from . import mock_constants as const
 
 class MockResonatorModel:
     """
@@ -33,8 +34,11 @@ class MockResonatorModel:
         # Parameters for the LC resonance model
         self.lc_resonances = [] # List of dicts: {'f0', 'Q', 'coupling'}
         
-        # System gain factor to scale output amplitudes to realistic levels
-        self.system_gain = 100.0  # Adjust this to control overall signal amplitude
+        # Note: Removed system_gain - S21 should be dimensionless transfer function
+        # Final scaling to ADC counts happens in UDP streamer
+        
+        # Initialize kinetic inductance parameters for each resonator
+        self.kinetic_inductance_fractions = []  # Per-resonator kinetic inductance fraction
 
         # Initialize with default LC resonances upon creation
         # self.generate_lc_resonances() # Or let MockCRS call this
@@ -116,9 +120,19 @@ class MockResonatorModel:
         self.resonator_current_f0s *= (1 - (self.resonator_pe + self.p_sky) * self.ff_factor)
 
     # --- LC Resonance Model Methods ---
-    def generate_lc_resonances(self, num_resonances=50, f_start=1e9, f_end=2e9):
-        """Generate simple LC resonances distributed across spectrum."""
+    def generate_lc_resonances(self, num_resonances=None, f_start=None, f_end=None):
+        """Generate LC resonances distributed across spectrum with kinetic inductance parameters."""
+        # Use constants if parameters not provided
+        if num_resonances is None:
+            num_resonances = const.DEFAULT_NUM_RESONANCES
+        if f_start is None:
+            f_start = const.DEFAULT_FREQ_START
+        if f_end is None:
+            f_end = const.DEFAULT_FREQ_END
+            
         self.lc_resonances = []
+        self.kinetic_inductance_fractions = []
+        
         if num_resonances == 0:
             return
 
@@ -127,80 +141,161 @@ class MockResonatorModel:
         frequencies = []
         
         attempts = 0
-        # Use the parameter num_resonances for max_attempts
-        max_attempts = num_resonances * 100 # Safety break for loop
+        max_attempts = num_resonances * 100
         while len(frequencies) < num_resonances and attempts < max_attempts:
             f = np.random.uniform(f_start, f_end)
             if all(abs(f - existing) > min_spacing for existing in frequencies):
                 frequencies.append(f)
-            attempts +=1
+            attempts += 1
         
         if len(frequencies) < num_resonances:
-            # Fallback if couldn't generate enough unique frequencies
-            # This might happen if f_start, f_end, num_resonances, min_spacing are conflicting
-            # For simplicity, just use what was generated, or fill with linear spacing
-            print(f"Warning: Could only generate {len(frequencies)} LC resonances out of {num_resonances} requested.")
-            if not frequencies and num_resonances > 0 : # if none generated, create some
-                 frequencies = np.linspace(f_start, f_end, num_resonances)
-
+            if const.DEBUG_RESONATOR_GENERATION:
+                print(f"Warning: Could only generate {len(frequencies)} LC resonances out of {num_resonances} requested.")
+            if not frequencies and num_resonances > 0:
+                frequencies = np.linspace(f_start, f_end, num_resonances)
 
         frequencies.sort()
         
         for f0_val in frequencies:
-            # High Q for narrow resonances: FWHM = f₀/Q
-            # For ~10 kHz FWHM at 1 GHz: Q = 1e9/10e3 = 100,000
-            Q_val = np.random.uniform(80000, 120000)
-            # Stronger coupling for deeper resonances (10-30 dB)
-            # k = 0.68 gives ~10 dB, k = 0.9 gives ~20 dB, k = 0.97 gives ~30 dB
-            coupling_val = np.random.uniform(0.68, 0.97)
-            self.lc_resonances.append({'f0': f0_val, 'Q': Q_val, 'coupling': coupling_val})
+            # Use constants for Q factor range
+            Q_val = np.random.uniform(const.DEFAULT_Q_MIN, const.DEFAULT_Q_MAX)
+            Q_val *= np.random.uniform(1 - const.Q_VARIATION, 1 + const.Q_VARIATION)
+            
+            # Use constants for coupling range
+            coupling_val = np.random.uniform(const.DEFAULT_COUPLING_MIN, const.DEFAULT_COUPLING_MAX)
+            
+            # Generate kinetic inductance fraction for this resonator
+            ki_fraction = const.DEFAULT_KINETIC_INDUCTANCE_FRACTION
+            ki_fraction *= np.random.uniform(1 - const.KINETIC_INDUCTANCE_VARIATION, 
+                                           1 + const.KINETIC_INDUCTANCE_VARIATION)
+            
+            self.lc_resonances.append({
+                'f0': f0_val, 
+                'Q': Q_val, 
+                'coupling': coupling_val
+            })
+            self.kinetic_inductance_fractions.append(ki_fraction)
 
     def s21_lc_response(self, frequency, amplitude=1.0):
-        """Calculate S21 response for the LC model, including amplitude dependence."""
+        """Calculate S21 response for the LC model with kinetic inductance effects and bifurcation."""
         if not self.lc_resonances:
             return 1.0 + 0j # No attenuation if no LC resonators
 
         s21_total = 1.0 + 0j
-        for res in self.lc_resonances:
+        
+        for idx, res in enumerate(self.lc_resonances):
             f0 = res['f0']
             Q = res['Q']
             k = res['coupling']
             
-            # Amplitude-dependent effects (simplified)
-            Q_eff = Q / (1 + amplitude**2 * 0.1) # Q degradation
-            f0_eff = f0 * (1 + amplitude**2 * 0.001) # Frequency shift
-            # k_eff = k * (1 + amplitude * 0.05) # Coupling changes - original had this
+            # Get kinetic inductance fraction for this resonator
+            ki_fraction = self.kinetic_inductance_fractions[idx] if idx < len(self.kinetic_inductance_fractions) else const.DEFAULT_KINETIC_INDUCTANCE_FRACTION
             
+            if const.ENABLE_BIFURCATION:
+                # Self-consistent calculation with bifurcation capability
+                f0_eff = self._calculate_self_consistent_frequency(frequency, f0, Q, k, amplitude, ki_fraction)
+            else:
+                # Simple frequency shift without self-consistency
+                f0_eff = self._calculate_simple_frequency_shift(f0, amplitude, ki_fraction)
+            
+            # Q degradation at high power
+            Q_eff = Q / (1 + amplitude**2 * 0.1)
+            
+            # Calculate S21 for this resonator
             delta = (frequency - f0_eff) / f0_eff
             denom = 1 + 2j * Q_eff * delta
-            
-            s21_res = 1 - k / denom # Using k (original coupling) instead of k_eff
+            s21_res = 1 - k / denom
             s21_total *= s21_res
         
-        # Add measurement noise (simplified)
-        noise_level = 0.001 * (1 + amplitude * 0.1)
+        # Add measurement noise (dimensionless, relative to S21)
+        noise_level = const.BASE_NOISE_LEVEL * (1 + amplitude * const.AMPLITUDE_NOISE_COUPLING)
         noise = noise_level * (np.random.randn() + 1j * np.random.randn())
         
         return s21_total + noise
+    
+    def _calculate_simple_frequency_shift(self, f0, amplitude, ki_fraction):
+        """Calculate frequency shift without self-consistency (faster)."""
+        # Normalized power
+        power_norm = (amplitude / const.POWER_NORMALIZATION) ** const.FREQUENCY_SHIFT_POWER_LAW
+        
+        # Apply saturation
+        if power_norm > const.SATURATION_POWER:
+            saturation_factor = const.SATURATION_POWER + (power_norm - const.SATURATION_POWER) / (1 + (power_norm / const.SATURATION_POWER) ** const.SATURATION_SHARPNESS)
+            power_norm = saturation_factor
+        
+        # Frequency shift (downward for KIDs)
+        freq_shift_fraction = -const.FREQUENCY_SHIFT_MAGNITUDE * ki_fraction * power_norm
+        return f0 * (1 + freq_shift_fraction)
+    
+    def _calculate_self_consistent_frequency(self, frequency, f0, Q, k, amplitude, ki_fraction):
+        """Calculate self-consistent frequency with potential bifurcation."""
+        # Initial guess
+        f0_eff = f0
+        
+        for iteration in range(const.BIFURCATION_ITERATIONS):
+            # Calculate S21 magnitude at current effective frequency
+            delta = (frequency - f0_eff) / f0_eff
+            denom = 1 + 2j * Q * delta
+            s21_res = 1 - k / denom
+            circulating_power = abs(s21_res)**2 * amplitude**2
+            
+            # Calculate new frequency based on circulating power
+            power_norm = (circulating_power / const.POWER_NORMALIZATION) ** const.FREQUENCY_SHIFT_POWER_LAW
+            
+            # Apply saturation
+            if power_norm > const.SATURATION_POWER:
+                saturation_factor = const.SATURATION_POWER + (power_norm - const.SATURATION_POWER) / (1 + (power_norm / const.SATURATION_POWER) ** const.SATURATION_SHARPNESS)
+                power_norm = saturation_factor
+            
+            # New effective frequency (downward shift for KIDs)
+            freq_shift_fraction = -const.FREQUENCY_SHIFT_MAGNITUDE * ki_fraction * power_norm
+            f0_new = f0 * (1 + freq_shift_fraction)
+            
+            # Check convergence
+            if abs(f0_new - f0_eff) / f0 < const.BIFURCATION_CONVERGENCE_TOLERANCE:
+                if const.DEBUG_BIFURCATION:
+                    print(f"Bifurcation converged in {iteration + 1} iterations")
+                break
+                
+            f0_eff = f0_new
+        
+        return f0_eff
 
     def calculate_channel_response(self, module, channel, frequency, amplitude, phase_degrees):
         """
-        Calculate complex S21 for a given channel's settings using the LC model.
-        This is the primary method used by MockCRS.get_samples and the UDP streamer.
+        Calculate dimensionless S21 transfer function for a given channel's settings.
+        
+        This returns the complex S21 transfer function that should be applied to
+        the commanded amplitude. The final scaling to ADC counts happens in the
+        UDP streamer.
+        
+        Parameters
+        ----------
+        module, channel : int
+            Channel identification (for context, not used in simplified model)
+        frequency : float
+            Probe frequency in Hz
+        amplitude : float
+            Commanded amplitude (0-1, where 1.0 = full scale)
+        phase_degrees : float
+            Commanded phase in degrees
+            
+        Returns
+        -------
+        complex
+            Dimensionless S21 transfer function * commanded_amplitude
+            This preserves the amplitude scaling for the UDP streamer
         """
-        # `module` and `channel` are passed for context but not directly used in this simplified model
-        # unless more complex per-channel/module effects are added.
-
         if amplitude == 0:
             return 0 + 0j # No signal if amplitude is zero
         
-        # Calculate S21 response using the LC model
+        # Calculate S21 response using the LC model (dimensionless)
         s21_val = self.s21_lc_response(frequency, amplitude)
         
         # Apply commanded phase
         phase_rad = np.deg2rad(phase_degrees)
         s21_with_phase = s21_val * np.exp(1j * phase_rad)
         
-        # Scale by amplitude and system gain
-        # S21 is a transfer function, output is S21 * input_amplitude * system_gain
-        return s21_with_phase * amplitude * self.system_gain
+        # Return S21 * commanded_amplitude (preserves amplitude scaling)
+        # The UDP streamer will handle final scaling to ADC counts
+        return s21_with_phase * amplitude

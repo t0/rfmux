@@ -1,9 +1,45 @@
 """
-Shim module for the rfmux.core.mock flavour.
+MockCRS Hardware Emulation System - Main Interface
 
-This module re-exports components from the new modularized mock system
-to maintain compatibility with the `!flavour "rfmux.core.mock"` directive
-in YAML hardware maps.
+This module provides the main interface for the MockCRS hardware emulation system.
+It implements a complete rfmux-compatible mock hardware that can be used for testing
+and development without requiring physical CRS hardware.
+
+Features:
+- Full CRS API compatibility via Tuber protocol
+- Realistic Kinetic Inductance Detector (KID) physics
+- Power-dependent frequency shifts and nonlinearity
+- UDP packet streaming for real-time data
+- Integration with Periscope GUI
+- Support for all measurement algorithms (network analysis, multisweep, etc.)
+
+Usage:
+    Add to hardware map YAML:
+    ```yaml
+    !HardwareMap
+    - !flavour "rfmux.core.mock"
+    - !CRS { serial: "0001", hostname: "127.0.0.1" }
+    ```
+
+    Then use normally:
+    ```python
+    import rfmux
+    s = rfmux.load_session(hardware_map_yaml)
+    crs = s.query(rfmux.CRS).one()
+    await crs.resolve()
+    # Use crs as normal - all methods work
+    ```
+
+Configuration:
+    Customize behavior by modifying rfmux/core/mock_constants.py:
+    - Resonator properties (frequency range, Q factors, coupling)
+    - Power dependence parameters (kinetic inductance, saturation)
+    - Physics model settings (bifurcation, debug flags)
+
+See Also:
+    - README_MockCRS.md: Comprehensive documentation
+    - mock_constants.py: Configuration parameters
+    - mock_resonator_model.py: Physics implementation
 """
 
 # Import the yaml_hook from the new mock_server module

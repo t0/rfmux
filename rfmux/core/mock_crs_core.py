@@ -6,6 +6,8 @@ import numpy as np
 from enum import Enum
 from datetime import datetime
 import contextlib # Not used directly, but often useful with context managers
+import atexit
+import weakref
 
 # Import schema classes
 from .schema import CRS as BaseCRS
@@ -15,6 +17,26 @@ from .schema import CRS as BaseCRS
 # Import helper classes from their new locations
 from .mock_resonator_model import MockResonatorModel
 from .mock_udp_streamer import MockUDPManager # Manages the UDP streamer thread
+
+# Import enhanced scaling constants
+from . import mock_constants as const
+
+# Module-level cleanup registry for MockCRS instances (to avoid JSON serialization issues)
+_mock_crs_instances = weakref.WeakSet()
+_cleanup_registered = False
+
+def _cleanup_all_mock_crs_instances():
+    """Emergency cleanup for all MockCRS instances at program exit"""
+    for instance in list(_mock_crs_instances):
+        try:
+            # Stop UDP streaming synchronously
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(instance.stop_udp_streaming())
+            loop.close()
+            print(f"[CLEANUP] Emergency cleanup completed for MockCRS instance {id(instance)}")
+        except Exception as e:
+            print(f"[CLEANUP] Error during emergency cleanup: {e}")
 
 # Enums (as defined in the original mock.py)
 class ClockSource(str, Enum):
@@ -256,6 +278,15 @@ class MockCRS(BaseCRS):
 
     def __init__(self, serial, slot=None, crate=None, **kwargs):
         super().__init__(serial=serial, slot=slot, crate=crate, **kwargs)
+        
+        # Register this instance for cleanup using module-level registry
+        global _mock_crs_instances, _cleanup_registered
+        _mock_crs_instances.add(self)
+        
+        # Register global cleanup handler (only once)
+        if not _cleanup_registered:
+            atexit.register(_cleanup_all_mock_crs_instances)
+            _cleanup_registered = True
         
         # self._tuber_host = "127.0.0.1" # Default, can be updated by yaml_hook
         # self._tuber_objname = "Dfmux" # Tuber object name
@@ -566,7 +597,7 @@ class MockCRS(BaseCRS):
         self.hmc7044_registers[address] = value
 
     async def get_samples(self, num_samples, channel=None, module=1, average=False):
-        """Get sample data for a specific module, delegating to resonator model."""
+        """Get sample data for a specific module, delegating to resonator model with enhanced scaling."""
         assert isinstance(num_samples, int), "Number of samples must be an integer"
         assert channel is None or isinstance(channel, int), "Channel must be None or an integer"
         assert module in [1, 2, 3, 4], "Invalid module number"
@@ -596,10 +627,13 @@ class MockCRS(BaseCRS):
                 phase_deg = chan_phase_deg if chan_phase_deg is not None else 0.0
                 s21_complex = self.resonator_model.calculate_channel_response(module, channel, total_freq, chan_amp, phase_deg)
                 
-                # Simulate multiple samples based on this single S21 value
-                # Add minor noise per sample if desired
-                i_list = [s21_complex.real + np.random.normal(0, 0.001) for _ in range(num_samples)]
-                q_list = [s21_complex.imag + np.random.normal(0, 0.001) for _ in range(num_samples)]
+                # APPLY SAME 10,000x SCALING AS UDP STREAMER
+                scale_factor = const.SCALE_FACTOR  # 8.38e10 = 83.8 billion
+                noise_level = const.UDP_NOISE_LEVEL  # Same noise level as UDP
+                
+                # Scale and add noise per sample
+                i_list = [s21_complex.real * scale_factor + np.random.normal(0, noise_level) for _ in range(num_samples)]
+                q_list = [s21_complex.imag * scale_factor + np.random.normal(0, noise_level) for _ in range(num_samples)]
             
             return {
                 "i": i_list, "q": q_list, "ts": t_list,
@@ -623,8 +657,14 @@ class MockCRS(BaseCRS):
                     # Use phase if set, otherwise default to 0
                     phase_deg = chan_phase_deg if chan_phase_deg is not None else 0.0
                     s21_complex = self.resonator_model.calculate_channel_response(module, ch_idx, total_freq, chan_amp, phase_deg)
-                    i_ch_samples = [s21_complex.real + np.random.normal(0, 0.001) for _ in range(num_samples)]
-                    q_ch_samples = [s21_complex.imag + np.random.normal(0, 0.001) for _ in range(num_samples)]
+    
+                    # APPLY SAME 10,000x SCALING AS UDP STREAMER
+                    scale_factor = const.SCALE_FACTOR  # 8.38e10 = 83.8 billion
+                    noise_level = const.UDP_NOISE_LEVEL  # Same noise level as UDP)
+
+                    # Scale and add noise per sample
+                    i_ch_samples = [s21_complex.real * scale_factor + np.random.normal(0, noise_level) for _ in range(num_samples)]
+                    q_ch_samples = [s21_complex.imag * scale_factor + np.random.normal(0, noise_level) for _ in range(num_samples)]
                 
                 i_data.append(i_ch_samples)
                 q_data.append(q_ch_samples)

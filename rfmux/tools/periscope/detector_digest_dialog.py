@@ -2,188 +2,317 @@
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtWidgets, QtGui
 
 from .utils import (
     ClickableViewBox, UnitConverter, LINE_WIDTH,
     IQ_COLORS, SCATTER_COLORS, DISTINCT_PLOT_COLORS, COLORMAP_CHOICES,
-    UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE
+    UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE, FITTING_COLORS
 )
-from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm # For direct use if needed
+from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm
 
 class DetectorDigestWindow(QtWidgets.QMainWindow):
     """
     A window that displays a detailed "digest" of a single detector resonance,
-    including three plots: Sweep (vs freq.), Sweep (IQ plane), and Bias amplitude optimization.
+    including three plots: Sweep (vs freq.), Sweep (IQ plane), Bias amplitude optimization,
+    and a panel for fitting results.
     """
     def __init__(self, parent: QtWidgets.QWidget = None,
-                 resonance_data_for_digest: dict = None, # {amp_raw: {'data': sweep_data_dict, 'actual_cf_hz': float, 'direction': str}}
+                 resonance_data_for_digest: dict = None, # {amp_raw_direction_key: {'data': sweep_data_dict, 'actual_cf_hz': float, 'direction': str, 'amplitude': float}}
                  detector_id: int = -1,
                  resonance_frequency_ghz: float = 0.0,
                  dac_scales: dict = None, # {module_id: scale_dbm}
                  zoom_box_mode: bool = True,
                  target_module: int = None,
-                 normalize_plot3: bool = False, # Added for Plot 3 normalization
-                 dark_mode: bool = False): # Added dark mode parameter
+                 normalize_plot3: bool = False, 
+                 dark_mode: bool = False,
+                 all_detectors_data: dict = None,  
+                 initial_detector_idx: int = None):  
         super().__init__(parent)
-        self.resonance_data_for_digest = resonance_data_for_digest or {} # {amp_raw: {'data': sweep_data_dict, 'actual_cf_hz': float}}
+        self.resonance_data_for_digest = resonance_data_for_digest or {} 
         self.detector_id = detector_id
-        self.resonance_frequency_ghz_title = resonance_frequency_ghz # For window title (conceptual base)
-        # self.f_active_bias_hz is now dynamic, see self.current_plot_offset_hz
+        self.resonance_frequency_ghz_title = resonance_frequency_ghz 
         self.dac_scales = dac_scales or {}
         self.zoom_box_mode = zoom_box_mode
         self.target_module = target_module
         self.normalize_plot3 = normalize_plot3
-        self.dark_mode = dark_mode # Store dark mode setting
-        
-        # Store reference to parent to ensure proper behavior
+        self.dark_mode = dark_mode 
         self.parent_window = parent
+        
+        # Navigation support
+        self.all_detectors_data = all_detectors_data or {}
+        self.detector_indices = sorted(self.all_detectors_data.keys()) if self.all_detectors_data else []
+        self.current_detector_index_in_list = 0  # Index in detector_indices list
+        
+        # If we have multiple detectors, find the initial one
+        if self.detector_indices and initial_detector_idx is not None:
+            try:
+                self.current_detector_index_in_list = self.detector_indices.index(initial_detector_idx)
+            except ValueError:
+                self.current_detector_index_in_list = 0
 
-        self.active_amplitude_raw = None
-        self.active_sweep_info = None # Will store {'data': data_dict, 'actual_cf_hz': float}
-        self.active_sweep_data = None # Convenience for self.active_sweep_info['data']
-        self.current_plot_offset_hz = None # This will be the f_bias for x-axes, from active_sweep_info['actual_cf_hz']
+        self.active_amplitude_raw_key = None # Stores the key like "amp_val:direction"
+        self.active_sweep_info = None 
+        self.active_sweep_data = None 
+        self.current_plot_offset_hz = None 
 
         if self.resonance_data_for_digest:
-            # Default to lowest power/amplitude sweep
-            self.active_amplitude_raw = min(self.resonance_data_for_digest.keys())
-            self.active_sweep_info = self.resonance_data_for_digest[self.active_amplitude_raw]
-            self.active_sweep_data = self.active_sweep_info['data']
-            self.current_plot_offset_hz = self.active_sweep_info['actual_cf_hz']
-        else: # Should not happen if MultisweepWindow sends valid data
-            self.current_plot_offset_hz = self.resonance_frequency_ghz_title * 1e9
+            try:
+                sorted_keys = sorted(
+                    self.resonance_data_for_digest.keys(),
+                    key=lambda k: float(k.split(":")[0]) 
+                )
+                if sorted_keys:
+                    self.active_amplitude_raw_key = sorted_keys[0]
+                    self.active_sweep_info = self.resonance_data_for_digest[self.active_amplitude_raw_key]
+                    self.active_sweep_data = self.active_sweep_info['data']
+                    self.current_plot_offset_hz = self.active_sweep_info['actual_cf_hz']
+            except (ValueError, IndexError, KeyError) as e: # Added KeyError
+                print(f"Error selecting default sweep: {e}. Keys: {list(self.resonance_data_for_digest.keys())}")
+                if self.resonance_data_for_digest: 
+                    try: # More robust fallback
+                        first_key = next(iter(self.resonance_data_for_digest))
+                        self.active_amplitude_raw_key = first_key
+                        self.active_sweep_info = self.resonance_data_for_digest[self.active_amplitude_raw_key]
+                        self.active_sweep_data = self.active_sweep_info['data']
+                        self.current_plot_offset_hz = self.active_sweep_info.get('actual_cf_hz', self.resonance_frequency_ghz_title * 1e9)
+                    except Exception as fallback_e:
+                         print(f"Critical error in fallback default sweep selection: {fallback_e}")
 
+
+        if self.current_plot_offset_hz is None: 
+             self.current_plot_offset_hz = self.resonance_frequency_ghz_title * 1e9
 
         self._setup_ui()
-        self._update_plots()
+        self._update_plots() 
 
         self.setWindowTitle(f"Detector Digest: Detector {self.detector_id+1}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
-        # Set window flags to ensure proper behavior as a standalone window
         self.setWindowFlags(QtCore.Qt.WindowType.Window)
-        self.resize(1200, 450) # Adjusted initial size
+        self.resize(1200, 700) # Increased height slightly more for additional NL params
 
     def _setup_ui(self):
-        """Sets up the UI layout with three plots."""
-        # Create a central widget for the QMainWindow
+        """Sets up the UI layout with plots and fitting information panel."""
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
         
-        # Create a vertical layout for title and plots
+        # Main vertical layout for the entire window content
         outer_layout = QtWidgets.QVBoxLayout(central_widget)
         
         # Set the background color of the dialog based on dark mode
-        bg_color = "#1C1C1C" if self.dark_mode else "#FFFFFF"
-        central_widget.setStyleSheet(f"background-color: {bg_color};")
+        bg_color_hex = "#1C1C1C" if self.dark_mode else "#FFFFFF" # Hex for stylesheet
+        central_widget.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}") # Apply to QWidget base
         
-        # Add a title label at the top
+        # Create navigation header with title and buttons
+        nav_widget = QtWidgets.QWidget()
+        nav_layout = QtWidgets.QHBoxLayout(nav_widget)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        
+        title_color_str = "white" if self.dark_mode else "black"
+        
+        # Previous button
+        self.prev_button = QtWidgets.QPushButton("◀ Previous")
+        self.prev_button.clicked.connect(self._navigate_previous)
+        self.prev_button.setEnabled(len(self.detector_indices) > 1)
+        nav_layout.addWidget(self.prev_button)
+        
+        # Title in the center
         title_text = f"Detector {self.detector_id+1} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
         self.title_label = QtWidgets.QLabel(title_text)
         self.title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         font = self.title_label.font()
-        font.setPointSize(font.pointSize() + 2)
-        font.setBold(False)
+        font.setPointSize(font.pointSize() + 2); font.setBold(False) 
         self.title_label.setFont(font)
+        self.title_label.setStyleSheet(f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}")
+        nav_layout.addWidget(self.title_label, 1)  # Stretch factor 1 to center
         
-        # Set title label color based on dark mode
-        title_color = "white" if self.dark_mode else "black"
-        self.title_label.setStyleSheet(f"margin-bottom: 10px; color: {title_color};")
+        # Next button
+        self.next_button = QtWidgets.QPushButton("Next ▶")
+        self.next_button.clicked.connect(self._navigate_next)
+        self.next_button.setEnabled(len(self.detector_indices) > 1)
+        nav_layout.addWidget(self.next_button)
         
-        outer_layout.addWidget(self.title_label)
+        # Add detector count label
+        detector_count_text = ""
+        if self.detector_indices:
+            detector_count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
+        self.detector_count_label = QtWidgets.QLabel(detector_count_text)
+        self.detector_count_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+        nav_layout.addWidget(self.detector_count_label)
         
-        # Create horizontal layout for the three plots
+        outer_layout.addWidget(nav_widget)
+        
         plots_layout = QtWidgets.QHBoxLayout()
-        outer_layout.addLayout(plots_layout)
-
-        # Define colors based on dark mode
-        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
 
         # Plot 1: Sweep (vs freq.)
-        vb1 = ClickableViewBox() # Use ClickableViewBox for consistency, though no specific click action here
-        vb1.parent_window = self # For zoom_box_mode
+        vb1 = ClickableViewBox(); vb1.parent_window = self
         self.plot1_sweep_vs_freq = pg.PlotWidget(viewBox=vb1, name="SweepVsFreq")
-        # Title will be set dynamically in _update_plots
-        self.plot1_sweep_vs_freq.setLabel('left', "Amplitude", units="V") # pyqtgraph will show mV
-        self.plot1_sweep_vs_freq.setLabel('bottom', "f - f_bias", units="Hz") # pyqtgraph will show kHz
+        self.plot1_sweep_vs_freq.setLabel('left', "Amplitude", units="V") 
+        self.plot1_sweep_vs_freq.setLabel('bottom', "f - f_bias", units="Hz") 
         self.plot1_sweep_vs_freq.showGrid(x=True, y=True, alpha=0.3)
-        self.plot1_legend = self.plot1_sweep_vs_freq.addLegend(offset=(30,10), labelTextColor=pen_color)
+        self.plot1_legend = self.plot1_sweep_vs_freq.addLegend(offset=(30,10), labelTextColor=plot_pen_color)
         plots_layout.addWidget(self.plot1_sweep_vs_freq)
 
         # Plot 2: Sweep (IQ plane)
-        vb2 = ClickableViewBox()
-        vb2.parent_window = self
+        vb2 = ClickableViewBox(); vb2.parent_window = self
         self.plot2_iq_plane = pg.PlotWidget(viewBox=vb2, name="SweepIQPlane")
-        # Title will be set dynamically in _update_plots
-        self.plot2_iq_plane.setLabel('left', "Q", units="V") # pyqtgraph will show mV
-        self.plot2_iq_plane.setLabel('bottom', "I", units="V") # pyqtgraph will show mV
+        self.plot2_iq_plane.setLabel('left', "Q", units="V") 
+        self.plot2_iq_plane.setLabel('bottom', "I", units="V") 
         self.plot2_iq_plane.setAspectLocked(True)
         self.plot2_iq_plane.showGrid(x=True, y=True, alpha=0.3)
-        self.plot2_legend = self.plot2_iq_plane.addLegend(offset=(30,10), labelTextColor=pen_color)
+        self.plot2_legend = self.plot2_iq_plane.addLegend(offset=(30,10), labelTextColor=plot_pen_color)
         plots_layout.addWidget(self.plot2_iq_plane)
 
         # Plot 3: Bias amplitude optimization
-        vb3 = ClickableViewBox() # Double-click interaction needed here
-        vb3.parent_window = self
+        vb3 = ClickableViewBox(); vb3.parent_window = self
         self.plot3_bias_opt = pg.PlotWidget(viewBox=vb3, name="BiasOpt")
         self.plot3_bias_opt.setLabel('left', "|S21|", units="dB")
-        self.plot3_bias_opt.setLabel('bottom', "f - f_bias", units="Hz") # pyqtgraph will show kHz
+        self.plot3_bias_opt.setLabel('bottom', "f - f_bias", units="Hz") 
         self.plot3_bias_opt.showGrid(x=True, y=True, alpha=0.3)
-        self.plot3_legend = self.plot3_bias_opt.addLegend(offset=(30,10), labelTextColor=pen_color)
+        self.plot3_legend = self.plot3_bias_opt.addLegend(offset=(30,10), labelTextColor=plot_pen_color)
         plots_layout.addWidget(self.plot3_bias_opt)
-        
-        # Connect double-click for Plot 3
         vb3.doubleClickedEvent.connect(self._handle_plot3_double_click)
+        
+        outer_layout.addLayout(plots_layout) # Add plots layout to main vertical layout
 
-        # Apply zoom box mode
+        # Fitting Information Panel
+        self.fitting_info_group = QtWidgets.QGroupBox("Fitting Results")
+        self.fitting_info_group.setStyleSheet(f"QGroupBox {{ color: {title_color_str}; border: 1px solid {title_color_str}; margin-top: 0.5em;}} QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 3px 0 3px; }}")
+        fitting_info_main_layout = QtWidgets.QHBoxLayout(self.fitting_info_group)
+
+        # Column 1: Skewed Fit
+        skewed_fit_group = QtWidgets.QGroupBox("Skewed Lorentzian Fit")
+        skewed_fit_group.setStyleSheet(f"QGroupBox {{ color: {title_color_str}; border: none;}}")
+        skewed_fit_layout = QtWidgets.QFormLayout(skewed_fit_group)
+        self.skewed_status_label = QtWidgets.QLabel("N/A"); skewed_fit_layout.addRow("Status:", self.skewed_status_label)
+        self.skewed_fr_label = QtWidgets.QLabel("N/A"); self.skewed_fr_label.setToolTip("Resonance frequency (fr)"); skewed_fit_layout.addRow("fr (MHz):", self.skewed_fr_label)
+        self.skewed_qr_label = QtWidgets.QLabel("N/A"); self.skewed_qr_label.setToolTip("Total quality factor (Qr)"); skewed_fit_layout.addRow("Qr:", self.skewed_qr_label)
+        self.skewed_qc_label = QtWidgets.QLabel("N/A"); self.skewed_qc_label.setToolTip("Coupling quality factor (Qc)"); skewed_fit_layout.addRow("Qc:", self.skewed_qc_label)
+        self.skewed_qi_label = QtWidgets.QLabel("N/A"); self.skewed_qi_label.setToolTip("Internal quality factor (Qi)"); skewed_fit_layout.addRow("Qi:", self.skewed_qi_label)
+        fitting_info_main_layout.addWidget(skewed_fit_group)
+
+        # Column 2: Nonlinear Fit
+        nl_fit_group = QtWidgets.QGroupBox("Nonlinear Fit")
+        nl_fit_group.setStyleSheet(f"QGroupBox {{ color: {title_color_str}; border: none;}}")
+        nl_fit_layout = QtWidgets.QFormLayout(nl_fit_group)
+        self.nl_status_label = QtWidgets.QLabel("N/A"); nl_fit_layout.addRow("Status:", self.nl_status_label)
+        self.nl_fr_label = QtWidgets.QLabel("N/A"); self.nl_fr_label.setToolTip("Nonlinear resonance frequency (fr_nl)"); nl_fit_layout.addRow("fr_nl (MHz):", self.nl_fr_label)
+        self.nl_qr_label = QtWidgets.QLabel("N/A"); self.nl_qr_label.setToolTip("Nonlinear total quality factor (Qr_nl)"); nl_fit_layout.addRow("Qr_nl:", self.nl_qr_label)
+        self.nl_qc_label = QtWidgets.QLabel("N/A"); self.nl_qc_label.setToolTip("Nonlinear coupling quality factor (Qc_nl)"); nl_fit_layout.addRow("Qc_nl:", self.nl_qc_label)
+        self.nl_qi_label = QtWidgets.QLabel("N/A"); self.nl_qi_label.setToolTip("Nonlinear internal quality factor (Qi_nl)"); nl_fit_layout.addRow("Qi_nl:", self.nl_qi_label)
+        self.nl_a_label = QtWidgets.QLabel("N/A"); self.nl_a_label.setToolTip("Nonlinearity parameter 'a'"); nl_fit_layout.addRow("'a':", self.nl_a_label)
+        self.nl_phi_label = QtWidgets.QLabel("N/A"); self.nl_phi_label.setToolTip("Nonlinearity phase parameter φ"); nl_fit_layout.addRow("φ (deg):", self.nl_phi_label)
+        self.nl_i0_label = QtWidgets.QLabel("N/A"); self.nl_i0_label.setToolTip("Nonlinear offset I0"); nl_fit_layout.addRow("I0:", self.nl_i0_label)
+        self.nl_q0_label = QtWidgets.QLabel("N/A"); self.nl_q0_label.setToolTip("Nonlinear offset Q0"); nl_fit_layout.addRow("Q0:", self.nl_q0_label)
+        fitting_info_main_layout.addWidget(nl_fit_group)
+        
+        fitting_label_color_style = f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
+        for layout_item in [skewed_fit_layout, nl_fit_layout]:
+            for i in range(layout_item.rowCount()):
+                label_widget = layout_item.itemAt(i, QtWidgets.QFormLayout.ItemRole.LabelRole).widget()
+                if label_widget: label_widget.setStyleSheet(fitting_label_color_style)
+                field_widget = layout_item.itemAt(i, QtWidgets.QFormLayout.ItemRole.FieldRole).widget()
+                if field_widget: field_widget.setStyleSheet(fitting_label_color_style)
+        
+        outer_layout.addWidget(self.fitting_info_group)
+        outer_layout.setStretchFactor(plots_layout, 3) 
+        outer_layout.setStretchFactor(self.fitting_info_group, 2) # Adjusted stretch factor
+
         self._apply_zoom_box_mode_to_all()
+        self.apply_theme(self.dark_mode)
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent):
+        """Handle keyboard navigation between detectors."""
+        if event.key() == QtCore.Qt.Key.Key_Left:
+            self._navigate_previous()
+        elif event.key() == QtCore.Qt.Key.Key_Right:
+            self._navigate_next()
+        else:
+            super().keyPressEvent(event)
+    
+    def _navigate_previous(self):
+        """Navigate to the previous detector."""
+        if not self.detector_indices or len(self.detector_indices) <= 1:
+            return
         
-        # Apply initial theme to plots
+        # Move to previous detector with wraparound
+        self.current_detector_index_in_list = (self.current_detector_index_in_list - 1) % len(self.detector_indices)
+        self._switch_to_detector(self.detector_indices[self.current_detector_index_in_list])
+    
+    def _navigate_next(self):
+        """Navigate to the next detector."""
+        if not self.detector_indices or len(self.detector_indices) <= 1:
+            return
         
-        # Apply to Plot 1: Sweep vs freq
-        self.plot1_sweep_vs_freq.setBackground(bg_color)
-        plot_item = self.plot1_sweep_vs_freq.getPlotItem()
-        # Initialize with correct colored title
-        active_power_dbm_str = "N/A"
-        if self.active_amplitude_raw is not None and self.target_module in self.dac_scales:
+        # Move to next detector with wraparound
+        self.current_detector_index_in_list = (self.current_detector_index_in_list + 1) % len(self.detector_indices)
+        self._switch_to_detector(self.detector_indices[self.current_detector_index_in_list])
+    
+    def _switch_to_detector(self, new_detector_id: int):
+        """Switch to display a different detector."""
+        if new_detector_id not in self.all_detectors_data:
+            return
+        
+        # Update detector-specific data
+        detector_data = self.all_detectors_data[new_detector_id]
+        self.detector_id = new_detector_id
+        self.resonance_data_for_digest = detector_data['resonance_data']
+        self.resonance_frequency_ghz_title = detector_data['conceptual_freq_hz'] / 1e9
+        
+        # Reset active sweep selection
+        self.active_amplitude_raw_key = None
+        self.active_sweep_info = None
+        self.active_sweep_data = None
+        self.current_plot_offset_hz = None
+        
+        # Select the first sweep for this detector
+        if self.resonance_data_for_digest:
             try:
-                active_power_dbm = UnitConverter.normalize_to_dbm(self.active_amplitude_raw, self.dac_scales[self.target_module])
-                active_power_dbm_str = f"{active_power_dbm:.2f} dBm"
-            except Exception:
-                pass  # Keep "N/A" or raw value if conversion fails
-        plot_item.setTitle(f"Sweep (Probe Power {active_power_dbm_str})", color=pen_color)
-        for axis_name in ("left", "bottom", "right", "top"):
-            ax = plot_item.getAxis(axis_name)
-            if ax:
-                ax.setPen(pen_color)
-                ax.setTextPen(pen_color)
+                sorted_keys = sorted(
+                    self.resonance_data_for_digest.keys(),
+                    key=lambda k: float(k.split(":")[0])
+                )
+                if sorted_keys:
+                    self.active_amplitude_raw_key = sorted_keys[0]
+                    self.active_sweep_info = self.resonance_data_for_digest[self.active_amplitude_raw_key]
+                    self.active_sweep_data = self.active_sweep_info['data']
+                    self.current_plot_offset_hz = self.active_sweep_info['actual_cf_hz']
+            except (ValueError, IndexError, KeyError) as e:
+                print(f"Error selecting default sweep: {e}")
+                if self.resonance_data_for_digest:
+                    try:
+                        first_key = next(iter(self.resonance_data_for_digest))
+                        self.active_amplitude_raw_key = first_key
+                        self.active_sweep_info = self.resonance_data_for_digest[self.active_amplitude_raw_key]
+                        self.active_sweep_data = self.active_sweep_info['data']
+                        self.current_plot_offset_hz = self.active_sweep_info.get('actual_cf_hz', self.resonance_frequency_ghz_title * 1e9)
+                    except Exception as fallback_e:
+                        print(f"Critical error in fallback default sweep selection: {fallback_e}")
         
-        # Apply to Plot 2: IQ plane
-        self.plot2_iq_plane.setBackground(bg_color)
-        plot_item = self.plot2_iq_plane.getPlotItem()
-        # Initialize with correct colored title
-        plot_item.setTitle(f"IQ (Probe Power {active_power_dbm_str})", color=pen_color)
-        for axis_name in ("left", "bottom", "right", "top"):
-            ax = plot_item.getAxis(axis_name)
-            if ax:
-                ax.setPen(pen_color)
-                ax.setTextPen(pen_color)
+        if self.current_plot_offset_hz is None:
+            self.current_plot_offset_hz = self.resonance_frequency_ghz_title * 1e9
         
-        # Apply to Plot 3: Bias amplitude optimization
-        self.plot3_bias_opt.setBackground(bg_color)
-        plot_item = self.plot3_bias_opt.getPlotItem()
-        # Initialize with correct colored title
-        plot_item.setTitle("Bias amplitude optimization", color=pen_color)
-        for axis_name in ("left", "bottom", "right", "top"):
-            ax = plot_item.getAxis(axis_name)
-            if ax:
-                ax.setPen(pen_color)
-                ax.setTextPen(pen_color)
+        # Update UI elements
+        title_text = f"Detector {self.detector_id+1} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
+        self.title_label.setText(title_text)
+        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id+1}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
+        
+        # Update detector count label
+        if hasattr(self, 'detector_count_label'):
+            detector_count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
+            self.detector_count_label.setText(detector_count_text)
+        
+        # Redraw plots with new data
+        self._update_plots()
 
     def _apply_zoom_box_mode_to_all(self):
+        """Applies the current zoom_box_mode state to all plot viewboxes."""
         for plot_widget in [self.plot1_sweep_vs_freq, self.plot2_iq_plane, self.plot3_bias_opt]:
             if plot_widget and isinstance(plot_widget.getViewBox(), ClickableViewBox):
                 plot_widget.getViewBox().enableZoomBoxMode(self.zoom_box_mode)
 
     def _clear_plots(self):
+        """Clears all plot items and legends, and resets fitting info labels."""
         for plot_widget, legend_widget in [
             (self.plot1_sweep_vs_freq, self.plot1_legend),
             (self.plot2_iq_plane, self.plot2_legend),
@@ -192,335 +321,374 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             if plot_widget:
                 for item in plot_widget.listDataItems(): plot_widget.removeItem(item)
             if legend_widget: legend_widget.clear()
+        
+        self.skewed_status_label.setText("N/A"); self.skewed_fr_label.setText("N/A"); self.skewed_qr_label.setText("N/A"); self.skewed_qc_label.setText("N/A"); self.skewed_qi_label.setText("N/A")
+        self.nl_status_label.setText("N/A"); self.nl_fr_label.setText("N/A"); self.nl_qr_label.setText("N/A"); self.nl_qc_label.setText("N/A"); self.nl_qi_label.setText("N/A"); self.nl_a_label.setText("N/A"); self.nl_phi_label.setText("N/A"); self.nl_i0_label.setText("N/A"); self.nl_q0_label.setText("N/A")
+
 
     def _update_plots(self):
-        """Populates all three plots with data."""
-        self._clear_plots()
-        if not self.active_sweep_data or not self.resonance_data_for_digest:
+        """Populates all three plots with data and updates fitting information panel."""
+        self._clear_plots() # Clear previous data and fitting info
+        if not self.active_sweep_data or not self.resonance_data_for_digest or self.active_sweep_info is None:
+            # If no active sweep data, ensure fitting panel also shows "N/A" or "Not Applied"
+            self._update_fitting_info_panel() # Call to set labels to default state
             return
 
-        active_power_dbm_str = "N/A"
-        bifurcation_indicator = ""
-        
-        if self.active_amplitude_raw is not None:
-            # Extract the actual amplitude from the composite key if needed
-            if isinstance(self.active_amplitude_raw, str) and ":" in self.active_amplitude_raw:
-                # Format is "amp_val:direction"
-                amp_part = self.active_amplitude_raw.split(":")[0]
-                active_amp_val = float(amp_part)
-            else:
-                # Legacy format - direct amplitude value
-                active_amp_val = self.active_amplitude_raw
-                
-            dac_scale = self.dac_scales.get(self.target_module)
-            if dac_scale is not None:
-                try:
-                    active_power_dbm = UnitConverter.normalize_to_dbm(active_amp_val, dac_scale)
-                    active_power_dbm_str = f"{active_power_dbm:.2f} dBm"
-                except Exception:
-                    pass # Keep "N/A" or raw value if conversion fails
-        
-        # Check if the active sweep is bifurcated
-        if self.active_sweep_data and self.active_sweep_data.get('is_bifurcated', False):
-            bifurcation_indicator = " (bifurcated)"
+        active_power_dbm_str = "N/A"; bifurcation_indicator = ""
+        active_amp_val_for_conversion = None
 
-        self.plot1_sweep_vs_freq.setTitle(f"Sweep (Probe Power {active_power_dbm_str}{bifurcation_indicator})")
-        self.plot2_iq_plane.setTitle(f"IQ (Probe Power {active_power_dbm_str}{bifurcation_indicator})")
+        if self.active_amplitude_raw_key is not None:
+            amp_part_str = self.active_amplitude_raw_key.split(":")[0]
+            try: active_amp_val_for_conversion = float(amp_part_str)
+            except ValueError: 
+                print(f"Warning: Could not parse amplitude from key '{self.active_amplitude_raw_key}'")
+                pass
 
-        # --- Plot 1: Sweep (vs freq.) ---
-        if self.active_sweep_data and self.current_plot_offset_hz is not None:
+            if active_amp_val_for_conversion is not None:
+                dac_scale = self.dac_scales.get(self.target_module)
+                if dac_scale is not None:
+                    try:
+                        active_power_dbm = UnitConverter.normalize_to_dbm(active_amp_val_for_conversion, dac_scale)
+                        active_power_dbm_str = f"{active_power_dbm:.2f} dBm"
+                    except Exception: pass
+        
+        if self.active_sweep_data.get('is_bifurcated', False): bifurcation_indicator = " (bifurcated)"
+        
+        plot_pen_color = "w" if self.dark_mode else "k"
+        self.plot1_sweep_vs_freq.setTitle(f"Sweep (Probe Power {active_power_dbm_str}{bifurcation_indicator})", color=plot_pen_color)
+        self.plot2_iq_plane.setTitle(f"IQ (Probe Power {active_power_dbm_str}{bifurcation_indicator})", color=plot_pen_color)
+
+        if self.current_plot_offset_hz is not None:
             freqs_hz_active = self.active_sweep_data.get('frequencies')
             iq_complex_active = self.active_sweep_data.get('iq_complex')
 
-            if freqs_hz_active is not None and iq_complex_active is not None:
+            if freqs_hz_active is not None and iq_complex_active is not None and len(freqs_hz_active) > 0:
                 s21_mag_volts = convert_roc_to_volts(np.abs(iq_complex_active))
                 s21_i_volts = convert_roc_to_volts(iq_complex_active.real)
                 s21_q_volts = convert_roc_to_volts(iq_complex_active.imag)
-                
                 x_axis_hz_offset = freqs_hz_active - self.current_plot_offset_hz
 
-                # Use white for dark mode, black for light mode for the magnitude curve
-                mag_color = 'w' if self.dark_mode else 'k'
-                # Store the theme-dependent color in IQ_COLORS
-                IQ_COLORS["MAGNITUDE"] = mag_color
-                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_mag_volts, pen=pg.mkPen(IQ_COLORS["MAGNITUDE"], width=LINE_WIDTH), name="|I + iQ|")
-                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_i_volts, pen=pg.mkPen(IQ_COLORS["I"], style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH), name="I")
-                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
+                # Plot raw data
+                # Fix magnitude color - ensure it's a valid color object
+                if IQ_COLORS.get("MAGNITUDE") is None:
+                    raw_mag_color = pg.mkColor(plot_pen_color)  # Ensure it's a valid color object
+                else:
+                    raw_mag_color = IQ_COLORS["MAGNITUDE"]
+                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_mag_volts, pen=pg.mkPen(raw_mag_color, width=LINE_WIDTH), name="|I+jQ| (Raw)")
+                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_i_volts, pen=pg.mkPen(IQ_COLORS["I"], style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH), name="I (Raw)")
+                self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, s21_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q (Raw)")
+                self.plot2_iq_plane.plot(s21_i_volts, s21_q_volts, pen=None, symbol='o', symbolBrush=SCATTER_COLORS["DEFAULT"], symbolPen=SCATTER_COLORS["DEFAULT"], symbolSize=5, name="Sweep IQ (Raw)")
+
+                # Skewed Fit Overlay (magnitude only)
+                if self.active_sweep_data.get('skewed_fit_success'):
+                    skewed_model_mag = self.active_sweep_data.get('skewed_model_mag')
+                    if skewed_model_mag is not None and len(skewed_model_mag) == len(x_axis_hz_offset):
+                        # The skewed model is normalized, we need to denormalize it
+                        # The normalization factor used in fitting is abs(s21_iq[-1])
+                        # We can calculate this from the raw data
+                        normalization_factor = 1.0
+                        if len(iq_complex_active) > 0:
+                            # Use the last point as the normalization reference (off-resonance baseline)
+                            normalization_factor = np.abs(iq_complex_active[-1])
+                            if normalization_factor < 1e-15:
+                                # Fallback if last point is too small
+                                normalization_factor = np.mean(np.abs(iq_complex_active[-10:]))
+                        
+                        # Apply the normalization factor to get back to physical scale
+                        skewed_model_mag_physical = skewed_model_mag * normalization_factor
+                        
+                        # Convert from counts to volts
+                        skewed_mag_volts = convert_roc_to_volts(skewed_model_mag_physical)
+                        self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, skewed_mag_volts, pen=pg.mkPen(FITTING_COLORS["SKEWED"], width=LINE_WIDTH, style=QtCore.Qt.PenStyle.DotLine), name="Skewed Fit Mag")
+                        # No IQ plane plot for skewed fit since it's magnitude-only
+                
+                # Nonlinear Fit Overlay
+                if self.active_sweep_data.get('nonlinear_fit_success'):
+                    nl_model_iq = self.active_sweep_data.get('nonlinear_model_iq') 
+                    if nl_model_iq is not None and len(nl_model_iq) == len(x_axis_hz_offset):
+                        # The model is generated for gain-corrected data, so we need to re-apply the gain
+                        # to match the physical reference frame of the displayed data
+                        gain_complex = self.active_sweep_data.get('gain_complex')
+                        if gain_complex is not None:
+                            # Apply the complex gain (both magnitude and phase)
+                            nl_model_iq_physical = nl_model_iq * gain_complex
+                        else:
+                            # No gain information available, use model as-is
+                            nl_model_iq_physical = nl_model_iq
+                        
+                        # Convert from counts to volts
+                        nl_mag_volts = convert_roc_to_volts(np.abs(nl_model_iq_physical))
+                        nl_i_volts = convert_roc_to_volts(nl_model_iq_physical.real)
+                        nl_q_volts = convert_roc_to_volts(nl_model_iq_physical.imag)
+                        self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, nl_mag_volts, pen=pg.mkPen(FITTING_COLORS["NONLINEAR"], width=LINE_WIDTH, style=QtCore.Qt.PenStyle.DashDotLine), name="Nonlinear Fit Mag")
+                        self.plot2_iq_plane.plot(nl_i_volts, nl_q_volts, pen=pg.mkPen(FITTING_COLORS["NONLINEAR"], width=LINE_WIDTH, style=QtCore.Qt.PenStyle.DashDotLine), name="Nonlinear Fit IQ")
                 self.plot1_sweep_vs_freq.autoRange()
 
-        # --- Plot 2: Sweep (IQ plane) ---
-        if self.active_sweep_data: # Re-check as it might be cleared if no data
-            iq_complex_active = self.active_sweep_data.get('iq_complex')
-            if iq_complex_active is not None:
-                s21_i_volts = convert_roc_to_volts(iq_complex_active.real)
-                s21_q_volts = convert_roc_to_volts(iq_complex_active.imag)
-                # Use SCATTER_COLORS for consistency rather than IQ_COLORS
-                self.plot2_iq_plane.plot(s21_i_volts, s21_q_volts, pen=None, symbol='o', 
-                                        symbolBrush=SCATTER_COLORS["DEFAULT"], symbolPen=SCATTER_COLORS["DEFAULT"], 
-                                        symbolSize=5, name="Sweep IQ")
-
-            # Plot rotation_tod if available
             rotation_tod_iq = self.active_sweep_data.get('rotation_tod')
             if rotation_tod_iq is not None and rotation_tod_iq.size > 0:
                 tod_i_volts = convert_roc_to_volts(rotation_tod_iq.real)
                 tod_q_volts = convert_roc_to_volts(rotation_tod_iq.imag)
-                # Use white for dark mode, black for light mode for the noise points
-                noise_color = 'w' if self.dark_mode else 'k'
-                # Store the theme-dependent color in SCATTER_COLORS
-                SCATTER_COLORS["NOISE"] = noise_color
-                # Use consistent styling with both brush and pen for scatter points
-                self.plot2_iq_plane.plot(tod_i_volts, tod_q_volts, pen=None, symbol='o', 
-                                        symbolBrush=SCATTER_COLORS["NOISE"], symbolPen=SCATTER_COLORS["NOISE"], 
-                                        symbolSize=3, name="Noise at f_bias")
-            
+                noise_color = 'w' if self.dark_mode else 'k' 
+                self.plot2_iq_plane.plot(tod_i_volts, tod_q_volts, pen=None, symbol='o', symbolBrush=noise_color, symbolPen=noise_color, symbolSize=3, name="Noise at f_bias")
             self.plot2_iq_plane.autoRange()
         
-        # --- Plot 3: Bias amplitude optimization ---
+        # --- Plot 3: Bias amplitude optimization (remains largely the same logic) ---
         if self.current_plot_offset_hz is not None:
-            # Group data by amplitude (without direction) for proper color assignment
-            data_by_amplitude = {}
-            
-            for key, sweep_info in self.resonance_data_for_digest.items():
-                # Extract amplitude from composite key or from the 'amplitude' field
-                if isinstance(key, str) and ":" in key:
-                    # New format: "amp_val:direction"
-                    amp_parts = key.split(":")
-                    amp_val = float(amp_parts[0])
-                    direction = amp_parts[1]
-                else:
-                    # Legacy format or direct amplitude value
-                    amp_val = sweep_info.get('amplitude', key)
-                    direction = sweep_info.get('direction', 'upward')
+            data_by_amplitude = {} 
+            for key, sweep_info_entry in self.resonance_data_for_digest.items():
+                amp_part_str = key.split(":")[0]
+                try: amp_val_float = float(amp_part_str)
+                except ValueError: continue # Skip if key format is unexpected
                 
-                if amp_val not in data_by_amplitude:
-                    data_by_amplitude[amp_val] = []
+                direction = sweep_info_entry.get('direction', 'upward') # Default if not present
                 
-                # Store sweep info with explicit direction
-                data_entry = {
-                    'sweep_info': sweep_info,
-                    'direction': direction,
-                    'key': key
-                }
-                data_by_amplitude[amp_val].append(data_entry)
+                if amp_val_float not in data_by_amplitude: data_by_amplitude[amp_val_float] = []
+                data_by_amplitude[amp_val_float].append({
+                    'sweep_info': sweep_info_entry, 
+                    'direction': direction, 
+                    'key': key # Original key "amp:direction"
+                })
             
-            # Sort amplitudes for consistent coloring
-            sorted_amplitudes = sorted(data_by_amplitude.keys())
-            num_unique_amps = len(sorted_amplitudes)
+            sorted_amplitudes_float = sorted(data_by_amplitude.keys())
+            num_unique_amps = len(sorted_amplitudes_float)
             
-            # Process each amplitude group
-            for amp_idx, amp_val in enumerate(sorted_amplitudes):
-                # Determine color for this amplitude group
-                if num_unique_amps <= 3:
-                    color = DISTINCT_PLOT_COLORS[amp_idx % len(DISTINCT_PLOT_COLORS)]
-                else:
-                    cmap = pg.colormap.get(COLORMAP_CHOICES["AMPLITUDE_SWEEP"])
-                    norm_idx = amp_idx / max(1, num_unique_amps - 1)
-                    if self.dark_mode:
-                        color_val_in_map = 0.3 + norm_idx * 0.7
-                    else:
-                        color_val_in_map = norm_idx * 0.9
-                    color = cmap.map(color_val_in_map)
-                
-                # Plot each direction for this amplitude
-                for data_entry in data_by_amplitude[amp_val]:
-                    sweep_info = data_entry['sweep_info']
-                    sweep_data = sweep_info['data']
+            for amp_idx, amp_val_float in enumerate(sorted_amplitudes_float):
+                color = DISTINCT_PLOT_COLORS[amp_idx % len(DISTINCT_PLOT_COLORS)] if num_unique_amps <= 3 else pg.colormap.get(COLORMAP_CHOICES["AMPLITUDE_SWEEP"]).map( (0.3 + (amp_idx / max(1, num_unique_amps - 1)) * 0.7) if self.dark_mode else (amp_idx / max(1, num_unique_amps - 1)) * 0.9 )
+                for data_entry in data_by_amplitude[amp_val_float]:
+                    sweep_data = data_entry['sweep_info']['data']
                     direction = data_entry['direction']
-                    
-                    freqs_hz = sweep_data.get('frequencies')
-                    iq_complex = sweep_data.get('iq_complex')
-                    
-                    if freqs_hz is None or iq_complex is None:
-                        continue
-                    
+                    freqs_hz, iq_complex = sweep_data.get('frequencies'), sweep_data.get('iq_complex')
+                    if freqs_hz is None or iq_complex is None or len(freqs_hz) == 0: continue
                     s21_mag_db = convert_roc_to_dbm(np.abs(iq_complex))
-                    
                     if self.normalize_plot3 and len(s21_mag_db) > 0:
                         ref_val = s21_mag_db[0]
-                        if np.isfinite(ref_val):
-                            s21_mag_db = s21_mag_db - ref_val
-                    
+                        if np.isfinite(ref_val): s21_mag_db -= ref_val
                     x_axis_hz_offset = freqs_hz - self.current_plot_offset_hz
-                    
-                    # Check if this sweep is bifurcated and adjust visual appearance
                     is_bifurcated = sweep_data.get('is_bifurcated', False)
-                    
-                    # Set line style based on direction using constants
                     line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
-                    
-                    # Reduce alpha (brightness) for bifurcated sweeps
-                    pen_color = color
-                    if is_bifurcated:
-                        # Reduce alpha to 50% for bifurcated sweeps
-                        pen_color = pg.mkColor(color)
-                        pen_color.setAlpha(128)  # 50% of 255
-                    
-                    current_pen = pg.mkPen(pen_color, width=LINE_WIDTH, style=line_style)
-                    
-                    # Generate legend name
-                    dac_scale_for_module = self.dac_scales.get(self.target_module)
-                    legend_name = f"{amp_val:.2e} Norm"  # Fallback
-                    if dac_scale_for_module is not None:
-                        try:
-                            dbm_val = UnitConverter.normalize_to_dbm(amp_val, dac_scale_for_module)
-                            legend_name = f"{dbm_val:.2f} dBm"
-                        except Exception:
-                            pass  # Stick to fallback
-                    
-                    # Add direction suffix to legend
-                    direction_suffix = " (Down)" if direction == "downward" else " (Up)"
-                    legend_name += direction_suffix
-                    
-                    # Add bifurcation indicator to legend
-                    if is_bifurcated:
-                        legend_name += " (bifurcated)"
-                    
-                    # Plot the data
+                    pen_color_plot3 = pg.mkColor(color); 
+                    if is_bifurcated: pen_color_plot3.setAlpha(128)
+                    current_pen = pg.mkPen(pen_color_plot3, width=LINE_WIDTH, style=line_style)
+                    dac_scale = self.dac_scales.get(self.target_module)
+                    legend_name = f"{amp_val_float:.2e} Norm"
+                    if dac_scale:
+                        try: legend_name = f"{UnitConverter.normalize_to_dbm(amp_val_float, dac_scale):.2f} dBm"
+                        except: pass
+                    legend_name += " (Down)" if direction == "downward" else " (Up)"
+                    if is_bifurcated: legend_name += " (bifurcated)"
                     self.plot3_bias_opt.plot(x_axis_hz_offset, s21_mag_db, pen=current_pen, name=legend_name)
         self.plot3_bias_opt.autoRange()
+        self._update_fitting_info_panel()
+
+    def _update_fitting_info_panel(self):
+        """Updates the fitting information panel based on self.active_sweep_data."""
+        if not self.active_sweep_data:
+            self.skewed_status_label.setText("N/A"); self.skewed_fr_label.setText("N/A"); self.skewed_qr_label.setText("N/A"); self.skewed_qc_label.setText("N/A"); self.skewed_qi_label.setText("N/A")
+            self.nl_status_label.setText("N/A"); self.nl_fr_label.setText("N/A"); self.nl_qr_label.setText("N/A"); self.nl_qc_label.setText("N/A"); self.nl_qi_label.setText("N/A"); self.nl_a_label.setText("N/A"); self.nl_phi_label.setText("N/A"); self.nl_i0_label.setText("N/A"); self.nl_q0_label.setText("N/A")
+            # Hide fitting panel if no data
+            self.fitting_info_group.setVisible(False)
+            return
+
+        # Skewed Fit
+        skewed_applied = self.active_sweep_data.get('skewed_fit_applied', False)
+        skewed_success = self.active_sweep_data.get('skewed_fit_success', False)
+        fit_params = self.active_sweep_data.get('fit_params', {})
+
+        if skewed_applied:
+            self.skewed_status_label.setText("Success" if skewed_success else "Failed")
+            if skewed_success and fit_params:
+                self.skewed_fr_label.setText(f"{fit_params.get('fr', 0) / 1e6:.6f}")
+                self.skewed_qr_label.setText(f"{fit_params.get('Qr', 0):,.1f}")
+                self.skewed_qc_label.setText(f"{fit_params.get('Qc', 0):,.1f}")
+                self.skewed_qi_label.setText(f"{fit_params.get('Qi', 0):,.1f}")
+            else: 
+                self.skewed_fr_label.setText("N/A"); self.skewed_qr_label.setText("N/A")
+                self.skewed_qc_label.setText("N/A"); self.skewed_qi_label.setText("N/A")
+        else: 
+            self.skewed_status_label.setText("Not Applied")
+            self.skewed_fr_label.setText("-"); self.skewed_qr_label.setText("-")
+            self.skewed_qc_label.setText("-"); self.skewed_qi_label.setText("-")
+
+        # Nonlinear Fit
+        nl_applied = self.active_sweep_data.get('nonlinear_fit_applied', False)
+        nl_success = self.active_sweep_data.get('nonlinear_fit_success', False)
+        nl_params_dict = self.active_sweep_data.get('nonlinear_fit_params', self.active_sweep_data)
+
+        if nl_applied:
+            self.nl_status_label.setText("Success" if nl_success else "Failed")
+            if nl_success:
+                nl_fr_val = nl_params_dict.get('fr_nl', nl_params_dict.get('fr', 0)) 
+                self.nl_fr_label.setText(f"{nl_fr_val / 1e6:.6f}")
+                self.nl_qr_label.setText(f"{nl_params_dict.get('Qr_nl', nl_params_dict.get('Qr',0)):,.1f}")
+                self.nl_qc_label.setText(f"{nl_params_dict.get('Qc_nl', nl_params_dict.get('Qc',0)):,.1f}")
+                self.nl_qi_label.setText(f"{nl_params_dict.get('Qi_nl', nl_params_dict.get('Qi',0)):,.1f}")
+                self.nl_a_label.setText(f"{nl_params_dict.get('a', 0):.3e}")
+                self.nl_phi_label.setText(f"{np.degrees(nl_params_dict.get('phi', 0)):.2f}")
+                self.nl_i0_label.setText(f"{nl_params_dict.get('i0', 0):.3e}")
+                self.nl_q0_label.setText(f"{nl_params_dict.get('q0', 0):.3e}")
+            else: 
+                self.nl_fr_label.setText("N/A"); self.nl_qr_label.setText("N/A"); self.nl_qc_label.setText("N/A"); self.nl_qi_label.setText("N/A"); self.nl_a_label.setText("N/A"); self.nl_phi_label.setText("N/A"); self.nl_i0_label.setText("N/A"); self.nl_q0_label.setText("N/A")
+        else: 
+            self.nl_status_label.setText("Not Applied")
+            self.nl_fr_label.setText("-"); self.nl_qr_label.setText("-"); self.nl_qc_label.setText("-"); self.nl_qi_label.setText("-"); self.nl_a_label.setText("-"); self.nl_phi_label.setText("-"); self.nl_i0_label.setText("-"); self.nl_q0_label.setText("-")
+
+        # Show/hide fitting panel based on whether any fits were applied
+        any_fits_applied = skewed_applied or nl_applied
+        self.fitting_info_group.setVisible(any_fits_applied)
 
     @QtCore.pyqtSlot(object)
     def _handle_plot3_double_click(self, ev):
         """Handles double-click on Plot 3 to change the active sweep."""
         view_box = self.plot3_bias_opt.getViewBox()
-        if not view_box or not self.resonance_data_for_digest or self.current_plot_offset_hz is None:
-            return
+        if not view_box or not self.resonance_data_for_digest or self.current_plot_offset_hz is None: return
 
         mouse_point = view_box.mapSceneToView(ev.scenePos())
-        # x_coord_hz_offset is relative to the current_plot_offset_hz
-        x_coord_on_plot = mouse_point.x() 
-        y_coord_on_plot = mouse_point.y()
+        x_coord_on_plot, y_coord_on_plot = mouse_point.x(), mouse_point.y()
+        min_dist_sq, closest_amp_key = float('inf'), None
 
-        min_dist_sq = float('inf')
-        closest_amp_raw = None
+        # Sort keys to ensure consistent behavior if multiple points are equidistant
+        # Sorting by the float value of the amplitude part of the key
+        sorted_keys = sorted(
+            self.resonance_data_for_digest.keys(),
+            key=lambda k: float(k.split(":")[0]) # Sort by amplitude part
+        )
 
-        sorted_amp_keys = sorted(self.resonance_data_for_digest.keys())
-
-        for amp_raw in sorted_amp_keys:
-            sweep_info = self.resonance_data_for_digest[amp_raw]
+        for amp_key in sorted_keys: 
+            sweep_info = self.resonance_data_for_digest[amp_key]
             sweep_data = sweep_info['data']
-            
-            freqs_hz = sweep_data.get('frequencies')
-            iq_complex = sweep_data.get('iq_complex')
+            freqs_hz, iq_complex = sweep_data.get('frequencies'), sweep_data.get('iq_complex')
 
-            if freqs_hz is not None and iq_complex is not None:
+            if freqs_hz is not None and iq_complex is not None and len(freqs_hz) > 0:
                 s21_mag_db_curve = convert_roc_to_dbm(np.abs(iq_complex))
-                if self.normalize_plot3 and len(s21_mag_db_curve) > 0: # Apply same normalization for distance calc
+                if self.normalize_plot3 and len(s21_mag_db_curve) > 0:
                     ref_val = s21_mag_db_curve[0]
-                    if np.isfinite(ref_val):
-                        s21_mag_db_curve = s21_mag_db_curve - ref_val
-
-                # X-axis for this specific curve, relative to current_plot_offset_hz
-                x_axis_for_this_curve = freqs_hz - self.current_plot_offset_hz
+                    if np.isfinite(ref_val): s21_mag_db_curve -= ref_val
                 
+                x_axis_for_this_curve = freqs_hz - self.current_plot_offset_hz
                 if not (x_axis_for_this_curve.min() <= x_coord_on_plot <= x_axis_for_this_curve.max()):
                     continue
                 
                 idx = np.abs(x_axis_for_this_curve - x_coord_on_plot).argmin()
                 dist_sq = (x_axis_for_this_curve[idx] - x_coord_on_plot)**2 + (s21_mag_db_curve[idx] - y_coord_on_plot)**2
-
                 if dist_sq < min_dist_sq:
-                    min_dist_sq = dist_sq
-                    closest_amp_raw = amp_raw
+                    min_dist_sq, closest_amp_key = dist_sq, amp_key
         
-        if closest_amp_raw is not None:
-            self.active_amplitude_raw = closest_amp_raw
-            self.active_sweep_info = self.resonance_data_for_digest[self.active_amplitude_raw]
+        if closest_amp_key is not None:
+            self.active_amplitude_raw_key = closest_amp_key 
+            self.active_sweep_info = self.resonance_data_for_digest[self.active_amplitude_raw_key]
             self.active_sweep_data = self.active_sweep_info['data']
-            self.current_plot_offset_hz = self.active_sweep_info['actual_cf_hz'] # Update the offset
-            
-            self._update_plots() # Redraw all plots with new active sweep and new x-axis offset
-            ev.accept() # Event handled
+            self.current_plot_offset_hz = self.active_sweep_info['actual_cf_hz']
+            self._update_plots() 
+            ev.accept()
             
     def apply_theme(self, dark_mode: bool):
-        """Apply the dark/light theme to all plots in this window."""
+        """Apply the dark/light theme to all plots and UI elements in this window."""
         self.dark_mode = dark_mode
-        
-        # Set the background color of the central widget
         central_widget = self.centralWidget()
         if central_widget:
             bg_color_hex = "#1C1C1C" if dark_mode else "#FFFFFF"
-            central_widget.setStyleSheet(f"background-color: {bg_color_hex};")
+            # Apply to central widget and ensure children inherit or are styled explicitly
+            central_widget.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}")
         
-        # Update title label color
+        title_color_str = "white" if dark_mode else "black"
         if hasattr(self, 'title_label'):
-            title_color = "white" if dark_mode else "black"
-            self.title_label.setStyleSheet(f"margin-bottom: 10px; color: {title_color};")
+            self.title_label.setStyleSheet(f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}")
         
-        # Apply theme to all plots
-        bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
+        plot_bg_color, plot_pen_color = ("k", "w") if dark_mode else ("w", "k")
         
-        try:
-            # Apply to Plot 1: Sweep vs freq
-            if self.plot1_sweep_vs_freq:
-                self.plot1_sweep_vs_freq.setBackground(bg_color)
-                # Update plot title color - use a more direct approach
-                plot_item = self.plot1_sweep_vs_freq.getPlotItem()
+        plot_widgets_legends = [
+            (self.plot1_sweep_vs_freq, self.plot1_legend, "Sweep"),
+            (self.plot2_iq_plane, self.plot2_legend, "IQ"),
+            (self.plot3_bias_opt, self.plot3_legend, "Bias amplitude optimization")
+        ]
+
+        for plot_widget, legend_widget, default_title_text in plot_widgets_legends:
+            if plot_widget:
+                plot_widget.setBackground(plot_bg_color)
+                plot_item = plot_widget.getPlotItem()
                 if plot_item:
-                    # Set the title explicitly with the color parameter
-                    title_text = plot_item.titleLabel.text if plot_item.titleLabel else "Sweep"
-                    plot_item.setTitle(title_text, color=pen_color)
-                # Update axes colors
-                for axis_name in ("left", "bottom", "right", "top"):
-                    ax = plot_item.getAxis(axis_name) if plot_item else None
-                    if ax:
-                        ax.setPen(pen_color)
-                        ax.setTextPen(pen_color)
-                        
-                # Update legend text color using the proper API
-                if self.plot1_legend:
-                    try:
-                        self.plot1_legend.setLabelTextColor(pen_color)
-                    except Exception as e:
-                        print(f"Error updating plot1_legend colors: {e}")
-            
-            # Apply to Plot 2: IQ plane
-            if self.plot2_iq_plane:
-                self.plot2_iq_plane.setBackground(bg_color)
-                # Update plot title color - use a more direct approach
-                plot_item = self.plot2_iq_plane.getPlotItem()
-                if plot_item:
-                    # Set the title explicitly with the color parameter
-                    title_text = plot_item.titleLabel.text if plot_item.titleLabel else "IQ"
-                    plot_item.setTitle(title_text, color=pen_color)
-                # Update axes colors
-                for axis_name in ("left", "bottom", "right", "top"):
-                    ax = plot_item.getAxis(axis_name) if plot_item else None
-                    if ax:
-                        ax.setPen(pen_color)
-                        ax.setTextPen(pen_color)
-                        
-                # Update legend text color using the proper API
-                if self.plot2_legend:
-                    try:
-                        self.plot2_legend.setLabelTextColor(pen_color)
-                    except Exception as e:
-                        print(f"Error updating plot2_legend colors: {e}")
-            
-            # Apply to Plot 3: Bias amplitude optimization
-            if self.plot3_bias_opt:
-                self.plot3_bias_opt.setBackground(bg_color)
-                # Update plot title color - use a more direct approach
-                plot_item = self.plot3_bias_opt.getPlotItem()
-                if plot_item:
-                    # Set the title explicitly with the color parameter
-                    title_text = plot_item.titleLabel.text if plot_item.titleLabel else "Bias amplitude optimization"
-                    plot_item.setTitle(title_text, color=pen_color)
-                # Update axes colors
-                for axis_name in ("left", "bottom", "right", "top"):
-                    ax = plot_item.getAxis(axis_name) if plot_item else None
-                    if ax:
-                        ax.setPen(pen_color)
-                        ax.setTextPen(pen_color)
-                        
-                # Update legend text color using the proper API
-                if self.plot3_legend:
-                    try:
-                        self.plot3_legend.setLabelTextColor(pen_color)
-                    except Exception as e:
-                        print(f"Error updating plot3_legend colors: {e}")
-            
-            # Redraw all plots to update curve colors based on dark mode setting
-            self._update_plots()
-        except Exception as e:
-            print(f"Error applying theme: {e}")
+                    # Titles for plot1 and plot2 are dynamic and set in _update_plots.
+                    # For plot3, its title is static.
+                    if plot_widget == self.plot3_bias_opt:
+                         current_title = plot_item.titleLabel.text if plot_item.titleLabel and plot_item.titleLabel.text else default_title_text
+                         plot_item.setTitle(current_title, color=plot_pen_color)
+                    
+                    for axis_name in ("left", "bottom", "right", "top"):
+                        ax = plot_item.getAxis(axis_name)
+                        if ax: ax.setPen(plot_pen_color); ax.setTextPen(plot_pen_color)
+                if legend_widget:
+                    try: legend_widget.setLabelTextColor(plot_pen_color)
+                    except Exception as e: print(f"Error updating legend color for {default_title_text}: {e}")
+        
+        if hasattr(self, 'fitting_info_group'):
+            self.fitting_info_group.setStyleSheet(f"QGroupBox {{ color: {title_color_str}; border: 1px solid {title_color_str}; margin-top: 0.5em;}} QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 3px 0 3px; }}")
+            sub_group_style = f"QGroupBox {{ color: {title_color_str}; border: none; background-color: transparent; }}"
+            fitting_label_color_style = f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
+            fitting_info_main_layout = self.fitting_info_group.layout()
+            if fitting_info_main_layout:
+                for i in range(fitting_info_main_layout.count()): 
+                    item = fitting_info_main_layout.itemAt(i)
+                    if item and item.widget() and isinstance(item.widget(), QtWidgets.QGroupBox):
+                        sub_group_box = item.widget()
+                        sub_group_box.setStyleSheet(sub_group_style)
+                        form_layout = sub_group_box.layout()
+                        if form_layout and isinstance(form_layout, QtWidgets.QFormLayout):
+                             for row in range(form_layout.rowCount()):
+                                label_widget = form_layout.itemAt(row, QtWidgets.QFormLayout.ItemRole.LabelRole).widget()
+                                if label_widget: label_widget.setStyleSheet(fitting_label_color_style)
+                                field_widget = form_layout.itemAt(row, QtWidgets.QFormLayout.ItemRole.FieldRole).widget()
+                                if field_widget: field_widget.setStyleSheet(fitting_label_color_style)
+        
+        # Update navigation buttons theme
+        button_style = ""
+        if dark_mode:
+            button_style = """
+                QPushButton {
+                    background-color: #3C3C3C;
+                    color: white;
+                    border: 1px solid #555555;
+                    padding: 5px 10px;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #4C4C4C;
+                }
+                QPushButton:pressed {
+                    background-color: #2C2C2C;
+                }
+                QPushButton:disabled {
+                    background-color: #1C1C1C;
+                    color: #666666;
+                }
+            """
+        else:
+            button_style = """
+                QPushButton {
+                    background-color: #F0F0F0;
+                    color: black;
+                    border: 1px solid #CCCCCC;
+                    padding: 5px 10px;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #E0E0E0;
+                }
+                QPushButton:pressed {
+                    background-color: #D0D0D0;
+                }
+                QPushButton:disabled {
+                    background-color: #F8F8F8;
+                    color: #999999;
+                }
+            """
+        
+        if hasattr(self, 'prev_button'):
+            self.prev_button.setStyleSheet(button_style)
+        if hasattr(self, 'next_button'):
+            self.next_button.setStyleSheet(button_style)
+        if hasattr(self, 'detector_count_label'):
+            self.detector_count_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+        
+        # Update plots to ensure all colors are refreshed with the new theme
+        self._update_plots()
+    

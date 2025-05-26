@@ -12,6 +12,7 @@ from .utils import * # Imports QtCore, QThread, QObject, pyqtSignal, QRunnable,
 # fitting is already imported via 'from .utils import *' if utils.py imports it from rfmux.algorithms.measurement
 # However, to be explicit for this module's direct dependency:
 from rfmux.algorithms.measurement import fitting as fitting_module_direct # Alias to avoid conflict if utils also exports 'fitting'
+from rfmux.algorithms.measurement import fitting_nonlinear # Import nonlinear fitting module
 
 class UDPReceiver(QtCore.QThread):
     """
@@ -388,10 +389,9 @@ class MultisweepTask(QtCore.QThread):
         """
         super().__init__()
         self.crs = crs
-        self.params = params
+        self.params = params 
         self.signals = signals
-        self.window = window # Store the MultisweepWindow instance
-        # Baseline frequencies are from the params passed by the window, reflecting its current configuration
+        self.window = window 
         self.baseline_resonance_frequencies = list(params.get('resonance_frequencies', []))
         self._running = True
         self.current_amplitude = -1
@@ -400,17 +400,166 @@ class MultisweepTask(QtCore.QThread):
         self._task_completed = asyncio.Event()
 
     def stop(self):
-        """Stop the multisweep task and cancel any ongoing async operation."""
         self._running = False
         self.requestInterruption()
 
     def _progress_callback_wrapper(self, module_idx, progress_percentage):
-        """Wrapper for progress callback to emit signals."""
         if self._running: self.signals.progress.emit(module_idx, progress_percentage)
+
+    def _apply_fitting_analysis(self, raw_results_from_crs):
+        if not raw_results_from_crs:
+            return raw_results_from_crs
+        
+        # Initialize enhanced_results as a copy to preserve raw data if fitting is skipped or fails
+        enhanced_results = {k: v.copy() for k, v in raw_results_from_crs.items()}
+
+        apply_skewed = self.params.get('apply_skewed_fit', False)
+        apply_nonlinear = self.params.get('apply_nonlinear_fit', False)
+
+        if not apply_skewed and not apply_nonlinear:
+            # If no fitting is requested, add flags indicating this
+            for res_idx in enhanced_results:
+                enhanced_results[res_idx]['skewed_fit_applied'] = False
+                enhanced_results[res_idx]['skewed_fit_success'] = False
+                enhanced_results[res_idx]['nonlinear_fit_applied'] = False
+                enhanced_results[res_idx]['nonlinear_fit_success'] = False
+            return enhanced_results
+
+        print(f"Applying fitting analysis to {len(raw_results_from_crs)} resonances...")
+        
+        # Temporary dictionary to hold results from skewed fit if it's applied
+        skewed_fit_results_temp = enhanced_results 
+
+        if apply_skewed:
+            try:
+                skewed_fit_results_temp = fitting_module_direct.fit_skewed_multisweep(
+                    enhanced_results, # Start with a copy of raw or previously enhanced data
+                    approx_Q_for_fit=1e4,
+                    fit_resonances=True,
+                    center_iq_circle=True,
+                    normalize_fit=True
+                )
+                print(f"Skewed fitting completed.")
+                # Mark skewed fit as applied and check success for each resonance
+                for res_idx in enhanced_results: # Iterate original keys to update
+                    if res_idx in skewed_fit_results_temp:
+                        enhanced_results[res_idx].update(skewed_fit_results_temp[res_idx])
+                        enhanced_results[res_idx]['skewed_fit_applied'] = True
+                        fit_p = enhanced_results[res_idx].get('fit_params', {})
+                        enhanced_results[res_idx]['skewed_fit_success'] = fit_p.get('fr') is not None and fit_p.get('fr') != 'nan'
+                        
+                        # Generate skewed model magnitude if fit was successful
+                        if enhanced_results[res_idx]['skewed_fit_success'] and fit_p:
+                            frequencies = enhanced_results[res_idx].get('frequencies')
+                            if frequencies is not None:
+                                try:
+                                    # Generate magnitude model using fitted parameters
+                                    skewed_model_mag = fitting_module_direct.s21_skewed(
+                                        frequencies, 
+                                        fit_p['fr'], 
+                                        fit_p['Qr'], 
+                                        fit_p['Qcre'], 
+                                        fit_p['Qcim'], 
+                                        fit_p['A']
+                                    )
+                                    enhanced_results[res_idx]['skewed_model_mag'] = skewed_model_mag
+                                except Exception as e:
+                                    print(f"Warning: Failed to generate skewed model for resonance {res_idx}: {e}", file=sys.stderr)
+                    else: # Should not happen if fit_skewed_multisweep returns all keys
+                        enhanced_results[res_idx]['skewed_fit_applied'] = True
+                        enhanced_results[res_idx]['skewed_fit_success'] = False
+            except Exception as e:
+                print(f"Warning: Skewed fitting failed: {e}", file=sys.stderr)
+                for res_idx in enhanced_results:
+                    enhanced_results[res_idx]['skewed_fit_applied'] = True
+                    enhanced_results[res_idx]['skewed_fit_success'] = False
+        else: # Skewed fit not applied
+            for res_idx in enhanced_results:
+                enhanced_results[res_idx]['skewed_fit_applied'] = False
+                enhanced_results[res_idx]['skewed_fit_success'] = False
+        
+        # Now, `enhanced_results` contains results from skewed fitting (if applied) or is still a copy of raw.
+        # `skewed_fit_results_temp` is not needed beyond this point if we update `enhanced_results` in place.
+
+        if apply_nonlinear:
+            try:
+                # Pass the current state of enhanced_results (which may include skewed fit data)
+                nonlinear_fit_output = fitting_nonlinear.fit_nonlinear_iq_multisweep(
+                    enhanced_results.copy(), # Pass a copy to avoid modifying during iteration if fit_nonlinear_iq_multisweep does
+                    fit_nonlinearity=True,
+                    n_extrema_points=5,
+                    verbose=False
+                )
+                print(f"Nonlinear fitting completed.")
+                # Update enhanced_results with nonlinear fit data
+                for res_idx in enhanced_results:
+                    if res_idx in nonlinear_fit_output:
+                        enhanced_results[res_idx].update(nonlinear_fit_output[res_idx])
+                        enhanced_results[res_idx]['nonlinear_fit_applied'] = True
+                        # 'nonlinear_fit_success' should be set by fit_nonlinear_iq_multisweep
+                        if 'nonlinear_fit_success' not in enhanced_results[res_idx]:
+                             enhanced_results[res_idx]['nonlinear_fit_success'] = False # Default if not set
+                        
+                        # Generate nonlinear model IQ if fit was successful
+                        if enhanced_results[res_idx].get('nonlinear_fit_success', False):
+                            nl_params = enhanced_results[res_idx].get('nonlinear_fit_params', {})
+                            frequencies = enhanced_results[res_idx].get('frequencies')
+                            if nl_params and frequencies is not None:
+                                try:
+                                    # Generate complex IQ model using fitted parameters
+                                    nonlinear_model_iq = fitting_nonlinear.nonlinear_iq(
+                                        frequencies,
+                                        nl_params['fr'],
+                                        nl_params['Qr'],
+                                        nl_params['amp'],
+                                        nl_params['phi'],
+                                        nl_params['a'],
+                                        nl_params['i0'],
+                                        nl_params['q0']
+                                    )
+                                    enhanced_results[res_idx]['nonlinear_model_iq'] = nonlinear_model_iq
+                                except Exception as e:
+                                    print(f"Warning: Failed to generate nonlinear model for resonance {res_idx}: {e}", file=sys.stderr)
+                    else: # Should not happen
+                        enhanced_results[res_idx]['nonlinear_fit_applied'] = True
+                        enhanced_results[res_idx]['nonlinear_fit_success'] = False
+            except Exception as e:
+                print(f"Warning: Nonlinear fitting failed: {e}", file=sys.stderr)
+                for res_idx in enhanced_results:
+                    enhanced_results[res_idx]['nonlinear_fit_applied'] = True
+                    enhanced_results[res_idx]['nonlinear_fit_success'] = False
+        else: # Nonlinear fit not applied
+             for res_idx in enhanced_results:
+                enhanced_results[res_idx]['nonlinear_fit_applied'] = False
+                enhanced_results[res_idx]['nonlinear_fit_success'] = False
+        
+        # Final summary
+        skewed_applied_count = sum(1 for r in enhanced_results.values() if r.get('skewed_fit_applied'))
+        skewed_success_count = sum(1 for r in enhanced_results.values() if r.get('skewed_fit_success'))
+        nonlinear_applied_count = sum(1 for r in enhanced_results.values() if r.get('nonlinear_fit_applied'))
+        nonlinear_success_count = sum(1 for r in enhanced_results.values() if r.get('nonlinear_fit_success'))
+
+        print(f"Fitting summary: Skewed: {skewed_success_count}/{skewed_applied_count if apply_skewed else len(enhanced_results)} successful. "
+              f"Nonlinear: {nonlinear_success_count}/{nonlinear_applied_count if apply_nonlinear else len(enhanced_results)} successful.")
+            
+        return enhanced_results
+            
+        # except Exception as e: # This outer try-except might be redundant now
+        #     print(f"Error in _apply_fitting_analysis: {e}", file=sys.stderr)
+        #     traceback.print_exc(file=sys.stderr)
+        #     # Ensure flags are set even on major error
+        #     for res_idx in raw_results_from_crs: # Iterate original keys
+        #         if res_idx not in enhanced_results: # If it wasn't even copied
+        #             enhanced_results[res_idx] = raw_results_from_crs[res_idx].copy()
+        #         enhanced_results[res_idx]['skewed_fit_applied'] = apply_skewed
+        #         enhanced_results[res_idx]['skewed_fit_success'] = False
+        #         enhanced_results[res_idx]['nonlinear_fit_applied'] = apply_nonlinear
+        #         enhanced_results[res_idx]['nonlinear_fit_success'] = False
+        #     return enhanced_results
+
 
     def run(self):
         """QThread entry point - runs in a separate thread."""
-        # Create asyncio loop for this thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
@@ -423,8 +572,6 @@ class MultisweepTask(QtCore.QThread):
             amplitudes = self.params.get('amps', [DEFAULT_AMPLITUDE])
             sweep_direction = self.params.get('sweep_direction', 'upward')
             conceptual_frequencies_from_window = self.window.conceptual_resonance_frequencies
-            
-            # Track iterations across all sweeps
             iteration_index = 0
 
             for amp_val in amplitudes:
@@ -433,13 +580,10 @@ class MultisweepTask(QtCore.QThread):
                     return
                 
                 self.current_amplitude = amp_val
-
-                # Dynamically determine input CFs for this specific amplitude
                 current_sweep_cfs_for_this_amp = []
-                # To map results back: conceptual_idx -> input_cf_chosen_for_this_amp
-                conceptual_idx_to_input_cf_map = {}
+                # conceptual_idx_to_input_cf_map = {} # Not strictly needed if results are always index-keyed
 
-                if not conceptual_frequencies_from_window: # Should not happen if window is configured
+                if not conceptual_frequencies_from_window:
                     self.signals.error.emit(module_idx, amp_val, "Conceptual frequencies not available from window.")
                     return
 
@@ -447,26 +591,18 @@ class MultisweepTask(QtCore.QThread):
                     remembered_cf = self.window._get_closest_remembered_cf(idx, amp_val)
                     chosen_input_cf = remembered_cf if remembered_cf is not None else self.baseline_resonance_frequencies[idx]
                     current_sweep_cfs_for_this_amp.append(chosen_input_cf)
-                    conceptual_idx_to_input_cf_map[idx] = chosen_input_cf
+                    # conceptual_idx_to_input_cf_map[idx] = chosen_input_cf
                 
-                # Determine which directions to sweep
-                directions_to_sweep = []
-                if sweep_direction == "both":
-                    directions_to_sweep = ["upward","downward"]  # Perform upward sweep first, then downward
-                else:
-                    directions_to_sweep = [sweep_direction]
+                directions_to_sweep = ["upward","downward"] if sweep_direction == "both" else [sweep_direction]
                 
-                # Perform sweep(s) for each direction
-                for direction in directions_to_sweep:
-                    # Update current iteration and direction
+                for direction_val in directions_to_sweep: # Renamed 'direction' to 'direction_val' to avoid conflict
                     self.current_iteration = iteration_index
-                    self.current_direction = direction
+                    self.current_direction = direction_val
                     
-                    # Signal the start of this iteration to update the status bar BEFORE we start the sweep
-                    self.signals.starting_iteration.emit(module_idx, iteration_index, amp_val, direction)
+                    self.signals.starting_iteration.emit(module_idx, iteration_index, amp_val, direction_val)
                     
                     multisweep_params = {
-                        'center_frequencies': current_sweep_cfs_for_this_amp, # Use dynamically determined CFs
+                        'center_frequencies': current_sweep_cfs_for_this_amp,
                         'span_hz': self.params['span_hz'],
                         'npoints_per_sweep': self.params['npoints_per_sweep'],
                         'amp': amp_val,
@@ -474,65 +610,47 @@ class MultisweepTask(QtCore.QThread):
                         'module': module_idx,
                         'progress_callback': self._progress_callback_wrapper,
                         'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', None),
-                        'sweep_direction': direction
+                        'sweep_direction': direction_val
                     }
                     
-                    # Process the multisweep asynchronously without blocking
                     raw_results_from_crs = loop.run_until_complete(self._process_multisweep(loop, multisweep_params))
                     
                     if self.isInterruptionRequested():
                         self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution.")
                         return
                     
-                    # Add bifurcation detection to each sweep's data
+                    # Process bifurcation detection first
                     if raw_results_from_crs:
-                        # Results should be keyed by index
                         for res_key, data_dict_val in raw_results_from_crs.items():
-                            if not isinstance(res_key, (int, np.integer)):
-                                print(f"Warning: Non-integer key {res_key} found in results. Expected index-based keys only.", file=sys.stderr)
-                                continue
-                                
+                            if not isinstance(res_key, (int, np.integer)): continue
                             iq_data = data_dict_val.get('iq_complex')
                             if iq_data is not None:
                                 try:
-                                    # Use fitting module to detect bifurcation
-                                    is_bifurcated = fitting_module_direct.identify_bifurcation(
-                                        iq_data
-                                    )
-                                    data_dict_val['is_bifurcated'] = is_bifurcated
+                                    data_dict_val['is_bifurcated'] = fitting_module_direct.identify_bifurcation(iq_data)
                                 except Exception as e:
-                                    # If bifurcation detection fails, default to False and log warning
                                     print(f"Warning: Bifurcation detection failed for index {res_key}: {e}", file=sys.stderr)
                                     data_dict_val['is_bifurcated'] = False
                             else:
-                                # No IQ data available, cannot detect bifurcation
                                 data_dict_val['is_bifurcated'] = False
                     
-                    results_for_plotting = raw_results_from_crs # For plotting, use the direct structure
-                    results_for_history = {} # For history: {conceptual_idx: bias_frequency}
-
-                    if raw_results_from_crs:
-                        # Results are keyed by index - extract the actual bias frequency for each resonance
-                        for res_idx, data_dict_val in raw_results_from_crs.items():
+                    # Now apply fitting analysis using the (potentially) bifurcation-annotated data
+                    # The self.params for apply_skewed_fit etc. are passed via the __init__ of MultisweepTask
+                    enhanced_results = self._apply_fitting_analysis(raw_results_from_crs) 
+                    results_for_plotting = enhanced_results 
+                    
+                    results_for_history = {}
+                    if enhanced_results: 
+                        for res_idx, data_dict_val in enhanced_results.items():
                             if isinstance(res_idx, (int, np.integer)):
-                                # Extract the actual bias frequency from the results
-                                bias_freq = data_dict_val.get('bias_frequency', 
-                                                             data_dict_val.get('original_center_frequency'))
-                                if bias_freq is not None:
-                                    results_for_history[res_idx] = bias_freq
-                                else:
-                                    print(f"Warning: No bias frequency found for index {res_idx}", file=sys.stderr)
-                            else:
-                                print(f"Warning (MultisweepTask): Non-integer key {res_idx} in results", file=sys.stderr)
+                                bias_freq = data_dict_val.get('bias_frequency', data_dict_val.get('original_center_frequency'))
+                                if bias_freq is not None: results_for_history[res_idx] = bias_freq
+                                else: print(f"Warning: No bias frequency found for index {res_idx}", file=sys.stderr)
+                            else: print(f"Warning (MultisweepTask): Non-integer key {res_idx} in results", file=sys.stderr)
                     
-                    if results_for_plotting is not None: # Can be None if crs.multisweep had issues
-                        # Use updated signal with iteration and direction information
-                        self.signals.data_update.emit(module_idx, iteration_index, amp_val, direction, results_for_plotting, results_for_history)
+                    if results_for_plotting is not None:
+                        self.signals.data_update.emit(module_idx, iteration_index, amp_val, direction_val, results_for_plotting, results_for_history)
                     
-                    # Signal completion of this iteration
-                    self.signals.completed_iteration.emit(module_idx, iteration_index, amp_val, direction)
-                    
-                    # Increment iteration counter for the next sweep
+                    self.signals.completed_iteration.emit(module_idx, iteration_index, amp_val, direction_val)
                     iteration_index += 1
             
             self.signals.all_completed.emit()
@@ -547,23 +665,17 @@ class MultisweepTask(QtCore.QThread):
             loop.close()
 
     async def _process_multisweep(self, loop, multisweep_params):
-        """Process a single multisweep operation asynchronously.
-        
-        This method periodically yields control back to the event loop to keep the GUI responsive.
-        """
         self._task_completed.clear()
         multisweep_coro = self.crs.multisweep(**multisweep_params)
         task = loop.create_task(multisweep_coro)
         
-        # Check for interruption while the task is running
         while not task.done():
             if self.isInterruptionRequested():
                 task.cancel()
-                await asyncio.sleep(0.01)  # Give the cancellation a chance to process
+                await asyncio.sleep(0.01) 
                 return None
-            await asyncio.sleep(0.1)  # Short sleep to yield control back to the event loop
+            await asyncio.sleep(0.1) 
         
-        # Get the result when the task is done
         if not task.cancelled():
             try:
                 return await task

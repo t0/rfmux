@@ -228,9 +228,10 @@ class MockResonatorModel:
         return f0 * (1 + freq_shift_fraction)
     
     def _calculate_self_consistent_frequency(self, frequency, f0, Q, k, amplitude, ki_fraction):
-        """Calculate self-consistent frequency with potential bifurcation."""
+        """Calculate self-consistent frequency with potential bifurcation using damped iteration."""
         # Initial guess
         f0_eff = f0
+        convergence_history = []
         
         for iteration in range(const.BIFURCATION_ITERATIONS):
             # Calculate S21 magnitude at current effective frequency
@@ -252,14 +253,24 @@ class MockResonatorModel:
             f0_new = f0 * (1 + freq_shift_fraction)
             
             # Check convergence
-            print("DEBUG: CONVERGENCE", abs(f0_new - f0_eff) / f0)
-            if abs(f0_new - f0_eff) / f0 < const.BIFURCATION_CONVERGENCE_TOLERANCE:
+            convergence_error = abs(f0_new - f0_eff) / f0
+            convergence_history.append(convergence_error)
+            
+            if const.DEBUG_BIFURCATION:
+                print(f"DEBUG: CONVERGENCE iter {iteration}: error = {convergence_error:.2e}")
+            
+            if convergence_error < const.BIFURCATION_CONVERGENCE_TOLERANCE:
                 if const.DEBUG_BIFURCATION:
                     print(f"Bifurcation converged in {iteration + 1} iterations")
                 break
-                
-            f0_eff = f0_new
-        print(iteration)
+            
+            # Apply damped iteration to prevent oscillation
+            # f0_eff = (1 - damping) * f0_eff + damping * f0_new
+            f0_eff = (1 - const.BIFURCATION_DAMPING_FACTOR) * f0_eff + const.BIFURCATION_DAMPING_FACTOR * f0_new
+        
+        if const.DEBUG_BIFURCATION and iteration == const.BIFURCATION_ITERATIONS - 1:
+            print(f"Warning: Bifurcation did not converge after {const.BIFURCATION_ITERATIONS} iterations")
+            
         return f0_eff
 
     def calculate_channel_response(self, module, channel, frequency, amplitude, phase_degrees):

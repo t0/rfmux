@@ -1043,6 +1043,9 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             
             # Redraw plots to ensure all legend items are updated correctly
             self._redraw_all_plots()
+            
+            # Update resonance legend entry to apply new theme colors
+            self._update_resonance_legend_entry(module)
 
     def _handle_set_cable_length_error(self, module_id: int, error_message: str):
         """Handles error during setting of cable length."""

@@ -42,25 +42,32 @@ def _get_recalculated_center_freq(
                 warnings.warn(f"Recalculated 'min-s21' frequency for original_cf {original_cf_hz*1e-6:.3f} MHz is not finite. Using original.")
         else:
             warnings.warn(f"Cannot recalculate 'min-s21' for original_cf {original_cf_hz*1e-6:.3f} MHz: all S21 magnitudes are zero.")
-    elif method == "max-dq":
+    elif method == "max-diq":
         if sweep_iq.size < 2 or sweep_freqs_hz.size < 2: # Need at least 2 points for gradient
-             warnings.warn(f"Cannot recalculate 'max-dq' for original_cf {original_cf_hz*1e-6:.3f} MHz: not enough sweep points ({sweep_iq.size}).")
+             warnings.warn(f"Cannot recalculate 'max-diq' for original_cf {original_cf_hz*1e-6:.3f} MHz: not enough sweep points ({sweep_iq.size}).")
              return original_cf_hz, "none"
-        phase_rad = np.angle(sweep_iq)
-        unwrapped_phase_rad = np.unwrap(phase_rad)
-        # Ensure frequencies are sorted for gradient, though linspace should ensure this.
-        # If frequencies might not be monotonic, sort them and corresponding unwrapped_phase_rad.
-        dq_df = np.gradient(unwrapped_phase_rad, sweep_freqs_hz)
-        if np.any(dq_df):
-            max_abs_dq_df_idx = np.argmax(np.abs(dq_df))
-            recalculated_freq = sweep_freqs_hz[max_abs_dq_df_idx]
+        # Calculate the velocity of the IQ point as it moves through the complex plane
+        # This includes both angular and radial motion components
+        i_vals = sweep_iq.real
+        q_vals = sweep_iq.imag
+        
+        # Calculate derivatives
+        di_df = np.gradient(i_vals, sweep_freqs_hz)
+        dq_df = np.gradient(q_vals, sweep_freqs_hz)
+        
+        # Total velocity magnitude in IQ plane
+        iq_velocity = np.sqrt(di_df**2 + dq_df**2)
+        
+        if np.any(iq_velocity):
+            max_velocity_idx = np.argmax(iq_velocity)
+            recalculated_freq = sweep_freqs_hz[max_velocity_idx]
             if np.isfinite(recalculated_freq):
                 new_frequency_hz = recalculated_freq
-                actual_method_applied = "max-dq"
+                actual_method_applied = "max-diq"
             else:
-                warnings.warn(f"Recalculated 'max-dq' frequency for original_cf {original_cf_hz*1e-6:.3f} MHz is not finite. Using original.")
+                warnings.warn(f"Recalculated 'max-diq' frequency for original_cf {original_cf_hz*1e-6:.3f} MHz is not finite. Using original.")
         else:
-            warnings.warn(f"Cannot recalculate 'max-dq' for original_cf {original_cf_hz*1e-6:.3f} MHz: dQ/df is zero everywhere.")
+            warnings.warn(f"Cannot recalculate 'max-diq' for original_cf {original_cf_hz*1e-6:.3f} MHz: IQ velocity is zero everywhere.")
     elif method is not None:
         warnings.warn(f"Unknown recalculate_center_frequencies method: '{method}'. No recalculation performed.")
 
@@ -74,7 +81,7 @@ async def multisweep(
     npoints_per_sweep: int,
     amp: float,
     nsamps: int = 10,
-    recalculate_center_frequencies: Optional[str] = None, # Options: "min-s21", "max-dq", or None
+    recalculate_center_frequencies: Optional[str] = None, # Options: "min-s21", "max-diq", or None
     sweep_direction: str = "upward", # Options: "upward", "downward"
     *,
     module,
@@ -104,9 +111,10 @@ async def multisweep(
             - "min-s21": Recalculates center frequency to the point of minimum |S21| in the sweep.
                          Acquires a TOD at this new frequency. Rotates sweep data to minimize
                          the I component of this TOD's mean.
-            - "max-dq": Recalculates center frequency to the point of maximum |d(phase)/df| in the sweep.
-                        Acquires a TOD at this new frequency. Rotates sweep data to align the
-                        principal component of this TOD (maximizing variance) with the I-axis.
+            - "max-diq": Recalculates center frequency to the point of maximum IQ velocity |d(I+jQ)/df| in the sweep.
+                         This finds where the IQ trajectory is moving fastest, considering both angular and
+                         radial motion. Acquires a TOD at this new frequency. Rotates sweep data to align the
+                         principal component of this TOD (maximizing variance) with the I-axis.
             - None: No recalculation. No TOD-based rotation is performed.
             Defaults to None.
         module (int | list[int]): The target readout module(s).
@@ -352,7 +360,7 @@ async def multisweep(
                 res_data_entry['rotation_tod'] = None # Initialize
                 res_data_entry['applied_rotation_degrees'] = 0.0 # Initialize
 
-                if recalc_method_used in ["min-s21", "max-dq"]:
+                if recalc_method_used in ["min-s21", "max-diq"]:
                     resonances_needing_tod.append({
                         "idx": idx,
                         "original_cf": cf_original,
@@ -397,7 +405,7 @@ async def multisweep(
                 res_data_entry = resonance_data[idx]
                 recalc_method_used = res_data_entry['recalculation_method_applied']
                 
-                if recalc_method_used not in ["min-s21", "max-dq"] or res_data_entry['rotation_tod'] is None:
+                if recalc_method_used not in ["min-s21", "max-diq"] or res_data_entry['rotation_tod'] is None:
                     # Ensure these are set if no TOD-based rotation happens
                     if res_data_entry.get('bias_frequency') is None : # Should have been set in step 1
                          res_data_entry['bias_frequency'] = cf_original
@@ -414,7 +422,7 @@ async def multisweep(
                     if recalc_method_used == "min-s21":
                         mean_tod = np.mean(tod_iq)
                         rotation_angle_rad = (np.pi / 2) - np.angle(mean_tod)
-                    elif recalc_method_used == "max-dq":
+                    elif recalc_method_used == "max-diq":
                         if tod_iq.size > 1:
                             data_matrix = np.vstack((tod_iq.real, tod_iq.imag))
                             try:
@@ -426,11 +434,11 @@ async def multisweep(
                                     pc1_vector_complex = eigenvectors[0, pc1_idx] + 1j * eigenvectors[1, pc1_idx]
                                     rotation_angle_rad = -np.angle(pc1_vector_complex)
                                 else:
-                                    warnings.warn(f"Covariance matrix for 'max-dq' rotation of cf {cf_original*1e-6:.3f} MHz contains non-finite values. Skipping rotation.")
+                                    warnings.warn(f"Covariance matrix for 'max-diq' rotation of cf {cf_original*1e-6:.3f} MHz contains non-finite values. Skipping rotation.")
                             except np.linalg.LinAlgError:
-                                 warnings.warn(f"PCA failed for 'max-dq' rotation of cf {cf_original*1e-6:.3f} MHz. Skipping rotation.")
+                                 warnings.warn(f"PCA failed for 'max-diq' rotation of cf {cf_original*1e-6:.3f} MHz. Skipping rotation.")
                         else:
-                            warnings.warn(f"Not enough TOD points for 'max-dq' PCA rotation for cf {cf_original*1e-6:.3f} MHz ({tod_iq.size} points). Skipping rotation.")
+                            warnings.warn(f"Not enough TOD points for 'max-diq' PCA rotation for cf {cf_original*1e-6:.3f} MHz ({tod_iq.size} points). Skipping rotation.")
                 
                 if rotation_angle_rad != 0.0:
                     rotation_factor = np.exp(1j * rotation_angle_rad)

@@ -70,6 +70,13 @@ DISTINCT_PLOT_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
 # Utility colors
 RESONANCE_LINE_COLOR = "#d62728"  # Red color for resonance lines
 
+# Colors for fitting overlays
+FITTING_COLORS = {
+    "SKEWED": "#2ca02c",    # Green for skewed fit
+    "NONLINEAR": "#9467bd", # Purple for nonlinear fit
+    "ERROR_BAND": "#ffbb78" # Light orange for error bands (if used)
+}
+
 # Threshold for using distinct colors vs. colormap in amplitude sweeps
 AMPLITUDE_COLORMAP_THRESHOLD = 3  # Use distinct colors if num_amps <= this value
 

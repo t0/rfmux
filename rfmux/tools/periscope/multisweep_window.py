@@ -1077,17 +1077,85 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             # Accept the event to prevent further processing (e.g., ClickableViewBox's own message box)
             ev.accept()
 
-            # Create a non-modal window for the detector digest
+            # Gather data for ALL detectors to enable navigation
+            all_detectors_data = {}
+            
+            # First, find all unique detector indices across all iterations
+            all_detector_indices = set()
+            for iter_data in self.results_by_iteration.values():
+                res_data = iter_data.get("data", {})
+                all_detector_indices.update(res_data.keys())
+            
+            # Now gather data for each detector
+            for det_idx in sorted(all_detector_indices):
+                # Get conceptual frequency for this detector
+                if det_idx < len(self.conceptual_resonance_frequencies):
+                    conceptual_freq_hz = self.conceptual_resonance_frequencies[det_idx]
+                else:
+                    # Fallback - try to find any frequency data for this detector
+                    conceptual_freq_hz = None
+                    for iter_data in self.results_by_iteration.values():
+                        res_data = iter_data.get("data", {})
+                        if det_idx in res_data:
+                            det_data = res_data[det_idx]
+                            conceptual_freq_hz = det_data.get('bias_frequency', det_data.get('original_center_frequency'))
+                            if conceptual_freq_hz:
+                                break
+                
+                if conceptual_freq_hz is None:
+                    continue  # Skip this detector if we can't find any frequency info
+                
+                # Gather sweep data for this detector across all amplitudes/directions
+                detector_resonance_data = {}
+                
+                # Use the same logic as above to gather data for each amplitude/direction combination
+                amplitude_direction_to_iteration = {}
+                for iter_idx, iter_data in self.results_by_iteration.items():
+                    amp_val = iter_data["amplitude"]
+                    direction = iter_data["direction"]
+                    key = (amp_val, direction)
+                    
+                    if key not in amplitude_direction_to_iteration or iter_idx > amplitude_direction_to_iteration[key]:
+                        amplitude_direction_to_iteration[key] = iter_idx
+                
+                for (amp_val, direction), iter_idx in amplitude_direction_to_iteration.items():
+                    iter_data = self.results_by_iteration[iter_idx]
+                    res_data = iter_data["data"]
+                    
+                    if not res_data or det_idx not in res_data:
+                        continue
+                    
+                    resonance_sweep_data = res_data[det_idx]
+                    actual_cf_for_this_amp = resonance_sweep_data.get('bias_frequency', 
+                                                                      resonance_sweep_data.get('original_center_frequency'))
+                    
+                    combo_key = f"{amp_val}:{direction}"
+                    detector_resonance_data[combo_key] = {
+                        'data': resonance_sweep_data,
+                        'actual_cf_hz': actual_cf_for_this_amp,
+                        'direction': direction,
+                        'amplitude': amp_val
+                    }
+                
+                if detector_resonance_data:  # Only add if we have data
+                    all_detectors_data[det_idx] = {
+                        'resonance_data': detector_resonance_data,
+                        'conceptual_freq_hz': conceptual_freq_hz
+                    }
+            
+            # Create a non-modal window for the detector digest with ALL detector data
             digest_window = DetectorDigestWindow(
                 parent=self, # type: ignore # parent is QWidget, DetectorDigestWindow expects QWidget
-                resonance_data_for_digest=resonance_data_for_digest,
+                resonance_data_for_digest=resonance_data_for_digest,  # Keep for backward compatibility
                 detector_id=detector_id,
                 resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
                 dac_scales=self.dac_scales,
                 zoom_box_mode=self.zoom_box_mode,
                 target_module=self.target_module, # type: ignore # target_module is int | None, DetectorDigestWindow expects int
                 normalize_plot3=self.normalize_traces,
-                dark_mode=self.dark_mode
+                dark_mode=self.dark_mode,
+                all_detectors_data=all_detectors_data,  
+                initial_detector_idx=detector_id 
             )
             
             # Add to tracking list to prevent garbage collection

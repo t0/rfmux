@@ -10,6 +10,7 @@ from .utils import (
     UnitConverter, traceback
 )
 from .network_analysis_base import NetworkAnalysisDialogBase
+from .tasks import DACScaleFetcher # Import DACScaleFetcher from tasks.py
 
 class MultisweepDialog(NetworkAnalysisDialogBase):
     """
@@ -135,7 +136,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         # Option to recalculate center frequencies and rotate
         self.recalc_cf_combo = QtWidgets.QComboBox()
-        self.recalc_cf_combo.addItems(["None", "min-S21", "max-dQ"])
+        self.recalc_cf_combo.addItems(["None", "min-S21", "max-dIQ"])
         
         # Set initial value for recalculate_center_frequencies
         # The old parameter was a boolean, True mapping to "min-s21" effectively
@@ -153,7 +154,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             "Determines how/if center frequencies are recalculated and sweep data is rotated:\n"
             "- None: No recalculation or TOD-based rotation.\n"
             "- min-S21: Recalculates to min |S21|. Acquires TOD. Rotates sweep to minimize TOD's I component.\n"
-            "- max-dQ: Recalculates to max |d(phase)/df|. Acquires TOD. Rotates sweep to align TOD's PCA with I-axis."
+            "- max-dIQ: Recalculates to max IQ velocity |d(I+jQ)/df|. Finds where the IQ trajectory moves fastest.\n"
+            "          Acquires TOD. Rotates sweep to align TOD's PCA with I-axis."
         )
         param_form_layout.addRow("Recalculate/Rotate Method:", self.recalc_cf_combo)
         
@@ -179,6 +181,16 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             "- Both: Perform both sweep directions sequentially."
         )
         param_form_layout.addRow("Sweep Direction:", self.sweep_direction_combo)
+        
+        # Fitting options
+        self.apply_skewed_fit_checkbox = QtWidgets.QCheckBox("Apply Skewed Fit")
+        self.apply_skewed_fit_checkbox.setChecked(self.params.get('apply_skewed_fit', True)) # Default to True
+        param_form_layout.addRow(self.apply_skewed_fit_checkbox)
+
+        self.apply_nonlinear_fit_checkbox = QtWidgets.QCheckBox("Apply Nonlinear Fit")
+        self.apply_nonlinear_fit_checkbox.setChecked(self.params.get('apply_nonlinear_fit', True)) # Default to True
+        param_form_layout.addRow(self.apply_nonlinear_fit_checkbox)
+        
         layout.addWidget(param_group)
 
         # Standard OK and Cancel buttons
@@ -262,6 +274,10 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             # Include the essential context for the multisweep
             params_dict['resonance_frequencies'] = self.resonance_frequencies
             params_dict['module'] = self.current_module
+            
+            # Get fitting parameters
+            params_dict['apply_skewed_fit'] = self.apply_skewed_fit_checkbox.isChecked()
+            params_dict['apply_nonlinear_fit'] = self.apply_nonlinear_fit_checkbox.isChecked()
 
             # Basic validation
             if params_dict['span_hz'] <= 0:

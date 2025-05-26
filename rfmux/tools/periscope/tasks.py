@@ -163,7 +163,10 @@ class DACScaleFetcher(QtCore.QThread):
         for module_idx in range(1, 9): # Renamed module
             try:
                 dac_scale = loop.run_until_complete(self.crs.get_dac_scale('DBM', module=module_idx))
-                dac_scales[module_idx] = dac_scale - 1.5
+                if dac_scale is not None:
+                    dac_scales[module_idx] = dac_scale - 1.5
+                else:
+                    dac_scales[module_idx] = None
             except Exception as e:
                 if "Can't access module" in str(e) and "analog banking" in str(e):
                     dac_scales[module_idx] = None

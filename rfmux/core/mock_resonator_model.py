@@ -252,13 +252,14 @@ class MockResonatorModel:
             f0_new = f0 * (1 + freq_shift_fraction)
             
             # Check convergence
+            print("DEBUG: CONVERGENCE", abs(f0_new - f0_eff) / f0)
             if abs(f0_new - f0_eff) / f0 < const.BIFURCATION_CONVERGENCE_TOLERANCE:
                 if const.DEBUG_BIFURCATION:
                     print(f"Bifurcation converged in {iteration + 1} iterations")
                 break
                 
             f0_eff = f0_new
-        
+        print(iteration)
         return f0_eff
 
     def calculate_channel_response(self, module, channel, frequency, amplitude, phase_degrees):

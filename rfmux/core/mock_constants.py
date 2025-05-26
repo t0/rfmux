@@ -12,14 +12,14 @@ DEFAULT_KINETIC_INDUCTANCE_FRACTION = 0.2  # 20% typical for Al resonators
 KINETIC_INDUCTANCE_VARIATION = 0.1  # ±10% variation between resonators
 
 # Power dependence parameters - ENHANCED for visible frequency shifts
-FREQUENCY_SHIFT_POWER_LAW = 1.0  # Power law exponent: Δf ∝ P^α (linear for simplicity)
-FREQUENCY_SHIFT_MAGNITUDE = 1e-3  # Base magnitude: Δf/f₀ = magnitude * (P/P₀)^α (1000x stronger!)
-POWER_NORMALIZATION = 0.005  # Reference power level for normalization (lower = more sensitive)
+FREQUENCY_SHIFT_POWER_LAW = 1.5  # Power law exponent: Δf ∝ P^α (linear for simplicity)
+FREQUENCY_SHIFT_MAGNITUDE = 1e-2  # Base magnitude: Δf/f₀ = magnitude * (P/P₀)^α (1000x stronger!)
+POWER_NORMALIZATION = 0.001  # Reference power level for normalization (lower = more sensitive)
 
 # Bifurcation parameters
 ENABLE_BIFURCATION = True  # Enable self-consistent frequency shift
-BIFURCATION_ITERATIONS = 3  # Number of iterations for self-consistency
-BIFURCATION_CONVERGENCE_TOLERANCE = 1e-6  # Convergence criterion for frequency
+BIFURCATION_ITERATIONS = 2000  # Number of iterations for self-consistency
+BIFURCATION_CONVERGENCE_TOLERANCE = 1e-7  # Convergence criterion for frequency
 
 # Nonlinearity saturation
 SATURATION_POWER = 0.1  # Power level where nonlinearity saturates (fixed comment)

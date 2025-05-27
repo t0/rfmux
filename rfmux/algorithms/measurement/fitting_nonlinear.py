@@ -1,11 +1,11 @@
 """
-Nonlinear resonator fitting functions for rfmux, inspired by CITKID.
+Nonlinear resonator fitting functions for rfmux, inspired by citkid.
 Implements advanced fitting procedures for KID resonators including nonlinearity.
 
-This module contains code adapted from the CITKID project:
+This module contains code adapted from the citkid project:
 https://github.com/loganfoote/citkid
 
-Original CITKID code is licensed under the Apache License, Version 2.0.
+Original citkid code is licensed under the Apache License, Version 2.0.
 See https://github.com/loganfoote/citkid/blob/main/LICENSE for details.
 
 Modifications and adaptations for rfmux:
@@ -13,7 +13,6 @@ Modifications and adaptations for rfmux:
 - Removed cable delay tau parameter (handled separately in rfmux)
 - Modified gain estimation to use frequency extrema instead of separate gain scan
 - Adapted to work with rfmux multisweep data structures
-- Added comprehensive docstrings and type hints
 """
 
 import numpy as np

@@ -88,7 +88,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         self.setWindowTitle(f"Detector Digest: Detector {self.detector_id+1}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
         self.setWindowFlags(QtCore.Qt.WindowType.Window)
-        self.resize(1200, 700) # Increased height slightly more for additional NL params
+        self.resize(1200, 1100) # Increased size to accommodate tables properly
 
     def _setup_ui(self):
         """Sets up the UI layout with plots and fitting information panel."""
@@ -183,36 +183,52 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         # Column 1: Skewed Fit
         skewed_fit_group = QtWidgets.QGroupBox("Skewed Lorentzian Fit")
         skewed_fit_group.setStyleSheet(f"QGroupBox {{ color: {title_color_str}; border: none;}}")
-        skewed_fit_layout = QtWidgets.QFormLayout(skewed_fit_group)
-        self.skewed_status_label = QtWidgets.QLabel("N/A"); skewed_fit_layout.addRow("Status:", self.skewed_status_label)
-        self.skewed_fr_label = QtWidgets.QLabel("N/A"); self.skewed_fr_label.setToolTip("Resonance frequency (fr)"); skewed_fit_layout.addRow("fr (MHz):", self.skewed_fr_label)
-        self.skewed_qr_label = QtWidgets.QLabel("N/A"); self.skewed_qr_label.setToolTip("Total quality factor (Qr)"); skewed_fit_layout.addRow("Qr:", self.skewed_qr_label)
-        self.skewed_qc_label = QtWidgets.QLabel("N/A"); self.skewed_qc_label.setToolTip("Coupling quality factor (Qc)"); skewed_fit_layout.addRow("Qc:", self.skewed_qc_label)
-        self.skewed_qi_label = QtWidgets.QLabel("N/A"); self.skewed_qi_label.setToolTip("Internal quality factor (Qi)"); skewed_fit_layout.addRow("Qi:", self.skewed_qi_label)
+        skewed_fit_layout = QtWidgets.QVBoxLayout(skewed_fit_group)
+        
+        # Create table for skewed fit
+        self.skewed_table = QtWidgets.QTableWidget()
+        self.skewed_table.setColumnCount(3)
+        self.skewed_table.setHorizontalHeaderLabels(["Parameter", "Value", "Description"])
+        self.skewed_table.horizontalHeader().setStretchLastSection(True)
+        self.skewed_table.verticalHeader().setVisible(False)
+        self.skewed_table.setAlternatingRowColors(True)
+        self.skewed_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.skewed_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        
+        # Set column widths
+        self.skewed_table.setColumnWidth(0, 80)
+        self.skewed_table.setColumnWidth(1, 100)
+        
+        # Initialize rows for skewed fit
+        self._init_skewed_table_rows()
+        
+        skewed_fit_layout.addWidget(self.skewed_table)
         fitting_info_main_layout.addWidget(skewed_fit_group)
 
         # Column 2: Nonlinear Fit
         nl_fit_group = QtWidgets.QGroupBox("Nonlinear Fit")
         nl_fit_group.setStyleSheet(f"QGroupBox {{ color: {title_color_str}; border: none;}}")
-        nl_fit_layout = QtWidgets.QFormLayout(nl_fit_group)
-        self.nl_status_label = QtWidgets.QLabel("N/A"); nl_fit_layout.addRow("Status:", self.nl_status_label)
-        self.nl_fr_label = QtWidgets.QLabel("N/A"); self.nl_fr_label.setToolTip("Nonlinear resonance frequency (fr_nl)"); nl_fit_layout.addRow("fr_nl (MHz):", self.nl_fr_label)
-        self.nl_qr_label = QtWidgets.QLabel("N/A"); self.nl_qr_label.setToolTip("Nonlinear total quality factor (Qr_nl)"); nl_fit_layout.addRow("Qr_nl:", self.nl_qr_label)
-        self.nl_qc_label = QtWidgets.QLabel("N/A"); self.nl_qc_label.setToolTip("Nonlinear coupling quality factor (Qc_nl)"); nl_fit_layout.addRow("Qc_nl:", self.nl_qc_label)
-        self.nl_qi_label = QtWidgets.QLabel("N/A"); self.nl_qi_label.setToolTip("Nonlinear internal quality factor (Qi_nl)"); nl_fit_layout.addRow("Qi_nl:", self.nl_qi_label)
-        self.nl_a_label = QtWidgets.QLabel("N/A"); self.nl_a_label.setToolTip("Nonlinearity parameter 'a'"); nl_fit_layout.addRow("'a':", self.nl_a_label)
-        self.nl_phi_label = QtWidgets.QLabel("N/A"); self.nl_phi_label.setToolTip("Nonlinearity phase parameter φ"); nl_fit_layout.addRow("φ (deg):", self.nl_phi_label)
-        self.nl_i0_label = QtWidgets.QLabel("N/A"); self.nl_i0_label.setToolTip("Nonlinear offset I0"); nl_fit_layout.addRow("I0:", self.nl_i0_label)
-        self.nl_q0_label = QtWidgets.QLabel("N/A"); self.nl_q0_label.setToolTip("Nonlinear offset Q0"); nl_fit_layout.addRow("Q0:", self.nl_q0_label)
-        fitting_info_main_layout.addWidget(nl_fit_group)
+        nl_fit_layout = QtWidgets.QVBoxLayout(nl_fit_group)
         
-        fitting_label_color_style = f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
-        for layout_item in [skewed_fit_layout, nl_fit_layout]:
-            for i in range(layout_item.rowCount()):
-                label_widget = layout_item.itemAt(i, QtWidgets.QFormLayout.ItemRole.LabelRole).widget()
-                if label_widget: label_widget.setStyleSheet(fitting_label_color_style)
-                field_widget = layout_item.itemAt(i, QtWidgets.QFormLayout.ItemRole.FieldRole).widget()
-                if field_widget: field_widget.setStyleSheet(fitting_label_color_style)
+        # Create table for nonlinear fit
+        self.nl_table = QtWidgets.QTableWidget()
+        self.nl_table.setColumnCount(3)
+        self.nl_table.setHorizontalHeaderLabels(["Parameter", "Value", "Description"])
+        self.nl_table.horizontalHeader().setStretchLastSection(True)
+        self.nl_table.verticalHeader().setVisible(False)
+        self.nl_table.setAlternatingRowColors(True)
+        self.nl_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.nl_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        
+        # Set column widths
+        self.nl_table.setColumnWidth(0, 80)
+        self.nl_table.setColumnWidth(1, 100)
+        
+        # Initialize rows for nonlinear fit
+        self._init_nl_table_rows()
+        
+        nl_fit_layout.addWidget(self.nl_table)
+        fitting_info_main_layout.addWidget(nl_fit_group)
         
         outer_layout.addWidget(self.fitting_info_group)
         outer_layout.setStretchFactor(plots_layout, 3) 
@@ -220,6 +236,51 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         self._apply_zoom_box_mode_to_all()
         self.apply_theme(self.dark_mode)
+
+    def _init_skewed_table_rows(self):
+        """Initialize the rows for the skewed fit table."""
+        params = [
+            ("Status", "", "Fit convergence status"),
+            ("fr", "MHz", "Resonance frequency"),
+            ("Qr", "", "Total quality factor (typical: 1e3-1e6)"),
+            ("Qc", "", "Coupling quality factor (typical: 1e3-1e7)"),
+            ("Qi", "", "Internal quality factor (typical: 1e4-1e7)"),
+            ("Bifurcation", "", "Bifurcation status (from nonlinear fit)")
+        ]
+        
+        self.skewed_table.setRowCount(len(params))
+        for i, (param, unit, desc) in enumerate(params):
+            # Parameter name
+            self.skewed_table.setItem(i, 0, QtWidgets.QTableWidgetItem(f"{param} ({unit})" if unit else param))
+            # Value (will be updated later)
+            self.skewed_table.setItem(i, 1, QtWidgets.QTableWidgetItem("N/A"))
+            # Description
+            self.skewed_table.setItem(i, 2, QtWidgets.QTableWidgetItem(desc))
+    
+    def _init_nl_table_rows(self):
+        """Initialize the rows for the nonlinear fit table."""
+        params = [
+            ("Status", "", "Fit convergence status"),
+            ("fr_nl", "MHz", "Nonlinear resonance frequency"),
+            ("Qr_nl", "", "Total quality factor (typical: 1e3-1e6)"),
+            ("Qc_nl", "", "Coupling quality factor (typical: 1e3-1e7)"),
+            ("Qi_nl", "", "Internal quality factor (typical: 1e4-1e7)"),
+            ("a", "", "Nonlinearity parameter (bifurcation at ~0.77)"),
+            ("φ", "deg", "Impedance mismatch phase"),
+            ("I0", "", "Complex gain offset (real part)"),
+            ("Q0", "", "Complex gain offset (imaginary part)"),
+            ("Bifurcation", "", "Bifurcation status")
+        ]
+        
+        self.nl_table.setRowCount(len(params))
+        for i, (param, unit, desc) in enumerate(params):
+            # Parameter name
+            self.nl_table.setItem(i, 0, QtWidgets.QTableWidgetItem(f"{param} ({unit})" if unit else param))
+            # Value (will be updated later)
+            value_item = QtWidgets.QTableWidgetItem("N/A")
+            self.nl_table.setItem(i, 1, value_item)
+            # Description
+            self.nl_table.setItem(i, 2, QtWidgets.QTableWidgetItem(desc))
 
     def keyPressEvent(self, event: QtGui.QKeyEvent):
         """Handle keyboard navigation between detectors."""
@@ -312,7 +373,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 plot_widget.getViewBox().enableZoomBoxMode(self.zoom_box_mode)
 
     def _clear_plots(self):
-        """Clears all plot items and legends, and resets fitting info labels."""
+        """Clears all plot items and legends, and resets fitting info tables."""
         for plot_widget, legend_widget in [
             (self.plot1_sweep_vs_freq, self.plot1_legend),
             (self.plot2_iq_plane, self.plot2_legend),
@@ -322,8 +383,15 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 for item in plot_widget.listDataItems(): plot_widget.removeItem(item)
             if legend_widget: legend_widget.clear()
         
-        self.skewed_status_label.setText("N/A"); self.skewed_fr_label.setText("N/A"); self.skewed_qr_label.setText("N/A"); self.skewed_qc_label.setText("N/A"); self.skewed_qi_label.setText("N/A")
-        self.nl_status_label.setText("N/A"); self.nl_fr_label.setText("N/A"); self.nl_qr_label.setText("N/A"); self.nl_qc_label.setText("N/A"); self.nl_qi_label.setText("N/A"); self.nl_a_label.setText("N/A"); self.nl_phi_label.setText("N/A"); self.nl_i0_label.setText("N/A"); self.nl_q0_label.setText("N/A")
+        # Reset table values to N/A
+        if hasattr(self, 'skewed_table'):
+            for row in range(self.skewed_table.rowCount()):
+                if self.skewed_table.item(row, 1):
+                    self.skewed_table.item(row, 1).setText("N/A")
+        if hasattr(self, 'nl_table'):
+            for row in range(self.nl_table.rowCount()):
+                if self.nl_table.item(row, 1):
+                    self.nl_table.item(row, 1).setText("N/A")
 
 
     def _update_plots(self):
@@ -466,8 +534,15 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     x_axis_hz_offset = freqs_hz - self.current_plot_offset_hz
                     is_bifurcated = sweep_data.get('is_bifurcated', False)
                     line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
-                    pen_color_plot3 = pg.mkColor(color); 
-                    if is_bifurcated: pen_color_plot3.setAlpha(128)
+                    # Create a fresh color for each line to avoid alpha bleed-through
+                    if is_bifurcated:
+                        # For bifurcated sweeps, create a new color with reduced alpha
+                        base_color = pg.mkColor(color)
+                        r, g, b, _ = base_color.getRgb()
+                        pen_color_plot3 = pg.mkColor(r, g, b, 128)
+                    else:
+                        # For non-bifurcated sweeps, use full alpha
+                        pen_color_plot3 = pg.mkColor(color)
                     current_pen = pg.mkPen(pen_color_plot3, width=LINE_WIDTH, style=line_style)
                     dac_scale = self.dac_scales.get(self.target_module)
                     legend_name = f"{amp_val_float:.2e} Norm"
@@ -482,55 +557,105 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
     def _update_fitting_info_panel(self):
         """Updates the fitting information panel based on self.active_sweep_data."""
-        if not self.active_sweep_data:
-            self.skewed_status_label.setText("N/A"); self.skewed_fr_label.setText("N/A"); self.skewed_qr_label.setText("N/A"); self.skewed_qc_label.setText("N/A"); self.skewed_qi_label.setText("N/A")
-            self.nl_status_label.setText("N/A"); self.nl_fr_label.setText("N/A"); self.nl_qr_label.setText("N/A"); self.nl_qc_label.setText("N/A"); self.nl_qi_label.setText("N/A"); self.nl_a_label.setText("N/A"); self.nl_phi_label.setText("N/A"); self.nl_i0_label.setText("N/A"); self.nl_q0_label.setText("N/A")
+        if not self.active_sweep_data or not hasattr(self, 'skewed_table') or not hasattr(self, 'nl_table'):
+            # Reset all table values to N/A
+            if hasattr(self, 'skewed_table'):
+                for row in range(self.skewed_table.rowCount()):
+                    if self.skewed_table.item(row, 1):
+                        self.skewed_table.item(row, 1).setText("N/A")
+            if hasattr(self, 'nl_table'):
+                for row in range(self.nl_table.rowCount()):
+                    if self.nl_table.item(row, 1):
+                        self.nl_table.item(row, 1).setText("N/A")
             # Hide fitting panel if no data
             self.fitting_info_group.setVisible(False)
             return
 
-        # Skewed Fit
+        # Skewed Fit - Update table rows
         skewed_applied = self.active_sweep_data.get('skewed_fit_applied', False)
         skewed_success = self.active_sweep_data.get('skewed_fit_success', False)
         fit_params = self.active_sweep_data.get('fit_params', {})
 
-        if skewed_applied:
-            self.skewed_status_label.setText("Success" if skewed_success else "Failed")
-            if skewed_success and fit_params:
-                self.skewed_fr_label.setText(f"{fit_params.get('fr', 0) / 1e6:.6f}")
-                self.skewed_qr_label.setText(f"{fit_params.get('Qr', 0):,.1f}")
-                self.skewed_qc_label.setText(f"{fit_params.get('Qc', 0):,.1f}")
-                self.skewed_qi_label.setText(f"{fit_params.get('Qi', 0):,.1f}")
-            else: 
-                self.skewed_fr_label.setText("N/A"); self.skewed_qr_label.setText("N/A")
-                self.skewed_qc_label.setText("N/A"); self.skewed_qi_label.setText("N/A")
-        else: 
-            self.skewed_status_label.setText("Not Applied")
-            self.skewed_fr_label.setText("-"); self.skewed_qr_label.setText("-")
-            self.skewed_qc_label.setText("-"); self.skewed_qi_label.setText("-")
+        # Row indices for skewed table
+        SKEWED_STATUS_ROW = 0
+        SKEWED_FR_ROW = 1
+        SKEWED_QR_ROW = 2
+        SKEWED_QC_ROW = 3
+        SKEWED_QI_ROW = 4
+        SKEWED_BIFURCATION_ROW = 5
 
-        # Nonlinear Fit
+        if skewed_applied:
+            self.skewed_table.item(SKEWED_STATUS_ROW, 1).setText("Success" if skewed_success else "Failed")
+            if skewed_success and fit_params:
+                self.skewed_table.item(SKEWED_FR_ROW, 1).setText(f"{fit_params.get('fr', 0) / 1e6:.6f}")
+                self.skewed_table.item(SKEWED_QR_ROW, 1).setText(f"{fit_params.get('Qr', 0):,.1f}")
+                self.skewed_table.item(SKEWED_QC_ROW, 1).setText(f"{fit_params.get('Qc', 0):,.1f}")
+                self.skewed_table.item(SKEWED_QI_ROW, 1).setText(f"{fit_params.get('Qi', 0):,.1f}")
+            else:
+                for row in [SKEWED_FR_ROW, SKEWED_QR_ROW, SKEWED_QC_ROW, SKEWED_QI_ROW]:
+                    self.skewed_table.item(row, 1).setText("N/A")
+        else: 
+            self.skewed_table.item(SKEWED_STATUS_ROW, 1).setText("Not Applied")
+            for row in [SKEWED_FR_ROW, SKEWED_QR_ROW, SKEWED_QC_ROW, SKEWED_QI_ROW]:
+                self.skewed_table.item(row, 1).setText("-")
+        
+        # Update bifurcation status in skewed table using the existing is_bifurcated field
+        # This is the same field used for the plot legends
+        is_bifurcated = self.active_sweep_data.get('is_bifurcated', False)
+        self.skewed_table.item(SKEWED_BIFURCATION_ROW, 1).setText("Yes" if is_bifurcated else "No")
+
+        # Nonlinear Fit - Update table rows
         nl_applied = self.active_sweep_data.get('nonlinear_fit_applied', False)
         nl_success = self.active_sweep_data.get('nonlinear_fit_success', False)
         nl_params_dict = self.active_sweep_data.get('nonlinear_fit_params', self.active_sweep_data)
 
+        # Row indices for nonlinear table
+        NL_STATUS_ROW = 0
+        NL_FR_ROW = 1
+        NL_QR_ROW = 2
+        NL_QC_ROW = 3
+        NL_QI_ROW = 4
+        NL_A_ROW = 5
+        NL_PHI_ROW = 6
+        NL_I0_ROW = 7
+        NL_Q0_ROW = 8
+        NL_BIFURCATION_ROW = 9
+
         if nl_applied:
-            self.nl_status_label.setText("Success" if nl_success else "Failed")
+            self.nl_table.item(NL_STATUS_ROW, 1).setText("Success" if nl_success else "Failed")
             if nl_success:
                 nl_fr_val = nl_params_dict.get('fr_nl', nl_params_dict.get('fr', 0)) 
-                self.nl_fr_label.setText(f"{nl_fr_val / 1e6:.6f}")
-                self.nl_qr_label.setText(f"{nl_params_dict.get('Qr_nl', nl_params_dict.get('Qr',0)):,.1f}")
-                self.nl_qc_label.setText(f"{nl_params_dict.get('Qc_nl', nl_params_dict.get('Qc',0)):,.1f}")
-                self.nl_qi_label.setText(f"{nl_params_dict.get('Qi_nl', nl_params_dict.get('Qi',0)):,.1f}")
-                self.nl_a_label.setText(f"{nl_params_dict.get('a', 0):.3e}")
-                self.nl_phi_label.setText(f"{np.degrees(nl_params_dict.get('phi', 0)):.2f}")
-                self.nl_i0_label.setText(f"{nl_params_dict.get('i0', 0):.3e}")
-                self.nl_q0_label.setText(f"{nl_params_dict.get('q0', 0):.3e}")
-            else: 
-                self.nl_fr_label.setText("N/A"); self.nl_qr_label.setText("N/A"); self.nl_qc_label.setText("N/A"); self.nl_qi_label.setText("N/A"); self.nl_a_label.setText("N/A"); self.nl_phi_label.setText("N/A"); self.nl_i0_label.setText("N/A"); self.nl_q0_label.setText("N/A")
+                self.nl_table.item(NL_FR_ROW, 1).setText(f"{nl_fr_val / 1e6:.6f}")
+                self.nl_table.item(NL_QR_ROW, 1).setText(f"{nl_params_dict.get('Qr_nl', nl_params_dict.get('Qr',0)):,.1f}")
+                self.nl_table.item(NL_QC_ROW, 1).setText(f"{nl_params_dict.get('Qc_nl', nl_params_dict.get('Qc',0)):,.1f}")
+                self.nl_table.item(NL_QI_ROW, 1).setText(f"{nl_params_dict.get('Qi_nl', nl_params_dict.get('Qi',0)):,.1f}")
+                
+                # Nonlinearity parameter 'a' with special formatting and color
+                a_value = nl_params_dict.get('a', 0)
+                a_item = self.nl_table.item(NL_A_ROW, 1)
+                a_item.setText(f"{a_value:.3e}")
+                
+                # Bifurcation threshold is 4*sqrt(3)/9 ≈ 0.77
+                bifurcation_threshold = 4 * np.sqrt(3) / 9
+                if a_value > bifurcation_threshold:
+                    a_item.setForeground(QtGui.QBrush(QtGui.QColor("red")))
+                    self.nl_table.item(NL_BIFURCATION_ROW, 1).setText("Yes")
+                else:
+                    # Reset to default color (based on dark mode)
+                    default_color = QtGui.QColor("white" if self.dark_mode else "black")
+                    a_item.setForeground(QtGui.QBrush(default_color))
+                    self.nl_table.item(NL_BIFURCATION_ROW, 1).setText("No")
+                
+                self.nl_table.item(NL_PHI_ROW, 1).setText(f"{np.degrees(nl_params_dict.get('phi', 0)):.2f}")
+                self.nl_table.item(NL_I0_ROW, 1).setText(f"{nl_params_dict.get('i0', 0):.3e}")
+                self.nl_table.item(NL_Q0_ROW, 1).setText(f"{nl_params_dict.get('q0', 0):.3e}")
+            else:
+                for row in range(NL_FR_ROW, NL_BIFURCATION_ROW + 1):
+                    self.nl_table.item(row, 1).setText("N/A")
         else: 
-            self.nl_status_label.setText("Not Applied")
-            self.nl_fr_label.setText("-"); self.nl_qr_label.setText("-"); self.nl_qc_label.setText("-"); self.nl_qi_label.setText("-"); self.nl_a_label.setText("-"); self.nl_phi_label.setText("-"); self.nl_i0_label.setText("-"); self.nl_q0_label.setText("-")
+            self.nl_table.item(NL_STATUS_ROW, 1).setText("Not Applied")
+            for row in range(NL_FR_ROW, NL_BIFURCATION_ROW + 1):
+                self.nl_table.item(row, 1).setText("-")
 
         # Show/hide fitting panel based on whether any fits were applied
         any_fits_applied = skewed_applied or nl_applied
@@ -691,4 +816,3 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         
         # Update plots to ensure all colors are refreshed with the new theme
         self._update_plots()
-    

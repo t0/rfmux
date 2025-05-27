@@ -184,7 +184,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             plot_item_mag.setTitle("Combined S21 Magnitude (All Resonances)", color=pen_color)
             plot_item_mag.setLabel('bottom', 'Frequency', units='Hz')
             plot_item_mag.showGrid(x=True, y=True, alpha=0.3)
-            self.mag_legend = plot_item_mag.addLegend(offset=(30,10),labelTextColor=pen_color)
+            self.mag_legend = plot_item_mag.addLegend(offset=(10,-50),labelTextColor=pen_color)
         self._update_mag_plot_label() # Set initial Y-axis label based on unit mode
         plot_layout.addWidget(self.combined_mag_plot)
 
@@ -198,7 +198,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             plot_item_phase.setLabel('bottom', 'Frequency', units='Hz')
             plot_item_phase.setLabel('left', 'Phase', units='deg')
             plot_item_phase.showGrid(x=True, y=True, alpha=0.3)
-            self.phase_legend = plot_item_phase.addLegend(offset=(30,10),labelTextColor=pen_color)
+            self.phase_legend = plot_item_phase.addLegend(offset=(10,-50),labelTextColor=pen_color)
         plot_layout.addWidget(self.combined_phase_plot)
         
         layout.addWidget(plot_container)
@@ -382,6 +382,35 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # Set the status message BEFORE the sweep starts
         status_message = f"Iteration {current_display_iteration}/{self.total_iterations}: Amplitude {amplitude:.4f} ({direction_text})"
         self.current_amp_label.setText(status_message)
+
+    def handle_fitting_progress(self, module: int, status_message: str):
+        """
+        Handler for the fitting_progress signal. Updates the status bar with fitting progress.
+        
+        Args:
+            module (int): The module reporting fitting progress.
+            status_message (str): The fitting status message.
+        """
+        if module != self.target_module: return
+        
+        # Get the current status base (iteration info)
+        current_text = self.current_amp_label.text()
+        
+        # Split the text to separate iteration info from any fitting status
+        if " - " in current_text:
+            # Keep only the iteration part
+            base_text = current_text.split(" - ")[0]
+        else:
+            base_text = current_text
+        
+        # Extract just the fitting status part from the message
+        if "Fitting in progress: " in status_message:
+            fitting_status = status_message.replace("Fitting in progress: ", "")
+            updated_text = f"{base_text} - {fitting_status}"
+            self.current_amp_label.setText(updated_text)
+        elif status_message == "Fitting Completed":
+            # When fitting is completed, just show the base text
+            self.current_amp_label.setText(base_text)
         
     def update_data(self, module: int, iteration: int, amplitude: float, direction: str, results_for_plotting: dict, results_for_history: dict):
         """
@@ -982,31 +1011,30 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         x_coord = mouse_point.x()
         # y_coord = mouse_point.y() # y_coord is not used for selecting the CF
 
-        # --- Find the resonance trace closest to the click's X-coordinate ---
-        min_horizontal_dist = float('inf')
+        # --- Find the resonance whose center/bias frequency is closest to the click's X-coordinate ---
+        min_distance = float('inf')
         clicked_res_idx = None
         clicked_actual_cf = None
 
-        # Iterate through all resonances to find which one is horizontally closest to the click
+        # Collect all unique resonances with their center frequencies
+        resonance_centers = {}  # {res_idx: center_freq}
+        
         if self.results_by_iteration:
             for iteration_data in self.results_by_iteration.values():
                 res_data = iteration_data.get("data", {})
                 for res_idx, data in res_data.items():
-                    # Get the actual frequencies for this resonance
-                    freqs_hz = data.get('frequencies')
-                    if freqs_hz is None or len(freqs_hz) == 0:
-                        continue
-                    
-                    # Check if click is within frequency range of this resonance
-                    if freqs_hz.min() <= x_coord <= freqs_hz.max():
-                        # Find closest frequency point
-                        freq_dists = np.abs(freqs_hz - x_coord)
-                        min_dist = freq_dists.min()
-                        if min_dist < min_horizontal_dist:
-                            min_horizontal_dist = min_dist
-                            clicked_res_idx = res_idx
-                            # Get the bias frequency for this resonance
-                            clicked_actual_cf = data.get('bias_frequency', data.get('original_center_frequency'))
+                    # Get the bias/center frequency for this resonance
+                    center_freq = data.get('bias_frequency', data.get('original_center_frequency'))
+                    if center_freq is not None:
+                        resonance_centers[res_idx] = center_freq
+        
+        # Find the resonance with center frequency closest to the click
+        for res_idx, center_freq in resonance_centers.items():
+            distance = abs(center_freq - x_coord)
+            if distance < min_distance:
+                min_distance = distance
+                clicked_res_idx = res_idx
+                clicked_actual_cf = center_freq
 
         if clicked_res_idx is not None and clicked_actual_cf is not None:
 

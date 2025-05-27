@@ -803,6 +803,8 @@ class PeriscopeRuntime:
                                                         QtCore.Qt.ConnectionType.QueuedConnection)
             self.multisweep_signals.error.connect(window.handle_error,
                                                 QtCore.Qt.ConnectionType.QueuedConnection)
+            self.multisweep_signals.fitting_progress.connect(window.handle_fitting_progress,
+                                                            QtCore.Qt.ConnectionType.QueuedConnection)
             
             # Pass the window instance to the task (now starts automatically since it's a QThread)
             task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window)

@@ -136,12 +136,12 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         # Option to recalculate center frequencies and rotate
         self.recalc_cf_combo = QtWidgets.QComboBox()
-        self.recalc_cf_combo.addItems(["None", "min-S21", "max-dIQ"])
+        self.recalc_cf_combo.addItems(["max-dIQ","None", "min-S21"])
         
         # Set initial value for recalculate_center_frequencies
         # The old parameter was a boolean, True mapping to "min-s21" effectively
         # New parameter is a string or None.
-        default_recalc_setting = self.params.get('recalculate_center_frequencies', None)
+        default_recalc_setting = self.params.get('recalculate_center_frequencies', "max-dIQ")
 
         if default_recalc_setting == "min-s21":
             self.recalc_cf_combo.setCurrentText("min-S21")
@@ -152,10 +152,10 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             
         self.recalc_cf_combo.setToolTip(
             "Determines how/if center frequencies are recalculated and sweep data is rotated:\n"
-            "- None: No recalculation or TOD-based rotation.\n"
+            "- max-dIQ [Often Optimal]: Recalculates to max IQ velocity |d(I+jQ)/df|. Finds where the IQ trajectory moves fastest.\n"
+            "           Acquires TOD. Rotates sweep to align TOD's PCA with I-axis."
             "- min-S21: Recalculates to min |S21|. Acquires TOD. Rotates sweep to minimize TOD's I component.\n"
-            "- max-dIQ: Recalculates to max IQ velocity |d(I+jQ)/df|. Finds where the IQ trajectory moves fastest.\n"
-            "          Acquires TOD. Rotates sweep to align TOD's PCA with I-axis."
+            "- None: No recalculation or TOD-based rotation.\n"
         )
         param_form_layout.addRow("Recalculate/Rotate Method:", self.recalc_cf_combo)
         

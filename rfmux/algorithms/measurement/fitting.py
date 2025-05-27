@@ -636,9 +636,9 @@ def fit_skewed_multisweep(
                 if fit_params_result.get('fr') != 'nan':
                     fitted_freq = fit_params_result.get('fr', 'nan')
                     fitted_Qr = fit_params_result.get('Qr', 'nan')
-                    if fitted_freq != 'nan' and fitted_Qr != 'nan':
-                        print(f"Fitted resonance: original_cf={original_cf*1e-6:.3f} MHz, "
-                              f"fitted_fr={fitted_freq*1e-6:.3f} MHz, Qr={fitted_Qr:.0f}")
+                    # if fitted_freq != 'nan' and fitted_Qr != 'nan':
+                    #     print(f"Fitted resonance: original_cf={original_cf*1e-6:.3f} MHz, "
+                    #           f"fitted_fr={fitted_freq*1e-6:.3f} MHz, Qr={fitted_Qr:.0f}")
                         
             except Exception as e:
                 warnings.warn(f"Fitting failed for resonance at {original_cf*1e-6:.3f} MHz during post-processing: {e}")
@@ -656,9 +656,9 @@ def fit_skewed_multisweep(
                     original_mean = np.mean(iq_complex)
                     centered_mean = np.mean(iq_centered_result)
                     shift_magnitude = abs(original_mean - centered_mean)
-                    if shift_magnitude > 1e-6:  # Only log if significant shift
-                        print(f"IQ centering applied to {original_cf*1e-6:.3f} MHz: "
-                              f"shifted by {shift_magnitude:.6f} units")
+                    # if shift_magnitude > 1e-6:  # Only log if significant shift
+                    #     print(f"IQ centering applied to {original_cf*1e-6:.3f} MHz: "
+                    #           f"shifted by {shift_magnitude:.6f} units")
                         
             except Exception as e:
                 warnings.warn(f"IQ centering failed for resonance at {original_cf*1e-6:.3f} MHz during post-processing: {e}")
@@ -1022,7 +1022,6 @@ def add_bifurcation_flags_to_multisweep_data(
     Returns:
         Dict: The loaded and modified multisweep data dictionary.
     """
-    # import pickle # No longer needed here, moved to top
 
     if isinstance(pickle_filepath_or_data, str):
         pickle_filepath = pickle_filepath_or_data

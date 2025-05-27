@@ -372,6 +372,7 @@ class MultisweepSignals(QObject):
     data_update = pyqtSignal(int, int, float, str, dict, dict) # module, iteration, amplitude, direction, results_for_plotting, results_for_history
     completed_iteration = pyqtSignal(int, int, float, str) # module, iteration, amplitude, direction
     starting_iteration = pyqtSignal(int, int, float, str) # module, iteration, amplitude, direction
+    fitting_progress = pyqtSignal(int, str) # module, status_message
     all_completed = pyqtSignal()
     error = pyqtSignal(int, float, str)
 
@@ -425,12 +426,16 @@ class MultisweepTask(QtCore.QThread):
                 enhanced_results[res_idx]['nonlinear_fit_success'] = False
             return enhanced_results
 
-        print(f"Applying fitting analysis to {len(raw_results_from_crs)} resonances...")
+    #print(f"Applying fitting analysis to {len(raw_results_from_crs)} resonances...")
         
         # Temporary dictionary to hold results from skewed fit if it's applied
         skewed_fit_results_temp = enhanced_results 
 
         if apply_skewed:
+            # Signal start of skewed fitting
+            module_idx = self.params.get('module')
+            if module_idx is not None and self._running:
+                self.signals.fitting_progress.emit(module_idx, "Fitting in progress: Applying skewed fits")
             try:
                 skewed_fit_results_temp = fitting_module_direct.fit_skewed_multisweep(
                     enhanced_results, # Start with a copy of raw or previously enhanced data
@@ -439,7 +444,7 @@ class MultisweepTask(QtCore.QThread):
                     center_iq_circle=True,
                     normalize_fit=True
                 )
-                print(f"Skewed fitting completed.")
+                #print(f"Skewed fitting completed.")
                 # Mark skewed fit as applied and check success for each resonance
                 for res_idx in enhanced_results: # Iterate original keys to update
                     if res_idx in skewed_fit_results_temp:
@@ -482,6 +487,10 @@ class MultisweepTask(QtCore.QThread):
         # `skewed_fit_results_temp` is not needed beyond this point if we update `enhanced_results` in place.
 
         if apply_nonlinear:
+            # Signal start of nonlinear fitting
+            module_idx = self.params.get('module')
+            if module_idx is not None and self._running:
+                self.signals.fitting_progress.emit(module_idx, "Fitting in progress: Applying non-linear fits")
             try:
                 # Pass the current state of enhanced_results (which may include skewed fit data)
                 nonlinear_fit_output = fitting_nonlinear.fit_nonlinear_iq_multisweep(
@@ -490,7 +499,7 @@ class MultisweepTask(QtCore.QThread):
                     n_extrema_points=5,
                     verbose=False
                 )
-                print(f"Nonlinear fitting completed.")
+                #print(f"Nonlinear fitting completed.")
                 # Update enhanced_results with nonlinear fit data
                 for res_idx in enhanced_results:
                     if res_idx in nonlinear_fit_output:
@@ -539,8 +548,13 @@ class MultisweepTask(QtCore.QThread):
         nonlinear_applied_count = sum(1 for r in enhanced_results.values() if r.get('nonlinear_fit_applied'))
         nonlinear_success_count = sum(1 for r in enhanced_results.values() if r.get('nonlinear_fit_success'))
 
-        print(f"Fitting summary: Skewed: {skewed_success_count}/{skewed_applied_count if apply_skewed else len(enhanced_results)} successful. "
-              f"Nonlinear: {nonlinear_success_count}/{nonlinear_applied_count if apply_nonlinear else len(enhanced_results)} successful.")
+        # print(f"Fitting summary: Skewed: {skewed_success_count}/{skewed_applied_count if apply_skewed else len(enhanced_results)} successful. "
+        #       f"Nonlinear: {nonlinear_success_count}/{nonlinear_applied_count if apply_nonlinear else len(enhanced_results)} successful.")
+        
+        # Signal completion of fitting
+        module_idx = self.params.get('module')
+        if module_idx is not None and self._running:
+            self.signals.fitting_progress.emit(module_idx, "Fitting Completed")
             
         return enhanced_results
             

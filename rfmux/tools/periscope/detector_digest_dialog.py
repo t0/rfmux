@@ -139,6 +139,12 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.detector_count_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
         nav_layout.addWidget(self.detector_count_label)
         
+        # Add trace navigation hint
+        trace_hint_text = "↑↓ to switch traces" if self.resonance_data_for_digest and len(self.resonance_data_for_digest) > 1 else ""
+        self.trace_hint_label = QtWidgets.QLabel(trace_hint_text)
+        self.trace_hint_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; font-size: 10pt; }}")
+        nav_layout.addWidget(self.trace_hint_label)
+        
         outer_layout.addWidget(nav_widget)
         
         plots_layout = QtWidgets.QHBoxLayout()
@@ -151,6 +157,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.plot1_sweep_vs_freq.setLabel('bottom', "f - f_bias", units="Hz") 
         self.plot1_sweep_vs_freq.showGrid(x=True, y=True, alpha=0.3)
         self.plot1_legend = self.plot1_sweep_vs_freq.addLegend(offset=(30,10), labelTextColor=plot_pen_color)
+        # Set smaller font for legend
+        self.plot1_legend.setLabelTextSize('8pt')
         plots_layout.addWidget(self.plot1_sweep_vs_freq)
 
         # Plot 2: Sweep (IQ plane)
@@ -161,6 +169,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.plot2_iq_plane.setAspectLocked(True)
         self.plot2_iq_plane.showGrid(x=True, y=True, alpha=0.3)
         self.plot2_legend = self.plot2_iq_plane.addLegend(offset=(30,10), labelTextColor=plot_pen_color)
+        # Set smaller font for legend
+        self.plot2_legend.setLabelTextSize('8pt')
         plots_layout.addWidget(self.plot2_iq_plane)
 
         # Plot 3: Bias amplitude optimization
@@ -170,6 +180,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.plot3_bias_opt.setLabel('bottom', "f - f_bias", units="Hz") 
         self.plot3_bias_opt.showGrid(x=True, y=True, alpha=0.3)
         self.plot3_legend = self.plot3_bias_opt.addLegend(offset=(30,10), labelTextColor=plot_pen_color)
+        # Set smaller font for legend
+        self.plot3_legend.setLabelTextSize('8pt')
         plots_layout.addWidget(self.plot3_bias_opt)
         vb3.doubleClickedEvent.connect(self._handle_plot3_double_click)
         
@@ -195,6 +207,13 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.skewed_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         self.skewed_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         
+        # Set smaller font for table
+        table_font = self.skewed_table.font()
+        table_font.setPointSize(table_font.pointSize() - 1)
+        self.skewed_table.setFont(table_font)
+        self.skewed_table.horizontalHeader().setFont(table_font)
+        self.skewed_table.verticalHeader().setDefaultSectionSize(20)  # Smaller row height
+        
         # Set column widths
         self.skewed_table.setColumnWidth(0, 80)
         self.skewed_table.setColumnWidth(1, 100)
@@ -219,6 +238,13 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.nl_table.setAlternatingRowColors(True)
         self.nl_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         self.nl_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        
+        # Set smaller font for table
+        table_font = self.nl_table.font()
+        table_font.setPointSize(table_font.pointSize() - 1)
+        self.nl_table.setFont(table_font)
+        self.nl_table.horizontalHeader().setFont(table_font)
+        self.nl_table.verticalHeader().setDefaultSectionSize(20)  # Smaller row height
         
         # Set column widths
         self.nl_table.setColumnWidth(0, 80)
@@ -283,11 +309,15 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.nl_table.setItem(i, 2, QtWidgets.QTableWidgetItem(desc))
 
     def keyPressEvent(self, event: QtGui.QKeyEvent):
-        """Handle keyboard navigation between detectors."""
+        """Handle keyboard navigation between detectors and traces."""
         if event.key() == QtCore.Qt.Key.Key_Left:
             self._navigate_previous()
         elif event.key() == QtCore.Qt.Key.Key_Right:
             self._navigate_next()
+        elif event.key() == QtCore.Qt.Key.Key_Up:
+            self._navigate_previous_trace()
+        elif event.key() == QtCore.Qt.Key.Key_Down:
+            self._navigate_next_trace()
         else:
             super().keyPressEvent(event)
     
@@ -813,6 +843,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.next_button.setStyleSheet(button_style)
         if hasattr(self, 'detector_count_label'):
             self.detector_count_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+        if hasattr(self, 'trace_hint_label'):
+            self.trace_hint_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; font-size: 10pt; }}")
         
         # Update plots to ensure all colors are refreshed with the new theme
         self._update_plots()

@@ -19,7 +19,7 @@ POWER_NORMALIZATION = 0.001  # Reference power level for normalization (lower = 
 # Bifurcation parameters
 ENABLE_BIFURCATION = True  # Enable self-consistent frequency shift
 BIFURCATION_ITERATIONS = 2000  # Number of iterations for self-consistency
-BIFURCATION_CONVERGENCE_TOLERANCE = 1e-6  # Convergence criterion for frequency (relaxed from 1e-7)
+BIFURCATION_CONVERGENCE_TOLERANCE = 1e-9  # Convergence criterion for frequency
 BIFURCATION_DAMPING_FACTOR = 0.9  # Damping factor to prevent oscillation (0.1-0.5 range)
 
 # Nonlinearity saturation

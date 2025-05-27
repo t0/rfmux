@@ -154,7 +154,7 @@ def _check_xcb_cursor_runtime() -> bool:
 _check_xcb_cursor_runtime()
 
 # Import PyQt only after checking XCB dependencies
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtWidgets, QtGui
 from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, Qt, QRegularExpression 
 # pyqtSignal is already imported, no need for alias unless it's shadowed, which it isn't here.
 from PyQt6.QtGui import QFont, QIntValidator, QIcon, QDoubleValidator, QRegularExpressionValidator

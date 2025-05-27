@@ -141,7 +141,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         # Set initial value for recalculate_center_frequencies
         # The old parameter was a boolean, True mapping to "min-s21" effectively
         # New parameter is a string or None.
-        default_recalc_setting = self.params.get('recalculate_center_frequencies', "max-dIQ")
+        default_recalc_setting = self.params.get('recalculate_center_frequencies', "max-diq")
 
         if default_recalc_setting == "min-s21":
             self.recalc_cf_combo.setCurrentText("min-S21")

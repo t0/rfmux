@@ -306,16 +306,44 @@ class MockCRSUDPStreamer(threading.Thread):
         # This array should store int32 values.
         iq_data_arr = array.array("i", [0] * (NUM_CHANNELS * 2))
         
-        non_zero_channels_count = 0
-        for ch_idx_0_based in range(NUM_CHANNELS): # 0 to 1023
-            channel_num_1_based = ch_idx_0_based + 1
+        # Get configured channels for this module to avoid processing all 1024
+        configured_channels = set()
+        for (mod, ch) in self.mock_crs.frequencies.keys():
+            if mod == module_num:
+                configured_channels.add(ch)
+        for (mod, ch) in self.mock_crs.amplitudes.keys():
+            if mod == module_num:
+                configured_channels.add(ch)
+        for (mod, ch) in self.mock_crs.phases.keys():
+            if mod == module_num:
+                configured_channels.add(ch)
+        
+        # Pre-calculate constants
+        full_scale_counts = const.SCALE_FACTOR * 2**8  # 32 bit number instead of 24 bit
+        noise_level = const.UDP_NOISE_LEVEL  # Base noise level (in ADC counts)
+        nco_freq = self.mock_crs.get_nco_frequency(module=module_num) or 0
+        
+        # Generate noise for all channels first (this is fast)
+        # Using vectorized operations for better performance
+        noise_array = np.random.normal(0, noise_level, NUM_CHANNELS * 2)
+        for i in range(NUM_CHANNELS * 2):
+            iq_data_arr[i] = int(np.clip(noise_array[i], -2147483648, 2147483647))
+        
+        non_zero_channels_count = len(configured_channels)
+        
+        # Only process configured channels (this is the expensive part)
+        for channel_num_1_based in configured_channels:
+            ch_idx_0_based = channel_num_1_based - 1
             
             # Get current settings for this channel from MockCRS
-            # These are the commanded settings
             freq = self.mock_crs.frequencies.get((module_num, channel_num_1_based), 0)
             amp = self.mock_crs.amplitudes.get((module_num, channel_num_1_based), 0)
             phase_deg = self.mock_crs.phases.get((module_num, channel_num_1_based), 0)
-            nco_freq = self.mock_crs.get_nco_frequency(module=module_num) or 0
+            
+            # Skip if amplitude is 0 (no signal)
+            if amp == 0:
+                continue
+                
             total_freq = freq + nco_freq
 
             # Calculate the S21 response using the resonator model
@@ -323,28 +351,13 @@ class MockCRSUDPStreamer(threading.Thread):
                 module_num, channel_num_1_based, total_freq, amp, phase_deg
             )
             
-            # REALISTIC SCALING: Use 10,000x enhanced scale factor from constants
-            # s21_complex now contains S21 * commanded_amplitude (from resonator model)
-            # amplitude=1.0 → 83.8 billion counts (10,000x larger than before)
-            # amplitude=0.01 → 838 million counts (typical range)
-            # This gives realistic dBm levels in Periscope
-            full_scale_counts = const.SCALE_FACTOR*2**8 #32 bit number instead of 24 bit
-            
-            # Add random noise even when amplitude is 0
-            # This simulates ADC noise that's always present
-            noise_level = const.UDP_NOISE_LEVEL  # Base noise level (in ADC counts)
-            i_noise = np.random.normal(0, noise_level)
-            q_noise = np.random.normal(0, noise_level)
-            
-            i_val_scaled = s21_complex.real * full_scale_counts + i_noise
-            q_val_scaled = s21_complex.imag * full_scale_counts + q_noise
+            # Scale and add to existing noise
+            i_val_scaled = s21_complex.real * full_scale_counts + iq_data_arr[ch_idx_0_based * 2]
+            q_val_scaled = s21_complex.imag * full_scale_counts + iq_data_arr[ch_idx_0_based * 2 + 1]
             
             # Clip to int32 range and convert to int
             iq_data_arr[ch_idx_0_based * 2] = int(np.clip(i_val_scaled, -2147483648, 2147483647))
             iq_data_arr[ch_idx_0_based * 2 + 1] = int(np.clip(q_val_scaled, -2147483648, 2147483647))
-            
-            if iq_data_arr[ch_idx_0_based * 2] != 0 or iq_data_arr[ch_idx_0_based * 2 + 1] != 0:
-                non_zero_channels_count += 1
         
         if seq == 0 and module_num == 1: # Log for first packet of first module
             print(f"[UDP] First packet details (module {module_num}): {non_zero_channels_count} non-zero channels.")

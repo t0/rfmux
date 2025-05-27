@@ -120,15 +120,14 @@ class MockResonatorModel:
         self.resonator_current_f0s *= (1 - (self.resonator_pe + self.p_sky) * self.ff_factor)
 
     # --- LC Resonance Model Methods ---
-    def generate_lc_resonances(self, num_resonances=None, f_start=None, f_end=None):
+    def generate_lc_resonances(self):
         """Generate LC resonances distributed across spectrum with kinetic inductance parameters."""
-        # Use constants if parameters not provided
-        if num_resonances is None:
-            num_resonances = const.DEFAULT_NUM_RESONANCES
-        if f_start is None:
-            f_start = const.DEFAULT_FREQ_START
-        if f_end is None:
-            f_end = const.DEFAULT_FREQ_END
+        # Get ALL values from stored config or defaults
+        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        
+        num_resonances = config.get('num_resonances', const.DEFAULT_NUM_RESONANCES)
+        f_start = config.get('freq_start', const.DEFAULT_FREQ_START)
+        f_end = config.get('freq_end', const.DEFAULT_FREQ_END)
             
         self.lc_resonances = []
         self.kinetic_inductance_fractions = []
@@ -156,18 +155,27 @@ class MockResonatorModel:
 
         frequencies.sort()
         
+        # Get config values from MockCRS physics_config or fallback to constants
+        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        q_min = config.get('q_min', const.DEFAULT_Q_MIN)
+        q_max = config.get('q_max', const.DEFAULT_Q_MAX)
+        q_variation = config.get('q_variation', const.Q_VARIATION)
+        coupling_min = config.get('coupling_min', const.DEFAULT_COUPLING_MIN)
+        coupling_max = config.get('coupling_max', const.DEFAULT_COUPLING_MAX)
+        ki_fraction_default = config.get('kinetic_inductance_fraction', const.DEFAULT_KINETIC_INDUCTANCE_FRACTION)
+        ki_variation = config.get('kinetic_inductance_variation', const.KINETIC_INDUCTANCE_VARIATION)
+        
         for f0_val in frequencies:
-            # Use constants for Q factor range
-            Q_val = np.random.uniform(const.DEFAULT_Q_MIN, const.DEFAULT_Q_MAX)
-            Q_val *= np.random.uniform(1 - const.Q_VARIATION, 1 + const.Q_VARIATION)
+            # Use config values for Q factor range
+            Q_val = np.random.uniform(q_min, q_max)
+            Q_val *= np.random.uniform(1 - q_variation, 1 + q_variation)
             
-            # Use constants for coupling range
-            coupling_val = np.random.uniform(const.DEFAULT_COUPLING_MIN, const.DEFAULT_COUPLING_MAX)
+            # Use config values for coupling range
+            coupling_val = np.random.uniform(coupling_min, coupling_max)
             
             # Generate kinetic inductance fraction for this resonator
-            ki_fraction = const.DEFAULT_KINETIC_INDUCTANCE_FRACTION
-            ki_fraction *= np.random.uniform(1 - const.KINETIC_INDUCTANCE_VARIATION, 
-                                           1 + const.KINETIC_INDUCTANCE_VARIATION)
+            ki_fraction = ki_fraction_default
+            ki_fraction *= np.random.uniform(1 - ki_variation, 1 + ki_variation)
             
             self.lc_resonances.append({
                 'f0': f0_val, 
@@ -181,6 +189,12 @@ class MockResonatorModel:
         if not self.lc_resonances:
             return 1.0 + 0j # No attenuation if no LC resonators
 
+        # Get config values from MockCRS physics_config or fallback to constants
+        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        enable_bifurcation = config.get('enable_bifurcation', const.ENABLE_BIFURCATION)
+        base_noise_level = config.get('base_noise_level', const.BASE_NOISE_LEVEL)
+        amplitude_noise_coupling = config.get('amplitude_noise_coupling', const.AMPLITUDE_NOISE_COUPLING)
+        
         s21_total = 1.0 + 0j
         
         for idx, res in enumerate(self.lc_resonances):
@@ -191,7 +205,7 @@ class MockResonatorModel:
             # Get kinetic inductance fraction for this resonator
             ki_fraction = self.kinetic_inductance_fractions[idx] if idx < len(self.kinetic_inductance_fractions) else const.DEFAULT_KINETIC_INDUCTANCE_FRACTION
             
-            if const.ENABLE_BIFURCATION:
+            if enable_bifurcation:
                 # Self-consistent calculation with bifurcation capability
                 f0_eff = self._calculate_self_consistent_frequency(frequency, f0, Q, k, amplitude, ki_fraction)
             else:
@@ -208,32 +222,51 @@ class MockResonatorModel:
             s21_total *= s21_res
         
         # Add measurement noise (dimensionless, relative to S21)
-        noise_level = const.BASE_NOISE_LEVEL * (1 + amplitude * const.AMPLITUDE_NOISE_COUPLING)
+        noise_level = base_noise_level * (1 + amplitude * amplitude_noise_coupling)
         noise = noise_level * (np.random.randn() + 1j * np.random.randn())
         
         return s21_total + noise
     
     def _calculate_simple_frequency_shift(self, f0, amplitude, ki_fraction):
         """Calculate frequency shift without self-consistency (faster)."""
+        # Get config values from MockCRS physics_config or fallback to constants
+        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        power_norm_const = config.get('power_normalization', const.POWER_NORMALIZATION)
+        freq_shift_power_law = config.get('frequency_shift_power_law', const.FREQUENCY_SHIFT_POWER_LAW)
+        freq_shift_mag = config.get('frequency_shift_magnitude', const.FREQUENCY_SHIFT_MAGNITUDE)
+        saturation_power = config.get('saturation_power', const.SATURATION_POWER)
+        saturation_sharpness = config.get('saturation_sharpness', const.SATURATION_SHARPNESS)
+        
         # Normalized power
-        power_norm = (amplitude / const.POWER_NORMALIZATION) ** const.FREQUENCY_SHIFT_POWER_LAW
+        power_norm = (amplitude / power_norm_const) ** freq_shift_power_law
         
         # Apply saturation
-        if power_norm > const.SATURATION_POWER:
-            saturation_factor = const.SATURATION_POWER + (power_norm - const.SATURATION_POWER) / (1 + (power_norm / const.SATURATION_POWER) ** const.SATURATION_SHARPNESS)
+        if power_norm > saturation_power:
+            saturation_factor = saturation_power + (power_norm - saturation_power) / (1 + (power_norm / saturation_power) ** saturation_sharpness)
             power_norm = saturation_factor
         
         # Frequency shift (downward for KIDs)
-        freq_shift_fraction = -const.FREQUENCY_SHIFT_MAGNITUDE * ki_fraction * power_norm
+        freq_shift_fraction = -freq_shift_mag * ki_fraction * power_norm
         return f0 * (1 + freq_shift_fraction)
     
     def _calculate_self_consistent_frequency(self, frequency, f0, Q, k, amplitude, ki_fraction):
         """Calculate self-consistent frequency with potential bifurcation using damped iteration."""
+        # Get config values from MockCRS physics_config or fallback to constants
+        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        power_norm_const = config.get('power_normalization', const.POWER_NORMALIZATION)
+        freq_shift_power_law = config.get('frequency_shift_power_law', const.FREQUENCY_SHIFT_POWER_LAW)
+        freq_shift_mag = config.get('frequency_shift_magnitude', const.FREQUENCY_SHIFT_MAGNITUDE)
+        saturation_power = config.get('saturation_power', const.SATURATION_POWER)
+        saturation_sharpness = config.get('saturation_sharpness', const.SATURATION_SHARPNESS)
+        bifurcation_iterations = config.get('bifurcation_iterations', const.BIFURCATION_ITERATIONS)
+        bifurcation_tolerance = config.get('bifurcation_convergence_tolerance', const.BIFURCATION_CONVERGENCE_TOLERANCE)
+        bifurcation_damping = config.get('bifurcation_damping_factor', const.BIFURCATION_DAMPING_FACTOR)
+        
         # Initial guess
         f0_eff = f0
         convergence_history = []
         
-        for iteration in range(const.BIFURCATION_ITERATIONS):
+        for iteration in range(bifurcation_iterations):
             # Calculate S21 magnitude at current effective frequency
             delta = (frequency - f0_eff) / f0_eff
             denom = 1 + 2j * Q * delta
@@ -241,15 +274,15 @@ class MockResonatorModel:
             circulating_power = abs(s21_res)**2 * amplitude**2
             
             # Calculate new frequency based on circulating power
-            power_norm = (circulating_power / const.POWER_NORMALIZATION) ** const.FREQUENCY_SHIFT_POWER_LAW
+            power_norm = (circulating_power / power_norm_const) ** freq_shift_power_law
             
             # Apply saturation
-            if power_norm > const.SATURATION_POWER:
-                saturation_factor = const.SATURATION_POWER + (power_norm - const.SATURATION_POWER) / (1 + (power_norm / const.SATURATION_POWER) ** const.SATURATION_SHARPNESS)
+            if power_norm > saturation_power:
+                saturation_factor = saturation_power + (power_norm - saturation_power) / (1 + (power_norm / saturation_power) ** saturation_sharpness)
                 power_norm = saturation_factor
             
             # New effective frequency (downward shift for KIDs)
-            freq_shift_fraction = -const.FREQUENCY_SHIFT_MAGNITUDE * ki_fraction * power_norm
+            freq_shift_fraction = -freq_shift_mag * ki_fraction * power_norm
             f0_new = f0 * (1 + freq_shift_fraction)
             
             # Check convergence
@@ -259,17 +292,16 @@ class MockResonatorModel:
             if const.DEBUG_BIFURCATION:
                 print(f"DEBUG: CONVERGENCE iter {iteration}: error = {convergence_error:.2e}")
             
-            if convergence_error < const.BIFURCATION_CONVERGENCE_TOLERANCE:
+            if convergence_error < bifurcation_tolerance:
                 if const.DEBUG_BIFURCATION:
                     print(f"Bifurcation converged in {iteration + 1} iterations")
                 break
             
             # Apply damped iteration to prevent oscillation
-            # f0_eff = (1 - damping) * f0_eff + damping * f0_new
-            f0_eff = (1 - const.BIFURCATION_DAMPING_FACTOR) * f0_eff + const.BIFURCATION_DAMPING_FACTOR * f0_new
+            f0_eff = (1 - bifurcation_damping) * f0_eff + bifurcation_damping * f0_new
         
-        if const.DEBUG_BIFURCATION and iteration == const.BIFURCATION_ITERATIONS - 1:
-            print(f"Warning: Bifurcation did not converge after {const.BIFURCATION_ITERATIONS} iterations")
+        if const.DEBUG_BIFURCATION and iteration == bifurcation_iterations - 1:
+            print(f"Warning: Bifurcation did not converge after {bifurcation_iterations} iterations")
             
         return f0_eff
 

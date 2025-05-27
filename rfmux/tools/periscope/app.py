@@ -52,6 +52,7 @@ from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, Initial
                        # and window classes (NetworkAnalysisWindow, MultisweepWindow).
                        # (Assumes periscope_ui.py has been refactored into ui.py and exports these).
 from .app_runtime import PeriscopeRuntime
+from .mock_configuration_dialog import MockConfigurationDialog
 
 # Note: The original commented-out lines for specific UI class imports
 # (e.g., NetworkAnalysisDialog) have been removed, as these are expected
@@ -123,6 +124,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Parse channel string (e.g., "1&2,3") into a list of channel groups.
         # parse_channels_multich is imported from .utils.
         self.channel_list: list[list[int]] = parse_channels_multich(chan_str)
+        
+        # Check if we're in mock mode
+        self.is_mock_mode = self.host in ["127.0.0.1", "localhost", "::1"]
+        self.mock_config = None  # Store current mock configuration
 
         # --- State Variables ---
         self.paused: bool = False               # Flag to pause/resume data processing
@@ -413,6 +418,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
             toolbar_layout.addWidget(cb_plot_type)
         toolbar_layout.addStretch(1) # Add stretch to push items to the left
+        
+        # Add mock reconfigure button if in mock mode
+        if self.is_mock_mode:
+            self.btn_reconfigure_mock = QtWidgets.QPushButton("Reconfigure Simulated KIDs")
+            self.btn_reconfigure_mock.setToolTip("Reconfigure the simulated KID resonator parameters")
+            self.btn_reconfigure_mock.clicked.connect(self._show_mock_config_dialog)
+            toolbar_layout.addWidget(self.btn_reconfigure_mock)
+        
         layout.addWidget(toolbar_widget) # Add the toolbar widget to the main vertical layout
 
     def _add_config_panel(self, layout: QtWidgets.QVBoxLayout):
@@ -1060,3 +1073,115 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                         if "I" in cset: cset["I"].setVisible(self.show_i)
                         if "Q" in cset: cset["Q"].setVisible(self.show_q)
                         if "Mag" in cset: cset["Mag"].setVisible(self.show_m)
+
+    def _show_mock_config_dialog(self):
+        """
+        Show the mock configuration dialog for adjusting simulated KID parameters.
+        
+        Only available when running in mock mode (connected to localhost).
+        """
+        if not self.is_mock_mode:
+            return
+            
+        # Get current configuration if available
+        current_config = self.mock_config or self._get_current_mock_config()
+        
+        # Show dialog
+        dialog = MockConfigurationDialog(self, current_config)
+        if dialog.exec():
+            # Get new configuration
+            new_config = dialog.get_configuration()
+            self.mock_config = new_config
+            
+            # Apply configuration to the mock CRS
+            self._apply_mock_configuration(new_config)
+            
+    def _get_current_mock_config(self) -> dict:
+        """
+        Get the current mock configuration from the mock_constants module.
+        
+        Returns:
+            dict: Current configuration values
+        """
+        try:
+            import rfmux.core.mock_constants as mc
+            return {
+                'kinetic_inductance_fraction': mc.DEFAULT_KINETIC_INDUCTANCE_FRACTION,
+                'kinetic_inductance_variation': mc.KINETIC_INDUCTANCE_VARIATION,
+                'frequency_shift_power_law': mc.FREQUENCY_SHIFT_POWER_LAW,
+                'frequency_shift_magnitude': mc.FREQUENCY_SHIFT_MAGNITUDE,
+                'power_normalization': mc.POWER_NORMALIZATION,
+                'enable_bifurcation': mc.ENABLE_BIFURCATION,
+                'bifurcation_iterations': mc.BIFURCATION_ITERATIONS,
+                'bifurcation_convergence_tolerance': mc.BIFURCATION_CONVERGENCE_TOLERANCE,
+                'bifurcation_damping_factor': mc.BIFURCATION_DAMPING_FACTOR,
+                'saturation_power': mc.SATURATION_POWER,
+                'saturation_sharpness': mc.SATURATION_SHARPNESS,
+                'q_min': mc.DEFAULT_Q_MIN,
+                'q_max': mc.DEFAULT_Q_MAX,
+                'q_variation': mc.Q_VARIATION,
+                'coupling_min': mc.DEFAULT_COUPLING_MIN,
+                'coupling_max': mc.DEFAULT_COUPLING_MAX,
+                'freq_start': mc.DEFAULT_FREQ_START,
+                'freq_end': mc.DEFAULT_FREQ_END,
+                'num_resonances': mc.DEFAULT_NUM_RESONANCES,
+                'base_noise_level': mc.BASE_NOISE_LEVEL,
+                'amplitude_noise_coupling': mc.AMPLITUDE_NOISE_COUPLING,
+                'udp_noise_level': mc.UDP_NOISE_LEVEL
+            }
+        except Exception as e:
+            print(f"Error getting current mock config: {e}")
+            # Return defaults if unable to read current values
+            return {}
+            
+    def _apply_mock_configuration(self, config: dict):
+        """
+        Apply the user's configuration to the mock CRS system.
+        
+        This sends the configuration to the server-side MockCRS to regenerate
+        resonators with the new parameters.
+        
+        Args:
+            config: Dictionary of configuration values
+        """
+        try:
+            if self.crs is not None and hasattr(self.crs, 'generate_resonators'):
+                import asyncio
+                
+                # Use the existing event loop or create new one
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_closed():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                try:
+                    # Apply configuration to server
+                    future = asyncio.ensure_future(self.crs.generate_resonators(config))
+                    resonator_count = loop.run_until_complete(future)
+                    
+                    print(f"Regenerated {resonator_count} resonators with new parameters")
+                    QtWidgets.QMessageBox.information(self, "Configuration Applied", 
+                                                   f"Mock KID parameters have been updated.\n"
+                                                   f"Generated {resonator_count} resonators.")
+                except Exception as e:
+                    import traceback
+                    print(f"Error regenerating resonators: {e}")
+                    traceback.print_exc()
+                    QtWidgets.QMessageBox.critical(self, "Configuration Error", 
+                                                 f"Failed to regenerate resonators:\n{str(e)}\n\n"
+                                                 f"Details:\n{traceback.format_exc()}")
+            else:
+                QtWidgets.QMessageBox.warning(self, "Configuration Warning", 
+                                            "CRS object not available or doesn't support mock configuration.")
+                
+        except Exception as e:
+            import traceback
+            print(f"Error applying mock configuration: {e}")
+            traceback.print_exc()
+            QtWidgets.QMessageBox.critical(self, "Configuration Error", 
+                                          f"Failed to apply mock configuration:\n{str(e)}\n\n"
+                                          f"Details:\n{traceback.format_exc()}")

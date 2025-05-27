@@ -136,7 +136,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         # Option to recalculate center frequencies and rotate
         self.recalc_cf_combo = QtWidgets.QComboBox()
-        self.recalc_cf_combo.addItems(["max-dIQ","None", "min-S21"])
+        self.recalc_cf_combo.addItems(["max-dIQ","min-S21","None"])
         
         # Set initial value for recalculate_center_frequencies
         # The old parameter was a boolean, True mapping to "min-s21" effectively
@@ -145,8 +145,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         if default_recalc_setting == "min-s21":
             self.recalc_cf_combo.setCurrentText("min-S21")
-        elif default_recalc_setting == "max-dq":
-            self.recalc_cf_combo.setCurrentText("max-dQ")
+        elif default_recalc_setting == "max-diq":
+            self.recalc_cf_combo.setCurrentText("max-dIQ")
         else: # Covers None or any other unexpected string
             self.recalc_cf_combo.setCurrentText("None")
             
@@ -255,8 +255,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 params_dict['recalculate_center_frequencies'] = None
             elif recalc_method_text == "min-S21":
                 params_dict['recalculate_center_frequencies'] = "min-s21"
-            elif recalc_method_text == "max-dQ":
-                params_dict['recalculate_center_frequencies'] = "max-dq"
+            elif recalc_method_text == "max-dIQ":
+                params_dict['recalculate_center_frequencies'] = "max-diq"
             else: # Should not happen with QComboBox
                 params_dict['recalculate_center_frequencies'] = None
             

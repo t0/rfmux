@@ -26,6 +26,7 @@ import warnings
 import asyncio
 
 from .app import Periscope  # Core application class
+from .mock_configuration_dialog import MockConfigurationDialog
 
 # Wildcard imports are used here for convenience to bring in numerous
 # utility functions, constants (like ICON_PATH, DEFAULT_BUFFER_SIZE),
@@ -192,6 +193,29 @@ def main():
             # Start UDP streaming automatically
             print("Starting MockCRS UDP streaming...")
             loop.run_until_complete(crs_obj.start_udp_streaming(host='127.0.0.1', port=9876))
+            
+            # Show mock configuration dialog
+            print("Opening mock configuration dialog...")
+            config_dialog = MockConfigurationDialog()
+            if config_dialog.exec():
+                # Get configuration
+                mock_config = config_dialog.get_configuration()
+                
+                try:
+                    # Apply configuration to the server
+                    resonator_count = loop.run_until_complete(crs_obj.generate_resonators(mock_config))
+                    print(f"Mock configuration applied successfully. Generated {resonator_count} resonators.")
+                except Exception as e:
+                    import traceback
+                    print(f"Error applying mock configuration: {e}")
+                    traceback.print_exc()
+                    QtWidgets.QMessageBox.critical(None, "Configuration Error", 
+                                                 f"Failed to apply mock configuration:\n{str(e)}\n\n"
+                                                 f"Details:\n{traceback.format_exc()}")
+            else:
+                # User cancelled - exit
+                print("Mock configuration cancelled, exiting...")
+                sys.exit(0)
             
         # Check if it's a hostname in the format rfmux####.local
         elif "rfmux" in crs_board and ".local" in crs_board:

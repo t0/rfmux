@@ -331,12 +331,78 @@ class MockCRS(BaseCRS):
         self.nyquist_zones = {} # module -> {target: zone}
         self.hmc7044_registers = {} # address -> value
 
+        # Store physics configuration (can be updated via generate_resonators)
+        self.physics_config = {}  # Will store active physics configuration
+        
         # Instantiate helpers
         self.resonator_model = MockResonatorModel(self) # Pass self for state access
         self.udp_manager = MockUDPManager(self)         # Pass self for state access
 
         # Initialize resonator parameters via the model
         self.resonator_model.generate_lc_resonances() # Default LC model init
+
+    async def generate_resonators(self, config=None):
+        """Generate/regenerate resonators with current or provided parameters.
+        
+        Parameters
+        ----------
+        config : dict, optional
+            Configuration parameters to use. If not provided, uses defaults.
+            Keys can include:
+            - num_resonances
+            - freq_start
+            - freq_end
+            - kinetic_inductance_fraction
+            - kinetic_inductance_variation
+            - q_min
+            - q_max
+            - q_variation
+            - coupling_min
+            - coupling_max
+            etc.
+        """
+        try:
+            # Initialize resonator model if needed
+            if not hasattr(self, 'resonator_model') or self.resonator_model is None:
+                self.resonator_model = MockResonatorModel(self)
+                
+            # Ensure lists are initialized
+            if not hasattr(self.resonator_model, 'lc_resonances'):
+                self.resonator_model.lc_resonances = []
+            if self.resonator_model.lc_resonances is None:
+                self.resonator_model.lc_resonances = []
+                
+            if not hasattr(self.resonator_model, 'kinetic_inductance_fractions'):
+                self.resonator_model.kinetic_inductance_fractions = []
+            if self.resonator_model.kinetic_inductance_fractions is None:
+                self.resonator_model.kinetic_inductance_fractions = []
+                
+            # Clear existing resonators
+            self.resonator_model.lc_resonances = []
+            self.resonator_model.kinetic_inductance_fractions = []
+            
+            # If config provided, store it permanently in the instance
+            if config:
+                # Update our physics configuration (permanent storage)
+                self.physics_config = config.copy()
+                
+                # Generate with new parameters - the model will use self.physics_config
+                self.resonator_model.generate_lc_resonances()
+            else:
+                # Generate with defaults
+                self.resonator_model.generate_lc_resonances()
+            
+            # Validate result
+            if self.resonator_model.lc_resonances is None:
+                self.resonator_model.lc_resonances = []
+                
+            return len(self.resonator_model.lc_resonances)
+            
+        except Exception as e:
+            print(f"Error in generate_resonators: {e}")
+            import traceback
+            traceback.print_exc()
+            raise  # Re-raise to send error back to client
 
     def validate_enum_member(self, value, enum_class, name):
         """Validate that value is a member of enum_class, converting strings if necessary."""
@@ -458,7 +524,7 @@ class MockCRS(BaseCRS):
         assert module in [1, 2, 3, 4]
         units = self.validate_enum_member(units, Units, "units")
         assert units in [Units.NORMALIZED, Units.RAW]
-        await asyncio.sleep(0.01) # Simulate delay
+        await asyncio.sleep(0.001) # Simulate delay
 
         i_vals, q_vals = [], []
         if units == Units.NORMALIZED:
@@ -475,7 +541,7 @@ class MockCRS(BaseCRS):
         assert module in [1, 2, 3, 4]
         units = self.validate_enum_member(units, Units, "units")
         assert units in [Units.NORMALIZED, Units.RAW]
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.001)
 
         i_vals, q_vals = [], []
         if units == Units.NORMALIZED:
@@ -493,7 +559,7 @@ class MockCRS(BaseCRS):
         assert module is not None and isinstance(module, int)
         
         # Simulate hardware communication delay
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.001)
         
         # Set NCO frequency for the module
         self.nco_frequencies[module] = frequency
@@ -601,7 +667,7 @@ class MockCRS(BaseCRS):
         assert isinstance(num_samples, int), "Number of samples must be an integer"
         assert channel is None or isinstance(channel, int), "Channel must be None or an integer"
         assert module in [1, 2, 3, 4], "Invalid module number"
-        await asyncio.sleep(0.01) # Simulate hardware delay
+        await asyncio.sleep(0.0001) # Simulate hardware delay
 
         overrange = False # Mock flags
         overvoltage = False

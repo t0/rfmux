@@ -88,7 +88,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         self.setWindowTitle(f"Detector Digest: Detector {self.detector_id+1}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
         self.setWindowFlags(QtCore.Qt.WindowType.Window)
-        self.resize(1200, 1100) # Increased size to accommodate tables properly
+        self.resize(1200, 1050) # Increased size to accommodate tables properly
 
     def _setup_ui(self):
         """Sets up the UI layout with plots and fitting information panel."""

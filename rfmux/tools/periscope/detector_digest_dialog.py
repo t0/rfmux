@@ -787,7 +787,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         mouse_point = view_box.mapSceneToView(ev.scenePos())
         x_coord_on_plot, y_coord_on_plot = mouse_point.x(), mouse_point.y()
-        min_dist_sq, closest_amp_key = float('inf'), None
+        min_dist_sq, closest_amp_key = np.inf, None
 
         # Sort keys to ensure consistent behavior if multiple points are equidistant
         # Sorting by the float value of the amplitude part of the key

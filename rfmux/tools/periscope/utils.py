@@ -315,7 +315,7 @@ class UnitConverter:
     """
     @staticmethod
     def normalize_to_dbm(normalized_amplitude: float, dac_scale_dbm: float, resistance: float = 50.0) -> float:
-        if normalized_amplitude <= 0: return float('-inf')
+        if normalized_amplitude <= 0: return -np.inf
         power_max_mw = 10**(dac_scale_dbm/10)
         power_max_w = power_max_mw / 1000
         v_rms_max = np.sqrt(power_max_w * resistance)

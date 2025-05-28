@@ -1012,7 +1012,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # y_coord = mouse_point.y() # y_coord is not used for selecting the CF
 
         # --- Find the resonance whose center/bias frequency is closest to the click's X-coordinate ---
-        min_distance = float('inf')
+        min_distance = np.inf
         clicked_res_idx = None
         clicked_actual_cf = None
 
@@ -1207,7 +1207,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         Returns:
             The remembered output CF (float) or None if no suitable history found.
         """
-        min_abs_amp_diff = float('inf')
+        min_abs_amp_diff = np.inf
         best_cf_found = None
 
         if not self.last_output_cfs_by_amp_and_conceptual_idx:

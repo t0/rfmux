@@ -640,7 +640,7 @@ class MultisweepTask(QtCore.QThread):
                             iq_data = data_dict_val.get('iq_complex')
                             if iq_data is not None:
                                 try:
-                                    data_dict_val['is_bifurcated'] = fitting_module_direct.identify_bifurcation(iq_data)
+                                    data_dict_val['is_bifurcated'] = fitting_module_direct.identify_bifurcation(iq_data, threshold_factor=7)
                                 except Exception as e:
                                     print(f"Warning: Bifurcation detection failed for index {res_key}: {e}", file=sys.stderr)
                                     data_dict_val['is_bifurcated'] = False

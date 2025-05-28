@@ -19,6 +19,8 @@ import numpy as np
 from scipy.optimize import curve_fit, fmin
 import warnings
 from typing import Dict, Tuple, List, Optional, Union, Any
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def nonlinear_iq(f: np.ndarray, fr: float, Qr: float, amp: float, phi: float, 
@@ -89,6 +91,7 @@ def get_y_nonlinear(yg: Union[float, np.ndarray], a: float) -> Union[float, np.n
         yg = y + a / (1 + y^2)
     
     This describes the frequency-pulling effect in a nonlinear resonator.
+    Fully vectorized implementation using NumPy operations.
     
     Parameters
     ----------
@@ -106,14 +109,35 @@ def get_y_nonlinear(yg: Union[float, np.ndarray], a: float) -> Union[float, np.n
         # Linear case - no frequency pulling
         return yg
     
-    # For small a, we can use a series expansion
-    # Otherwise, solve the cubic equation numerically
-    if isinstance(yg, np.ndarray):
-        y = np.zeros_like(yg)
-        for i, yg_val in enumerate(yg):
-            y[i] = _solve_single_y(yg_val, a)
-    else:
-        y = _solve_single_y(yg, a)
+    # Handle scalar case
+    if np.isscalar(yg):
+        return _solve_single_y(yg, a)
+    
+    # Vectorized Newton's method for arrays
+    yg = np.asarray(yg)
+    y = yg.copy()  # Initial guess
+    
+    # Perform Newton iterations
+    for _ in range(50):  # Maximum iterations
+        # Vectorized function evaluation: f(y) = y + a/(1+y^2) - yg
+        y_sq = y * y
+        f_val = y + a / (1 + y_sq) - yg
+        
+        # Vectorized derivative: f'(y) = 1 - 2*a*y/(1+y^2)^2
+        denom_sq = (1 + y_sq) ** 2
+        f_prime = 1 - 2 * a * y / denom_sq
+        
+        # Update where derivative is not too small
+        mask = np.abs(f_prime) > 1e-10
+        if not np.any(mask):
+            break
+            
+        # Newton update: y_new = y - f(y)/f'(y)
+        y[mask] -= f_val[mask] / f_prime[mask]
+        
+        # Check convergence
+        if np.all(np.abs(f_val) < 1e-10):
+            break
     
     return y
 
@@ -432,11 +456,95 @@ def calculate_residuals(z_data: np.ndarray, z_fit: np.ndarray) -> float:
         return rms_error
 
 
+def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) -> Tuple[Union[int, np.integer], Dict]:
+    """
+    Fit a single resonance - extracted for parallel execution.
+    
+    Parameters
+    ----------
+    args : tuple
+        (res_key, resonance_data, fit_nonlinearity, n_extrema_points)
+        
+    Returns
+    -------
+    res_key : int or np.integer
+        The resonance index key
+    updated_data : dict
+        Dictionary with fitting results added
+    """
+    res_key, resonance_data, fit_nonlinearity, n_extrema_points = args
+    
+    # Make a copy to avoid modifying the original
+    updated_data = resonance_data.copy()
+    
+    frequencies = resonance_data.get('frequencies')
+    iq_complex = resonance_data.get('iq_complex')
+    original_cf = resonance_data.get('original_center_frequency')
+    
+    if frequencies is None or iq_complex is None or original_cf is None:
+        # Mark as failed
+        updated_data['nonlinear_fit_params'] = None
+        updated_data['nonlinear_fit_errors'] = None
+        updated_data['nonlinear_fit_residual'] = np.inf
+        updated_data['nonlinear_fit_success'] = False
+        return res_key, updated_data
+    
+    try:
+        # Step 1: Estimate and remove gain
+        iq_corrected, gain_mag, gain_phase = estimate_and_remove_gain(
+            frequencies, iq_complex, n_extrema_points
+        )
+        
+        # Store gain info
+        updated_data['gain_complex'] = gain_mag * np.exp(1j * gain_phase)
+        updated_data['iq_gain_corrected'] = iq_corrected
+        
+        # Step 2: Fit nonlinear model
+        p0, popt, perr, residual = fit_nonlinear_iq(
+            frequencies, iq_corrected, 
+            fit_nonlinearity=fit_nonlinearity
+        )
+        
+        # Step 3: Store results
+        param_names = ['fr', 'Qr', 'amp', 'phi', 'a', 'i0', 'q0']
+        
+        updated_data['nonlinear_fit_params'] = {
+            name: value for name, value in zip(param_names, popt)
+        }
+        
+        updated_data['nonlinear_fit_errors'] = {
+            name: error for name, error in zip(param_names, perr)
+        }
+        
+        updated_data['nonlinear_fit_residual'] = residual
+        updated_data['nonlinear_fit_success'] = residual < 0.1
+        
+        # Calculate derived parameters
+        Qr = popt[1]
+        amp = popt[2]
+        if amp < 1:
+            Qc = Qr / amp
+            Qi = 1 / (1/Qr - 1/Qc)
+            updated_data['nonlinear_fit_params']['Qc'] = Qc
+            updated_data['nonlinear_fit_params']['Qi'] = Qi
+            
+    except Exception as e:
+        warnings.warn(f"Nonlinear fitting failed for {original_cf*1e-6:.3f} MHz: {e}")
+        updated_data['nonlinear_fit_params'] = None
+        updated_data['nonlinear_fit_errors'] = None
+        updated_data['nonlinear_fit_residual'] = np.inf
+        updated_data['nonlinear_fit_success'] = False
+    
+    return res_key, updated_data
+
+
 def fit_nonlinear_iq_multisweep(
     multisweep_data: Union[Dict, List[Dict]],
     fit_nonlinearity: bool = True,
     n_extrema_points: int = 5,
-    verbose: bool = False
+    verbose: bool = False,
+    parallel: bool = True,
+    max_workers: Optional[int] = None
 ) -> Union[Dict, List[Dict]]:
     """
     Process multisweep results with CITKID-style nonlinear resonator fitting.
@@ -458,6 +566,11 @@ def fit_nonlinear_iq_multisweep(
         Default: 5
     verbose : bool, optional
         If True, prints fitting progress and results. Default: False
+    parallel : bool, optional
+        If True, use ThreadPoolExecutor for parallel fitting. Default: True
+    max_workers : int or None, optional
+        Maximum number of worker threads. If None, uses min(4, cpu_count).
+        Default: None
         
     Returns
     -------
@@ -473,7 +586,7 @@ def fit_nonlinear_iq_multisweep(
     # Handle multi-module case
     if isinstance(multisweep_data, list):
         return [fit_nonlinear_iq_multisweep(
-            module_data, fit_nonlinearity, n_extrema_points, verbose
+            module_data, fit_nonlinearity, n_extrema_points, verbose, parallel, max_workers
         ) for module_data in multisweep_data]
     
     # Process single module
@@ -481,7 +594,8 @@ def fit_nonlinear_iq_multisweep(
         warnings.warn("fit_nonlinear_iq_multisweep: input is not a dict or list")
         return multisweep_data
     
-    # Process each resonance
+    # Filter valid resonances
+    valid_resonances = []
     for res_key, resonance_data in multisweep_data.items():
         if not isinstance(resonance_data, dict):
             continue
@@ -491,74 +605,81 @@ def fit_nonlinear_iq_multisweep(
             if verbose:
                 print(f"Skipping non-integer key {res_key}: expected index-based keys only")
             continue
+        
+        # Check required fields
+        if (resonance_data.get('frequencies') is not None and 
+            resonance_data.get('iq_complex') is not None and
+            resonance_data.get('original_center_frequency') is not None):
+            valid_resonances.append((res_key, resonance_data))
+        elif verbose:
+            cf = resonance_data.get('original_center_frequency')
+            if cf:
+                print(f"Skipping resonance at {cf*1e-6:.3f} MHz: missing data")
+            else:
+                print(f"Skipping resonance at index {res_key}: missing data")
+    
+    # Decide whether to use parallel processing
+    if parallel and len(valid_resonances) > 1:
+        # Set up worker pool
+        if max_workers is None:
+            max_workers = min(4, os.cpu_count() or 1)
+        
+        if verbose:
+            print(f"\nProcessing {len(valid_resonances)} resonances in parallel with {max_workers} workers...")
+        
+        # Prepare arguments for parallel execution
+        args_list = [(res_key, res_data, fit_nonlinearity, n_extrema_points) 
+                      for res_key, res_data in valid_resonances]
+        
+        # Process in parallel
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            futures = {executor.submit(_fit_single_resonance, args): args[0] 
+                       for args in args_list}
             
-        frequencies = resonance_data.get('frequencies')
-        iq_complex = resonance_data.get('iq_complex')
-        original_cf = resonance_data.get('original_center_frequency')
-        bias_freq = resonance_data.get('bias_frequency', original_cf)
+            # Collect results as they complete
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                try:
+                    res_key, updated_data = future.result()
+                    multisweep_data[res_key].update(updated_data)
+                    
+                    if verbose:
+                        cf = updated_data.get('original_center_frequency', 0)
+                        success = updated_data.get('nonlinear_fit_success', False)
+                        status = "✓" if success else "✗"
+                        print(f"  [{completed}/{len(valid_resonances)}] {status} Resonance at {cf*1e-6:.3f} MHz")
+                        
+                        if success and updated_data.get('nonlinear_fit_params'):
+                            params = updated_data['nonlinear_fit_params']
+                            print(f"      Fitted fr: {params['fr']*1e-6:.3f} MHz, "
+                                  f"Qr: {params['Qr']:.0f}, a: {params.get('a', 0):.3f}")
+                        
+                except Exception as e:
+                    res_key = futures[future]
+                    warnings.warn(f"Parallel fitting failed for resonance {res_key}: {e}")
+    else:
+        # Sequential processing
+        if verbose and len(valid_resonances) > 0:
+            print(f"\nProcessing {len(valid_resonances)} resonances sequentially...")
         
-        if original_cf is None:
-            if verbose:
-                print(f"Skipping resonance at index {res_key}: missing original_center_frequency")
-            continue
-        
-        if frequencies is None or iq_complex is None:
-            if verbose:
-                print(f"Skipping resonance at {original_cf*1e-6:.3f} MHz: missing data")
-            continue
-        
-        try:
-            # Step 1: Estimate and remove gain
-            iq_corrected, gain_mag, gain_phase = estimate_and_remove_gain(
-                frequencies, iq_complex, n_extrema_points
+        for i, (res_key, resonance_data) in enumerate(valid_resonances):
+            _, updated_data = _fit_single_resonance(
+                (res_key, resonance_data, fit_nonlinearity, n_extrema_points)
             )
-            
-            # Store gain info
-            resonance_data['gain_complex'] = gain_mag * np.exp(1j * gain_phase)
-            resonance_data['iq_gain_corrected'] = iq_corrected
-            
-            # Step 2: Fit nonlinear model
-            p0, popt, perr, residual = fit_nonlinear_iq(
-                frequencies, iq_corrected, 
-                fit_nonlinearity=fit_nonlinearity
-            )
-            
-            # Step 3: Store results
-            param_names = ['fr', 'Qr', 'amp', 'phi', 'a', 'i0', 'q0']
-            
-            resonance_data['nonlinear_fit_params'] = {
-                name: value for name, value in zip(param_names, popt)
-            }
-            
-            resonance_data['nonlinear_fit_errors'] = {
-                name: error for name, error in zip(param_names, perr)
-            }
-            
-            resonance_data['nonlinear_fit_residual'] = residual
-            resonance_data['nonlinear_fit_success'] = residual < 0.1
-            
-            # Calculate derived parameters
-            Qr = popt[1]
-            amp = popt[2]
-            if amp < 1:
-                Qc = Qr / amp
-                Qi = 1 / (1/Qr - 1/Qc)
-                resonance_data['nonlinear_fit_params']['Qc'] = Qc
-                resonance_data['nonlinear_fit_params']['Qi'] = Qi
+            multisweep_data[res_key].update(updated_data)
             
             if verbose:
-                print(f"\nResonance at {original_cf*1e-6:.3f} MHz:")
-                print(f"  Fitted fr: {popt[0]*1e-6:.3f} MHz")
-                print(f"  Qr: {popt[1]:.0f}, amp: {popt[2]:.3f}")
-                print(f"  Nonlinearity a: {popt[4]:.3f}")
-                print(f"  Residual: {residual:.3e}")
+                cf = updated_data.get('original_center_frequency', 0)
+                success = updated_data.get('nonlinear_fit_success', False)
+                status = "✓" if success else "✗"
+                print(f"  [{i+1}/{len(valid_resonances)}] {status} Resonance at {cf*1e-6:.3f} MHz")
                 
-        except Exception as e:
-            warnings.warn(f"Nonlinear fitting failed for {original_cf*1e-6:.3f} MHz: {e}")
-            resonance_data['nonlinear_fit_params'] = None
-            resonance_data['nonlinear_fit_errors'] = None
-            resonance_data['nonlinear_fit_residual'] = np.inf
-            resonance_data['nonlinear_fit_success'] = False
+                if success and updated_data.get('nonlinear_fit_params'):
+                    params = updated_data['nonlinear_fit_params']
+                    print(f"      Fitted fr: {params['fr']*1e-6:.3f} MHz, "
+                          f"Qr: {params['Qr']:.0f}, a: {params.get('a', 0):.3f}")
     
     return multisweep_data
 

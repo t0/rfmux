@@ -88,7 +88,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         self.setWindowTitle(f"Detector Digest: Detector {self.detector_id+1}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
         self.setWindowFlags(QtCore.Qt.WindowType.Window)
-        self.resize(1200, 1050) # Increased size to accommodate tables properly
+        self.resize(1200, 800) # Increased size to accommodate tables properly
 
     def _setup_ui(self):
         """Sets up the UI layout with plots and fitting information panel."""
@@ -97,10 +97,19 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         
         # Main vertical layout for the entire window content
         outer_layout = QtWidgets.QVBoxLayout(central_widget)
+        outer_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins for cleaner look
         
         # Set the background color of the dialog based on dark mode
         bg_color_hex = "#1C1C1C" if self.dark_mode else "#FFFFFF" # Hex for stylesheet
         central_widget.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}") # Apply to QWidget base
+        
+        # Create main splitter for resizable panes
+        self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        
+        # Create top widget for navigation and plots
+        top_widget = QtWidgets.QWidget()
+        top_layout = QtWidgets.QVBoxLayout(top_widget)
+        top_layout.setContentsMargins(5, 5, 5, 0)  # Small margins for the top section
         
         # Create navigation header with title and buttons
         nav_widget = QtWidgets.QWidget()
@@ -145,7 +154,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.trace_hint_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; font-size: 10pt; }}")
         nav_layout.addWidget(self.trace_hint_label)
         
-        outer_layout.addWidget(nav_widget)
+        top_layout.addWidget(nav_widget)
         
         plots_layout = QtWidgets.QHBoxLayout()
         plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
@@ -185,8 +194,11 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         plots_layout.addWidget(self.plot3_bias_opt)
         vb3.doubleClickedEvent.connect(self._handle_plot3_double_click)
         
-        outer_layout.addLayout(plots_layout) # Add plots layout to main vertical layout
+        top_layout.addLayout(plots_layout)  # Add plots to top widget
 
+        # Add top widget to splitter
+        self.main_splitter.addWidget(top_widget)
+        
         # Fitting Information Panel
         self.fitting_info_group = QtWidgets.QGroupBox("Fitting Results")
         self.fitting_info_group.setStyleSheet(f"QGroupBox {{ color: {title_color_str}; border: 1px solid {title_color_str}; margin-top: 0.5em;}} QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 3px 0 3px; }}")
@@ -256,9 +268,16 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         nl_fit_layout.addWidget(self.nl_table)
         fitting_info_main_layout.addWidget(nl_fit_group)
         
-        outer_layout.addWidget(self.fitting_info_group)
-        outer_layout.setStretchFactor(plots_layout, 3) 
-        outer_layout.setStretchFactor(self.fitting_info_group, 2) # Adjusted stretch factor
+        # Add fitting info group to splitter
+        self.main_splitter.addWidget(self.fitting_info_group)
+        
+        # Configure splitter
+        self.main_splitter.setSizes([600, 400])  # 60% plots, 40% tables
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(5)
+        
+        # Add splitter to main layout
+        outer_layout.addWidget(self.main_splitter)
 
         self._apply_zoom_box_mode_to_all()
         self.apply_theme(self.dark_mode)
@@ -338,6 +357,75 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         # Move to next detector with wraparound
         self.current_detector_index_in_list = (self.current_detector_index_in_list + 1) % len(self.detector_indices)
         self._switch_to_detector(self.detector_indices[self.current_detector_index_in_list])
+    
+    def _navigate_previous_trace(self):
+        """Navigate to the previous amplitude trace."""
+        if not self.resonance_data_for_digest or len(self.resonance_data_for_digest) <= 1:
+            return
+        
+        # Get sorted list of amplitude keys
+        sorted_keys = sorted(
+            self.resonance_data_for_digest.keys(),
+            key=lambda k: float(k.split(":")[0])
+        )
+        
+        # Find current index
+        try:
+            current_idx = sorted_keys.index(self.active_amplitude_raw_key)
+            # Move to previous with wraparound
+            new_idx = (current_idx - 1) % len(sorted_keys)
+            self._switch_to_amplitude_trace(sorted_keys[new_idx])
+        except ValueError:
+            # If current key not found, select first
+            if sorted_keys:
+                self._switch_to_amplitude_trace(sorted_keys[0])
+    
+    def _navigate_next_trace(self):
+        """Navigate to the next amplitude trace."""
+        if not self.resonance_data_for_digest or len(self.resonance_data_for_digest) <= 1:
+            return
+        
+        # Get sorted list of amplitude keys
+        sorted_keys = sorted(
+            self.resonance_data_for_digest.keys(),
+            key=lambda k: float(k.split(":")[0])
+        )
+        
+        # Find current index
+        try:
+            current_idx = sorted_keys.index(self.active_amplitude_raw_key)
+            # Move to next with wraparound
+            new_idx = (current_idx + 1) % len(sorted_keys)
+            self._switch_to_amplitude_trace(sorted_keys[new_idx])
+        except ValueError:
+            # If current key not found, select first
+            if sorted_keys:
+                self._switch_to_amplitude_trace(sorted_keys[0])
+    
+    def _switch_to_amplitude_trace(self, amplitude_key: str):
+        """Switch to a different amplitude trace."""
+        if amplitude_key not in self.resonance_data_for_digest:
+            return
+        
+        self.active_amplitude_raw_key = amplitude_key
+        self.active_sweep_info = self.resonance_data_for_digest[amplitude_key]
+        self.active_sweep_data = self.active_sweep_info['data']
+        self.current_plot_offset_hz = self.active_sweep_info['actual_cf_hz']
+        
+        # Update trace hint label with current position
+        if hasattr(self, 'trace_hint_label'):
+            sorted_keys = sorted(
+                self.resonance_data_for_digest.keys(),
+                key=lambda k: float(k.split(":")[0])
+            )
+            try:
+                current_idx = sorted_keys.index(amplitude_key)
+                trace_hint_text = f"Trace {current_idx + 1}/{len(sorted_keys)} (↑↓ to switch)"
+                self.trace_hint_label.setText(trace_hint_text)
+            except ValueError:
+                pass
+        
+        self._update_plots()
     
     def _switch_to_detector(self, new_detector_id: int):
         """Switch to display a different detector."""
@@ -836,6 +924,18 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     color: #999999;
                 }
             """
+        
+        # Update splitter theme
+        if hasattr(self, 'main_splitter'):
+            splitter_style = f"""
+            QSplitter::handle {{
+                background-color: {'#555555' if dark_mode else '#CCCCCC'};
+            }}
+            QSplitter::handle:hover {{
+                background-color: {'#777777' if dark_mode else '#AAAAAA'};
+            }}
+            """
+            self.main_splitter.setStyleSheet(splitter_style)
         
         if hasattr(self, 'prev_button'):
             self.prev_button.setStyleSheet(button_style)

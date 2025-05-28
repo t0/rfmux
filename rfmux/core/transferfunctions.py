@@ -6,6 +6,7 @@ import numpy as np
 
 # Added import for PSD computation
 from scipy.signal import welch
+from scipy.constants import pi, c
 
 
 # TODO: Empirical value (should probably be a hybrid)
@@ -25,7 +26,13 @@ FREQ_QUANTUM = COMB_SAMPLING_FREQ / 256 / 2**DDS_PHASE_ACC_NBITS
 # TODO: verify still appropriate
 BASE_FREQUENCY = COMB_SAMPLING_FREQ / 256 / 2**12
 
+# ────────────────── Cable Delay Compensation Functions ───────────────────
+SPEED_OF_LIGHT_VACUUM = c  # m/s
+VELOCITY_FACTOR_COAX = 0.66
+EFFECTIVE_PROPAGATION_SPEED = SPEED_OF_LIGHT_VACUUM * VELOCITY_FACTOR_COAX
+
 # TODO: These should be functions that take the current and attenuation as inputs
+# CAN assume -1.75 dBm loss in the balun
 # ADC_FS = -1 # dbm
 # DAC_FS = -1 # dbm
 
@@ -437,3 +444,81 @@ def spectrum_from_slow_tod(
         "freq_dsb": freq_dsb,
         "psd_dual_sideband": psd_dual_sideband_db,
     }
+
+def fit_cable_delay(freqs: np.ndarray, phases_deg: np.ndarray) -> float:
+    """
+    Fits the phase vs. frequency data to determine the residual group delay.
+
+    Parameters
+    ----------
+    freqs : np.ndarray
+        Array of frequencies in Hz.
+    phases_deg : np.ndarray
+        Array of corresponding phases in degrees, as currently displayed
+        (i.e., already compensated by any existing cable length setting).
+
+    Returns
+    -------
+    float
+        The calculated additional group delay (tau_additional) in seconds.
+        This delay corresponds to the residual phase slope.
+    """
+    if len(freqs) < 2 or len(phases_deg) < 2 or len(freqs) != len(phases_deg):
+        # Not enough data points to perform a fit
+        return 0.0
+
+    phases_rad = np.deg2rad(phases_deg)
+    unwrapped_phases_rad = np.unwrap(phases_rad)
+
+    # Perform linear fit: phase_rad = slope * freq_hz + intercept
+    slope, _ = np.polyfit(freqs, unwrapped_phases_rad, 1)
+
+    # The phase slope d(phase_rad)/d(freq_hz) = 2 * pi * tau
+    # So, tau_additional = slope / (2 * pi)
+    tau_additional = -slope / (2 * np.pi)
+    
+    return tau_additional
+
+def calculate_new_cable_length(current_physical_length_m: float, additional_delay_s: float) -> float:
+    """
+    Calculates the new physical cable length based on the current length and an additional delay.
+
+    Parameters
+    ----------
+    current_physical_length_m : float
+        The current physical cable length setting in meters.
+    additional_delay_s : float
+        The additional group delay calculated from the phase slope (e.g., by fit_cable_delay).
+
+    Returns
+    -------
+    float
+        The new total physical cable length in meters.
+    """
+    additional_physical_length_m = additional_delay_s * EFFECTIVE_PROPAGATION_SPEED
+    new_physical_length_m = current_physical_length_m + additional_physical_length_m
+    return new_physical_length_m
+
+def recalculate_displayed_phase(
+    freqs: np.ndarray, 
+    phases_deg_currently_displayed: np.ndarray, 
+    old_physical_length_m: float, 
+    new_physical_length_m: float
+) -> np.ndarray:
+    """
+    Recalculates the phase data with only the delta compensation.
+    """
+    if len(freqs) == 0:
+        return np.array([])
+
+    # Calculate the delta length
+    delta_length_m = new_physical_length_m - old_physical_length_m
+    
+    # Calculate phase shift from delta length
+    # A positive delta_length means more cable, which creates positive phase shift
+    delta_phase_rad = (2 * np.pi * freqs * delta_length_m) / EFFECTIVE_PROPAGATION_SPEED
+    
+    # Apply the delta compensation directly
+    phases_new_displayed_rad = np.deg2rad(phases_deg_currently_displayed) + delta_phase_rad
+    
+    return np.rad2deg(phases_new_displayed_rad)

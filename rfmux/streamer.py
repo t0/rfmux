@@ -34,7 +34,7 @@ if not hasattr(socket, "IP_ADD_SOURCE_MEMBERSHIP"):
 class InAddr(ctypes.Structure):
     _fields_ = [("s_addr", ctypes.c_uint32)]
 
-    def __init__(self, ip: bytes):
+    def __init__(self, ip: str):
         # Accept IP address as a string
         self.s_addr = int.from_bytes(socket.inet_aton(ip), byteorder="little")
 
@@ -200,15 +200,25 @@ def get_local_ip(crs_hostname):
     Determines the local IP address used to reach the CRS device.
 
     Args:
-        crs_hostname (str): The hostname or IP address of the CRS device.
+        crs_hostname (str): The hostname or IP address of the CRS device, optionally with port.
 
     Returns:
         str: The local IP address of the network interface used to reach the CRS device.
     """
+    # Parse hostname to extract just the host part if port is included
+    if ':' in crs_hostname:
+        hostname = crs_hostname.split(':')[0]
+    else:
+        hostname = crs_hostname
+    
+    # Special handling for localhost
+    if hostname in ["127.0.0.1", "localhost", "::1"]:
+        return "127.0.0.1"
+    
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         try:
-            # Connect to the CRS hostname on an arbitrary port to determine the local IP
-            s.connect((crs_hostname, 1))
+            # Connect to the hostname on an arbitrary port to determine the local IP
+            s.connect((hostname, 1))
             local_ip = s.getsockname()[0]
         except Exception:
             raise Exception("Could not determine local IP address!")
@@ -216,7 +226,43 @@ def get_local_ip(crs_hostname):
 
 
 def get_multicast_socket(crs_hostname):
+    # Extract just the hostname part for source address resolution
+    if ':' in crs_hostname:
+        hostname_only = crs_hostname.split(':')[0]
+    else:
+        hostname_only = crs_hostname
+    
+    # Check if this is a localhost connection (MockCRS uses unicast)
+    if hostname_only in ["127.0.0.1", "localhost", "::1"]:
+        # Create a unicast socket for MockCRS
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        # Bind to the streamer port on localhost
+        sock.bind(("127.0.0.1", STREAMER_PORT))
+        
+        # Set a large receive buffer size
+        rcvbuf = 16777216
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        
+        # Ensure SO_RCVBUF didn't just fail silently
+        actual = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        if sys.platform == "linux":
+            # Linux returns a doubled value
+            actual /= 2
+        if actual != rcvbuf:
+            warnings.warn(
+                f"Unable to set SO_RCVBUF to {rcvbuf} (got {actual}). Consider "
+                "'sudo sysctl net.core.rmem_max=67108864' or similar. This setting "
+                "can be made persistent across reboots by configuring "
+                "/etc/sysctl.conf or /etc/sysctl.d."
+            )
+        
+        return sock
+    
+    # Original multicast socket code for real hardware
     multicast_interface_ip = get_local_ip(crs_hostname)
+    
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
     # Configure the socket for multicast reception
@@ -253,7 +299,7 @@ def get_multicast_socket(crs_hostname):
     mreq = IPMreqSource(
         imr_multiaddr=InAddr(STREAMER_HOST),
         imr_interface=InAddr(multicast_interface_ip),
-        imr_sourceaddr=InAddr(socket.gethostbyname(crs_hostname)),
+        imr_sourceaddr=InAddr(socket.gethostbyname(hostname_only)),
     )
 
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_SOURCE_MEMBERSHIP, bytes(mreq))

@@ -6,6 +6,7 @@ pairings in order to measure the complex S21 across a large bandwidth. Often use
 import warnings
 import asyncio
 import numpy as np
+import scipy.signal as signal
 from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
 
@@ -20,15 +21,18 @@ async def take_netanal(
     npoints: int = 5000,
     max_chans: int = 1023,
     max_span: float = 500e6,
+    rotate_phase_to_0: bool = True,
     *,
-    module
+    module,
+    progress_callback=None,
+    data_callback=None,
 ):
     """
     Perform a network analysis over the frequency range [fmin, fmax].
     Returns the frequencies and complex amplitude and phase at each frequencies.
-    The sweep is divided into sub-ranges (chunks) whenever the span exceeds `max_span`. 
+    The sweep is divided into sub-ranges (chunks) whenever the span exceeds `max_span`.
     Each chunk is associated with a single NCO setting (midpoint of the chunk).
-    
+
     Exactly one frequency overlaps between consecutive chunks, which is used to
     compute a phase rotation so that the entire measurement is aligned across
     multiple NCO settings.
@@ -52,21 +56,28 @@ async def take_netanal(
         by default 1023.
     max_span : float, optional
         Maximum span (Hz) per NCO setting, defaults to the droop-free (non-extended) range of 500MHz.
+    rotate_phase_to_0 : bool, optional
+        If True, applies an arbitrary global phase rotation to make the first point
+        have zero phase. This makes it easier to compare phase responses across
+        different measurements, by default True.
     module : int or list of int
         - If an integer, run one measurement on that module.
         - If a list, e.g. [1, 2, 3], run concurrently for each module in the list
           and return a dict keyed by module number.
         - Note -- lists must be within a single analog bank (1-4) or (5-8).
+    progress_callback : callable, optional
+        Callback function that receives (module, progress_percentage) updates.
+    data_callback : callable, optional
+        Callback function that receives (module, freqs, amps, phases) updates.
 
     Returns
     -------
-    If `module` is a list:
-        list
-            A list where each value is a tuple corresponding to the modules in the list:
-            (fs_sorted, iq_sorted, phase_sorted).
-    Otherwise:
-        fs_sorted, iq_sorted, phase_sorted : np.ndarray
-        Frequency, I/Q, and phase arrays for the single measurement.
+    dict
+        A dictionary containing the measurement results.
+        Keys:
+        - 'frequencies': numpy.ndarray - Sorted frequency points (Hz).
+        - 'iq_complex': numpy.ndarray - Complex I/Q data corresponding to 'frequencies'.
+        - 'phase_degrees': numpy.ndarray - Phase in degrees corresponding to 'frequencies'.
     """
 
     # If user passed modules as a list, run in parallel across those modules
@@ -95,11 +106,13 @@ async def take_netanal(
                 npoints=npoints,
                 max_chans=max_chans,
                 max_span=max_span,
+                rotate_phase_to_0=rotate_phase_to_0,
                 module=m,
+                progress_callback=progress_callback,
+                data_callback=data_callback,
             ))
         results = await asyncio.gather(*tasks)
         return results
-        # return {m: result for m, result in zip(module, results)}
 
     # Generate a global array of frequencies across [fmin, fmax].
     freqs_global = np.linspace(fmin, fmax, npoints, endpoint=True)
@@ -139,8 +152,12 @@ async def take_netanal(
     # Prepare arrays for final data across all chunks.
     fs_all, iq_all = [], []
     prev_boundary_iq = None  # To store I/Q of the overlap freq from previous chunk.
+    first_point_rotation = None  # Store rotation to set first point phase to 0
+    first_data_point = None  # Store the very first data point for rotation reference
 
     # Process each chunk.
+    total_chunks = len(chunks)
+    
     for i, (start_idx, end_idx) in enumerate(chunks):
         freqs_chunk = freqs_global[start_idx:end_idx + 1]
         if not len(freqs_chunk):
@@ -149,6 +166,9 @@ async def take_netanal(
         # NCO frequency is the midpoint of the chunk.
         nco_freq = 0.5 * (freqs_chunk[0] + freqs_chunk[-1])
         await crs.set_nco_frequency(nco_freq, module=module)
+
+        # Track data at the chunk level
+        chunk_fs_full, chunk_iq_full = [], []        
 
         # Arrays to collect data from this chunk before optional rotation.
         chunk_fs, chunk_iq = [], []
@@ -166,15 +186,7 @@ async def take_netanal(
 
             # Add random offsets to dither IMD tones
             # but ensure they don't exceed NCO bandwidth at the extrema.
-            # WARNING: This does assume users aren't taking data with <50Hz
-            #          resolution. If so, will need to get more clever and
-            #          apply the edge cases to all relevant frequencies and not
-            #          just the extrema.
-            ifreqs = np.concatenate([
-                [comb[0] - 50 * np.sign(comb[0] - nco_freq) * np.random.random()],
-                comb[1:-1] + 100 * (np.random.random(len(comb) - 2) - 0.5),
-                [comb[-1] - 50 * np.sign(comb[-1] - nco_freq) * np.random.random()]
-            ])
+            ifreqs = _safe_concatenate_frequencies(comb, nco_freq)
 
             # Not every internal loop has to use the same number of channels.
             # This block ensures the unused ones are zeroed WHILE programming
@@ -199,26 +211,72 @@ async def take_netanal(
             samples = await crs.get_samples(
                 nsamps, average=True, channel=None, module=module
             )
+            new_iq_points = []
             for ch in range(len(ifreqs)):
                 i_val = samples.mean.i[ch]
                 q_val = samples.mean.q[ch]
-                chunk_iq.append(i_val + 1j * q_val)
+                iq_val = i_val + 1j * q_val
+                
+                # Store the very first data point if we haven't seen one yet
+                if i == 0 and it == 0 and ch == 0 and first_data_point is None:
+                    first_data_point = iq_val
+                    # Calculate the phase rotation factor (only once for the entire dataset)
+                    if rotate_phase_to_0 and abs(first_data_point) > 1e-15:
+                        first_point_rotation = abs(first_data_point) / first_data_point
+                
+                # Apply the rotation to this point if needed
+                if rotate_phase_to_0 and first_point_rotation is not None:
+                    iq_val = iq_val * first_point_rotation
+                    
+                new_iq_points.append(iq_val)
+                
+            # Add the frequency points
+            chunk_fs_full.extend(chunk_fs)
+            # Add the (potentially rotated) IQ points
+            chunk_iq_full.extend(new_iq_points)
+            
+            # Clear the temporary arrays for the next iteration
+            chunk_fs = []
+            chunk_iq = []
+            
+            if data_callback and chunk_fs_full:
+                fs_array = np.array(fs_all + chunk_fs_full)
+                iq_array = np.array(iq_all + chunk_iq_full)
+                amp_array = np.abs(iq_array)
+                phase_array = np.degrees(np.angle(iq_array))
+                data_callback(module, fs_array, amp_array, phase_array)
+
+            # Report progress
+            if progress_callback:
+                progress = ((i * niter + it + 1) / (total_chunks * niter)) * 100
+                progress_callback(module, progress)
 
         # Rotate new NCO chunk so the overlap freq aligns with previous NCO phase.
         if i > 0 and prev_boundary_iq is not None:
-            boundary_new = chunk_iq[0]
+            boundary_new = chunk_iq_full[0]
             if abs(boundary_new) > 1e-15:
                 rot = prev_boundary_iq / boundary_new
-                # Remove the overlap freq from this chunk's arrays, apply rotation to the rest.
-                chunk_iq = [iq_val * rot for iq_val in chunk_iq[1:]]
-                chunk_fs = chunk_fs[1:]
+                # Apply rotation to all but the first point (overlap point)
+                rotated_iq = [chunk_iq_full[0]] + [iq_val * rot for iq_val in chunk_iq_full[1:]]
+                # Now remove the overlap point
+                chunk_iq_full = rotated_iq[1:]
+                chunk_fs_full = chunk_fs_full[1:]
 
         # Update the boundary freq's I/Q for use in the next chunk.
-        prev_boundary_iq = chunk_iq[-1]
+        if chunk_iq_full:
+            prev_boundary_iq = chunk_iq_full[-1]
 
         # Accumulate into global arrays.
-        fs_all.extend(chunk_fs)
-        iq_all.extend(chunk_iq)
+        fs_all.extend(chunk_fs_full)
+        iq_all.extend(chunk_iq_full)
+        
+        # Report final data update after rotation
+        if data_callback:
+            fs_array = np.array(fs_all)
+            iq_array = np.array(iq_all)
+            amp_array = np.abs(iq_array)
+            phase_array = np.degrees(np.angle(iq_array))
+            data_callback(module, fs_array, amp_array, phase_array)
 
     # Clean up before exiting
     async with crs.tuber_context() as ctx:
@@ -226,12 +284,64 @@ async def take_netanal(
             ctx.set_amplitude(0, channel=j+1, module=module)
         await ctx()
 
-    fs_all = np.array(fs_all)
-    iq_all = np.array(iq_all)
-    phase_all = np.degrees(np.angle(iq_all))
+    fs_all_np = np.array(fs_all)
+    iq_all_np = np.array(iq_all)
 
-    # Sort all interleaved and chunked data by ascending frequency.
-    combined = sorted(zip(fs_all, iq_all, phase_all), key=lambda x: x[0])
-    fs_sorted, iq_sorted, phase_sorted = zip(*combined)
+    if len(fs_all_np) == 0: # Handle empty data
+        # Return arrays in the expected dictionary structure
+        return {
+            'frequencies': np.array([]),
+            'iq_complex': np.array([]),
+            'phase_degrees': np.array([])
+        }
 
-    return np.array(fs_sorted), np.array(iq_sorted), np.array(phase_sorted)
+    sort_indices = np.argsort(fs_all_np)
+    fs_sorted = fs_all_np[sort_indices]
+    iq_sorted = iq_all_np[sort_indices]
+    phase_sorted = np.degrees(np.angle(iq_sorted))
+
+    result_dict = {
+        'frequencies': fs_sorted,
+        'iq_complex': iq_sorted,
+        'phase_degrees': phase_sorted
+    }
+            
+    return result_dict
+
+def _safe_concatenate_frequencies(comb, nco_freq):
+    """
+    Safely concatenate frequency arrays with dithering, handling edge cases
+    with small numbers of elements.
+    
+    Parameters
+    ----------
+    comb : ndarray
+        Array of frequencies to dither
+    nco_freq : float
+        NCO frequency reference
+        
+    Returns
+    -------
+    ndarray
+        Array of dithered frequencies
+    """
+    if len(comb) == 0:
+        return np.array([])
+    
+    if len(comb) == 1:
+        # Only one frequency - just dither it slightly
+        return np.array([comb[0] - 50 * np.sign(comb[0] - nco_freq) * np.random.random()])
+    
+    if len(comb) == 2:
+        # Two frequencies - dither both as edge cases
+        return np.array([
+            comb[0] - 50 * np.sign(comb[0] - nco_freq) * np.random.random(),
+            comb[1] - 50 * np.sign(comb[1] - nco_freq) * np.random.random()
+        ])
+    
+    # Normal case with more than 2 frequencies
+    return np.concatenate([
+        [comb[0] - 50 * np.sign(comb[0] - nco_freq) * np.random.random()],
+        comb[1:-1] + 100 * (np.random.random(len(comb) - 2) - 0.5),
+        [comb[-1] - 50 * np.sign(comb[-1] - nco_freq) * np.random.random()]
+    ])

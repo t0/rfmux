@@ -23,7 +23,7 @@ class ArgumentFiller:
 
         >>> mod = crs.module[3].channel[4]
 
-    The ArgumentFiller allows these indexed objects to autoamtically be
+    The ArgumentFiller allows these indexed objects to automatically be
     translated into function-call arguments on a TuberObject. For example:
 
         >>> crs.get_frequency(d.UNITS.HZ, channel=3, module=4)

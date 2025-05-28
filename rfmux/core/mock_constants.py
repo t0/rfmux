@@ -42,9 +42,9 @@ DEFAULT_COUPLING_MIN = 0.68
 DEFAULT_COUPLING_MAX = 0.97
 
 # Frequency range for resonance generation
-DEFAULT_FREQ_START = 1e9  # 1 GHz
-DEFAULT_FREQ_END = 2e9    # 2 GHz
-DEFAULT_NUM_RESONANCES = 500
+DEFAULT_FREQ_START = 0.5e9  # 1 GHz
+DEFAULT_FREQ_END = 1e9    # 2 GHz
+DEFAULT_NUM_RESONANCES = 50
 
 # =============================================================================
 # Amplitude and Noise Parameters

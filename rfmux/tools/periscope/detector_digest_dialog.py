@@ -221,7 +221,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         
         # Set smaller font for table
         table_font = self.skewed_table.font()
-        table_font.setPointSize(table_font.pointSize() - 1)
+        table_font.setPointSize(table_font.pointSize())
         self.skewed_table.setFont(table_font)
         self.skewed_table.horizontalHeader().setFont(table_font)
         self.skewed_table.verticalHeader().setDefaultSectionSize(20)  # Smaller row height
@@ -253,7 +253,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         
         # Set smaller font for table
         table_font = self.nl_table.font()
-        table_font.setPointSize(table_font.pointSize() - 1)
+        table_font.setPointSize(table_font.pointSize())
         self.nl_table.setFont(table_font)
         self.nl_table.horizontalHeader().setFont(table_font)
         self.nl_table.verticalHeader().setDefaultSectionSize(20)  # Smaller row height

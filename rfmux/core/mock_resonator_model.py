@@ -66,7 +66,7 @@ class MockResonatorModel:
 
         freq_range = f_end - f_start
         if num_resonators * min_spacing > freq_range and num_resonators > 0 : # check num_resonators > 0
-             max_resonators = int(freq_range / min_spacing) if min_spacing > 0 else float('inf')
+             max_resonators = int(freq_range / min_spacing) if min_spacing > 0 else np.inf
              raise ValueError(
                 f"Cannot fit {num_resonators} resonators with min_spacing {min_spacing}Hz "
                 f"in range {freq_range}Hz. Max possible: {max_resonators}"

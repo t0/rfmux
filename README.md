@@ -14,24 +14,47 @@ Clone rfmux from github, and then install via pip (will also install the depende
 
 ```bash
 cd rfmux
-pip install .
+pip install -e .
 ```
 
 Note that rfmux requires Python 3.12 or later
+
+## Periscope
+
+[periscope_v2_demo.webm](https://github.com/user-attachments/assets/9466fb54-1552-4b1a-bd22-dec9c9259b72)
 
 An additional system library that cannot be automatically installed with pip is xcb-cursor.
 This is required for the real-time GUI visualization tool `periscope`. It can be installed via:
 ```bash
 $ sudo apt-get install libxcb-cursor0
 ```
-Once the pip command above has completed, the visualizer can be called directly from the commandline:
+Once the pip command above has completed, the visualizer can be called directly from the commandline using the CRS serial number:
 ```bash
-$ periscope rfmux0022.local --module 2 --channels "1,3&5"
+$ periscope 0022 --module 2 --channels "1,3&5"
 ```
 or directly from within a Python / IPython / Jupyter environment as a method of a CRS object:
 ```python
 >>> crs.raise_periscope(module=2, channels="1,3&5")
 ```
+
+### Emulation Mode
+
+`periscope` can also be run in a local emulation mode that simulates both the CRS and a KID array by using "mock" as the CRS serial number.
+When launched this way, you will be prompted to customize the parameters of the KID array to be emulated.
+
+```bash
+$ periscope mock --module 1 --channels "1,3&5"
+```
+
+Mock mode is under active development, and not all CRS functions are instrumented, but it does emulate KID non-linear inductance, all of the tuning algorithms currently used in rfmux, fitters, and the real-time visualization.
+Instantiating a hardware map using mock mode also allows for offline algorithm development, as most of the signal processing functions are properly emulated at baseband.
+
+```python
+s = load_session("""
+!HardwareMap
+- !flavour "rfmux.core.mock"
+- !CRS { serial: "MOCK0001", hostname: "127.0.0.1" }
+""")
 
 ## Firmware & Git LFS
 

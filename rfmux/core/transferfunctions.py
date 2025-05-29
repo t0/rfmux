@@ -245,7 +245,7 @@ def compensate_psd_for_cics(frequencies, psd, dec_stage=6, spectrum_cutoff=0.9):
     cic1_corr_c = _general_single_cic_correction(freq_abs * R1 * R2, f_in1, R=R1, N=3)
     cic2_corr_c = _general_single_cic_correction(freq_abs * R2, f_in2, R=R2, N=6)
     correction = cic1_corr_c * cic2_corr_c
-    psd_corrected = psd / correction
+    psd_corrected = psd / correction**2
 
     # Enforce cutoff
     nyquist = fs / 2

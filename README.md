@@ -55,6 +55,7 @@ s = load_session("""
 - !flavour "rfmux.core.mock"
 - !CRS { serial: "MOCK0001", hostname: "127.0.0.1" }
 """)
+```
 
 ## Firmware & Git LFS
 

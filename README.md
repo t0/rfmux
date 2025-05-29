@@ -28,7 +28,7 @@ This is required for the real-time GUI visualization tool `periscope`. It can be
 ```bash
 $ sudo apt-get install libxcb-cursor0
 ```
-Once the pip command above has completed, the visualizer can be called directly from the commandline using the CRS serial number:
+The visualizer can be called directly from the commandline using the CRS serial number:
 ```bash
 $ periscope 0022 --module 2 --channels "1,3&5"
 ```
@@ -46,7 +46,7 @@ When launched this way, you will be prompted to customize the parameters of the 
 $ periscope mock --module 1 --channels "1,3&5"
 ```
 
-Mock mode is under active development, and not all CRS functions are instrumented, but it does emulate KID non-linear inductance, all of the tuning algorithms currently used in rfmux, fitters, and the real-time visualization.
+Emulation mode is under active development, and not all CRS functions are instrumented, but it does emulate KID non-linear inductance, all of the tuning algorithms currently used in rfmux, fitters, and the real-time visualization.
 Instantiating a hardware map using mock mode also allows for offline algorithm development, as most of the signal processing functions are properly emulated at baseband.
 
 ```python

@@ -7,6 +7,8 @@ import numpy as np
 # Added import for PSD computation
 from scipy.signal import welch
 from scipy.constants import pi, c
+from typing import Union, Optional, Dict, Literal
+import warnings
 
 
 # TODO: Empirical value (should probably be a hybrid)
@@ -258,47 +260,79 @@ def compensate_psd_for_cics(frequencies, psd, dec_stage=6, spectrum_cutoff=0.9):
 
 
 def spectrum_from_slow_tod(
-    i_data,
-    q_data,
-    dec_stage,
-    scaling="psd",
-    nperseg=None,
-    reference="relative",
-    spectrum_cutoff=0.9,
-):
+    i_data: Union[np.ndarray, list],
+    q_data: Union[np.ndarray, list],
+    dec_stage: int,
+    scaling: Literal["psd", "ps"] = "psd",
+    nperseg: Optional[int] = None,
+    reference: Literal["relative", "absolute"] = "relative",
+    spectrum_cutoff: float = 0.9,
+    input_units: Literal["adc_counts", "volts"] = "adc_counts",
+) -> Dict[str, np.ndarray]:
     """
-    Internal function to compute both the I/Q single-sideband PSD and
-    the dual-sideband complex PSD in either dBc or dBm, depending on 'reference'.
-    The 'scaling' argument can be 'psd' => power spectral density (V^2/Hz)
-    or 'ps' => power spectrum (V^2).
+    Compute both the I/Q single-sideband PSD and the dual-sideband complex PSD.
+    
+    This function calculates power spectral density (PSD) or power spectrum (PS) from
+    time-domain I/Q data, applying CIC filter corrections and converting to appropriate
+    units (dBc or dBm) based on the reference type.
 
     Parameters
     ----------
     i_data : array-like
-        Time-domain I (real) samples.
+        Time-domain I (real) samples. Units must match `input_units` parameter.
     q_data : array-like
-        Time-domain Q (imag) samples.
+        Time-domain Q (imag) samples. Units must match `input_units` parameter.
     dec_stage : int
         Decimation stage to define the second CIC correction factor.
-    scaling : {'psd','ps'}
-        Whether we interpret Welch output as a PSD (V^2/Hz) or total power spectrum (V^2).
+    scaling : {'psd','ps'}, default='psd'
+        Whether to compute power spectral density (V²/Hz) or power spectrum (V²).
+        - 'psd': Power spectral density in V²/Hz (or equivalent)
+        - 'ps': Power spectrum in V²
     nperseg : int, optional
-        Number of samples per Welch segment. Default is all samples (no segmentation).
-    reference : {'relative','absolute'}
-        If 'relative', we do dBc => referencing the DC bin as the carrier.
-        If 'absolute', we do dBm => referencing an absolute scale with 50 ohms.
-    spectrum_cutoff : float
-        Fraction of Nyquist frequency to retain in the spectrum (default: 0.9).
+        Number of samples per Welch segment. Default uses all samples (no segmentation).
+    reference : {'relative','absolute'}, default='relative'
+        Reference type for the output spectrum:
+        - 'relative': Output in dBc, referencing the DC bin as the carrier
+        - 'absolute': Output in dBm, referencing an absolute scale with 50Ω termination
+    spectrum_cutoff : float, default=0.9
+        Fraction of Nyquist frequency to retain in the spectrum.
+    input_units : {'adc_counts', 'volts'}, default='adc_counts'
+        Units of the input data:
+        - 'adc_counts': Input data is in ADC counts (also known as readout counts or ROC).
+                        Use this when passing raw data from crs.get_samples() or similar.
+                        Corresponds to crs.UNITS.ADC_COUNTS.
+        - 'volts': Input data is already converted to volts.
+                   Use this when data has been pre-converted using VOLTS_PER_ROC.
+                   Corresponds to crs.UNITS.VOLTS.
 
     Returns
     -------
     dict
         A dictionary containing:
-          "freq_iq" : array of frequency bins for single-sideband I/Q,
-          "psd_i"   : array of final I data in dBc or dBm,
-          "psd_q"   : array of final Q data in dBc or dBm,
-          "freq_dsb": array of frequency bins for the dual-sideband data,
-          "psd_dual_sideband": array of final dual-sideband data in dBc or dBm.
+        - "freq_iq" : np.ndarray
+            Frequency bins for single-sideband I/Q spectra (Hz)
+        - "psd_i" : np.ndarray  
+            I-channel spectrum in dBc or dBm (depending on `reference`)
+        - "psd_q" : np.ndarray
+            Q-channel spectrum in dBc or dBm (depending on `reference`)
+        - "freq_dsb" : np.ndarray
+            Frequency bins for dual-sideband spectrum (Hz)
+        - "psd_dual_sideband" : np.ndarray
+            Dual-sideband complex spectrum in dBc or dBm (depending on `reference`)
+    
+    Raises
+    ------
+    ValueError
+        If `input_units` is not one of the allowed values ('adc_counts' or 'volts').
+    
+    Notes
+    -----
+    The function handles unit conversion internally when `reference='absolute'`:
+    - If `input_units='adc_counts'`, data is converted to volts using VOLTS_PER_ROC
+    - If `input_units='volts'`, data is used as-is
+    
+    For `reference='relative'`, the input units don't affect the output since
+    everything is normalized to the carrier (DC bin) power.
     """
     if nperseg is None:
         nperseg = len(i_data)
@@ -306,8 +340,33 @@ def spectrum_from_slow_tod(
     # Convert 'psd'/'ps' to scipy's 'density'/'spectrum'
     scipy_scaling = "density" if scaling.lower() == "psd" else "spectrum"
 
+    # Validate input_units parameter
+    valid_units = ["adc_counts", "volts"]
+    if input_units not in valid_units:
+        raise ValueError(
+            f"Invalid input_units '{input_units}'. "
+            f"Must be one of {valid_units}. "
+            f"Use 'adc_counts' (crs.UNITS.ADC_COUNTS) for raw ADC data or "
+            f"'volts' (crs.UNITS.VOLTS) for pre-converted voltage data."
+        )
+    
+    # Handle legacy "roc" value for backwards compatibility
+    if input_units == "roc":
+        warnings.warn(
+            "input_units='roc' is deprecated. Use 'adc_counts' instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        input_units = "adc_counts"
+    
     arr_i = np.asarray(i_data)
     arr_q = np.asarray(q_data)
+    
+    # Convert from ADC counts to volts if needed for absolute reference
+    if input_units == "adc_counts" and reference == "absolute":
+        arr_i = arr_i * VOLTS_PER_ROC
+        arr_q = arr_q * VOLTS_PER_ROC
+    
     arr_complex = arr_i + 1j * arr_q
 
     fs = decimation_to_sampling(dec_stage)

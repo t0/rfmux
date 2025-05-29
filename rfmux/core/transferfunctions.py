@@ -205,7 +205,7 @@ def _general_single_cic_correction(frequencies, f_in, R=64, N=6):
        factor is an approximation that should perform well but will not be absolutely
        precise.
     """
-    freq_ratio = frequencies / f_in
+    freq_ratio = frequencies / (f_in / R)
     with np.errstate(divide="ignore", invalid="ignore"):
         numerator = np.sin(np.pi * freq_ratio)
         denominator = np.sin(np.pi * freq_ratio / R)
@@ -242,8 +242,8 @@ def compensate_psd_for_cics(frequencies, psd, dec_stage=6, spectrum_cutoff=0.9):
     freq_abs = np.abs(frequencies)
 
     # Apply CIC correction for both CIC stages
-    cic1_corr_c = _general_single_cic_correction(freq_abs * R1 * R2, f_in1, R=R1, N=3)
-    cic2_corr_c = _general_single_cic_correction(freq_abs * R2, f_in2, R=R2, N=6)
+    cic1_corr_c = _general_single_cic_correction(freq_abs, f_in1, R=R1, N=3)
+    cic2_corr_c = _general_single_cic_correction(freq_abs, f_in2, R=R2, N=6)
     correction = cic1_corr_c * cic2_corr_c
     psd_corrected = psd / correction**2
 

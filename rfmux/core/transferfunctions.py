@@ -581,3 +581,59 @@ def recalculate_displayed_phase(
     phases_new_displayed_rad = np.deg2rad(phases_deg_currently_displayed) + delta_phase_rad
     
     return np.rad2deg(phases_new_displayed_rad)
+
+
+def exp_bin_noise_data(f: np.ndarray, psd: np.ndarray, nbins: int = 1000) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Bin a noise PSD using exponential bin sizes.
+    
+    This is a visual aid for cleaner plotting of noise spectra. The exponential
+    binning is not statistically rigorous but provides a cleaner visualization
+    of noise floors while preserving spectral features.
+    
+    Parameters
+    ----------
+    f : array-like
+        Frequency data in Hz
+    psd : array-like
+        Power spectral density data (same shape as f)
+    nbins : int, optional
+        Number of bins to use (default: 1000)
+        
+    Returns
+    -------
+    fbinned : np.ndarray
+        Binned frequency data (geometric mean of bin edges)
+    psd_binned : np.ndarray
+        Binned PSD data (mean of points in each bin)
+    """
+    f = np.asarray(f)
+    psd = np.asarray(psd)
+    
+    if len(f) < 2:
+        return f, psd
+    
+    # Optimized implementation using numpy operations
+    fmin = f[0] + 10e-3  # Small offset to avoid zero
+    fmax = f[-1]
+    
+    # Generate all bin edges at once
+    bin_edges = fmin * (fmax / fmin)**(np.linspace(0, 1, nbins))
+    
+    # Use histogram to bin the data efficiently
+    # digitize gives us which bin each frequency belongs to
+    bin_indices = np.digitize(f, bin_edges)
+    
+    # Pre-allocate arrays
+    fbinned = []
+    psd_binned = []
+    
+    # Process each bin
+    for i in range(1, nbins):
+        mask = bin_indices == i
+        if np.any(mask):
+            # Geometric mean of bin edges for center frequency
+            fbinned.append(np.sqrt(bin_edges[i-1] * bin_edges[i]))
+            psd_binned.append(np.mean(psd[mask]))
+    
+    return np.array(fbinned), np.array(psd_binned)

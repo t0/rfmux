@@ -13,6 +13,7 @@ from .utils import * # Imports QtCore, QThread, QObject, pyqtSignal, QRunnable,
 # However, to be explicit for this module's direct dependency:
 from rfmux.algorithms.measurement import fitting as fitting_module_direct # Alias to avoid conflict if utils also exports 'fitting'
 from rfmux.algorithms.measurement import fitting_nonlinear # Import nonlinear fitting module
+from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential binning function
 
 # Additional imports for async fitting with ThreadPoolExecutor
 import os
@@ -111,11 +112,13 @@ class PSDSignals(QObject):
 
 class PSDTask(QRunnable):
     def __init__(self, row: int, ch: int, I: np.ndarray, Q: np.ndarray, mode: str, dec_stage: int,
-                 real_units: bool, psd_absolute: bool, segments: int, signals: PSDSignals):
+                 real_units: bool, psd_absolute: bool, segments: int, signals: PSDSignals, exp_binning: bool = False, nbins: int = 1000):
         super().__init__()
         self.row, self.ch, self.I, self.Q, self.mode = row, ch, I.copy(), Q.copy(), mode
         self.dec_stage, self.real_units, self.psd_absolute = dec_stage, real_units, psd_absolute
         self.segments, self.signals = segments, signals
+        self.exp_binning = exp_binning
+        self.nbins = nbins
 
     def run(self):
         data_len = len(self.I)
@@ -132,21 +135,61 @@ class PSDTask(QRunnable):
         
     def _compute_ssb_psd(self, ref, nper):
         # spectrum_from_slow_tod from .utils
+        # Determine input units based on whether data was already converted to volts
+        input_units = "volts" if self.real_units else "adc_counts"
+        
         spec_iq = spectrum_from_slow_tod(i_data=self.I, q_data=self.Q, dec_stage=self.dec_stage,
-                                         scaling="psd", reference=ref, nperseg=nper, spectrum_cutoff=0.9)
-        M_data = np.sqrt(self.I**2 + self.Q**2)
-        spec_m = spectrum_from_slow_tod(i_data=M_data, q_data=np.zeros_like(M_data), dec_stage=self.dec_stage,
-                                        scaling="psd", reference=ref, nperseg=nper, spectrum_cutoff=0.9)
-        return (spec_iq["freq_iq"], spec_iq["psd_i"], spec_iq["psd_q"], spec_m["psd_i"],
-                spec_m["freq_iq"], spec_m["psd_i"], float(self.dec_stage))
+                                         scaling="psd", reference=ref, nperseg=nper, spectrum_cutoff=0.9,
+                                         input_units=input_units)
+        
+        freq_iq = spec_iq["freq_iq"]
+        psd_i = spec_iq["psd_i"]
+        psd_q = spec_iq["psd_q"]
+        
+        # For magnitude PSD: compute in frequency domain from I and Q PSDs
+        # For uncorrelated I and Q noise, magnitude PSD ≈ PSD_I + PSD_Q
+        # This avoids artifacts from computing PSD of time-domain magnitude
+        if ref == "counts":
+            # When in counts mode, PSDs are in linear scale
+            psd_m = psd_i + psd_q
+        else:
+            # When in dB scale (dBc or dBm), convert to linear, add, then convert back
+            psd_i_linear = 10**(psd_i / 10)
+            psd_q_linear = 10**(psd_q / 10)
+            psd_m_linear = psd_i_linear + psd_q_linear
+            psd_m = 10 * np.log10(psd_m_linear)
+        
+        freq_m = freq_iq  # Same frequency grid
+        
+        # Apply exponential binning if enabled
+        if self.exp_binning and len(freq_iq) > 1:
+            freq_iq_binned, psd_i_binned = exp_bin_noise_data(freq_iq, psd_i, self.nbins)
+            _, psd_q_binned = exp_bin_noise_data(freq_iq, psd_q, self.nbins)
+            freq_m_binned, psd_m_binned = exp_bin_noise_data(freq_m, psd_m, self.nbins)
+            return (freq_iq_binned, psd_i_binned, psd_q_binned, psd_m_binned,
+                    freq_m_binned, psd_m_binned, float(self.dec_stage))
+        
+        return (freq_iq, psd_i, psd_q, psd_m, freq_m, psd_m, float(self.dec_stage))
         
     def _compute_dsb_psd(self, ref, nper):
         # spectrum_from_slow_tod from .utils
+        # Determine input units based on whether data was already converted to volts
+        input_units = "volts" if self.real_units else "adc_counts"
+        
         spec_iq = spectrum_from_slow_tod(i_data=self.I, q_data=self.Q, dec_stage=self.dec_stage,
-                                         scaling="psd", reference=ref, nperseg=nper, spectrum_cutoff=0.9)
+                                         scaling="psd", reference=ref, nperseg=nper, spectrum_cutoff=0.9,
+                                         input_units=input_units)
         freq_dsb, psd_dsb = spec_iq["freq_dsb"], spec_iq["psd_dual_sideband"]
         order = np.argsort(freq_dsb)
-        return (freq_dsb[order], psd_dsb[order])
+        freq_dsb_sorted = freq_dsb[order]
+        psd_dsb_sorted = psd_dsb[order]
+        
+        # Apply exponential binning if enabled
+        if self.exp_binning and len(freq_dsb_sorted) > 1:
+            freq_dsb_binned, psd_dsb_binned = exp_bin_noise_data(freq_dsb_sorted, psd_dsb_sorted, self.nbins)
+            return (freq_dsb_binned, psd_dsb_binned)
+        
+        return (freq_dsb_sorted, psd_dsb_sorted)
 
 class CRSInitializeSignals(QObject):
     success = pyqtSignal(str); error = pyqtSignal(str)

@@ -538,7 +538,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         Create the 'PSD Mode' group box for the configuration panel.
 
-        Contains controls for PSD scale (absolute/relative) and Welch segments.
+        Contains controls for PSD scale (absolute/relative), Welch segments, and binning options.
 
         Returns:
             QtWidgets.QGroupBox: The configured group box.
@@ -560,12 +560,33 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.spin_segments.setMaximumWidth(80)
         self.spin_segments.setToolTip("Number of segments for Welch PSD averaging (more segments = smoother floor, less resolution).")
 
+        # Binning controls
+        self.cb_exp_binning = QtWidgets.QCheckBox("Exponential bins")
+        self.cb_exp_binning.setChecked(False)  # Default to off
+        self.cb_exp_binning.setToolTip("Apply exponential binning to PSD plots. This is a visual aid and is not statistically rigorous.")
+        
+        self.spin_bins = QtWidgets.QSpinBox()  # Spinbox for number of bins
+        self.spin_bins.setRange(10, 5000)      # Reasonable range for bins
+        self.spin_bins.setValue(100)          # Default to 100 bins
+        self.spin_bins.setMaximumWidth(80)
+        self.spin_bins.setToolTip("Number of bins for exponential binning.")
+        self.spin_bins.setEnabled(False)       # Disabled by default
+        
+        # Enable/disable bins spinner based on checkbox
+        self.cb_exp_binning.toggled.connect(self.spin_bins.setEnabled)
+
         # Add widgets to the grid layout
         grid_layout.addWidget(self.lbl_psd_scale, 0, 0) # Row 0, Col 0
         grid_layout.addWidget(self.rb_psd_abs, 0, 1)    # Row 0, Col 1
         grid_layout.addWidget(self.rb_psd_rel, 0, 2)    # Row 0, Col 2
         grid_layout.addWidget(QtWidgets.QLabel("Segments:"), 1, 0) # Row 1, Col 0
-        grid_layout.addWidget(self.spin_segments, 1, 1) # Row 1, Col 1 (spans 1 column)
+        grid_layout.addWidget(self.spin_segments, 1, 1) # Row 1, Col 1
+        
+        # Binning row
+        grid_layout.addWidget(QtWidgets.QLabel("Binning:"), 2, 0) # Row 2, Col 0
+        grid_layout.addWidget(self.cb_exp_binning, 2, 1)          # Row 2, Col 1
+        grid_layout.addWidget(self.spin_bins, 2, 2)               # Row 2, Col 2
+        
         return group_box
 
     def _create_display_group(self) -> QtWidgets.QGroupBox:

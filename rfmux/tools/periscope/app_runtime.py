@@ -533,7 +533,7 @@ class PeriscopeRuntime:
                     rawI = self.buf[ch_val]["I"].data(); rawQ = self.buf[ch_val]["Q"].data()
                     I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ)) if self.real_units else (rawI, rawQ) # Renamed I,Q
                     self.psd_workers[row_i]["S"][ch_val] = True
-                    task = PSDTask(row_i, ch_val, I_data, Q_data, "SSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals)
+                    task = PSDTask(row_i, ch_val, I_data, Q_data, "SSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
                     self.pool.start(task)
         
         # Dispatch Dual-Sideband (DSB) PSD tasks
@@ -543,7 +543,7 @@ class PeriscopeRuntime:
                     rawI = self.buf[ch_val]["I"].data(); rawQ = self.buf[ch_val]["Q"].data()
                     I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ)) if self.real_units else (rawI, rawQ) # Renamed I,Q
                     self.psd_workers[row_i]["D"][ch_val] = True
-                    task = PSDTask(row_i, ch_val, I_data, Q_data, "DSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals)
+                    task = PSDTask(row_i, ch_val, I_data, Q_data, "DSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
                     self.pool.start(task)
 
     def _update_performance_stats(self, now: float):

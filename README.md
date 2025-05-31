@@ -21,7 +21,7 @@ Note that rfmux requires Python 3.12 or later
 
 ## Periscope
 
-[periscope_v2_demo.webm](https://github.com/user-attachments/assets/9466fb54-1552-4b1a-bd22-dec9c9259b72)
+https://github.com/user-attachments/assets/fa8eb68c-8593-43b1-af96-285720ed0d5f
 
 An additional system library that cannot be automatically installed with pip is xcb-cursor.
 This is required for the real-time GUI visualization tool `periscope`. It can be installed via:

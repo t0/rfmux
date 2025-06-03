@@ -15,7 +15,7 @@ STREAMER_LEN = 8240  # expected packet length in bytes
 STREAMER_MAGIC = 0x5344494B
 STREAMER_VERSION = 5
 NUM_CHANNELS = 1024
-SS_PER_SECOND = 125000000
+SS_PER_SECOND = 156250000
 
 # This seems like a long timeout - in practice, we can see long delays when
 # packets are flowing normally

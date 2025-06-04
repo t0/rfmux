@@ -446,6 +446,9 @@ class PeriscopeRuntime:
         """
         # math from .utils
         for ch_val in self.all_chs: # Renamed ch
+            if len(pkt.s)/2 <= ch_val-1:
+                continue # don't plot channels that aren't streamed
+
             Ival = pkt.s[2 * (ch_val - 1)] / 256.0  # Assuming 8-bit ADC data
             Qval = pkt.s[2 * (ch_val - 1) + 1] / 256.0
             self.buf[ch_val]["I"].add(Ival); self.buf[ch_val]["Q"].add(Qval)

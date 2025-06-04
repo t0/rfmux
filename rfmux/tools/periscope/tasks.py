@@ -35,7 +35,7 @@ class UDPReceiver(QtCore.QThread):
     def run(self):
         while not self.isInterruptionRequested():
             try:
-                data = self.sock.recv(streamer.STREAMER_LEN)
+                data = self.sock.recv(streamer.LONG_PACKET_SIZE)
                 pkt = streamer.DfmuxPacket.from_bytes(data)
             except socket.timeout:
                 continue

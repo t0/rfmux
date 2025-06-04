@@ -284,15 +284,15 @@ def parse_channels_multich(txt: str) -> List[List[int]]:
                 sub = sub.strip()
                 if sub.isdigit():
                     c = int(sub)
-                    # streamer.NUM_CHANNELS is available from rfmux.streamer
-                    if 1 <= c <= streamer.NUM_CHANNELS:
+                    # streamer.LONG_PACKET_CHANNELS is available from rfmux.streamer
+                    if 1 <= c <= streamer.LONG_PACKET_CHANNELS:
                         group.append(c)
             if group:
                 out.append(group)
         else:
             if token.isdigit():
                 c = int(token)
-                if 1 <= c <= streamer.NUM_CHANNELS:
+                if 1 <= c <= streamer.LONG_PACKET_CHANNELS:
                     out.append([c])
     if not out:
         return [[1]]

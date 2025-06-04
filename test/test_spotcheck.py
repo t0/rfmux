@@ -108,5 +108,40 @@ async def test_set_get_decimation(live_session):
     await d.set_decimation(stage=6, short=False, modules=[1, 2, 3, 4])
 
 
+@pytest.mark.asyncio
+async def test_py_get_samples_long_and_short(live_session):
+    """
+    Does py_get_samples play nice with long and short packets?
+    """
+
+    d = live_session.query(rfmux.CRS).one()
+    await d.resolve()
+
+    await d.set_decimation(stage=6, short=True, modules=[1])
+
+    # Try with "channel" specified and low
+    x = await d.py_get_samples(10, channel=1, module=1)
+    assert len(x.i) == 10 and len(x.q) == 10
+
+    # Try with "channel" specified and too high
+    with pytest.raises(ValueError):
+        x = await d.py_get_samples(10, channel=129, module=1)
+
+    # Now don't specify "channel" - should get an array of 128 channels
+    x = await d.py_get_samples(10, module=1)
+    assert len(x.i) == 128 and len(x.q) == 128
+
+    # Back to long packets
+    await d.set_decimation(stage=6, short=False, modules=[1, 2, 3, 4])
+
+    # Try with "channel" specified and low
+    x = await d.py_get_samples(10, channel=1, module=1)
+    assert len(x.i) == 10 and len(x.q) == 10
+
+    # Now don't specify "channel" - should get an array of 1024 channels
+    x = await d.py_get_samples(10, module=1)
+    assert len(x.i) == 1024 and len(x.q) == 1024
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

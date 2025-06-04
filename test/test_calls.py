@@ -62,10 +62,8 @@ async def test_algorithm():
 
 
 @pytest.mark.asyncio
-async def test_simple_live_board_interaction(live_session):
-    d = live_session.query(rfmux.CRS).one()
-    await d.resolve()
-    await d.get_frequency(d.UNITS.HZ, channel=1, module=1)
+async def test_simple_live_board_interaction(crs):
+    await crs.get_frequency(crs.UNITS.HZ, channel=1, module=1)
 
 
 @pytest.mark.asyncio

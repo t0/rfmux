@@ -48,14 +48,14 @@ async def test_nco_set_get_frequencies(live_session, frequency, module):
 
     if zone <= 2:
         # Works as expected without API warning
-        await d.set_nco_frequency(frequency, d.UNITS.HZ, module=module)
+        await d.set_nco_frequency(frequency, module=module)
     else:
         # Nyquist zones 3 and 4 currently emit a bogus warning from the RFDC
         # API
         with pytest.warns(UserWarning):
-            await d.set_nco_frequency(frequency, d.UNITS.HZ, module=module)
+            await d.set_nco_frequency(frequency, module=module)
 
-    assert (await d.get_nco_frequency(d.UNITS.HZ, module=module)) == pytest.approx(
+    assert (await d.get_nco_frequency(module=module)) == pytest.approx(
         frequency, abs=0.001
     )  # expect agreement below 1 mHz
 

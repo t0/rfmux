@@ -24,6 +24,7 @@ This test script can be invoked in three ways:
 
 import rfmux
 import pytest
+import numpy as np
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -99,6 +100,30 @@ async def test_set_get_decimation(crs):
 
     # be polite
     await crs.set_decimation(stage=6, short=False, modules=[1, 2, 3, 4])
+
+
+@pytest.mark.asyncio
+async def test_high_sampling_rate(crs):
+    """
+    Are samples arriving correctly ordered, even at high sampling rates?
+
+    This verifies the (limited) reorder buffer in both py_get_samples and
+    get_samples, and indirectly checks the network and streamer capacity.
+    Both of these needed attention in the lead-up to v1.5.6, so this test
+    checks against associated regressions.
+    """
+
+    # fastest streaming available for a single module
+    await crs.set_decimation(stage=0, short=True, modules=[1])
+
+    # py_get_samples
+    x = await crs.py_get_samples(1000, channel=1, module=1, _extra_metadata=True)
+    assert {*np.diff(x.seq)} == {1}
+
+    # get_samples
+    x = await crs.get_samples(1000, channel=1, module=1, _extra_metadata=True)
+    assert {*np.diff(x.seq)} == {1}
+
 
 
 @pytest.mark.asyncio

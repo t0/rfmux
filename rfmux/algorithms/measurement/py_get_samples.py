@@ -53,7 +53,8 @@ async def py_get_samples(crs: CRS,
                          scaling: str = 'psd',
                          nsegments: int = 1,
                          reference: str = 'relative',
-                         spectrum_cutoff: float = 0.9):
+                         spectrum_cutoff: float = 0.9,
+                         _extra_metadata: bool = False):
     """
     Asynchronously retrieves samples from the CRS device.
 
@@ -83,6 +84,9 @@ async def py_get_samples(crs: CRS,
         'absolute' => dBm or dBm/Hz with absolute scaling in spectra, volts in TOD
     spectrum_cutoff : float, optional
         Fraction of Nyquist to retain. Default=0.9 => up to 0.9*(fs/2).
+    _extra_metadata : bool, optional
+        If True, include extra packet data beyond what get_samples returns.
+        This is primarily intended for regression testing.
 
     Returns
     -------
@@ -270,6 +274,9 @@ async def py_get_samples(crs: CRS,
 
     # Otherwise build the normal time-domain results
     results = dict(ts=[TuberResult(dataclasses.asdict(p.ts)) for p in packets])
+
+    if _extra_metadata:
+        results["seq"] = [p.seq for p in packets]
 
     if channel is None:
         # Return data for all channels

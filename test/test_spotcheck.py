@@ -74,5 +74,39 @@ async def test_nco_set_get_frequencies(live_session, frequency, module):
             assert False
 
 
+@pytest.mark.asyncio
+async def test_set_get_decimation(live_session):
+    """
+    Does set_decimation and get_decimation operate correctly?
+    """
+
+    d = live_session.query(rfmux.CRS).one()
+    await d.resolve()
+
+    # clearly this should fail - requesting absurd amounts of bandwidth
+    with pytest.raises(rfmux.tuber.TuberRemoteError):
+        await d.set_decimation(stage=0, short=False, modules=[1, 2, 3, 4])
+
+    # we should be able to stream nothing, but can't get a value from get_decimation like this
+    await d.set_decimation(stage=6, short=False, modules=[])
+    assert (await d.get_decimation()) is None
+
+    # With short packets, we can go all the way down to FIR stage 0
+    # (but only with one module at a time)
+    for module in range(1, 5):
+        for stage in range(0, 7):
+            await d.set_decimation(stage=stage, short=True, modules=[module])
+            assert (await d.get_decimation()) == stage
+
+    # With longer packets, we can only do this at FIR stage 3 and up
+    for module in range(1, 5):
+        for stage in range(3, 7):
+            await d.set_decimation(stage=stage, short=False, modules=[module])
+            assert (await d.get_decimation()) == stage
+
+    # be polite
+    await d.set_decimation(stage=6, short=False, modules=[1, 2, 3, 4])
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

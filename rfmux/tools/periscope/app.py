@@ -375,14 +375,21 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.cb_real.toggled.connect(self._toggle_real_units)
 
         # Checkboxes to select which plot types are displayed
+        # For mock mode, default to TOD and FFT (not PSDs)
         self.cb_time = QtWidgets.QCheckBox("TOD", checked=True) # Time-domain
         self.cb_iq = QtWidgets.QCheckBox("IQ", checked=False)    # IQ plane
-        self.cb_fft = QtWidgets.QCheckBox("FFT", checked=False)   # Raw FFT
-        self.cb_ssb = QtWidgets.QCheckBox("Single Sideband PSD", checked=True) # SSB PSD
+        self.cb_fft = QtWidgets.QCheckBox("FFT", checked=self.is_mock_mode)   # Raw FFT - on by default in mock mode
+        self.cb_ssb = QtWidgets.QCheckBox("Single Sideband PSD", checked=not self.is_mock_mode) # SSB PSD - off in mock mode
         self.cb_dsb = QtWidgets.QCheckBox("Dual Sideband PSD", checked=False)  # DSB PSD
-        # Connect toggled signal of each plot type checkbox to rebuild the layout
-        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
+        
+        # Connect toggled signal of each plot type checkbox
+        # For PSD checkboxes in mock mode, show warning
+        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft):
             cb_plot_type.toggled.connect(self._build_layout)
+        
+        # Special handling for PSD checkboxes in mock mode
+        self.cb_ssb.toggled.connect(self._handle_psd_toggle)
+        self.cb_dsb.toggled.connect(self._handle_psd_toggle)
 
         # Button to open CRS (Control and Readout System) initialization dialog
         self.btn_init_crs = QtWidgets.QPushButton("Initialize CRS Board")
@@ -1094,6 +1101,37 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                         if "I" in cset: cset["I"].setVisible(self.show_i)
                         if "Q" in cset: cset["Q"].setVisible(self.show_q)
                         if "Mag" in cset: cset["Mag"].setVisible(self.show_m)
+
+    def _handle_psd_toggle(self, checked: bool):
+        """
+        Handle toggling of PSD checkboxes, showing warning in mock mode.
+        
+        In mock mode, PSDs have inaccurate high frequency correction because
+        the simulated data doesn't include the actual CIC filter response.
+        
+        Args:
+            checked (bool): Whether the checkbox was checked
+        """
+        # Show warning only when enabling PSD in mock mode
+        if self.is_mock_mode and checked:
+            sender = self.sender()
+            psd_type = "Single Sideband" if sender == self.cb_ssb else "Dual Sideband"
+            
+            msg = QtWidgets.QMessageBox(self)
+            msg.setWindowTitle("Mock Mode PSD Warning")
+            msg.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+            msg.setText(
+                f"Warning: {psd_type} PSD in Mock Mode\n\n"
+                "In mock mode, the high frequency correction for PSD plots will be inaccurate.\n\n"
+                "The simulated data does not include the actual CIC decimation filter response, "
+                "so the droop correction applied to PSD plots may not be representative of real hardware behavior.\n\n"
+                "For accurate PSD analysis, please connect to a real CRS board."
+            )
+            msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
+            msg.exec()
+        
+        # Always rebuild layout after toggle
+        self._build_layout()
 
     def _show_mock_config_dialog(self):
         """

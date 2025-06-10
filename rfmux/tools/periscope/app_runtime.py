@@ -409,7 +409,7 @@ class PeriscopeRuntime:
     def _process_incoming_packets(self):
         """Process all packets currently in the receiver queue."""
         while not self.receiver.queue.empty():
-            pkt = self.receiver.queue.get(); self.pkt_cnt += 1
+            (seq, pkt) = self.receiver.queue.get(); self.pkt_cnt += 1
             t_rel = self._calculate_relative_timestamp(pkt)
             self._update_buffers(pkt, t_rel)
 

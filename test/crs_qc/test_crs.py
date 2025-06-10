@@ -1,45 +1,65 @@
+#!/usr/bin/env -S pytest-3 -s
+'''
+Welcome to the CRS QC framework. You should invoke these tests as follows:
+
+    $ pytest test_crs_integrated.py --serial=<serial> -s
+
+If you wish to run only a set of particular tests:
+
+    $ pytest test_crs.py --serial=<serial> -k "<test_test_name_1> or <test_name_2>"
+'''
+
 import os
 import pytest
 import rfmux
 import time
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')  # Set the backend to 'Agg' for non-interactive use
 import matplotlib.pyplot as plt
+import socket
+import requests
+
 from scipy import signal
 from scipy.stats import linregress
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 from conftest import wait_for_action
-'''
 
-Welcome to the 1st draft of the CRS QC. To begin testing, type into the terminal 
-$ pytest test_crs_integrated.py --serial=<serial> -s
+matplotlib.use('Agg')  # Set the backend to 'Agg' for non-interactive use
 
-If you wish to run only a set of particular tests:
+# Ensure network can resolve the board. Does not use rfmux.
+def test_can_resolve_crs(request, results):
+    '''Can we resolve a CRS board?
 
-$ pytest test_crs_integrated.py --serial=<serial> -k "<test_test_name_1> or <test_name_2>"
+    This is a basic "is the board alive, and is the network functioning" check.
+    It doesn't rely on rfmux because we want to slowly assemble faith in a
+    working set-up and produce the most informative error messages possible if
+    something breaks.
+    '''
 
-'''
-# Ensure the board and the computer are connected to the same network.
-# Most basic check, does not use hidfmux
-def test_board_bootup(results):
-    print("Retrieving board status")
-    os.system("timeout 1 /home/joshua/code/crs-mkids/firmware/rfmux/r1.4/parser -i enp6s0 -t | grep 'Enclosure\\|Timestamp' > boot.txt")
+    hostname = f'rfmux{request.config.getoption("--serial")}.local'
+
+    # 1. Can we resolve the board?
     try:
-        with open('boot.txt', 'r') as file:
-            content = file.read()
-    except FileNotFoundError:
-        pytest.fail("No file was generated. Check your parser directory and connection to the board")
-        
-    assert content, "Error: No data received. The board might not be booted correctly."
-    os.remove('boot.txt')
-    print("Board boot status: OK")
+        address = socket.gethostbyname(hostname)
+    except Exception as e:
+        raise IOError(f"Unable to resolve hostname {hostname}!") from e
+
+    # 2. Can we make a bare/empty HTTP request to it?
+    try:
+        text = requests.post(f'http://{hostname}/tuber', data="[]").text
+    except Exception as e:
+        raise IOError("Unable to invoke basic call with CRS via HTTP POST!") from e
+    assert text == '[]'
 
     results['tests'].append({
-        'title': 'Board Bootup Test',
+        'title': 'Board Communications Test',
         'status': 'OK'
-        })
+    })
+
+@pytest.mark.asyncio
+async def test_multicast_reception(d):
+    x = await d.py_get_samples(1, module=1, channel=1)
    
 '''-------------------------------------HELPER FUNCTIONS---------------------------------------------'''
 def transfer_function_helper(raw_sampl, AMPLITUDE, scale, attenuation):
@@ -63,7 +83,7 @@ def transfer_function_helper(raw_sampl, AMPLITUDE, scale, attenuation):
     predicted_magnitude_dbm = DAC_output_dBm - attenuation
     return median_magnitude_dbm, predicted_magnitude_dbm
 
-def value_setter_helper(d, frequency, amplitude, scale, attenuation, channel, module, nco, target_dac, target_adc, highbank):
+def value_setter_helper(d, frequency, amplitude, scale, attenuation, channel, module, nco):
     '''
 
     NOTE: All the tests below are written with the following numbering conventions for highbanks
@@ -73,15 +93,10 @@ def value_setter_helper(d, frequency, amplitude, scale, attenuation, channel, mo
     '''
 
     d.clear_channels()
-    d.set_frequency(frequency, d.UNITS.HZ, channel, module)
-    d.set_amplitude(amplitude, d.UNITS.NORMALIZED, target_dac, channel, module)
-
-    if highbank == True:
-        module+=4
+    d.set_frequency(frequency, channel, module)
+    d.set_amplitude(amplitude, d.UNITS.NORMALIZED, channel, module)
     d.set_dac_scale(scale, d.UNITS.DBM, module)
     d.set_adc_attenuator(attenuation, d.UNITS.DB, module=module)
-    d.set_nco_frequency(nco, d.UNITS.HZ, target_dac, module=module)
-    d.set_nco_frequency(-nco, d.UNITS.HZ, target_adc, module=module)
 
 #small legacy helper used in checking how circular the i-q blob is
 def covariance_matrix(samples):
@@ -91,7 +106,8 @@ def covariance_matrix(samples):
     return ratio
 '''------------------------------------------------------------------------------------------------------------'''
 '''-------------------------------------------SENSORS--------------------------------------------------------------'''
-def test_temperature(d, results, summary_results):
+@pytest.mark.asyncio
+async def test_temperature(d, results, summary_results):
     TEMPERATURE_MIN = 0.0
     TEMPERATURE_MAX = 70.0
     errors = []
@@ -110,10 +126,10 @@ def test_temperature(d, results, summary_results):
         d.TEMPERATURE_SENSOR.RFSOC_PL, 
         d.TEMPERATURE_SENSOR.RFSOC_PS,
     )
-    with d.tuber_context() as ctx:
+    async with d.tuber_context() as ctx:
         for s in sensors:
             ctx.get_motherboard_temperature(s)
-        temps = ctx()
+        temps = await ctx()
     for (s, v) in zip(sensors, temps):
         if not (TEMPERATURE_MIN <= v <= TEMPERATURE_MAX):
             errors.append(f"Sensor {s} with value {v} out of range {TEMPERATURE_MIN}, {TEMPERATURE_MAX}!")
@@ -129,8 +145,9 @@ def test_temperature(d, results, summary_results):
     if 'Board Health' not in summary_results['summary']:
         summary_results['summary']['Board Health'] = {}
     summary_results['summary']['Board Health']['Temperature Test'] = test_status
-    
-def test_voltages(d, results,summary_results):
+
+@pytest.mark.asyncio
+async def test_voltages(d, results,summary_results):
 
     VOLTAGE_TOL = 0.10  # 10%
     test_status = 'Pass'
@@ -170,10 +187,10 @@ def test_voltages(d, results,summary_results):
         (d.VOLTAGE_SENSOR.RFSOC_VCC_PSPLL0, 1.2),# in rfsoc_power
     )
     #Get the real time data from sensors and check if it's within 10% of the allowed
-    with d.tuber_context() as ctx:
+    async with d.tuber_context() as ctx:
         for (s, nv) in sensors:
             ctx.get_motherboard_voltage(s)
-        voltages = ctx()
+        voltages = await ctx()
     for ((s, nv), v) in zip(sensors, voltages):
         min_v = nv * (1 - VOLTAGE_TOL)
         max_v = nv * (1 + VOLTAGE_TOL)
@@ -194,7 +211,8 @@ def test_voltages(d, results,summary_results):
         summary_results['summary']['Board Health'] = {}
     summary_results['summary']['Board Health']['Voltage Test'] = test_status
 
-def test_currents(d, results, summary_results):
+@pytest.mark.asyncio
+async def test_currents(d, results, summary_results):
     CURRENT_LIMIT = 0.4  # 40% tolerance on the current limit
     test_status = 'Pass'
     sensors = (
@@ -209,10 +227,10 @@ def test_currents(d, results, summary_results):
         (d.CURRENT_SENSOR.MB_R5V0, 4.1),
         (d.CURRENT_SENSOR.MB_VBP, 4),
     )
-    with d.tuber_context() as ctx:
+    async with d.tuber_context() as ctx:
         for (s, nc) in sensors:
             ctx.get_motherboard_current(s)
-        currents = ctx()
+        currents = await ctx()
     for ((s, nc), v) in zip(sensors, currents):
         min_c = nc * (1 - CURRENT_LIMIT)
         max_c = nc * (1 + CURRENT_LIMIT)
@@ -234,7 +252,8 @@ def test_currents(d, results, summary_results):
     summary_results['summary']['Board Health']['Current Test'] = test_status
 '''------------------------------------------------------------------------------------------------------------'''
 '''-------------------------------------------DAC--------------------------------------------------------------'''
-def test_dac_passband(d, results, summary_results, num_runs, test_highbank, results_dir):
+@pytest.mark.asyncio
+async def test_dac_passband(d, results, summary_results, num_runs, test_highbank, results_dir):
 
     '''This test aims to determine 2 things: if the magnitude of the output signal from the DAC 
     is within expected margin and if the passband stays flat throughout the predicted frequency range (-300 -- 300) wrt the NCO.
@@ -256,8 +275,6 @@ def test_dac_passband(d, results, summary_results, num_runs, test_highbank, resu
 
     # FIXME: Some issue with the higher range of the frequencies showing a dip
     AMPLITUDE = 0.005 # FIXME: JM change by x5
-    TARGET_DAC = d.TARGET.DAC
-    TARGET_ADC = d.TARGET.ADC
     SAMPLES = 10
     NCO_FREQUENCY = 1e9+123
     ATTENUATION = 0
@@ -267,8 +284,8 @@ def test_dac_passband(d, results, summary_results, num_runs, test_highbank, resu
     NOMINAL_CHANNEL = 1
     TITLE = 'DAC Passband Test'
 
-   #feel free to increase the range and density of frequencies
-    frequencies = np.arange(-300e6, 300e6, 10e6)
+    # Feel free to increase the range and density of frequencies
+    frequencies = np.arange(-250e6, 250e6, 10e6)
     channels = np.arange(1, 1001)
     nruns = int(np.ceil(len(frequencies) / len(channels)))
     lenrun = min(len(frequencies), len(channels))
@@ -302,20 +319,20 @@ def test_dac_passband(d, results, summary_results, num_runs, test_highbank, resu
                 time.sleep(0.2)
 
                 #First, call the function to set all the parameters that won't change: attenuation, scale, nco
-                value_setter_helper(d, NOMINAL_FREQUENCY,NOMINAL_AMPLITUDE, SCALE, ATTENUATION, NOMINAL_CHANNEL, module, NCO_FREQUENCY, TARGET_DAC, TARGET_ADC, highbank_run)
+                value_setter_helper(d, NOMINAL_FREQUENCY,NOMINAL_AMPLITUDE, SCALE, ATTENUATION, NOMINAL_CHANNEL, module, NCO_FREQUENCY)
                 
-                with d.tuber_context() as ctx:
+                async with d.tuber_context() as ctx:
                     #Set all the nessesary channels for the run
                     for idx in range(start_idx, end_idx):
                         channel = int(channels[idx - start_idx])  # Convert to int and access correct channel
                         frequency = float(frequencies[idx])  # Convert to float
-                        ctx.set_frequency(frequency, d.UNITS.HZ, channel, module)
-                        ctx.set_amplitude(AMPLITUDE, d.UNITS.NORMALIZED, TARGET_DAC, channel, module)
-                    ctx()
+                        ctx.set_frequency(frequency, channel, module)
+                        ctx.set_amplitude(AMPLITUDE, d.UNITS.NORMALIZED, channel, module)
+                    await ctx()
                 time.sleep(0.2)
 
                 # Get all the samples for the current run
-                raw = d.py_get_samples(SAMPLES, channel=None, module=module)
+                raw = await d.py_get_samples(SAMPLES, channel=None, module=module)
 
                 for idx in range(start_idx, end_idx):
                     channel = int(channels[idx - start_idx])  # Convert to int and access correct channel
@@ -388,15 +405,14 @@ def test_dac_passband(d, results, summary_results, num_runs, test_highbank, resu
     results['tests'].append(test_result)
 
 
-def test_dac_amplitude_transfer(d, results, summary_results, test_highbank, num_runs, results_dir):
+@pytest.mark.asyncio
+async def test_dac_amplitude_transfer(d, results, summary_results, test_highbank, num_runs, results_dir):
     '''
     This test aims to determine if the output of the dac is scaled appropriately with the change in amplitude. The algorithm uses only 1 channel
     at each module a set frequency, varying its amplitude. The result is compared to the transfer function prediction
     
     '''
     SCALE = 1
-    TARGET_DAC = d.TARGET.DAC
-    TARGET_ADC = d.TARGET.ADC
     SAMPLES = 100
     ATTENUATION = 0
     CHANNEL = 1
@@ -429,12 +445,12 @@ def test_dac_amplitude_transfer(d, results, summary_results, test_highbank, num_
                 print(f'DAC_amplitude - Testing Module #:{module}')
             
             #When starting to test a new module, clear all channels and use the value_setter to set the variables that won't change attenuation, scale, frequency etc
-            value_setter_helper(d, FREQUENCY, NOMINAL_AMPLITUDE, SCALE, ATTENUATION, CHANNEL, module, NCO_FREQUENCY, TARGET_DAC, TARGET_ADC, highbank_run)
+            value_setter_helper(d, FREQUENCY, NOMINAL_AMPLITUDE, SCALE, ATTENUATION, CHANNEL, module, NCO_FREQUENCY)
             
 
             for amplitude in amplitudes:
-                d.set_amplitude(amplitude, d.UNITS.NORMALIZED, TARGET_DAC, CHANNEL, module)
-                samples = d.py_get_samples(SAMPLES, channel=CHANNEL, module=module)
+                d.set_amplitude(amplitude, d.UNITS.NORMALIZED, CHANNEL, module)
+                samples = await d.py_get_samples(SAMPLES, channel=CHANNEL, module=module)
                 median_magnitude_dbm, predicted_magnitude_dbm = transfer_function_helper(samples, amplitude, SCALE, ATTENUATION)
                 amplitude_values.append(amplitude)
                 magnitude_dbm_values.append(median_magnitude_dbm)
@@ -506,7 +522,8 @@ def test_dac_amplitude_transfer(d, results, summary_results, test_highbank, num_
     results['tests'].append(test_result)
 
 
-def test_dac_scale_transfer(d, results, summary_results, test_highbank, num_runs, results_dir):
+@pytest.mark.asyncio
+async def test_dac_scale_transfer(d, results, summary_results, test_highbank, num_runs, results_dir):
     '''
     This test aims to determine if the output of the dac is scaled appropriately with the change in 'scale' value (actually controlled 
     by varying the current in the balun). The algorithm uses only 1 channel at each module a set frequency, varying its scale. 
@@ -519,8 +536,6 @@ def test_dac_scale_transfer(d, results, summary_results, test_highbank, num_runs
     #set parameters for testing
     AMPLITUDE= 1
     NOMINAL_SCALE = 1
-    TARGET_DAC = d.TARGET.DAC
-    TARGET_ADC = d.TARGET.ADC
     SAMPLES = 100
     FREQUENCY = 150.5763e6
     NCO_FREQUENCY = 0
@@ -545,7 +560,7 @@ def test_dac_scale_transfer(d, results, summary_results, test_highbank, num_runs
             predicted_magnitude_dbm_values = []
 
             d.clear_channels()
-            value_setter_helper(d, FREQUENCY, AMPLITUDE, NOMINAL_SCALE, ATTENUATION, CHANNEL, module, NCO_FREQUENCY, TARGET_DAC, TARGET_ADC, highbank_run)
+            value_setter_helper(d, FREQUENCY, AMPLITUDE, NOMINAL_SCALE, ATTENUATION, CHANNEL, module, NCO_FREQUENCY)
             module_sample = module
 
             if highbank_run:
@@ -558,7 +573,7 @@ def test_dac_scale_transfer(d, results, summary_results, test_highbank, num_runs
             for scale in range (0, 8):
                 
                 d.set_dac_scale(scale, d.UNITS.DBM, module_set)
-                raw_sampl = d.py_get_samples(SAMPLES, channel=CHANNEL, module=module_sample)
+                raw_sampl = await d.py_get_samples(SAMPLES, channel=CHANNEL, module=module_sample)
                 median_magnitude_dbm, predicted_magnitude_dbm = transfer_function_helper(raw_sampl, AMPLITUDE, scale, ATTENUATION)
                 
                 scale_values.append(scale)
@@ -624,7 +639,8 @@ def test_dac_scale_transfer(d, results, summary_results, test_highbank, num_runs
     d.set_analog_bank(False)
     results['tests'].append(test_result)
 
-def test_dac_mixmodes(d, results, summary_results, test_highbank):
+@pytest.mark.asyncio
+async def test_dac_mixmodes(d, results, summary_results, test_highbank):
     '''
     This test aims to verify the overall behaviour of the nyquist zones (1(NRZ) or 2(RC)) set in the firmware as well as a sanity check for the hardware response in
     the higher nquist regions. 
@@ -637,8 +653,6 @@ def test_dac_mixmodes(d, results, summary_results, test_highbank):
     BANDWIDTH = 550e6  # in Hz (275 MHz on each side of NCO)
     AMPLITUDE = 1
     SCALE = 1
-    TARGET_DAC = d.TARGET.DAC
-    TARGET_ADC = d.TARGET.ADC
     SAMPLES = 100
     ATTENUATION = 0
     STEP = 50e6
@@ -678,7 +692,7 @@ def test_dac_mixmodes(d, results, summary_results, test_highbank):
             }
         }
 
-    def mixmode_test_for_bank(bank_name, is_highbank):
+    async def mixmode_test_for_bank(bank_name, is_highbank):
         test_result = {
             'title': f'DAC Mixmodes Test - {bank_name} bank',
             'analog_bank': bank_name,
@@ -705,8 +719,8 @@ def test_dac_mixmodes(d, results, summary_results, test_highbank):
                 while nco < MAX_TOTAL_FREQUENCY:
                     while frequency <= DAC_MAX_FREQUENCY and nco + frequency < MAX_TOTAL_FREQUENCY:
                         if nco + frequency >= 0:
-                            value_setter_helper(d, frequency, AMPLITUDE, SCALE, ATTENUATION, CHANNEL, module_setter, nco, TARGET_DAC, TARGET_ADC, is_highbank)
-                            samples = d.py_get_samples(SAMPLES, channel=CHANNEL, module=module_setter)
+                            value_setter_helper(d, frequency, AMPLITUDE, SCALE, ATTENUATION, CHANNEL, module_setter, nco)
+                            samples = await d.py_get_samples(SAMPLES, channel=CHANNEL, module=module_setter)
                             module_magnitude_dbm, _ = transfer_function_helper(samples, AMPLITUDE, SCALE, ATTENUATION)
 
                             if nyquist_zone == 1:
@@ -760,7 +774,7 @@ def test_dac_mixmodes(d, results, summary_results, test_highbank):
         results['tests'].append(test_result)
 
     # Run test for low bank
-    mixmode_test_for_bank('low', False)
+    await mixmode_test_for_bank('low', False)
 
     # If high bank needs to be tested, prompt the user to switch filters and run again
     if test_highbank:
@@ -770,7 +784,7 @@ def test_dac_mixmodes(d, results, summary_results, test_highbank):
                         3rd Nyquist filter to ADC#7\n \
                         If already have filters connected - disregard this message")
         
-        mixmode_test_for_bank('high', True)
+        await mixmode_test_for_bank('high', True)
 
     d.set_analog_bank(False)
 
@@ -780,10 +794,9 @@ def test_dac_mixmodes(d, results, summary_results, test_highbank):
 '''---------------------------------------------------------------------------------------------------------------'''
 '''--------------------------------------------------ADC----------------------------------------------------------'''
 
-def test_adc_attenuation(d, results, summary_results, test_highbank, num_runs, results_dir):
+@pytest.mark.asyncio
+async def test_adc_attenuation(d, results, summary_results, test_highbank, num_runs, results_dir):
     AMPLITUDE = 1
-    TARGET_DAC = d.TARGET.DAC
-    TARGET_ADC = d.TARGET.ADC
     SAMPLES = 100
     FREQUENCY = 80.234562e6
     NCO_FREQUENCY = 0
@@ -806,7 +819,7 @@ def test_adc_attenuation(d, results, summary_results, test_highbank, num_runs, r
             predicted_magnitude_dbm_values = []
 
             d.clear_channels()
-            value_setter_helper(d, FREQUENCY, AMPLITUDE, SCALE, ATTENUATION_0, CHANNEL, module, NCO_FREQUENCY, TARGET_DAC, TARGET_ADC, highbank_run)
+            value_setter_helper(d, FREQUENCY, AMPLITUDE, SCALE, ATTENUATION_0, CHANNEL, module, NCO_FREQUENCY)
 
             module_sample = module
             if highbank_run:
@@ -818,7 +831,7 @@ def test_adc_attenuation(d, results, summary_results, test_highbank, num_runs, r
 
             for attenuation in range(0, 15):
                 d.set_adc_attenuator(attenuation, d.UNITS.DB, module=module_set)
-                raw_sampl = d.py_get_samples(SAMPLES, channel=CHANNEL, module=module_sample)
+                raw_sampl = await d.py_get_samples(SAMPLES, channel=CHANNEL, module=module_sample)
                 median_magnitude_dbm, predicted_magnitude_dbm = transfer_function_helper(raw_sampl, AMPLITUDE, SCALE, attenuation)
                 attenuation_values.append(attenuation)
                 magnitude_dbm_values.append(median_magnitude_dbm)
@@ -884,10 +897,9 @@ def test_adc_attenuation(d, results, summary_results, test_highbank, num_runs, r
 
 
 @pytest.mark.skip(reason="no way of currently testing this")
-def test_adc_even_phase(d, results):
+@pytest.mark.asyncio
+async def test_adc_even_phase(d, results):
     AMPLITUDE = 0.1
-    TARGET_DAC = d.TARGET.DAC
-    TARGET_ADC = d.TARGET.ADC
     SAMPLES = 100
     FREQUENCY = 1000
     NCO_FREQUENCY = 0
@@ -899,8 +911,8 @@ def test_adc_even_phase(d, results):
         'modules': []
     }
     for module in range(1, 5):
-        value_setter_helper(d, FREQUENCY, AMPLITUDE, SCALE, 0, CHANNEL, module, NCO_FREQUENCY, TARGET_DAC, TARGET_ADC)
-        x = d.py_get_samples(SAMPLES, channel=1, module=1)
+        value_setter_helper(d, FREQUENCY, AMPLITUDE, SCALE, 0, CHANNEL, module, NCO_FREQUENCY)
+        x = await d.py_get_samples(SAMPLES, channel=1, module=1)
     
         data_i_samples = np.array(x.i)
         data_q_samples = np.array(x.q)
@@ -943,13 +955,12 @@ def psd_helper(data_i_raw, data_q_raw):
     return psd_i, psd_q, psdfreq
        
 
-def test_loopback_noise(d, results, summary_results, test_highbank, num_runs, results_dir):
+@pytest.mark.asyncio
+async def test_loopback_noise(d, results, summary_results, test_highbank, num_runs, results_dir):
     '''
     1. Send a signal with no amplitude to gauge the noise floor, and any spikes in the noise floor
     2. Send a higher power signal to dominate the output with 1/f noise. Determine the slope of 1/f and any unusual spikes
     '''
-    TARGET_DAC = d.TARGET.DAC
-    TARGET_ADC = d.TARGET.ADC
     SAMPLES = 10000
 
     # Set parameters for testing white noise floor
@@ -988,16 +999,16 @@ def test_loopback_noise(d, results, summary_results, test_highbank, num_runs, re
 
             # 1. Test the noise environment: send a signal with no amplitude and plot the PSD of the samples
             d.clear_channels()
-            value_setter_helper(d, FREQUENCY, AMPLITUDE_0, SCALE, ATTENUATION, CHANNEL_WHITE, mod, NCO_FREQUENCY, TARGET_DAC, TARGET_ADC, highbank_run)
-            raw_samples_white = d.py_get_samples(SAMPLES, channel=CHANNEL_WHITE, module=mod)
+            value_setter_helper(d, FREQUENCY, AMPLITUDE_0, SCALE, ATTENUATION, CHANNEL_WHITE, mod, NCO_FREQUENCY)
+            raw_samples_white = await d.py_get_samples(SAMPLES, channel=CHANNEL_WHITE, module=mod)
             data_i_white = np.array(raw_samples_white.i)
             data_q_white = np.array(raw_samples_white.q)
             psd_i_white, psd_q_white, psdfreq_white = psd_helper(data_i_white, data_q_white)
 
 
             # 2. Test the PSD of a large signal, establishing an expectation for 1/f slope and peak noise at low frequency
-            value_setter_helper(d, FREQUENCY_1_F, AMPLITUDE_1_F, SCALE_1_F, ATTENUATION_1_F, CHANNEL_1_F, mod, NCO_FREQUENCY_1_F, TARGET_DAC, TARGET_ADC, highbank_run)
-            raw_samples_psd = d.py_get_samples(SAMPLES, channel=CHANNEL_1_F, module=mod)
+            value_setter_helper(d, FREQUENCY_1_F, AMPLITUDE_1_F, SCALE_1_F, ATTENUATION_1_F, CHANNEL_1_F, mod, NCO_FREQUENCY_1_F)
+            raw_samples_psd = await d.py_get_samples(SAMPLES, channel=CHANNEL_1_F, module=mod)
             data_i_1_f = np.array(raw_samples_psd.i)
             data_q_1_f = np.array(raw_samples_psd.q)
             psd_i_1_f, psd_q_1_f, psdfreq_1_f = psd_helper(data_i_1_f, data_q_1_f)
@@ -1143,7 +1154,8 @@ def test_loopback_noise(d, results, summary_results, test_highbank, num_runs, re
 
 
 
-def test_wideband_noise(d, results, summary_results, test_highbank, num_runs, results_dir):
+@pytest.mark.asyncio
+async def test_wideband_noise(d, results, summary_results, test_highbank, num_runs, results_dir):
 
     SAMPLING_FREQUENCY = 5e9  # 5 GHz
     NUM_SAMPLES = 4000  # Total number of samples
@@ -1165,7 +1177,7 @@ def test_wideband_noise(d, results, summary_results, test_highbank, num_runs, re
 
             d.clear_channels()
             time.sleep(1)
-            samples = d.get_fast_samples(NUM_SAMPLES, d.UNITS.RAW, module=mod)
+            samples = await d.get_fast_samples(NUM_SAMPLES, module=mod)
 
             volts_peak_samples = (np.sqrt(2)) * np.sqrt(50 * (10 ** (-1.75 / 10)) / 1000) / 1880796.4604246316
             I_signal = np.array(samples.i) * volts_peak_samples

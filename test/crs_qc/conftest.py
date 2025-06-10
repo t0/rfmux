@@ -12,59 +12,6 @@ import inspect
 import pytest_asyncio
 from report_generator import generate_report_from_data
 
-def run_async_if_needed(func):
-    """Run the given function synchronously, but if it's a coroutine, run it asynchronously."""
-    def wrapper(*args, **kwargs):
-        if inspect.iscoroutinefunction(func):
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                return asyncio.ensure_future(func(*args, **kwargs))
-            else:
-                return loop.run_until_complete(func(*args, **kwargs))
-        else:
-            return func(*args, **kwargs)
-    return wrapper
-
-class SyncContextWrapper:
-    def __init__(self, async_context):
-        self.async_context = async_context
-
-    def __enter__(self):
-        loop = asyncio.get_event_loop()
-        self.context = loop.run_until_complete(self.async_context.__aenter__())
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(self.async_context.__aexit__(exc_type, exc_val, exc_tb))
-
-    def __call__(self, *args, **kwargs):
-        # Automatically await the __call__ method
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(self.context(*args, **kwargs))
-
-    def __getattr__(self, name):
-        # Delegate attribute access to the underlying context
-        return getattr(self.context, name)
-
-
-# Patching function for d object
-def patch_tuber_context(d):
-    original_tuber_context = d.tuber_context
-
-    def patched_tuber_context(*args, **kwargs):
-        # Check if we're in an async context
-        try:
-            asyncio.get_running_loop()
-            # If we're in an async context, return the original async context
-            return original_tuber_context(*args, **kwargs)
-        except RuntimeError:
-            # If we're in a sync context, return the SyncContextWrapper
-            return SyncContextWrapper(original_tuber_context(*args, **kwargs))
-
-    # Override the tuber_context method with the patched version
-    setattr(d, 'tuber_context', patched_tuber_context)
-
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_sessionstart(session):
@@ -101,8 +48,8 @@ def serial(pytestconfig):
     return serial
 
 
-@pytest.fixture(scope="session")
-def d(pytestconfig):
+@pytest_asyncio.fixture(scope="function")
+async def d(pytestconfig):
     serial = pytestconfig.getoption("--serial")
     if serial is None:
         pytest.fail("--serial number not provided! Can't talk to the CRS board.")
@@ -110,25 +57,11 @@ def d(pytestconfig):
     hwm = rfmux.load_session(f'!HardwareMap [ !CRS {{serial: "{serial}"}} ]')
     d = hwm.query(rfmux.CRS).one()
 
-    # Wrap the 'resolve' method with run_async_if_needed since we need it to get the other methods
-    setattr(d, "resolve", run_async_if_needed(getattr(d, "resolve")) ) # Wrap all methods with run_async_if_needed
-
     # Resolve the device to get all the methods    
-    d.resolve()
+    await d.resolve()
+    await d.set_timestamp_port(d.TIMESTAMP_PORT.TEST)
 
-    # Wrap all callable methods, async or not, with run_async_if_needed
-    for attr in dir(d):
-        if not attr.startswith('__'):  # Skip internal methods
-            method = getattr(d, attr)
-            if callable(method):  # Check if it's callable
-                setattr(d, attr, run_async_if_needed(method))  # Wrap all methods with run_async_if_needed
-
-    # Patch tuber_context to seamlessly switch between async and sync contexts
-    patch_tuber_context(d)
-
-    d.set_timestamp_port(d.TIMESTAMP_PORT.TEST)
-
-    return d  # Return the wrapped 'd' object
+    return d
 
 
 @pytest.fixture(scope="session")

@@ -16,91 +16,15 @@ import numpy as np # For np.clip in generate_packet
 # Import DfmuxPacket and related constants from streamer
 from ..streamer import (
     DfmuxPacket, Timestamp, TimestampPort,
-    STREAMER_MAGIC, STREAMER_VERSION, NUM_CHANNELS, SS_PER_SECOND,
-    STREAMER_PORT # Default port for streaming
+    STREAMER_MAGIC,
+    SHORT_PACKET_VERSION, LONG_PACKET_VERSION,
+    SHORT_PACKET_CHANNELS, LONG_PACKET_CHANNELS,
+    SS_PER_SECOND,
+    STREAMER_PORT, # Default port for streaming
 )
 
 # Import enhanced scaling constants
 from . import mock_constants as const
-
-def _dfmuxpacket_to_bytes(self: DfmuxPacket) -> bytes:
-    """
-    Serialize a DfmuxPacket into 8240 bytes, matching streamer.py 'from_bytes()'.
-    Layout:
-      - 16-byte header (<IHHBBBBI)
-      - 8192-byte channel data (NUM_CHANNELS*2 int32)
-      - 32-byte timestamp (<8I)
-    """
-    # Ensure ts.c is an int before bitwise operations
-    c_val = int(self.ts.c) if self.ts.c is not None else 0
-    c_masked = c_val & 0x1FFFFFFF
-    
-    source_map = {
-        TimestampPort.BACKPLANE: 0,
-        TimestampPort.TEST: 1,
-        TimestampPort.SMA: 2,
-        # Using TEST as a fallback if source is not in map or is None
-    }
-    source_val = source_map.get(self.ts.source, source_map[TimestampPort.TEST])
-    c_masked |= (source_val << 29)
-    
-    if self.ts.recent:
-        c_masked |= 0x80000000
-
-    hdr_struct = struct.Struct("<IHHBBBBI")
-    hdr = hdr_struct.pack(
-        self.magic if self.magic is not None else STREAMER_MAGIC,
-        self.version if self.version is not None else STREAMER_VERSION,
-        int(self.serial) if self.serial is not None else 0, # Ensure serial is int
-        self.num_modules if self.num_modules is not None else 1,
-        self.block if self.block is not None else 0,
-        self.fir_stage if self.fir_stage is not None else 6, # Default FIR stage
-        self.module if self.module is not None else 0, # Module index
-        self.seq if self.seq is not None else 0
-    )
-
-    # Channel data: s should be an array.array('i')
-    if not isinstance(self.s, array.array) or self.s.typecode != 'i':
-        # If s is not the correct type (e.g. list of floats from model), convert it
-        # This is a critical point for data integrity.
-        # Assuming s contains float values that need to be scaled and converted to int32
-        temp_arr = array.array("i", [0] * (NUM_CHANNELS * 2))
-        scale = 32767 # Example scale, might need adjustment based on expected data range
-        for i in range(NUM_CHANNELS * 2):
-            if i < len(self.s):
-                # This assumes s is flat [i0, q0, i1, q1, ...]
-                # If s is [[i0,q0], [i1,q1]...], logic needs change
-                val = self.s[i] * scale 
-                temp_arr[i] = int(np.clip(val, -2147483648, 2147483647))
-            else:
-                temp_arr[i] = 0 # Pad if s is too short
-        body_bytes = temp_arr.tobytes()
-
-    else: # self.s is already an array.array('i')
-        body_bytes = self.s.tobytes()
-
-    if len(body_bytes) != NUM_CHANNELS * 2 * 4: # 4 bytes per int32
-        raise ValueError(f"Channel data must be {NUM_CHANNELS*2*4} bytes. Got {len(body_bytes)}")
-    
-    ts_struct = struct.Struct("<8I")
-    ts_data = ts_struct.pack(
-        self.ts.y if self.ts.y is not None else 0,
-        self.ts.d if self.ts.d is not None else 0,
-        self.ts.h if self.ts.h is not None else 0,
-        self.ts.m if self.ts.m is not None else 0,
-        self.ts.s if self.ts.s is not None else 0,
-        self.ts.ss if self.ts.ss is not None else 0,
-        c_masked,
-        self.ts.sbs if self.ts.sbs is not None else 0
-    )
-
-    packet = hdr + body_bytes + ts_data
-    if len(packet) != 8240:
-        raise ValueError(f"Packet length mismatch: {len(packet)} != 8240")
-    return packet
-
-# Monkey-patch the to_bytes method onto DfmuxPacket
-DfmuxPacket.to_bytes = _dfmuxpacket_to_bytes
 
 # Global registry to track all active UDP streamers for cleanup
 _active_streamers = []
@@ -266,7 +190,7 @@ class MockCRSUDPStreamer(threading.Thread):
                     
                     # Sleep to maintain sample rate (only if still running)
                     if self.running:
-                        fir_stage = self.mock_crs.get_fir_stage()
+                        fir_stage = self.mock_crs.get_decimation()
                         sample_rate_per_channel = 625e6 / (256 * 64 * (2**fir_stage))
                         frame_time = 1.0 / sample_rate_per_channel
                         
@@ -304,7 +228,13 @@ class MockCRSUDPStreamer(threading.Thread):
         """Generate a DfmuxPacket for a specific module."""
         # Create channel data array (NUM_CHANNELS = 1024, so 2048 int32s for I & Q)
         # This array should store int32 values.
-        iq_data_arr = array.array("i", [0] * (NUM_CHANNELS * 2))
+
+        if self.mock_crs.short_packets:
+            num_channels = SHORT_PACKET_CHANNELS
+        else:
+            num_channels = LONG_PACKET_CHANNELS
+
+        iq_data_arr = array.array("i", [0] * (num_channels * 2))
         
         # Get configured channels for this module to avoid processing all 1024
         configured_channels = set()
@@ -325,8 +255,8 @@ class MockCRSUDPStreamer(threading.Thread):
         
         # Generate noise for all channels first (this is fast)
         # Using vectorized operations for better performance
-        noise_array = np.random.normal(0, noise_level, NUM_CHANNELS * 2)
-        for i in range(NUM_CHANNELS * 2):
+        noise_array = np.random.normal(0, noise_level, num_channels * 2)
+        for i in range(num_channels * 2):
             iq_data_arr[i] = int(np.clip(noise_array[i], -2147483648, 2147483647))
         
         non_zero_channels_count = len(configured_channels)
@@ -377,11 +307,11 @@ class MockCRSUDPStreamer(threading.Thread):
         
         packet = DfmuxPacket(
             magic=STREAMER_MAGIC,
-            version=STREAMER_VERSION,
+            version=SHORT_PACKET_VERSION if self.mock_crs.short_packets else LONG_PACKET_VERSION,
             serial=int(self.mock_crs.serial) if self.mock_crs.serial and self.mock_crs.serial.isdigit() else 0,
             num_modules=1, # Packet is for one module's data
             block=0, # Block number, typically 0 for continuous streaming
-            fir_stage=self.mock_crs.get_fir_stage(),
+            fir_stage=self.mock_crs.get_decimation(),
             module=module_num - 1,  # DfmuxPacket module is 0-indexed
             seq=seq,
             s=iq_data_arr, # This should be the array.array('i')

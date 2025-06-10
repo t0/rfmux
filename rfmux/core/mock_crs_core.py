@@ -303,7 +303,11 @@ class MockCRS(BaseCRS):
         self.amplitudes = {}   # (module, channel) -> amplitude
         self.phases = {}       # (module, channel) -> phase
         self.tuning_results = {} # Placeholder
+
+        self.active_modules = [1, 2, 3, 4]  # FIXME: add set_analog_bank() support
         self.fir_stage = 6     # Default FIR stage
+        self.streamed_modules = [1, 2, 3, 4]
+        self.short_packets = False
 
         self.temperature_sensors = {
             "MOTHERBOARD_TEMPERATURE_POWER": 30.0, "MOTHERBOARD_TEMPERATURE_ARM": 35.0,
@@ -496,12 +500,25 @@ class MockCRS(BaseCRS):
             raise ValueError(f"Invalid rail '{rail}'. Must be one of {list(self.RAIL_DICT.values())}")
         return self.rails.get(rail, {}).get("current")
 
-    def set_fir_stage(self, stage):
-        assert isinstance(stage, int), "FIR stage must be an integer"
-        self.fir_stage = stage
+    def set_decimation(self, stage: int=6,
+                       short_packets: bool=False,
+                       modules: list[int] | None=None):
 
-    def get_fir_stage(self):
-        return self.fir_stage
+        assert isinstance(stage, int) and 0 <= stage <= 6, \
+                "FIR stage must be an integer between 0 and 6 (inclusive)"
+
+        if modules is None:
+            modules = list(self.active_modules)
+
+        if not isinstance(modules, list) or set(modules) > set(self.active_modules):
+            raise ValueError("Invalid 'modules' argument to set_decimation!")
+
+        self.fir_stage = stage
+        self.short_packets = short_packets
+        self.streamed_modules = modules
+
+    def get_decimation(self):
+        return None if len(self.streamed_modules)==0 else self.fir_stage
 
     async def _thread_lock_acquire(self): # Keep for server compatibility
         await asyncio.sleep(0.001) # Minimal sleep

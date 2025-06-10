@@ -409,7 +409,7 @@ class PeriscopeRuntime:
     def _process_incoming_packets(self):
         """Process all packets currently in the receiver queue."""
         while not self.receiver.queue.empty():
-            pkt = self.receiver.queue.get(); self.pkt_cnt += 1
+            (seq, pkt) = self.receiver.queue.get(); self.pkt_cnt += 1
             t_rel = self._calculate_relative_timestamp(pkt)
             self._update_buffers(pkt, t_rel)
 
@@ -446,6 +446,9 @@ class PeriscopeRuntime:
         """
         # math from .utils
         for ch_val in self.all_chs: # Renamed ch
+            if len(pkt.s)/2 <= ch_val-1:
+                continue # don't plot channels that aren't streamed
+
             Ival = pkt.s[2 * (ch_val - 1)] / 256.0  # Assuming 8-bit ADC data
             Qval = pkt.s[2 * (ch_val - 1) + 1] / 256.0
             self.buf[ch_val]["I"].add(Ival); self.buf[ch_val]["Q"].add(Qval)

@@ -57,6 +57,11 @@ td {
 }
 td.pass { background-color: #c8e6c9; }
 td.fail { background-color: #ffcdd2; }
+tr {
+    /* Discourage splitting cells across page breaks */
+    page-break-inside: avoid;
+    break-inside: avoid;
+}
 
 /* Images: centered, scaled */
 figure {

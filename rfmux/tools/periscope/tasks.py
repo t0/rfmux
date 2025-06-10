@@ -28,7 +28,7 @@ class UDPReceiver(QtCore.QThread):
     def __init__(self, host: str, module: int) -> None:
         super().__init__()
         self.module_id = module
-        self.queue = queue.Queue()
+        self.queue = queue.PriorityQueue()
         self.sock = streamer.get_multicast_socket(host) # streamer from .utils
         self.sock.settimeout(0.2)
 
@@ -42,7 +42,7 @@ class UDPReceiver(QtCore.QThread):
             except OSError:
                 break
             if pkt.module == self.module_id - 1:
-                self.queue.put(pkt)
+                self.queue.put((pkt.seq, pkt))
 
     def stop(self):
         self.requestInterruption()

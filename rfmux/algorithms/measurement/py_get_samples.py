@@ -110,9 +110,7 @@ async def py_get_samples(crs: CRS,
     # later on, when we have a packet to inspect. (This is kinder than
     # explicitly querying the readout mode, since older firmware may not
     # support it.)
-    assert (
-        module in crs.modules.module
-    ), f"Unspecified or invalid module! Available modules: {crs.modules.module}"
+    assert module in range(1, 9), f"Invalid module {module}! Must be between 1 and 8"
 
     # We need to ensure all data we grab from the network was emitted "now" or
     # later, from the perspective of control flow. Because of delays in the

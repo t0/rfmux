@@ -132,6 +132,20 @@ async def take_netanal(
             f"If you encounter errors, either reduce max_chans to 128 or use crs.set_decimation(short=False)."
         )
         warnings.warn(warn_msg)
+    
+    # Check actual available channels by doing a simple get_samples
+    test_samples = await crs.get_samples(1, average=True, channel=None, module=module)
+    available_channels = len(test_samples.mean.i) if hasattr(test_samples.mean, 'i') else 0
+    
+    if max_chans > available_channels:
+        error_msg = (
+            f"Requested {max_chans} channels, but only {available_channels} channels are available.\n"
+            f"This appears to be due to decimation stage settings (short=True limits to 128 channels).\n"
+            f"To fix this, either:\n"
+            f"  1. Reduce max_chans to {available_channels} or less\n"
+            f"  2. Use crs.set_decimation() with the short=False argument to enable up to 1024 channels"
+        )
+        raise ValueError(error_msg)
 
     # Identify NCO chunk boundaries by stepping up to max_span each time.
     chunks = []
@@ -221,24 +235,8 @@ async def take_netanal(
             )
             new_iq_points = []
             for ch in range(len(ifreqs)):
-                try:
-                    i_val = samples.mean.i[ch]
-                    q_val = samples.mean.q[ch]
-                except IndexError as e:
-                    # Check if this is likely due to decimation stage limits
-                    available_channels = len(samples.mean.i) if hasattr(samples.mean, 'i') else 0
-                    if available_channels <= 128:
-                        error_msg = (
-                            f"Channel index {ch} out of range. Only {available_channels} channels are available.\n"
-                            f"This appears to be due to decimation stage settings (short=True limits to 128 channels).\n"
-                            f"To fix this, either:\n"
-                            f"  1. Reduce max_chans to {available_channels} or less\n"
-                            f"  2. Use crs.set_decimation() with the short=False argument to enable up to 1024 channels"
-                        )
-                        raise IndexError(error_msg) from e
-                    else:
-                        # Re-raise original error if not related to decimation
-                        raise
+                i_val = samples.mean.i[ch]
+                q_val = samples.mean.q[ch]
                 iq_val = i_val + 1j * q_val
                 
                 # Store the very first data point if we haven't seen one yet

@@ -57,7 +57,7 @@ class IPMreqSource(ctypes.Structure):
                 ("imr_sourceaddr", InAddr),
                 ("imr_interface", InAddr),
             ]
-        case "linux":
+        case "linux" | "darwin":
             _fields_ = [
                 ("imr_multiaddr", InAddr),
                 ("imr_interface", InAddr),
@@ -325,6 +325,83 @@ def get_local_ip(crs_hostname):
     return local_ip
 
 
+def _set_socket_buffer_size(sock, desired_size=16777216):
+    """
+    Attempt to set socket receive buffer size, trying progressively smaller values if needed.
+    This handles platform limitations, particularly on macOS which has lower limits than Linux.
+    
+    Args:
+        sock: The socket to configure
+        desired_size: The desired buffer size in bytes (default 16MB)
+    
+    Returns:
+        The actual buffer size that was set
+    """
+    # Buffer sizes to try, in descending order
+    # macOS typically supports up to ~7.4MB, while Linux can go much higher
+    buffer_sizes = [
+        desired_size,  # 16MB
+        8388608,       # 8MB
+        7430000,       # ~7.4MB (near macOS limit)
+        4194304,       # 4MB
+    ]
+    
+    actual_size = None
+    set_size = None
+    
+    for size in buffer_sizes:
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, size)
+            set_size = size
+            
+            # Verify what was actually set
+            actual_size = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+            if sys.platform == "linux":
+                # Linux returns a doubled value
+                actual_size //= 2
+            
+            # If we successfully set a buffer size, we're done
+            break
+            
+        except OSError as e:
+            # This size was rejected, try the next smaller one
+            continue
+    
+    if set_size is None:
+        # This should rarely happen, but handle it gracefully
+        warnings.warn(
+            "Unable to set socket receive buffer to any reasonable size. "
+            "Network performance may be severely impacted."
+        )
+        return 0
+    
+    # Warn if we couldn't set the desired size or if actual differs from requested
+    if set_size < desired_size:
+        if sys.platform == "darwin":
+            warnings.warn(
+                f"macOS UDP buffer size limit prevented setting SO_RCVBUF to {desired_size} bytes. "
+                f"Set to {set_size} bytes instead (actual: {actual_size} bytes). "
+                f"This is a known macOS limitation. To increase the limit, you can try: "
+                f"'sudo sysctl -w kern.ipc.maxsockbuf=16777216' (temporary) or add "
+                f"'kern.ipc.maxsockbuf=16777216' to /etc/sysctl.conf (permanent)."
+            )
+        else:
+            warnings.warn(
+                f"Unable to set SO_RCVBUF to {desired_size} bytes. "
+                f"Set to {set_size} bytes instead (actual: {actual_size} bytes). "
+                f"Consider increasing system limits."
+            )
+    elif actual_size != set_size:
+        # Size was accepted but kernel adjusted it
+        warnings.warn(
+            f"SO_RCVBUF was adjusted by the kernel from {set_size} to {actual_size} bytes. "
+            f"Consider 'sudo sysctl net.core.rmem_max=67108864' or similar. This setting "
+            f"can be made persistent across reboots by configuring /etc/sysctl.conf or /etc/sysctl.d."
+        )
+    
+    return actual_size
+
+
 def get_multicast_socket(crs_hostname):
     # Extract just the hostname part for source address resolution
     if ':' in crs_hostname:
@@ -341,22 +418,8 @@ def get_multicast_socket(crs_hostname):
         # Bind to the streamer port on localhost
         sock.bind(("127.0.0.1", STREAMER_PORT))
         
-        # Set a large receive buffer size
-        rcvbuf = 16777216
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
-        
-        # Ensure SO_RCVBUF didn't just fail silently
-        actual = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-        if sys.platform == "linux":
-            # Linux returns a doubled value
-            actual /= 2
-        if actual != rcvbuf:
-            warnings.warn(
-                f"Unable to set SO_RCVBUF to {rcvbuf} (got {actual}). Consider "
-                "'sudo sysctl net.core.rmem_max=67108864' or similar. This setting "
-                "can be made persistent across reboots by configuring "
-                "/etc/sysctl.conf or /etc/sysctl.d."
-            )
+        # Set receive buffer size with platform-aware handling
+        _set_socket_buffer_size(sock)
         
         return sock
     
@@ -371,22 +434,8 @@ def get_multicast_socket(crs_hostname):
     # Bind the socket to all interfaces on the specified port
     sock.bind(("", STREAMER_PORT))
 
-    # Set a large receive buffer size
-    rcvbuf = 16777216
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
-
-    # Ensure SO_RCVBUF didn't just fail silently
-    actual = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-    if sys.platform == "linux":
-        # Linux returns a doubled value
-        actual /= 2
-    if actual != rcvbuf:
-        warnings.warn(
-            f"Unable to set SO_RCVBUF to {rcvbuf} (got {actual}). Consider "
-            "'sudo sysctl net.core.rmem_max=67108864' or similar. This setting "
-            "can be made persistent across reboots by configuring "
-            "/etc/sysctl.conf or /etc/sysctl.d."
-        )
+    # Set receive buffer size with platform-aware handling
+    _set_socket_buffer_size(sock)
 
     # Set the interface to receive multicast packets
     sock.setsockopt(

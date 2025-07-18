@@ -51,13 +51,13 @@ class IPMreqSource(ctypes.Structure):
     """
 
     match sys.platform:
-        case "win32":
+        case "win32" | "darwin":
             _fields_ = [
                 ("imr_multiaddr", InAddr),
                 ("imr_sourceaddr", InAddr),
                 ("imr_interface", InAddr),
             ]
-        case "linux" | "darwin":
+        case "linux":
             _fields_ = [
                 ("imr_multiaddr", InAddr),
                 ("imr_interface", InAddr),

@@ -124,6 +124,14 @@ async def take_netanal(
             "Results may be noisy due to possible DAC clipping."
         )
         warnings.warn(warn_msg)
+    
+    # Warn if max_chans might exceed decimation stage limits
+    if max_chans > 128:
+        warn_msg = (
+            f"Requested {max_chans} channels, but decimation stage with short=True only supports 128 channels. "
+            f"If you encounter errors, either reduce max_chans to 128 or use crs.set_decimation(short=False)."
+        )
+        warnings.warn(warn_msg)
 
     # Identify NCO chunk boundaries by stepping up to max_span each time.
     chunks = []
@@ -213,8 +221,24 @@ async def take_netanal(
             )
             new_iq_points = []
             for ch in range(len(ifreqs)):
-                i_val = samples.mean.i[ch]
-                q_val = samples.mean.q[ch]
+                try:
+                    i_val = samples.mean.i[ch]
+                    q_val = samples.mean.q[ch]
+                except IndexError as e:
+                    # Check if this is likely due to decimation stage limits
+                    available_channels = len(samples.mean.i) if hasattr(samples.mean, 'i') else 0
+                    if available_channels <= 128:
+                        error_msg = (
+                            f"Channel index {ch} out of range. Only {available_channels} channels are available.\n"
+                            f"This appears to be due to decimation stage settings (short=True limits to 128 channels).\n"
+                            f"To fix this, either:\n"
+                            f"  1. Reduce max_chans to {available_channels} or less\n"
+                            f"  2. Use crs.set_decimation() with the short=False argument to enable up to 1024 channels"
+                        )
+                        raise IndexError(error_msg) from e
+                    else:
+                        # Re-raise original error if not related to decimation
+                        raise
                 iq_val = i_val + 1j * q_val
                 
                 # Store the very first data point if we haven't seen one yet

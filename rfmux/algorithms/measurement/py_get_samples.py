@@ -303,7 +303,7 @@ async def py_get_samples(crs: CRS,
         nperseg = num_samples // nsegments
 
         # Retrieve decimation stage => helps define final sampling freq
-        dec_stage = await crs.get_decimation(module=module)
+        dec_stage = await crs.get_decimation()
         fs = 625e6/(256*64*(2**dec_stage))
 
         spec_data = {}

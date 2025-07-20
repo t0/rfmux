@@ -988,3 +988,102 @@ class MultisweepTask(QtCore.QThread):
             for res_idx in enhanced_results:
                 enhanced_results[res_idx]['fitting_error'] = str(e)
             return enhanced_results
+
+
+class BiasKidsSignals(QObject):
+    """Signals for BiasKidsTask."""
+    progress = pyqtSignal(int, float)  # module, progress_percentage
+    completed = pyqtSignal(int, dict, dict)  # module, biased_results, df_calibrations
+    error = pyqtSignal(str)  # error_message
+
+
+class BiasKidsTask(QtCore.QThread):
+    """QThread subclass for running the bias_kids algorithm without blocking the GUI."""
+    
+    def __init__(self, crs: "CRS", module: int, multisweep_results: dict, signals: BiasKidsSignals):
+        """
+        Initialize the BiasKidsTask.
+        
+        Args:
+            crs: Control and Readout System object
+            module: Module number to bias
+            multisweep_results: Multisweep results in GUI format
+            signals: Signal object for communication with GUI
+        """
+        super().__init__()
+        self.crs = crs
+        self.module = module
+        self.multisweep_results = multisweep_results
+        self.signals = signals
+        self._running = True
+        
+    def stop(self):
+        """Stop the task."""
+        self._running = False
+        self.requestInterruption()
+        
+    def run(self):
+        """QThread entry point - runs in a separate thread."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            # Progress callback
+            def progress_cb(module, progress):
+                if self._running:
+                    self.signals.progress.emit(module, progress)
+            
+            # Run the bias_kids algorithm
+            result = loop.run_until_complete(self._run_bias_kids(progress_cb))
+            
+            if self.isInterruptionRequested():
+                self.signals.error.emit("Bias KIDs operation was cancelled.")
+                return
+                
+            if result:
+                # Handle both dict and list return types from bias_kids
+                if isinstance(result, list):
+                    # For list results (multiple modules), we're only processing one module here
+                    # so this shouldn't happen, but handle it gracefully
+                    if len(result) > 0:
+                        result = result[0]  # Take the first module's results
+                    else:
+                        self.signals.error.emit("Bias KIDs operation returned empty list.")
+                        return
+                
+                # Extract df_calibration values (result is now guaranteed to be a dict)
+                df_calibrations = {}
+                for det_idx, det_data in result.items():
+                    if 'df_calibration' in det_data:
+                        df_calibrations[det_idx] = det_data['df_calibration']
+                
+                # Emit completion with results
+                self.signals.completed.emit(self.module, result, df_calibrations)
+            else:
+                self.signals.error.emit("Bias KIDs operation returned no results.")
+                
+        except asyncio.CancelledError:
+            self.signals.error.emit("Bias KIDs operation was cancelled.")
+        except Exception as e:
+            import traceback
+            error_msg = f"Error in BiasKidsTask: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+            print(error_msg)  # Also print to console
+            self.signals.error.emit(error_msg)
+        finally:
+            if loop.is_running():
+                loop.stop()
+            loop.close()
+            
+    async def _run_bias_kids(self, progress_callback):
+        """Run the bias_kids algorithm asynchronously."""
+        # Import bias_kids as a regular function
+        from rfmux.algorithms.measurement.bias_kids import bias_kids
+        
+        # Call bias_kids directly, passing the CRS object
+        result = await bias_kids(
+            crs=self.crs,
+            multisweep_results=self.multisweep_results,
+            module=self.module,
+            progress_callback=progress_callback
+        )
+        return result

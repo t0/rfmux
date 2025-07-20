@@ -9,6 +9,7 @@ from scipy.signal import welch
 from scipy.constants import pi, c
 from typing import Union, Optional, Dict, Literal
 import warnings
+from scipy import interpolate
 
 
 # TODO: Empirical value (should probably be a hybrid)
@@ -637,3 +638,43 @@ def exp_bin_noise_data(f: np.ndarray, psd: np.ndarray, nbins: int = 1000) -> tup
             psd_binned.append(np.mean(psd[mask]))
     
     return np.array(fbinned), np.array(psd_binned)
+
+
+def convert_iq_to_df(iq, fbias, f_calsweep, iq_calsweep):
+    '''
+    Equation 4.5 of Pete Barry's thesis (https://orca.cardiff.ac.uk/id/eprint/71562/1/2014BarryPPhD.pdf)
+    Converts from I,Q voltage units to fequency shift and dissipation.
+
+    NOTE This assumes linearity over the dynamic range being exercised.
+
+    Parameters:
+    -----------
+
+    iq : numpy array
+        complex I+jQ data in voltage units. Note that this can be an I,Q timestream or an FFT of an I,Q
+        timestream 
+
+    fbias : float
+        resonant frequency (or, frequency at which to compute the derivatives used in the conversion)
+
+    f_calsweep : arraylike
+        array of frequency data from the sweep 
+
+    iq_calsweep : arraylike
+        array of I+jQ values from the sweep IN VOLTAGE UNITS, corresponding to f_calsweep
+
+    Returns:
+    --------
+
+    df : numpy array
+        the converted data, in the format (ffs)+1j*(diss) where ffs is frequency shift (NOT fractional frequency shift)
+        and diss is dissipative. To get fractional frequency shift, divide by fbias.    
+    '''
+    fdi = interpolate.CubicSpline(f_calsweep, iq_calsweep.real).derivative()
+    fdq = interpolate.CubicSpline(f_calsweep, iq_calsweep.imag).derivative()
+    dIr = fdi(fbias)
+    dQr = fdq(fbias)
+
+    df = iq / (dIr +1.j*dQr)
+
+    return df

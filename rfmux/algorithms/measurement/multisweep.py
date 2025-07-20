@@ -12,6 +12,7 @@ from collections import defaultdict
 
 from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
+from rfmux.core.transferfunctions import convert_roc_to_volts, convert_iq_to_df
 from typing import Optional, Tuple, Dict, Any # Added for type hinting
 
 def _get_recalculated_center_freq(
@@ -83,6 +84,7 @@ async def multisweep(
     nsamps: int = 10,
     recalculate_center_frequencies: Optional[str] = None, # Options: "min-s21", "max-diq", or None
     sweep_direction: str = "upward", # Options: "upward", "downward"
+    apply_df_calibration: bool = True,  # Enable frequency shift/dissipation calibration
     *,
     module,
     progress_callback=None,
@@ -117,28 +119,72 @@ async def multisweep(
                          principal component of this TOD (maximizing variance) with the I-axis.
             - None: No recalculation. No TOD-based rotation is performed.
             Defaults to None.
+        sweep_direction (str, optional): The direction of the frequency sweep.
+            - "upward": Sweep from lower to higher frequencies.
+            - "downward": Sweep from higher to lower frequencies.
+            Defaults to "upward".
+        apply_df_calibration (bool, optional): Whether to apply frequency shift/dissipation calibration.
+            When True, converts IQ data to frequency shift and dissipation units using sweep derivatives.
+            Defaults to True.
         module (int | list[int]): The target readout module(s).
         progress_callback (callable, optional): Function called with (module, progress_percentage).
         data_callback (callable, optional): Function called with intermediate results during acquisition.
 
     Returns:
-        dict: A dictionary where keys are the final center frequencies (float, Hz).
-              The nature of this key (original or recalculated) is indicated within the value.
-              The value for each key is another dictionary containing:
+        dict: A dictionary where keys are detector indices (0-based integers).
+              Each value is a dictionary containing:
               {
-                  key_freq: {
-                      'frequencies': np.ndarray (Hz), # Original sweep frequencies
+                  detector_idx: {
+                      'frequencies': np.ndarray (Hz), # Sweep frequencies
                       'iq_complex': np.ndarray (complex), # Final, possibly rotated, sweep IQ data
                       'phase_degrees': np.ndarray (degrees), # Derived from final iq_complex
-                      'original_center_frequency': float,
-                      'recalculation_method_applied': str, # "min-s21", "max-dq", or "none"
-                      'key_frequency_is_recalculated': bool,
+                      'original_center_frequency': float, # Original center frequency for this detector
+                      'bias_frequency': float, # Frequency to use for biasing (may be recalculated)
+                      'recalculation_method_applied': str, # "min-s21", "max-diq", or "none"
                       'rotation_tod': Optional[np.ndarray], # 1000-sample IQ TOD, if acquired
-                      'applied_rotation_degrees': Optional[float] # Rotation applied to sweep data
+                      'applied_rotation_degrees': Optional[float], # Rotation applied to sweep data
+                      'sweep_direction': str, # "upward" or "downward"
+                      'sweep_amplitude': float, # Normalized amplitude used in sweep
+                      'iq_complex_volts': Optional[np.ndarray], # Sweep IQ data in voltage units
+                      'df_calibration': Optional[complex], # Calibration factor: multiply IQ data (volts) by this to get freq shift + j*dissipation
+                      'calibrated_tod_df': Optional[np.ndarray], # rotation_tod converted to freq shift + j*dissipation
+                      
+                      # Fitting results (if fitting was applied):
+                      'is_bifurcated': bool, # Whether bifurcation was detected
+                      'skewed_fit_applied': bool,
+                      'skewed_fit_success': bool,
+                      'fit_params': Optional[dict], # Skewed fit parameters if successful
+                      'skewed_model_mag': Optional[np.ndarray], # Skewed fit model
+                      'nonlinear_fit_applied': bool,
+                      'nonlinear_fit_success': bool,
+                      'nonlinear_fit_params': Optional[dict], # Nonlinear fit parameters if successful
+                      'nonlinear_model_iq': Optional[np.ndarray], # Nonlinear fit model
                   },
                   ...
               }
+              
               If running on multiple modules, returns a list of these dictionaries.
+              
+              Note: When multisweep is run with multiple amplitudes through the GUI (e.g., using
+              MultisweepTask), the results are typically stored in a structure like:
+              {
+                  'results_by_iteration': [
+                      {
+                          'iteration': 0,
+                          'amplitude': 0.1,
+                          'direction': 'upward',
+                          'data': {detector_idx: {...detector_data...}, ...}
+                      },
+                      {
+                          'iteration': 1,
+                          'amplitude': 0.2,
+                          'direction': 'upward',
+                          'data': {detector_idx: {...detector_data...}, ...}
+                      },
+                      ...
+                  ]
+              }
+              However, this structure is created by the GUI task, not by this algorithm directly.
     """
 
     # --- Handle parallel execution if module is a list ---
@@ -461,6 +507,42 @@ async def multisweep(
         # Get bias frequency (either recalculated or original)
         bias_freq = data_entry.get('bias_frequency', original_cf)
         recalc_method_applied = data_entry.get('recalculation_method_applied', "none")
+        
+        # Apply calibration if requested
+        iq_complex_volts = None
+        df_calibration = None
+        calibrated_tod_df = None
+        
+        if apply_df_calibration:
+            # Convert sweep IQ data from ADC counts to volts
+            iq_complex_volts = convert_roc_to_volts(final_iq_complex)
+            
+            # Calculate calibration at bias frequency
+            try:
+                # Calculate the calibration factor by converting iq=1 (in volts)
+                # This gives us the conversion factor: any future IQ data can be 
+                # multiplied by this to get frequency shift and dissipation
+                df_calibration = convert_iq_to_df(
+                    np.array([1.0 + 0j]),  # Unit IQ in volts
+                    bias_freq,
+                    data_entry['frequencies'],
+                    iq_complex_volts
+                )[0]  # Get the single complex value
+                
+                # If we have a TOD, calibrate it too
+                if data_entry.get('rotation_tod') is not None:
+                    rotation_tod_volts = convert_roc_to_volts(data_entry['rotation_tod'])
+                    calibrated_tod_df = convert_iq_to_df(
+                        rotation_tod_volts, 
+                        bias_freq,
+                        data_entry['frequencies'],
+                        iq_complex_volts
+                    )
+                    
+            except Exception as e:
+                warnings.warn(f"Calibration failed for resonance {idx}: {e}")
+                df_calibration = None
+                calibrated_tod_df = None
 
         result_dict = {
             'frequencies': data_entry['frequencies'],
@@ -471,7 +553,11 @@ async def multisweep(
             'recalculation_method_applied': recalc_method_applied,
             'rotation_tod': data_entry.get('rotation_tod'),
             'applied_rotation_degrees': data_entry.get('applied_rotation_degrees'),
-            'sweep_direction': sweep_direction
+            'sweep_direction': sweep_direction,
+            'sweep_amplitude': amp,  # Store the amplitude used in the sweep
+            'iq_complex_volts': iq_complex_volts,  # Sweep IQ data in voltage units
+            'df_calibration': df_calibration,  # Calibration parameters
+            'calibrated_tod_df': calibrated_tod_df  # Calibrated TOD data
         }
         results_by_index[idx] = result_dict
     

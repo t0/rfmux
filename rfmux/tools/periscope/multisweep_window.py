@@ -3,8 +3,10 @@ import datetime
 import pickle
 import numpy as np
 from PyQt6 import QtCore, QtWidgets
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 import pyqtgraph as pg
+import asyncio
+import traceback
 
 # Imports from within the 'periscope' subpackage
 from .utils import (
@@ -21,6 +23,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
     across various probe amplitudes. It provides controls for data export,
     re-running sweeps, unit conversion, normalization, and plot interaction.
     """
+    
+    # Signal emitted when bias_kids algorithm completes with df_calibration data
+    df_calibration_ready = pyqtSignal(int, dict)  # module, {detector_idx: df_calibration}
     def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None, dark_mode=False):
         """
         Initializes the MultisweepWindow.
@@ -83,6 +88,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.show_cf_lines_cb = None # Checkbox for toggling CF lines
         self.cf_lines_mag = {}  # Stores {amplitude: [InfiniteLine_mag]}
         self.cf_lines_phase = {} # Stores {amplitude: [InfiniteLine_phase]}
+        
+        # Bias KIDs output storage
+        self.bias_kids_output = None  # Stores the output from bias_kids algorithm
 
         self._setup_ui()
         self.resize(1200, 800) # Default window size
@@ -113,6 +121,12 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.rerun_btn = QtWidgets.QPushButton("Re-run Multisweep")
         self.rerun_btn.clicked.connect(self._rerun_multisweep)
         toolbar.addWidget(self.rerun_btn)
+        
+        # Bias KIDs Button
+        self.bias_kids_btn = QtWidgets.QPushButton("Bias KIDs")
+        self.bias_kids_btn.clicked.connect(self._bias_kids)
+        self.bias_kids_btn.setToolTip("Bias detectors at optimal operating points based on multisweep results")
+        toolbar.addWidget(self.bias_kids_btn)
         
         toolbar.addSeparator()
 
@@ -744,7 +758,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 'target_module': self.target_module,
                 'initial_parameters': self.initial_params,
                 'dac_scales_used': self.dac_scales,
-                'results_by_iteration': self.results_by_iteration
+                'results_by_iteration': self.results_by_iteration,
+                'bias_kids_output': self.bias_kids_output  # Include bias_kids results if available
             }
             with open(filename, 'wb') as f: # Write in binary mode for pickle
                 pickle.dump(export_content, f)
@@ -1275,3 +1290,112 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         for digest_window in self.detector_digest_windows:
             if hasattr(digest_window, 'apply_theme'):
                 digest_window.apply_theme(dark_mode)
+    
+    def _bias_kids(self):
+        """
+        Run the bias_kids algorithm on the current multisweep results.
+        Programs detectors at optimal operating points and stores calibration data.
+        """
+        # Check prerequisites
+        if not self.results_by_iteration:
+            QtWidgets.QMessageBox.warning(self, "No Data", 
+                                        "No multisweep data available. Please run a multisweep first.")
+            return
+        
+        parent = self.parent()
+        if not parent:
+            QtWidgets.QMessageBox.warning(self, "Parent Not Available", 
+                                        "Parent window not available. Cannot access CRS object.")
+            return
+            
+        if not hasattr(parent, 'crs'):
+            QtWidgets.QMessageBox.warning(self, "CRS Not Found", 
+                                        "Parent window does not have CRS object.")
+            return
+            
+        if parent.crs is None:
+            QtWidgets.QMessageBox.warning(self, "CRS Not Available", 
+                                        "CRS object is None. Cannot bias detectors.")
+            return
+        
+        # Prepare data in GUI format expected by bias_kids
+        gui_format_results = {
+            'results_by_iteration': list(self.results_by_iteration.values())
+        }
+        
+        # Import BiasKidsTask and BiasKidsSignals from tasks module
+        from .tasks import BiasKidsTask, BiasKidsSignals
+        
+        # Create signals for communication with the task
+        self.bias_kids_signals = BiasKidsSignals()
+        self.bias_kids_signals.progress.connect(self._bias_kids_progress)
+        self.bias_kids_signals.completed.connect(self._bias_kids_completed)
+        self.bias_kids_signals.error.connect(self._bias_kids_error)
+        
+        # Ensure we have a valid module number
+        if self.target_module is None:
+            QtWidgets.QMessageBox.warning(self, "Module Not Set", 
+                                        "Target module is not set. Cannot bias detectors.")
+            return
+        
+        # Create and start the task
+        self.bias_kids_task = BiasKidsTask(
+            parent.crs,
+            self.target_module,
+            gui_format_results,
+            self.bias_kids_signals
+        )
+        
+        # Update UI to show operation in progress
+        self.bias_kids_btn.setEnabled(False)
+        self.bias_kids_btn.setText("Biasing...")
+        
+        # Start the task
+        self.bias_kids_task.start()
+    
+    def _bias_kids_progress(self, module, progress):
+        """Handle progress updates from the bias_kids task."""
+        # Could update a progress indicator if desired
+        pass
+    
+    def _bias_kids_completed(self, module, biased_results, df_calibrations):
+        """Handle completion of the bias_kids task."""
+        # Store the output
+        self.bias_kids_output = biased_results
+        
+        # Emit signal with df_calibration data
+        if df_calibrations:
+            self.df_calibration_ready.emit(module, df_calibrations)
+        
+        # Show success dialog
+        num_biased = len(biased_results)
+        total_detectors = len(self.conceptual_resonance_frequencies)
+        
+        msg = f"Successfully biased {num_biased} out of {total_detectors} detectors.\n\n"
+        
+        if num_biased > 0:
+            msg += "The detectors have been programmed at their optimal operating points."
+            if df_calibrations:
+                msg += "\n\nFrequency shift calibration data has been loaded into the main window."
+        else:
+            msg += "No detectors met the criteria for biasing."
+        
+        QtWidgets.QMessageBox.information(self, "Bias KIDs Complete", msg)
+        
+        # Reset UI
+        self.bias_kids_btn.setEnabled(True)
+        self.bias_kids_btn.setText("Bias KIDs")
+        
+        # Clean up the task
+        self.bias_kids_task = None
+    
+    def _bias_kids_error(self, error_msg):
+        """Handle errors from the bias_kids task."""
+        QtWidgets.QMessageBox.critical(self, "Bias KIDs Error", error_msg)
+        
+        # Reset UI
+        self.bias_kids_btn.setEnabled(True)
+        self.bias_kids_btn.setText("Bias KIDs")
+        
+        # Clean up the task
+        self.bias_kids_task = None

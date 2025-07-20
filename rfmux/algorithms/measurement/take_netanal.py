@@ -125,14 +125,6 @@ async def take_netanal(
         )
         warnings.warn(warn_msg)
     
-    # Warn if max_chans might exceed decimation stage limits
-    if max_chans > 128:
-        warn_msg = (
-            f"Requested {max_chans} channels, but decimation stage with short=True only supports 128 channels. "
-            f"If you encounter errors, either reduce max_chans to 128 or use crs.set_decimation(short=False)."
-        )
-        warnings.warn(warn_msg)
-    
     # Check actual available channels by doing a simple get_samples
     test_samples = await crs.get_samples(1, average=True, channel=None, module=module)
     available_channels = len(test_samples.mean.i) if hasattr(test_samples.mean, 'i') else 0

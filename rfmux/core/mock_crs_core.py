@@ -138,10 +138,12 @@ class MockCRSContext:
         }))
         return self  # Enable method chaining
     
-    def set_phase(self, phase, channel=None, module=None):
+    def set_phase(self, phase, units='DEGREES', target=None, channel=None, module=None):
         """Queue a phase setting operation"""
         self.pending_ops.append(('set_phase', {
             'phase': phase,
+            'units': units,
+            'target': target,
             'channel': channel,
             'module': module
         }))
@@ -449,16 +451,45 @@ class MockCRS(BaseCRS):
         assert module is not None and isinstance(module, int), "Module must be an integer"
         return self.amplitudes.get((module, channel))
 
-    def set_phase(self, phase, channel=None, module=None):
+    def set_phase(self, phase, units='DEGREES', target=None, channel=None, module=None):
         assert isinstance(phase, (int, float)), "Phase must be a number"
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
-        self.phases[(module, channel)] = phase
+        
+        # Validate units if provided as string
+        if isinstance(units, str):
+            units = units.upper()
+            if units not in ['DEGREES', 'RADIANS']:
+                raise ValueError(f"Invalid phase units '{units}'. Must be 'DEGREES' or 'RADIANS'")
+        
+        # Convert to degrees for internal storage
+        if units == 'RADIANS' or (hasattr(units, 'value') and units.value == 'radians'):
+            phase_degrees = phase * 180.0 / np.pi
+        else:
+            phase_degrees = phase
+            
+        self.phases[(module, channel)] = phase_degrees
 
-    def get_phase(self, channel=None, module=None):
+    def get_phase(self, units='DEGREES', target=None, channel=None, module=None):
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
-        return self.phases.get((module, channel))
+        
+        # Get phase in degrees (internal storage)
+        phase_degrees = self.phases.get((module, channel))
+        if phase_degrees is None:
+            return None
+            
+        # Validate units if provided as string
+        if isinstance(units, str):
+            units = units.upper()
+            if units not in ['DEGREES', 'RADIANS']:
+                raise ValueError(f"Invalid phase units '{units}'. Must be 'DEGREES' or 'RADIANS'")
+        
+        # Convert based on requested units
+        if units == 'RADIANS' or (hasattr(units, 'value') and units.value == 'radians'):
+            return phase_degrees * np.pi / 180.0
+        else:
+            return phase_degrees
 
     def set_timestamp_port(self, port):
         port = self.validate_enum_member(port, TimestampPort, "timestamp port")

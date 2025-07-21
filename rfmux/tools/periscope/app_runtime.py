@@ -121,7 +121,7 @@ class PeriscopeRuntime:
             vb = ClickableViewBox() # From .utils
             pw = pg.PlotWidget(viewBox=vb, title=f"{mode_title(mode_key)} – {row_title}") # mode_title from .utils
             self._configure_plot_auto_range(pw, mode_key)
-            self._configure_plot_axes(pw, mode_key)
+            self._configure_plot_axes(pw, mode_key, group)
             self._apply_plot_theme(pw)
             pw.showGrid(x=True, y=True, alpha=0.3)
             self.grid.addWidget(pw, row_i, col)
@@ -146,29 +146,55 @@ class PeriscopeRuntime:
         if mode_key == "T": pw.enableAutoRange(pg.ViewBox.XYAxes, True)
         else: pw.enableAutoRange(pg.ViewBox.XYAxes, self.auto_scale_plots)
 
-    def _configure_plot_axes(self, pw: pg.PlotWidget, mode_key: str):
-        """Configure axis labels and scales for a given plot based on its mode."""
-        # convert_roc_to_volts from .utils
+    def _configure_plot_axes(self, pw: pg.PlotWidget, mode_key: str, group: list[int]):
+        """Configure axis labels and scales for a given plot based on its mode and calibration availability."""
+        # Check if all channels in the group have df calibration
+        all_have_calibration = False
+        if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
+            all_have_calibration = all(
+                ch in self.df_calibrations[self.module] 
+                for ch in group
+            )
+        
+        # Determine axis labels based on unit mode and calibration availability
         if mode_key == "T":
-            pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
+            if self.unit_mode == "df" and all_have_calibration:
+                pw.setLabel("left", "Freq. Shift / Dissipation", units="Hz / unitless")
+            else:
+                pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
         elif mode_key == "IQ":
             pw.getViewBox().setAspectLocked(True)
-            pw.setLabel("bottom", "I", units="V" if self.real_units else "Counts")
-            pw.setLabel("left",   "Q", units="V" if self.real_units else "Counts")
+            if self.unit_mode == "df" and all_have_calibration:
+                pw.setLabel("bottom", "Freq. Shift", units="Hz")
+                pw.setLabel("left", "Dissipation", units="unitless")
+            else:
+                pw.setLabel("bottom", "I", units="V" if self.real_units else "Counts")
+                pw.setLabel("left",   "Q", units="V" if self.real_units else "Counts")
         elif mode_key == "F":
             pw.setLogMode(x=True, y=True)
             pw.setLabel("bottom", "Freq", units="Hz")
-            pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
+            if self.unit_mode == "df" and all_have_calibration:
+                pw.setLabel("left", "Amplitude", units="Hz or unitless")
+            else:
+                pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
         elif mode_key == "S":
             pw.setLogMode(x=True, y=not self.real_units)
             pw.setLabel("bottom", "Freq", units="Hz")
-            lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
-            pw.setLabel("left", f"PSD ({lbl})" if self.real_units else "PSD (Counts²/Hz)")
+            if self.unit_mode == "df" and all_have_calibration:
+                # When in df units, PSDs become ASDs (Amplitude Spectral Densities)
+                pw.setLabel("left", "ASD (Hz/√Hz or 1/√Hz)")
+            else:
+                lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
+                pw.setLabel("left", f"PSD ({lbl})" if self.real_units else "PSD (Counts²/Hz)")
         else:  # "D"
             pw.setLogMode(x=False, y=not self.real_units)
             pw.setLabel("bottom", "Freq", units="Hz")
-            lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
-            pw.setLabel("left", f"PSD ({lbl})" if self.real_units else "PSD (Counts²/Hz)")
+            if self.unit_mode == "df" and all_have_calibration:
+                # When in df units, PSDs become ASDs (Amplitude Spectral Densities)
+                pw.setLabel("left", "ASD (Hz/√Hz or 1/√Hz)")
+            else:
+                lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
+                pw.setLabel("left", f"PSD ({lbl})" if self.real_units else "PSD (Counts²/Hz)")
 
     def _configure_plot_fonts(self, pw: pg.PlotWidget, font: QFont):
         """Apply the standard font to plot titles and axis labels."""
@@ -216,23 +242,53 @@ class PeriscopeRuntime:
             dict: A dictionary mapping the channel ID to its curve items.
         """
         # LINE_WIDTH from .utils
+        # Determine legend names based on unit mode AND calibration availability
+        has_df_calibration = (
+            self.unit_mode == "df" and 
+            hasattr(self, 'df_calibrations') and 
+            self.module in self.df_calibrations and
+            ch_val in self.df_calibrations[self.module]
+        )
+        
+        if has_df_calibration:
+            i_name = "Freq Shift"
+            q_name = "Dissipation"
+        else:
+            i_name = "I"
+            q_name = "Q"
+            
         if mode_key == "T":
-            cI = pw.plot(pen=pg.mkPen(single_colors["I"],   width=LINE_WIDTH), name="I")
-            cQ = pw.plot(pen=pg.mkPen(single_colors["Q"],   width=LINE_WIDTH), name="Q")
-            cM = pw.plot(pen=pg.mkPen(single_colors["Mag"], width=LINE_WIDTH), name="Mag")
-            self._fade_hidden_entries(legend, ("I", "Q"))
-            return {ch_val: {"I": cI, "Q": cQ, "Mag": cM}}
+            cI = pw.plot(pen=pg.mkPen(single_colors["I"],   width=LINE_WIDTH), name=i_name)
+            cQ = pw.plot(pen=pg.mkPen(single_colors["Q"],   width=LINE_WIDTH), name=q_name)
+            # Only create magnitude curve if not in df units with calibration
+            if has_df_calibration:
+                cM = None  # No magnitude in df units
+                self._fade_hidden_entries(legend, (i_name, q_name))
+                return {ch_val: {"I": cI, "Q": cQ}}
+            else:
+                cM = pw.plot(pen=pg.mkPen(single_colors["Mag"], width=LINE_WIDTH), name="Mag")
+                self._fade_hidden_entries(legend, (i_name, q_name))
+                return {ch_val: {"I": cI, "Q": cQ, "Mag": cM}}
         elif mode_key == "F":
-            cI = pw.plot(pen=pg.mkPen(single_colors["I"],   width=LINE_WIDTH), name="I"); cI.setFftMode(True)
-            cQ = pw.plot(pen=pg.mkPen(single_colors["Q"],   width=LINE_WIDTH), name="Q"); cQ.setFftMode(True)
-            cM = pw.plot(pen=pg.mkPen(single_colors["Mag"], width=LINE_WIDTH), name="Mag"); cM.setFftMode(True)
-            self._fade_hidden_entries(legend, ("I", "Q"))
-            return {ch_val: {"I": cI, "Q": cQ, "Mag": cM}}
+            cI = pw.plot(pen=pg.mkPen(single_colors["I"],   width=LINE_WIDTH), name=i_name); cI.setFftMode(True)
+            cQ = pw.plot(pen=pg.mkPen(single_colors["Q"],   width=LINE_WIDTH), name=q_name); cQ.setFftMode(True)
+            # Only create magnitude curve if not in df units with calibration
+            if has_df_calibration:
+                self._fade_hidden_entries(legend, (i_name, q_name))
+                return {ch_val: {"I": cI, "Q": cQ}}
+            else:
+                cM = pw.plot(pen=pg.mkPen(single_colors["Mag"], width=LINE_WIDTH), name="Mag"); cM.setFftMode(True)
+                self._fade_hidden_entries(legend, (i_name, q_name))
+                return {ch_val: {"I": cI, "Q": cQ, "Mag": cM}}
         elif mode_key == "S":
-            cI = pw.plot(pen=pg.mkPen(single_colors["I"],   width=LINE_WIDTH), name="I")
-            cQ = pw.plot(pen=pg.mkPen(single_colors["Q"],   width=LINE_WIDTH), name="Q")
-            cM = pw.plot(pen=pg.mkPen(single_colors["Mag"], width=LINE_WIDTH), name="Mag")
-            return {ch_val: {"I": cI, "Q": cQ, "Mag": cM}}
+            cI = pw.plot(pen=pg.mkPen(single_colors["I"],   width=LINE_WIDTH), name=i_name)
+            cQ = pw.plot(pen=pg.mkPen(single_colors["Q"],   width=LINE_WIDTH), name=q_name)
+            # Only create magnitude curve if not in df units with calibration
+            if has_df_calibration:
+                return {ch_val: {"I": cI, "Q": cQ}}
+            else:
+                cM = pw.plot(pen=pg.mkPen(single_colors["Mag"], width=LINE_WIDTH), name="Mag")
+                return {ch_val: {"I": cI, "Q": cQ, "Mag": cM}}
         else:  # "D"
             cD = pw.plot(pen=pg.mkPen(single_colors["DSB"], width=LINE_WIDTH), name="Complex DSB")
             return {ch_val: {"Cmplx": cD}}
@@ -255,22 +311,50 @@ class PeriscopeRuntime:
         """
         mode_dict = {}
         for i, ch_val in enumerate(group): # Renamed ch
+            # Check calibration availability per channel
+            has_df_calibration = (
+                self.unit_mode == "df" and 
+                hasattr(self, 'df_calibrations') and 
+                self.module in self.df_calibrations and
+                ch_val in self.df_calibrations[self.module]
+            )
+            
+            # Set suffixes based on calibration availability
+            if has_df_calibration:
+                i_suffix = "-FreqShift"
+                q_suffix = "-Dissipation"
+            else:
+                i_suffix = "-I"
+                q_suffix = "-Q"
+                
             (colI, colQ, colM) = channel_families[i % len(channel_families)]
             if mode_key == "T":
-                cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH), name=f"ch{ch_val}-I")
-                cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH), name=f"ch{ch_val}-Q")
-                cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH), name=f"ch{ch_val}-Mag")
-                mode_dict[ch_val] = {"I": cI, "Q": cQ, "Mag": cM}
+                cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH), name=f"ch{ch_val}{i_suffix}")
+                cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH), name=f"ch{ch_val}{q_suffix}")
+                # Only create magnitude curve if not in df units with calibration
+                if has_df_calibration:
+                    mode_dict[ch_val] = {"I": cI, "Q": cQ}
+                else:
+                    cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH), name=f"ch{ch_val}-Mag")
+                    mode_dict[ch_val] = {"I": cI, "Q": cQ, "Mag": cM}
             elif mode_key == "F":
-                cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH), name=f"ch{ch_val}-I"); cI.setFftMode(True)
-                cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH), name=f"ch{ch_val}-Q"); cQ.setFftMode(True)
-                cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH), name=f"ch{ch_val}-Mag"); cM.setFftMode(True)
-                mode_dict[ch_val] = {"I": cI, "Q": cQ, "Mag": cM}
+                cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH), name=f"ch{ch_val}{i_suffix}"); cI.setFftMode(True)
+                cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH), name=f"ch{ch_val}{q_suffix}"); cQ.setFftMode(True)
+                # Only create magnitude curve if not in df units with calibration
+                if has_df_calibration:
+                    mode_dict[ch_val] = {"I": cI, "Q": cQ}
+                else:
+                    cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH), name=f"ch{ch_val}-Mag"); cM.setFftMode(True)
+                    mode_dict[ch_val] = {"I": cI, "Q": cQ, "Mag": cM}
             elif mode_key == "S":
-                cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH), name=f"ch{ch_val}-I")
-                cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH), name=f"ch{ch_val}-Q")
-                cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH), name=f"ch{ch_val}-Mag")
-                mode_dict[ch_val] = {"I": cI, "Q": cQ, "Mag": cM}
+                cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH), name=f"ch{ch_val}{i_suffix}")
+                cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH), name=f"ch{ch_val}{q_suffix}")
+                # Only create magnitude curve if not in df units with calibration
+                if has_df_calibration:
+                    mode_dict[ch_val] = {"I": cI, "Q": cQ}
+                else:
+                    cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH), name=f"ch{ch_val}-Mag")
+                    mode_dict[ch_val] = {"I": cI, "Q": cQ, "Mag": cM}
             else:  # "D"
                 cD = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH), name=f"ch{ch_val}-DSB")
                 mode_dict[ch_val] = {"Cmplx": cD}
@@ -475,22 +559,46 @@ class PeriscopeRuntime:
         """
         rawI = self.buf[ch_val]["I"].data(); rawQ = self.buf[ch_val]["Q"].data()
         rawM = self.buf[ch_val]["M"].data(); tarr = self.tbuf[ch_val].data()
-        # convert_roc_to_volts from .utils
-        I_data, Q_data, M_data = (convert_roc_to_volts(d) for d in (rawI, rawQ, rawM)) if self.real_units else (rawI, rawQ, rawM) # Renamed I,Q,M
+        
+        # Apply appropriate unit conversion based on unit_mode
+        if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
+            # Check if calibration data exists for this channel
+            df_cal = self.df_calibrations[self.module].get(ch_val)
+            if df_cal is not None:
+                # Convert to volts first
+                I_volts = convert_roc_to_volts(rawI)
+                Q_volts = convert_roc_to_volts(rawQ)
+                # Apply df calibration: multiply complex IQ by calibration factor
+                iq_volts = I_volts + 1j * Q_volts
+                df_complex = iq_volts * df_cal
+                # Extract frequency shift (real) and dissipation (imaginary)
+                I_data = df_complex.real  # Frequency shift in Hz
+                Q_data = df_complex.imag  # Dissipation (unitless)
+                # Magnitude in df space
+                M_data = np.abs(df_complex)
+            else:
+                # No calibration for this channel, fall back to counts
+                I_data, Q_data, M_data = rawI, rawQ, rawM
+        elif self.real_units:
+            # Standard voltage conversion
+            I_data, Q_data, M_data = (convert_roc_to_volts(d) for d in (rawI, rawQ, rawM))
+        else:
+            # Raw counts
+            I_data, Q_data, M_data = rawI, rawQ, rawM
         
         # Update Time-Domain (TOD) plots
         if "T" in rowCurves and ch_val in rowCurves["T"]:
             cset = rowCurves["T"][ch_val]
             if cset["I"].isVisible(): cset["I"].setData(tarr, I_data)
             if cset["Q"].isVisible(): cset["Q"].setData(tarr, Q_data)
-            if cset["Mag"].isVisible(): cset["Mag"].setData(tarr, M_data)
+            if "Mag" in cset and cset["Mag"].isVisible(): cset["Mag"].setData(tarr, M_data)
         
         # Update FFT plots
         if "F" in rowCurves and ch_val in rowCurves["F"]:
             cset = rowCurves["F"][ch_val]
             if cset["I"].isVisible(): cset["I"].setData(tarr, I_data, fftMode=True)
             if cset["Q"].isVisible(): cset["Q"].setData(tarr, Q_data, fftMode=True)
-            if cset["Mag"].isVisible(): cset["Mag"].setData(tarr, M_data, fftMode=True)
+            if "Mag" in cset and cset["Mag"].isVisible(): cset["Mag"].setData(tarr, M_data, fftMode=True)
 
     def _dispatch_iq_task(self, row_i: int, group: list[int], rowCurves: dict):
         """
@@ -504,13 +612,72 @@ class PeriscopeRuntime:
         # IQTask from .tasks
         mode_key = rowCurves["IQ"]["mode"] # Renamed mode
         if len(group) == 1: # Single channel IQ plot
-            c_val = group[0]; rawI = self.buf[c_val]["I"].data(); rawQ = self.buf[c_val]["Q"].data() # Renamed c
+            c_val = group[0]
+            rawI = self.buf[c_val]["I"].data()
+            rawQ = self.buf[c_val]["Q"].data()
+            
+            # Apply unit conversion (same logic as in _update_channel_plot_data)
+            if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
+                df_cal = self.df_calibrations[self.module].get(c_val)
+                if df_cal is not None:
+                    # Convert to volts first
+                    I_volts = convert_roc_to_volts(rawI)
+                    Q_volts = convert_roc_to_volts(rawQ)
+                    # Apply df calibration
+                    iq_volts = I_volts + 1j * Q_volts
+                    df_complex = iq_volts * df_cal
+                    # Extract frequency shift (real) and dissipation (imaginary)
+                    I_data = df_complex.real  # Frequency shift in Hz
+                    Q_data = df_complex.imag  # Dissipation (unitless)
+                else:
+                    # No calibration for this channel
+                    I_data, Q_data = rawI, rawQ
+            elif self.real_units:
+                # Standard voltage conversion
+                I_data = convert_roc_to_volts(rawI)
+                Q_data = convert_roc_to_volts(rawQ)
+            else:
+                # Raw counts
+                I_data, Q_data = rawI, rawQ
+            
             self.iq_workers[row_i] = True
-            task = IQTask(row_i, c_val, rawI, rawQ, self.dot_px, mode_key, self.iq_signals)
+            task = IQTask(row_i, c_val, I_data, Q_data, self.dot_px, mode_key, self.iq_signals)
             self.pool.start(task)
-        else: # Multi-channel IQ plot (concatenate data)
-            concatI = np.concatenate([self.buf[ch]["I"].data() for ch in group])
-            concatQ = np.concatenate([self.buf[ch]["Q"].data() for ch in group])
+        else: # Multi-channel IQ plot (concatenate converted data)
+            all_I_data = []
+            all_Q_data = []
+            
+            for ch in group:
+                rawI = self.buf[ch]["I"].data()
+                rawQ = self.buf[ch]["Q"].data()
+                
+                # Apply unit conversion for each channel
+                if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
+                    df_cal = self.df_calibrations[self.module].get(ch)
+                    if df_cal is not None:
+                        # Convert to volts first
+                        I_volts = convert_roc_to_volts(rawI)
+                        Q_volts = convert_roc_to_volts(rawQ)
+                        # Apply df calibration
+                        iq_volts = I_volts + 1j * Q_volts
+                        df_complex = iq_volts * df_cal
+                        # Extract frequency shift and dissipation
+                        I_data = df_complex.real
+                        Q_data = df_complex.imag
+                    else:
+                        I_data, Q_data = rawI, rawQ
+                elif self.real_units:
+                    I_data = convert_roc_to_volts(rawI)
+                    Q_data = convert_roc_to_volts(rawQ)
+                else:
+                    I_data, Q_data = rawI, rawQ
+                    
+                all_I_data.append(I_data)
+                all_Q_data.append(Q_data)
+            
+            concatI = np.concatenate(all_I_data)
+            concatQ = np.concatenate(all_Q_data)
+            
             big_size = concatI.size
             if big_size > 50000: # Downsample if too many points for performance
                 stride = max(1, big_size // 50000)
@@ -534,7 +701,30 @@ class PeriscopeRuntime:
             for ch_val in group: # Renamed ch
                 if not self.psd_workers[row_i]["S"].get(ch_val, False): # Check if worker already active
                     rawI = self.buf[ch_val]["I"].data(); rawQ = self.buf[ch_val]["Q"].data()
-                    I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ)) if self.real_units else (rawI, rawQ) # Renamed I,Q
+                    
+                    # Apply unit conversion (same logic as in _update_channel_plot_data)
+                    if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
+                        df_cal = self.df_calibrations[self.module].get(ch_val)
+                        if df_cal is not None:
+                            # Convert to volts first
+                            I_volts = convert_roc_to_volts(rawI)
+                            Q_volts = convert_roc_to_volts(rawQ)
+                            # Apply df calibration
+                            iq_volts = I_volts + 1j * Q_volts
+                            df_complex = iq_volts * df_cal
+                            # Extract frequency shift (real) and dissipation (imaginary)
+                            I_data = df_complex.real  # Frequency shift in Hz
+                            Q_data = df_complex.imag  # Dissipation (unitless)
+                        else:
+                            # No calibration for this channel
+                            I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ)) if self.real_units else (rawI, rawQ)
+                    elif self.real_units:
+                        # Standard voltage conversion
+                        I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ))
+                    else:
+                        # Raw counts
+                        I_data, Q_data = rawI, rawQ
+                    
                     self.psd_workers[row_i]["S"][ch_val] = True
                     task = PSDTask(row_i, ch_val, I_data, Q_data, "SSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
                     self.pool.start(task)
@@ -544,7 +734,30 @@ class PeriscopeRuntime:
             for ch_val in group: # Renamed ch
                 if not self.psd_workers[row_i]["D"].get(ch_val, False): # Check if worker already active
                     rawI = self.buf[ch_val]["I"].data(); rawQ = self.buf[ch_val]["Q"].data()
-                    I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ)) if self.real_units else (rawI, rawQ) # Renamed I,Q
+                    
+                    # Apply unit conversion (same logic as in _update_channel_plot_data)
+                    if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
+                        df_cal = self.df_calibrations[self.module].get(ch_val)
+                        if df_cal is not None:
+                            # Convert to volts first
+                            I_volts = convert_roc_to_volts(rawI)
+                            Q_volts = convert_roc_to_volts(rawQ)
+                            # Apply df calibration
+                            iq_volts = I_volts + 1j * Q_volts
+                            df_complex = iq_volts * df_cal
+                            # Extract frequency shift (real) and dissipation (imaginary)
+                            I_data = df_complex.real  # Frequency shift in Hz
+                            Q_data = df_complex.imag  # Dissipation (unitless)
+                        else:
+                            # No calibration for this channel
+                            I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ)) if self.real_units else (rawI, rawQ)
+                    elif self.real_units:
+                        # Standard voltage conversion
+                        I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ))
+                    else:
+                        # Raw counts
+                        I_data, Q_data = rawI, rawQ
+                    
                     self.psd_workers[row_i]["D"][ch_val] = True
                     task = PSDTask(row_i, ch_val, I_data, Q_data, "DSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
                     self.pool.start(task)
@@ -660,7 +873,7 @@ class PeriscopeRuntime:
         
         if sdict[ch_val]["I"].isVisible(): sdict[ch_val]["I"].setData(freq_i, psd_i)
         if sdict[ch_val]["Q"].isVisible(): sdict[ch_val]["Q"].setData(freq_i, psd_q)
-        if sdict[ch_val]["Mag"].isVisible(): sdict[ch_val]["Mag"].setData(freq_i, psd_m)
+        if "Mag" in sdict[ch_val] and sdict[ch_val]["Mag"].isVisible(): sdict[ch_val]["Mag"].setData(freq_i, psd_m)
 
     def _update_dsb_curve(self, row: int, ch_val: int, payload):
         """
@@ -782,6 +995,10 @@ class PeriscopeRuntime:
             window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), 
                                      dac_scales=dac_scales_for_window, dark_mode=self.dark_mode)
             self.multisweep_windows[window_id] = {'window': window, 'params': params.copy()}
+            
+            # Connect df_calibration_ready signal if the method exists
+            if hasattr(window, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
+                window.df_calibration_ready.connect(self._handle_df_calibration_ready)
             
             # Disconnect any previous signal connections to avoid multiple calls
             try:

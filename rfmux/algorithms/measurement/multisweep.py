@@ -131,7 +131,7 @@ async def multisweep(
         data_callback (callable, optional): Function called with intermediate results during acquisition.
 
     Returns:
-        dict: A dictionary where keys are detector indices (0-based integers).
+        dict: A dictionary where keys are detector indices (1-based integers matching channel numbers).
               Each value is a dictionary containing:
               {
                   detector_idx: {
@@ -243,9 +243,10 @@ async def multisweep(
     # --- Generate sweep frequencies ---
     resonance_data = {}
     # Create a mapping from center frequency to index for later reference
-    cf_to_index = {cf: idx for idx, cf in enumerate(center_frequencies)}
+    # Use 1-based indexing to match hardware channel numbering
+    cf_to_index = {cf: idx for idx, cf in enumerate(center_frequencies, start=1)}
 
-    for idx, cf in enumerate(center_frequencies):
+    for idx, cf in enumerate(center_frequencies, start=1):
         # Generate points for this sweep based on direction
         if sweep_direction == "upward":
             sweep_points = np.linspace(

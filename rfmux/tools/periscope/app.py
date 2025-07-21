@@ -144,12 +144,18 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # --- Display Settings ---
         self.dark_mode: bool = True             # UI theme (dark/light)
         self.real_units: bool = False           # Display data in real units (V, dBm) vs. counts
+        self.unit_mode: str = "counts"          # Current unit mode: "counts", "real", or "df"
         self.psd_absolute: bool = True          # PSD y-axis scale (absolute dBm/Hz vs. relative dBc/Hz)
         self.auto_scale_plots: bool = True      # Enable/disable auto-ranging for plots (except TOD)
         self.show_i: bool = True                # Visibility of 'I' component traces
         self.show_q: bool = True                # Visibility of 'Q' component traces
         self.show_m: bool = True                # Visibility of 'Magnitude' component traces
         self.zoom_box_mode: bool = True         # Default mouse mode for plots (zoom vs pan)
+        
+        # --- df Calibration Storage ---
+        # Stores calibration factors for frequency shift/dissipation conversion
+        # Structure: {module: {detector_idx: complex_calibration_factor}}
+        self.df_calibrations: Dict[int, Dict[int, complex]] = {}
 
         # --- Initialization Steps ---
         # Initialize structures for tracking background worker threads.
@@ -369,10 +375,29 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.b_pause = QtWidgets.QPushButton("Pause", clicked=self._toggle_pause)
         self.b_pause.setToolTip("Pause or resume real-time data acquisition and display.")
 
-        # Checkbox to toggle between raw counts and real units (Volts, dBm/Hz)
-        self.cb_real = QtWidgets.QCheckBox("Real Units", checked=self.real_units)
-        self.cb_real.setToolTip("Toggle display units between raw 'counts' and real-world voltage/power units.")
-        self.cb_real.toggled.connect(self._toggle_real_units)
+        # Radio buttons for unit selection
+        self.unit_group = QtWidgets.QButtonGroup()
+        self.rb_counts = QtWidgets.QRadioButton("Counts")
+        self.rb_real_units = QtWidgets.QRadioButton("Real Units")
+        self.rb_df_units = QtWidgets.QRadioButton("df Units")
+        
+        self.rb_counts.setToolTip("Display raw ADC counts")
+        self.rb_real_units.setToolTip("Display in voltage/power units (V, dBm/Hz)")
+        self.rb_df_units.setToolTip("Display frequency shift (Hz) and dissipation")
+        
+        # Add to button group for exclusive selection
+        self.unit_group.addButton(self.rb_counts, 0)
+        self.unit_group.addButton(self.rb_real_units, 1)
+        self.unit_group.addButton(self.rb_df_units, 2)
+        
+        # Set initial state based on real_units flag
+        if self.real_units:
+            self.rb_real_units.setChecked(True)
+        else:
+            self.rb_counts.setChecked(True)
+        
+        # Connect signal
+        self.unit_group.buttonClicked.connect(self._unit_mode_changed)
 
         # Checkboxes to select which plot types are displayed
         self.cb_time = QtWidgets.QCheckBox("TOD", checked=True) # Time-domain
@@ -413,7 +438,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         toolbar_layout.addWidget(self.e_buf)
         toolbar_layout.addWidget(self.b_pause)
         toolbar_layout.addSpacing(30)
-        toolbar_layout.addWidget(self.cb_real)
+        
+        # Add unit radio buttons
+        toolbar_layout.addWidget(QtWidgets.QLabel("Units:"))
+        toolbar_layout.addWidget(self.rb_counts)
+        toolbar_layout.addWidget(self.rb_real_units)
+        toolbar_layout.addWidget(self.rb_df_units)
         toolbar_layout.addSpacing(30)
         for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
             toolbar_layout.addWidget(cb_plot_type)
@@ -1094,6 +1124,65 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                         if "I" in cset: cset["I"].setVisible(self.show_i)
                         if "Q" in cset: cset["Q"].setVisible(self.show_q)
                         if "Mag" in cset: cset["Mag"].setVisible(self.show_m)
+    
+    def _unit_mode_changed(self, button: QtWidgets.QRadioButton):
+        """
+        Handle unit mode changes from radio buttons.
+        
+        Updates the unit mode and real_units flag, checks for df calibration availability,
+        and rebuilds the layout with appropriate labels.
+        
+        Args:
+            button: The radio button that was clicked
+        """
+        button_id = self.unit_group.id(button)
+        
+        if button_id == 0:  # Counts
+            self.unit_mode = "counts"
+            self.real_units = False
+        elif button_id == 1:  # Real Units
+            self.unit_mode = "real"
+            self.real_units = True
+        elif button_id == 2:  # df Units
+            self.unit_mode = "df"
+            self.real_units = False  # df units are different from standard real units
+            
+            # Check if calibration data is available
+            if not self.df_calibrations.get(self.module):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "df Calibration Not Available",
+                    "df calibration data is not available for this module.\n\n"
+                    "To use df units:\n"
+                    "1. Run a multisweep analysis\n"
+                    "2. Click 'Bias KIDs' in the multisweep window\n"
+                    "3. The calibration data will be loaded automatically"
+                )
+                # Reset to counts mode
+                self.rb_counts.setChecked(True)
+                self.unit_mode = "counts"
+                self.real_units = False
+                return
+        
+        # Rebuild layout to update axis labels
+        self._build_layout()
+    
+    def _handle_df_calibration_ready(self, module: int, df_calibrations: Dict[int, complex]):
+        """
+        Handle the df_calibration_ready signal from MultisweepWindow.
+        
+        Stores the calibration data for the specified module.
+        
+        Args:
+            module: Module number
+            df_calibrations: Dictionary mapping detector indices (1-based) to complex calibration factors
+        """
+        # Store calibration data for this module
+        self.df_calibrations[module] = df_calibrations
+        
+        # Log to console instead of showing popup (already shown by MultisweepWindow)
+        num_calibrated = len(df_calibrations)
+        print(f"[Periscope] df calibration loaded for {num_calibrated} detectors on module {module}")
 
     def _show_mock_config_dialog(self):
         """

@@ -759,44 +759,8 @@ class MultisweepTask(QtCore.QThread):
         if not raw_results:
             return raw_results
         
-        # For small datasets, use single thread to avoid overhead
-        if len(raw_results) <= 10:
-            return await self._process_fitting_single_thread(raw_results)
-        
         # For larger datasets, use parallel processing
         return await self._process_fitting_multi_thread(raw_results)
-    
-    async def _process_fitting_single_thread(self, raw_results):
-        """Process fitting in a single thread."""
-        loop = asyncio.get_event_loop()
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(
-                self._apply_fitting_analysis_thread_safe,
-                raw_results.copy(),
-                self.params.get('apply_skewed_fit', False),
-                self.params.get('apply_nonlinear_fit', False),
-                self.params.get('module')
-            )
-            
-            async_future = asyncio.wrap_future(future)
-            
-            while not async_future.done():
-                if self.isInterruptionRequested():
-                    future.cancel()
-                    try:
-                        await asyncio.wait_for(async_future, timeout=0.1)
-                    except (asyncio.TimeoutError, asyncio.CancelledError):
-                        pass
-                    return raw_results
-                
-                try:
-                    enhanced_results = await asyncio.wait_for(async_future, timeout=0.1)
-                    return enhanced_results
-                except asyncio.TimeoutError:
-                    continue
-        
-        return raw_results
     
     async def _process_fitting_multi_thread(self, raw_results):
         """Process fitting using multiple threads for better performance."""

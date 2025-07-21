@@ -2,25 +2,22 @@
 
 # r1.5.6 - 2025-05-22
 
+## On-board Python environment
+
+- The on-board rfmux distribution (used in JupyterLab sessions) has been
+  updated.
+
+## Decimation and Streaming
+
 - set_fir_stage is now set_decimation() - please consult the DocStrings for the
   new API. (Since there's no FIR anywhere in the system, the old function name
   was nothing but confusing. The new call is backwards-compatible but can now
   also stream short packets and "blank out" unused modules to increase the
   available network bandwidth for high-rate modules. See below.)
 
-- Fixes IRIG-B encoder/decoder. Timestamps previously rolled over faster than
-  they should have - unfortunately, while the IRIG-B TEST-mode encoder and
-  decoder were self-consistent, what they agreed on was not a valid IRIG-B
-  timestamp. This is now fixed.
-
-- "SHORT" packetizer support added. To activate this, use "short=True" argument
-  to set_fir_stage. The resulting packets are only 128 channels long. In
-  exchange for giving up all but the first 128 streamed channels, you get:
-
-  * Packets that don't fragment on a standard Ethernet (no-jumbo-frame)
-    network, and
-  * An 8x reduction in network traffic, allowing you higher FIR stage settings
-    without packet loss or 1GbE pipe saturation
+- get_fir_stage is now get_decimation(). This is a matching call to
+  set_fir_stage, and returns a single integer corresponding to the active
+  decimation stage.
 
 - "Streamer blanking" support, allowing you to select which readout modules are
   streamed. This is accessible via the "modules" argument to set_decimation.
@@ -44,6 +41,42 @@ and stream packets at FIR stage 0 (38.147 ksps) without packet loss.
   traffic, packets aren't always transmitted in sequence. (A corresponding
   change has already been committed to py_get_samples, but it is not as
   comprehensive.)
+
+- get_samples() has an _extra_metadata option that breaks beat-for-beat
+  compatibility between get_samples() and py_get_samples(). When you supply
+  "True" for this option, you'll get some behind-the-scenes metadata that
+  may help when diagnosing some streaming misbehaviour.
+
+- We now use packetizer sequence numbers, not timestamps, in order to inject
+  the "data freshness" checks that prevent sequencing issues. For example, you
+  would expect the following code
+
+  >>> await crs.set_amplitude(...)
+  >>> x = await crs.get_samples(...)
+
+  to return data in "x" that was taken _after_ the set_amplitude() call.
+  Because data takes time to flow through the system, get_samples() needs to
+  explicitly check that data it receives from the network is sufficiently
+  fresh. It used to do that with timestamps, which relied on a valid timestamp
+  source (typically, TEST in benchtop settings and BACKPLANE or SMA in
+  deployment). Using sequence numbers instead is less headache and just as
+  good.
+
+## IRIG-B timestamps
+
+- Fixes IRIG-B encoder/decoder. Timestamps previously rolled over faster than
+  they should have - unfortunately, while the IRIG-B TEST-mode encoder and
+  decoder were self-consistent, what they agreed on was not a valid IRIG-B
+  timestamp. This is now fixed.
+
+- "SHORT" packetizer support added. To activate this, use "short=True" argument
+  to set_fir_stage. The resulting packets are only 128 channels long. In
+  exchange for giving up all but the first 128 streamed channels, you get:
+
+  * Packets that don't fragment on a standard Ethernet (no-jumbo-frame)
+    network, and
+  * An 8x reduction in network traffic, allowing you higher FIR stage settings
+    without packet loss or 1GbE pipe saturation
 
 ## r1.5.5 - 2025-01-23
 

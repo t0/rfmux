@@ -336,6 +336,7 @@ class MockCRS(BaseCRS):
         self.adc_calibration_coefficients = {} # module -> {block: [coeffs]}
         self.nyquist_zones = {} # module -> {target: zone}
         self.hmc7044_registers = {} # address -> value
+        self.cable_lengths = {}  # module -> cable length in meters
 
         # Store physics configuration (can be updated via generate_resonators)
         self.physics_config = {}  # Will store active physics configuration
@@ -817,8 +818,15 @@ class MockCRS(BaseCRS):
     def set_cable_length(self, length, module):
         assert isinstance(length, (int, float))
         assert isinstance(module, int)
-        # Placeholder, does nothing in mock
+        # Store the cable length for the module
+        self.cable_lengths[module] = length
         return None # Important for Tuber serialization
+    
+    def get_cable_length(self, module):
+        """Get the cable length for a module."""
+        assert isinstance(module, int)
+        # Return stored cable length or default to 0.0
+        return self.cable_lengths.get(module, 0.0)
 
     def raise_periscope(self, module=1, channels="1", 
                         buf_size=5000, fps=30.0, 

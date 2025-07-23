@@ -51,12 +51,12 @@ class FindResonancesDialog(QtWidgets.QDialog):
 
         # Minimum Q (float)
         self.min_Q_edit = QtWidgets.QLineEdit(str(DEFAULT_MIN_Q))
-        self.min_Q_edit.setValidator(QDoubleValidator(1.0, 1e10, 0, self)) # Allow scientific notation input
+        self.min_Q_edit.setValidator(QDoubleValidator(1.0, 1e10, -1, self)) # Allow scientific notation input with any decimal places
         layout.addRow("Min Q:", self.min_Q_edit)
 
         # Maximum Q (float)
         self.max_Q_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_Q))
-        self.max_Q_edit.setValidator(QDoubleValidator(1.0, 1e10, 0, self))
+        self.max_Q_edit.setValidator(QDoubleValidator(1.0, 1e10, -1, self))
         layout.addRow("Max Q:", self.max_Q_edit)
 
         # Minimum resonance separation in MHz (float)

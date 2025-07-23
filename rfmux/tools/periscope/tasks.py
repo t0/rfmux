@@ -677,7 +677,8 @@ class MultisweepTask(QtCore.QThread):
                         'nsamps': self.params.get('nsamps', 10),
                         'module': module_idx,
                         'progress_callback': self._progress_callback_wrapper,
-                        'recalculate_center_frequencies': self.params.get('recalculate_center_frequencies', None),
+                        'bias_frequency_method': self.params.get('bias_frequency_method', 'max-diq'),
+                        'rotate_saved_data': self.params.get('rotate_saved_data', False),
                         'sweep_direction': direction_val
                     }
                     
@@ -964,7 +965,7 @@ class BiasKidsSignals(QObject):
 class BiasKidsTask(QtCore.QThread):
     """QThread subclass for running the bias_kids algorithm without blocking the GUI."""
     
-    def __init__(self, crs: "CRS", module: int, multisweep_results: dict, signals: BiasKidsSignals):
+    def __init__(self, crs: "CRS", module: int, multisweep_results: dict, signals: BiasKidsSignals, bias_params: Optional[Dict[str, Any]] = None):
         """
         Initialize the BiasKidsTask.
         
@@ -973,12 +974,14 @@ class BiasKidsTask(QtCore.QThread):
             module: Module number to bias
             multisweep_results: Multisweep results in GUI format
             signals: Signal object for communication with GUI
+            bias_params: Optional dictionary of bias parameters from dialog
         """
         super().__init__()
         self.crs = crs
         self.module = module
         self.multisweep_results = multisweep_results
         self.signals = signals
+        self.bias_params = bias_params or {}
         self._running = True
         
     def stop(self):
@@ -1043,11 +1046,28 @@ class BiasKidsTask(QtCore.QThread):
         # Import bias_kids as a regular function
         from rfmux.algorithms.measurement.bias_kids import bias_kids
         
-        # Call bias_kids directly, passing the CRS object
-        result = await bias_kids(
-            crs=self.crs,
-            multisweep_results=self.multisweep_results,
-            module=self.module,
-            progress_callback=progress_callback
-        )
+        # Extract parameters from bias_params
+        kwargs = {
+            'crs': self.crs,
+            'multisweep_results': self.multisweep_results,
+            'module': self.module,
+            'progress_callback': progress_callback
+        }
+        
+        # Add optional parameters from dialog
+        if 'nonlinear_threshold' in self.bias_params:
+            kwargs['nonlinear_threshold'] = self.bias_params['nonlinear_threshold']
+        if 'fallback_to_lowest' in self.bias_params:
+            kwargs['fallback_to_lowest'] = self.bias_params['fallback_to_lowest']
+        if 'optimize_phase' in self.bias_params:
+            kwargs['optimize_phase'] = self.bias_params['optimize_phase']
+        if 'bandpass_params' in self.bias_params:
+            kwargs['bandpass_params'] = self.bias_params['bandpass_params']
+        if 'num_phase_samples' in self.bias_params:
+            kwargs['num_phase_samples'] = self.bias_params['num_phase_samples']
+        if 'phase_step' in self.bias_params:
+            kwargs['phase_step'] = self.bias_params['phase_step']
+        
+        # Call bias_kids with all parameters
+        result = await bias_kids(**kwargs)
         return result

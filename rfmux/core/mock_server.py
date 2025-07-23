@@ -19,8 +19,7 @@ from .schema import CRS as BaseCRS
 # DO NOT import algorithms on the server side
 # Algorithms should only run on the client side
 
-mp_ctx = multiprocessing.get_context("fork")
-
+mp_ctx = multiprocessing.get_context()
 def yaml_hook(hwm):
     """Patch up the HWM using mock Dfmuxes instead of real ones.
 

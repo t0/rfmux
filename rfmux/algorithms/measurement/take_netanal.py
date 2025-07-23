@@ -124,6 +124,20 @@ async def take_netanal(
             "Results may be noisy due to possible DAC clipping."
         )
         warnings.warn(warn_msg)
+    
+    # Check actual available channels by doing a simple get_samples
+    test_samples = await crs.get_samples(1, average=True, channel=None, module=module)
+    available_channels = len(test_samples.mean.i) if hasattr(test_samples.mean, 'i') else 0
+    
+    if max_chans > available_channels:
+        error_msg = (
+            f"Requested {max_chans} channels, but only {available_channels} channels are available.\n"
+            f"This appears to be due to decimation stage settings (short=True limits to 128 channels).\n"
+            f"To fix this, either:\n"
+            f"  1. Reduce max_chans to {available_channels} or less\n"
+            f"  2. Use crs.set_decimation() with the short=False argument to enable up to 1024 channels"
+        )
+        raise ValueError(error_msg)
 
     # Identify NCO chunk boundaries by stepping up to max_span each time.
     chunks = []

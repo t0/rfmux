@@ -138,10 +138,12 @@ class MockCRSContext:
         }))
         return self  # Enable method chaining
     
-    def set_phase(self, phase, channel=None, module=None):
+    def set_phase(self, phase, units='DEGREES', target=None, channel=None, module=None):
         """Queue a phase setting operation"""
         self.pending_ops.append(('set_phase', {
             'phase': phase,
+            'units': units,
+            'target': target,
             'channel': channel,
             'module': module
         }))
@@ -303,7 +305,11 @@ class MockCRS(BaseCRS):
         self.amplitudes = {}   # (module, channel) -> amplitude
         self.phases = {}       # (module, channel) -> phase
         self.tuning_results = {} # Placeholder
+
+        self.active_modules = [1, 2, 3, 4]  # FIXME: add set_analog_bank() support
         self.fir_stage = 6     # Default FIR stage
+        self.streamed_modules = [1, 2, 3, 4]
+        self.short_packets = False
 
         self.temperature_sensors = {
             "MOTHERBOARD_TEMPERATURE_POWER": 30.0, "MOTHERBOARD_TEMPERATURE_ARM": 35.0,
@@ -330,6 +336,7 @@ class MockCRS(BaseCRS):
         self.adc_calibration_coefficients = {} # module -> {block: [coeffs]}
         self.nyquist_zones = {} # module -> {target: zone}
         self.hmc7044_registers = {} # address -> value
+        self.cable_lengths = {}  # module -> cable length in meters
 
         # Store physics configuration (can be updated via generate_resonators)
         self.physics_config = {}  # Will store active physics configuration
@@ -445,16 +452,45 @@ class MockCRS(BaseCRS):
         assert module is not None and isinstance(module, int), "Module must be an integer"
         return self.amplitudes.get((module, channel))
 
-    def set_phase(self, phase, channel=None, module=None):
+    def set_phase(self, phase, units='DEGREES', target=None, channel=None, module=None):
         assert isinstance(phase, (int, float)), "Phase must be a number"
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
-        self.phases[(module, channel)] = phase
+        
+        # Validate units if provided as string
+        if isinstance(units, str):
+            units = units.upper()
+            if units not in ['DEGREES', 'RADIANS']:
+                raise ValueError(f"Invalid phase units '{units}'. Must be 'DEGREES' or 'RADIANS'")
+        
+        # Convert to degrees for internal storage
+        if units == 'RADIANS' or (hasattr(units, 'value') and units.value == 'radians'):
+            phase_degrees = phase * 180.0 / np.pi
+        else:
+            phase_degrees = phase
+            
+        self.phases[(module, channel)] = phase_degrees
 
-    def get_phase(self, channel=None, module=None):
+    def get_phase(self, units='DEGREES', target=None, channel=None, module=None):
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
-        return self.phases.get((module, channel))
+        
+        # Get phase in degrees (internal storage)
+        phase_degrees = self.phases.get((module, channel))
+        if phase_degrees is None:
+            return None
+            
+        # Validate units if provided as string
+        if isinstance(units, str):
+            units = units.upper()
+            if units not in ['DEGREES', 'RADIANS']:
+                raise ValueError(f"Invalid phase units '{units}'. Must be 'DEGREES' or 'RADIANS'")
+        
+        # Convert based on requested units
+        if units == 'RADIANS' or (hasattr(units, 'value') and units.value == 'radians'):
+            return phase_degrees * np.pi / 180.0
+        else:
+            return phase_degrees
 
     def set_timestamp_port(self, port):
         port = self.validate_enum_member(port, TimestampPort, "timestamp port")
@@ -496,12 +532,25 @@ class MockCRS(BaseCRS):
             raise ValueError(f"Invalid rail '{rail}'. Must be one of {list(self.RAIL_DICT.values())}")
         return self.rails.get(rail, {}).get("current")
 
-    def set_fir_stage(self, stage):
-        assert isinstance(stage, int), "FIR stage must be an integer"
-        self.fir_stage = stage
+    def set_decimation(self, stage: int=6,
+                       short_packets: bool=False,
+                       modules: list[int] | None=None):
 
-    def get_fir_stage(self):
-        return self.fir_stage
+        assert isinstance(stage, int) and 0 <= stage <= 6, \
+                "FIR stage must be an integer between 0 and 6 (inclusive)"
+
+        if modules is None:
+            modules = list(self.active_modules)
+
+        if not isinstance(modules, list) or set(modules) > set(self.active_modules):
+            raise ValueError("Invalid 'modules' argument to set_decimation!")
+
+        self.fir_stage = stage
+        self.short_packets = short_packets
+        self.streamed_modules = modules
+
+    def get_decimation(self):
+        return None if len(self.streamed_modules)==0 else self.fir_stage
 
     async def _thread_lock_acquire(self): # Keep for server compatibility
         await asyncio.sleep(0.001) # Minimal sleep
@@ -769,8 +818,15 @@ class MockCRS(BaseCRS):
     def set_cable_length(self, length, module):
         assert isinstance(length, (int, float))
         assert isinstance(module, int)
-        # Placeholder, does nothing in mock
+        # Store the cable length for the module
+        self.cable_lengths[module] = length
         return None # Important for Tuber serialization
+    
+    def get_cable_length(self, module):
+        """Get the cable length for a module."""
+        assert isinstance(module, int)
+        # Return stored cable length or default to 0.0
+        return self.cable_lengths.get(module, 0.0)
 
     def raise_periscope(self, module=1, channels="1", 
                         buf_size=5000, fps=30.0, 

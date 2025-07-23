@@ -86,7 +86,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self._setup_ui()
         self._update_plots() 
 
-        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id+1}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
+        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
         self.setWindowFlags(QtCore.Qt.WindowType.Window)
         self.resize(1200, 800) # Increased size to accommodate tables properly
 
@@ -125,7 +125,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         nav_layout.addWidget(self.prev_button)
         
         # Title in the center
-        title_text = f"Detector {self.detector_id+1} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
+        title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
         self.title_label = QtWidgets.QLabel(title_text)
         self.title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         font = self.title_label.font()
@@ -472,9 +472,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.current_plot_offset_hz = self.resonance_frequency_ghz_title * 1e9
         
         # Update UI elements
-        title_text = f"Detector {self.detector_id+1} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
+        title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
         self.title_label.setText(title_text)
-        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id+1}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
+        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
         
         # Update detector count label
         if hasattr(self, 'detector_count_label'):

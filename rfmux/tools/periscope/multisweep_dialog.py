@@ -134,14 +134,12 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         self.setup_amplitude_group(param_form_layout) # Shared amplitude settings
 
-        # Option to recalculate center frequencies and rotate
+        # Option to recalculate center frequencies
         self.recalc_cf_combo = QtWidgets.QComboBox()
         self.recalc_cf_combo.addItems(["max-dIQ","min-S21","None"])
         
-        # Set initial value for recalculate_center_frequencies
-        # The old parameter was a boolean, True mapping to "min-s21" effectively
-        # New parameter is a string or None.
-        default_recalc_setting = self.params.get('recalculate_center_frequencies', "max-diq")
+        # Set initial value for bias_frequency_method
+        default_recalc_setting = self.params.get('bias_frequency_method', "max-diq")
 
         if default_recalc_setting == "min-s21":
             self.recalc_cf_combo.setCurrentText("min-S21")
@@ -151,13 +149,24 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.recalc_cf_combo.setCurrentText("None")
             
         self.recalc_cf_combo.setToolTip(
-            "Determines how/if center frequencies are recalculated and sweep data is rotated:\n"
+            "Determines how/if center frequencies are recalculated for biasing:\n"
             "- max-dIQ [Often Optimal]: Recalculates to max IQ velocity |d(I+jQ)/df|. Finds where the IQ trajectory moves fastest.\n"
-            "           Acquires TOD. Rotates sweep to align TOD's PCA with I-axis."
-            "- min-S21: Recalculates to min |S21|. Acquires TOD. Rotates sweep to minimize TOD's I component.\n"
-            "- None: No recalculation or TOD-based rotation.\n"
+            "- min-S21: Recalculates to min |S21|.\n"
+            "- None: No recalculation. Use original center frequency.\n"
         )
-        param_form_layout.addRow("Recalculate/Rotate Method:", self.recalc_cf_combo)
+        param_form_layout.addRow("Bias Frequency Method:", self.recalc_cf_combo)
+        
+        # Option to rotate saved data
+        self.rotate_saved_data_checkbox = QtWidgets.QCheckBox("Rotate Saved Data")
+        self.rotate_saved_data_checkbox.setChecked(self.params.get('rotate_saved_data', False)) # Default to False for df calibration
+        self.rotate_saved_data_checkbox.setToolTip(
+            "Whether to rotate sweep data based on TOD analysis.\n"
+            "When checked and bias frequency method is not None:\n"
+            "- For min-S21: Rotates to minimize the I component of the TOD's mean.\n"
+            "- For max-dIQ: Rotates to align the principal component of the TOD with the I-axis.\n"
+            "Note: Should be unchecked when using df calibration to ensure consistency."
+        )
+        param_form_layout.addRow(self.rotate_saved_data_checkbox)
         
         # Sweep direction selection
         self.sweep_direction_combo = QtWidgets.QComboBox()
@@ -252,13 +261,16 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             
             recalc_method_text = self.recalc_cf_combo.currentText()
             if recalc_method_text == "None":
-                params_dict['recalculate_center_frequencies'] = None
+                params_dict['bias_frequency_method'] = None
             elif recalc_method_text == "min-S21":
-                params_dict['recalculate_center_frequencies'] = "min-s21"
+                params_dict['bias_frequency_method'] = "min-s21"
             elif recalc_method_text == "max-dIQ":
-                params_dict['recalculate_center_frequencies'] = "max-diq"
+                params_dict['bias_frequency_method'] = "max-diq"
             else: # Should not happen with QComboBox
-                params_dict['recalculate_center_frequencies'] = None
+                params_dict['bias_frequency_method'] = None
+            
+            # Get rotate saved data setting
+            params_dict['rotate_saved_data'] = self.rotate_saved_data_checkbox.isChecked()
             
             # Get sweep direction
             sweep_direction_text = self.sweep_direction_combo.currentText()

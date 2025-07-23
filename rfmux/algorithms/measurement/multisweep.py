@@ -82,7 +82,8 @@ async def multisweep(
     npoints_per_sweep: int,
     amp: float,
     nsamps: int = 10,
-    recalculate_center_frequencies: Optional[str] = None, # Options: "min-s21", "max-diq", or None
+    bias_frequency_method: Optional[str] = "max-diq", # Options: "min-s21", "max-diq", or None
+    rotate_saved_data: bool = False,  # Whether to rotate sweep data based on TOD analysis
     sweep_direction: str = "upward", # Options: "upward", "downward"
     apply_df_calibration: bool = True,  # Enable frequency shift/dissipation calibration
     *,
@@ -108,17 +109,20 @@ async def multisweep(
         amp (float): Amplitude (normalized DAC units) for all tones.
         nsamps (int, optional): Number of samples to average per frequency point for the main sweep.
                                 Defaults to 10. The TOD acquisition for rotation uses 1000 samples.
-        recalculate_center_frequencies (Optional[str], optional):
-            Determines how/if center frequencies are recalculated and how sweep data is rotated.
+        bias_frequency_method (Optional[str], optional):
+            Determines how/if center frequencies are recalculated for biasing.
             - "min-s21": Recalculates center frequency to the point of minimum |S21| in the sweep.
-                         Acquires a TOD at this new frequency. Rotates sweep data to minimize
-                         the I component of this TOD's mean.
             - "max-diq": Recalculates center frequency to the point of maximum IQ velocity |d(I+jQ)/df| in the sweep.
                          This finds where the IQ trajectory is moving fastest, considering both angular and
-                         radial motion. Acquires a TOD at this new frequency. Rotates sweep data to align the
-                         principal component of this TOD (maximizing variance) with the I-axis.
-            - None: No recalculation. No TOD-based rotation is performed.
-            Defaults to None.
+                         radial motion.
+            - None: No recalculation. Use original center frequency.
+            Defaults to "max-diq".
+        rotate_saved_data (bool, optional):
+            Whether to rotate sweep data based on TOD analysis. When True and bias_frequency_method
+            is not None:
+            - For "min-s21": Rotates to minimize the I component of the TOD's mean.
+            - For "max-diq": Rotates to align the principal component of the TOD with the I-axis.
+            Defaults to False.
         sweep_direction (str, optional): The direction of the frequency sweep.
             - "upward": Sweep from lower to higher frequencies.
             - "downward": Sweep from higher to lower frequencies.
@@ -209,7 +213,8 @@ async def multisweep(
                 npoints_per_sweep=npoints_per_sweep,
                 amp=amp,
                 nsamps=nsamps,
-                recalculate_center_frequencies=recalculate_center_frequencies,
+                bias_frequency_method=bias_frequency_method,
+                rotate_saved_data=rotate_saved_data,
                 module=m, # Pass single module here
                 progress_callback=progress_callback,
                 data_callback=data_callback,
@@ -390,7 +395,7 @@ async def multisweep(
                     data_callback(module, intermediate_results)
         
         # --- Post-Sweep Processing for this NCO Region (TOD acquisition and rotation) ---
-        if recalculate_center_frequencies is not None: # Only proceed if a method is specified
+        if bias_frequency_method is not None: # Only proceed if a method is specified
             # Step 1: Determine all bias frequencies and methods for this region
             resonances_needing_tod = [] # List of resonances needing TOD acquisition
             for cf_original in region_cfs:
@@ -400,7 +405,7 @@ async def multisweep(
                     original_cf_hz=cf_original,
                     sweep_freqs_hz=res_data_entry['frequencies'],
                     sweep_iq=res_data_entry['iq_complex'], # Use raw sweep IQ for recalc
-                    method=recalculate_center_frequencies
+                    method=bias_frequency_method
                 )
                 res_data_entry['bias_frequency'] = bias_freq
                 res_data_entry['recalculation_method_applied'] = recalc_method_used
@@ -487,7 +492,11 @@ async def multisweep(
                         else:
                             warnings.warn(f"Not enough TOD points for 'max-diq' PCA rotation for cf {cf_original*1e-6:.3f} MHz ({tod_iq.size} points). Skipping rotation.")
                 
-                if rotation_angle_rad != 0.0:
+                # Store the calculated rotation angle regardless of whether we apply it
+                res_data_entry['calculated_rotation_degrees'] = np.degrees(rotation_angle_rad)
+                
+                # Only apply rotation if rotate_saved_data is True
+                if rotate_saved_data and rotation_angle_rad != 0.0:
                     rotation_factor = np.exp(1j * rotation_angle_rad)
                     res_data_entry['iq_complex'] *= rotation_factor
                     
@@ -496,7 +505,9 @@ async def multisweep(
                         res_data_entry['rotation_tod'] *= rotation_factor
                         
                     res_data_entry['applied_rotation_degrees'] = np.degrees(rotation_angle_rad)
-                # If no rotation was calculated (e.g. TOD was empty or issues), applied_rotation_degrees remains 0.0
+                else:
+                    # If rotation not applied, mark as 0
+                    res_data_entry['applied_rotation_degrees'] = 0.0
 
     # --- Format final results for each resonance ---
     # Now keyed by index, not frequency

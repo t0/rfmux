@@ -70,7 +70,8 @@ async def main(serial="MOCK"):
         'amp': 0.001,
         'nsamps': 10,
         'module': MODULE,
-        'recalculate_center_frequencies': 'max-diq',
+        'bias_frequency_method': 'max-diq',  # Method to find optimal bias frequency
+        'rotate_saved_data': False,          # Don't rotate data for df calibration consistency
         'sweep_direction': 'upward'
     }
     

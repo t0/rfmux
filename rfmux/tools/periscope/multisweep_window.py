@@ -1058,8 +1058,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             detector_id = clicked_res_idx
             
             # Get the conceptual frequency for this resonance index
-            if clicked_res_idx < len(self.conceptual_resonance_frequencies):
-                conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[clicked_res_idx]
+            # Note: clicked_res_idx is 1-based, but conceptual_resonance_frequencies is 0-based
+            if clicked_res_idx <= len(self.conceptual_resonance_frequencies) and clicked_res_idx > 0:
+                conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[clicked_res_idx - 1]
             else:
                 print(f"Warning: Clicked resonance index {clicked_res_idx} exceeds conceptual frequencies list length.")
                 conceptual_resonance_base_freq_hz = clicked_actual_cf
@@ -1132,8 +1133,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             # Now gather data for each detector
             for det_idx in sorted(all_detector_indices):
                 # Get conceptual frequency for this detector
-                if det_idx < len(self.conceptual_resonance_frequencies):
-                    conceptual_freq_hz = self.conceptual_resonance_frequencies[det_idx]
+                # Note: det_idx is 1-based, but conceptual_resonance_frequencies is 0-based
+                if det_idx <= len(self.conceptual_resonance_frequencies) and det_idx > 0:
+                    conceptual_freq_hz = self.conceptual_resonance_frequencies[det_idx - 1]
                 else:
                     # Fallback - try to find any frequency data for this detector
                     conceptual_freq_hz = None
@@ -1318,6 +1320,17 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                                         "CRS object is None. Cannot bias detectors.")
             return
         
+        # Import the dialog
+        from .bias_kids_dialog import BiasKidsDialog
+        
+        # Show dialog to get parameters
+        dialog = BiasKidsDialog(self)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return  # User cancelled
+        
+        # Get parameters from dialog
+        bias_params = dialog.get_parameters()
+        
         # Prepare data in GUI format expected by bias_kids
         gui_format_results = {
             'results_by_iteration': list(self.results_by_iteration.values())
@@ -1338,12 +1351,13 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                                         "Target module is not set. Cannot bias detectors.")
             return
         
-        # Create and start the task
+        # Create and start the task with dialog parameters
         self.bias_kids_task = BiasKidsTask(
             parent.crs,
             self.target_module,
             gui_format_results,
-            self.bias_kids_signals
+            self.bias_kids_signals,
+            bias_params  # Pass the dialog parameters
         )
         
         # Update UI to show operation in progress

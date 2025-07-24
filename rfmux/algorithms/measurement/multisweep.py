@@ -13,6 +13,7 @@ from collections import defaultdict
 from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
 from rfmux.core.transferfunctions import convert_roc_to_volts, convert_iq_to_df
+from rfmux.algorithms.measurement.fitting import center_resonance_iq_circle
 from typing import Optional, Tuple, Dict, Any # Added for type hinting
 
 def _get_recalculated_center_freq(
@@ -47,16 +48,24 @@ def _get_recalculated_center_freq(
         if sweep_iq.size < 2 or sweep_freqs_hz.size < 2: # Need at least 2 points for gradient
              warnings.warn(f"Cannot recalculate 'max-diq' for original_cf {original_cf_hz*1e-6:.3f} MHz: not enough sweep points ({sweep_iq.size}).")
              return original_cf_hz, "none"
+        
+        # Center the IQ data first to calculate velocity relative to the resonance circle center
+        try:
+            centered_iq = center_resonance_iq_circle(sweep_iq)
+        except Exception as e:
+            warnings.warn(f"Failed to center IQ circle for 'max-diq' calculation at {original_cf_hz*1e-6:.3f} MHz: {e}. Using uncentered data.")
+            centered_iq = sweep_iq
+        
         # Calculate the velocity of the IQ point as it moves through the complex plane
-        # This includes both angular and radial motion components
-        i_vals = sweep_iq.real
-        q_vals = sweep_iq.imag
+        # This is now relative to the circle center, not the origin
+        i_vals = centered_iq.real
+        q_vals = centered_iq.imag
         
         # Calculate derivatives
         di_df = np.gradient(i_vals, sweep_freqs_hz)
         dq_df = np.gradient(q_vals, sweep_freqs_hz)
         
-        # Total velocity magnitude in IQ plane
+        # Total velocity magnitude in IQ plane (relative to circle center)
         iq_velocity = np.sqrt(di_df**2 + dq_df**2)
         
         if np.any(iq_velocity):

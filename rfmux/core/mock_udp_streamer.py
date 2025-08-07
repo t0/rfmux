@@ -273,7 +273,7 @@ class MockCRSUDPStreamer(threading.Thread):
                 _active_streamers.remove(self)
     
     def generate_packet_for_module(self, module_num, seq):
-        """Generate a DfmuxPacket for a specific module."""
+        """Generate a DfmuxPacket for a specific module with coupled channels."""
         # Create channel data array (NUM_CHANNELS = 1024, so 2048 int32s for I & Q)
         # This array should store int32 values.
 
@@ -284,22 +284,9 @@ class MockCRSUDPStreamer(threading.Thread):
 
         iq_data_arr = array.array("i", [0] * (num_channels * 2))
         
-        # Get configured channels for this module to avoid processing all 1024
-        configured_channels = set()
-        for (mod, ch) in self.mock_crs.frequencies.keys():
-            if mod == module_num:
-                configured_channels.add(ch)
-        for (mod, ch) in self.mock_crs.amplitudes.keys():
-            if mod == module_num:
-                configured_channels.add(ch)
-        for (mod, ch) in self.mock_crs.phases.keys():
-            if mod == module_num:
-                configured_channels.add(ch)
-        
         # Pre-calculate constants
         full_scale_counts = const.SCALE_FACTOR * 2**8  # 32 bit number instead of 24 bit
         noise_level = const.UDP_NOISE_LEVEL  # Base noise level (in ADC counts)
-        nco_freq = self.mock_crs.get_nco_frequency(module=module_num) or 0
         
         # Generate noise for all channels first (this is fast)
         # Using vectorized operations for better performance
@@ -307,35 +294,63 @@ class MockCRSUDPStreamer(threading.Thread):
         for i in range(num_channels * 2):
             iq_data_arr[i] = int(np.clip(noise_array[i], -2147483648, 2147483647))
         
-        non_zero_channels_count = len(configured_channels)
-        
-        # Only process configured channels (this is the expensive part)
-        for channel_num_1_based in configured_channels:
-            ch_idx_0_based = channel_num_1_based - 1
+        # NEW: Use module-wide coupled calculation if available
+        if hasattr(self.mock_crs.resonator_model, 'calculate_module_response_coupled'):
+            # Get all channel responses at once (includes coupling effects)
+            channel_responses = self.mock_crs.resonator_model.calculate_module_response_coupled(module_num)
             
-            # Get current settings for this channel from MockCRS
-            freq = self.mock_crs.frequencies.get((module_num, channel_num_1_based), 0)
-            amp = self.mock_crs.amplitudes.get((module_num, channel_num_1_based), 0)
-            phase_deg = self.mock_crs.phases.get((module_num, channel_num_1_based), 0)
-            
-            # Skip if amplitude is 0 (no signal)
-            if amp == 0:
-                continue
+            # Fill in the channel data
+            for ch_num_1 in channel_responses:
+                ch_idx_0 = ch_num_1 - 1  # Convert to 0-based index
                 
-            total_freq = freq + nco_freq
-
-            # Calculate the S21 response using the resonator model
-            s21_complex = self.mock_crs.resonator_model.calculate_channel_response(
-                module_num, channel_num_1_based, total_freq, amp, phase_deg
-            )
+                # Use coupled response
+                s21_complex = channel_responses[ch_num_1]
+                
+                # Scale and add to existing noise
+                i_val = s21_complex.real * full_scale_counts + iq_data_arr[ch_idx_0 * 2]
+                q_val = s21_complex.imag * full_scale_counts + iq_data_arr[ch_idx_0 * 2 + 1]
+                
+                # Clip and store
+                iq_data_arr[ch_idx_0 * 2] = int(np.clip(i_val, -2147483648, 2147483647))
+                iq_data_arr[ch_idx_0 * 2 + 1] = int(np.clip(q_val, -2147483648, 2147483647))
             
-            # Scale and add to existing noise
-            i_val_scaled = s21_complex.real * full_scale_counts + iq_data_arr[ch_idx_0_based * 2]
-            q_val_scaled = s21_complex.imag * full_scale_counts + iq_data_arr[ch_idx_0_based * 2 + 1]
+            non_zero_channels_count = len(channel_responses)
+        else:
+            print("ERROR WITH COUPLING CODE - this shouldn't happen with updated resonator model")
+            non_zero_channels_count = 0
+            # # Fallback to original implementation (shouldn't happen with updated code)
+            # configured_channels = set()
+            # for (mod, ch) in self.mock_crs.frequencies.keys():
+            #     if mod == module_num:
+            #         configured_channels.add(ch)
+            # for (mod, ch) in self.mock_crs.amplitudes.keys():
+            #     if mod == module_num:
+            #         configured_channels.add(ch)
             
-            # Clip to int32 range and convert to int
-            iq_data_arr[ch_idx_0_based * 2] = int(np.clip(i_val_scaled, -2147483648, 2147483647))
-            iq_data_arr[ch_idx_0_based * 2 + 1] = int(np.clip(q_val_scaled, -2147483648, 2147483647))
+            # nco_freq = self.mock_crs.get_nco_frequency(module=module_num) or 0
+            # non_zero_channels_count = len(configured_channels)
+            
+            # # Process configured channels individually
+            # for channel_num_1_based in configured_channels:
+            #     ch_idx_0_based = channel_num_1_based - 1
+                
+            #     freq = self.mock_crs.frequencies.get((module_num, channel_num_1_based), 0)
+            #     amp = self.mock_crs.amplitudes.get((module_num, channel_num_1_based), 0)
+            #     phase_deg = self.mock_crs.phases.get((module_num, channel_num_1_based), 0)
+                
+            #     if amp == 0:
+            #         continue
+                    
+            #     total_freq = freq + nco_freq
+            #     s21_complex = self.mock_crs.resonator_model.calculate_channel_response(
+            #         module_num, channel_num_1_based, total_freq, amp, phase_deg
+            #     )
+                
+            #     i_val_scaled = s21_complex.real * full_scale_counts + iq_data_arr[ch_idx_0_based * 2]
+            #     q_val_scaled = s21_complex.imag * full_scale_counts + iq_data_arr[ch_idx_0_based * 2 + 1]
+                
+            #     iq_data_arr[ch_idx_0_based * 2] = int(np.clip(i_val_scaled, -2147483648, 2147483647))
+            #     iq_data_arr[ch_idx_0_based * 2 + 1] = int(np.clip(q_val_scaled, -2147483648, 2147483647))
         
         if seq == 0 and module_num == 1: # Log for first packet of first module
             print(f"[UDP] First packet details (module {module_num}): {non_zero_channels_count} non-zero channels.")

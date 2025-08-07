@@ -39,6 +39,22 @@ class MockResonatorModel:
         
         # Initialize kinetic inductance parameters for each resonator
         self.kinetic_inductance_fractions = []  # Per-resonator kinetic inductance fraction
+        
+        # CIC bandwidth cache for different decimation stages
+        self.cic_bandwidths = {
+            0: 625e6 / 256 / 64 / 2,      # 19.073 kHz
+            1: 625e6 / 256 / 64 / 4,      # 9.537 kHz  
+            2: 625e6 / 256 / 64 / 8,      # 4.768 kHz
+            3: 625e6 / 256 / 64 / 16,     # 2.384 kHz
+            4: 625e6 / 256 / 64 / 32,     # 1.192 kHz
+            5: 625e6 / 256 / 64 / 64,     # 596 Hz
+            6: 625e6 / 256 / 64 / 128,    # 298 Hz
+        }
+        
+        # Performance caches
+        self._s21_cache = {}  # Cache S21 responses
+        self._cic_cache = {}  # Cache CIC filter responses
+        self._cache_valid = False
 
         # Initialize with default LC resonances upon creation
         # self.generate_lc_resonances() # Or let MockCRS call this
@@ -94,6 +110,7 @@ class MockResonatorModel:
             self.resonator_Q_factors = np.array([])
             
         self.initialize_dynamic_resonators()
+        self.invalidate_caches()
 
     def s21_response(self, frequency):
         """Compute the combined S21 response of the original resonator comb."""
@@ -183,6 +200,8 @@ class MockResonatorModel:
                 'coupling': coupling_val
             })
             self.kinetic_inductance_fractions.append(ki_fraction)
+        
+        self.invalidate_caches()
 
     def s21_lc_response(self, frequency, amplitude=1.0):
         """Calculate S21 response for the LC model with kinetic inductance effects and bifurcation."""
@@ -304,21 +323,204 @@ class MockResonatorModel:
             print(f"Warning: Bifurcation did not converge after {bifurcation_iterations} iterations")
             
         return f0_eff
+    
+    def invalidate_caches(self):
+        """Clear caches when resonator parameters change."""
+        self._s21_cache.clear()
+        self._cic_cache.clear()
+        self._cache_valid = False
+    
+    def _get_cached_s21(self, frequency, amplitude):
+        """Get S21 response with caching."""
+        # Round frequency to nearest Hz for cache key
+        freq_key = round(frequency)
+        amp_key = round(amplitude * 1000) / 1000  # 3 decimal places
+        
+        cache_key = (freq_key, amp_key)
+        if cache_key not in self._s21_cache:
+            self._s21_cache[cache_key] = self.s21_lc_response(frequency, amplitude)
+        
+        return self._s21_cache[cache_key]
+    
+    def _get_cached_cic_response(self, freq_offset, fir_stage):
+        """Get CIC response with caching."""
+        # Round to nearest 0.1 Hz
+        offset_key = round(freq_offset * 10) / 10
+        cache_key = (offset_key, fir_stage)
+        
+        if cache_key not in self._cic_cache:
+            self._cic_cache[cache_key] = self._calculate_cic_response(freq_offset, fir_stage)
+        
+        return self._cic_cache[cache_key]
+    
+    def _calculate_cic_response(self, freq_offset, fir_stage):
+        """
+        Calculate CIC filter response at a given frequency offset.
+        
+        Parameters
+        ----------
+        freq_offset : float
+            Frequency offset from channel center in Hz
+        fir_stage : int
+            FIR decimation stage (0-6)
+            
+        Returns
+        -------
+        float
+            Filter response (0-1)
+        """
+        # Import the CIC model from transferfunctions
+        from . import transferfunctions as tf
+        
+        # CIC parameters
+        R1 = 64  # First stage decimation
+        R2 = 2**fir_stage  # Second stage decimation
+        f_in1 = 625e6 / 256  # Input to first CIC
+        f_in2 = f_in1 / R1   # Input to second CIC
+        
+        # Calculate response for both stages
+        # Using absolute value since response is symmetric
+        freq_abs = abs(freq_offset)
+        
+        # Avoid division by zero at DC
+        if freq_abs < 0.01:
+            return 1.0
+            
+        # First CIC (3 stages)
+        cic1_response = tf._general_single_cic_correction(
+            np.array([freq_abs]), f_in1, R=R1, N=3
+        )[0]
+        
+        # Second CIC (6 stages)  
+        cic2_response = tf._general_single_cic_correction(
+            np.array([freq_abs]), f_in2, R=R2, N=6
+        )[0]
+        
+        # Combined response
+        total_response = cic1_response * cic2_response
+        
+        # Clamp to [0, 1] range
+        return np.clip(total_response, 0, 1)
+    
+    def calculate_module_response_coupled(self, module):
+        """
+        Calculate coupled response for all channels in a module.
+        
+        This implements realistic channel coupling where all channels
+        contribute to a composite signal that each channel then observes
+        through its own demodulation.
+        
+        Parameters
+        ----------
+        module : int
+            Module number (1-4)
+            
+        Returns
+        -------
+        dict
+            Channel responses keyed by channel number (1-based)
+            Each value is a complex number representing I+jQ
+        """
+        # Get NCO frequency for this module
+        nco_freq = self.mock_crs.nco_frequencies.get(module, 0)
+        
+        # Get decimation stage for bandwidth calculation
+        fir_stage = self.mock_crs.fir_stage
+        bandwidth = self.cic_bandwidths.get(fir_stage, 298)  # Hz
+        
+        # Step 1: Collect all active tones with their S21-modified amplitudes
+        active_tones = []
+        
+        # Find all configured channels in this module
+        for (mod, ch) in self.mock_crs.frequencies.keys():
+            if mod != module:
+                continue
+                
+            freq = self.mock_crs.frequencies.get((mod, ch))
+            amp = self.mock_crs.amplitudes.get((mod, ch))
+            
+            if freq is None or amp is None or amp == 0:
+                continue
+                
+            phase_deg = self.mock_crs.phases.get((mod, ch), 0)
+            total_freq = freq + nco_freq
+            
+            # Apply S21 response for this specific tone
+            # This is key: each tone gets its own S21 based on its frequency
+            # Use caching for performance
+            s21_complex = self._get_cached_s21(total_freq, amp)
+            
+            # Combine amplitude, S21, and phase
+            complex_amplitude = amp * s21_complex * np.exp(1j * np.deg2rad(phase_deg))
+            
+            active_tones.append({
+                'channel': ch,
+                'frequency': total_freq,
+                'complex_amplitude': complex_amplitude,
+                'original_amplitude': amp  # Keep for debugging
+            })
+        
+        # Step 2: For each observing channel, calculate what it sees
+        responses = {}
+        
+        # Only process channels that are configured
+        configured_channels = set()
+        for (mod, ch) in self.mock_crs.frequencies.keys():
+            if mod == module:
+                configured_channels.add(ch)
+        for (mod, ch) in self.mock_crs.amplitudes.keys():
+            if mod == module:
+                configured_channels.add(ch)
+        
+        for obs_ch in configured_channels:
+            # Get observation frequency
+            obs_freq = self.mock_crs.frequencies.get((module, obs_ch))
+            
+            # Skip if channel not configured for observation
+            if obs_freq is None:
+                continue
+                
+            obs_freq_total = obs_freq + nco_freq
+            
+            # Initialize signal accumulator
+            signal = 0 + 0j
+            
+            # Process each active tone
+            for tone in active_tones:
+                freq_diff = tone['frequency'] - obs_freq_total
+                
+                # Check if tone is within this channel's bandwidth
+                if abs(freq_diff) <= bandwidth:
+                    if abs(freq_diff) < 0.1:  # Essentially DC (same frequency)
+                        # Direct contribution (includes own tone if present)
+                        signal += tone['complex_amplitude']
+                    else:
+                        # Beat frequency contribution
+                        # Apply CIC filter response to attenuate based on frequency offset
+                        cic_response = self._get_cached_cic_response(freq_diff, fir_stage)
+                        signal += tone['complex_amplitude'] * cic_response
+                        
+                        # Note: For true time-domain simulation, we'd multiply by
+                        # exp(1j * 2 * pi * freq_diff * t) and average over samples
+            
+            responses[obs_ch] = signal
+        
+        return responses
 
     def calculate_channel_response(self, module, channel, frequency, amplitude, phase_degrees):
         """
-        Calculate dimensionless S21 transfer function for a given channel's settings.
+        Calculate response for a single channel.
         
-        This returns the complex S21 transfer function that should be applied to
-        the commanded amplitude. The final scaling to ADC counts happens in the
-        UDP streamer.
+        This method now uses the coupled module-wide calculation for accuracy
+        when multiple channels are active, but falls back to single-channel
+        calculation for efficiency when only one channel is active.
         
         Parameters
         ----------
         module, channel : int
-            Channel identification (for context, not used in simplified model)
+            Channel identification
         frequency : float
-            Probe frequency in Hz
+            Probe frequency in Hz (total, including NCO)
         amplitude : float
             Commanded amplitude (0-1, where 1.0 = full scale)
         phase_degrees : float
@@ -333,13 +535,34 @@ class MockResonatorModel:
         if amplitude == 0:
             return 0 + 0j # No signal if amplitude is zero
         
-        # Calculate S21 response using the LC model (dimensionless)
-        s21_val = self.s21_lc_response(frequency, amplitude)
+        # Check if there are other active channels in this module
+        other_active_channels = False
+        for (mod, ch) in self.mock_crs.frequencies.keys():
+            if mod == module and ch != channel:
+                amp = self.mock_crs.amplitudes.get((mod, ch), 0)
+                if amp != 0:
+                    other_active_channels = True
+                    break
         
-        # Apply commanded phase
+        if other_active_channels:
+            # Use coupled calculation when multiple channels are active
+            # Store this channel's settings temporarily
+            nco_freq = self.mock_crs.nco_frequencies.get(module, 0)
+            self.mock_crs.frequencies[(module, channel)] = frequency - nco_freq
+            self.mock_crs.amplitudes[(module, channel)] = amplitude
+            self.mock_crs.phases[(module, channel)] = phase_degrees
+            
+            # Calculate module-wide response
+            module_responses = self.calculate_module_response_coupled(module)
+            
+            # Extract this channel's response
+            if channel in module_responses:
+                return module_responses[channel]
+        
+        # Single channel case - use original efficient calculation
+        s21_val = self.s21_lc_response(frequency, amplitude)
         phase_rad = np.deg2rad(phase_degrees)
         s21_with_phase = s21_val * np.exp(1j * phase_rad)
         
         # Return S21 * commanded_amplitude (preserves amplitude scaling)
-        # The UDP streamer will handle final scaling to ADC counts
         return s21_with_phase * amplitude

@@ -494,6 +494,9 @@ class PeriscopeRuntime:
         """Process all packets currently in the receiver queue."""
         while not self.receiver.queue.empty():
             (seq, pkt) = self.receiver.queue.get(); self.pkt_cnt += 1
+            # Store the actual decimation stage from the packet
+            if hasattr(pkt, 'fir_stage'):
+                self.actual_dec_stage = pkt.fir_stage
             t_rel = self._calculate_relative_timestamp(pkt)
             self._update_buffers(pkt, t_rel)
 
@@ -772,9 +775,16 @@ class PeriscopeRuntime:
 
     def _update_dec_stage(self):
         """
-        Infer and update the decimation stage based on the data rate of the first channel.
+        Update the decimation stage from the actual packet data.
+        Falls back to inferring from data rate if packet doesn't have fir_stage.
         This is used for accurate PSD frequency axis scaling.
         """
+        # Use actual decimation stage from packets if available
+        if hasattr(self, 'actual_dec_stage'):
+            self.dec_stage = self.actual_dec_stage
+            return
+            
+        # Fall back to inferring from data rate (legacy behavior)
         # infer_dec_stage from .utils
         if not self.channel_list or not self.channel_list[0]: return
         ch_val = self.channel_list[0][0] # Renamed ch

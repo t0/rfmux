@@ -722,7 +722,9 @@ class MockCRS(BaseCRS):
         overvoltage = False
         
         # Get sample rate based on decimation
-        fir_stage = self.get_decimation() or 6
+        fir_stage = self.get_decimation()
+        if fir_stage is None:
+            fir_stage = 6  # Default only if None, not if 0
         fs = 625e6 / 256 / 64 / (2**fir_stage)  # Actual sample rate based on decimation
         t_list = (np.arange(num_samples) / fs).tolist()
 

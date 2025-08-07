@@ -404,7 +404,7 @@ class MockResonatorModel:
     
     def calculate_module_response_coupled(self, module, num_samples=1, sample_rate=None, start_time=0):
         """
-        Calculate coupled response for all channels in a module.
+        Calculate coupled response for all channels in a module using vectorized operations.
         
         This implements realistic channel coupling where all channels
         contribute to a composite signal that each channel then observes
@@ -436,53 +436,17 @@ class MockResonatorModel:
         fir_stage = self.mock_crs.fir_stage
         bandwidth = self.cic_bandwidths.get(fir_stage, 298)  # Hz
         
-        # Step 1: Collect all active tones with their S21-modified amplitudes
-        active_tones = []
-        
-        # Find all configured channels in this module
-        for (mod, ch) in self.mock_crs.frequencies.keys():
-            if mod != module:
-                continue
-                
-            freq = self.mock_crs.frequencies.get((mod, ch))
-            amp = self.mock_crs.amplitudes.get((mod, ch))
-            
-            if freq is None or amp is None or amp == 0:
-                continue
-                
-            phase_deg = self.mock_crs.phases.get((mod, ch), 0)
-            total_freq = freq + nco_freq
-            
-            # Apply S21 response for this specific tone
-            # This is key: each tone gets its own S21 based on its frequency
-            # Use caching for performance
-            s21_complex = self._get_cached_s21(total_freq, amp)
-            
-            # Combine amplitude, S21, and phase
-            complex_amplitude = amp * s21_complex * np.exp(1j * np.deg2rad(phase_deg))
-            
-            active_tones.append({
-                'channel': ch,
-                'frequency': total_freq,
-                'complex_amplitude': complex_amplitude,
-                'original_amplitude': amp  # Keep for debugging
-            })
-        
         # Determine sample rate if not provided
         if sample_rate is None:
-            # Use decimation-based sample rate
             sample_rate = 625e6 / 256 / 64 / (2**fir_stage)
         
-        # Generate time array for beat frequency simulation
-        if num_samples > 1:
-            t = start_time + np.arange(num_samples) / sample_rate
-        else:
-            t = np.array([start_time])  # Single sample at specified time
+        # Step 1: Collect active tones and observing channels
+        active_tone_freqs = []
+        active_tone_amps = []
+        obs_channels = []
+        obs_freqs = []
         
-        # Step 2: For each observing channel, calculate what it sees
-        responses = {}
-        
-        # Only process channels that are configured
+        # Find all configured channels in this module
         configured_channels = set()
         for (mod, ch) in self.mock_crs.frequencies.keys():
             if mod == module:
@@ -491,50 +455,102 @@ class MockResonatorModel:
             if mod == module:
                 configured_channels.add(ch)
         
-        for obs_ch in configured_channels:
-            # Get observation frequency
-            obs_freq = self.mock_crs.frequencies.get((module, obs_ch))
+        # Collect active tones (transmitting channels)
+        for ch in configured_channels:
+            freq = self.mock_crs.frequencies.get((module, ch))
+            amp = self.mock_crs.amplitudes.get((module, ch))
             
-            # Skip if channel not configured for observation
-            if obs_freq is None:
-                continue
+            if freq is not None and amp is not None and amp != 0:
+                phase_deg = self.mock_crs.phases.get((module, ch), 0)
+                total_freq = freq + nco_freq
                 
-            obs_freq_total = obs_freq + nco_freq
+                # Apply S21 response
+                s21_complex = self._get_cached_s21(total_freq, amp)
+                
+                # Combine amplitude, S21, and phase
+                complex_amplitude = amp * s21_complex * np.exp(1j * np.deg2rad(phase_deg))
+                
+                active_tone_freqs.append(total_freq)
+                active_tone_amps.append(complex_amplitude)
+        
+        # Collect observing channels
+        for ch in configured_channels:
+            freq = self.mock_crs.frequencies.get((module, ch))
+            if freq is not None:
+                obs_channels.append(ch)
+                obs_freqs.append(freq + nco_freq)
+        
+        # If no active tones or observers, return empty
+        if not active_tone_freqs or not obs_channels:
+            return {}
+        
+        # Convert to numpy arrays for vectorization
+        tone_freqs = np.array(active_tone_freqs)  # Shape: (n_tones,)
+        tone_amps = np.array(active_tone_amps)     # Shape: (n_tones,)
+        obs_freqs_arr = np.array(obs_freqs)        # Shape: (n_obs,)
+        
+        # Step 2: Vectorized calculation of all frequency differences
+        # Broadcasting: (n_obs, 1) - (1, n_tones) = (n_obs, n_tones)
+        freq_diffs = tone_freqs[np.newaxis, :] - obs_freqs_arr[:, np.newaxis]
+        
+        # Step 3: Determine which tones are within bandwidth for each observer
+        within_bandwidth = np.abs(freq_diffs) <= bandwidth
+        
+        # Step 4: Calculate responses for single time point (most common case)
+        if num_samples == 1:
+            t = start_time
             
-            # Initialize signal accumulator (array if multiple samples)
-            if num_samples > 1:
+            # Vectorized beat frequency calculation
+            # Phase for each tone-observer pair at time t
+            phases = 2 * np.pi * freq_diffs * t
+            
+            # Complex exponentials for all pairs
+            beat_factors = np.exp(1j * phases)
+            
+            # Apply CIC response (simplified - just use distance attenuation for now)
+            # For better accuracy, could vectorize the CIC calculation
+            cic_responses = np.where(
+                np.abs(freq_diffs) < 0.1,  # DC components
+                1.0,
+                np.sinc(freq_diffs / bandwidth) ** 2  # Simplified CIC approximation
+            )
+            
+            # Calculate contributions: (n_obs, n_tones)
+            contributions = tone_amps[np.newaxis, :] * beat_factors * cic_responses
+            
+            # Mask out tones outside bandwidth
+            contributions = np.where(within_bandwidth, contributions, 0)
+            
+            # Sum contributions for each observer
+            signals = np.sum(contributions, axis=1)  # Shape: (n_obs,)
+            
+            # Build response dictionary
+            responses = {}
+            for i, ch in enumerate(obs_channels):
+                responses[ch] = complex(signals[i])
+        
+        else:
+            # Multiple time samples - still vectorized but over time
+            t = start_time + np.arange(num_samples) / sample_rate
+            responses = {}
+            
+            for i, ch in enumerate(obs_channels):
                 signal = np.zeros(num_samples, dtype=complex)
-            else:
-                signal = 0 + 0j
-            
-            # Process each active tone
-            for tone in active_tones:
-                freq_diff = tone['frequency'] - obs_freq_total
                 
-                # Check if tone is within this channel's bandwidth
-                if abs(freq_diff) <= bandwidth:
-                    if abs(freq_diff) < 0.1:  # Essentially DC (same frequency)
-                        # Direct contribution (includes own tone if present)
-                        signal += tone['complex_amplitude']
-                    else:
-                        # Beat frequency contribution - time-varying!
-                        # Apply CIC filter response to attenuate based on frequency offset
-                        cic_response = self._get_cached_cic_response(freq_diff, fir_stage)
+                # Process tones for this observer
+                for j, tone_amp in enumerate(tone_amps):
+                    if within_bandwidth[i, j]:
+                        freq_diff = freq_diffs[i, j]
                         
-                        # Generate time-varying beat signal
-                        # Complex exponential for beat frequency at time t
-                        beat_signal = tone['complex_amplitude'] * cic_response * np.exp(1j * 2 * np.pi * freq_diff * t)
-                        signal += beat_signal
-            
-            # Store response (single value or array)
-            if num_samples > 1:
-                responses[obs_ch] = signal
-            else:
-                # Ensure we return a scalar complex value
-                if isinstance(signal, np.ndarray):
-                    responses[obs_ch] = complex(signal[0])
-                else:
-                    responses[obs_ch] = complex(signal)
+                        if abs(freq_diff) < 0.1:  # DC
+                            signal += tone_amp
+                        else:
+                            # Simplified CIC response
+                            cic_response = np.sinc(freq_diff / bandwidth) ** 2
+                            # Time-varying beat
+                            signal += tone_amp * cic_response * np.exp(1j * 2 * np.pi * freq_diff * t)
+                
+                responses[ch] = signal
         
         return responses
 

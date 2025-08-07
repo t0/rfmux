@@ -400,17 +400,35 @@ def get_multicast_socket(crs_hostname):
     else:
         hostname_only = crs_hostname
     
-    # Check if this is a localhost connection (MockCRS uses unicast)
+    # Check if this is a localhost connection (MockCRS uses multicast)
     if hostname_only in ["127.0.0.1", "localhost", "::1"]:
-        # Create a unicast socket for MockCRS
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Create a multicast socket for MockCRS (using multicast on loopback)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        # Bind to the streamer port on localhost
-        sock.bind(("127.0.0.1", STREAMER_PORT))
+        # For multicast on Linux, we may need SO_REUSEPORT as well
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except AttributeError:
+            pass  # SO_REUSEPORT not available on all platforms
+        
+        # Bind to all interfaces on the streamer port (needed for multicast)
+        sock.bind(("", STREAMER_PORT))
         
         # Set receive buffer size with platform-aware handling
         _set_socket_buffer_size(sock)
+        
+        # Enable multicast loopback to receive our own packets
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        
+        # Set the multicast interface to loopback for receiving
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("127.0.0.1"))
+        
+        # Join the multicast group specifically on loopback interface
+        mreq_lo = struct.pack("4s4s", socket.inet_aton(STREAMER_HOST), socket.inet_aton("127.0.0.1"))
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq_lo)
+        
+        # print(f"[Periscope UDP] Multicast receiver configured for {STREAMER_HOST}:{STREAMER_PORT} on loopback")
         
         return sock
     

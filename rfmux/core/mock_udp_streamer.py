@@ -57,15 +57,24 @@ def _register_global_cleanup():
 class MockCRSUDPStreamer(threading.Thread):
     """Streams UDP packets with S21 data based on MockCRS state"""
     
-    def __init__(self, mock_crs, host='127.0.0.1', port=STREAMER_PORT, modules_to_stream=None):
+    def __init__(self, mock_crs, host='239.192.0.2', port=STREAMER_PORT, modules_to_stream=None, use_multicast=True):
         super().__init__(daemon=True)
         self.mock_crs = mock_crs # Reference to MockCRS instance
         self.host = host
         self.port = port
+        self.use_multicast = use_multicast
         
-        # For MockCRS, always use unicast to 127.0.0.1 for reliability
-        self.unicast_host = '127.0.0.1'
-        self.unicast_port = port # Use the provided port
+        # Configure for multicast or unicast
+        if use_multicast:
+            # Use multicast for better hardware emulation
+            self.multicast_group = host if host.startswith('239.') else '239.192.0.2'
+            self.multicast_port = port
+            print(f"[UDP] MockCRSUDPStreamer initialized - multicast to {self.multicast_group}:{self.multicast_port}")
+        else:
+            # Fall back to unicast for specific testing scenarios
+            self.unicast_host = host if host != '239.192.0.2' else '127.0.0.1'
+            self.unicast_port = port
+            print(f"[UDP] MockCRSUDPStreamer initialized - unicast to {self.unicast_host}:{self.unicast_port}")
         
         # If modules_to_stream is specified, only stream those modules
         # Otherwise, we'll determine which modules to stream based on configured channels
@@ -81,14 +90,41 @@ class MockCRSUDPStreamer(threading.Thread):
         _active_streamers.append(self)
         _register_global_cleanup()
         
-        #print(f"[UDP] MockCRSUDPStreamer initialized - unicast to {self.unicast_host}:{self.unicast_port}")
-        
     def _init_socket(self):
-        """Initialize the UDP socket."""
+        """Initialize the UDP socket for multicast or unicast."""
         if self.socket is None:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # SO_SNDBUF might not be necessary for local unicast but doesn't hurt
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
+            if self.use_multicast:
+                # Create socket for multicast
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+
+                
+                # Enable multicast loopback so local processes can receive
+                self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+                
+                # Set socket send buffer size for performance
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
+                
+                # Bind multicast to loopback interface (lo) for local testing
+                # Using if_nametoindex to get the interface index for 'lo'
+                try:
+                    lo_index = socket.if_nametoindex('lo')
+                    # Use IP_MULTICAST_IF with the loopback address
+                    # Note: IP_MULTICAST_IF expects an IP address, not an interface index
+                    # For interface index, we'd use IPV6_MULTICAST_IF, but we're using IPv4
+                    # So we stick with the loopback IP address
+                    self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton('127.0.0.1'))
+                    print(f"[UDP] Multicast bound to loopback interface (lo, index {lo_index})")
+                except OSError:
+                    # Fallback if 'lo' interface not found (shouldn't happen on Linux)
+                    print("[UDP] Warning: Could not find 'lo' interface, using default")
+                    self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton('0.0.0.0'))
+                
+                print(f"[UDP] Multicast socket initialized for {self.multicast_group}:{self.multicast_port}")
+            else:
+                # Create socket for unicast
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
+                print(f"[UDP] Unicast socket initialized")
     
     def _cleanup_socket(self):
         """Clean up the UDP socket."""
@@ -166,14 +202,26 @@ class MockCRSUDPStreamer(threading.Thread):
                             
                         try:
                             packet_bytes = self.generate_packet_for_module(module_num, self.seq_counters[module_num])
-                            bytes_sent = self.socket.sendto(packet_bytes, (self.unicast_host, self.unicast_port))
+                            
+                            if self.use_multicast:
+                                if self.socket:
+                                    bytes_sent = self.socket.sendto(packet_bytes, (self.multicast_group, self.multicast_port))
+                                    destination = f"{self.multicast_group}:{self.multicast_port}"
+                                else:
+                                    raise RuntimeError("Socket not initialized")
+                            else:
+                                if self.socket:
+                                    bytes_sent = self.socket.sendto(packet_bytes, (self.unicast_host, self.unicast_port))
+                                    destination = f"{self.unicast_host}:{self.unicast_port}"
+                                else:
+                                    raise RuntimeError("Socket not initialized")
                             
                             self.seq_counters[module_num] += 1
                             self.packets_sent += 1
                             packet_count_interval += 1
                             
-                            #if self.packets_sent <= 20: # Log first few packets (e.g., 5 per module)
-                                #print(f"[UDP] Sent unicast packet #{self.packets_sent}: module={module_num}, seq={self.seq_counters[module_num]-1}, size={bytes_sent} bytes to {self.unicast_host}:{self.unicast_port}")
+                            if self.packets_sent <= 5: # Log first few packets
+                                print(f"[UDP] Sent {'multicast' if self.use_multicast else 'unicast'} packet #{self.packets_sent}: module={module_num}, seq={self.seq_counters[module_num]-1}, size={bytes_sent} bytes to {destination}")
                             
                         except Exception as e:
                             if self.running:  # Only log if we're still supposed to be running
@@ -295,25 +343,27 @@ class MockCRSUDPStreamer(threading.Thread):
         
         now = datetime.now()
         ts = Timestamp(
-            y=now.year % 100,
-            d=now.timetuple().tm_yday,
-            h=now.hour, m=now.minute, s=now.second,
-            ss=int(now.microsecond * SS_PER_SECOND / 1e6), # Scaled sub-seconds
-            c=0, # Carrier phase, typically 0 for mock
-            sbs=0, # Sub-block sequence, typically 0 for mock
+            y=np.int32(now.year % 100),
+            d=np.int32(now.timetuple().tm_yday),
+            h=np.int32(now.hour), 
+            m=np.int32(now.minute), 
+            s=np.int32(now.second),
+            ss=np.int32(now.microsecond * SS_PER_SECOND / 1e6), # Scaled sub-seconds
+            c=np.int32(0), # Carrier phase, typically 0 for mock
+            sbs=np.int32(0), # Sub-block sequence, typically 0 for mock
             source=TimestampPort.TEST, # Mock data source
             recent=True
         )
         
         packet = DfmuxPacket(
-            magic=STREAMER_MAGIC,
-            version=SHORT_PACKET_VERSION if self.mock_crs.short_packets else LONG_PACKET_VERSION,
-            serial=int(self.mock_crs.serial) if self.mock_crs.serial and self.mock_crs.serial.isdigit() else 0,
-            num_modules=1, # Packet is for one module's data
-            block=0, # Block number, typically 0 for continuous streaming
+            magic=np.uint32(STREAMER_MAGIC),
+            version=np.uint16(SHORT_PACKET_VERSION if self.mock_crs.short_packets else LONG_PACKET_VERSION),
+            serial=np.uint16(int(self.mock_crs.serial) if self.mock_crs.serial and self.mock_crs.serial.isdigit() else 0),
+            num_modules=np.uint8(1), # Packet is for one module's data
+            block=np.uint8(0), # Block number, typically 0 for continuous streaming
             fir_stage=self.mock_crs.get_decimation(),
-            module=module_num - 1,  # DfmuxPacket module is 0-indexed
-            seq=seq,
+            module=np.uint8(module_num - 1),  # DfmuxPacket module is 0-indexed
+            seq=np.uint32(seq),
             s=iq_data_arr, # This should be the array.array('i')
             ts=ts
         )
@@ -328,16 +378,30 @@ class MockUDPManager:
         self.udp_thread = None
         self._udp_streaming_active = False # Internal flag
 
-    async def start_udp_streaming(self, host='127.0.0.1', port=STREAMER_PORT):
-        """Start UDP streaming with proper error handling."""
+    async def start_udp_streaming(self, host='239.192.0.2', port=STREAMER_PORT, use_multicast=True):
+        """Start UDP streaming with proper error handling.
+        
+        Args:
+            host: Multicast group address (default: '239.192.0.2') or unicast IP
+            port: UDP port number (default: STREAMER_PORT)
+            use_multicast: If True, use multicast; if False, use unicast
+        """
         try:
             if not self._udp_streaming_active:
                 self._udp_streaming_active = True
-                # Ensure host is 127.0.0.1 for mock reliability
-                self.udp_thread = MockCRSUDPStreamer(self.mock_crs, '127.0.0.1', port)
+                
+                # Create the streamer with multicast or unicast configuration
+                self.udp_thread = MockCRSUDPStreamer(
+                    self.mock_crs, 
+                    host=host, 
+                    port=port,
+                    use_multicast=use_multicast
+                )
                 self.udp_thread.start()
                 await asyncio.sleep(0.1) # Give thread time to start
-                print(f"[Manager] UDP Streaming started to 127.0.0.1:{port}")
+                
+                mode = "multicast" if use_multicast else "unicast"
+                print(f"[Manager] UDP Streaming started ({mode}) to {host}:{port}")
                 return True
             else:
                 print("[Manager] UDP Streaming already active.")

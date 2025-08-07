@@ -402,7 +402,7 @@ class MockResonatorModel:
         # Clamp to [0, 1] range
         return np.clip(total_response, 0, 1)
     
-    def calculate_module_response_coupled(self, module):
+    def calculate_module_response_coupled(self, module, num_samples=1, sample_rate=None, start_time=0):
         """
         Calculate coupled response for all channels in a module.
         
@@ -414,12 +414,20 @@ class MockResonatorModel:
         ----------
         module : int
             Module number (1-4)
+        num_samples : int
+            Number of time samples to generate (for beat frequency simulation)
+        sample_rate : float, optional
+            Sample rate in Hz. If None, uses decimation-based rate.
+        start_time : float
+            Starting time in seconds for time-varying signals (e.g., for UDP packets)
             
         Returns
         -------
         dict
             Channel responses keyed by channel number (1-based)
-            Each value is a complex number representing I+jQ
+            Each value is either:
+            - A complex number (if num_samples=1)
+            - A complex array of length num_samples (if num_samples>1)
         """
         # Get NCO frequency for this module
         nco_freq = self.mock_crs.nco_frequencies.get(module, 0)
@@ -460,6 +468,17 @@ class MockResonatorModel:
                 'original_amplitude': amp  # Keep for debugging
             })
         
+        # Determine sample rate if not provided
+        if sample_rate is None:
+            # Use decimation-based sample rate
+            sample_rate = 625e6 / 256 / 64 / (2**fir_stage)
+        
+        # Generate time array for beat frequency simulation
+        if num_samples > 1:
+            t = start_time + np.arange(num_samples) / sample_rate
+        else:
+            t = np.array([start_time])  # Single sample at specified time
+        
         # Step 2: For each observing channel, calculate what it sees
         responses = {}
         
@@ -482,8 +501,11 @@ class MockResonatorModel:
                 
             obs_freq_total = obs_freq + nco_freq
             
-            # Initialize signal accumulator
-            signal = 0 + 0j
+            # Initialize signal accumulator (array if multiple samples)
+            if num_samples > 1:
+                signal = np.zeros(num_samples, dtype=complex)
+            else:
+                signal = 0 + 0j
             
             # Process each active tone
             for tone in active_tones:
@@ -495,15 +517,24 @@ class MockResonatorModel:
                         # Direct contribution (includes own tone if present)
                         signal += tone['complex_amplitude']
                     else:
-                        # Beat frequency contribution
+                        # Beat frequency contribution - time-varying!
                         # Apply CIC filter response to attenuate based on frequency offset
                         cic_response = self._get_cached_cic_response(freq_diff, fir_stage)
-                        signal += tone['complex_amplitude'] * cic_response
                         
-                        # Note: For true time-domain simulation, we'd multiply by
-                        # exp(1j * 2 * pi * freq_diff * t) and average over samples
+                        # Generate time-varying beat signal
+                        # Complex exponential for beat frequency at time t
+                        beat_signal = tone['complex_amplitude'] * cic_response * np.exp(1j * 2 * np.pi * freq_diff * t)
+                        signal += beat_signal
             
-            responses[obs_ch] = signal
+            # Store response (single value or array)
+            if num_samples > 1:
+                responses[obs_ch] = signal
+            else:
+                # Ensure we return a scalar complex value
+                if isinstance(signal, np.ndarray):
+                    responses[obs_ch] = complex(signal[0])
+                else:
+                    responses[obs_ch] = complex(signal)
         
         return responses
 

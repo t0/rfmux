@@ -296,19 +296,33 @@ class MockCRSUDPStreamer(threading.Thread):
         
         # NEW: Use module-wide coupled calculation if available
         if hasattr(self.mock_crs.resonator_model, 'calculate_module_response_coupled'):
-            # Get all channel responses at once (includes coupling effects)
-            channel_responses = self.mock_crs.resonator_model.calculate_module_response_coupled(module_num)
+            # Get sample rate for time-varying signals
+            fir_stage = self.mock_crs.get_decimation() or 6
+            sample_rate = 625e6 / 256 / 64 / (2**fir_stage)
             
-            # Fill in the channel data
+            # Calculate time for this packet (based on sequence number)
+            # Each packet represents one sample in time
+            t = seq / sample_rate
+            
+            # Get all channel responses at once (includes coupling effects and time-varying beats)
+            # Now using the unified method with start_time parameter
+            channel_responses = self.mock_crs.resonator_model.calculate_module_response_coupled(
+                module_num, 
+                num_samples=1,  # Single sample per packet
+                sample_rate=sample_rate,
+                start_time=t   # Pass the current time for this packet
+            )
+            
+            # Process each channel's response
             for ch_num_1 in channel_responses:
                 ch_idx_0 = ch_num_1 - 1  # Convert to 0-based index
                 
-                # Use coupled response
-                s21_complex = channel_responses[ch_num_1]
+                # Get the complex signal for this channel
+                signal = channel_responses[ch_num_1]
                 
                 # Scale and add to existing noise
-                i_val = s21_complex.real * full_scale_counts + iq_data_arr[ch_idx_0 * 2]
-                q_val = s21_complex.imag * full_scale_counts + iq_data_arr[ch_idx_0 * 2 + 1]
+                i_val = signal.real * full_scale_counts + iq_data_arr[ch_idx_0 * 2]
+                q_val = signal.imag * full_scale_counts + iq_data_arr[ch_idx_0 * 2 + 1]
                 
                 # Clip and store
                 iq_data_arr[ch_idx_0 * 2] = int(np.clip(i_val, -2147483648, 2147483647))

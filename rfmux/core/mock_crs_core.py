@@ -721,65 +721,77 @@ class MockCRS(BaseCRS):
         overrange = False # Mock flags
         overvoltage = False
         
-        fs = 1e6  # 1 MHz sample rate for timestamping
+        # Get sample rate based on decimation
+        fir_stage = self.get_decimation() or 6
+        fs = 625e6 / 256 / 64 / (2**fir_stage)  # Actual sample rate based on decimation
         t_list = (np.arange(num_samples) / fs).tolist()
 
         nco_freq = self.get_nco_frequency(module=module) or 0
+        
+        # Scaling constants
+        scale_factor = const.SCALE_FACTOR  # Base scaling
+        noise_level = const.UDP_NOISE_LEVEL  # Noise level
 
         if channel is not None:
-            # Single channel logic
-            chan_freq = self.frequencies.get((module, channel))
-            chan_amp = self.amplitudes.get((module, channel))
-            chan_phase_deg = self.phases.get((module, channel))
-
-            if chan_freq is None or chan_amp is None:
-                # Default to zero if frequency or amplitude not configured
-                i_list = [0.0] * num_samples
-                q_list = [0.0] * num_samples
+            # Single channel logic - use coupled calculation for time-varying signals
+            # Get the coupled response (which includes beat frequencies)
+            module_responses = self.resonator_model.calculate_module_response_coupled(
+                module, num_samples=num_samples, sample_rate=fs
+            )
+            
+            if channel in module_responses:
+                response = module_responses[channel]
+                
+                # Handle both single values and arrays
+                if isinstance(response, np.ndarray):
+                    # Time-varying signal (beat frequencies)
+                    i_list = (response.real * scale_factor + np.random.normal(0, noise_level, num_samples)).tolist()
+                    q_list = (response.imag * scale_factor + np.random.normal(0, noise_level, num_samples)).tolist()
+                else:
+                    # Single value - repeat for all samples
+                    i_base = response.real * scale_factor
+                    q_base = response.imag * scale_factor
+                    i_list = [i_base + np.random.normal(0, noise_level) for _ in range(num_samples)]
+                    q_list = [q_base + np.random.normal(0, noise_level) for _ in range(num_samples)]
             else:
-                total_freq = chan_freq + nco_freq
-                # Use phase if set, otherwise default to 0
-                phase_deg = chan_phase_deg if chan_phase_deg is not None else 0.0
-                s21_complex = self.resonator_model.calculate_channel_response(module, channel, total_freq, chan_amp, phase_deg)
-                
-                # APPLY SAME 10,000x SCALING AS UDP STREAMER
-                scale_factor = const.SCALE_FACTOR  # 8.38e10 = 83.8 billion
-                noise_level = const.UDP_NOISE_LEVEL  # Same noise level as UDP
-                
-                # Scale and add noise per sample
-                i_list = [s21_complex.real * scale_factor + np.random.normal(0, noise_level) for _ in range(num_samples)]
-                q_list = [s21_complex.imag * scale_factor + np.random.normal(0, noise_level) for _ in range(num_samples)]
+                # Channel not configured
+                i_list = [np.random.normal(0, noise_level) for _ in range(num_samples)]
+                q_list = [np.random.normal(0, noise_level) for _ in range(num_samples)]
             
             return {
                 "i": i_list, "q": q_list, "ts": t_list,
                 "flags": {"overrange": overrange, "overvoltage": overvoltage}
             }
         else:
-            # All channels logic
+            # All channels logic - use coupled calculation
             channels_per_module = 1024 # As per NUM_CHANNELS in streamer
             i_data, q_data = [], []
-
+            
+            # Get all channel responses at once (includes coupling)
+            module_responses = self.resonator_model.calculate_module_response_coupled(
+                module, num_samples=num_samples, sample_rate=fs
+            )
+            
+            # Process each channel
             for ch_idx in range(1, channels_per_module + 1): # 1-based channel
-                chan_freq = self.frequencies.get((module, ch_idx))
-                chan_amp = self.amplitudes.get((module, ch_idx))
-                chan_phase_deg = self.phases.get((module, ch_idx))
-
-                if chan_freq is None or chan_amp is None:
-                    i_ch_samples = [0.0] * num_samples
-                    q_ch_samples = [0.0] * num_samples
+                if ch_idx in module_responses:
+                    response = module_responses[ch_idx]
+                    
+                    # Handle both single values and arrays
+                    if isinstance(response, np.ndarray):
+                        # Time-varying signal
+                        i_ch_samples = (response.real * scale_factor + np.random.normal(0, noise_level, num_samples)).tolist()
+                        q_ch_samples = (response.imag * scale_factor + np.random.normal(0, noise_level, num_samples)).tolist()
+                    else:
+                        # Single value - repeat for all samples
+                        i_base = response.real * scale_factor
+                        q_base = response.imag * scale_factor
+                        i_ch_samples = [i_base + np.random.normal(0, noise_level) for _ in range(num_samples)]
+                        q_ch_samples = [q_base + np.random.normal(0, noise_level) for _ in range(num_samples)]
                 else:
-                    total_freq = chan_freq + nco_freq
-                    # Use phase if set, otherwise default to 0
-                    phase_deg = chan_phase_deg if chan_phase_deg is not None else 0.0
-                    s21_complex = self.resonator_model.calculate_channel_response(module, ch_idx, total_freq, chan_amp, phase_deg)
-    
-                    # APPLY SAME 10,000x SCALING AS UDP STREAMER
-                    scale_factor = const.SCALE_FACTOR  # 8.38e10 = 83.8 billion
-                    noise_level = const.UDP_NOISE_LEVEL  # Same noise level as UDP)
-
-                    # Scale and add noise per sample
-                    i_ch_samples = [s21_complex.real * scale_factor + np.random.normal(0, noise_level) for _ in range(num_samples)]
-                    q_ch_samples = [s21_complex.imag * scale_factor + np.random.normal(0, noise_level) for _ in range(num_samples)]
+                    # Channel not configured - just noise
+                    i_ch_samples = [np.random.normal(0, noise_level) for _ in range(num_samples)]
+                    q_ch_samples = [np.random.normal(0, noise_level) for _ in range(num_samples)]
                 
                 i_data.append(i_ch_samples)
                 q_data.append(q_ch_samples)

@@ -1,6 +1,10 @@
 [build-system]
-requires = ["setuptools", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = [
+	"scikit-build-core>=0.10.0",
+	"cmake>=3.15",
+	"pybind11[global]>=2.8",
+]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "rfmux"
@@ -13,11 +17,11 @@ authors = [
 dependencies = [
   "PyQt6",
   "aiohttp",
-  "ipython",
+  "h5py",
   "ipykernel",
+  "ipython",
   "matplotlib",
   "numpy",
-#  "pygetdata", # This is not yet in PyPI. Should be added back when available.
   "pyqtgraph",
   "pytest",
   "pytest-asyncio",
@@ -33,10 +37,8 @@ requires-python = ">=3.12"
 
 [project.gui-scripts]
 periscope = "rfmux.tools.periscope.__main__:main"
+parser = "rfmux.tools.parser:main"
 
 [project.urls]
 homepage = "https://github.com/t0/rfmux"
 repository = "https://github.com/t0/rfmux"
-
-[tool.setuptools]
-packages = ["rfmux"]

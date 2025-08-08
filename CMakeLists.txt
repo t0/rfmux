@@ -4,17 +4,15 @@ project(parser LANGUAGES CXX)
 
 set(PYBIND11_FINDPYTHON ON)
 
-# Try to use a local pybind11; fall back on FetchContent
+# Pybind11 is installed as a Python dependency, so we need to make sure we look
+# in the right places for pybind11 headers
+execute_process(
+  COMMAND python -m pybind11 --cmakedir
+  OUTPUT_VARIABLE _PYBIND11_DIR
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+list(APPEND CMAKE_PREFIX_PATH "${_PYBIND11_DIR}")
 find_package(pybind11 CONFIG QUIET)
-if (NOT TARGET pybind11)
-  message(STATUS "pybind11 not found - fetching via FetchContent...")
-  FetchContent_Declare(
-    pybind11
-    GIT_REPOSITORY https://github.com/pybind/pybind11
-    GIT_TAG v3.0.0
-  )
-FetchContent_MakeAvailable(pybind11)
-endif()
 
 # Try to use a local fmt::format installation. If that didn't work, try via FetchContent.
 find_package(fmt CONFIG QUIET)

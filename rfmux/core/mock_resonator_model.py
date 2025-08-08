@@ -140,7 +140,7 @@ class MockResonatorModel:
     def generate_lc_resonances(self):
         """Generate LC resonances distributed across spectrum with kinetic inductance parameters."""
         # Get ALL values from stored config or defaults
-        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        config = getattr(self.mock_crs, '_physics_config', {})
         
         num_resonances = config.get('num_resonances', const.DEFAULT_NUM_RESONANCES)
         f_start = config.get('freq_start', const.DEFAULT_FREQ_START)
@@ -173,7 +173,7 @@ class MockResonatorModel:
         frequencies.sort()
         
         # Get config values from MockCRS physics_config or fallback to constants
-        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        config = getattr(self.mock_crs, '_physics_config', {})
         q_min = config.get('q_min', const.DEFAULT_Q_MIN)
         q_max = config.get('q_max', const.DEFAULT_Q_MAX)
         q_variation = config.get('q_variation', const.Q_VARIATION)
@@ -209,7 +209,7 @@ class MockResonatorModel:
             return 1.0 + 0j # No attenuation if no LC resonators
 
         # Get config values from MockCRS physics_config or fallback to constants
-        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        config = getattr(self.mock_crs, '_physics_config', {})
         enable_bifurcation = config.get('enable_bifurcation', const.ENABLE_BIFURCATION)
         base_noise_level = config.get('base_noise_level', const.BASE_NOISE_LEVEL)
         amplitude_noise_coupling = config.get('amplitude_noise_coupling', const.AMPLITUDE_NOISE_COUPLING)
@@ -249,7 +249,7 @@ class MockResonatorModel:
     def _calculate_simple_frequency_shift(self, f0, amplitude, ki_fraction):
         """Calculate frequency shift without self-consistency (faster)."""
         # Get config values from MockCRS physics_config or fallback to constants
-        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        config = getattr(self.mock_crs, '_physics_config', {})
         power_norm_const = config.get('power_normalization', const.POWER_NORMALIZATION)
         freq_shift_power_law = config.get('frequency_shift_power_law', const.FREQUENCY_SHIFT_POWER_LAW)
         freq_shift_mag = config.get('frequency_shift_magnitude', const.FREQUENCY_SHIFT_MAGNITUDE)
@@ -271,7 +271,7 @@ class MockResonatorModel:
     def _calculate_self_consistent_frequency(self, frequency, f0, Q, k, amplitude, ki_fraction):
         """Calculate self-consistent frequency with potential bifurcation using damped iteration."""
         # Get config values from MockCRS physics_config or fallback to constants
-        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        config = getattr(self.mock_crs, '_physics_config', {})
         power_norm_const = config.get('power_normalization', const.POWER_NORMALIZATION)
         freq_shift_power_law = config.get('frequency_shift_power_law', const.FREQUENCY_SHIFT_POWER_LAW)
         freq_shift_mag = config.get('frequency_shift_magnitude', const.FREQUENCY_SHIFT_MAGNITUDE)
@@ -430,10 +430,10 @@ class MockResonatorModel:
             - A complex array of length num_samples (if num_samples>1)
         """
         # Get NCO frequency for this module
-        nco_freq = self.mock_crs.nco_frequencies.get(module, 0)
+        nco_freq = self.mock_crs._nco_frequencies.get(module, 0)
         
         # Get decimation stage for bandwidth calculation
-        fir_stage = self.mock_crs.fir_stage
+        fir_stage = self.mock_crs._fir_stage
         bandwidth = self.cic_bandwidths.get(fir_stage, 298)  # Hz
         
         # Determine sample rate if not provided
@@ -448,20 +448,20 @@ class MockResonatorModel:
         
         # Find all configured channels in this module
         configured_channels = set()
-        for (mod, ch) in self.mock_crs.frequencies.keys():
+        for (mod, ch) in self.mock_crs._frequencies.keys():
             if mod == module:
                 configured_channels.add(ch)
-        for (mod, ch) in self.mock_crs.amplitudes.keys():
+        for (mod, ch) in self.mock_crs._amplitudes.keys():
             if mod == module:
                 configured_channels.add(ch)
         
         # Collect active tones (transmitting channels)
         for ch in configured_channels:
-            freq = self.mock_crs.frequencies.get((module, ch))
-            amp = self.mock_crs.amplitudes.get((module, ch))
+            freq = self.mock_crs._frequencies.get((module, ch))
+            amp = self.mock_crs._amplitudes.get((module, ch))
             
             if freq is not None and amp is not None and amp != 0:
-                phase_deg = self.mock_crs.phases.get((module, ch), 0)
+                phase_deg = self.mock_crs._phases.get((module, ch), 0)
                 total_freq = freq + nco_freq
                 
                 # Apply S21 response
@@ -475,7 +475,7 @@ class MockResonatorModel:
         
         # Collect observing channels
         for ch in configured_channels:
-            freq = self.mock_crs.frequencies.get((module, ch))
+            freq = self.mock_crs._frequencies.get((module, ch))
             if freq is not None:
                 obs_channels.append(ch)
                 obs_freqs.append(freq + nco_freq)
@@ -584,9 +584,9 @@ class MockResonatorModel:
         
         # Check if there are other active channels in this module
         other_active_channels = False
-        for (mod, ch) in self.mock_crs.frequencies.keys():
+        for (mod, ch) in self.mock_crs._frequencies.keys():
             if mod == module and ch != channel:
-                amp = self.mock_crs.amplitudes.get((mod, ch), 0)
+                amp = self.mock_crs._amplitudes.get((mod, ch), 0)
                 if amp != 0:
                     other_active_channels = True
                     break
@@ -594,10 +594,10 @@ class MockResonatorModel:
         if other_active_channels:
             # Use coupled calculation when multiple channels are active
             # Store this channel's settings temporarily
-            nco_freq = self.mock_crs.nco_frequencies.get(module, 0)
-            self.mock_crs.frequencies[(module, channel)] = frequency - nco_freq
-            self.mock_crs.amplitudes[(module, channel)] = amplitude
-            self.mock_crs.phases[(module, channel)] = phase_degrees
+            nco_freq = self.mock_crs._nco_frequencies.get(module, 0)
+            self.mock_crs._frequencies[(module, channel)] = frequency - nco_freq
+            self.mock_crs._amplitudes[(module, channel)] = amplitude
+            self.mock_crs._phases[(module, channel)] = phase_degrees
             
             # Calculate module-wide response
             module_responses = self.calculate_module_response_coupled(module)

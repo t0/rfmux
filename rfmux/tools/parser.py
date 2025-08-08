@@ -197,7 +197,7 @@ def main(args=None):
 
                 if internal_drops or boundary_drops:
                     s.packets_dropped += internal_drops + boundary_drops
-                    if verbose:
+                    if args.verbose:
                         print(
                             stderr,
                             f"Dropped {internal_drops + boundary_drops} packets! "

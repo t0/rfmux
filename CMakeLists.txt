@@ -37,4 +37,4 @@ else()
   target_compile_options(_parser PRIVATE -Wall -Wextra -Wpedantic -O3 -flto=auto)
 endif()
 
-target_link_libraries(_parser PRIVATE fmt::fmt)
+target_link_libraries(_parser PRIVATE pybind11::pybind11 fmt::fmt)

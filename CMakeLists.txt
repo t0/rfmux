@@ -16,7 +16,7 @@ find_package(pybind11 CONFIG REQUIRED)
 
 # Try to use a local fmt::format installation. If that didn't work, try via FetchContent.
 find_package(fmt CONFIG QUIET)
-if (NOT TARGET fmt::fmt)
+if (NOT TARGET fmt::fmt-header-only)
   message(STATUS "fmt not found - fetching via FetchContent...")
   include(FetchContent)
   FetchContent_Declare(
@@ -37,4 +37,4 @@ else()
   target_compile_options(_parser PRIVATE -Wall -Wextra -Wpedantic -O3 -flto=auto)
 endif()
 
-target_link_libraries(_parser PRIVATE pybind11::pybind11 fmt::fmt)
+target_link_libraries(_parser PRIVATE pybind11::pybind11 fmt::fmt-header-only)

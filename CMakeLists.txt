@@ -3,6 +3,7 @@ include(FetchContent)
 project(parser LANGUAGES CXX)
 
 set(PYBIND11_FINDPYTHON ON)
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
 # Pybind11 is installed as a Python dependency, so we need to make sure we look
 # in the right places for pybind11 headers

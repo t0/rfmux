@@ -11,7 +11,7 @@ if (NOT TARGET pybind11)
   FetchContent_Declare(
     pybind11
     GIT_REPOSITORY https://github.com/pybind/pybind11
-    GIT_TAG 3.0.0
+    GIT_TAG v3.0.0
   )
 FetchContent_MakeAvailable(pybind11)
 endif()

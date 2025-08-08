@@ -66,9 +66,11 @@ struct Parser {
 		if(setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &so_rcvbuf, sizeof(so_rcvbuf)) == -1)
 		throw std::runtime_error(fmt::format("Can't set SO_RCVBUF to {}!", so_rcvbuf));
 
+#if defined(__linux__)
 		/* Don't deliver all packets - just the ones we've asked for */
 		const int zero = 0;
 		setsockopt(sockfd, IPPROTO_IP, IP_MULTICAST_ALL, &zero, sizeof(zero));
+#endif
 
 		/* bind() */
 		struct sockaddr_in addr = {

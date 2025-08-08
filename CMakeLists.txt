@@ -12,7 +12,7 @@ execute_process(
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 list(APPEND CMAKE_PREFIX_PATH "${_PYBIND11_DIR}")
-find_package(pybind11 CONFIG QUIET)
+find_package(pybind11 CONFIG REQUIRED)
 
 # Try to use a local fmt::format installation. If that didn't work, try via FetchContent.
 find_package(fmt CONFIG QUIET)

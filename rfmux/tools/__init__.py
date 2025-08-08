@@ -1,6 +1,7 @@
 import os
+from . import parser
 
-__all__ = []
+__all__ = ["parser"]
 
 if "CRS_EMBEDDED" in os.environ:
     # Bypass periscope imports. The embedded environment on the CRS doesn't

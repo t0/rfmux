@@ -7,6 +7,15 @@
 
 #include "packet.hpp"
 
+#if defined(__linux__)
+# define HAVE_IP_MULTICAST_ALL
+# define HAVE_RECVMMSG
+#elif defined(__APPLE__)
+#elif defined(_WIN32) || defined(_WIN64)
+#else
+# error "Unknown platform!"
+#endif
+
 /* The reorder buffer (see below) needs a comparison operator
  * that sorts packets by sequence number. This needs to work
  * even when seq wraps around (that is, from 0xffffffff to 0).
@@ -46,6 +55,50 @@ using reorder_queues_type = std::map<
 	module_uid_type,
 	reorder_queue_type>;
 
+#if !defined(HAVE_RECVMMSG)
+struct mmsghdr {
+	struct msghdr msg_hdr;
+	unsigned int  msg_len;
+};
+
+int recvmmsg(int sockfd, struct mmsghdr *msgvec,
+		unsigned int vlen, int flags,
+		const struct timespec *timeout) {
+
+	unsigned int i;
+	int rc;
+	struct timeval tv;
+	struct timeval *tvp = NULL;
+
+	if (timeout) {
+		/* timespec to timeval */
+		tv.tv_sec  = timeout->tv_sec;
+		tv.tv_usec = timeout->tv_nsec / 1000;
+		tvp = &tv;
+	}
+
+	for (i = 0; i < vlen; i++) {
+		/* apply timeout only on first message or if reset desired */
+		if (tvp) {
+			fd_set readfds;
+			FD_ZERO(&readfds);
+			FD_SET(sockfd, &readfds);
+			rc = select(sockfd + 1, &readfds, NULL, NULL, tvp);
+			if (rc <= 0)
+				return rc; /* 0 = timeout, -1 = error */
+		}
+
+		rc = recvmsg(sockfd, &msgvec[i].msg_hdr, flags);
+		if (rc < 0)
+			return -1;
+
+		msgvec[i].msg_len = (unsigned int)rc;
+	}
+
+	return (int)vlen;
+}
+#endif
+
 struct Parser {
 	Parser(std::string ifname) {
 		if(!(sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)))
@@ -66,7 +119,7 @@ struct Parser {
 		if(setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &so_rcvbuf, sizeof(so_rcvbuf)) == -1)
 		throw std::runtime_error(fmt::format("Can't set SO_RCVBUF to {}!", so_rcvbuf));
 
-#if defined(__linux__)
+#if defined(HAVE_IP_MULTICAST_ALL)
 		/* Don't deliver all packets - just the ones we've asked for */
 		const int zero = 0;
 		setsockopt(sockfd, IPPROTO_IP, IP_MULTICAST_ALL, &zero, sizeof(zero));

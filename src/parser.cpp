@@ -52,8 +52,14 @@ struct Parser {
 			throw std::runtime_error("Failed to create socket!");
 
 		/* Permit re-binding */
-		const int so_reuseaddr = 1;
-		setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &so_reuseaddr, sizeof(so_reuseaddr));
+		const int one = 1;
+		setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+		setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+
+		/* Also permit packets to be received by loopback. This is
+		 * nominally not used (but is useful when running some kind of
+		 * fake streamer, including periscope in "mock" mode) */
+		setsockopt(sockfd, SOL_SOCKET, IP_MULTICAST_LOOP, &one, sizeof(one));
 
 		/* Use large socket buffer */
 		const int so_rcvbuf = 16777216;
@@ -61,8 +67,8 @@ struct Parser {
 		throw std::runtime_error(fmt::format("Can't set SO_RCVBUF to {}!", so_rcvbuf));
 
 		/* Don't deliver all packets - just the ones we've asked for */
-		const int ip_multicast_all = 0;
-		setsockopt(sockfd, IPPROTO_IP, IP_MULTICAST_ALL, &ip_multicast_all, sizeof(ip_multicast_all));
+		const int zero = 0;
+		setsockopt(sockfd, IPPROTO_IP, IP_MULTICAST_ALL, &zero, sizeof(zero));
 
 		/* bind() */
 		struct sockaddr_in addr = {
@@ -157,7 +163,7 @@ struct Parser {
 			/* Validate packets, and re-format short packets as long ones
 			 * (so we're only dealing with a single format downstream) */
 			for(int i=0; i<rv; i++) {
-				if(incoming[i].magic != PACKET_MAGIC)
+				if(incoming[i].magic != STREAMER_MAGIC)
 					throw std::runtime_error(fmt::format("Packet didn't have correct magic! (0x{:08x})",
 							(uint32_t)incoming[i].magic));
 
@@ -208,7 +214,7 @@ struct Parser {
 		 * (so we're only dealing with a single format downstream) */
 		for(auto &p : incoming) {
 			auto h = reinterpret_cast<ReadoutPacketHeader*>(&p);
-			if(h->magic != PACKET_MAGIC)
+			if(h->magic != STREAMER_MAGIC)
 				throw std::runtime_error(fmt::format("Packet didn't have correct magic! (0x{:08x})",
 						(uint32_t)h->magic));
 
@@ -336,6 +342,17 @@ PYBIND11_MODULE(_parser, m) {
 
 	PYBIND11_NUMPY_DTYPE(Timestamp, y, d, h, m, s, ss, c, sbs);
 	PYBIND11_NUMPY_DTYPE(ReadoutFrame, seq, samples, ts);
+
+	/* Expose module-level attributes that might be handy */
+	m.attr("STREAMER_HOST") = STREAMER_HOST;
+	m.attr("STREAMER_PORT") = STREAMER_PORT;
+	m.attr("STREAMER_MAGIC") = STREAMER_MAGIC;
+	m.attr("LONG_PACKET_VERSION") = LONG_PACKET_VERSION;
+	m.attr("LONG_PACKET_CHANNELS") = LONG_PACKET_CHANNELS;
+	m.attr("LONG_PACKET_SIZE") = LONG_PACKET_SIZE;
+	m.attr("SHORT_PACKET_VERSION") = SHORT_PACKET_VERSION;
+	m.attr("SHORT_PACKET_CHANNELS") = SHORT_PACKET_CHANNELS;
+	m.attr("SHORT_PACKET_SIZE") = SHORT_PACKET_SIZE;
 
 	/* Expose the dtype to Python (for consistent in-memory representation) */
 	m.attr("ReadoutFrame") = py::dtype::of<ReadoutFrame>();

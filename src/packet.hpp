@@ -23,12 +23,10 @@ using namespace pybind11::literals;
 /* Multicast address for streaming */
 #define STREAMER_HOST		"239.192.0.2"
 
-static const inline uint32_t PACKET_MAGIC=0x5344494b;
-static const inline uint32_t FAST_PACKET_MAGIC = 0xfa57b175;
+static const inline uint32_t STREAMER_MAGIC=0x5344494b;
 static const uint16_t STREAMER_PORT=9876;
 
 static const size_t LONG_PACKET_CHANNELS = 1024;
-static const uint32_t LONG_PACKET_SIZE = (LONG_PACKET_CHANNELS + 2 + 4) * 8;
 static const uint16_t LONG_PACKET_VERSION = 5;
 
 static const size_t SHORT_PACKET_CHANNELS = 128;
@@ -79,15 +77,6 @@ struct ReadoutPacketHeader {
 	uint32_t seq; /* incrementing sequence number */
 };
 
-/* When we receive a multicast packet, we don't yet know what kind it will be -
- * we only know that it will have a maximum length and a common header. */
-struct RawFrame {
-	union {
-		ReadoutPacketHeader header;
-		char buf[LONG_PACKET_SIZE];
-	};
-};
-
 /* This structure describes on-the-wire readout packets */
 struct iq32 { int32_t i, q; };
 template<int nsamples>
@@ -102,4 +91,16 @@ struct ReadoutFrame {
 	uint32_t seq;
 	std::complex<double> samples[LONG_PACKET_CHANNELS];
 	struct Timestamp ts;
+};
+
+static const uint32_t LONG_PACKET_SIZE = sizeof(StaticReadoutPacket<LONG_PACKET_CHANNELS>);
+static const uint32_t SHORT_PACKET_SIZE = sizeof(StaticReadoutPacket<SHORT_PACKET_CHANNELS>);
+
+/* When we receive a multicast packet, we don't yet know what kind it will be -
+ * we only know that it will have a maximum length and a common header. */
+struct RawFrame {
+	union {
+		ReadoutPacketHeader header;
+		char buf[LONG_PACKET_SIZE];
+	};
 };

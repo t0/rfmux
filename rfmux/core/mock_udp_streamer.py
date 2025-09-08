@@ -125,7 +125,9 @@ class MockCRSUDPStreamer(threading.Thread):
                         continue
                 else:
                     # Fallback if 'lo or lo0' interface not found (shouldn't happen on Linux or Mac)
-                    print("[UDP] Warning: Could not find 'lo' interface, using default")
+                    print("[UDP] Warning: Could not find 'lo' or 'lo0' interface")
+                    print("[UDP] Warning: The packets are now being launched on your network, rather than on the loopback interface")
+                    print("\nPlease implement the loopback interface with either 'lo' or 'lo0'")
                     self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton('0.0.0.0'))
                 
                 print(f"[UDP] Multicast socket initialized for {self.multicast_group}:{self.multicast_port}")

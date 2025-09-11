@@ -402,8 +402,9 @@ class MockCRS(BaseCRS):
             # Validate result
             if self.resonator_model.lc_resonances is None:
                 self.resonator_model.lc_resonances = []
+            print('updated!')
                 
-            return len(self.resonator_model.lc_resonances)
+            return len(self.resonator_model.lc_resonances), self.resonator_model.lc_resonances
             
         except Exception as e:
             print(f"Error in generate_resonators: {e}")

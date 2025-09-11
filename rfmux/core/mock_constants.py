@@ -43,8 +43,8 @@ DEFAULT_COUPLING_MAX = 0.97
 
 # Frequency range for resonance generation
 DEFAULT_FREQ_START = 0.5e9  # 1 GHz
-DEFAULT_FREQ_END = 1e9    # 2 GHz
-DEFAULT_NUM_RESONANCES = 50
+DEFAULT_FREQ_END = 0.6e9   # 2 GHz
+DEFAULT_NUM_RESONANCES = 2
 
 # =============================================================================
 # Amplitude and Noise Parameters
@@ -55,7 +55,7 @@ BASE_NOISE_LEVEL = 0.001  # Base noise level (relative to S21)
 AMPLITUDE_NOISE_COUPLING = 0.01  # How noise scales with amplitude
 
 # ADC simulation parameters  
-UDP_NOISE_LEVEL = 10.0  # ADC noise level (in counts)
+UDP_NOISE_LEVEL = 20.0  # ADC noise level (in counts)
 SCALE_FACTOR = 2**21  # Scaling factor: 2^21 ≈ 2.1 million counts
 
 # =============================================================================

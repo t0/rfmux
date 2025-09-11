@@ -3,7 +3,16 @@ Mock CRS Device - Resonator Physics Model.
 Encapsulates the logic for resonator physics simulation, including S21 response.
 """
 import numpy as np
+import copy
 from . import mock_constants as const
+
+import sys
+sys.path.append('/home/maclean/code/')
+sys.path.append('/home/maclean/code/mr_resonator/')
+import mr_resonator
+from mr_resonator.mr_complex_resonator import MR_complex_resonator as MR_complex_resonator
+from mr_resonator.mr_lekid import MR_LEKID as MR_LEKID
+
 
 class MockResonatorModel:
     """
@@ -137,7 +146,40 @@ class MockResonatorModel:
         self.resonator_current_f0s *= (1 - (self.resonator_pe + self.p_sky) * self.ff_factor)
 
     # --- LC Resonance Model Methods ---
-    def generate_lc_resonances(self):
+    def generate_lc_resonances(self, num_resonances=2, base_res_params=dict()):
+        '''
+        try out generating mr resonator objects instead of LCs
+        '''
+
+        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        print('got config:', config)
+        # num_resonances = config.get('num_resonances', const.DEFAULT_NUM_RESONANCES)
+        
+        self.lc_resonances = []
+        self.kinetic_inductance_fractions = [] # mimic the format of the original function
+        frequencies = []
+
+        C_base = 1e-12
+        for x in range(num_resonances):
+            this_res_params = copy.deepcopy(base_res_params)
+            this_res_params['C'] = C_base * (0.9 + 0.01*x)
+            res = MR_complex_resonator(**this_res_params)
+            print('%.3e'%(res.lekid.compute_fr()))
+            # but we can't pass whole resonator objects to json
+            ## so maybe let's start by getting the circuit values
+            ## and then we can generate a new lekid with them each time
+            ### this can't be the permanent solution, since we'll eventually need nqp
+            ### but right now if we generate a new resonator, it does a more complicated
+            ### init process to iterate the starting state
+            lekid_params = dict(R=res.lekid.R, Lk=res.lekid.Lk, 
+                Lg=res.lekid.Lg, C=res.lekid.C, Cc=res.lekid.Cc)
+            self.lc_resonances.append(lekid_params)
+
+            self.kinetic_inductance_fractions.append(res.alpha_k) ### 
+
+
+
+    def generate_lc_resonances_lc(self):
         """Generate LC resonances distributed across spectrum with kinetic inductance parameters."""
         # Get ALL values from stored config or defaults
         config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
@@ -203,7 +245,7 @@ class MockResonatorModel:
         
         self.invalidate_caches()
 
-    def s21_lc_response(self, frequency, amplitude=1.0):
+    def s21_lc_response_lc(self, frequency, amplitude=1.0):
         """Calculate S21 response for the LC model with kinetic inductance effects and bifurcation."""
         if not self.lc_resonances:
             return 1.0 + 0j # No attenuation if no LC resonators
@@ -245,6 +287,26 @@ class MockResonatorModel:
         noise = noise_level * (np.random.randn() + 1j * np.random.randn())
         
         return s21_total + noise
+
+    def s21_lc_response(self, frequency, amplitude=1.0):
+        '''
+        test version using the mr_resonator objects
+
+        '''
+        # amplitude *= 1e-5 # TEMPORARY mr_resonator expects volts at Vin
+
+        s21_total = 1.0 + 0j
+
+        for idx, lekid_params in enumerate(self.lc_resonances):
+            lekid = MR_LEKID(**lekid_params)
+            s21_res = lekid.compute_Vout(frequency, Vin=amplitude) / amplitude
+            s21_total *= s21_res
+            # TODO ignore impacts of other resonances for now
+
+        return s21_total
+
+
+
     
     def _calculate_simple_frequency_shift(self, f0, amplitude, ki_fraction):
         """Calculate frequency shift without self-consistency (faster)."""

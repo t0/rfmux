@@ -31,12 +31,36 @@ class UDPReceiver(QtCore.QThread):
         self.queue = queue.PriorityQueue()
         self.sock = streamer.get_multicast_socket(host) # streamer from .utils
         self.sock.settimeout(0.2)
+        self.packets_received = 0
+        self.packets_dropped = 0
+        self.first_packet_received = 0
+        self.prev_seq = 0
+
+    def calc_dropped_packets(self, prev_seq, seq):
+        diff = seq - prev_seq
+        if diff > 1:
+            self.packets_dropped = self.packets_dropped + (diff - 1)
+            
+    def receive_counter(self):
+        self.packets_received += 1
+
+    def get_dropped_packets(self):
+        return self.packets_dropped
+
+    def get_received_packets(self):
+        return self.packets_received
 
     def run(self):
         while not self.isInterruptionRequested():
             try:
                 data = self.sock.recv(streamer.LONG_PACKET_SIZE)
                 pkt = streamer.DfmuxPacket.from_bytes(data)
+                if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
+                    self.first_packet_received = pkt.seq
+                    self.prev_seq = pkt.seq
+                self.receive_counter()
+                self.calc_dropped_packets(self.prev_seq, pkt.seq)
+                self.prev_seq = pkt.seq
             except socket.timeout:
                 continue
             except OSError:
@@ -45,6 +69,8 @@ class UDPReceiver(QtCore.QThread):
                 self.queue.put((pkt.seq, pkt))
 
     def stop(self):
+        print(f"[UDP] UDP receiving thread stopped. Total packets received: {self.packets_received}")
+        print(f"[UDP] UDP receiving thread stopped. Total packets dropped: {self.packets_dropped}")
         self.requestInterruption()
         try:
             self.sock.close()

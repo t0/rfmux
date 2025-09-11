@@ -768,9 +768,12 @@ class PeriscopeRuntime:
     def _update_performance_stats(self, now: float):
         """Update FPS and PPS display in the status bar approximately once per second."""
         if (now - self.t_last) >= 1.0:
+            dropped = self.receiver.get_dropped_packets()
+            received = self.receiver.get_received_packets()
+            percent = (dropped / (dropped + received)) * 100
             fps = self.frame_cnt / (now - self.t_last)
             pps = self.pkt_cnt / (now - self.t_last)
-            self.statusBar().showMessage(f"FPS {fps:.1f} | Packets/s {pps:.1f}")
+            self.statusBar().showMessage(f"FPS {fps:.1f} | Packets/s {pps:.1f} | Packet Loss : {percent:.1f}% | Dropped : {dropped}") 
             self.frame_cnt = 0; self.pkt_cnt = 0; self.t_last = now
 
     def _update_dec_stage(self):

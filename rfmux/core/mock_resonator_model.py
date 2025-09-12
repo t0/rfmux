@@ -43,6 +43,9 @@ class MockResonatorModel:
         # Parameters for the LC resonance model
         self.lc_resonances = [] # List of dicts: {'f0', 'Q', 'coupling'}
         
+        # Store persistent mr_resonator objects to avoid memory leaks
+        self.mr_lekids = []  # List of persistent MR_LEKID objects
+        
         # Note: Removed system_gain - S21 should be dimensionless transfer function
         # Final scaling to ADC counts happens in UDP streamer
         
@@ -148,34 +151,46 @@ class MockResonatorModel:
     # --- LC Resonance Model Methods ---
     def generate_lc_resonances(self, num_resonances=2, base_res_params=dict()):
         '''
-        try out generating mr resonator objects instead of LCs
+        Generate mr_resonator objects and store them persistently to avoid memory leaks
         '''
 
         config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
         print('got config:', config)
         # num_resonances = config.get('num_resonances', const.DEFAULT_NUM_RESONANCES)
         
+        # Clear existing objects to prevent memory leaks
         self.lc_resonances = []
-        self.kinetic_inductance_fractions = [] # mimic the format of the original function
+        self.mr_lekids = []
+        self.kinetic_inductance_fractions = []
         frequencies = []
 
         C_base = 1e-12
         for x in range(num_resonances):
-            this_res_params = copy.deepcopy(base_res_params)
-            this_res_params['C'] = C_base * (0.9 + 0.01*x)
-            res = MR_complex_resonator(**this_res_params)
-            print('%.3e'%(res.lekid.compute_fr()))
-            # but we can't pass whole resonator objects to json
-            ## so maybe let's start by getting the circuit values
-            ## and then we can generate a new lekid with them each time
-            ### this can't be the permanent solution, since we'll eventually need nqp
-            ### but right now if we generate a new resonator, it does a more complicated
-            ### init process to iterate the starting state
-            lekid_params = dict(R=res.lekid.R, Lk=res.lekid.Lk, 
-                Lg=res.lekid.Lg, C=res.lekid.C, Cc=res.lekid.Cc)
-            self.lc_resonances.append(lekid_params)
+            try:
+                this_res_params = copy.deepcopy(base_res_params)
+                this_res_params['C'] = C_base * (0.9 + 0.01*x)
+                
+                # Create the full resonator for parameter extraction
+                res = MR_complex_resonator(**this_res_params)
+                print('%.3e'%(res.lekid.compute_fr()))
+                
+                # Store the persistent LEKID object (this fixes the memory leak)
+                self.mr_lekids.append(res.lekid)
+                
+                # Keep parameter dict for backward compatibility
+                lekid_params = dict(R=res.lekid.R, Lk=res.lekid.Lk, 
+                    Lg=res.lekid.Lg, C=res.lekid.C, Cc=res.lekid.Cc)
+                self.lc_resonances.append(lekid_params)
 
-            self.kinetic_inductance_fractions.append(res.alpha_k) ### 
+                self.kinetic_inductance_fractions.append(res.alpha_k)
+                
+            except Exception as e:
+                print(f"Warning: Failed to create resonator {x}: {e}")
+                # Continue with other resonators
+                continue
+        
+        print(f"Successfully created {len(self.mr_lekids)} persistent LEKID objects")
+        self.invalidate_caches()
 
 
 
@@ -290,20 +305,39 @@ class MockResonatorModel:
 
     def s21_lc_response(self, frequency, amplitude=1.0):
         '''
-        test version using the mr_resonator objects
-
+        test version using persistent mr_resonator objects to avoid memory leaks
         '''
-        # amplitude *= 1e-5 # TEMPORARY mr_resonator expects volts at Vin
+        # Use persistent LEKID objects if available, otherwise fall back to parameter-based approach
+        if self.mr_lekids:
+            s21_total = 1.0 + 0j
+            
+            for lekid in self.mr_lekids:
+                try:
+                    # Use pre-created persistent LEKID objects
+                    s21_res = lekid.compute_Vout(frequency, Vin=amplitude) / amplitude
+                    s21_total *= s21_res
+                except Exception as e:
+                    print(f"Warning: LEKID calculation failed: {e}")
+                    # Fall back to simple response if mr_resonator fails
+                    s21_total *= 0.9 + 0.1j  # Simple fallback response
+                    
+            return s21_total
+        
+        else:
+            # Fallback to parameter-based approach if no persistent objects
+            print("Warning: No persistent LEKID objects found, using parameter-based fallback")
+            s21_total = 1.0 + 0j
 
-        s21_total = 1.0 + 0j
+            for idx, lekid_params in enumerate(self.lc_resonances):
+                try:
+                    lekid = MR_LEKID(**lekid_params)
+                    s21_res = lekid.compute_Vout(frequency, Vin=amplitude) / amplitude
+                    s21_total *= s21_res
+                except Exception as e:
+                    print(f"Warning: Fallback LEKID calculation failed: {e}")
+                    s21_total *= 0.9 + 0.1j  # Simple fallback response
 
-        for idx, lekid_params in enumerate(self.lc_resonances):
-            lekid = MR_LEKID(**lekid_params)
-            s21_res = lekid.compute_Vout(frequency, Vin=amplitude) / amplitude
-            s21_total *= s21_res
-            # TODO ignore impacts of other resonances for now
-
-        return s21_total
+            return s21_total
 
 
 

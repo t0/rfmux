@@ -339,14 +339,15 @@ class MockCRS(BaseCRS):
         self.cable_lengths = {}  # module -> cable length in meters
 
         # Store physics configuration (can be updated via generate_resonators)
-        self.physics_config = {}  # Will store active physics configuration
+        from .mock_crs_helper import DEFAULT_MOCK_CONFIG
+        self.physics_config = DEFAULT_MOCK_CONFIG.copy()  # Initialize with defaults
         
         # Instantiate helpers
         self.resonator_model = MockResonatorModel(self) # Pass self for state access
         self.udp_manager = MockUDPManager(self)         # Pass self for state access
 
-        # Initialize resonator parameters via the model
-        self.resonator_model.generate_lc_resonances() # Default LC model init
+        # Don't generate resonators automatically - let create_mock_crs handle it
+        # This prevents double generation and uses the correct configuration
 
     async def generate_resonators(self, config=None):
         """Generate/regenerate resonators with current or provided parameters.
@@ -354,57 +355,47 @@ class MockCRS(BaseCRS):
         Parameters
         ----------
         config : dict, optional
-            Configuration parameters to use. If not provided, uses defaults.
+            Configuration parameters to use. If not provided, uses current physics_config.
             Keys can include:
-            - num_resonances
-            - freq_start
-            - freq_end
-            - kinetic_inductance_fraction
-            - kinetic_inductance_variation
-            - q_min
-            - q_max
-            - q_variation
-            - coupling_min
-            - coupling_max
-            etc.
+            - num_resonances: Number of resonators to generate
+            - freq_start: Starting frequency (Hz)
+            - freq_end: Ending frequency (Hz)
+            - Lk, Lg, R, Cc: Circuit parameters
+            - C_variation, Cc_variation, R_variation: Parameter variations
+            - Vin, input_atten_dB: Readout parameters
         """
         try:
             # Initialize resonator model if needed
             if not hasattr(self, 'resonator_model') or self.resonator_model is None:
                 self.resonator_model = MockResonatorModel(self)
-                
-            # Ensure lists are initialized
-            if not hasattr(self.resonator_model, 'lc_resonances'):
-                self.resonator_model.lc_resonances = []
-            if self.resonator_model.lc_resonances is None:
-                self.resonator_model.lc_resonances = []
-                
-            if not hasattr(self.resonator_model, 'kinetic_inductance_fractions'):
-                self.resonator_model.kinetic_inductance_fractions = []
-            if self.resonator_model.kinetic_inductance_fractions is None:
-                self.resonator_model.kinetic_inductance_fractions = []
-                
-            # Clear existing resonators
-            self.resonator_model.lc_resonances = []
-            self.resonator_model.kinetic_inductance_fractions = []
+                print('initialized resonator model')
             
             # If config provided, store it permanently in the instance
             if config:
                 # Update our physics configuration (permanent storage)
-                self.physics_config = config.copy()
-                
-                # Generate with new parameters - the model will use self.physics_config
-                self.resonator_model.generate_lc_resonances()
-            else:
-                # Generate with defaults
-                self.resonator_model.generate_lc_resonances()
+                self.physics_config.update(config)
             
-            # Validate result
-            if self.resonator_model.lc_resonances is None:
-                self.resonator_model.lc_resonances = []
-            print('updated!')
+            # Use the current physics configuration
+            active_config = self.physics_config
+            
+            # Extract parameters from config
+            num_resonances = active_config.get('num_resonances', 2)
+            
+            # Call the resonator model's generate_resonators method
+            self.resonator_model.generate_resonators(
+                num_resonances=num_resonances,
+                config=active_config
+            )
+            
+            # Get the count of generated resonators
+            resonator_count = len(self.resonator_model.mr_lekids)
+            
+            # Get resonance frequencies for return value
+            resonance_frequencies = self.resonator_model.resonator_frequencies.copy()
+            
+            print(f'Updated! Generated {resonator_count} mr_resonator objects')
                 
-            return len(self.resonator_model.lc_resonances), self.resonator_model.lc_resonances
+            return resonator_count, resonance_frequencies
             
         except Exception as e:
             print(f"Error in generate_resonators: {e}")

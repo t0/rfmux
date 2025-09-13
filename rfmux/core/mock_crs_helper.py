@@ -26,39 +26,34 @@ from rfmux.core.crs import CRS
 
 # Default mock configuration parameters
 DEFAULT_MOCK_CONFIG = {
-    # Resonator generation parameters
-    'num_resonances': 10,
-    'freq_start': 4e9,  # 4 GHz
-    'freq_end': 8e9,    # 8 GHz
+    # Basic resonator distribution
+    'num_resonances': 5,
+    'freq_start': 1e9,  # Hz
+    'freq_end': 1.5e9,    # Hz
     
-    # Quality factor parameters
-    'q_min': 1e4,
-    'q_max': 1e5,
-    'q_variation': 0.3,
+    # Physics parameters (determine Lk and R via quasiparticle density)
+    'T': 0.12,  # Temperature [K]
+    'Popt': 1e-18,  # Optical power [W]
     
-    # Coupling parameters
-    'coupling_min': 0.5,
-    'coupling_max': 2.0,
+    # Circuit parameters (base values for MR_LEKID)
+    'Lg': 10e-9,  # Geometric inductance [H]  
+    'Cc': 0.01e-12,  # Coupling capacitor [F]
+    'L_junk': 0,  # Parasitic inductance [H]
     
-    # Nonlinearity parameters
-    'kinetic_inductance_fraction': 0.05,
-    'kinetic_inductance_variation': 0.2,
-    'frequency_shift_power_law': 0.5,
-    'frequency_shift_magnitude': 0.01,
-    'power_normalization': 1e-12,
+    # Variations (as fractional standard deviations)
+    'C_variation': 0.01,  # 1% variation in capacitance -> small frequency scatter
+    'Cc_variation': 0.01,  # 10% variation in coupling capacitor
     
-    # Bifurcation parameters
-    'enable_bifurcation': False,
-    'bifurcation_iterations': 10,
-    'bifurcation_convergence_tolerance': 1e-6,
-    'bifurcation_damping_factor': 0.5,
-    'saturation_power': 1e-13,
-    'saturation_sharpness': 2.0,
+    # Readout parameters
+    'Vin': 1e-5,  # Input voltage [V]
+    'input_atten_dB': 10,  # Input attenuation [dB]
+    'system_termination': 50,  # System impedance [Ω]
+    'ZLNA': 50,  # LNA input impedance [Ω] (real)
+    'GLNA': 10.0,  # LNA gain
     
-    # Noise parameters
+    # Simulation noise parameters (for UDP streaming)
     'base_noise_level': 1e-4,
-    'amplitude_noise_coupling': 0.01,
-    'udp_noise_level': 0.1
+    'udp_noise_level': 0.05,
 }
 
 
@@ -106,7 +101,6 @@ async def create_mock_crs(
         print(f"UDP Streaming: {udp_host}:{udp_port}")
         print(f"Resonators: {mock_config['num_resonances']}")
         print(f"Frequency Range: {mock_config['freq_start']/1e9:.1f} - {mock_config['freq_end']/1e9:.1f} GHz")
-        print(f"Bifurcation: {'Enabled' if mock_config['enable_bifurcation'] else 'Disabled'}")
         print("="*60)
     
     try:

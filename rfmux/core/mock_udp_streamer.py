@@ -335,6 +335,10 @@ class MockCRSUDPStreamer(threading.Thread):
             # Each packet represents one sample in time
             t = seq / sample_rate
             
+            # Update QP densities based on current time (for pulse events)
+            if hasattr(self.mock_crs.resonator_model, 'update_qp_densities_for_time'):
+                self.mock_crs.resonator_model.update_qp_densities_for_time(t)
+            
             # Count configured channels for debugging
             num_configured = 0
             for (mod, ch) in self.mock_crs.frequencies.keys():
@@ -377,43 +381,6 @@ class MockCRSUDPStreamer(threading.Thread):
             print("ERROR WITH COUPLING CODE - this shouldn't happen with updated resonator model")
             non_zero_channels_count = 0
             timing_physics = timing_fill_array = time.perf_counter()
-            # # Fallback to original implementation (shouldn't happen with updated code)
-            # configured_channels = set()
-            # for (mod, ch) in self.mock_crs.frequencies.keys():
-            #     if mod == module_num:
-            #         configured_channels.add(ch)
-            # for (mod, ch) in self.mock_crs.amplitudes.keys():
-            #     if mod == module_num:
-            #         configured_channels.add(ch)
-            
-            # nco_freq = self.mock_crs.get_nco_frequency(module=module_num) or 0
-            # non_zero_channels_count = len(configured_channels)
-            
-            # # Process configured channels individually
-            # for channel_num_1_based in configured_channels:
-            #     ch_idx_0_based = channel_num_1_based - 1
-                
-            #     freq = self.mock_crs.frequencies.get((module_num, channel_num_1_based), 0)
-            #     amp = self.mock_crs.amplitudes.get((module_num, channel_num_1_based), 0)
-            #     phase_deg = self.mock_crs.phases.get((module_num, channel_num_1_based), 0)
-                
-            #     if amp == 0:
-            #         continue
-                    
-            #     total_freq = freq + nco_freq
-            #     s21_complex = self.mock_crs.resonator_model.calculate_channel_response(
-            #         module_num, channel_num_1_based, total_freq, amp, phase_deg
-            #     )
-                
-            #     i_val_scaled = s21_complex.real * full_scale_counts + iq_data_arr[ch_idx_0_based * 2]
-            #     q_val_scaled = s21_complex.imag * full_scale_counts + iq_data_arr[ch_idx_0_based * 2 + 1]
-                
-            #     iq_data_arr[ch_idx_0_based * 2] = int(np.clip(i_val_scaled, -2147483648, 2147483647))
-            #     iq_data_arr[ch_idx_0_based * 2 + 1] = int(np.clip(q_val_scaled, -2147483648, 2147483647))
-        
-        # if seq == 0 and module_num == 1: # Log for first packet of first module
-        #     print(f"[UDP] First packet details (module {module_num}): {non_zero_channels_count} non-zero channels.")
-        #     print(f"[UDP] Using enhanced scale factor: {full_scale_counts:.2e}")
         
         # Calculate deterministic timestamp based on sequence number and sampling rate
         # Get the decimation stage and calculate sample rate

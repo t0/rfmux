@@ -394,6 +394,17 @@ class MockCRS(BaseCRS):
             resonance_frequencies = self.resonator_model.resonator_frequencies.copy()
             
             print(f'Updated! Generated {resonator_count} mr_resonator objects')
+
+            # # set a default bias carrier on each generated resonator
+            # # first set the NCO to be the mean of these frequencies
+            # nco_freq = np.mean(resonance_frequencies)
+            # print('setting nco frequency to %.3e'%nco_freq)
+            # await self.set_nco_frequency(nco_freq)
+            # default_carrier_amplitude = 0.005
+            # for chindex, fr in enumerate(resonance_frequencies):
+            #     print('setting channel %d carrier at %.3e Hz at amplitude %.3f'%(chindex+1, fr, default_carrier_amplitude))
+            #     await self.set_frequency(fr-nco_freq, channel=chindex+1, module=1)
+            #     await self.set_amplitude(default_carrier_amplitude, channel=chindex+1, module=1)
                 
             return resonator_count, resonance_frequencies
             

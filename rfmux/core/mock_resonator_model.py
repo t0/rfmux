@@ -67,6 +67,20 @@ class MockResonatorModel:
         self._s21_cache = {}  # Cache S21 responses
         self._cic_cache = {}  # Cache CIC filter responses
         self._cache_valid = False
+        
+        # Pulse event tracking for time-dependent QP density
+        self.pulse_events = []  # List of active pulses
+        self.pulse_config = {
+            'mode': 'none',      # 'periodic', 'random', 'manual', or 'none'
+            'period': 10.0,      # seconds (for periodic mode)
+            'probability': 0.001, # per-timestep probability (for random mode)
+            'tau_rise': 1e-6,    # rise time constant (seconds)
+            'tau_decay': 1e-3,   # decay time constant (seconds)
+            'amplitude': 0.5,    # max QP density increase
+            'resonators': 'all', # 'all' or list of resonator indices
+        }
+        self.last_pulse_time = {}  # Track last pulse time for each resonator
+        self.last_update_time = 0  # Track last time we updated QP densities
 
     # --- MR_Resonator Methods ---
     def generate_resonators(self, num_resonances=2, config=None):
@@ -241,6 +255,33 @@ class MockResonatorModel:
         
         print(f"Successfully created {len(self.mr_lekids)} persistent LEKID objects")
         print(f"Successfully created {len(self.mr_complex_resonators)} persistent MR_complex_resonator objects")
+        
+
+        # set a default bias carrier on each generated resonator
+        # first set the NCO to be the mean of these frequencies
+        # nco_freq = np.mean(self.resonator_frequencies)
+        # print('setting nco frequency to %.3e'%nco_freq)
+        # self.mock_crs.set_nco_frequency(nco_freq, module=1)
+        # default_carrier_amplitude = 0.005
+        # for chindex, fr in enumerate(self.resonator_frequencies):
+        #     print('setting channel %d carrier at %.3e Hz at amplitude %.3f'%(chindex+1, fr, default_carrier_amplitude))
+        #     self.mock_crs.set_frequency(fr-nco_freq, channel=chindex+1, module=1)
+        #     self.mock_crs.set_amplitude(default_carrier_amplitude, channel=chindex+1, module=1)
+             
+
+        # Configure pulse events if specified in config
+        pulse_mode = config.get('pulse_mode', 'none')
+        if pulse_mode != 'none':
+            self.set_pulse_mode(
+                pulse_mode,
+                period=config.get('pulse_period', 10.0),
+                probability=config.get('pulse_probability', 0.001),
+                tau_rise=config.get('pulse_tau_rise', 1e-6),
+                tau_decay=config.get('pulse_tau_decay', 1e-3),
+                amplitude=config.get('pulse_amplitude', 0.5),
+                resonators=config.get('pulse_resonators', 'all')
+            )
+        
         self.invalidate_caches()
 
 
@@ -440,6 +481,148 @@ class MockResonatorModel:
         self._s21_cache.clear()
         self._cic_cache.clear()
         self._cache_valid = False
+    
+    def update_qp_densities_for_time(self, current_time):
+        """Update all resonator QP densities based on active pulses.
+        
+        Parameters
+        ----------
+        current_time : float
+            Current time in seconds since streaming started
+        """
+        # Only update if time has advanced
+        if current_time <= self.last_update_time:
+            return
+        
+        dt = current_time - self.last_update_time
+        self.last_update_time = current_time
+        
+        # Check if we should trigger new pulses
+        self._check_trigger_pulses(current_time, dt)
+        
+        # Update QP density for each resonator based on active pulses
+        for i in range(len(self.mr_lekids)):
+            # Calculate total QP contribution from all active pulses
+            total_qp = 0
+            
+            # Filter active pulses for this resonator
+            for pulse in self.pulse_events:
+                if pulse['resonator_index'] == i:
+                    # Calculate pulse contribution at current time
+                    pulse_dt = current_time - pulse['start_time']
+                    if pulse_dt >= 0:
+                        # Exponential rise and decay model
+                        if pulse_dt < pulse['tau_rise'] * 5:  # Rising edge
+                            qp_contrib = pulse['amplitude'] * (1 - np.exp(-pulse_dt / pulse['tau_rise']))
+                        else:  # Decay phase
+                            rise_time = pulse['tau_rise'] * 5
+                            decay_dt = pulse_dt - rise_time
+                            qp_contrib = pulse['amplitude'] * np.exp(-decay_dt / pulse['tau_decay'])
+                        
+                        total_qp += qp_contrib
+            
+            # Set the QP density (this will update Lk and R via existing method)
+            if total_qp > 0:
+                self.set_quasiparticle_density(i, total_qp)
+            else:
+                # Reset to baseline if no active pulses
+                self.set_quasiparticle_density(i, 0)
+        
+        # Clean up old pulses (after 5 decay constants)
+        self.pulse_events = [p for p in self.pulse_events 
+                           if current_time - p['start_time'] < p['tau_rise'] * 5 + p['tau_decay'] * 5]
+    
+    def _check_trigger_pulses(self, current_time, dt):
+        """Check if new pulses should be triggered based on mode.
+        
+        Parameters
+        ----------
+        current_time : float
+            Current time in seconds
+        dt : float
+            Time step since last update
+        """
+        mode = self.pulse_config['mode']
+        
+        if mode == 'none' or mode == 'manual':
+            return
+        
+        # Determine which resonators can receive pulses
+        if self.pulse_config['resonators'] == 'all':
+            target_resonators = list(range(len(self.mr_lekids)))
+        else:
+            target_resonators = self.pulse_config['resonators']
+        
+        if mode == 'periodic':
+            # Check each resonator for periodic pulses
+            period = self.pulse_config['period']
+            for res_idx in target_resonators:
+                last_time = self.last_pulse_time.get(res_idx, -period)
+                if current_time - last_time >= period:
+                    self.add_pulse_event(res_idx, current_time)
+                    self.last_pulse_time[res_idx] = current_time
+        
+        elif mode == 'random':
+            # Random pulses based on probability per timestep
+            prob = self.pulse_config['probability']
+            for res_idx in target_resonators:
+                if np.random.random() < prob * dt:
+                    self.add_pulse_event(res_idx, current_time)
+                    self.last_pulse_time[res_idx] = current_time
+    
+    def add_pulse_event(self, resonator_index, start_time, amplitude=None):
+        """Manually add a pulse event to a specific resonator.
+        
+        Parameters
+        ----------
+        resonator_index : int
+            Index of the resonator (0-based)
+        start_time : float
+            Time when the pulse starts (seconds)
+        amplitude : float, optional
+            Maximum QP density increase. If None, uses config default.
+        """
+        if resonator_index >= len(self.mr_lekids):
+            print(f"Warning: Resonator index {resonator_index} out of range")
+            return
+        
+        pulse = {
+            'resonator_index': resonator_index,
+            'start_time': start_time,
+            'amplitude': amplitude or self.pulse_config['amplitude'],
+            'tau_rise': self.pulse_config['tau_rise'],
+            'tau_decay': self.pulse_config['tau_decay'],
+        }
+        print('added new pulse with amplitude:', pulse['amplitude'])
+        self.pulse_events.append(pulse)
+        
+        # Invalidate caches since parameters will change
+        self.invalidate_caches()
+    
+    def set_pulse_mode(self, mode, **kwargs):
+        """Configure pulse generation mode and parameters.
+        
+        Parameters
+        ----------
+        mode : str
+            Pulse mode: 'periodic', 'random', 'manual', or 'none'
+        **kwargs : dict
+            Additional configuration parameters:
+            - period: Period in seconds (for periodic mode)
+            - probability: Probability per timestep (for random mode)
+            - tau_rise: Rise time constant in seconds
+            - tau_decay: Decay time constant in seconds
+            - amplitude: Maximum QP density increase
+            - resonators: 'all' or list of resonator indices
+        """
+        self.pulse_config['mode'] = mode
+        
+        # Update any provided parameters
+        for key, value in kwargs.items():
+            if key in self.pulse_config:
+                self.pulse_config[key] = value
+        
+        print(f"Pulse mode set to '{mode}' with config: {self.pulse_config}")
     
     def _get_cached_s21(self, frequency, amplitude):
         """Get S21 response with caching."""

@@ -54,6 +54,15 @@ DEFAULT_MOCK_CONFIG = {
     # Simulation noise parameters (for UDP streaming)
     'base_noise_level': 1e-4,
     'udp_noise_level': 0.05,
+    
+    # Pulse event parameters (for time-dependent QP density)
+    'pulse_mode': 'periodic',      # 'periodic', 'random', 'manual', or 'none'
+    'pulse_period': 10,      # seconds between pulses (for periodic mode)
+    'pulse_probability': 0.001, # probability per timestep (for random mode)
+    'pulse_tau_rise': 1e-6,    # rise time constant (seconds)
+    'pulse_tau_decay': 1e-3,   # decay time constant (seconds)  
+    'pulse_amplitude': 1.1,    # max QP density increase
+    'pulse_resonators': 'all', # 'all' or list of resonator indices
 }
 
 
@@ -127,6 +136,7 @@ async def create_mock_crs(
             print(f"3. Generating {mock_config['num_resonances']} simulated resonators...")
         
         resonator_count = await crs.generate_resonators(mock_config)
+        print('generrrrrating resonators!')
         
         if verbose:
             print(f"   ✓ Generated {resonator_count} resonators")

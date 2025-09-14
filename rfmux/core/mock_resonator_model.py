@@ -114,6 +114,9 @@ class MockResonatorModel:
         system_termination = config.get('system_termination', 50)
         ZLNA = config.get('ZLNA', 50)  # Now a real number
         GLNA = config.get('GLNA', 1.0)
+
+        # temporarily add a value for Istar that is very large so the current dependent effects will be small
+        self.Istar = 1e-2
         
         # Clear existing objects to prevent memory leaks
         self.mr_lekids = []
@@ -126,6 +129,7 @@ class MockResonatorModel:
         self.lk_qp_factors = []
         self.r_qp_factors = []
         self.lk_current_factors = []
+        self.resonator_currents = []
 
         # Step 1: Create a reference MR_complex_resonator to compute Lk and R from T and Popt
         print(f"Computing Lk and R from T={T} K and Popt={Popt} W")
@@ -141,7 +145,8 @@ class MockResonatorModel:
             'input_atten_dB': input_atten_dB,
             'base_readout_f': (freq_start + freq_end) / 2,  # Middle frequency as initial guess
             'verbose': False,
-            'ZLNA': complex(ZLNA, 0)
+            'ZLNA': complex(ZLNA, 0),
+            'GLNA': GLNA
         }
         
         # Create reference resonator to get physics-computed Lk and R
@@ -189,7 +194,8 @@ class MockResonatorModel:
                     'input_atten_dB': input_atten_dB,
                     'base_readout_f': target_freq,  # Initial guess for readout frequency
                     'verbose': False,  # Suppress individual resonator output
-                    'ZLNA': complex(ZLNA, 0)  # Convert real ZLNA to complex for MR_complex_resonator
+                    'ZLNA': complex(ZLNA, 0),  # Convert real ZLNA to complex for MR_complex_resonator
+                    'GLNA': GLNA
                 }
                 
                 # Create the full MR_complex_resonator (includes physics modeling)
@@ -220,6 +226,7 @@ class MockResonatorModel:
                 self.lk_qp_factors.append(1.0)
                 self.r_qp_factors.append(1.0)
                 self.lk_current_factors.append(1.0)
+                self.resonator_currents.append(0.)
                 
                 # Store metadata (use actual computed frequency)
                 self.resonator_frequencies.append(actual_freq)
@@ -236,17 +243,6 @@ class MockResonatorModel:
         print(f"Successfully created {len(self.mr_complex_resonators)} persistent MR_complex_resonator objects")
         self.invalidate_caches()
 
-    def generate_lc_resonances(self, num_resonances=2, base_res_params=None):
-        """
-        Backward compatibility wrapper around generate_resonators().
-        
-        This method exists to maintain compatibility with existing code that
-        calls generate_lc_resonances(). It simply delegates to generate_resonators().
-        """
-        return self.generate_resonators(
-            num_resonances=num_resonances,
-            base_res_params=base_res_params
-        )
 
     def s21_lc_response(self, frequency, amplitude=1.0):
         """
@@ -261,6 +257,7 @@ class MockResonatorModel:
         
         # Update parameters for current amplitude
         self.update_lekids_for_current(frequency, amplitude)
+        # print('updating s21"')
         
         # Calculate S21 with updated parameters
         s21_total = 1.0 + 0j
@@ -328,7 +325,7 @@ class MockResonatorModel:
         self.update_lekid_parameters(lekid_index)
         self.invalidate_caches()
 
-    def calculate_resonator_currents(self, frequency, Vin):
+    def calculate_resonator_currents(self, frequency, Vin, damp=0.1):
         """
         Calculate the current through each resonator using current divider.
         
@@ -353,13 +350,17 @@ class MockResonatorModel:
                 Z_other = None
             
             # Use the LEKID's built-in method to calculate current
-            I_res = lekid.calc_Ires(
+            # apply a damping factor to stabilize the iterative solution
+            # and because the current cannot physically change instantaneously
+            next_I_res = lekid.calc_Ires(
                 fc=frequency,
                 Zres=impedances[i],
                 Vin=Vin,
                 Z_other=Z_other
             )
+            I_res = self.resonator_currents[i] + damp*(next_I_res - self.resonator_currents[i])
             currents.append(I_res)
+            self.resonator_currents[i] = I_res
         
         return currents
 
@@ -388,7 +389,7 @@ class MockResonatorModel:
         
         This is an iterative process to find self-consistent solution.
         """
-        max_iterations = 5
+        max_iterations = 25
         tolerance = 1e-6
         
         for iteration in range(max_iterations):
@@ -400,6 +401,7 @@ class MockResonatorModel:
                 factor_change = max(abs(new - old) for new, old in 
                                   zip(new_factors, self.lk_current_factors))
                 if factor_change < tolerance:
+                    # print('current factor change within tolerance!')
                     break
             
             # Apply the new factors

@@ -33,11 +33,11 @@ DEFAULT_MOCK_CONFIG = {
     
     # Physics parameters (determine Lk and R via quasiparticle density)
     'T': 0.12,  # Temperature [K]
-    'Popt': 1e-18,  # Optical power [W]
+    'Popt': 1e-13,  # Optical power [W]
     
     # Circuit parameters (base values for MR_LEKID)
     'Lg': 10e-9,  # Geometric inductance [H]  
-    'Cc': 0.01e-12,  # Coupling capacitor [F]
+    'Cc': 0.02e-12,  # Coupling capacitor [F]
     'L_junk': 0,  # Parasitic inductance [H]
     
     # Variations (as fractional standard deviations)
@@ -49,7 +49,7 @@ DEFAULT_MOCK_CONFIG = {
     'input_atten_dB': 10,  # Input attenuation [dB]
     'system_termination': 50,  # System impedance [Ω]
     'ZLNA': 50,  # LNA input impedance [Ω] (real)
-    'GLNA': 10.0,  # LNA gain
+    'GLNA': 10**(10./20.),  # LNA gain (Vout/Vin)
     
     # Simulation noise parameters (for UDP streaming)
     'base_noise_level': 1e-4,

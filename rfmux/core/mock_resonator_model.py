@@ -38,6 +38,13 @@ class MockResonatorModel:
         # Store base parameters for each LEKID (as fabricated)
         self.base_lekid_params = []  # Original R, Lk values at T=0, nqp=0
         
+        # Store base nqp values computed from physics
+        self.base_nqp_values = []    # Base quasiparticle density for each resonator
+        
+        # Noise configuration
+        self.nqp_noise_enabled = True
+        self.nqp_noise_std_factor = 0.1  # Default 10% noise
+        
         # Layer 1: Quasiparticle effects (affects base Lk and R)
         self.lk_qp_factors = []      # Lk_qp = Lk_base * lk_qp_factor
         self.r_qp_factors = []       # R_qp = R_base * r_qp_factor
@@ -140,10 +147,15 @@ class MockResonatorModel:
         
         # Clear layered parameter tracking
         self.base_lekid_params = []
+        self.base_nqp_values = []  # Clear base nqp values
         self.lk_qp_factors = []
         self.r_qp_factors = []
         self.lk_current_factors = []
         self.resonator_currents = []
+        
+        # Configure noise parameters from config
+        self.nqp_noise_enabled = config.get('nqp_noise_enabled', True)
+        self.nqp_noise_std_factor = config.get('nqp_noise_std_factor', 0.1)
 
         # Step 1: Create a reference MR_complex_resonator to compute Lk and R from T and Popt
         print(f"Computing Lk and R from T={T} K and Popt={Popt} W")
@@ -227,6 +239,11 @@ class MockResonatorModel:
                 self.mr_lekids.append(lekid)
                 self.mr_complex_resonators.append(complex_res)  # Keep for future QP tracking
                 
+                # Compute and store base nqp using calc_nqp() method
+                base_nqp = complex_res.calc_nqp()
+                self.base_nqp_values.append(base_nqp)
+                print(f"  Base nqp: {base_nqp:.2e}")
+                
                 # Store base parameters (as-fabricated values)
                 self.base_lekid_params.append({
                     'R': lekid.R,
@@ -290,15 +307,21 @@ class MockResonatorModel:
         Calculate S21 response with all physics effects.
         
         Includes:
-        - Quasiparticle effects (if set)
+        - Noisy quasiparticle density (fresh noise each call)
+        - Physics-based Lk and R from noisy nqp
         - Current-dependent kinetic inductance
         """
         if not self.mr_lekids:
             return 1.0 + 0j
         
-        # Update parameters for current amplitude
+        # Generate fresh noisy nqp values for this calculation
+        if self.base_nqp_values:  # Only if we have base nqp values
+            noisy_nqp = self.generate_noisy_nqp_values()
+            # Update base Lk/R from noisy nqp using physics
+            self.update_base_params_from_nqp(noisy_nqp)
+        
+        # Update parameters for current amplitude (applies on top of noisy base values)
         self.update_lekids_for_current(frequency, amplitude)
-        # print('updating s21"')
         
         # Calculate S21 with updated parameters
         s21_total = 1.0 + 0j
@@ -451,6 +474,56 @@ class MockResonatorModel:
             # Update all LEKID parameters
             for i in range(len(self.mr_lekids)):
                 self.update_lekid_parameters(i)
+
+    def generate_noisy_nqp_values(self):
+        """
+        Generate fresh noisy nqp values for all resonators.
+        
+        Returns
+        -------
+        list
+            List of noisy nqp values, one per resonator
+        """
+        noisy_nqp = []
+        for base_nqp in self.base_nqp_values:
+            if self.nqp_noise_enabled and base_nqp > 0:
+                # Generate Gaussian noise with std = base_nqp * noise_factor
+                noise = np.random.normal(0, base_nqp * self.nqp_noise_std_factor)
+                # Ensure non-negative nqp
+                noisy_value = max(0, base_nqp + noise)
+                noisy_nqp.append(noisy_value)
+            else:
+                noisy_nqp.append(base_nqp)
+        return noisy_nqp
+
+    def update_base_params_from_nqp(self, noisy_nqp_values):
+        """
+        Update base Lk and R values using MR_complex_resonator physics.
+        
+        This uses the actual physics methods from MR_complex_resonator to compute
+        Lk and R from the noisy nqp values, ensuring physically consistent results.
+        
+        Parameters
+        ----------
+        noisy_nqp_values : list
+            List of noisy nqp values, one per resonator
+        """
+        for i, (complex_res, nqp) in enumerate(zip(self.mr_complex_resonators, noisy_nqp_values)):
+            try:
+                # Use MR_complex_resonator methods to compute Lk and R from nqp
+                sigma1 = complex_res.calc_sigma1(nqp=nqp)
+                sigma2 = complex_res.calc_sigma2(nqp=nqp)
+                sigma = sigma1 - 1j*sigma2
+                Zs = complex_res.calc_Zs(f=complex_res.readout_f, sigma=sigma)
+                R_new, Lk_new = complex_res.calc_R_L(f=complex_res.readout_f, Zs=Zs)
+                
+                # Update base parameters (these become the new "base" before current effects)
+                self.base_lekid_params[i]['R'] = R_new
+                self.base_lekid_params[i]['Lk'] = Lk_new
+                
+            except Exception as e:
+                print(f"Warning: Failed to update parameters for resonator {i} from nqp: {e}")
+                # Keep existing base parameters if calculation fails
 
     def set_istar(self, istar):
         """Set the characteristic current for all resonators."""
@@ -625,8 +698,12 @@ class MockResonatorModel:
         print(f"Pulse mode set to '{mode}' with config: {self.pulse_config}")
     
     def _get_cached_s21(self, frequency, amplitude):
-        """Get S21 response with caching."""
-        # Round frequency to nearest Hz for cache key
+        """Get S21 response with caching disabled when noise is enabled."""
+        # Disable caching when noise is enabled to ensure fresh noise each call
+        if self.nqp_noise_enabled:
+            return self.s21_lc_response(frequency, amplitude)
+        
+        # Use caching when noise is disabled for performance
         freq_key = round(frequency)
         amp_key = round(amplitude * 1000) / 1000  # 3 decimal places
         

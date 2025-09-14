@@ -363,6 +363,8 @@ class MockCRS(BaseCRS):
             - Lk, Lg, R, Cc: Circuit parameters
             - C_variation, Cc_variation, R_variation: Parameter variations
             - Vin, input_atten_dB: Readout parameters
+            - auto_bias_kids: Boolean to enable automatic KID biasing (default: True)
+            - bias_amplitude: Amplitude for automatic biasing in normalized units (default: 0.01)
         """
         try:
             # Initialize resonator model if needed
@@ -395,16 +397,10 @@ class MockCRS(BaseCRS):
             
             print(f'Updated! Generated {resonator_count} mr_resonator objects')
 
-            # # set a default bias carrier on each generated resonator
-            # # first set the NCO to be the mean of these frequencies
-            # nco_freq = np.mean(resonance_frequencies)
-            # print('setting nco frequency to %.3e'%nco_freq)
-            # await self.set_nco_frequency(nco_freq)
-            # default_carrier_amplitude = 0.005
-            # for chindex, fr in enumerate(resonance_frequencies):
-            #     print('setting channel %d carrier at %.3e Hz at amplitude %.3f'%(chindex+1, fr, default_carrier_amplitude))
-            #     await self.set_frequency(fr-nco_freq, channel=chindex+1, module=1)
-            #     await self.set_amplitude(default_carrier_amplitude, channel=chindex+1, module=1)
+            # Auto-configure channels if requested
+            auto_bias = active_config.get('auto_bias_kids', True)
+            if auto_bias and resonance_frequencies:
+                await self._auto_bias_kids(active_config, resonance_frequencies)
                 
             return resonator_count, resonance_frequencies
             
@@ -413,6 +409,52 @@ class MockCRS(BaseCRS):
             import traceback
             traceback.print_exc()
             raise  # Re-raise to send error back to client
+
+    async def _auto_bias_kids(self, config, resonance_frequencies, amplitude=None):
+        """Automatically configure channels at resonator frequencies (bias KIDs).
+        
+        Parameters
+        ----------
+        config : dict
+            Configuration dictionary containing bias parameters
+        resonance_frequencies : list
+            List of resonator frequencies in Hz
+        """
+        try:
+            # Get configuration parameters
+            if amplitude is None:
+                amplitude = config.get('bias_amplitude', 0.01)  # Normalized units
+            module = 1  # Always use module 1 for mock
+            
+            print(f"[MockCRS] Auto-biasing {len(resonance_frequencies)} KIDs with amplitude {amplitude}")
+            
+            # Set NCO to the mean of resonance frequencies
+            nco_freq = np.mean(resonance_frequencies)
+            print(f"[MockCRS] Setting NCO frequency to {nco_freq:.3e} Hz")
+            await self.set_nco_frequency(nco_freq, module=module)
+            
+            # Configure channels for each resonator (up to 256 channels per module)
+            configured_count = 0
+            for i, freq_Hz in enumerate(resonance_frequencies[:256]):
+                channel = i + 1  # Channels are 1-indexed
+                
+                # Set frequency relative to NCO
+                relative_freq = freq_Hz - nco_freq
+                
+                # Configure the channel (these are synchronous methods)
+                self.set_frequency(relative_freq, channel=channel, module=module)
+                self.set_amplitude(amplitude, channel=channel, module=module)
+                self.set_phase(0, channel=channel, module=module)
+                
+                configured_count += 1
+                
+            print(f"[MockCRS] Configured {configured_count} channels with automatic KID biasing")
+            
+        except Exception as e:
+            print(f"[MockCRS] Error in auto-bias KIDs: {e}")
+            import traceback
+            traceback.print_exc()
+            # Don't re-raise - this is a convenience feature, not critical
 
     def validate_enum_member(self, value, enum_class, name):
         """Validate that value is a member of enum_class, converting strings if necessary."""

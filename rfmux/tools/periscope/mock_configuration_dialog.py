@@ -149,6 +149,26 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.freq_end_spin.setToolTip("Ending frequency for resonance generation")
         layout.addWidget(self.freq_end_spin, row, 3)
         
+        row += 1
+        
+        # Automatic KID biasing
+        self.auto_bias_check = QtWidgets.QCheckBox("Automatically bias KIDs")
+        self.auto_bias_check.setChecked(True)  # Default to True
+        self.auto_bias_check.setToolTip("Automatically configure channels at resonator frequencies")
+        layout.addWidget(self.auto_bias_check, row, 0, 1, 2)
+        
+        layout.addWidget(QtWidgets.QLabel("Bias Amplitude (normalized):"), row, 2)
+        self.bias_amplitude_spin = QtWidgets.QDoubleSpinBox()
+        self.bias_amplitude_spin.setRange(0.001, 1.0)
+        self.bias_amplitude_spin.setSingleStep(0.001)
+        self.bias_amplitude_spin.setDecimals(3)
+        self.bias_amplitude_spin.setValue(0.01)  # Default: 0.01 (=-40 dBm)
+        self.bias_amplitude_spin.setToolTip("Amplitude for automatic KID biasing (0.01 = -40 dBm)")
+        layout.addWidget(self.bias_amplitude_spin, row, 3)
+        
+        # Connect checkbox to enable/disable amplitude field
+        self.auto_bias_check.toggled.connect(self.bias_amplitude_spin.setEnabled)
+        
         return group
         
     def _create_advanced_widget(self) -> QtWidgets.QWidget:
@@ -420,6 +440,10 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.freq_start_spin.setValue(mock_constants.DEFAULT_FREQ_START / 1e9)  # Convert Hz to GHz
         self.freq_end_spin.setValue(mock_constants.DEFAULT_FREQ_END / 1e9)  # Convert Hz to GHz
         
+        # Automatic KID biasing parameters
+        self.auto_bias_check.setChecked(True)  # Default to True
+        self.bias_amplitude_spin.setValue(0.01)  # Default: 0.01 (=-40 dBm)
+        
         # Kinetic inductance parameters
         self.kinetic_fraction_spin.setValue(mock_constants.DEFAULT_KINETIC_INDUCTANCE_FRACTION)
         self.kinetic_variation_spin.setValue(mock_constants.KINETIC_INDUCTANCE_VARIATION)
@@ -465,6 +489,12 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             self.freq_start_spin.setValue(self.current_config['freq_start'] / 1e9)  # Convert to GHz
         if 'freq_end' in self.current_config:
             self.freq_end_spin.setValue(self.current_config['freq_end'] / 1e9)  # Convert to GHz
+            
+        # Automatic KID biasing parameters
+        if 'auto_bias_kids' in self.current_config:
+            self.auto_bias_check.setChecked(self.current_config['auto_bias_kids'])
+        if 'bias_amplitude' in self.current_config:
+            self.bias_amplitude_spin.setValue(self.current_config['bias_amplitude'])
             
         # Kinetic inductance parameters
         if 'kinetic_inductance_fraction' in self.current_config:
@@ -562,6 +592,10 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             'num_resonances': self.num_resonances_spin.value(),
             'freq_start': self.freq_start_spin.value() * 1e9,  # Convert GHz to Hz
             'freq_end': self.freq_end_spin.value() * 1e9,      # Convert GHz to Hz
+            
+            # Automatic KID biasing parameters
+            'auto_bias_kids': self.auto_bias_check.isChecked(),
+            'bias_amplitude': self.bias_amplitude_spin.value(),
             
             # Kinetic inductance parameters
             'kinetic_inductance_fraction': self.kinetic_fraction_spin.value(),

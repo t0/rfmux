@@ -462,6 +462,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.btn_reconfigure_mock.setToolTip("Reconfigure the simulated KID resonator parameters")
             self.btn_reconfigure_mock.clicked.connect(self._show_mock_config_dialog)
             toolbar_layout.addWidget(self.btn_reconfigure_mock)
+            
+            # Add quasiparticle pulse button
+            self.btn_qp_pulses = QtWidgets.QPushButton("QP Pulses: Off")
+            self.btn_qp_pulses.setToolTip("Toggle quasiparticle pulses in mock mode\nCycles through: Off → Periodic → Random → Off")
+            self.btn_qp_pulses.clicked.connect(self._toggle_qp_pulses)
+            self.qp_pulse_mode = 'none'  # Track current pulse mode
+            toolbar_layout.addWidget(self.btn_qp_pulses)
         
         layout.addWidget(toolbar_widget) # Add the toolbar widget to the main vertical layout
 
@@ -1333,3 +1340,120 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             QtWidgets.QMessageBox.critical(self, "Configuration Error", 
                                           f"Failed to apply mock configuration:\n{str(e)}\n\n"
                                           f"Details:\n{traceback.format_exc()}")
+
+    def _toggle_qp_pulses(self):
+        """
+        Toggle quasiparticle pulse modes in mock mode.
+        
+        Cycles through: Off → Periodic → Random → Off
+        """
+        if not self.is_mock_mode or self.crs is None:
+            return
+            
+        # Check if the CRS has pulse control methods
+        if not hasattr(self.crs, 'set_pulse_mode'):
+            QtWidgets.QMessageBox.warning(
+                self, 
+                "Pulse System Not Available", 
+                "The mock CRS does not support pulse functionality.\n"
+                "Please ensure you're using the latest version of the mock system."
+            )
+            return
+        
+        # Run the async pulse mode setting in a separate thread
+        import asyncio
+        import threading
+        
+        def run_async_pulse_mode():
+            try:
+                # Create new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                # Cycle through pulse modes
+                if self.qp_pulse_mode == 'none':
+                    # Switch to periodic mode
+                    self.qp_pulse_mode = 'periodic'
+                    
+                    # Configure periodic pulses with reasonable parameters
+                    loop.run_until_complete(self.crs.set_pulse_mode(
+                        'periodic',
+                        period=10.0,        # 10 second intervals
+                        tau_rise=1e-6,      # 1 microsecond rise time
+                        tau_decay=1e-1,     # 1 millisecond decay time
+                        amplitude=10.0,      # Double the base QP density
+                        resonators='all'    # Apply to all resonators
+                    ))
+                    print("[Periscope] Enabled periodic QP pulses (10s intervals)")
+                    
+                elif self.qp_pulse_mode == 'periodic':
+                    # Switch to random mode
+                    self.qp_pulse_mode = 'random'
+                    
+                    # Configure random pulses with low probability
+                    loop.run_until_complete(self.crs.set_pulse_mode(
+                        'random',
+                        probability=0.001,  # 0.1% chance per timestep
+                        tau_rise=1e-6,      # 1 microsecond rise time
+                        tau_decay=1e-1,     # 1 millisecond decay time
+                        amplitude=10.0,      # Double the base QP density
+                        resonators='all'    # Apply to all resonators
+                    ))
+                    print("[Periscope] Enabled random QP pulses (0.1% probability)")
+                    
+                elif self.qp_pulse_mode == 'random':
+                    # Switch back to off
+                    self.qp_pulse_mode = 'none'
+                    
+                    # Disable pulses
+                    loop.run_until_complete(self.crs.set_pulse_mode('none'))
+                    print("[Periscope] Disabled QP pulses")
+                
+                # Update UI on main thread
+                QtCore.QMetaObject.invokeMethod(
+                    self, "_update_pulse_button_ui", 
+                    QtCore.Qt.ConnectionType.QueuedConnection
+                )
+                
+            except Exception as e:
+                print(f"[Periscope] Error setting pulse mode: {e}")
+                # Show error on main thread
+                QtCore.QMetaObject.invokeMethod(
+                    self, "_show_pulse_error", 
+                    QtCore.Qt.ConnectionType.QueuedConnection,
+                    QtCore.Q_ARG(str, str(e))
+                )
+            finally:
+                loop.close()
+        
+        # Start the async operation in a separate thread
+        thread = threading.Thread(target=run_async_pulse_mode, daemon=True)
+        thread.start()
+    
+    @QtCore.pyqtSlot()
+    def _update_pulse_button_ui(self):
+        """Update the pulse button UI after async operation completes."""
+        # Update button text based on current mode
+        if self.qp_pulse_mode == 'periodic':
+            self.btn_qp_pulses.setText("QP Pulses: Periodic")
+        elif self.qp_pulse_mode == 'random':
+            self.btn_qp_pulses.setText("QP Pulses: Random")
+        else:
+            self.btn_qp_pulses.setText("QP Pulses: Off")
+        
+        # Update tooltip to show current state
+        tooltip_text = (
+            f"Toggle quasiparticle pulses in mock mode\n"
+            f"Current: {self.qp_pulse_mode.title()}\n"
+            f"Cycles through: Off → Periodic → Random → Off"
+        )
+        self.btn_qp_pulses.setToolTip(tooltip_text)
+    
+    @QtCore.pyqtSlot(str)
+    def _show_pulse_error(self, error_msg):
+        """Show pulse control error on main thread."""
+        QtWidgets.QMessageBox.critical(
+            self,
+            "Pulse Control Error",
+            f"Failed to set pulse mode.\n\nError: {error_msg}"
+        )

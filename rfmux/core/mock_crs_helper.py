@@ -26,39 +26,51 @@ from rfmux.core.crs import CRS
 
 # Default mock configuration parameters
 DEFAULT_MOCK_CONFIG = {
-    # Resonator generation parameters
-    'num_resonances': 10,
-    'freq_start': 4e9,  # 4 GHz
-    'freq_end': 8e9,    # 8 GHz
+    # Basic resonator distribution
+    'num_resonances': 5,
+    'freq_start': 1e9,  # Hz
+    'freq_end': 1.5e9,    # Hz
     
-    # Quality factor parameters
-    'q_min': 1e4,
-    'q_max': 1e5,
-    'q_variation': 0.3,
+    # Physics parameters (determine Lk and R via quasiparticle density)
+    'T': 0.12,  # Temperature [K]
+    'Popt': 1e-13,  # Optical power [W]
     
-    # Coupling parameters
-    'coupling_min': 0.5,
-    'coupling_max': 2.0,
+    # Circuit parameters (base values for MR_LEKID)
+    'Lg': 10e-9,  # Geometric inductance [H]  
+    'Cc': 0.02e-12,  # Coupling capacitor [F]
+    'L_junk': 0,  # Parasitic inductance [H]
     
-    # Nonlinearity parameters
-    'kinetic_inductance_fraction': 0.05,
-    'kinetic_inductance_variation': 0.2,
-    'frequency_shift_power_law': 0.5,
-    'frequency_shift_magnitude': 0.01,
-    'power_normalization': 1e-12,
+    # Variations (as fractional standard deviations)
+    'C_variation': 0.01,  # 1% variation in capacitance -> small frequency scatter
+    'Cc_variation': 0.01,  # 10% variation in coupling capacitor
     
-    # Bifurcation parameters
-    'enable_bifurcation': False,
-    'bifurcation_iterations': 10,
-    'bifurcation_convergence_tolerance': 1e-6,
-    'bifurcation_damping_factor': 0.5,
-    'saturation_power': 1e-13,
-    'saturation_sharpness': 2.0,
+    # Readout parameters
+    'Vin': 1e-5,  # Input voltage [V]
+    'input_atten_dB': 10,  # Input attenuation [dB]
+    'system_termination': 50,  # System impedance [Ω]
+    'ZLNA': 50,  # LNA input impedance [Ω] (real)
+    'GLNA': 10**(10./20.),  # LNA gain (Vout/Vin)
     
-    # Noise parameters
+    # Simulation noise parameters (for UDP streaming)
     'base_noise_level': 1e-4,
-    'amplitude_noise_coupling': 0.01,
-    'udp_noise_level': 0.1
+    'udp_noise_level': 0.05,
+    
+    # Pulse event parameters (for time-dependent QP density)
+    'pulse_mode': 'none',      # 'periodic', 'random', 'manual', or 'none'
+    'pulse_period': 10,      # seconds between pulses (for periodic mode)
+    'pulse_probability': 0.001, # probability per timestep (for random mode)
+    'pulse_tau_rise': 1e-6,    # rise time constant (seconds)
+    'pulse_tau_decay': 1e-3,   # decay time constant (seconds)  
+    'pulse_amplitude': 2.0,    # multiplicative factor relative to base_nqp (2.0 = double the base nqp)
+    'pulse_resonators': 'all', # 'all' or list of resonator indices
+    
+    # Quasiparticle density noise parameters
+    'nqp_noise_enabled': True,   # Enable noise on quasiparticle density
+    'nqp_noise_std_factor': 0.1, # Standard deviation as fraction of base nqp (10% noise)
+    
+    # Automatic KID biasing parameters
+    'auto_bias_kids': False,    # Enable automatic channel configuration
+    'bias_amplitude': 0.01,    # Bias amplitude in normalized units (=-40 dBm)
 }
 
 
@@ -106,7 +118,6 @@ async def create_mock_crs(
         print(f"UDP Streaming: {udp_host}:{udp_port}")
         print(f"Resonators: {mock_config['num_resonances']}")
         print(f"Frequency Range: {mock_config['freq_start']/1e9:.1f} - {mock_config['freq_end']/1e9:.1f} GHz")
-        print(f"Bifurcation: {'Enabled' if mock_config['enable_bifurcation'] else 'Disabled'}")
         print("="*60)
     
     try:

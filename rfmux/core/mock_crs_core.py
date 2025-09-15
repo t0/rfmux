@@ -339,14 +339,15 @@ class MockCRS(BaseCRS):
         self.cable_lengths = {}  # module -> cable length in meters
 
         # Store physics configuration (can be updated via generate_resonators)
-        self.physics_config = {}  # Will store active physics configuration
+        from .mock_crs_helper import DEFAULT_MOCK_CONFIG
+        self.physics_config = DEFAULT_MOCK_CONFIG.copy()  # Initialize with defaults
         
         # Instantiate helpers
         self.resonator_model = MockResonatorModel(self) # Pass self for state access
         self.udp_manager = MockUDPManager(self)         # Pass self for state access
 
-        # Initialize resonator parameters via the model
-        self.resonator_model.generate_lc_resonances() # Default LC model init
+        # Don't generate resonators automatically - let create_mock_crs handle it
+        # This prevents double generation and uses the correct configuration
 
     async def generate_resonators(self, config=None):
         """Generate/regenerate resonators with current or provided parameters.
@@ -354,62 +355,106 @@ class MockCRS(BaseCRS):
         Parameters
         ----------
         config : dict, optional
-            Configuration parameters to use. If not provided, uses defaults.
+            Configuration parameters to use. If not provided, uses current physics_config.
             Keys can include:
-            - num_resonances
-            - freq_start
-            - freq_end
-            - kinetic_inductance_fraction
-            - kinetic_inductance_variation
-            - q_min
-            - q_max
-            - q_variation
-            - coupling_min
-            - coupling_max
-            etc.
+            - num_resonances: Number of resonators to generate
+            - freq_start: Starting frequency (Hz)
+            - freq_end: Ending frequency (Hz)
+            - Lk, Lg, R, Cc: Circuit parameters
+            - C_variation, Cc_variation, R_variation: Parameter variations
+            - Vin, input_atten_dB: Readout parameters
+            - auto_bias_kids: Boolean to enable automatic KID biasing (default: True)
+            - bias_amplitude: Amplitude for automatic biasing in normalized units (default: 0.01)
         """
         try:
             # Initialize resonator model if needed
             if not hasattr(self, 'resonator_model') or self.resonator_model is None:
                 self.resonator_model = MockResonatorModel(self)
-                
-            # Ensure lists are initialized
-            if not hasattr(self.resonator_model, 'lc_resonances'):
-                self.resonator_model.lc_resonances = []
-            if self.resonator_model.lc_resonances is None:
-                self.resonator_model.lc_resonances = []
-                
-            if not hasattr(self.resonator_model, 'kinetic_inductance_fractions'):
-                self.resonator_model.kinetic_inductance_fractions = []
-            if self.resonator_model.kinetic_inductance_fractions is None:
-                self.resonator_model.kinetic_inductance_fractions = []
-                
-            # Clear existing resonators
-            self.resonator_model.lc_resonances = []
-            self.resonator_model.kinetic_inductance_fractions = []
+                print('initialized resonator model')
             
             # If config provided, store it permanently in the instance
             if config:
                 # Update our physics configuration (permanent storage)
-                self.physics_config = config.copy()
-                
-                # Generate with new parameters - the model will use self.physics_config
-                self.resonator_model.generate_lc_resonances()
-            else:
-                # Generate with defaults
-                self.resonator_model.generate_lc_resonances()
+                self.physics_config.update(config)
             
-            # Validate result
-            if self.resonator_model.lc_resonances is None:
-                self.resonator_model.lc_resonances = []
+            # Use the current physics configuration
+            active_config = self.physics_config
+            
+            # Extract parameters from config
+            num_resonances = active_config.get('num_resonances', 2)
+            
+            # Call the resonator model's generate_resonators method
+            self.resonator_model.generate_resonators(
+                num_resonances=num_resonances,
+                config=active_config
+            )
+            
+            # Get the count of generated resonators
+            resonator_count = len(self.resonator_model.mr_lekids)
+            
+            # Get resonance frequencies for return value
+            resonance_frequencies = self.resonator_model.resonator_frequencies.copy()
+            
+            print(f'Updated! Generated {resonator_count} mr_resonator objects')
+
+            # Auto-configure channels if requested
+            auto_bias = active_config.get('auto_bias_kids', True)
+            if auto_bias and resonance_frequencies:
+                await self._auto_bias_kids(active_config, resonance_frequencies)
                 
-            return len(self.resonator_model.lc_resonances)
+            return resonator_count, resonance_frequencies
             
         except Exception as e:
             print(f"Error in generate_resonators: {e}")
             import traceback
             traceback.print_exc()
             raise  # Re-raise to send error back to client
+
+    async def _auto_bias_kids(self, config, resonance_frequencies, amplitude=None):
+        """Automatically configure channels at resonator frequencies (bias KIDs).
+        
+        Parameters
+        ----------
+        config : dict
+            Configuration dictionary containing bias parameters
+        resonance_frequencies : list
+            List of resonator frequencies in Hz
+        """
+        try:
+            # Get configuration parameters
+            if amplitude is None:
+                amplitude = config.get('bias_amplitude', 0.01)  # Normalized units
+            module = 1  # Always use module 1 for mock
+            
+            print(f"[MockCRS] Auto-biasing {len(resonance_frequencies)} KIDs with amplitude {amplitude}")
+            
+            # Set NCO to the mean of resonance frequencies
+            nco_freq = np.mean(resonance_frequencies)
+            print(f"[MockCRS] Setting NCO frequency to {nco_freq:.3e} Hz")
+            await self.set_nco_frequency(nco_freq, module=module)
+            
+            # Configure channels for each resonator (up to 256 channels per module)
+            configured_count = 0
+            for i, freq_Hz in enumerate(resonance_frequencies[:256]):
+                channel = i + 1  # Channels are 1-indexed
+                
+                # Set frequency relative to NCO
+                relative_freq = freq_Hz - nco_freq
+                
+                # Configure the channel (these are synchronous methods)
+                self.set_frequency(relative_freq, channel=channel, module=module)
+                self.set_amplitude(amplitude, channel=channel, module=module)
+                self.set_phase(0, channel=channel, module=module)
+                
+                configured_count += 1
+                
+            print(f"[MockCRS] Configured {configured_count} channels with automatic KID biasing")
+            
+        except Exception as e:
+            print(f"[MockCRS] Error in auto-bias KIDs: {e}")
+            import traceback
+            traceback.print_exc()
+            # Don't re-raise - this is a convenience feature, not critical
 
     def validate_enum_member(self, value, enum_class, name):
         """Validate that value is a member of enum_class, converting strings if necessary."""
@@ -894,6 +939,84 @@ class MockCRS(BaseCRS):
 
     def get_udp_streaming_status(self): # This was not async in original
         return self.udp_manager.get_udp_streaming_status()
+    
+    # --- Quasiparticle Pulse Control ---
+    async def set_pulse_mode(self, mode, **kwargs):
+        """
+        Set the quasiparticle pulse mode for the resonator model.
+        
+        Parameters
+        ----------
+        mode : str
+            Pulse mode: 'periodic', 'random', 'manual', or 'none'
+        **kwargs : dict
+            Additional configuration parameters:
+            - period: Period in seconds (for periodic mode)
+            - probability: Probability per timestep (for random mode)
+            - tau_rise: Rise time constant in seconds
+            - tau_decay: Decay time constant in seconds
+            - amplitude: Maximum QP density increase
+            - resonators: 'all' or list of resonator indices
+        """
+        if not hasattr(self, 'resonator_model') or self.resonator_model is None:
+            raise RuntimeError("Resonator model not available. Cannot set pulse mode.")
+        
+        if not hasattr(self.resonator_model, 'set_pulse_mode'):
+            raise RuntimeError("Resonator model does not support pulse functionality.")
+        
+        # Add small delay to simulate async operation
+        await asyncio.sleep(0.001)
+        
+        return self.resonator_model.set_pulse_mode(mode, **kwargs)
+    
+    async def add_pulse_event(self, resonator_index, start_time, amplitude=None):
+        """
+        Manually add a pulse event to a specific resonator.
+        
+        Parameters
+        ----------
+        resonator_index : int
+            Index of the resonator (0-based)
+        start_time : float
+            Time when the pulse starts (seconds)
+        amplitude : float, optional
+            Maximum QP density increase. If None, uses config default.
+        """
+        if not hasattr(self, 'resonator_model') or self.resonator_model is None:
+            raise RuntimeError("Resonator model not available. Cannot add pulse event.")
+        
+        if not hasattr(self.resonator_model, 'add_pulse_event'):
+            raise RuntimeError("Resonator model does not support pulse functionality.")
+        
+        # Add small delay to simulate async operation
+        await asyncio.sleep(0.001)
+        
+        return self.resonator_model.add_pulse_event(resonator_index, start_time, amplitude)
+    
+    async def get_pulse_status(self):
+        """
+        Get the current pulse configuration and status.
+        
+        Returns
+        -------
+        dict
+            Dictionary containing pulse configuration and active pulse count
+        """
+        if not hasattr(self, 'resonator_model') or self.resonator_model is None:
+            return {'mode': 'unavailable', 'active_pulses': 0, 'error': 'Resonator model not available'}
+        
+        if not hasattr(self.resonator_model, 'pulse_config'):
+            return {'mode': 'unsupported', 'active_pulses': 0, 'error': 'Pulse functionality not supported'}
+        
+        # Add small delay to simulate async operation
+        await asyncio.sleep(0.001)
+        
+        return {
+            'mode': self.resonator_model.pulse_config.get('mode', 'unknown'),
+            'config': self.resonator_model.pulse_config.copy(),
+            'active_pulses': len(getattr(self.resonator_model, 'pulse_events', [])),
+            'error': None
+        }
     
     def tuber_context(self, **kwargs):
         """Return a context manager for batched operations (server-side use)"""

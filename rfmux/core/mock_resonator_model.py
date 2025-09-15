@@ -43,7 +43,7 @@ class MockResonatorModel:
         
         # Noise configuration
         self.nqp_noise_enabled = True
-        self.nqp_noise_std_factor = 0.001  # Default noise
+        self.nqp_noise_std_factor = 0.0001  # Default noise
         
         # Current effects (affects Lk only, applied after physics-based base params)
         self.lk_current_factors = []  # Lk_total = Lk_base * lk_current_factor

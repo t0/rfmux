@@ -90,6 +90,44 @@ net.core.rmem_max=67108864
 - **Linux:** Primary platform for testing and deployment.
 - **Windows:** Supported but less tested. Specific windows README is available in the [Windows README](./README.Windows.md).
 
+## rfmux Repository Map  
+This repository map provides a structural overview. Individual file listings may change over time.  
+
+### docs  
+Documentation area for repository-level information, including change logs.  
+
+### Firmware  
+Contains firmware artifacts and supporting instructions.  
+- **Release notes** track firmware versions.  
+- **Boot artifacts** (e.g., boot binaries, parser, root filesystem images) are organized under versioned subdirectories (e.g., `r1.5.x`).  
+- Includes guidance for fetching large LFS binaries and flashing MicroSD cards.  
+
+### Home (Jupyter Hub Content)  
+Interactive environment for demos, documentation, and release notes.  
+- **Landing page** introduces CRS boards.  
+- **Demos** provide example notebooks and scripts illustrating analyses and tuning workflows.  
+- **Release Notes** document versioned changes.  
+- **Technical Documentation** contains detailed technical notes on system design and signal processing.  
+
+### Python Package `rfmux`  
+Implements the core software functionality.  
+- **Top-level package** handles exports, session helpers, version checks, and IPython integration.  
+- **Core** defines schemas, hardware mapping, data handling, conversion utilities, and **mock infrastructure** for testing.
+- **Algorithms** provides measurement and fitting routines for resonator analysis and network sweeps.  
+- **Tools** includes optional GUI applications such as *Periscope* for real-time visualization and network analysis.  
+- **Tuber** implements a lightweight RPC/remote-object communication layer.  
+
+### Tests  
+Structured tests for both live hardware and mock environments.  
+- Unit and integration tests validate schema parsing, algorithms, and system behavior.  
+- Quality-control workflows generate reports and plots for CRS verification.  
+
+### Jupyter Settings  
+Configuration files for Jupyter Lab, enabling autosave and setting preferred viewers.  
+
+### Other Files  
+Repository-level files for installation, usage notes (including Windows-specific guidance), package metadata, contribution guidelines, and test automation (tox, shell helpers). 
+
 ## Contribution & Feedback
 
 We actively encourage contributions and feedback. Understanding operator code and needs is how we determine what to add to rfmux.

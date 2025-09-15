@@ -3,6 +3,7 @@ Mock CRS Device - Server Process and YAML Hook.
 Handles the mock server setup, process management, and request handling for Tuber.
 """
 import asyncio
+import inspect
 import json
 import socket
 import multiprocessing
@@ -12,7 +13,7 @@ import signal
 import numpy as np
 
 # Import MockCRS from its new location
-from .mock_crs_core import MockCRS
+from .mock_crs_core import ClientMockCRS, ServerMockCRS
 # Import BaseCRS for type hinting or direct use if necessary
 from .schema import CRS as BaseCRS
 
@@ -46,7 +47,7 @@ def yaml_hook(hwm):
         sockets.append(s)
         d.hostname = f"{hostname}:{port}"
         # Instantiate MockCRS from mock_crs_core
-        models[port] = MockCRS(
+        models[port] = ServerMockCRS(
             serial=d.serial if d.serial else ("%05d" % port),
             slot=d.slot if d.crate else None,
             crate=d.crate.serial if d.crate else None,
@@ -225,17 +226,6 @@ class ServerProcess(mp_ctx.Process):
             # Debug log
             #print(f"[DEBUG] Method request: method={method_name}, object={object_name}")
             
-            # List of algorithm methods that should NOT be executed on the server
-            # These should only run on the client side
-            algorithm_methods = {
-                'take_netanal', 'multisweep'
-                # Add other algorithm names here as needed
-            }
-            
-            # Check if this is an algorithm method
-            if method_name in algorithm_methods:
-                return {"error": {"message": f"Method '{method_name}' is an algorithm that should run on the client side, not the server"}}
-            
             # Look for the method on the instance
             m = None
             if hasattr(model, method_name):
@@ -311,40 +301,15 @@ class ServerProcess(mp_ctx.Process):
             # Normal object metadata request
             # We need to provide some metadata to TuberObject so it can populate
             # properties and methods on the client-side object.
-            illegal_prefixes = ("__", "_MockCRS__", "_thread_lock_", "_resolve", "_sa_")
-            # Also exclude Tuber-specific methods and SQLAlchemy properties that shouldn't be exposed
-            exclude_methods = {
-                "tuber_resolve", "tuber_context", "object_factory", 
-                "_resolve_meta", "_resolve_method", "_resolve_object",
-                "_context_class", "reconstruct", "to_query",
-                # Exclude algorithms that should run on client side
-                "take_netanal", "multisweep"
-            }
-            exclude_properties = {
-                "metadata", "registry", "_sa_class_manager", "_sa_instance_state",
-                "_sa_registry", "is_container", "modules", "module", "crate",
-                "hwm", "tuber_hostname", "keys", "values", "items",
-                # Exclude dictionary attributes that cause issues with Tuber resolution
-                "frequencies", "amplitudes", "phases", "tuning_results",
-                "temperature_sensors", "rails", "nco_frequencies",
-                "adc_attenuators", "dac_scales", "adc_autocal",
-                "adc_calibration_mode", "adc_calibration_coefficients",
-                "nyquist_zones", "hmc7044_registers",
-                # Exclude helper objects that can't be serialized
-                "resonator_model", "udp_manager", "timestamp"
-            }
+            illegal_prefixes = ("_",)
             
             # Special enum properties that should be included even though they're callables
             special_enum_properties = {
-                "TIMESTAMP_PORT", "CLOCKSOURCE", "UNITS", "TARGET"
+                "TIMESTAMP_PORT", "CLOCKSOURCE", "UNITS", "TARGET",
             }
             
-            names = set(
-                filter(lambda s: not any(s.startswith(p) for p in illegal_prefixes) 
-                                 and s not in exclude_methods
-                                 and s not in exclude_properties, 
-                       dir(model))
-            )
+            # Figure out things we might want to export
+            names = set(filter(lambda s: not s.startswith('_'), dir(model)))
             
             methods = []
             properties = []
@@ -356,14 +321,9 @@ class ServerProcess(mp_ctx.Process):
                     if name in special_enum_properties:
                         properties.append(name)
                     elif callable(attr):
-                        # Only include methods that are not coroutines from parent classes
-                        if not (asyncio.iscoroutinefunction(attr) and 
-                                name in ['tuber_resolve', 'resolve']):
-                            methods.append(name)
+                        methods.append(name)
                     else:
-                        # Double-check it's not in exclude list and not a dict
-                        if name not in exclude_properties and not isinstance(attr, dict):
-                            properties.append(name)
+                        properties.append(name)
                 except:
                     # Skip attributes that can't be accessed
                     pass

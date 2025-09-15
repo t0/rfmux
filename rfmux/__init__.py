@@ -16,10 +16,12 @@ __all__ = [
     "set_session",
     "load_from_database",
     "TuberRemoteError",
+    "_parser",
 ]
 
 # Check version numbers
 import sys
+import warnings
 
 if sys.version_info < (3, 10):
     raise RuntimeError("Python >= 3.10 is required.")
@@ -44,6 +46,7 @@ for package, min_version in tuples:
 # For ipython sessions, activate awaitless
 try:
     from . import awaitless
+
     awaitless.load_ipython_extension()
 except (ImportError, RuntimeError):
     pass
@@ -86,5 +89,17 @@ from .core.session import load_session, get_session, set_session, load_from_data
 from . import core, algorithms, streamer, tools
 
 from .tuber import TuberRemoteError
+
+# Ensure the C++ extension can be imported. Because this is a new build step,
+# emit a warning when/if it fails.
+try:
+    from . import _parser
+except ImportError as e:
+    raise ImportError(
+        "Failed to import C++ extension module! "
+        "Installing rfmux (e.g. pip install .) is now mandatory. "
+        "Please ask if you need help. We recommend the 'uv' tool "
+        "(https://docs.astral.sh/uv/)."
+    ) from e
 
 # vim: sts=4 ts=4 sw=4 tw=78 smarttab expandtab

@@ -940,6 +940,84 @@ class MockCRS(BaseCRS):
     def get_udp_streaming_status(self): # This was not async in original
         return self.udp_manager.get_udp_streaming_status()
     
+    # --- Quasiparticle Pulse Control ---
+    async def set_pulse_mode(self, mode, **kwargs):
+        """
+        Set the quasiparticle pulse mode for the resonator model.
+        
+        Parameters
+        ----------
+        mode : str
+            Pulse mode: 'periodic', 'random', 'manual', or 'none'
+        **kwargs : dict
+            Additional configuration parameters:
+            - period: Period in seconds (for periodic mode)
+            - probability: Probability per timestep (for random mode)
+            - tau_rise: Rise time constant in seconds
+            - tau_decay: Decay time constant in seconds
+            - amplitude: Maximum QP density increase
+            - resonators: 'all' or list of resonator indices
+        """
+        if not hasattr(self, 'resonator_model') or self.resonator_model is None:
+            raise RuntimeError("Resonator model not available. Cannot set pulse mode.")
+        
+        if not hasattr(self.resonator_model, 'set_pulse_mode'):
+            raise RuntimeError("Resonator model does not support pulse functionality.")
+        
+        # Add small delay to simulate async operation
+        await asyncio.sleep(0.001)
+        
+        return self.resonator_model.set_pulse_mode(mode, **kwargs)
+    
+    async def add_pulse_event(self, resonator_index, start_time, amplitude=None):
+        """
+        Manually add a pulse event to a specific resonator.
+        
+        Parameters
+        ----------
+        resonator_index : int
+            Index of the resonator (0-based)
+        start_time : float
+            Time when the pulse starts (seconds)
+        amplitude : float, optional
+            Maximum QP density increase. If None, uses config default.
+        """
+        if not hasattr(self, 'resonator_model') or self.resonator_model is None:
+            raise RuntimeError("Resonator model not available. Cannot add pulse event.")
+        
+        if not hasattr(self.resonator_model, 'add_pulse_event'):
+            raise RuntimeError("Resonator model does not support pulse functionality.")
+        
+        # Add small delay to simulate async operation
+        await asyncio.sleep(0.001)
+        
+        return self.resonator_model.add_pulse_event(resonator_index, start_time, amplitude)
+    
+    async def get_pulse_status(self):
+        """
+        Get the current pulse configuration and status.
+        
+        Returns
+        -------
+        dict
+            Dictionary containing pulse configuration and active pulse count
+        """
+        if not hasattr(self, 'resonator_model') or self.resonator_model is None:
+            return {'mode': 'unavailable', 'active_pulses': 0, 'error': 'Resonator model not available'}
+        
+        if not hasattr(self.resonator_model, 'pulse_config'):
+            return {'mode': 'unsupported', 'active_pulses': 0, 'error': 'Pulse functionality not supported'}
+        
+        # Add small delay to simulate async operation
+        await asyncio.sleep(0.001)
+        
+        return {
+            'mode': self.resonator_model.pulse_config.get('mode', 'unknown'),
+            'config': self.resonator_model.pulse_config.copy(),
+            'active_pulses': len(getattr(self.resonator_model, 'pulse_events', [])),
+            'error': None
+        }
+    
     def tuber_context(self, **kwargs):
         """Return a context manager for batched operations (server-side use)"""
         return MockCRSContext(self)

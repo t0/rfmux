@@ -43,17 +43,13 @@ class MockResonatorModel:
         
         # Noise configuration
         self.nqp_noise_enabled = True
-        self.nqp_noise_std_factor = 0.1  # Default 10% noise
+        self.nqp_noise_std_factor = 0.001  # Default noise
         
-        # Layer 1: Quasiparticle effects (affects base Lk and R)
-        self.lk_qp_factors = []      # Lk_qp = Lk_base * lk_qp_factor
-        self.r_qp_factors = []       # R_qp = R_base * r_qp_factor
-        
-        # Layer 2: Current effects (affects Lk only, on top of QP effects)
-        self.lk_current_factors = []  # Lk_total = Lk_qp * lk_current_factor
+        # Current effects (affects Lk only, applied after physics-based base params)
+        self.lk_current_factors = []  # Lk_total = Lk_base * lk_current_factor
         
         # Physical constants
-        self.Istar = 1e-6  # Characteristic current [A]
+        self.Istar = 5e-3  # Characteristic current [A]
         
         # Resonator metadata (parallel arrays to mr_lekids)
         self.resonator_frequencies = []  # Resonance frequencies for each LEKID
@@ -82,8 +78,8 @@ class MockResonatorModel:
             'period': 10.0,      # seconds (for periodic mode)
             'probability': 0.001, # per-timestep probability (for random mode)
             'tau_rise': 1e-6,    # rise time constant (seconds)
-            'tau_decay': 1e-3,   # decay time constant (seconds)
-            'amplitude': 0.5,    # max QP density increase
+            'tau_decay': 1e-1,   # decay time constant (seconds)
+            'amplitude': 10.0,    # multiplicative factor relative to base_nqp (2.0 = double the base nqp)
             'resonators': 'all', # 'all' or list of resonator indices
         }
         self.last_pulse_time = {}  # Track last pulse time for each resonator
@@ -135,9 +131,6 @@ class MockResonatorModel:
         system_termination = config.get('system_termination', 50)
         ZLNA = config.get('ZLNA', 50)  # Now a real number
         GLNA = config.get('GLNA', 1.0)
-
-        # temporarily add a value for Istar that is very large so the current dependent effects will be small
-        self.Istar = 1e-2
         
         # Clear existing objects to prevent memory leaks
         self.mr_lekids = []
@@ -148,8 +141,6 @@ class MockResonatorModel:
         # Clear layered parameter tracking
         self.base_lekid_params = []
         self.base_nqp_values = []  # Clear base nqp values
-        self.lk_qp_factors = []
-        self.r_qp_factors = []
         self.lk_current_factors = []
         self.resonator_currents = []
         
@@ -253,9 +244,7 @@ class MockResonatorModel:
                     'Cc': lekid.Cc
                 })
                 
-                # Initialize all modification factors to 1 (no modification)
-                self.lk_qp_factors.append(1.0)
-                self.r_qp_factors.append(1.0)
+                # Initialize current factors to 1 (no modification)
                 self.lk_current_factors.append(1.0)
                 self.resonator_currents.append(0.)
                 
@@ -272,19 +261,6 @@ class MockResonatorModel:
         
         print(f"Successfully created {len(self.mr_lekids)} persistent LEKID objects")
         print(f"Successfully created {len(self.mr_complex_resonators)} persistent MR_complex_resonator objects")
-        
-
-        # set a default bias carrier on each generated resonator
-        # first set the NCO to be the mean of these frequencies
-        # nco_freq = np.mean(self.resonator_frequencies)
-        # print('setting nco frequency to %.3e'%nco_freq)
-        # self.mock_crs.set_nco_frequency(nco_freq, module=1)
-        # default_carrier_amplitude = 0.005
-        # for chindex, fr in enumerate(self.resonator_frequencies):
-        #     print('setting channel %d carrier at %.3e Hz at amplitude %.3f'%(chindex+1, fr, default_carrier_amplitude))
-        #     self.mock_crs.set_frequency(fr-nco_freq, channel=chindex+1, module=1)
-        #     self.mock_crs.set_amplitude(default_carrier_amplitude, channel=chindex+1, module=1)
-             
 
         # Configure pulse events if specified in config
         pulse_mode = config.get('pulse_mode', 'none')
@@ -295,7 +271,7 @@ class MockResonatorModel:
                 probability=config.get('pulse_probability', 0.001),
                 tau_rise=config.get('pulse_tau_rise', 1e-6),
                 tau_decay=config.get('pulse_tau_decay', 1e-3),
-                amplitude=config.get('pulse_amplitude', 0.5),
+                amplitude=config.get('pulse_amplitude', 2.0),
                 resonators=config.get('pulse_resonators', 'all')
             )
         
@@ -307,20 +283,58 @@ class MockResonatorModel:
         Calculate S21 response with all physics effects.
         
         Includes:
+        - Pulse-modified quasiparticle density (if pulses are active)
         - Noisy quasiparticle density (fresh noise each call)
-        - Physics-based Lk and R from noisy nqp
+        - Physics-based Lk and R from combined nqp
         - Current-dependent kinetic inductance
         """
         if not self.mr_lekids:
             return 1.0 + 0j
         
-        # Generate fresh noisy nqp values for this calculation
+        # Calculate effective nqp values including both pulses and noise
         if self.base_nqp_values:  # Only if we have base nqp values
-            noisy_nqp = self.generate_noisy_nqp_values()
-            # Update base Lk/R from noisy nqp using physics
-            self.update_base_params_from_nqp(noisy_nqp)
+            effective_nqp = []
+            
+            for i in range(len(self.base_nqp_values)):
+                base_nqp = self.base_nqp_values[i]
+                
+                # Start with base nqp
+                current_nqp = base_nqp
+                
+                # Add pulse contributions if any pulses are active
+                pulse_excess = 0
+                for pulse in self.pulse_events:
+                    if pulse['resonator_index'] == i:
+                        # Calculate pulse contribution at current time
+                        # Use last_update_time as current time for consistency
+                        pulse_dt = self.last_update_time - pulse['start_time']
+                        if pulse_dt >= 0:
+                            # Exponential rise and decay model
+                            if pulse_dt < pulse['tau_rise']:  # Rising edge
+                                time_factor = (1 - np.exp(-pulse_dt / pulse['tau_rise']))
+                            else:  # Decay phase
+                                rise_time = pulse['tau_rise']
+                                decay_dt = pulse_dt - rise_time
+                                time_factor = np.exp(-decay_dt / pulse['tau_decay'])
+                            
+                            # Calculate excess QP relative to base_nqp
+                            excess_factor = (pulse['amplitude'] - 1.0) * time_factor
+                            pulse_excess += excess_factor * base_nqp
+                
+                # Add pulse effects to base nqp
+                current_nqp = base_nqp + pulse_excess
+                
+                # Add noise on top of pulse-modified nqp
+                if self.nqp_noise_enabled and current_nqp > 0:
+                    noise = np.random.normal(0, base_nqp * self.nqp_noise_std_factor)
+                    current_nqp = max(0, current_nqp + noise)
+                
+                effective_nqp.append(current_nqp)
+            
+            # Update base Lk/R from effective nqp using physics
+            self.update_base_params_from_nqp(effective_nqp)
         
-        # Update parameters for current amplitude (applies on top of noisy base values)
+        # Update parameters for current amplitude (applies on top of effective base values)
         self.update_lekids_for_current(frequency, amplitude)
         
         # Calculate S21 with updated parameters
@@ -337,57 +351,25 @@ class MockResonatorModel:
 
     def update_lekid_parameters(self, lekid_index):
         """
-        Apply all layers of modifications to a LEKID's parameters.
+        Apply current-dependent modifications to a LEKID's parameters.
         
         Order of operations:
-        1. Start with base (as-fabricated) parameters
-        2. Apply quasiparticle modifications
-        3. Apply current-dependent modifications
+        1. Start with base parameters (already updated by physics from nqp)
+        2. Apply current-dependent modifications to Lk only
         """
         base_params = self.base_lekid_params[lekid_index]
         lekid = self.mr_lekids[lekid_index]
         
-        # Layer 1: Apply quasiparticle effects
-        Lk_qp = base_params['Lk'] * self.lk_qp_factors[lekid_index]
-        R_qp = base_params['R'] * self.r_qp_factors[lekid_index]
-        
-        # Layer 2: Apply current effects (on top of QP-modified Lk)
-        Lk_total = Lk_qp * self.lk_current_factors[lekid_index]
+        # Apply current effects to Lk (R is not affected by current)
+        Lk_total = base_params['Lk'] * self.lk_current_factors[lekid_index]
+        R_total = base_params['R']  # R comes directly from physics calculation
         
         # Update the LEKID object
         lekid.Lk = Lk_total
-        lekid.R = R_qp
+        lekid.R = R_total
         lekid.L = lekid.Lk + lekid.Lg
         lekid.alpha_k = lekid.Lk / lekid.L
 
-    def set_quasiparticle_density(self, lekid_index, nqp):
-        """
-        Set quasiparticle density for a specific resonator.
-        
-        This affects the BASE kinetic inductance and resistance,
-        before any current-dependent effects are applied.
-        
-        Parameters
-        ----------
-        lekid_index : int
-            Index of the resonator
-        nqp : float
-            Quasiparticle density (normalized or absolute, TBD)
-        """
-        # Physics model for QP effects (placeholder - to be refined)
-        # These are multiplicative factors on the base values
-        
-        # Kinetic inductance increases with QP density
-        # (fewer Cooper pairs → higher kinetic inductance)
-        self.lk_qp_factors[lekid_index] = 1 + nqp * 0.1  # Example scaling
-        
-        # Resistance increases with QP density
-        # (more normal electrons → higher loss)
-        self.r_qp_factors[lekid_index] = 1 + nqp * 0.5  # Example scaling
-        
-        # Apply the updated parameters
-        self.update_lekid_parameters(lekid_index)
-        self.invalidate_caches()
 
     def calculate_resonator_currents(self, frequency, Vin, damp=0.1):
         """
@@ -540,13 +522,9 @@ class MockResonatorModel:
         return {
             'base_Lk': base['Lk'],
             'base_R': base['R'],
-            'qp_factor_Lk': self.lk_qp_factors[lekid_index],
-            'qp_factor_R': self.r_qp_factors[lekid_index],
             'current_factor_Lk': self.lk_current_factors[lekid_index],
             'final_Lk': current.Lk,
-            'final_R': current.R,
-            'Lk_qp': base['Lk'] * self.lk_qp_factors[lekid_index],
-            'R_qp': base['R'] * self.r_qp_factors[lekid_index]
+            'final_R': current.R
         }
     
     def invalidate_caches(self):
@@ -573,10 +551,15 @@ class MockResonatorModel:
         # Check if we should trigger new pulses
         self._check_trigger_pulses(current_time, dt)
         
-        # Update QP density for each resonator based on active pulses
+        # Calculate QP densities for all resonators based on active pulses
+        pulse_nqp_values = []
+        
         for i in range(len(self.mr_lekids)):
-            # Calculate total QP contribution from all active pulses
-            total_qp = 0
+            # Get base nqp for this resonator
+            base_nqp = self.base_nqp_values[i] if i < len(self.base_nqp_values) else 0
+            
+            # Calculate total excess QP contribution from all active pulses
+            excess_qp = 0
             
             # Filter active pulses for this resonator
             for pulse in self.pulse_events:
@@ -585,25 +568,34 @@ class MockResonatorModel:
                     pulse_dt = current_time - pulse['start_time']
                     if pulse_dt >= 0:
                         # Exponential rise and decay model
-                        if pulse_dt < pulse['tau_rise'] * 5:  # Rising edge
-                            qp_contrib = pulse['amplitude'] * (1 - np.exp(-pulse_dt / pulse['tau_rise']))
+                        if pulse_dt < pulse['tau_rise']:  # Rising edge
+                            time_factor = (1 - np.exp(-pulse_dt / pulse['tau_rise']))
                         else:  # Decay phase
-                            rise_time = pulse['tau_rise'] * 5
+                            rise_time = pulse['tau_rise']
                             decay_dt = pulse_dt - rise_time
-                            qp_contrib = pulse['amplitude'] * np.exp(-decay_dt / pulse['tau_decay'])
+                            time_factor = np.exp(-decay_dt / pulse['tau_decay'])
                         
-                        total_qp += qp_contrib
+                        # Calculate excess QP relative to base_nqp
+                        # amplitude=2.0 means total_nqp = base_nqp + 1.0*base_nqp = 2*base_nqp
+                        excess_factor = (pulse['amplitude'] - 1.0) * time_factor
+                        excess_qp += excess_factor * base_nqp
             
-            # Set the QP density (this will update Lk and R via existing method)
-            if total_qp > 0:
-                self.set_quasiparticle_density(i, total_qp)
-            else:
-                # Reset to baseline if no active pulses
-                self.set_quasiparticle_density(i, 0)
+            # Calculate total absolute QP density
+            total_nqp = base_nqp + excess_qp
+            
+            # Ensure non-negative QP density
+            total_nqp = max(0, total_nqp)
+            
+            pulse_nqp_values.append(total_nqp)
         
-        # Clean up old pulses (after 5 decay constants)
+        # Update base parameters using physics-based method (same as noise)
+        if pulse_nqp_values:
+            self.update_base_params_from_nqp(pulse_nqp_values)
+            self.invalidate_caches()
+        
+        # Clean up old pulses (after n decay constants)
         self.pulse_events = [p for p in self.pulse_events 
-                           if current_time - p['start_time'] < p['tau_rise'] * 5 + p['tau_decay'] * 5]
+                           if current_time - p['start_time'] < p['tau_rise'] + p['tau_decay'] * 15]
     
     def _check_trigger_pulses(self, current_time, dt):
         """Check if new pulses should be triggered based on mode.

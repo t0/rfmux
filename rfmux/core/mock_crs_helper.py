@@ -61,7 +61,7 @@ DEFAULT_MOCK_CONFIG = {
     'pulse_probability': 0.001, # probability per timestep (for random mode)
     'pulse_tau_rise': 1e-6,    # rise time constant (seconds)
     'pulse_tau_decay': 1e-3,   # decay time constant (seconds)  
-    'pulse_amplitude': 1.1,    # max QP density increase
+    'pulse_amplitude': 2.0,    # multiplicative factor relative to base_nqp (2.0 = double the base nqp)
     'pulse_resonators': 'all', # 'all' or list of resonator indices
     
     # Quasiparticle density noise parameters

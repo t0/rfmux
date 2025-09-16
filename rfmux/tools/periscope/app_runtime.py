@@ -768,13 +768,42 @@ class PeriscopeRuntime:
     def _update_performance_stats(self, now: float):
         """Update FPS and PPS display in the status bar approximately once per second."""
         if (now - self.t_last) >= 1.0:
+            #### Getting packet counts ###
             dropped = self.receiver.get_dropped_packets()
             received = self.receiver.get_received_packets()
-            percent = (dropped / (dropped + received)) * 100
+            
+            ##### Percent calculation #####
+            drop_lastsec = dropped - self.prev_drop
+            receive_lastsec = received - self.prev_receive
+            percent = (drop_lastsec / (drop_lastsec + receive_lastsec)) * 100
+            
+            #### Per second metrics #####
             fps = self.frame_cnt / (now - self.t_last)
             pps = self.pkt_cnt / (now - self.t_last)
-            self.statusBar().showMessage(f"FPS {fps:.1f} | Packets/s {pps:.1f} | Packet Loss : {percent:.1f}% | Dropped : {dropped}") 
+
+            #### Update labels ####
+            self.fps_label.setText(f"FPS: {fps:.1f}")
+            self.pps_label.setText(f"Packets/s: {pps:.1f}")
+
+            # Color packet loss red if > 1%
+            if percent > 1:
+                color = "red"
+                self.info_text.setText("PACKET LOSS HIGH - CONSULT HELP FOR NETWORKING SUGGESTIONS")
+            else: 
+                color = "white"
+            self.packet_loss_label.setStyleSheet(f"color: {color};")
+            self.packet_loss_label.setText(f"Packet Loss: {percent:.1f}%")
+
+            self.dropped_label.setText(f"Dropped: {dropped}")
+            
+            #### Showing on status bar ####
+            # self.statusBar().showMessage(f"FPS {fps:.1f} | Packets/s {pps:.1f} | Packet Loss : {percent_x}% | Dropped : {dropped}") 
+            
+            #### Initializing ####
             self.frame_cnt = 0; self.pkt_cnt = 0; self.t_last = now
+            self.prev_drop = dropped
+            self.prev_receive = received
+            
 
     def _update_dec_stage(self):
         """

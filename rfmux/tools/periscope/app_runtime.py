@@ -788,10 +788,11 @@ class PeriscopeRuntime:
             # Color packet loss red if > 1%
             if percent > 1:
                 color = "red"
+                self.packet_loss_label.setStyleSheet(f"color: {color};")
                 self.info_text.setText("PACKET LOSS HIGH - CONSULT HELP FOR NETWORKING SUGGESTIONS")
             else: 
-                color = "white"
-            self.packet_loss_label.setStyleSheet(f"color: {color};")
+                default_color = self.packet_loss_label.palette().color(QtGui.QPalette.WindowText)
+                self.packet_loss_label.setStyleSheet(f"color: {default_color.name()};")
             self.packet_loss_label.setText(f"Packet Loss: {percent:.1f}%")
 
             self.dropped_label.setText(f"Dropped: {dropped}")

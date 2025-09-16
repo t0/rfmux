@@ -135,6 +135,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.frame_cnt: int = 0                 # Counter for GUI frames rendered
         self.pkt_cnt: int = 0                   # Counter for processed UDP packets
         self.t_last: float = time.time()        # Timestamp of the last performance update (time from .utils)
+        self.prev_receive = 0
+        self.prev_drop = 0
 
         # Decimation stage, dynamically updated based on inferred sample rate.
         # This is used for PSD calculations.
@@ -678,6 +680,20 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         # `QtWidgets` is from .utils.
         self.setStatusBar(QtWidgets.QStatusBar()) # Create and set a new status bar
+
+        self.fps_label = QtWidgets.QLabel()
+        self.pps_label = QtWidgets.QLabel()
+        self.packet_loss_label = QtWidgets.QLabel()
+        self.dropped_label = QtWidgets.QLabel()
+        self.info_text = QtWidgets.QLabel()
+
+        # Add them to the status bar
+        self.statusBar().addWidget(self.fps_label)
+        self.statusBar().addWidget(self.pps_label)
+        self.statusBar().addWidget(self.packet_loss_label)
+        self.statusBar().addWidget(self.dropped_label)
+        self.statusBar().addPermanentWidget(self.info_text)
+        
 
     def _show_help(self):
         """

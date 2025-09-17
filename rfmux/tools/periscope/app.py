@@ -687,6 +687,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.dropped_label = QtWidgets.QLabel()
         self.info_text = QtWidgets.QLabel()
 
+        self.default_packet_loss_color = self.packet_loss_label.palette().color(QtGui.QPalette.WindowText).name()
+
         # Add them to the status bar
         self.statusBar().addWidget(self.fps_label)
         self.statusBar().addWidget(self.pps_label)

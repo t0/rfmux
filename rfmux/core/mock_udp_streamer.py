@@ -110,8 +110,8 @@ class MockCRSUDPStreamer(threading.Thread):
                 self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
 
                 if platform.system() == "Windows":
+                    print("Identfied as a windows machine while setting up socket")
                     try:
-                        print("Identfied as a windows machine while setting up socket")
                         self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
                         self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("127.0.0.1"))
                     except:
@@ -121,6 +121,7 @@ class MockCRSUDPStreamer(threading.Thread):
                 # Bind multicast to loopback interface (lo) for local testing
                 # Using if_nametoindex to get the interface index for 'lo'  
                 else:
+                    print("Identfied as an Unix-like system, either Mac or Linux, will follow the socket protocol accordingly")
                     for iface in ("lo", "lo0"): 
                         # lo is for Linux and lo0 is for Mac 
                         try:

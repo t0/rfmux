@@ -12,6 +12,7 @@ import signal
 import atexit
 from datetime import datetime
 import numpy as np # For np.clip in generate_packet
+import platform
 
 # Import DfmuxPacket and related constants from streamer
 from ..streamer import (
@@ -107,30 +108,40 @@ class MockCRSUDPStreamer(threading.Thread):
                 
                 # Set socket send buffer size for performance
                 self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
+
+                if platform.system() == "Windows":
+                    try:
+                        print("Identfied as a windows machine while setting up socket")
+                        self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+                        self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("127.0.0.1"))
+                    except:
+                        print("Issue setting up socket on windows")
+                    
                 
                 # Bind multicast to loopback interface (lo) for local testing
-                # Using if_nametoindex to get the interface index for 'lo'
-                for iface in ("lo", "lo0"): 
-                    # lo is for Linux and lo0 is for Mac 
-                    try:
-                        lo_index = socket.if_nametoindex(iface)
-                        # Use IP_MULTICAST_IF with the loopback address
-                        # Note: IP_MULTICAST_IF expects an IP address, not an interface index
-                        # For interface index, we'd use IPV6_MULTICAST_IF, but we're using IPv4
-                        # So we stick with the loopback IP address
-                        self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton('127.0.0.1'))
-                        print(f"[UDP] Multicast bound to loopback interface ({iface}, index {lo_index})")
-                        break
-                    except OSError:
-                        continue
+                # Using if_nametoindex to get the interface index for 'lo'  
                 else:
-                    # Fallback if 'lo or lo0' interface not found (shouldn't happen on Linux or Mac)
-                    print("[UDP] Warning: Could not find 'lo' or 'lo0' interface")
-                    print("[UDP] Warning: The packets are now being launched on your network, rather than on the loopback interface")
-                    print("\nPlease implement the loopback interface with either 'lo' or 'lo0'")
-                    self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton('0.0.0.0'))
-                
-                print(f"[UDP] Multicast socket initialized for {self.multicast_group}:{self.multicast_port}")
+                    for iface in ("lo", "lo0"): 
+                        # lo is for Linux and lo0 is for Mac 
+                        try:
+                            lo_index = socket.if_nametoindex(iface)
+                            # Use IP_MULTICAST_IF with the loopback address
+                            # Note: IP_MULTICAST_IF expects an IP address, not an interface index
+                            # For interface index, we'd use IPV6_MULTICAST_IF, but we're using IPv4
+                            # So we stick with the loopback IP address
+                            self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton('127.0.0.1'))
+                            print(f"[UDP] Multicast bound to loopback interface ({iface}, index {lo_index})")
+                            break
+                        except OSError:
+                            continue
+                    else:
+                        # Fallback if 'lo or lo0' interface not found (shouldn't happen on Linux or Mac)
+                        print("[UDP] Warning: Could not find 'lo' or 'lo0' interface")
+                        print("[UDP] Warning: The packets are now being launched on your network, rather than on the loopback interface")
+                        print("\nPlease implement the loopback interface with either 'lo' or 'lo0'")
+                        self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton('0.0.0.0'))
+                    
+                    print(f"[UDP] Multicast socket initialized for {self.multicast_group}:{self.multicast_port}")
             else:
                 # Create socket for unicast
                 self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

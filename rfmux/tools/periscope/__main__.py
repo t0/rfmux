@@ -38,8 +38,13 @@ from .mock_configuration_dialog import MockConfigurationDialog
 from .utils import *
 from .tasks import *
 from .ui import *
+import platform
 # Note: The original commented-out lines for QtWidgets and QIcon imports
 # have been removed as they are expected to be covered by 'from .utils import *'.
+
+if platform.system() == "Windows":
+    print("Identified as Windows system")
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 def main():
     """

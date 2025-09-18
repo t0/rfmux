@@ -7,6 +7,7 @@ import socket
 import struct
 import sys
 import warnings
+import platform
 
 # Constants
 STREAMER_PORT = 9876

@@ -28,18 +28,436 @@ The final output:
 import array
 import asyncio
 import contextlib
+import ctypes
 import dataclasses
 import enum
 import numpy as np
 import socket
 import sys
 import warnings
+import pytest
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...tuber.codecs import TuberResult
 from ...core.transferfunctions import VOLTS_PER_ROC, spectrum_from_slow_tod
 from ... import streamer
+
+from dataclasses import dataclass, asdict, astuple
+from scipy.signal import welch
+
+STREAMER_PORT = 9876
+STREAMER_HOST = "239.192.0.2"
+STREAMER_LEN = 8240
+STREAMER_MAGIC = 0x5344494B
+STREAMER_VERSION = 5
+NUM_CHANNELS = 1024
+SS_PER_SECOND = 125000000
+
+# This seems like a long timeout - in practice, we can see long delays when
+# packets are flowing normally
+STREAMER_TIMEOUT = 60
+
+# Source-specific multicasting support was added in 3.12.0
+if not hasattr(socket, 'IP_ADD_SOURCE_MEMBERSHIP'):
+    raise NotImplementedError(
+            "Module 'socket' doesn't have source-specific multicasting (SSM) "
+            "support, which was added in Python 3.12.0. Refer to "
+            "https://github.com/python/cpython/issues/89415 and the Python "
+            "3.12.0 release notes for details."
+    )
+
+
+class InAddr(ctypes.Structure):
+    _fields_ = [("s_addr", ctypes.c_uint32)]
+
+    def __init__(self, ip: bytes):
+        # Accept IP address as a string
+        self.s_addr = int.from_bytes(socket.inet_aton(ip), byteorder='little')
+
+
+class IPMreqSource(ctypes.Structure):
+    '''
+    The order of fields in this structure is implementation-specific.
+    Notably, fields have different order in Windows and Linux.
+    '''
+
+    match sys.platform:
+        case 'win32':
+            _fields_ = [
+                ("imr_multiaddr", InAddr),
+                ("imr_sourceaddr", InAddr),
+                ("imr_interface", InAddr),
+        ]
+        case 'linux':
+            _fields_ = [
+                ("imr_multiaddr", InAddr),
+                ("imr_interface", InAddr),
+                ("imr_sourceaddr", InAddr),
+            ]
+        case _:
+            raise NotImplementedError(f"Source-specific multicast support for {sys.platform} is incomplete.")
+
+
+class TimestampPort(str, enum.Enum):
+    BACKPLANE = "BACKPLANE"
+    TEST = "TEST"
+    SMA = "SMA"
+    GND = "GND"
+
+
+@dataclass(order=True)
+class Timestamp:
+    y: np.int32 # 0-99
+    d: np.int32 # 1-366
+    h: np.int32 # 0-23
+    m: np.int32 # 0-59
+    s: np.int32 # 0-59
+    ss: np.int32 # 0-SS_PER_SECOND-1
+    c: np.int32
+    sbs: np.int32
+
+    source: TimestampPort
+    recent: bool
+
+    def renormalize(self):
+        """
+        Normalizes the timestamp fields, carrying over seconds->minutes->hours->days
+        as needed. Ignores leap years for day-of-year handling.
+        """
+        old = astuple(self)
+
+        carry, self.ss = divmod(self.ss, SS_PER_SECOND)
+        self.s += carry
+
+        carry, self.s = divmod(self.s, 60)
+        self.m += carry
+
+        carry, self.m = divmod(self.m, 60)
+        self.h += carry
+
+        carry, self.h = divmod(self.h, 24)
+        self.d += carry
+
+        self.d -= 1  # convert to zero-indexed
+        carry, self.d = divmod(self.d, 365)  # does not work on leap day
+        self.d += 1  # restore to 1-indexed
+        self.y += carry
+        self.y %= 100  # and roll over
+
+
+    @classmethod
+    def from_bytes(cls, data):
+        # Unpack the timestamp data from the last portion of the packet
+        args = struct.unpack("<8I", data)
+        ts = Timestamp(*args, recent=False, source=TimestampPort.GND)
+
+        # Decode the source from the 'c' field
+        source_bits = (ts.c >> 29) & 0x3
+        if source_bits == 0:
+            ts.source = TimestampPort.BACKPLANE
+        elif source_bits == 1:
+            ts.source = TimestampPort.TEST
+        elif source_bits == 2:
+            ts.source = TimestampPort.SMA
+        elif source_bits == 3:
+            ts.source = TimestampPort.GND
+        else:
+            raise RuntimeError("Unexpected timestamp source!")
+
+        # Decode the 'recent' flag from the 'c' field
+        ts.recent = bool(ts.c & 0x80000000)
+
+        # Mask off the higher bits to get the actual count
+        ts.c &= 0x1FFFFFFF
+
+        return ts
+
+    @classmethod
+    def from_TuberResult(cls, ts):
+        # Convert the TuberResult into a dictionary we can use
+        data = { f: getattr(ts, f) for f in dir(ts) if not f.startswith('_')}
+        return Timestamp(**data)
+
+
+@dataclass
+class DfmuxPacket:
+    magic: np.uint32
+    version: np.uint16
+    serial: np.uint16
+
+    num_modules: np.uint8
+    block: np.uint8
+    fir_stage: np.uint8
+    module: np.uint8
+
+    seq: np.uint32
+
+    s: array.array
+
+    ts: Timestamp
+
+    @classmethod
+    def from_bytes(cls, data):
+        """
+        Parses the entire DfmuxPacket from raw bytes, which contain:
+          - a header (<IHHBBBBI)
+          - channel data (NUM_CHANNELS * 2 * sizeof(int))
+          - a timestamp (8 * sizeof(uint32))
+        """
+        # Ensure the data length matches the expected packet length
+        assert (
+            len(data) == STREAMER_LEN
+        ), f"Packet had unexpected size {len(data)} != {STREAMER_LEN}!"
+
+        # Unpack the packet header
+        header = struct.Struct("<IHHBBBBI")
+        header_args = header.unpack(data[: header.size])
+
+        # Extract the body (channel data)
+        body = array.array("i")
+        bodysize = NUM_CHANNELS * 2 * body.itemsize
+        body.frombytes(data[header.size : header.size + bodysize])
+
+        # Parse the timestamp from the remaining data
+        ts = Timestamp.from_bytes(data[header.size + bodysize :])
+
+        # Return a DfmuxPacket instance with the parsed data
+        return DfmuxPacket(*header_args, s=body, ts=ts)
+
+
+def get_local_ip(crs_hostname):
+    """
+    Determines the local IP address used to reach the CRS device.
+
+    Args:
+        crs_hostname (str): The hostname or IP address of the CRS device.
+
+    Returns:
+        str: The local IP address of the network interface used to reach the CRS device.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            # Connect to the CRS hostname on an arbitrary port to determine the local IP
+            s.connect((crs_hostname, 1))
+            local_ip = s.getsockname()[0]
+        except Exception:
+            raise Exception("Could not determine local IP address!")
+    return local_ip
+
+
+def _cic_correction(frequencies, f_in, R=64, N=6):
+    """
+    Compute the single-stage CIC (Cascaded Integrator-Comb) filter correction factor.
+
+    CIC filters exhibit passband droop, especially at higher frequencies. This function
+    calculates a correction factor to approximately compensate for that droop. The
+    correction factor is derived analytically based on the idealized mathematical
+    expressions for a CIC filter. However, in firmware implementations, the filter
+    coefficients are quantized, so the actual correction will not be perfectly exact,
+    but will still be quite close.
+
+    Parameters
+    ----------
+    frequencies : ndarray
+        Frequency bins (in Hz) for which the correction factor is desired. Typically
+        these might be FFT bin centers or some other set of discrete frequencies at
+        which droop compensation is needed.
+    f_in : float
+        Input (pre-decimation) sampling rate in Hz. This is the rate at which data
+        enters the CIC filter before it is decimated.
+    R : int, optional
+        The decimation rate. Default is 64.
+    N : int, optional
+        The number of CIC stages (integrator-comb pairs). Default is 6.
+
+    Returns
+    -------
+    correction : ndarray
+        Array of correction values (dimensionless, same shape as `frequencies`) that can
+        be multiplied by the frequency response (or by the time-domain samples after
+        the CIC filter) to approximately correct for the droop introduced by the filter.
+
+    Notes
+    -----
+    1. The correction factor is computed using the ratio of sinc functions raised to
+       the power of N:
+
+       .. math::
+          H_{corr}(\\omega) =
+              \\left(
+                  \\frac{\\sin\\left(\\pi f / f_{in}\\right)}
+                       {\\sin\\left(\\frac{\\pi f}{R f_{in}}\\right)}
+              \\right)^N
+              \\times \\frac{1}{R^N}
+
+       where :math:`f` is the frequency, :math:`f_{in}` is the input sample rate,
+       :math:`R` is the decimation ratio, and :math:`N` is the number of stages.
+
+    2. At DC (0 Hz), the expression above has an indeterminate form
+       :math:`0/0`. We replace those NaN values with the ideal DC gain of 
+       :math:`R^N`, then normalize by :math:`R^N`, effectively making the
+       correction factor 1 at DC.
+
+    3. In practical hardware/firmware implementations, the CIC coefficients may be
+       quantized or truncated, which means that the filter's actual response can deviate
+       slightly from the ideal model used here. Therefore, the computed correction
+       factor is an approximation that should perform well but will not be absolutely
+       precise.
+    """
+    freq_ratio = frequencies / f_in
+    with np.errstate(divide='ignore', invalid='ignore'):
+        numerator = np.sin(np.pi * freq_ratio)
+        denominator = np.sin(np.pi * freq_ratio / R)
+        correction = (numerator / denominator) ** N
+        # Replace NaNs at DC with the ideal DC gain = R^N
+        correction[np.isnan(correction)] = R ** N
+    return correction / (R ** N)
+
+
+def _compute_spectrum(i_data, q_data, fs, dec_stage,
+                     scaling='psd', nperseg=None,
+                     reference='relative',
+                     spectrum_cutoff=0.9):
+    """
+    Internal function to compute both the I/Q single-sideband PSD and
+    the dual-sideband complex PSD in either dBc or dBm, depending on 'reference'.
+    The 'scaling' argument can be 'psd' => power spectral density (V^2/Hz)
+    or 'ps' => power spectrum (V^2).
+
+    Parameters
+    ----------
+    i_data : array-like
+        Time-domain I (real) samples.
+    q_data : array-like
+        Time-domain Q (imag) samples.
+    fs : float
+        Sampling frequency in Hz.
+    dec_stage : int
+        Decimation stage to define the second CIC correction factor.
+    scaling : {'psd','ps'}
+        Whether we interpret Welch output as a PSD (V^2/Hz) or total power spectrum (V^2).
+    nperseg : int, optional
+        Number of samples per Welch segment. Default is all samples (no segmentation).
+    reference : {'relative','absolute'}
+        If 'relative', we do dBc => referencing the DC bin as the carrier.
+        If 'absolute', we do dBm => referencing an absolute scale with 50 ohms.
+    spectrum_cutoff : float
+        Fraction of Nyquist frequency to retain in the spectrum (default: 0.9).
+
+    Returns
+    -------
+    dict
+        A dictionary containing:
+          "freq_iq" : array of frequency bins for single-sideband I/Q,
+          "psd_i"   : array of final I data in dBc or dBm,
+          "psd_q"   : array of final Q data in dBc or dBm,
+          "freq_dsb": array of frequency bins for the dual-sideband data,
+          "psd_dual_sideband": array of final dual-sideband data in dBc or dBm.
+    """
+    if nperseg is None:
+        nperseg = len(i_data)
+
+    # Convert 'psd'/'ps' to scipy's 'density'/'spectrum'
+    scipy_scaling = 'density' if scaling.lower() == 'psd' else 'spectrum'
+
+    arr_i = np.asarray(i_data)
+    arr_q = np.asarray(q_data)
+    arr_complex = arr_i + 1j * arr_q
+
+
+    # Define CIC decimation parameters
+    R1 = 64
+    R2 = 2 ** dec_stage
+    f_in1 = 625e6 / 256.0  # Original samplerate before 1st CIC
+    f_in2 = f_in1 / R1     # Samplerate before 2nd CIC
+
+    # Welch for dual-sideband complex
+    freq_dsb, psd_c = welch(
+        arr_complex, fs=fs, nperseg=nperseg,
+        scaling=scipy_scaling,
+        return_onesided=False,
+        detrend=False # Important because we need the DC information for normalization
+    )
+    # The CIC corrections are symmetric
+    freq_abs = np.abs(freq_dsb)
+
+    # Apply CIC correction
+    cic1_corr_c = _cic_correction(freq_abs * R1 * R2, f_in1, R=R1, N=3)
+    cic2_corr_c = _cic_correction(freq_abs * R2, f_in2, R=R2, N=6)
+    correction_c = cic1_corr_c * cic2_corr_c
+    psd_c_corrected = psd_c / correction_c
+
+    # Enforce cutoff
+    nyquist = fs / 2
+    cutoff_freq = spectrum_cutoff * nyquist
+    cutoff_idx_c = freq_abs <= cutoff_freq
+    freq_dsb = freq_dsb[cutoff_idx_c]
+    psd_c_corrected = psd_c_corrected[cutoff_idx_c]
+
+    # Carrier normalization based on DC bin
+    carrier_normalization = psd_c_corrected[0]*(fs/nperseg)
+
+    if reference == 'relative' and scaling == 'psd': # Normalize by the _PS_ of the DC bin:
+        ## OVERWRITE the DC bin on the assumption that this is the carrier we are normalizing to
+        ## This gives people the correct "reference" right on the plot, as we are correctly assuming
+        ## the carrier in total power, not a power density
+        psd_c_corrected[0] = psd_c_corrected[0]*(fs/nperseg)
+        psd_dual_sideband_db = 10.0 * np.log10(psd_c_corrected / (carrier_normalization + 1e-30))
+                
+    elif reference == 'relative' and scaling == 'ps': # DC bin already correctly normalized:
+        psd_dual_sideband_db = 10.0 * np.log10(psd_c_corrected / ((psd_c_corrected[0]) + 1e-30))
+    else:
+        # absolute => convert V^2 -> W => dBm
+        p_c = psd_c_corrected / 50.0
+        psd_dual_sideband_db = 10.0 * np.log10(p_c / 1e-3 + 1e-30)
+
+    # Single-sideband I/Q
+    freq_i, psd_i = welch(arr_i, fs=fs, nperseg=nperseg, scaling=scipy_scaling, return_onesided=True, detrend=None)
+    freq_q, psd_q = welch(arr_q, fs=fs, nperseg=nperseg, scaling=scipy_scaling, return_onesided=True, detrend=None)
+    freq_iq = freq_i
+
+    # CIC Correction
+    cic1_corr = _cic_correction(freq_iq * R1 * R2, f_in1, R=R1, N=6)
+    cic2_corr = _cic_correction(freq_iq * R2, f_in2, R=R2, N=6)
+    correction_iq = cic1_corr * cic2_corr
+
+    psd_i_corrected = psd_i / correction_iq
+    psd_q_corrected = psd_q / correction_iq
+
+    cutoff_idx_iq = freq_iq <= cutoff_freq
+    freq_iq = freq_iq[cutoff_idx_iq]
+    psd_i_corrected = psd_i_corrected[cutoff_idx_iq]
+    psd_q_corrected = psd_q_corrected[cutoff_idx_iq]
+
+    # Convert to dBc or dBm
+    if reference == 'relative' and scaling == 'psd': # Normalize by the _PS_ of the DC bin
+        ## OVERWRITE the DC bin on the assumption that this is the carrier we are normalizing to
+        ## This gives people the correct "reference" right on the plot, as we are correctly assuming
+        ## the carrier in total power, not a power density
+        psd_i_corrected[0] = psd_i_corrected[0]*(fs/nperseg)
+        psd_q_corrected[0] = psd_q_corrected[0]*(fs/nperseg)
+
+        ## Then normalize to the TOTAL power (in I and Q)
+        psd_i_db = 10.0 * np.log10(psd_i_corrected / (carrier_normalization + 1e-30))
+        psd_q_db = 10.0 * np.log10(psd_q_corrected / (carrier_normalization + 1e-30))
+    elif reference == 'relative' and scaling == 'ps': # We are already dealing with PS
+        psd_i_db = 10.0 * np.log10(psd_i_corrected / (psd_c_corrected[0] + 1e-30))
+        psd_q_db = 10.0 * np.log10(psd_q_corrected / (psd_c_corrected[0] + 1e-30))
+    else:
+        # absolute => convert V^2 to W => W to dBm
+        p_i = psd_i_corrected / 50.0
+        p_q = psd_q_corrected / 50.0
+        psd_i_db = 10.0 * np.log10(p_i / 1e-3 + 1e-30)
+        psd_q_db = 10.0 * np.log10(p_q / 1e-3 + 1e-30)
+
+    return {
+        "freq_iq": freq_iq,
+        "psd_i": psd_i_db,
+        "psd_q": psd_q_db,
+        "freq_dsb": freq_dsb,
+        "psd_dual_sideband": psd_dual_sideband_db,
+    }
 
 
 @macro(CRS, register=True)
@@ -363,3 +781,57 @@ async def py_get_samples(crs: CRS,
         results["spectrum"] = TuberResult(spec_data)
 
     return TuberResult(results)
+
+
+@pytest.mark.filterwarnings("ignore:divide by zero encountered in log10")
+def test__compute_spectrum_dc_i(request):
+    # DC signal in I only
+    x = _compute_spectrum(
+        np.ones(1000), np.zeros(1000), 625e6 / (256 * 64 * 2**6), 6, scaling="ps"
+    )
+
+    (freq_dsb, psd_dsb, psd_i, psd_q, freq_iq) = (
+        x["freq_dsb"],
+        x["psd_dual_sideband"],
+        x["psd_i"],
+        x["psd_q"],
+        x["freq_iq"],
+    )
+
+    # Q had better be negligible
+    assert all(psd_q < -300)
+
+    # I and DSB spectra are only allowed energy at DC
+    assert all((psd_i < -300) | (np.abs(freq_iq) < 1))
+    assert all((psd_dsb < -300) | (np.abs(freq_dsb) < 1))
+
+    # magnitude 1 -> expect 0 dB
+    assert max(psd_i) == pytest.approx(0, abs=1)
+    assert max(psd_dsb) == pytest.approx(0, abs=1)
+
+
+@pytest.mark.filterwarnings("ignore:divide by zero encountered in log10")
+def test__compute_spectrum_dc_q(request):
+    # DC signal in Q only
+    x = _compute_spectrum(
+        np.zeros(1000), np.ones(1000), 625e6 / (256 * 64 * 2**6), 6, scaling="ps"
+    )
+
+    (freq_dsb, psd_dsb, psd_i, psd_q, freq_iq) = (
+        x["freq_dsb"],
+        x["psd_dual_sideband"],
+        x["psd_i"],
+        x["psd_q"],
+        x["freq_iq"],
+    )
+
+    # I had better be negligible
+    assert all(psd_i < -300)
+
+    # Q and DSB spectra are only allowed energy at DC
+    assert all((psd_q < -300) | (np.abs(freq_iq) < 1))
+    assert all((psd_dsb < -300) | (np.abs(freq_dsb) < 1))
+
+    # magnitude 1 -> expect 0 dB
+    assert max(psd_q) == pytest.approx(0, abs=1)
+    assert max(psd_dsb) == pytest.approx(0, abs=1)

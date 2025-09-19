@@ -34,9 +34,31 @@ requires-python = ">=3.12"
 [project.gui-scripts]
 periscope = "rfmux.tools.periscope.__main__:main"
 
+[dependency-groups]
+dev = [
+  "bs4",
+  "htpy",
+  "jupytext",
+  "markdown",
+  "nbclient",
+  "pytest_check",
+  "requests",
+  "scikit-learn",
+  "weasyprint",
+]
+
 [project.urls]
 homepage = "https://github.com/t0/rfmux"
 repository = "https://github.com/t0/rfmux"
 
 [tool.setuptools]
 packages = ["rfmux"]
+
+[tool.pytest.ini_options]
+markers = [
+  "offline",
+  "qc_stage1",
+  "qc_stage2",
+]
+
+asyncio_default_fixture_loop_scope = "session"

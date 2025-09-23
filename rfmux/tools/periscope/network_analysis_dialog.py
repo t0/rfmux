@@ -7,6 +7,7 @@ from .utils import (
     DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
     UnitConverter, traceback
 )
+import pickle
 from .tasks import DACScaleFetcher
 from .network_analysis_base import NetworkAnalysisDialogBase
 
@@ -74,12 +75,17 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         # Buttons for starting or canceling the analysis
         btn_layout = QtWidgets.QHBoxLayout()
         self.start_btn = QtWidgets.QPushButton("Start Analysis")
+        self.load_btn = QtWidgets.QPushButton("Load Analysis")
         self.cancel_btn = QtWidgets.QPushButton("Cancel")
         btn_layout.addWidget(self.start_btn)
+        btn_layout.addWidget(self.load_btn)
         btn_layout.addWidget(self.cancel_btn)
         layout.addLayout(btn_layout)
         
         self.start_btn.clicked.connect(self.accept) # Connect to QDialog's accept slot
+
+        self.load_btn.clicked.connect(self._load_netanal_data)
+        
         self.cancel_btn.clicked.connect(self.reject) # Connect to QDialog's reject slot
         
         self._update_dbm_from_normalized() # Initial update of dBm field based on default amplitude
@@ -115,7 +121,86 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         # Remove duplicates and sort, though current logic might not produce duplicates if input is clean.
         return sorted(list(set(selected_modules)))
 
-    def get_parameters(self) -> dict | None:
+    
+    def _load_netanal_data(self) -> None:
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load Network Analysis Parameters",
+            "",
+            "Pickle Files (*.pkl *.pickle);;All Files (*)",
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "rb") as fh:
+                payload = pickle.load(fh)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Load Failed",
+                f"Could not read '{file_path}':\n{exc}",
+            )
+            return
+
+        if isinstance(payload, dict) and isinstance(payload.get("parameters"), dict):
+            params = payload["parameters"]
+        elif isinstance(payload, dict):
+            params = payload
+        else:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid File",
+                "The selected file does not contain network-analysis parameters.",
+            )
+            return
+
+        # Keep a copy so get_parameters() can merge in anything we don't expose in the UI.
+        self._loaded_params = params.copy()
+
+        module_value = params.get("module")
+        if module_value is None:
+            module_text = "All"
+        elif isinstance(module_value, (list, tuple, set)):
+            module_text = ", ".join(str(int(m)) for m in module_value)
+        else:
+            module_text = str(module_value)
+        self.module_entry.setText(module_text)
+
+        amps = params.get("amps") or ([params["amp"]] if "amp" in params else None)
+        if amps:
+            try:
+                amp_text = ", ".join(f"{float(amp):g}" for amp in amps)
+            except (TypeError, ValueError):
+                amp_text = ", ".join(str(amp) for amp in amps)
+            self.amp_edit.setText(amp_text)
+
+        def set_if_present(key, widget, formatter):
+            if key in params and params[key] is not None:
+                try:
+                    widget.setText(formatter(params[key]))
+                except Exception:
+                    widget.setText(str(params[key]))
+
+        set_if_present("fmin", self.fmin_edit, lambda v: f"{float(v) / 1e6:g}")
+        set_if_present("fmax", self.fmax_edit, lambda v: f"{float(v) / 1e6:g}")
+        set_if_present("cable_length", self.cable_length_edit, lambda v: f"{float(v):g}")
+        set_if_present("npoints", self.points_edit, lambda v: str(int(float(v))))
+        set_if_present("nsamps", self.samples_edit, lambda v: str(int(float(v))))
+        set_if_present("max_chans", self.max_chans_edit, lambda v: str(int(float(v))))
+        set_if_present("max_span", self.max_span_edit, lambda v: f"{float(v) / 1e6:g}")
+
+        if "clear_channels" in params:
+            self.clear_channels_cb.setChecked(bool(params["clear_channels"]))
+
+        # Refresh derived UI elements after populating the fields.
+        self._update_dac_scale_info()
+        self._update_dbm_from_normalized()
+
+
+
+
+    def get_parameters(self, data_netanal=None) -> dict | None:
         """
         Retrieves and validates the network analysis parameters from the UI fields.
 

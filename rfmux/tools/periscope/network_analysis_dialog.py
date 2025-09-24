@@ -31,6 +31,8 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         self.setWindowTitle("Network Analysis Configuration")
         self.setModal(False) # Modeless dialog
         self._setup_ui()
+        self.load_data_available = False
+        self._load_data = {}
         
     def _setup_ui(self):
         """Sets up the user interface elements for the dialog."""
@@ -84,7 +86,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         
         self.start_btn.clicked.connect(self.accept) # Connect to QDialog's accept slot
 
-        self.load_btn.clicked.connect(self._load_netanal_data)
+        self.load_btn.clicked.connect(self._load_data_avail)
         
         self.cancel_btn.clicked.connect(self.reject) # Connect to QDialog's reject slot
         
@@ -122,7 +124,11 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         return sorted(list(set(selected_modules)))
 
     
-    def _load_netanal_data(self) -> None:
+    def _load_data_avail(self):
+        self.load_data_available = True
+        self._load_netanal_data()
+    
+    def _load_netanal_data(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Load Network Analysis Parameters",
@@ -143,10 +149,11 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             )
             return
 
-        if isinstance(payload, dict) and isinstance(payload.get("parameters"), dict):
+        if isinstance(payload, dict) and (isinstance(payload.get("parameters"), dict) and isinstance(payload.get("modules"), dict)):
             params = payload["parameters"]
-        elif isinstance(payload, dict):
-            params = payload
+            self._load_data = payload.copy()
+        # elif isinstance(payload, dict):
+        #     params = payload
         else:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -156,7 +163,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             return
 
         # Keep a copy so get_parameters() can merge in anything we don't expose in the UI.
-        self._loaded_params = params.copy()
+        # self._loaded_params = params.copy()
 
         module_value = params.get("module")
         if module_value is None:
@@ -197,10 +204,9 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         self._update_dac_scale_info()
         self._update_dbm_from_normalized()
 
+    #     self.load_data_available = True
 
-
-
-    def get_parameters(self, data_netanal=None) -> dict | None:
+    def get_parameters(self) -> dict | None:
         """
         Retrieves and validates the network analysis parameters from the UI fields.
 
@@ -209,37 +215,40 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             Shows an error message on invalid input.
         """
         try:
-            module_text = self.module_entry.text().strip()
-            selected_module_param = None # Parameter for 'module' key
-            if module_text.lower() != 'all':
-                parsed_modules = self._get_selected_modules()
-                if parsed_modules:
-                    selected_module_param = parsed_modules
-            
-            amp_text = self.amp_edit.text().strip()
-            # Use parsed amplitude values, or default if input is empty
-            amps_list = self._parse_amplitude_values(amp_text) or [DEFAULT_AMPLITUDE]
-            
-            # Construct parameters dictionary
-            # Using eval for frequency and span allows expressions, but ensure inputs are numbers.
-            # Consider replacing eval with direct float conversion if expressions aren't strictly needed.
-            params_dict = {
-                'amps': amps_list,
-                'module': selected_module_param, # Can be None (interpreted as all by backend) or list of modules
-                'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
-                'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
-                'cable_length': float(self.cable_length_edit.text()),
-                'npoints': int(self.points_edit.text()),
-                'nsamps': int(self.samples_edit.text()),
-                'max_chans': int(self.max_chans_edit.text()),
-                'max_span': float(eval(self.max_span_edit.text())) * 1e6, # Convert MHz to Hz
-                'clear_channels': self.clear_channels_cb.isChecked()
-            }
-            # Basic validation for frequency range
-            if params_dict['fmin'] >= params_dict['fmax']:
-                QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
-                return None
-            return params_dict
+            if self.load_data_available:
+                return self._load_data 
+            else:
+                module_text = self.module_entry.text().strip()
+                selected_module_param = None # Parameter for 'module' key
+                if module_text.lower() != 'all':
+                    parsed_modules = self._get_selected_modules()
+                    if parsed_modules:
+                        selected_module_param = parsed_modules
+                
+                amp_text = self.amp_edit.text().strip()
+                # Use parsed amplitude values, or default if input is empty
+                amps_list = self._parse_amplitude_values(amp_text) or [DEFAULT_AMPLITUDE]
+                
+                # Construct parameters dictionary
+                # Using eval for frequency and span allows expressions, but ensure inputs are numbers.
+                # Consider replacing eval with direct float conversion if expressions aren't strictly needed.
+                params_dict = {
+                    'amps': amps_list,
+                    'module': selected_module_param, # Can be None (interpreted as all by backend) or list of modules
+                    'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
+                    'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
+                    'cable_length': float(self.cable_length_edit.text()),
+                    'npoints': int(self.points_edit.text()),
+                    'nsamps': int(self.samples_edit.text()),
+                    'max_chans': int(self.max_chans_edit.text()),
+                    'max_span': float(eval(self.max_span_edit.text())) * 1e6, # Convert MHz to Hz
+                    'clear_channels': self.clear_channels_cb.isChecked()
+                }
+                # Basic validation for frequency range
+                if params_dict['fmin'] >= params_dict['fmax']:
+                    QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
+                    return None
+                return params_dict
         except Exception as e:
             traceback.print_exc() # Log the full traceback for debugging
             QtWidgets.QMessageBox.critical(self, "Error Parsing Parameters", f"Invalid parameter input: {str(e)}")

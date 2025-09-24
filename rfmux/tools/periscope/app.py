@@ -866,7 +866,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.dac_scales = dialog.dac_scales.copy()
             params = dialog.get_parameters()
             if params:
-                self._start_network_analysis(params)
+                if "modules" in params.keys():
+                    print("Using loaded data")
+                    self._load_network_analysis(params)
+                else:
+                    self._start_network_analysis(params)
 
     def _start_network_analysis(self, params: dict):
         """
@@ -937,6 +941,64 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 window_instance.update_amplitude_progress(mod_iter, 1, len(amplitudes), amplitudes[0])
                 self._start_next_amplitude_task(mod_iter, params, window_id)
             window_instance.show()
+        except Exception as e:
+            print(f"Error in _start_network_analysis: {e}")
+            traceback.print_exc() # traceback from .utils
+
+
+    def _load_network_analysis(self, params: dict):
+        """
+        Initialize and start a new network analysis process.
+
+        This method creates a new `NetworkAnalysisWindow` to display the results
+        and a `NetworkAnalysisTask` to perform the sweep in a background thread.
+        It handles single or multiple module sweeps and iterates through specified
+        amplitudes if provided.
+
+        Args:
+            params (dict): A dictionary of parameters for the network analysis,
+                           typically obtained from `NetworkAnalysisDialog`.
+                           Expected keys include 'module' (int or list of ints),
+                           'amps' (list of floats), 'amp' (float, fallback if 'amps'
+                           is not present), and other sweep-specific settings.
+        """
+        try:
+            if self.crs is None:
+                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
+                return
+            selected_module_param = params['parameters'].get('module') # Renamed to avoid conflict
+            if selected_module_param is None:
+                modules_to_run = list(range(1, 9))
+            elif isinstance(selected_module_param, list):
+                modules_to_run = selected_module_param
+            else:
+                modules_to_run = [selected_module_param]
+            if not hasattr(self, 'dac_scales'):
+                QtWidgets.QMessageBox.critical(self, "Error", 
+                    "DAC scales are not available. Please run the network analysis configuration again.")
+                return
+            window_id = f"window_{self.netanal_window_count}"
+            self.netanal_window_count += 1
+            dac_scales_local = self.dac_scales.copy() # Renamed
+            # NetworkAnalysisWindow from .ui
+            window_instance = NetworkAnalysisWindow(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode) # Renamed
+            window_instance.set_params(params['parameters'])
+            window_instance.window_id = window_id
+            self.netanal_windows[window_id] = {
+                'window': window_instance}
+            
+            amplitudes = params['parameters'].get('amps')
+            for mod in modules_to_run:
+                for i in range(len(amplitudes)):
+                    freqs = np.array(params['modules'][mod][i]['frequency']['values'])
+                    amps = np.array(params['modules'][mod][i]['magnitude']['counts']['raw'])
+                    phases = np.array(params['modules'][mod][i]['phase']['values'])
+                    
+                    window_instance.update_data(mod, freqs, amps, phases)
+                    window_instance.update_data_with_amp(mod, freqs, amps, phases, amplitudes[i])
+
+                window_data = self.netanal_windows[window_id]
+                window_instance.show()
         except Exception as e:
             print(f"Error in _start_network_analysis: {e}")
             traceback.print_exc() # traceback from .utils

@@ -742,8 +742,49 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             self._update_resonance_legend_entry(active_module) 
             self._toggle_resonances_visible(self.show_resonances_cb.isChecked()) 
         self._update_multisweep_button_state(active_module)
+        
+    def _use_loaded_resonances(self, active_module: int, load_resonance_freqs: list):
+        print("Using loaded resonances at")
+        if active_module in self.plots:
+            plot_info = self.plots[active_module]
+            amp_plot_item = plot_info['amp_plot'].getPlotItem()
+            phase_plot_item = plot_info['phase_plot'].getPlotItem()
 
+            for line in plot_info.get('resonance_lines_mag', []):
+                amp_plot_item.removeItem(line)
+            plot_info['resonance_lines_mag'] = []
 
+            for line in plot_info.get('resonance_lines_phase', []):
+                phase_plot_item.removeItem(line)
+            plot_info['resonance_lines_phase'] = []
+
+            self.resonance_freqs[active_module] = []
+            
+            res_freqs_hz = load_resonance_freqs
+
+            if len(res_freqs_hz) < 1:
+                QtWidgets.QMessageBox.information(self, "No Resonances Found in this file", 
+                                                  f"No resonances were identified for Module {active_module} with the given parameters. Upload another file. Or rerun analysis on the resulting plot.")
+                self._update_multisweep_button_state(active_module) 
+                return 
+
+            line_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
+            for res_freq_hz in res_freqs_hz:
+                print(res_freq_hz)
+                line_mag = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
+                amp_plot_item.addItem(line_mag)
+                plot_info['resonance_lines_mag'].append(line_mag)
+
+                line_phase = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
+                phase_plot_item.addItem(line_phase)
+                plot_info['resonance_lines_phase'].append(line_phase)
+
+            self.resonance_freqs[active_module] = res_freqs_hz
+            self._update_resonance_checkbox_text(active_module) 
+            self._update_resonance_legend_entry(active_module) 
+            self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
+        self._update_multisweep_button_state(active_module)
+        
     def _remove_faux_resonance_legend_entry(self, module_id: int):
         """Removes the faux resonance legend entry for a module."""
         if module_id in self.plots:

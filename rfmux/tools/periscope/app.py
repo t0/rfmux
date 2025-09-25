@@ -998,7 +998,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     window_instance.update_data_with_amp(mod, freqs, amps, phases, amplitudes[i])
 
                 window_data = self.netanal_windows[window_id]
-                window_instance.show()
+                
+                r_freq = params['modules'][mod]['resonances_hz']
+                window_instance._use_loaded_resonances(mod, r_freq)
+                    
+            window_instance.show()
         except Exception as e:
             print(f"Error in _start_network_analysis: {e}")
             traceback.print_exc() # traceback from .utils

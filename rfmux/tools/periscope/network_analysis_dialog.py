@@ -11,6 +11,44 @@ import pickle
 from .tasks import DACScaleFetcher
 from .network_analysis_base import NetworkAnalysisDialogBase
 
+
+#### Making sure the function below has global access ###
+def load_network_analysis_payload(parent: QtWidgets.QWidget):
+    file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+        parent,
+        "Load Network Analysis Parameters",
+        "",
+        "Pickle Files (*.pkl *.pickle);;All Files (*)",
+    )
+    if not file_path:
+        return None
+
+    try:
+        with open(file_path, "rb") as fh:
+            payload = pickle.load(fh)
+    except Exception as exc:
+        QtWidgets.QMessageBox.critical(
+            parent,
+            "Load Failed",
+            f"Could not read '{file_path}':\n{exc}",
+        )
+        return None
+
+    if (
+        isinstance(payload, dict)
+        and isinstance(payload.get("parameters"), dict)
+        and isinstance(payload.get("modules"), dict)
+    ):
+        return payload
+
+    QtWidgets.QMessageBox.warning(
+        parent,
+        "Invalid File",
+        "The selected file does not contain network-analysis parameters.",
+    )
+    return None
+
+
 class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
     """
     Dialog for configuring and initiating a new Network Analysis.
@@ -129,41 +167,12 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         self._load_netanal_data()
     
     def _load_netanal_data(self):
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "Load Network Analysis Parameters",
-            "",
-            "Pickle Files (*.pkl *.pickle);;All Files (*)",
-        )
-        if not file_path:
+        payload = load_network_analysis_payload(self)
+        if payload is None:
             return
 
-        try:
-            with open(file_path, "rb") as fh:
-                payload = pickle.load(fh)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                self,
-                "Load Failed",
-                f"Could not read '{file_path}':\n{exc}",
-            )
-            return
-
-        if isinstance(payload, dict) and (isinstance(payload.get("parameters"), dict) and isinstance(payload.get("modules"), dict)):
-            params = payload["parameters"]
-            self._load_data = payload.copy()
-        # elif isinstance(payload, dict):
-        #     params = payload
-        else:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Invalid File",
-                "The selected file does not contain network-analysis parameters.",
-            )
-            return
-
-        # Keep a copy so get_parameters() can merge in anything we don't expose in the UI.
-        # self._loaded_params = params.copy()
+        params = payload["parameters"]
+        self._load_data = payload.copy()
 
         module_value = params.get("module")
         if module_value is None:
@@ -206,6 +215,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
 
     #     self.load_data_available = True
 
+        
     def get_parameters(self) -> dict | None:
         """
         Retrieves and validates the network analysis parameters from the UI fields.
@@ -216,7 +226,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         """
         try:
             if self.load_data_available:
-                return self._load_data 
+                return self._load_data
             else:
                 module_text = self.module_entry.text().strip()
                 selected_module_param = None # Parameter for 'module' key
@@ -253,6 +263,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             traceback.print_exc() # Log the full traceback for debugging
             QtWidgets.QMessageBox.critical(self, "Error Parsing Parameters", f"Invalid parameter input: {str(e)}")
             return None
+
 
 class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
     """

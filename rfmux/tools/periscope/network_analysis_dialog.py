@@ -75,6 +75,10 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
     def _setup_ui(self):
         """Sets up the user interface elements for the dialog."""
         layout = QtWidgets.QVBoxLayout(self)
+
+        self.import_button = QtWidgets.QPushButton("Import Data")
+        self.import_button.clicked.connect(self._load_netanal_data)
+        layout.addWidget(self.import_button, alignment=QtCore.Qt.AlignLeft)
         
         param_group = QtWidgets.QGroupBox("Analysis Parameters")
         param_layout = QtWidgets.QFormLayout(param_group)
@@ -124,7 +128,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         
         self.start_btn.clicked.connect(self.accept) # Connect to QDialog's accept slot
 
-        self.load_btn.clicked.connect(self._load_data_avail)
+        self.load_btn.clicked.connect(self._load_data_avail) 
         
         self.cancel_btn.clicked.connect(self.reject) # Connect to QDialog's reject slot
         
@@ -164,7 +168,8 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
     
     def _load_data_avail(self):
         self.load_data_available = True
-        self._load_netanal_data()
+        self.accept()
+ 
     
     def _load_netanal_data(self):
         payload = load_network_analysis_payload(self)

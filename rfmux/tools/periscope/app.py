@@ -980,13 +980,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             window_id = f"window_{self.netanal_window_count}"
             self.netanal_window_count += 1
             dac_scales_local = self.dac_scales.copy() # Renamed
+            window_signals = NetworkAnalysisSignals()
             # NetworkAnalysisWindow from .ui
             window_instance = NetworkAnalysisWindow(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode) # Renamed
             window_instance.set_params(params['parameters'])
             window_instance.window_id = window_id
-            self.netanal_windows[window_id] = {
-                'window': window_instance}
-            
+            self.netanal_windows[window_id] = {'window': window_instance, 'signals': window_signals}
             amplitudes = params['parameters'].get('amps')
             for mod in modules_to_run:
                 for i in range(len(amplitudes)):
@@ -1048,6 +1047,35 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             print(f"Error in _handle_analysis_completed: {e}")
             traceback.print_exc()
 
+    def check_connection(self, window_data, window_id):
+        
+        window_instance = window_data["window"]
+        window_signals = window_data["signals"]
+        
+        count = window_signals.receivers(window_signals.progress)
+        if count == 0:
+            window_signals.progress.connect(
+                lambda mod, prog: window_instance.update_progress(mod, prog), # mod, prog to avoid conflict
+                QtCore.Qt.ConnectionType.QueuedConnection)
+            window_signals.data_update.connect(
+                lambda mod, freqs, amps, phases: window_instance.update_data(mod, freqs, amps, phases),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+            window_signals.data_update_with_amp.connect(
+                lambda mod, freqs, amps, phases, amp_val:  # amp_val to avoid conflict
+                window_instance.update_data_with_amp(mod, freqs, amps, phases, amp_val),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+            window_signals.completed.connect(
+                lambda mod: self._handle_analysis_completed(mod, window_id),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+            window_signals.error.connect(
+                lambda error_msg: QtWidgets.QMessageBox.critical(window_instance, "Network Analysis Error", error_msg),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+        else:
+            return
+            
+        
+    
+    
     def _start_next_amplitude_task(self, module_param: int, params: dict, window_id: str): # Renamed module
         """
         Start the next network analysis task for a given module and amplitude.
@@ -1067,6 +1095,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         try:
             if window_id not in self.netanal_windows: return
             window_data = self.netanal_windows[window_id]
+            self.check_connection(window_data, window_id)
             signals = window_data['signals']
             if module_param not in window_data['amplitude_queues'] or not window_data['amplitude_queues'][module_param]:
                 return
@@ -1105,14 +1134,19 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             sender_widget = self.sender() # Renamed
             source_window = None
             window_id = None
-            if sender_widget and hasattr(sender_widget, 'window'): source_window = sender_widget.window()
+            if sender_widget and hasattr(sender_widget, 'window'): 
+                source_window = sender_widget.window()
             for w_id, w_data in self.netanal_windows.items():
-                if w_data['window'] == source_window: window_id = w_id; break
-            if not window_id: return
+                if w_data['window'] == source_window: 
+                    window_id = w_id; break
+            if not window_id: 
+                print("No window_id found")
+                return
             window_data = self.netanal_windows[window_id]
             window = window_data['window']
             window.data.clear(); window.raw_data.clear()
-            for mod, pbar in window.progress_bars.items(): pbar.setValue(0) # Renamed module
+            for mod, pbar in window.progress_bars.items(): 
+                pbar.setValue(0) # Renamed module
             window.clear_plots(); window.set_params(params)
             selected_module_param = params.get('module') # Renamed
             if selected_module_param is None: modules_to_run = list(range(1, 9))

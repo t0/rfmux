@@ -233,6 +233,23 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             self.progress_bars = {}
             self.progress_labels = {}
 
+    def _hide_progress_bars(self):
+        """Hide the entire Analysis Progress group."""
+        if self.progress_group:
+            self.progress_group.hide()
+
+    def _show_progress_bars(self, reset=False):
+        """Show the Analysis Progress group again.
+           If reset=True, reset progress bars and labels to defaults.
+        """
+        if self.progress_group:
+            self.progress_group.show()
+            if reset:
+                for module, pbar in self.progress_bars.items():
+                    pbar.setValue(0)  # reset progress
+                for module, label in self.progress_labels.items():
+                    label.clear()     # clear amplitude text
+    
     def _setup_plot_area(self, layout):
         """Set up the plot area with tabs for each module."""
         self.tabs = QtWidgets.QTabWidget()

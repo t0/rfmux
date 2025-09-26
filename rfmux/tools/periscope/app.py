@@ -983,6 +983,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             window_signals = NetworkAnalysisSignals()
             # NetworkAnalysisWindow from .ui
             window_instance = NetworkAnalysisWindow(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode) # Renamed
+            window_instance._hide_progress_bars() #### Remove the progress bar when loading the data
             window_instance.set_params(params['parameters'])
             window_instance.window_id = window_id
             self.netanal_windows[window_id] = {'window': window_instance, 'signals': window_signals}

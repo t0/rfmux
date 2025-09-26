@@ -762,15 +762,8 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             
             res_freqs_hz = load_resonance_freqs
 
-            if len(res_freqs_hz) < 1:
-                QtWidgets.QMessageBox.information(self, "No Resonances Found in this file", 
-                                                  f"No resonances were identified for Module {active_module} with the given parameters. Upload another file. Or rerun analysis on the resulting plot.")
-                self._update_multisweep_button_state(active_module) 
-                return 
-
             line_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
             for res_freq_hz in res_freqs_hz:
-                print(res_freq_hz)
                 line_mag = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
                 amp_plot_item.addItem(line_mag)
                 plot_info['resonance_lines_mag'].append(line_mag)

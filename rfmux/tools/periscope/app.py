@@ -1211,7 +1211,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if dialog.exec():
             params = dialog.get_parameters()
             if params:
-                self._start_multisweep_analysis(params)
+                if "results_by_iteration" in params.keys():
+                    self._load_multisweep_analysis(params)
+                else:
+                    self._start_multisweep_analysis(params)
     
     
     def _netanal_progress(self, module_param: int, progress: float):

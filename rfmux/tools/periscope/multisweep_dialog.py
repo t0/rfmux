@@ -46,7 +46,7 @@ def load_multisweep_payload(parent: QtWidgets.QWidget):
     QtWidgets.QMessageBox.warning(
         parent,
         "Invalid File",
-        "The selected file does not contain network-analysis parameters.",
+        "The selected file does not contain Multisweep parameters.",
     )
     return None
 
@@ -75,6 +75,9 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.resonance_frequencies = resonance_frequencies or []
         self.current_module = current_module # Store the current module for DAC scale and params
         self.load_multisweep = load_multisweep
+
+        self.use_data_from_file = False
+        self._load_data = {}
 
         self.setWindowTitle("Multisweep Configuration")
         self.setModal(True)
@@ -284,14 +287,34 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         
         layout.addWidget(param_group)
 
-        # Standard OK and Cancel buttons
-        self.button_box = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
-        )
+
+
+        if self.load_multisweep:
+            btn_layout = QtWidgets.QHBoxLayout()
+            self.start_btn = QtWidgets.QPushButton("Start Multisweep")
+            self.load_btn = QtWidgets.QPushButton("Load Multisweep")
+            self.load_btn.setEnabled(False) ### Will enable once file is available.
+            self.cancel_btn = QtWidgets.QPushButton("Cancel")
+            btn_layout.addWidget(self.start_btn)
+            btn_layout.addWidget(self.load_btn)
+            btn_layout.addWidget(self.cancel_btn)
+            layout.addLayout(btn_layout)
         
-        self.button_box.accepted.connect(self.accept)
-        self.button_box.rejected.connect(self.reject)
-        layout.addWidget(self.button_box)
+            self.start_btn.clicked.connect(self.accept) # Connect to QDialog's accept slot
+    
+            self.load_btn.clicked.connect(self._load_data_avail) 
+            
+            self.cancel_btn.clicked.connect(self.reject) # Connect to QDialog's reject slot
+
+        else:
+            # Standard OK and Cancel buttons
+            self.button_box = QtWidgets.QDialogButtonBox(
+                QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            )
+            
+            self.button_box.accepted.connect(self.accept)
+            self.button_box.rejected.connect(self.reject)
+            layout.addWidget(self.button_box)
 
         # Initial update of dBm field if DAC scales are already known
         if self.dac_scales: # Check if dac_scales were passed or fetched synchronously before UI setup
@@ -300,10 +323,20 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         
         self.setMinimumWidth(500) # Ensure dialog is wide enough
 
+    def _load_data_avail(self):
+        self.use_data_from_file = True
+        self.accept()
+        
     def _import_file(self):
         """Handle file import and update UI fields."""
         
         payload = load_multisweep_payload(self)
+        if payload is None:
+            return
+        else:
+            self.load_btn.setEnabled(True) ### Will enable once file is available.
+            
+        self._load_data = payload.copy() #### Storing it for later ###
         params = payload['initial_parameters']
     
         # Resonances (convert Hz -> MHz for display)
@@ -358,92 +391,95 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         """
         params_dict = {}
         try:
-            amp_text = self.amp_edit.text().strip()
-            # Parse the text from the amplitude edit field.
-            # _parse_amplitude_values returns a list of floats.
-            amps_list = self._parse_amplitude_values(amp_text) 
-
-            # If amp_text was empty or unparsable, _parse_amplitude_values returns an empty list.
-            # In this case, we must provide a default list of amplitudes for the task.
-            if not amps_list:
-                # Use a list containing a single default amplitude.
-                # Prioritize default from initial params if available, else global default.
-                initial_amp_setting = self.params.get('amp', DEFAULT_AMPLITUDE) # Could be from 'amp' or 'amps'[0] via setup_amplitude_group
-                
-                # Ensure initial_amp_setting is a single float value
-                if isinstance(initial_amp_setting, list):
-                    single_default = initial_amp_setting[0] if initial_amp_setting else DEFAULT_AMPLITUDE
-                else:
-                    single_default = initial_amp_setting
-
-                amps_list = [single_default]
-
-            # Store the full list of amplitudes (parsed or defaulted) for the MultisweepTask.
-            params_dict['amps'] = amps_list
-
-            # Store the first amplitude under the singular 'amp' key for potential compatibility
-            # or for display purposes elsewhere. The MultisweepTask itself iterates over 'amps'.
-            # This assumes amps_list is now guaranteed to be non-empty.
-            params_dict['amp'] = amps_list[0]
-            
-            params_dict['span_hz'] = float(self.span_khz_edit.text()) * 1e3 # Convert kHz to Hz
-            params_dict['npoints_per_sweep'] = int(self.npoints_edit.text())
-            params_dict['nsamps'] = int(self.nsamps_edit.text())
-            
-            recalc_method_text = self.recalc_cf_combo.currentText()
-            if recalc_method_text == "None":
-                params_dict['bias_frequency_method'] = None
-            elif recalc_method_text == "min-S21":
-                params_dict['bias_frequency_method'] = "min-s21"
-            elif recalc_method_text == "max-dIQ":
-                params_dict['bias_frequency_method'] = "max-diq"
-            else: # Should not happen with QComboBox
-                params_dict['bias_frequency_method'] = None
-            
-            # Get rotate saved data setting
-            params_dict['rotate_saved_data'] = self.rotate_saved_data_checkbox.isChecked()
-            
-            # Get sweep direction
-            sweep_direction_text = self.sweep_direction_combo.currentText()
-            if sweep_direction_text == "Upward":
-                params_dict['sweep_direction'] = "upward"
-            elif sweep_direction_text == "Downward":
-                params_dict['sweep_direction'] = "downward"
-            elif sweep_direction_text == "Both":
-                params_dict['sweep_direction'] = "both"
-            else: # Should not happen with QComboBox
-                params_dict['sweep_direction'] = "upward"
-                
-            # Include the essential context for the multisweep
-            if self.load_multisweep:
-                params_dict['resonance_frequencies'] = []
-                freqs = self.resonances_edit.text().split(',')
-                for f in freqs:
-                    params_dict['resonance_frequencies'].append(np.float64(f) * 1e6)
+            if self.use_data_from_file:
+                return self._load_data
             else:
-                params_dict['resonance_frequencies'] = self.resonance_frequencies
-            params_dict['module'] = self.current_module
-            
-            # Get fitting parameters
-            params_dict['apply_skewed_fit'] = self.apply_skewed_fit_checkbox.isChecked()
-            params_dict['apply_nonlinear_fit'] = self.apply_nonlinear_fit_checkbox.isChecked()
-
-            # Basic validation
-            if params_dict['span_hz'] <= 0:
-                QtWidgets.QMessageBox.warning(self, "Validation Error", "Span must be positive.")
-                return None
-            if params_dict['npoints_per_sweep'] < 2:
-                QtWidgets.QMessageBox.warning(self, "Validation Error", "Number of points per sweep must be at least 2.")
-                return None
-            if params_dict['nsamps'] < 1:
-                QtWidgets.QMessageBox.warning(self, "Validation Error", "Samples to average must be at least 1.")
-                return None
-            if len(params_dict['resonance_frequencies']) <= 1:
-                 QtWidgets.QMessageBox.warning(self, "Configuration Error", "No target resonances specified for multisweep.")
-                 return None
-
-
-            return params_dict
+                amp_text = self.amp_edit.text().strip()
+                # Parse the text from the amplitude edit field.
+                # _parse_amplitude_values returns a list of floats.
+                amps_list = self._parse_amplitude_values(amp_text) 
+    
+                # If amp_text was empty or unparsable, _parse_amplitude_values returns an empty list.
+                # In this case, we must provide a default list of amplitudes for the task.
+                if not amps_list:
+                    # Use a list containing a single default amplitude.
+                    # Prioritize default from initial params if available, else global default.
+                    initial_amp_setting = self.params.get('amp', DEFAULT_AMPLITUDE) # Could be from 'amp' or 'amps'[0] via setup_amplitude_group
+                    
+                    # Ensure initial_amp_setting is a single float value
+                    if isinstance(initial_amp_setting, list):
+                        single_default = initial_amp_setting[0] if initial_amp_setting else DEFAULT_AMPLITUDE
+                    else:
+                        single_default = initial_amp_setting
+    
+                    amps_list = [single_default]
+    
+                # Store the full list of amplitudes (parsed or defaulted) for the MultisweepTask.
+                params_dict['amps'] = amps_list
+    
+                # Store the first amplitude under the singular 'amp' key for potential compatibility
+                # or for display purposes elsewhere. The MultisweepTask itself iterates over 'amps'.
+                # This assumes amps_list is now guaranteed to be non-empty.
+                params_dict['amp'] = amps_list[0]
+                
+                params_dict['span_hz'] = float(self.span_khz_edit.text()) * 1e3 # Convert kHz to Hz
+                params_dict['npoints_per_sweep'] = int(self.npoints_edit.text())
+                params_dict['nsamps'] = int(self.nsamps_edit.text())
+                
+                recalc_method_text = self.recalc_cf_combo.currentText()
+                if recalc_method_text == "None":
+                    params_dict['bias_frequency_method'] = None
+                elif recalc_method_text == "min-S21":
+                    params_dict['bias_frequency_method'] = "min-s21"
+                elif recalc_method_text == "max-dIQ":
+                    params_dict['bias_frequency_method'] = "max-diq"
+                else: # Should not happen with QComboBox
+                    params_dict['bias_frequency_method'] = None
+                
+                # Get rotate saved data setting
+                params_dict['rotate_saved_data'] = self.rotate_saved_data_checkbox.isChecked()
+                
+                # Get sweep direction
+                sweep_direction_text = self.sweep_direction_combo.currentText()
+                if sweep_direction_text == "Upward":
+                    params_dict['sweep_direction'] = "upward"
+                elif sweep_direction_text == "Downward":
+                    params_dict['sweep_direction'] = "downward"
+                elif sweep_direction_text == "Both":
+                    params_dict['sweep_direction'] = "both"
+                else: # Should not happen with QComboBox
+                    params_dict['sweep_direction'] = "upward"
+                    
+                # Include the essential context for the multisweep
+                if self.load_multisweep:
+                    params_dict['resonance_frequencies'] = []
+                    freqs = self.resonances_edit.text().split(',')
+                    for f in freqs:
+                        params_dict['resonance_frequencies'].append(np.float64(f) * 1e6)
+                else:
+                    params_dict['resonance_frequencies'] = self.resonance_frequencies
+                params_dict['module'] = self.current_module
+                
+                # Get fitting parameters
+                params_dict['apply_skewed_fit'] = self.apply_skewed_fit_checkbox.isChecked()
+                params_dict['apply_nonlinear_fit'] = self.apply_nonlinear_fit_checkbox.isChecked()
+    
+                # Basic validation
+                if params_dict['span_hz'] <= 0:
+                    QtWidgets.QMessageBox.warning(self, "Validation Error", "Span must be positive.")
+                    return None
+                if params_dict['npoints_per_sweep'] < 2:
+                    QtWidgets.QMessageBox.warning(self, "Validation Error", "Number of points per sweep must be at least 2.")
+                    return None
+                if params_dict['nsamps'] < 1:
+                    QtWidgets.QMessageBox.warning(self, "Validation Error", "Samples to average must be at least 1.")
+                    return None
+                if len(params_dict['resonance_frequencies']) <= 1:
+                     QtWidgets.QMessageBox.warning(self, "Configuration Error", "No target resonances specified for multisweep.")
+                     return None
+    
+    
+                return params_dict
         except ValueError as e: # Handles errors from float() or int() conversion
             QtWidgets.QMessageBox.critical(self, "Input Error", f"Invalid numerical input: {str(e)}")
             return None

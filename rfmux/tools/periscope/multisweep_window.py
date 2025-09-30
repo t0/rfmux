@@ -358,6 +358,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         
         layout.addWidget(self.progress_group)
 
+    def _hide_progress_bars(self):
+        """Hide the entire Analysis Progress group."""
+        if self.progress_group:
+            self.progress_group.hide()
+
     def update_progress(self, module, progress_percentage):
         """
         Updates the progress bar if the update is for the target module.

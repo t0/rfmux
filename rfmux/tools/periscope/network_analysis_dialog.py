@@ -120,6 +120,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         btn_layout = QtWidgets.QHBoxLayout()
         self.start_btn = QtWidgets.QPushButton("Start Analysis")
         self.load_btn = QtWidgets.QPushButton("Load Analysis")
+        self.load_btn.setEnabled(False) ### Will enable once file is available.
         self.cancel_btn = QtWidgets.QPushButton("Cancel")
         btn_layout.addWidget(self.start_btn)
         btn_layout.addWidget(self.load_btn)
@@ -175,6 +176,8 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         payload = load_network_analysis_payload(self)
         if payload is None:
             return
+        else:
+            self.load_btn.setEnabled(True)
 
         params = payload["parameters"]
         self._load_data = payload.copy()

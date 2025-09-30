@@ -761,7 +761,6 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
         self._update_multisweep_button_state(active_module)
         
     def _use_loaded_resonances(self, active_module: int, load_resonance_freqs: list):
-        print("Using loaded resonances at")
         if active_module in self.plots:
             plot_info = self.plots[active_module]
             amp_plot_item = plot_info['amp_plot'].getPlotItem()

@@ -1047,6 +1047,48 @@ class PeriscopeRuntime:
             print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
             QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
 
+
+    def _load_multisweep_analysis(self, load_params: dict):
+        """
+        Start a new multisweep analysis.
+
+        Creates a `MultisweepWindow` and a `MultisweepTask`.
+        Connects signals for progress, data updates, and completion.
+
+        Args:
+            params (dict): Parameters for the multisweep analysis, typically
+                            from a configuration dialog.
+        """
+        # MultisweepWindow from .ui, MultisweepTask from .tasks, sys, traceback from .utils
+        try:
+            if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep."); return
+            window_id = f"multisweep_window_{self.multisweep_window_count}"; self.multisweep_window_count += 1
+            params = load_params['initial_parameters']
+            target_module = params.get('module')
+            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep."); return
+            
+            dac_scales_for_window = self.dac_scales if hasattr(self, 'dac_scales') else {}
+            window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), 
+                                     dac_scales=dac_scales_for_window, dark_mode=self.dark_mode)
+            self.multisweep_windows[window_id] = {'window': window, 'params': params.copy()}
+            
+            # Connect df_calibration_ready signal if the method exists
+            if hasattr(window, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
+                window.df_calibration_ready.connect(self._handle_df_calibration_ready)
+
+            window._hide_progress_bars()
+            iteration_params = load_params['results_by_iteration']
+            for i in range(len(iteration_params)):
+                amplitude = iteration_params[i]['amplitude']
+                direction = iteration_params[i]['direction']
+                data = iteration_params[i]['data']
+                window.update_data(target_module, i, amplitude, direction, data, None)
+            window.show()
+        except Exception as e:
+            error_msg = f"Error starting multisweep analysis: {type(e).__name__}: {str(e)}"
+            print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
+            QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
+
     def _start_multisweep_analysis_for_window(self, window_instance: 'MultisweepWindow', params: dict):
         """
         Re-run a multisweep analysis for an existing MultisweepWindow.

@@ -432,6 +432,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.btn_netanal.setEnabled(False)
             self.btn_netanal.setToolTip("CRS object not available - network analysis disabled.")
 
+        # Button to Load Multisweep Dialog
+        self.btn_load_multi = QtWidgets.QPushButton("Load Multisweep")
+        self.btn_load_multi.setToolTip("Load Multisweep directly from main window.")
+        self.btn_load_multi.clicked.connect(self._load_multisweep_dialog)
+        if self.crs is None: # Disable if no CRS object is available
+            self.btn_load_multi.setEnabled(False)
+            self.btn_load_multi.setToolTip("CRS object not available - load multisweep disabled.")
+
         # Help button
         self.btn_help = QtWidgets.QPushButton("Help")
         self.btn_help.setToolTip("Show usage instructions, interaction details, and examples.")
@@ -498,9 +506,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         action_buttons_layout.addWidget(self.btn_interactive_session)
 
         action_buttons_layout.addWidget(self.btn_init_crs)
-        action_buttons_layout.addWidget(self.btn_netanal) 
+        action_buttons_layout.addWidget(self.btn_netanal)
+        action_buttons_layout.addWidget(self.btn_load_multi)
         action_buttons_layout.addWidget(self.btn_toggle_cfg)
-        action_buttons_layout.addWidget(self.btn_help)    
+        action_buttons_layout.addWidget(self.btn_help)  
         layout.addWidget(action_buttons_widget)
 
         # --- Collapsible Configuration Panel ---
@@ -867,7 +876,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             params = dialog.get_parameters()
             if params:
                 if "modules" in params.keys():
-                    print("Using loaded data")
                     self._load_network_analysis(params)
                 else:
                     self._start_network_analysis(params)
@@ -1166,6 +1174,45 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         except Exception as e:
             print(f"Error in _rerun_network_analysis: {e}")
             traceback.print_exc()
+        
+    def _load_multisweep_dialog(self) -> None:
+        """
+        Show the dialog to configure and run multisweep analysis.
+        """
+        # Try to get active module
+        default_dac_scales = {m: -0.5 for m in range(1, 9)}
+        netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
+        netanal_dialog.module_entry.setText(str(self.module))
+        fetcher = DACScaleFetcher(self.crs)
+        fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
+        fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
+        fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
+        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
+        fetcher.start()
+        
+        active_module = self.module
+    
+        # Try to get resonances (if available)
+        resonances = []
+        if hasattr(self, "resonance_freqs") and active_module is not None:
+            resonances = self.resonance_freqs.get(active_module, [])
+    
+        
+        # --- Launch dialog even if no resonances yet ---
+        dialog = MultisweepDialog( parent=netanal_dialog, 
+                                   resonance_frequencies=resonances,   # may be []
+                                   dac_scales=netanal_dialog.dac_scales,   # may be {}
+                                   current_module=active_module,       # may be None
+                                   initial_params=None ,                # nothing prefilled
+                                   load_multisweep = True
+                                 )
+    
+        
+        if dialog.exec():
+            params = dialog.get_parameters()
+            if params:
+                self._start_multisweep_analysis(params)
+    
     
     def _netanal_progress(self, module_param: int, progress: float):
         """Slot for network analysis progress signals. Currently a placeholder."""

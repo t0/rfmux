@@ -3,6 +3,7 @@
 from .utils import *
 from .tasks import *
 from .ui import *
+import asyncio
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
@@ -1048,6 +1049,10 @@ class PeriscopeRuntime:
             QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
 
 
+    async def set_nco_from_load(self, crs, nco_freq, module):
+        await crs.set_nco_frequency(nco_freq, module=module)
+        
+    
     def _load_multisweep_analysis(self, load_params: dict):
         """
         Start a new multisweep analysis.
@@ -1078,6 +1083,22 @@ class PeriscopeRuntime:
 
             window._hide_progress_bars()
             iteration_params = load_params['results_by_iteration']
+
+            span_hz = params['span_hz']
+            reso_frequencies = params['resonance_frequencies']
+
+            nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
+
+            crs = self.crs
+            asyncio.run(self.set_nco_from_load(crs, nco_freq, target_module)) #### Setting up the nco frequency ######
+            
+            # history = {}
+            # resonance_order = iteration_params[0]['data'].keys()
+            # for r in resonance_order:
+            #     history[r-1] = iteration_params[0]['data'][r]['bias_frequency']
+
+            # print("history is", history)
+            
             for i in range(len(iteration_params)):
                 amplitude = iteration_params[i]['amplitude']
                 direction = iteration_params[i]['direction']

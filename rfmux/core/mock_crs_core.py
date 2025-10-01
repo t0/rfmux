@@ -615,7 +615,7 @@ class MockCRS(BaseCRS):
 
     def get_nco_frequency(self, module=None, target=None): # target unused but for API compat
         assert module is not None and isinstance(module, int)
-        return self.nco_frequencies.get(module)
+        return self.nco_frequencies.get(module, 0)
 
     def set_adc_attenuator(self, attenuation, module=None):
         assert isinstance(attenuation, int) and 0 <= attenuation <= 27

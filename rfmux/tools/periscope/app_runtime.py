@@ -1018,8 +1018,9 @@ class PeriscopeRuntime:
                 self.multisweep_signals.completed_iteration.disconnect()
                 self.multisweep_signals.all_completed.disconnect()
                 self.multisweep_signals.error.disconnect()
-            except TypeError: pass # Raised if signals were not previously connected
-            
+            except TypeError: 
+                pass # Raised if signals were not previously connected
+
             # Connect signals from the MultisweepTask to the new window's slots
             self.multisweep_signals.progress.connect(window.update_progress,
                                                    QtCore.Qt.ConnectionType.QueuedConnection)
@@ -1135,6 +1136,35 @@ class PeriscopeRuntime:
             
         self.multisweep_windows[window_id]['params'] = params.copy() # Update stored params
         # Pass the window_instance to the task (now starts automatically since it's a QThread)
+        
+        ### This reconnects to signal ####
+        try:
+            self.multisweep_signals.progress.disconnect()
+            self.multisweep_signals.data_update.disconnect()
+            self.multisweep_signals.completed_iteration.disconnect()
+            self.multisweep_signals.all_completed.disconnect()
+            self.multisweep_signals.error.disconnect()
+        except TypeError: 
+            pass # Raised if signals were not previously connected
+
+        # Connect signals from the MultisweepTask to the new window's slots
+        self.multisweep_signals.progress.connect(window_instance.update_progress,
+                                               QtCore.Qt.ConnectionType.QueuedConnection)
+        self.multisweep_signals.starting_iteration.connect(window_instance.handle_starting_iteration,
+                                                         QtCore.Qt.ConnectionType.QueuedConnection)
+        self.multisweep_signals.data_update.connect(window_instance.update_data,
+                                                  QtCore.Qt.ConnectionType.QueuedConnection)
+        self.multisweep_signals.completed_iteration.connect(
+            lambda module, iteration, amplitude, direction: window_instance.completed_amplitude_sweep(module, amplitude),
+            QtCore.Qt.ConnectionType.QueuedConnection)
+        self.multisweep_signals.all_completed.connect(window_instance.all_sweeps_completed,
+                                                    QtCore.Qt.ConnectionType.QueuedConnection)
+        self.multisweep_signals.error.connect(window_instance.handle_error,
+                                            QtCore.Qt.ConnectionType.QueuedConnection)
+        self.multisweep_signals.fitting_progress.connect(window_instance.handle_fitting_progress,
+                                                        QtCore.Qt.ConnectionType.QueuedConnection)
+
+        
         task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window_instance)
         self.multisweep_tasks[old_task_key] = task
         task.start()  # Start the QThread directly

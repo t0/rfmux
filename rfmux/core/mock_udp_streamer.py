@@ -110,7 +110,6 @@ class MockCRSUDPStreamer(threading.Thread):
                 self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
 
                 if platform.system() == "Windows":
-                    print("Identfied as a windows machine while setting up socket")
                     try:
                         self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
                         self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("127.0.0.1"))
@@ -121,7 +120,6 @@ class MockCRSUDPStreamer(threading.Thread):
                 # Bind multicast to loopback interface (lo) for local testing
                 # Using if_nametoindex to get the interface index for 'lo'  
                 else:
-                    print("Identfied as an Unix-like system, either Mac or Linux, will follow the socket protocol accordingly")
                     for iface in ("lo", "lo0"): 
                         # lo is for Linux and lo0 is for Mac 
                         try:
@@ -139,7 +137,6 @@ class MockCRSUDPStreamer(threading.Thread):
                         # Fallback if 'lo or lo0' interface not found (shouldn't happen on Linux or Mac)
                         print("[UDP] Warning: Could not find 'lo' or 'lo0' interface")
                         print("[UDP] Warning: The packets are now being launched on your network, rather than on the loopback interface")
-                        print("\nPlease implement the loopback interface with either 'lo' or 'lo0'")
                         self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton('0.0.0.0'))
                     
                     print(f"[UDP] Multicast socket initialized for {self.multicast_group}:{self.multicast_port}")

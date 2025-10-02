@@ -43,7 +43,6 @@ import platform
 # have been removed as they are expected to be covered by 'from .utils import *'.
 
 if platform.system() == "Windows":
-    print("Identified as Windows system")
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 def main():

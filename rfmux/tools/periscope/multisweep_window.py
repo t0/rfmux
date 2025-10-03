@@ -358,6 +358,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         
         layout.addWidget(self.progress_group)
 
+    def _hide_progress_bars(self):
+        """Hide the entire Analysis Progress group."""
+        if self.progress_group:
+            self.progress_group.hide()
+
     def update_progress(self, module, progress_percentage):
         """
         Updates the progress bar if the update is for the target module.
@@ -1324,7 +1329,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         from .bias_kids_dialog import BiasKidsDialog
         
         # Show dialog to get parameters
-        dialog = BiasKidsDialog(self)
+        dialog = BiasKidsDialog(self, self.target_module)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return  # User cancelled
         

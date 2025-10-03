@@ -233,6 +233,23 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             self.progress_bars = {}
             self.progress_labels = {}
 
+    def _hide_progress_bars(self):
+        """Hide the entire Analysis Progress group."""
+        if self.progress_group:
+            self.progress_group.hide()
+
+    def _show_progress_bars(self, reset=False):
+        """Show the Analysis Progress group again.
+           If reset=True, reset progress bars and labels to defaults.
+        """
+        if self.progress_group:
+            self.progress_group.show()
+            if reset:
+                for module, pbar in self.progress_bars.items():
+                    pbar.setValue(0)  # reset progress
+                for module, label in self.progress_labels.items():
+                    label.clear()     # clear amplitude text
+    
     def _setup_plot_area(self, layout):
         """Set up the plot area with tabs for each module."""
         self.tabs = QtWidgets.QTabWidget()
@@ -742,8 +759,41 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             self._update_resonance_legend_entry(active_module) 
             self._toggle_resonances_visible(self.show_resonances_cb.isChecked()) 
         self._update_multisweep_button_state(active_module)
+        
+    def _use_loaded_resonances(self, active_module: int, load_resonance_freqs: list):
+        if active_module in self.plots:
+            plot_info = self.plots[active_module]
+            amp_plot_item = plot_info['amp_plot'].getPlotItem()
+            phase_plot_item = plot_info['phase_plot'].getPlotItem()
 
+            for line in plot_info.get('resonance_lines_mag', []):
+                amp_plot_item.removeItem(line)
+            plot_info['resonance_lines_mag'] = []
 
+            for line in plot_info.get('resonance_lines_phase', []):
+                phase_plot_item.removeItem(line)
+            plot_info['resonance_lines_phase'] = []
+
+            self.resonance_freqs[active_module] = []
+            
+            res_freqs_hz = load_resonance_freqs
+
+            line_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
+            for res_freq_hz in res_freqs_hz:
+                line_mag = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
+                amp_plot_item.addItem(line_mag)
+                plot_info['resonance_lines_mag'].append(line_mag)
+
+                line_phase = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
+                phase_plot_item.addItem(line_phase)
+                plot_info['resonance_lines_phase'].append(line_phase)
+
+            self.resonance_freqs[active_module] = res_freqs_hz
+            self._update_resonance_checkbox_text(active_module) 
+            self._update_resonance_legend_entry(active_module) 
+            self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
+        self._update_multisweep_button_state(active_module)
+        
     def _remove_faux_resonance_legend_entry(self, module_id: int):
         """Removes the faux resonance legend entry for a module."""
         if module_id in self.plots:

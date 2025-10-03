@@ -5,16 +5,64 @@ from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout, QFormLayout
 from PyQt6.QtCore import Qt
 import numpy as np
 
+from .utils import (QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator, QDoubleValidator, QIntValidator)
+import pickle
+
+def load_bias_payload(parent: QtWidgets.QWidget):
+    file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+        parent,
+        "Load Network Analysis Parameters",
+        "",
+        "Pickle Files (*.pkl *.pickle);;All Files (*)",
+    )
+    if not file_path:
+        return None
+
+    try:
+        with open(file_path, "rb") as fh:
+            payload = pickle.load(fh)
+    except Exception as exc:
+        QtWidgets.QMessageBox.critical(
+            parent,
+            "Load Failed",
+            f"Could not read '{file_path}':\n{exc}",
+        )
+        return None
+
+    if (
+        isinstance(payload, dict)
+        and isinstance(payload.get("initial_parameters"), dict)
+        and (payload.get("bias_kids_output") is not None)
+    ):
+        return payload
+
+    QtWidgets.QMessageBox.warning(
+        parent,
+        "Invalid File",
+        "The selected file does not contain Bias parameters.",
+    )
+    return None
+
 
 class BiasKidsDialog(QDialog):
     """Dialog for configuring Bias KIDs algorithm parameters."""
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, active_module : int | None = None, load_bias = False):
         super().__init__(parent)
         self.setWindowTitle("Bias KIDs Configuration")
         self.setModal(True)
         self.setMinimumWidth(400)
-        
+        self._load_data = {}
+        self.use_load_file = False
+        self.current_module = active_module
+
+        if load_bias:
+            self.load_ui()
+        else:
+            self.setup_ui()
+
+
+    def setup_ui(self):
         # Create layout
         layout = QVBoxLayout(self)
         
@@ -146,6 +194,170 @@ class BiasKidsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         
+    def load_ui(self):
+        
+        self.setWindowTitle("Load Bias")
+        layout = QtWidgets.QVBoxLayout(self)
+
+        # --- Top: Import File Button ---
+        self.import_button = QtWidgets.QPushButton("Import File")
+        self.import_button.clicked.connect(self._import_file)
+        layout.addWidget(self.import_button, alignment=QtCore.Qt.AlignTop)
+
+        # --- Tones ---
+        tones_layout = QtWidgets.QHBoxLayout()
+        tones_label = QtWidgets.QLabel("Tones (MHz):")
+        self.tones_edit = QtWidgets.QLineEdit()
+        tones_layout.addWidget(tones_label)
+        tones_layout.addWidget(self.tones_edit)
+        layout.addLayout(tones_layout)
+
+        # --- Sweep Amplitude ---
+        amp_layout = QtWidgets.QHBoxLayout()
+        amp_label = QtWidgets.QLabel("Sweep Amplitude (normalized):")
+        self.amp_edit = QtWidgets.QLineEdit()
+        amp_layout.addWidget(amp_label)
+        amp_layout.addWidget(self.amp_edit)
+        layout.addLayout(amp_layout)
+
+        span_layout = QtWidgets.QHBoxLayout()
+        span_label = QtWidgets.QLabel("Span (kHz)")
+        self.span_khz_edit = QtWidgets.QLineEdit(str(50.0))
+        self.span_khz_edit.setValidator(QDoubleValidator(0.1, 10000.0, 2, self)) # Min 0.1 kHz, Max 10 MHz
+        span_layout.addWidget(span_label)
+        span_layout.addWidget(self.span_khz_edit)
+        layout.addLayout(span_layout)
+
+        # --- Phase ---
+        phase_layout = QtWidgets.QHBoxLayout()
+        phase_label = QtWidgets.QLabel("Rotational Phases (degrees):")
+        self.phase_edit = QtWidgets.QLineEdit("0.0")  # default value
+        phase_layout.addWidget(phase_label)
+        phase_layout.addWidget(self.phase_edit)
+        layout.addLayout(phase_layout)
+
+        # --- Bottom Row: Set Bias / Set and Plot Bias ---
+        bias_layout = QtWidgets.QHBoxLayout()
+        self.set_bias_btn = QtWidgets.QPushButton("Set Bias")
+        self.plot_bias_btn = QtWidgets.QPushButton("Set + Plot Bias")
+        self.plot_bias_btn.setEnabled(False)
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        bias_layout.addWidget(self.set_bias_btn, alignment=QtCore.Qt.AlignLeft)
+        bias_layout.addWidget(self.plot_bias_btn, alignment=QtCore.Qt.AlignCenter)
+        bias_layout.addWidget(self.cancel_btn, alignment=QtCore.Qt.AlignRight)
+        layout.addLayout(bias_layout)
+
+        # --- Connect actions ---
+        self.set_bias_btn.clicked.connect(self.accept)
+        self.plot_bias_btn.clicked.connect(self._on_set_and_plot_bias)
+        self.cancel_btn.clicked.connect(self.reject)
+
+        self.setMinimumWidth(500) # Ensure dialog is wide enough
+
+        
+
+    def _on_set_and_plot_bias(self):
+        self.use_load_file = True
+        print("We can plot bro")
+
+    def _import_file(self):
+        """Handle file import and update UI fields."""
+        
+        payload = load_bias_payload(self)
+        if payload is None:
+            return
+        else:
+            self.plot_bias_btn.setEnabled(True) ### Will enable once file is available.
+            
+        self._load_data = payload.copy() #### Storing it for later ###
+        params = payload['initial_parameters']
+        bias_output = payload['bias_kids_output']
+
+        bias_freqs = []
+        amplitudes = []
+        phases = []
+
+        for det_idx, det_data in bias_output.items():
+            if not det_data.get("bias_successful", True):
+                print("Bias was successful")
+        
+            channel = int(det_data.get("bias_channel", det_idx))
+            bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
+            bias_freqs.append(bias_freq)
+            amplitude = det_data.get("sweep_amplitude")
+            amplitudes.append(amplitude)
+            phase = det_data.get("optimal_phase_degrees", 0)
+            phases.append(phase)
+
+
+        #### Setting up the text boxes #####
+        
+        self.tones_edit.setText(",".join([f"{f/1e6:.6f}" for f in bias_freqs]))
+        
+        span_khz = params['span_hz'] / 1e3
+        self.span_khz_edit.setText(str(span_khz))
+
+        self.amp_edit.setText(",".join([f"{a:.3f}" for a in amplitudes]))
+        self.phase_edit.setText(",".join([f"{p:.1f}" for p in phases]))
+
+        
+    def get_load_param(self) -> dict | None:
+        params_dict = {}
+        try:
+            amp_text = [x.strip() for x in self.amp_edit.text().split(',')]
+            tone_text = [t.strip() for t in self.tones_edit.text().split(',')]
+            phase_text = [p.strip() for p in self.phase_edit.text().split(',')]
+
+            params_dict['module'] = self.current_module
+            params_dict['phases'] = []
+            params_dict['amplitudes'] = []
+            params_dict['bias_frequencies'] = []
+
+            for i in range(len(amp_text)):
+                params_dict['amplitudes'].append(float(amp_text[i]))
+            for i in range(len(tone_text)):    
+                params_dict['bias_frequencies'].append(float(tone_text[i])*1e6)
+
+            span_hz = float(self.span_khz_edit.text()) * 1e3
+            params_dict['span_hz'] = span_hz
+
+            len_amps = len(params_dict['amplitudes'])
+            len_bias = len(params_dict['bias_frequencies'])
+
+            if len(phase_text) == 1: ##### In case user wants to set the same phase value for all the tones ####
+                for i in range(len_amps):
+                    params_dict['phases'].append(float(phase_text[0]))
+            else:
+                for i in range(len(phase_text)):    
+                    params_dict['phases'].append(float(phase_text[i]))
+
+            if params_dict['span_hz'] <= 0:
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "Span must be positive.")
+                return None
+            if params_dict['module'] is None:
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "No module identified.")
+                return None
+            if len_amps < 1:
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "No amplitudes provided.")
+                return None
+            if (len_amps != len_bias):
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "Number of amplitudes and frequencies are not the same")
+                return None
+            if len_bias < 1:
+                QtWidgets.QMessageBox.warning(self, "Configuration Error", "No frequencies provided.")
+                return None
+
+            return params_dict
+
+        
+        except ValueError as e: # Handles errors from float() or int() conversion
+            QtWidgets.QMessageBox.critical(self, "Input Error", f"Invalid numerical input: {str(e)}")
+            return None
+        except Exception as e: # Catch any other unexpected errors
+            traceback.print_exc()
+            QtWidgets.QMessageBox.critical(self, "Error", f"Could not parse parameters: {str(e)}")
+            return None
+    
     def _update_phase_controls(self, enabled):
         """Enable/disable phase optimization controls based on checkbox state."""
         self.apply_bandpass_checkbox.setEnabled(enabled)

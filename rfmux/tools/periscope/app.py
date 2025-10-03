@@ -54,6 +54,7 @@ from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, Initial
 from .app_runtime import PeriscopeRuntime
 from .mock_configuration_dialog import MockConfigurationDialog
 
+
 # Note: The original commented-out lines for specific UI class imports
 # (e.g., NetworkAnalysisDialog) have been removed, as these are expected
 # to be covered by 'from .ui import *'.
@@ -440,6 +441,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.btn_load_multi.setEnabled(False)
             self.btn_load_multi.setToolTip("CRS object not available - load multisweep disabled.")
 
+        # Button to Load Bias KIDS Dialog
+        self.btn_load_bias = QtWidgets.QPushButton("Load Bias")
+        self.btn_load_bias.setToolTip("Bias KIDS directly from the main window.")
+        self.btn_load_bias.clicked.connect(self.handle_bias_from_file)
+        if self.crs is None: # Disable if no CRS object is available
+            self.btn_load_bias.setEnabled(False)
+            self.btn_load_bias.setToolTip("CRS object not available - load Bias disabled.")
+
         # Help button
         self.btn_help = QtWidgets.QPushButton("Help")
         self.btn_help.setToolTip("Show usage instructions, interaction details, and examples.")
@@ -508,6 +517,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         action_buttons_layout.addWidget(self.btn_init_crs)
         action_buttons_layout.addWidget(self.btn_netanal)
         action_buttons_layout.addWidget(self.btn_load_multi)
+        action_buttons_layout.addWidget(self.btn_load_bias)
         action_buttons_layout.addWidget(self.btn_toggle_cfg)
         action_buttons_layout.addWidget(self.btn_help)  
         layout.addWidget(action_buttons_widget)
@@ -1206,7 +1216,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                                    initial_params=None ,                # nothing prefilled
                                    load_multisweep = True
                                  )
-    
+
         
         if dialog.exec():
             params = dialog.get_parameters()
@@ -1216,6 +1226,77 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 else:
                     self._start_multisweep_analysis(params)
     
+    
+    def handle_bias_from_file(self) -> None:
+        """Slot for the 'Load Bias…' button in the main application window."""
+        if self.crs is None:
+            QtWidgets.QMessageBox.warning(self, "CRS Not Available", "Connect to a CRS before loading bias data.")
+            return
+
+
+        from .bias_kids_dialog import BiasKidsDialog
+        dialog = BiasKidsDialog(self, self.module, True)
+
+        if dialog.exec():
+            params = dialog.get_load_param()
+            if params:
+                if "bias_kids_output" in params.keys():
+                    self._set_and_plot_bias(params)
+                else:
+                    self._set_bias(params)
+
+    def _set_bias(self, params):
+
+        span_hz = params.get("span_hz")
+        bias_freqs = params.get("bias_frequencies")
+        amplitudes = params.get("amplitudes")
+        phases = params.get("phases")
+        module = params.get("module")
+
+        channels = np.arange(1, len(bias_freqs)+1).tolist()
+
+        if module is None:
+            QtWidgets.QMessageBox.critical(self, "Missing Module", "The file does not specify which module was biased.")
+            return
+
+        if span_hz and bias_freqs:
+            nco_freq = ((min(bias_freqs) - span_hz / 2) + (max(bias_freqs) + span_hz / 2)) / 2
+            asyncio.run(self.set_nco_from_load(self.crs, nco_freq, module))
+    
+        asyncio.run(self.apply_bias_output(self.crs, module, amplitudes, bias_freqs, channels, phases))
+        
+    async def apply_bias_output(self, crs, module: int, amplitudes: list, bias_freqs : list,
+                                channels : list, phases : list) -> None:
+    
+        BASE_BAND_STEP_HZ = 298.0232238769531 #### Taken from bias_kids.py
+        if not bias_freqs:
+            return
+        nco_freq = await crs.get_nco_frequency(module=module)
+        async with crs.tuber_context() as ctx:
+            for i in range(len(amplitudes)):
+                quantized_bias = round(bias_freqs[i] / BASE_BAND_STEP_HZ) * BASE_BAND_STEP_HZ
+                ctx.set_frequency(quantized_bias - nco_freq, channel=channels[i], module=module)
+                
+                ctx.set_amplitude(float(amplitudes[i]), channel=channels[i], module=module)
+                
+                ctx.set_phase(float(phases[i]), units=crs.UNITS.DEGREES, target=crs.TARGET.ADC, channel=channels[i], module=module)
+            await ctx()
+    
+        # df_cal = {
+        #     det_idx: data["df_calibration"]
+        #     for det_idx, data in payload["bias_kids_output"].items()
+        #     if data.get("df_calibration") is not None
+        # }
+        # if df_cal and hasattr(self, "_handle_df_calibration_ready"):
+        #     self._handle_df_calibration_ready(module, df_cal)
+
+
+    def set_bias(self, params):
+        print("Place holder for setting bias")
+
+    def set_plot_bias(self, params):
+        print("Place holder for setting and plotting bias")
+            
     
     def _netanal_progress(self, module_param: int, progress: float):
         """Slot for network analysis progress signals. Currently a placeholder."""

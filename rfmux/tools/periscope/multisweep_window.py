@@ -1329,7 +1329,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         from .bias_kids_dialog import BiasKidsDialog
         
         # Show dialog to get parameters
-        dialog = BiasKidsDialog(self)
+        dialog = BiasKidsDialog(self, self.target_module)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return  # User cancelled
         

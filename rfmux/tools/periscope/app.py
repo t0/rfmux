@@ -1281,6 +1281,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 
                 ctx.set_phase(float(phases[i]), units=crs.UNITS.DEGREES, target=crs.TARGET.ADC, channel=channels[i], module=module)
             await ctx()
+
+        print(f"[Bias] Bias applied for {len(bias_freqs)} frequencies")
     
         # df_cal = {
         #     det_idx: data["df_calibration"]
@@ -1289,6 +1291,95 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # }
         # if df_cal and hasattr(self, "_handle_df_calibration_ready"):
         #     self._handle_df_calibration_ready(module, df_cal)
+
+
+    def _set_and_plot_bias(self, load_params):
+
+        #### Making sure the dac scales are set in case unit change is needed somewhere#####
+        
+        default_dac_scales = {m: -0.5 for m in range(1, 9)}
+        netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
+        netanal_dialog.module_entry.setText(str(self.module))
+        fetcher = DACScaleFetcher(self.crs)
+        fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
+        fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
+        fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
+        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
+        fetcher.start()
+        
+        active_module = self.module
+
+        try:
+            #### Will visualize in the multisweep window ######
+            if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep."); return
+            window_id = f"multisweep_window_{self.multisweep_window_count}"; self.multisweep_window_count += 1
+            params = load_params['initial_parameters']
+            target_module = params.get('module')
+            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep."); return
+            
+            dac_scales_for_window = self.dac_scales if hasattr(self, 'dac_scales') else {}
+            window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), 
+                                     dac_scales=dac_scales_for_window, dark_mode=self.dark_mode)
+            self.multisweep_windows[window_id] = {'window': window, 'params': params.copy()}
+            
+            # Connect df_calibration_ready signal if the method exists
+            if hasattr(window, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
+                window.df_calibration_ready.connect(self._handle_df_calibration_ready)
+
+            window._hide_progress_bars()
+
+            span_hz = params['span_hz']
+            reso_frequencies = params['resonance_frequencies']
+
+            nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
+            crs = self.crs
+            asyncio.run(self.set_nco_from_load(crs, nco_freq, target_module)) #### Setting up the nco frequency ######
+
+            ###### Setting up the bias #######
+
+            bias_output =load_params['bias_kids_output']
+            
+            bias_freqs = []
+            amplitudes = []
+            phases = []
+            channels = []
+            data_full = {}
+            
+            for det_idx, det_data in bias_output.items():
+                channel = int(det_data.get("bias_channel", det_idx))
+                channels.append(channel)
+                bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
+                bias_freqs.append(bias_freq)
+                amplitude = det_data.get("sweep_amplitude")
+                amplitudes.append(amplitude)
+                phase = det_data.get("optimal_phase_degrees", 0)
+                phases.append(phase)
+                new_data = {}
+                for k, v in bias_output[det_idx].items():
+                    new_data[k] = v
+                    if k == "nonlinear_model_iq":
+                        break
+                data_full[det_idx] = new_data
+
+
+            asyncio.run(self.apply_bias_output(self.crs, target_module, amplitudes, bias_freqs, channels, phases))
+            
+            ##### Plotting the bias #######
+
+            direction = load_params['results_by_iteration'][0]['direction'] ### Assuming sweep direction will be same for all 
+            
+            for i in range(len(bias_output)):
+                amplitude = amplitudes[i]
+                direction = direction
+                data = data_full
+                # print(type(data))
+                # print(data)
+                window.update_data(target_module, i, amplitude, direction, data, None)
+            window.show()
+        except Exception as e:
+            error_msg = f"Error displaying results: {type(e).__name__}: {str(e)}"
+            print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
+            QtWidgets.QMessageBox.critical(self, "Bias Error", error_msg)
 
 
     def set_bias(self, params):

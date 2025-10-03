@@ -258,7 +258,7 @@ class BiasKidsDialog(QDialog):
 
     def _on_set_and_plot_bias(self):
         self.use_load_file = True
-        print("We can plot bro")
+        self.accept()
 
     def _import_file(self):
         """Handle file import and update UI fields."""
@@ -304,50 +304,53 @@ class BiasKidsDialog(QDialog):
     def get_load_param(self) -> dict | None:
         params_dict = {}
         try:
-            amp_text = [x.strip() for x in self.amp_edit.text().split(',')]
-            tone_text = [t.strip() for t in self.tones_edit.text().split(',')]
-            phase_text = [p.strip() for p in self.phase_edit.text().split(',')]
-
-            params_dict['module'] = self.current_module
-            params_dict['phases'] = []
-            params_dict['amplitudes'] = []
-            params_dict['bias_frequencies'] = []
-
-            for i in range(len(amp_text)):
-                params_dict['amplitudes'].append(float(amp_text[i]))
-            for i in range(len(tone_text)):    
-                params_dict['bias_frequencies'].append(float(tone_text[i])*1e6)
-
-            span_hz = float(self.span_khz_edit.text()) * 1e3
-            params_dict['span_hz'] = span_hz
-
-            len_amps = len(params_dict['amplitudes'])
-            len_bias = len(params_dict['bias_frequencies'])
-
-            if len(phase_text) == 1: ##### In case user wants to set the same phase value for all the tones ####
-                for i in range(len_amps):
-                    params_dict['phases'].append(float(phase_text[0]))
+            if self.use_load_file:
+                return self._load_data
             else:
-                for i in range(len(phase_text)):    
-                    params_dict['phases'].append(float(phase_text[i]))
-
-            if params_dict['span_hz'] <= 0:
-                QtWidgets.QMessageBox.warning(self, "Validation Error", "Span must be positive.")
-                return None
-            if params_dict['module'] is None:
-                QtWidgets.QMessageBox.warning(self, "Validation Error", "No module identified.")
-                return None
-            if len_amps < 1:
-                QtWidgets.QMessageBox.warning(self, "Validation Error", "No amplitudes provided.")
-                return None
-            if (len_amps != len_bias):
-                QtWidgets.QMessageBox.warning(self, "Validation Error", "Number of amplitudes and frequencies are not the same")
-                return None
-            if len_bias < 1:
-                QtWidgets.QMessageBox.warning(self, "Configuration Error", "No frequencies provided.")
-                return None
-
-            return params_dict
+                amp_text = [x.strip() for x in self.amp_edit.text().split(',')]
+                tone_text = [t.strip() for t in self.tones_edit.text().split(',')]
+                phase_text = [p.strip() for p in self.phase_edit.text().split(',')]
+    
+                params_dict['module'] = self.current_module
+                params_dict['phases'] = []
+                params_dict['amplitudes'] = []
+                params_dict['bias_frequencies'] = []
+    
+                for i in range(len(amp_text)):
+                    params_dict['amplitudes'].append(float(amp_text[i]))
+                for i in range(len(tone_text)):    
+                    params_dict['bias_frequencies'].append(float(tone_text[i])*1e6)
+    
+                span_hz = float(self.span_khz_edit.text()) * 1e3
+                params_dict['span_hz'] = span_hz
+    
+                len_amps = len(params_dict['amplitudes'])
+                len_bias = len(params_dict['bias_frequencies'])
+    
+                if len(phase_text) == 1: ##### In case user wants to set the same phase value for all the tones ####
+                    for i in range(len_amps):
+                        params_dict['phases'].append(float(phase_text[0]))
+                else:
+                    for i in range(len(phase_text)):    
+                        params_dict['phases'].append(float(phase_text[i]))
+    
+                if params_dict['span_hz'] <= 0:
+                    QtWidgets.QMessageBox.warning(self, "Validation Error", "Span must be positive.")
+                    return None
+                if params_dict['module'] is None:
+                    QtWidgets.QMessageBox.warning(self, "Validation Error", "No module identified.")
+                    return None
+                if len_amps < 1:
+                    QtWidgets.QMessageBox.warning(self, "Validation Error", "No amplitudes provided.")
+                    return None
+                if (len_amps != len_bias):
+                    QtWidgets.QMessageBox.warning(self, "Validation Error", "Number of amplitudes and frequencies are not the same")
+                    return None
+                if len_bias < 1:
+                    QtWidgets.QMessageBox.warning(self, "Configuration Error", "No frequencies provided.")
+                    return None
+    
+                return params_dict
 
         
         except ValueError as e: # Handles errors from float() or int() conversion

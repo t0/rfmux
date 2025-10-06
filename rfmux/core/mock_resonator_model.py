@@ -5,6 +5,7 @@ Encapsulates the logic for resonator physics simulation, including S21 response.
 import numpy as np
 from . import mock_constants as const
 
+
 class MockResonatorModel:
     """
     Handles resonator physics simulation for MockCRS.
@@ -79,7 +80,8 @@ class MockResonatorModel:
         """Generate random resonator frequencies and Q factors for the original model."""
         frequencies = []
         Q_factors = []
-
+        np.random.seed(42) #### Fixing the seed so that we can recreate the randomness
+        
         freq_range = f_end - f_start
         if num_resonators * min_spacing > freq_range and num_resonators > 0 : # check num_resonators > 0
              max_resonators = int(freq_range / min_spacing) if min_spacing > 0 else np.inf
@@ -140,6 +142,7 @@ class MockResonatorModel:
     def generate_lc_resonances(self):
         """Generate LC resonances distributed across spectrum with kinetic inductance parameters."""
         # Get ALL values from stored config or defaults
+        np.random.seed(42) #### Fixing the seed so that we can recreate the randomness
         config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
         
         num_resonances = config.get('num_resonances', const.DEFAULT_NUM_RESONANCES)

@@ -27,7 +27,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                  normalize_plot3: bool = False, 
                  dark_mode: bool = False,
                  all_detectors_data: dict = None,  
-                 initial_detector_idx: int = None):  
+                 initial_detector_idx: int = None,
+                 noise_data = None): 
         super().__init__(parent)
         self.resonance_data_for_digest = resonance_data_for_digest or {} 
         self.detector_id = detector_id
@@ -55,6 +56,15 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.active_sweep_info = None 
         self.active_sweep_data = None 
         self.current_plot_offset_hz = None 
+        
+        self.noise_data = noise_data
+        self.noise_i_data = None
+        self.noise_q_data = None
+        
+        if self.noise_data is not None:
+            self.noise_i_data = self.noise_data.i[self.detector_id-1]
+            self.noise_q_data = self.noise_data.q[self.detector_id-1]
+
 
         if self.resonance_data_for_digest:
             try:
@@ -443,6 +453,15 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.active_sweep_info = None
         self.active_sweep_data = None
         self.current_plot_offset_hz = None
+        self.noise_i_data = None
+        self.noise_q_data = None
+        
+        if self.noise_data is not None:
+            self.noise_i_data = self.noise_data.i[self.detector_id-1]
+            self.noise_q_data = self.noise_data.q[self.detector_id-1]
+
+
+        
         
         # Select the first sweep for this detector
         if self.resonance_data_for_digest:
@@ -611,12 +630,35 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 self.plot1_sweep_vs_freq.autoRange()
 
             rotation_tod_iq = self.active_sweep_data.get('rotation_tod')
+
             if rotation_tod_iq is not None and rotation_tod_iq.size > 0:
                 tod_i_volts = convert_roc_to_volts(rotation_tod_iq.real)
                 tod_q_volts = convert_roc_to_volts(rotation_tod_iq.imag)
+
                 noise_color = 'w' if self.dark_mode else 'k' 
                 self.plot2_iq_plane.plot(tod_i_volts, tod_q_volts, pen=None, symbol='o', symbolBrush=noise_color, symbolPen=noise_color, symbolSize=3, name="Noise at f_bias")
+
+            if self.noise_i_data is not None and self.noise_q_data is not None:
+                rotation_noise_i = np.array(self.noise_i_data)
+                rotation_noise_q = np.array(self.noise_q_data)
+                
+                noise_i_volts = convert_roc_to_volts(rotation_noise_i)
+                noise_q_volts = convert_roc_to_volts(rotation_noise_q)
+
+                self.plot2_iq_plane.plot(
+                    noise_i_volts,
+                    noise_q_volts,
+                    pen=None,
+                    symbol='o',
+                    symbolBrush='r',
+                    symbolPen='r',
+                    symbolSize=3,
+                    name="Data after Bias sampling"
+                )
+                
             self.plot2_iq_plane.autoRange()
+
+            
         
         # --- Plot 3: Bias amplitude optimization (remains largely the same logic) ---
         if self.current_plot_offset_hz is not None:

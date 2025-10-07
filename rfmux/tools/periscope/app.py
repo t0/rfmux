@@ -1274,7 +1274,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         nco_freq = await crs.get_nco_frequency(module=module)
         async with crs.tuber_context() as ctx:
             for i in range(len(amplitudes)):
+
                 quantized_bias = round(bias_freqs[i] / BASE_BAND_STEP_HZ) * BASE_BAND_STEP_HZ
+                # print("Channel", channels[i], "is frequency", quantized_bias)
                 ctx.set_frequency(quantized_bias - nco_freq, channel=channels[i], module=module)
                 
                 ctx.set_amplitude(float(amplitudes[i]), channel=channels[i], module=module)
@@ -1319,7 +1321,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             
             dac_scales_for_window = self.dac_scales if hasattr(self, 'dac_scales') else {}
             window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), 
-                                     dac_scales=dac_scales_for_window, dark_mode=self.dark_mode)
+                                     dac_scales=dac_scales_for_window, dark_mode=self.dark_mode, loaded_bias=True)
             self.multisweep_windows[window_id] = {'window': window, 'params': params.copy()}
             
             # Connect df_calibration_ready signal if the method exists
@@ -1376,6 +1378,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 # print(data)
                 window.update_data(target_module, i, amplitude, direction, data, None)
             window.show()
+
+            
         except Exception as e:
             error_msg = f"Error displaying results: {type(e).__name__}: {str(e)}"
             print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)

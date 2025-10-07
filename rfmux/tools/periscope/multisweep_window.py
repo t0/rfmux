@@ -26,7 +26,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
     
     # Signal emitted when bias_kids algorithm completes with df_calibration data
     df_calibration_ready = pyqtSignal(int, dict)  # module, {detector_idx: df_calibration}
-    def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None, dark_mode=False):
+    def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None, dark_mode=False, loaded_bias=False):
         """
         Initializes the MultisweepWindow.
 
@@ -45,6 +45,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.initial_params = initial_params or {}  # Store initial parameters for potential re-runs
         self.dac_scales = dac_scales or {}          # DAC scales for unit conversions
         self.dark_mode = dark_mode                 # Store dark mode setting
+        self.bias_data_avail = loaded_bias
+        self.samples_taken = False
+        self.noise_data = {}
         
         # Track open detector digest windows to prevent garbage collection
         self.detector_digest_windows = []
@@ -127,6 +130,12 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.bias_kids_btn.clicked.connect(self._bias_kids)
         self.bias_kids_btn.setToolTip("Bias detectors at optimal operating points based on multisweep results")
         toolbar.addWidget(self.bias_kids_btn)
+
+        self.take_samp_btn = QtWidgets.QPushButton("Take Noise Samples")
+        self.take_samp_btn.setVisible(self.bias_data_avail)
+        self.take_samp_btn.clicked.connect(self._take_noise_samps)        
+        self.take_samp_btn.setToolTip("Get Noise data to see if detectors were biased correctly.")
+        toolbar.addWidget(self.take_samp_btn)
         
         toolbar.addSeparator()
 
@@ -1012,6 +1021,39 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # if it's called for other reasons (data update, unit change, etc.),
         # respecting the checkbox state at that time.
 
+
+    def _take_noise_samps(self):
+        total = 50
+        print(f"[Bias] {total} samples requested")
+        self.take_samp_btn.setEnabled(False)
+        # self.progress_bar.setRange(0, total)
+        # self.progress_bar.setValue(0)
+        # self.current_amp_label.setText("Collecting noise samples...")
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        # Launch async sampler
+        samples = loop.run_until_complete(self.collecting_samples(self.parent().crs, self.target_module, total))
+        self.noise_data = samples
+        loop.close()
+        self.take_samp_btn.setEnabled(True)
+        self.samples_taken = True
+    
+    async def collecting_samples(self, crs, module, total):
+
+        samples = await self.parent().crs.get_samples(
+            total, average=False, channel=None, module=self.target_module
+        )
+        return samples
+        
+    
     @QtCore.pyqtSlot(object)
     def _handle_multisweep_plot_double_click(self, ev):
         """
@@ -1035,6 +1077,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         min_distance = np.inf
         clicked_res_idx = None
         clicked_actual_cf = None
+        noise_data = None
 
         # Collect all unique resonances with their center frequencies
         resonance_centers = {}  # {res_idx: center_freq}
@@ -1061,6 +1104,10 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             # --- Determine the conceptual resonance and its ID ---
             # The clicked_res_idx IS the detector ID since results are keyed by index
             detector_id = clicked_res_idx
+
+            if self.samples_taken:
+                noise_data = self.noise_data
+
             
             # Get the conceptual frequency for this resonance index
             # Note: clicked_res_idx is 1-based, but conceptual_resonance_frequencies is 0-based
@@ -1205,7 +1252,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 normalize_plot3=self.normalize_traces,
                 dark_mode=self.dark_mode,
                 all_detectors_data=all_detectors_data,  
-                initial_detector_idx=detector_id 
+                initial_detector_idx=detector_id,
+                noise_data = noise_data
+                # noise_data = self.noise_data #### Will probably have to keep for each detector???
             )
             
             # Add to tracking list to prevent garbage collection

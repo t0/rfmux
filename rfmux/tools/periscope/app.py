@@ -1201,6 +1201,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         fetcher.start()
         
         active_module = self.module
+
     
         # Try to get resonances (if available)
         resonances = []
@@ -1317,6 +1318,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             window_id = f"multisweep_window_{self.multisweep_window_count}"; self.multisweep_window_count += 1
             params = load_params['initial_parameters']
             target_module = params.get('module')
+
+            dac_scale_for_mod = load_params['dac_scales_used'][target_module] 
+
+            if dac_scale_for_mod != netanal_dialog.dac_scales[target_module]:
+                QtWidgets.QMessageBox.warning(self, "Warning", "Mismatch in Dac scales, exact data won't be reproduced.")
+            
             if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep."); return
             
             dac_scales_for_window = self.dac_scales if hasattr(self, 'dac_scales') else {}

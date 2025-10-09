@@ -19,18 +19,22 @@ from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential
 import os
 import concurrent.futures
 from typing import Dict, Any, Optional, Callable
+import platform
 
 class UDPReceiver(QtCore.QThread):
     """
     Receives multicast packets in a dedicated QThread and pushes them
     into a thread-safe queue.
     """
-    def __init__(self, host: str, module: int) -> None:
-        super().__init__()
+    def _init_(self, host: str, module: int) -> None:
+        super()._init_()
         self.module_id = module
         self.queue = queue.PriorityQueue()
         self.sock = streamer.get_multicast_socket(host) # streamer from .utils
-        self.sock.settimeout(0.2)
+        if platform.system() == "Windows":
+            self.sock.setblocking(False)
+        else:
+            self.sock.settimeout(0.2)
         self.packets_received = 0
         self.packets_dropped = 0
         self.first_packet_received = 0
@@ -52,21 +56,42 @@ class UDPReceiver(QtCore.QThread):
 
     def run(self):
         while not self.isInterruptionRequested():
-            try:
-                data = self.sock.recv(streamer.LONG_PACKET_SIZE)
-                pkt = streamer.DfmuxPacket.from_bytes(data)
-                if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
-                    self.first_packet_received = pkt.seq
+            if platform.system() == "Windows":
+                try:
+                    t0 = time.perf_counter() 
+                    data = self.sock.recv(streamer.LONG_PACKET_SIZE)
+                    pkt = streamer.DfmuxPacket.from_bytes(data)
+                    if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
+                        self.first_packet_received = pkt.seq
+                        self.prev_seq = pkt.seq
+                    self.receive_counter()
+                    self.calc_dropped_packets(self.prev_seq, pkt.seq)
                     self.prev_seq = pkt.seq
-                self.receive_counter()
-                self.calc_dropped_packets(self.prev_seq, pkt.seq)
-                self.prev_seq = pkt.seq
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            if pkt.module == self.module_id - 1:
-                self.queue.put((pkt.seq, pkt))
+                    if pkt.module == self.module_id - 1:
+                        self.queue.put((pkt.seq, pkt))
+                except BlockingIOError:
+                    # No data available right now — just loop
+                    pass
+                except OSError:
+                    break
+            else:
+                try:
+                    t0 = time.perf_counter()
+                    data = self.sock.recv(streamer.LONG_PACKET_SIZE)
+                    t1 = time.perf_counter()
+                    pkt = streamer.DfmuxPacket.from_bytes(data)
+                    if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
+                        self.first_packet_received = pkt.seq
+                        self.prev_seq = pkt.seq
+                    self.receive_counter()
+                    self.calc_dropped_packets(self.prev_seq, pkt.seq)
+                    self.prev_seq = pkt.seq
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if pkt.module == self.module_id - 1:
+                    self.queue.put((pkt.seq, pkt))
 
     def stop(self):
         print(f"[UDP] UDP receiving thread stopped. Total packets received: {self.packets_received}")

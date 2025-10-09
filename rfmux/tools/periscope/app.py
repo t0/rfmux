@@ -790,6 +790,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             "     sudo net.core.rmem_max = 67108864\n"
             "```\n"
             "- **Windows:** \n\n"
+            "   Please consult the README.Windows.md available on rfmux repo on how to increase the buffer size and additional resources.
             "If you are still seeing dropped packets due to UDP overflows in machines with limited UDP buffer sizes (such as OSX and Windows), it can help to reduce the periscope plotting buffer size, or number of plots.\n"            
         )
         help_dialog = QtWidgets.QDialog(self)

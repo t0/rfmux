@@ -52,3 +52,29 @@ If you've gotten this far, it's likely that the rest of rfmux should work fine.
 Again, Windows is not our primary development platform - which means you might
 discover problems we haven't seen in our release testing. If you discover a
 problem, please let us know and we'll try to fix it.
+
+## Increase Buffer Size Windows ##
+To set parameters like `DefaultReceiveWindow`, `MaximumBufferSize` and `MaximumDynamicBufferSize`
+- Press Win+R, type regedit, hit Enter.
+- Navigate to:
+`HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Afd\Parameters`
+- Right-click → New → DWORD (32-bit) Value → name it `DefaultReceiveWindow`.
+- Double-click it, set Base to Decimal, then set Value data to 67108864 (64 MB).
+- Repeat for `MaximumBufferSize` (and `MaximumDynamicBufferSize`).
+- Close Registry Editor and reboot for changes to take effect.
+
+## Periscope using Condas ##
+
+Once you have git installed using the link provided above. 
+
+You can install condas using - https://docs.conda.io/projects/conda/en/stable/user-guide/install/windows.html
+
+You can now link up condas inside your git bash
+Locate your `condo.sh` file and run the following 
+- `echo ". '/c/Users/<YOUR_USERNAME>/anaconda3/etc/profile.d/conda.sh'" >> ~/.bashrc` if you have miniconda replace anaconda3 with miniconda3
+- `source ~/.bashrc`
+- `conda activate base`
+
+You can now clone the rfmux repo and install it using the steps README.md
+
+To test everything works run `periscope mock`

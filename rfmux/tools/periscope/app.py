@@ -1235,6 +1235,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             return
 
 
+        default_dac_scales = {m: -0.5 for m in range(1, 9)}
+        netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
+        netanal_dialog.module_entry.setText(str(self.module))
+        fetcher = DACScaleFetcher(self.crs)
+        fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
+        fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
+        fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
+        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
+        fetcher.start()
+        
         from .bias_kids_dialog import BiasKidsDialog
         dialog = BiasKidsDialog(self, self.module, True)
 
@@ -1300,16 +1310,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         #### Making sure the dac scales are set in case unit change is needed somewhere#####
         
-        default_dac_scales = {m: -0.5 for m in range(1, 9)}
-        netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
-        netanal_dialog.module_entry.setText(str(self.module))
-        fetcher = DACScaleFetcher(self.crs)
-        fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
-        fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
-        fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
-        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
-        fetcher.start()
-        
         active_module = self.module
 
         try:
@@ -1320,9 +1320,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             target_module = params.get('module')
 
             dac_scale_for_mod = load_params['dac_scales_used'][target_module] 
+            dac_scale_for_board = self.dac_scales[target_module]
 
-            if dac_scale_for_mod != netanal_dialog.dac_scales[target_module]:
-                QtWidgets.QMessageBox.warning(self, "Warning", "Mismatch in Dac scales, exact data won't be reproduced.")
+            if dac_scale_for_mod != dac_scale_for_board:
+                QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
             
             if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep."); return
             

@@ -1075,10 +1075,11 @@ class PeriscopeRuntime:
             
             dac_scales_for_window = self.dac_scales if hasattr(self, 'dac_scales') else {}
 
-            dac_scale_for_mod = load_params['dac_scales_used'][target_module] 
+            dac_scale_for_mod = load_params['dac_scales_used'][target_module]
+            dac_scale_for_board = dac_scales_for_window[target_module]
 
-            if dac_scale_for_mod != dac_scales_for_window[target_module]:
-                QtWidgets.QMessageBox.warning(self, "Warning", "Mismatch in Dac scales, exact data won't be reproduced.")
+            if dac_scale_for_mod != dac_scale_for_board:
+                QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
                 
             window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), 
                                      dac_scales=dac_scales_for_window, dark_mode=self.dark_mode)

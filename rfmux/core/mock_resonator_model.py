@@ -80,7 +80,10 @@ class MockResonatorModel:
         """Generate random resonator frequencies and Q factors for the original model."""
         frequencies = []
         Q_factors = []
-        np.random.seed(42) #### Fixing the seed so that we can recreate the randomness
+        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        seed = config.get('resonator_random_seed', 42)
+        np.random.seed(seed) #### Fixing the seed so that we can recreate the randomness
+        
         
         freq_range = f_end - f_start
         if num_resonators * min_spacing > freq_range and num_resonators > 0 : # check num_resonators > 0
@@ -142,8 +145,10 @@ class MockResonatorModel:
     def generate_lc_resonances(self):
         """Generate LC resonances distributed across spectrum with kinetic inductance parameters."""
         # Get ALL values from stored config or defaults
-        np.random.seed(42) #### Fixing the seed so that we can recreate the randomness
         config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        seed = config.get('resonator_random_seed', 42)
+
+        np.random.seed(seed) #### Fixing the seed so that we can recreate the randomness
         
         num_resonances = config.get('num_resonances', const.DEFAULT_NUM_RESONANCES)
         f_start = config.get('freq_start', const.DEFAULT_FREQ_START)

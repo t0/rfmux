@@ -1610,7 +1610,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 'num_resonances': mc.DEFAULT_NUM_RESONANCES,
                 'base_noise_level': mc.BASE_NOISE_LEVEL,
                 'amplitude_noise_coupling': mc.AMPLITUDE_NOISE_COUPLING,
-                'udp_noise_level': mc.UDP_NOISE_LEVEL
+                'udp_noise_level': mc.UDP_NOISE_LEVEL,
+                'resonator_random_seed' : 42
             }
         except Exception as e:
             print(f"Error getting current mock config: {e}")

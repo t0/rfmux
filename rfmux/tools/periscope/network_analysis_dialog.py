@@ -12,14 +12,20 @@ from .tasks import DACScaleFetcher
 from .network_analysis_base import NetworkAnalysisDialogBase
 
 
-#### Making sure the function below has global access ###
-def load_network_analysis_payload(parent: QtWidgets.QWidget):
-    file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-        parent,
-        "Load Network Analysis Parameters",
-        "",
-        "Pickle Files (*.pkl *.pickle);;All Files (*)",
-    )
+def load_network_analysis_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
+
+    # If no filename was passed, fall back to showing a dialog (blocking version)
+    if file_path is None:
+        options = QtWidgets.QFileDialog.Options()
+        options |= QtWidgets.QFileDialog.Option.DontUseNativeDialog
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            parent,
+            "Load Network Analysis Parameters",
+            "",
+            "Pickle Files (*.pkl *.pickle);;All Files (*)",
+            options=options,
+        )
+
     if not file_path:
         return None
 
@@ -47,6 +53,7 @@ def load_network_analysis_payload(parent: QtWidgets.QWidget):
         "The selected file does not contain network-analysis parameters.",
     )
     return None
+
 
 
 class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
@@ -170,18 +177,52 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
     def _load_data_avail(self):
         self.load_data_available = True
         self.accept()
- 
-    
+
+
     def _load_netanal_data(self):
-        payload = load_network_analysis_payload(self)
+        """
+        Asynchronously trigger a non-blocking QFileDialog using the main thread.
+        Using QTimer avoids interfering with existing threads.
+        """
+        QtCore.QTimer.singleShot(0, self._open_file_dialog_async)
+
+
+    def _open_file_dialog_async(self):
+        if not hasattr(self, "_file_dialog") or self._file_dialog is None:
+            self._file_dialog = QtWidgets.QFileDialog(self, "Load Network Analysis Parameters")
+            self._file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
+    
+            self._file_dialog.setNameFilters([
+                "Pickle Files (*.pkl *.pickle)",
+                "All Files (*)",
+            ])
+    
+            # Force non-native + non-blocking behavior
+            self._file_dialog.setOptions(
+                QtWidgets.QFileDialog.Option.DontUseNativeDialog
+                | QtWidgets.QFileDialog.Option.ReadOnly
+            )
+            self._file_dialog.setModal(False)
+    
+            # Connect signals
+            self._file_dialog.fileSelected.connect(self._on_file_selected)
+            self._file_dialog.rejected.connect(self._on_file_dialog_closed)
+    
+        # Show the dialog async
+        self._file_dialog.open()
+
+
+    @QtCore.pyqtSlot(str)
+    def _on_file_selected(self, path: str):
+        payload = load_network_analysis_payload(self, file_path=path)
         if payload is None:
             return
-        else:
-            self.load_btn.setEnabled(True)
-
-        params = payload["parameters"]
+    
+        self.load_btn.setEnabled(True)
         self._load_data = payload.copy()
-
+    
+        params = payload["parameters"]
+    
         module_value = params.get("module")
         if module_value is None:
             module_text = "All"
@@ -190,7 +231,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         else:
             module_text = str(module_value)
         self.module_entry.setText(module_text)
-
+    
         amps = params.get("amps") or ([params["amp"]] if "amp" in params else None)
         if amps:
             try:
@@ -198,14 +239,14 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             except (TypeError, ValueError):
                 amp_text = ", ".join(str(amp) for amp in amps)
             self.amp_edit.setText(amp_text)
-
+    
         def set_if_present(key, widget, formatter):
             if key in params and params[key] is not None:
                 try:
                     widget.setText(formatter(params[key]))
                 except Exception:
                     widget.setText(str(params[key]))
-
+    
         set_if_present("fmin", self.fmin_edit, lambda v: f"{float(v) / 1e6:g}")
         set_if_present("fmax", self.fmax_edit, lambda v: f"{float(v) / 1e6:g}")
         set_if_present("cable_length", self.cable_length_edit, lambda v: f"{float(v):g}")
@@ -213,16 +254,17 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         set_if_present("nsamps", self.samples_edit, lambda v: str(int(float(v))))
         set_if_present("max_chans", self.max_chans_edit, lambda v: str(int(float(v))))
         set_if_present("max_span", self.max_span_edit, lambda v: f"{float(v) / 1e6:g}")
-
+    
         if "clear_channels" in params:
             self.clear_channels_cb.setChecked(bool(params["clear_channels"]))
-
-        # Refresh derived UI elements after populating the fields.
+    
         self._update_dac_scale_info()
         self._update_dbm_from_normalized()
 
-    #     self.load_data_available = True
 
+    @QtCore.pyqtSlot()
+    def _on_file_dialog_closed(self):
+        pass
         
     def get_parameters(self) -> dict | None:
         """

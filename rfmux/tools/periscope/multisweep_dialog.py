@@ -15,13 +15,24 @@ import pickle
 import numpy as np
 from PyQt6.QtCore import Qt
 
-def load_multisweep_payload(parent: QtWidgets.QWidget):
-    file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-        parent,
-        "Load Network Analysis Parameters",
-        "",
-        "Pickle Files (*.pkl *.pickle);;All Files (*)",
-    )
+def load_multisweep_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
+    """
+    Loads a multisweep payload from a pickle file.
+
+    If file_path is None, it prompts for a file using a blocking dialog (fallback).
+    Otherwise, it loads directly from file_path.
+    """
+    if file_path is None:
+        options = QtWidgets.QFileDialog.Options()
+        options |= QtWidgets.QFileDialog.Option.DontUseNativeDialog
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            parent,
+            "Load Network Analysis Parameters",
+            "",
+            "Pickle Files (*.pkl *.pickle);;All Files (*)",
+            options=options,
+        )
+
     if not file_path:
         return None
 
@@ -49,6 +60,7 @@ def load_multisweep_payload(parent: QtWidgets.QWidget):
         "The selected file does not contain Multisweep parameters.",
     )
     return None
+
 
 class MultisweepDialog(NetworkAnalysisDialogBase):
     """
@@ -327,16 +339,41 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.use_data_from_file = True
         self.accept()
         
+    
     def _import_file(self):
-        """Handle file import and update UI fields."""
-        
-        payload = load_multisweep_payload(self)
+        """
+        Trigger non-blocking async file dialog instead of blocking getOpenFileName.
+        """
+        QtCore.QTimer.singleShot(0, self._open_file_dialog_async)
+
+    def _open_file_dialog_async(self):
+        if not hasattr(self, "_file_dialog") or self._file_dialog is None:
+            self._file_dialog = QtWidgets.QFileDialog(self, "Load Multisweep Parameters")
+            self._file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
+            self._file_dialog.setNameFilters([
+                "Pickle Files (*.pkl *.pickle)",
+                "All Files (*)",
+            ])
+            self._file_dialog.setOptions(
+                QtWidgets.QFileDialog.Option.DontUseNativeDialog
+                | QtWidgets.QFileDialog.Option.ReadOnly
+            )
+            self._file_dialog.setModal(False)
+            self._file_dialog.fileSelected.connect(self._on_file_selected)
+            self._file_dialog.rejected.connect(self._on_file_dialog_closed)
+
+        self._file_dialog.open()
+
+
+    @QtCore.pyqtSlot(str)
+    def _on_file_selected(self, path: str):
+        payload = load_multisweep_payload(self, file_path=path)
         if payload is None:
             return
-        else:
-            self.load_btn.setEnabled(True) ### Will enable once file is available.
-            
-        self._load_data = payload.copy() #### Storing it for later ###
+    
+        self.load_btn.setEnabled(True)
+        self._load_data = payload.copy()
+        
         params = payload['initial_parameters']
     
         # Resonances (convert Hz -> MHz for display)
@@ -348,31 +385,23 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         span_khz = params['span_hz'] / 1e3
         self.span_khz_edit.setText(str(span_khz))
     
-        # Number of Points per Sweep
         self.npoints_edit.setText(str(params['npoints_per_sweep']))
-    
-        # Samples to Average
         self.nsamps_edit.setText(str(params['nsamps']))
     
-        # Bias Frequency Method (dropdown)
-        idx = self.recalc_cf_combo.findText(params['bias_frequency_method'], 
-                                              Qt.MatchFixedString)
+        idx = self.recalc_cf_combo.findText(params['bias_frequency_method'], Qt.MatchFlag.MatchFixedString)
         if idx >= 0:
             self.recalc_cf_combo.setCurrentIndex(idx)
     
-        # Rotate Saved Data (checkbox)
         self.rotate_saved_data_checkbox.setChecked(params['rotate_saved_data'])
     
-        # Sweep Direction (dropdown)
         idx = self.sweep_direction_combo.findText(params['sweep_direction'].capitalize(),
-                                            Qt.MatchFixedString)
+                                                  Qt.MatchFlag.MatchFixedString)
         if idx >= 0:
             self.sweep_direction_combo.setCurrentIndex(idx)
     
-        # Apply Skewed Fit / Nonlinear Fit
         self.apply_skewed_fit_checkbox.setChecked(params['apply_skewed_fit'])
         self.apply_nonlinear_fit_checkbox.setChecked(params['apply_nonlinear_fit'])
-
+    
         amps = params.get("amps") or ([params["amp"]] if "amp" in params else None)
         if amps:
             try:
@@ -380,6 +409,12 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             except (TypeError, ValueError):
                 amp_text = ", ".join(str(amp) for amp in amps)
             self.amp_edit.setText(amp_text)
+    
+    
+    @QtCore.pyqtSlot()
+    def _on_file_dialog_closed(self):
+        pass  # Optional: keep or clear dialog
+
     
     def get_parameters(self) -> dict | None:
         """

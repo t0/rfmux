@@ -8,13 +8,25 @@ import numpy as np
 from .utils import (QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator, QDoubleValidator, QIntValidator)
 import pickle
 
-def load_bias_payload(parent: QtWidgets.QWidget):
-    file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-        parent,
-        "Load Network Analysis Parameters",
-        "",
-        "Pickle Files (*.pkl *.pickle);;All Files (*)",
-    )
+def load_bias_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
+    """
+    Loads a bias payload from a pickle file.
+
+    If file_path is None, it prompts the user (blocking fallback).
+    Otherwise loads directly from the given path.
+    """
+    if file_path is None:
+        # Fallback blocking dialog if no path is passed
+        options = QtWidgets.QFileDialog.Options()
+        options |= QtWidgets.QFileDialog.Option.DontUseNativeDialog
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            parent,
+            "Load Bias Parameters",
+            "",
+            "Pickle Files (*.pkl *.pickle);;All Files (*)",
+            options=options,
+        )
+
     if not file_path:
         return None
 
@@ -42,6 +54,7 @@ def load_bias_payload(parent: QtWidgets.QWidget):
         "The selected file does not contain Bias parameters.",
     )
     return None
+
 
 
 class BiasKidsDialog(QDialog):
@@ -261,44 +274,72 @@ class BiasKidsDialog(QDialog):
         self.accept()
 
     def _import_file(self):
-        """Handle file import and update UI fields."""
-        
-        payload = load_bias_payload(self)
+        # Use a deferred call so the dialog opens outside the blocked event loop
+        QtCore.QTimer.singleShot(0, self._open_file_dialog_async)
+
+
+    def _open_file_dialog_async(self):
+        if not hasattr(self, "_file_dialog") or self._file_dialog is None:
+            self._file_dialog = QtWidgets.QFileDialog(self, "Load Network Analysis Parameters")
+            self._file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
+            self._file_dialog.setNameFilters([
+                "Pickle Files (*.pkl *.pickle)",
+                "All Files (*)",
+            ])
+            self._file_dialog.setOptions(
+                QtWidgets.QFileDialog.Option.DontUseNativeDialog
+                | QtWidgets.QFileDialog.Option.ReadOnly
+            )
+            self._file_dialog.setModal(False)
+            self._file_dialog.fileSelected.connect(self._on_file_selected)
+            self._file_dialog.rejected.connect(self._on_file_dialog_closed)
+    
+        self._file_dialog.open()
+    
+    
+    @QtCore.pyqtSlot(str)
+    def _on_file_selected(self, path: str):
+        payload = load_bias_payload(self, file_path=path)
         if payload is None:
             return
-        else:
-            self.plot_bias_btn.setEnabled(True) ### Will enable once file is available.
-            
-        self._load_data = payload.copy() #### Storing it for later ###
+    
+        self.plot_bias_btn.setEnabled(True)
+        self._load_data = payload.copy()
+    
         params = payload['initial_parameters']
         bias_output = payload['bias_kids_output']
-
+    
         bias_freqs = []
         amplitudes = []
         phases = []
-
+    
         for det_idx, det_data in bias_output.items():
             if not det_data.get("bias_successful", True):
                 print("Bias was successful")
-        
+    
             channel = int(det_data.get("bias_channel", det_idx))
             bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
             bias_freqs.append(bias_freq)
+    
             amplitude = det_data.get("sweep_amplitude")
             amplitudes.append(amplitude)
+    
             phase = det_data.get("optimal_phase_degrees", 0)
             phases.append(phase)
-
-
-        #### Setting up the text boxes #####
-        
+    
         self.tones_edit.setText(",".join([f"{f/1e6:.6f}" for f in bias_freqs]))
-        
+    
         span_khz = params['span_hz'] / 1e3
         self.span_khz_edit.setText(str(span_khz))
-
+    
         self.amp_edit.setText(",".join([f"{a:.3f}" for a in amplitudes]))
         self.phase_edit.setText(",".join([f"{p:.1f}" for p in phases]))
+    
+    
+    @QtCore.pyqtSlot()
+    def _on_file_dialog_closed(self):
+        pass
+
 
         
     def get_load_param(self) -> dict | None:

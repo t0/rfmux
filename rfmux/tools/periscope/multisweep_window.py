@@ -1028,7 +1028,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
     def _take_noise_samps(self):
         total = 50
-        print(f"[Bias] {total} samples requested")
+        # print(f"[Bias] {total} samples requested")
         self.take_samp_btn.setEnabled(False)
         # self.progress_bar.setRange(0, total)
         # self.progress_bar.setValue(0)
@@ -1049,6 +1049,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         loop.close()
         self.take_samp_btn.setEnabled(True)
         self.samples_taken = True
+
+        return self.noise_data
     
     async def collecting_samples(self, crs, module, total):
 

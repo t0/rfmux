@@ -53,6 +53,7 @@ from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, Initial
                        # (Assumes periscope_ui.py has been refactored into ui.py and exports these).
 from .app_runtime import PeriscopeRuntime
 from .mock_configuration_dialog import MockConfigurationDialog
+from rfmux.core.transferfunctions import convert_roc_to_volts
 
 
 # Note: The original commented-out lines for specific UI class imports
@@ -152,6 +153,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.show_q: bool = True                # Visibility of 'Q' component traces
         self.show_m: bool = True                # Visibility of 'Magnitude' component traces
         self.zoom_box_mode: bool = True         # Default mouse mode for plots (zoom vs pan)
+
+
+        self.test_noise_samples = {}           ##### debugging purposes 
+        self.noise_count = 0                   ##### debugging purposes 
+        self.phase_shifts = []                 ##### debugging purposes 
         
         # --- df Calibration Storage ---
         # Stores calibration factors for frequency shift/dissipation conversion
@@ -1354,6 +1360,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             phases = []
             channels = []
             data_full = {}
+            data_rod = {}
             
             for det_idx, det_data in bias_output.items():
                 channel = int(det_data.get("bias_channel", det_idx))
@@ -1367,12 +1374,21 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 new_data = {}
                 for k, v in bias_output[det_idx].items():
                     new_data[k] = v
+                    if k == "rotation_tod":
+                        data_rod[channel] = v
                     if k == "nonlinear_model_iq":
                         break
                 data_full[det_idx] = new_data
 
 
             asyncio.run(self.apply_bias_output(self.crs, target_module, amplitudes, bias_freqs, channels, phases))
+                
+            asyncio.run(self.adjust_phase(target_module, channels, data_rod))
+
+
+            print(f"[Bias] Refining the rotation")
+            self.noise_count = self.noise_count + 1
+            asyncio.run(self.adjust_phase(target_module, channels, data_rod, True))
             
             ##### Plotting the bias #######
 
@@ -1382,8 +1398,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 amplitude = amplitudes[i]
                 direction = direction
                 data = data_full
-                # print(type(data))
-                # print(data)
                 window.update_data(target_module, i, amplitude, direction, data, None)
             window.show()
 
@@ -1394,11 +1408,75 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             QtWidgets.QMessageBox.critical(self, "Bias Error", error_msg)
 
 
-    def set_bias(self, params):
-        print("Place holder for setting bias")
 
-    def set_plot_bias(self, params):
-        print("Place holder for setting and plotting bias")
+    async def adjust_phase(self, module, channels, data_rod, refine=False):
+        if self.crs is None: 
+            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for Bias.") 
+            return
+        else:
+            crs = self.crs
+
+        for channel in channels:
+            samples = await self.collecting_samples_chan(crs, module, channel)
+            
+            phase_shift = self.calculate_shift(data_rod[channel], samples.i, samples.q, refine)
+            
+            self.phase_shifts.append(phase_shift)
+            
+            init_phase = await crs.get_phase(crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
+            
+            mod_phase = phase_shift + init_phase 
+            
+            await crs.set_phase(mod_phase, crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
+            
+            phase_after_change = await crs.get_phase(crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
+            
+            print(f"[Bias] Phase shift implemented of {phase_after_change} degrees")            
+            
+    def calculate_shift(self, file_samples, noise_i, noise_q, refine):
+        i_val_file = convert_roc_to_volts(file_samples.real)
+        q_val_file = convert_roc_to_volts(file_samples.imag)
+        phase_file = np.degrees(np.arctan(np.mean(q_val_file/i_val_file)))
+
+        
+        i_val_noise = convert_roc_to_volts(np.array(noise_i))
+        q_val_noise = convert_roc_to_volts(np.array(noise_q))
+        phase_noise = np.degrees(np.arctan(np.mean(q_val_noise/i_val_noise)))
+
+        phase_shift =  phase_noise - phase_file
+
+        q_noise_mean = np.mean(q_val_noise)
+        i_noise_mean = np.mean(i_val_noise)
+
+        q_file_mean = np.mean(q_val_file)
+        i_file_mean = np.mean(i_val_file)
+
+
+        if ((q_noise_mean/q_file_mean) < 0) and ((i_noise_mean/i_file_mean) < 0): ### incase there are in opposite quadrants
+            print(f"[Bias] Opposite quadrant shifting by 180")
+            phase_shift = phase_shift + 180
+            
+
+
+        # print(f"The phase difference between file and noise is {phase_shift} degrees")
+        # print("The distance is", dist)
+
+        return phase_shift
+        
+    async def collecting_samples_chan(self, crs, module, channel, total=100):
+        samples = await crs.get_samples(total, average=False, channel=channel, module=module)
+
+        if channel not in self.test_noise_samples:
+            self.test_noise_samples[channel] = {}
+
+        self.test_noise_samples[channel][self.noise_count] = np.array(samples.i) + np.array(samples.q) * 1j
+        return samples
+
+    def get_test_noise(self):
+        return self.test_noise_samples
+
+    def get_phase_shift(self):
+        return self.phase_shifts
             
     
     def _netanal_progress(self, module_param: int, progress: float):

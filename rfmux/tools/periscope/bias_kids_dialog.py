@@ -242,12 +242,12 @@ class BiasKidsDialog(QDialog):
         layout.addLayout(span_layout)
 
         # --- Phase ---
-        phase_layout = QtWidgets.QHBoxLayout()
-        phase_label = QtWidgets.QLabel("Rotational Phases (degrees):")
-        self.phase_edit = QtWidgets.QLineEdit("0.0")  # default value
-        phase_layout.addWidget(phase_label)
-        phase_layout.addWidget(self.phase_edit)
-        layout.addLayout(phase_layout)
+        # phase_layout = QtWidgets.QHBoxLayout()
+        # phase_label = QtWidgets.QLabel("Rotational Phases (degrees):")
+        # self.phase_edit = QtWidgets.QLineEdit("0.0")  # default value
+        # phase_layout.addWidget(phase_label)
+        # phase_layout.addWidget(self.phase_edit)
+        # layout.addLayout(phase_layout)
 
         # --- Bottom Row: Set Bias / Set and Plot Bias ---
         bias_layout = QtWidgets.QHBoxLayout()
@@ -333,7 +333,7 @@ class BiasKidsDialog(QDialog):
         self.span_khz_edit.setText(str(span_khz))
     
         self.amp_edit.setText(",".join([f"{a:.3f}" for a in amplitudes]))
-        self.phase_edit.setText(",".join([f"{p:.1f}" for p in phases]))
+        # self.phase_edit.setText(",".join([f"{p:.1f}" for p in phases]))
     
     
     @QtCore.pyqtSlot()
@@ -350,7 +350,7 @@ class BiasKidsDialog(QDialog):
             else:
                 amp_text = [x.strip() for x in self.amp_edit.text().split(',')]
                 tone_text = [t.strip() for t in self.tones_edit.text().split(',')]
-                phase_text = [p.strip() for p in self.phase_edit.text().split(',')]
+                # phase_text = [p.strip() for p in self.phase_edit.text().split(',')]
     
                 params_dict['module'] = self.current_module
                 params_dict['phases'] = []
@@ -368,12 +368,12 @@ class BiasKidsDialog(QDialog):
                 len_amps = len(params_dict['amplitudes'])
                 len_bias = len(params_dict['bias_frequencies'])
     
-                if len(phase_text) == 1: ##### In case user wants to set the same phase value for all the tones ####
-                    for i in range(len_amps):
-                        params_dict['phases'].append(float(phase_text[0]))
-                else:
-                    for i in range(len(phase_text)):    
-                        params_dict['phases'].append(float(phase_text[i]))
+                # if len(phase_text) == 1: ##### In case user wants to set the same phase value for all the tones ####
+                for i in range(len_amps):
+                    params_dict['phases'].append(float(0)) ## default phase a 0
+                # else:
+                #     for i in range(len(phase_text)):    
+                #         params_dict['phases'].append(float(phase_text[i]))
     
                 if params_dict['span_hz'] <= 0:
                     QtWidgets.QMessageBox.warning(self, "Validation Error", "Span must be positive.")

@@ -28,7 +28,10 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                  dark_mode: bool = False,
                  all_detectors_data: dict = None,  
                  initial_detector_idx: int = None,
-                 noise_data = None): 
+                 noise_data = None,
+                 debug_noise_data = None,
+                 debug_phase_data = None,
+                 debug = False): 
         super().__init__(parent)
         self.resonance_data_for_digest = resonance_data_for_digest or {} 
         self.detector_id = detector_id
@@ -60,6 +63,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.noise_data = noise_data
         self.noise_i_data = None
         self.noise_q_data = None
+
+        
+        self.debug = debug
+
+        if self.debug:
+            self.full_debug = debug_noise_data
+            self.debug_noise = self.full_debug[self.detector_id]
+            self.phase_debug = debug_phase_data
         
         if self.noise_data is not None:
             self.noise_i_data = self.noise_data.i[self.detector_id-1]
@@ -455,13 +466,15 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.current_plot_offset_hz = None
         self.noise_i_data = None
         self.noise_q_data = None
+
+        
+        if self.debug:
+            self.debug_noise = self.full_debug[self.detector_id]
+        # print("For detector", self.detector_id, "the noise is", self.debug_noise)
         
         if self.noise_data is not None:
             self.noise_i_data = self.noise_data.i[self.detector_id-1]
             self.noise_q_data = self.noise_data.q[self.detector_id-1]
-
-
-        
         
         # Select the first sweep for this detector
         if self.resonance_data_for_digest:
@@ -635,15 +648,50 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 tod_i_volts = convert_roc_to_volts(rotation_tod_iq.real)
                 tod_q_volts = convert_roc_to_volts(rotation_tod_iq.imag)
 
+                mean_phase_file = np.arctan(np.mean(tod_q_volts/tod_i_volts))
+                mean_mag_file = np.mean(np.sqrt(tod_i_volts**2 + tod_q_volts**2))
+                # print("Mean phase of the rotation data in file is", np.degrees(mean_phase_file), "degrees")
+                # print("Mean magnitude of the rotation data in file is", mean_mag_file)
+
                 noise_color = 'w' if self.dark_mode else 'k' 
                 self.plot2_iq_plane.plot(tod_i_volts, tod_q_volts, pen=None, symbol='o', symbolBrush=noise_color, symbolPen=noise_color, symbolSize=3, name="Noise at f_bias")
-
+                
+            if self.debug:
+                test_colors = ['orange', 'y']
+                test_labels = ['Initial Noise', 'Refined Noise']
+                for idx, (key, noise) in enumerate(self.debug_noise.items()):
+                    noise_i = np.array(self.debug_noise[key].real)
+                    noise_q = np.array(self.debug_noise[key].imag)
+                    
+                    noise_i_v = convert_roc_to_volts(noise_i)
+                    noise_q_v = convert_roc_to_volts(noise_q)
+    
+                    test_color = test_colors[idx % len(test_colors)]
+                    test_label = test_labels[idx % len(test_labels)]
+    
+                    self.plot2_iq_plane.plot(
+                        noise_i_v,
+                        noise_q_v,
+                        pen=None,
+                        symbol='o',
+                        symbolBrush=test_color,
+                        symbolPen=test_color,
+                        symbolSize=3,
+                        name=test_label
+                    )
+            
             if self.noise_i_data is not None and self.noise_q_data is not None:
                 rotation_noise_i = np.array(self.noise_i_data)
                 rotation_noise_q = np.array(self.noise_q_data)
                 
                 noise_i_volts = convert_roc_to_volts(rotation_noise_i)
                 noise_q_volts = convert_roc_to_volts(rotation_noise_q)
+
+                mean_phase_noise = np.arctan(np.mean(noise_q_volts/noise_i_volts))
+                mean_mag_noise = np.mean(np.sqrt(noise_i_volts**2 + noise_q_volts**2))
+                
+                # print("Mean phase of the noise data collected is", np.degrees(mean_phase_noise), "degrees\n")
+                # print("Mean magnitude of the noise data", mean_mag_noise)
 
                 self.plot2_iq_plane.plot(
                     noise_i_volts,

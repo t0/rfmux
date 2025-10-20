@@ -48,6 +48,10 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.bias_data_avail = loaded_bias
         self.samples_taken = False
         self.noise_data = {}
+
+        self.debug_noise_data = {}
+        self.debug_phase_data = []
+
         
         # Track open detector digest windows to prevent garbage collection
         self.detector_digest_windows = []
@@ -1073,6 +1077,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         x_coord = mouse_point.x()
         # y_coord = mouse_point.y() # y_coord is not used for selecting the CF
 
+        self.debug_noise_data = self.parent().get_test_noise()
+        self.debug_phase_data = self.parent().get_phase_shift()
+        
         # --- Find the resonance whose center/bias frequency is closest to the click's X-coordinate ---
         min_distance = np.inf
         clicked_res_idx = None
@@ -1253,8 +1260,10 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 dark_mode=self.dark_mode,
                 all_detectors_data=all_detectors_data,  
                 initial_detector_idx=detector_id,
-                noise_data = noise_data
-                # noise_data = self.noise_data #### Will probably have to keep for each detector???
+                noise_data = noise_data,
+                debug_noise_data = self.debug_noise_data,
+                debug_phase_data = self.debug_phase_data,
+                debug = False            
             )
             
             # Add to tracking list to prevent garbage collection

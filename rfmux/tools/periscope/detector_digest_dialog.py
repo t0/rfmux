@@ -42,6 +42,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.normalize_plot3 = normalize_plot3
         self.dark_mode = dark_mode 
         self.parent_window = parent
+
+        self.cuurent_detector = self.detector_id
         
         # Navigation support
         self.all_detectors_data = all_detectors_data or {}
@@ -160,6 +162,11 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.next_button.clicked.connect(self._navigate_next)
         self.next_button.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.next_button)
+
+        self.refresh_noise_button = QtWidgets.QPushButton("Take Noise")
+        self.refresh_noise_button.clicked.connect(self._refresh_noise_samps)
+        self.refresh_noise_button.setEnabled(len(self.detector_indices) > 1)
+        nav_layout.addWidget(self.refresh_noise_button)
         
         # Add detector count label
         detector_count_text = ""
@@ -303,6 +310,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self._apply_zoom_box_mode_to_all()
         self.apply_theme(self.dark_mode)
 
+    def _refresh_noise_samps(self):
+        self.current_detector = self.detector_id
+        self.noise_data = self.parent()._take_noise_samps()
+        self.noise_i_data = self.noise_data.i[self.current_detector - 1]
+        self.noise_q_data = self.noise_data.q[self.current_detector - 1]
+        self._update_plots()
+    
+    
     def _init_skewed_table_rows(self):
         """Initialize the rows for the skewed fit table."""
         params = [
@@ -456,6 +471,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         # Update detector-specific data
         detector_data = self.all_detectors_data[new_detector_id]
         self.detector_id = new_detector_id
+        self.current_detector = self.detector_id
         self.resonance_data_for_digest = detector_data['resonance_data']
         self.resonance_frequency_ghz_title = detector_data['conceptual_freq_hz'] / 1e9
         

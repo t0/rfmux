@@ -93,6 +93,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         self.setWindowTitle("Multisweep Configuration")
         self.setModal(True)
+        self.use_raw_frequencies = True
 
         
         # if self.load_multisweep:
@@ -178,10 +179,21 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             # --- Resonances Section ---
             res_info_group = QtWidgets.QGroupBox("Target Resonances")
             res_info_layout = QtWidgets.QVBoxLayout(res_info_group)
+            
+            res_label_layout = QtWidgets.QHBoxLayout()
             self.resonances_info_label = QtWidgets.QLabel("No file loaded. Enter manually if desired.")
             self.resonances_info_label.setWordWrap(True)
-            res_info_layout.addWidget(self.resonances_info_label)
-        
+            res_label_layout.addWidget(self.resonances_info_label, stretch=1)
+            
+            self.res_freq_combo = QtWidgets.QComboBox()
+            self.res_freq_combo.setEnabled(False)
+            self.res_freq_combo.addItems(["Use resonance central frequency", "Use resonance fit frequency"])
+            self.res_freq_combo.setToolTip("Select which resonance frequency type to use.")
+            self.res_freq_combo.currentIndexChanged.connect(self._scroll_resonance)
+            res_label_layout.addWidget(self.res_freq_combo)
+            
+            res_info_layout.addLayout(res_label_layout)
+    
             # Manual input fallback (comma-separated resonances in MHz)
             self.resonances_edit = QtWidgets.QLineEdit()
             self.resonances_edit.setPlaceholderText("Enter resonance frequencies (MHz, comma separated)")
@@ -198,12 +210,28 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 # Show first few resonance frequencies for quick reference
                 res_freq_mhz_str = ", ".join([f"{f / 1e6:.3f}" for f in self.resonance_frequencies[:5]])
                 if num_resonances > 5:
-                    res_freq_mhz_str += ", ..." # Indicate more frequencies exist
+                    res_freq_mhz_str += ", ..."  # Indicate more frequencies exist
                 res_label_text += f"\nFrequencies (MHz): {res_freq_mhz_str}"
+    
+            
             self.resonances_info_label = QtWidgets.QLabel(res_label_text)
             self.resonances_info_label.setWordWrap(True)
             res_info_layout.addWidget(self.resonances_info_label)
             layout.addWidget(res_info_group)
+            
+            # # Label + scroll button side by side
+            # res_label_layout = QtWidgets.QHBoxLayout()
+            # self.resonances_info_label = QtWidgets.QLabel(res_label_text)
+            # self.resonances_info_label.setWordWrap(True)
+            # res_label_layout.addWidget(self.resonances_info_label, stretch=1)
+            
+            # self.res_freq_combo = QtWidgets.QComboBox()
+            # self.res_freq_combo.addItems(["Use resonance central frequency", "Use resonance fit frequency"])
+            # self.res_freq_combo.setToolTip("Select which resonance frequency type to use.")
+            # self.res_freq_combo.currentIndexChanged.connect(self._scroll_resonance)
+            # res_label_layout.addWidget(self.res_freq_combo)
+            
+            # res_info_layout.addLayout(res_label_layout)
 
         # Sweep parameters group
         param_group = QtWidgets.QGroupBox("Sweep Parameters")
@@ -338,6 +366,22 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     def _load_data_avail(self):
         self.use_data_from_file = True
         self.accept()
+
+    def _scroll_resonance(self):
+        selected = self.res_freq_combo.currentText().lower()
+        self.resonances_edit.clear()
+
+        if "fit" in selected:
+            self.load_btn.setEnabled(False)
+            self.use_raw_frequencies = False
+            freqs = self._get_frequencies(self._load_data, self.use_raw_frequencies)
+        else:
+            self.use_raw_frequencies = True
+            self.load_btn.setEnabled(True)
+            freqs = self._get_frequencies(self._load_data, self.use_raw_frequencies)
+
+        self.resonances_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
+        self.resonances_info_label.setText(f"Loaded {len(freqs)} resonances from file.")
         
     
     def _import_file(self):
@@ -373,13 +417,16 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     
         self.load_btn.setEnabled(True)
         self._load_data = payload.copy()
+        self.res_freq_combo.setEnabled(True)
         
         params = payload['initial_parameters']
-    
-        # Resonances (convert Hz -> MHz for display)
-        freqs = params['resonance_frequencies']
+
+        freqs = self._get_frequencies(payload, self.use_raw_frequencies)
+        
         self.resonances_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
         self.resonances_info_label.setText(f"Loaded {len(freqs)} resonances from file.")
+
+
     
         # Span per Resonance (Hz -> kHz)
         span_khz = params['span_hz'] / 1e3
@@ -410,6 +457,35 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 amp_text = ", ".join(str(amp) for amp in amps)
             self.amp_edit.setText(amp_text)
     
+    
+    def _get_frequencies(self, payload, raw_resonance = True):
+        params = payload['initial_parameters']
+        freqs = params['resonance_frequencies']
+        
+        if raw_resonance:
+            return freqs
+
+        else:
+            ref_freqs = []
+    
+            if params['apply_skewed_fit']:
+                for i in range(len(freqs)):
+                    ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['fit_params']['fr'])
+                ref_freqs.sort()
+                return ref_freqs
+    
+            if params['apply_nonlinear_fit']:
+                for i in range(len(freqs)):
+                    ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['nonlinear_fit_params']['fr'])
+                ref_freqs.sort()
+                return ref_freqs
+    
+            for i in range(len(freqs)):
+                ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['bias_frequency'])
+            ref_freqs.sort()
+                
+            return ref_freqs
+        
     
     @QtCore.pyqtSlot()
     def _on_file_dialog_closed(self):

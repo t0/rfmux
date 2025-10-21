@@ -785,6 +785,21 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
 
+    def _get_fit_frequencies(self, freqs):
+        ref_freqs = []
+        for i in range(len(freqs)):
+            if self.results_by_iteration[0]['data'][i+1]['skewed_fit_success']:
+                ref_freqs.append(self.results_by_iteration[0]['data'][i+1]['fit_params']['fr'])
+            elif self.results_by_iteration[0]['data'][i+1]['nonlinear_fit_success']:
+                ref_freqs.append(self.results_by_iteration[0]['data'][i+1]['nonlinear_fit_params']['fr'])
+            else:
+                ref_freqs.append(self.results_by_iteration[0]['data'][i+1]['bias_frequency'])
+                
+        ref_freqs.sort()
+        return ref_freqs
+
+    
+    
     def _rerun_multisweep(self):
         """
         Allows the user to re-run the multisweep analysis, potentially with modified parameters.
@@ -800,6 +815,12 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
         # --- Determine frequencies to seed the dialog ---
         dialog_seed_frequencies = list(self.conceptual_resonance_frequencies) # Start with conceptual
+
+        ##### Getting the fit values for updating in re-run ######
+
+        fit_freqs = self._get_fit_frequencies(dialog_seed_frequencies)
+
+        
         if self.current_run_amps: # If there was a previous/current run configuration
             # Use a representative amplitude from the current/last run to seed the dialog
             # For simplicity, let's use the first amplitude from the current_run_amps.
@@ -808,6 +829,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 remembered_cf = self._get_closest_remembered_cf(idx, representative_amp_for_seeding)
                 if remembered_cf is not None:
                     dialog_seed_frequencies[idx] = remembered_cf
+        
         
         # Prepare other parameters for the dialog
         dialog_initial_params = self.initial_params.copy() # Use a copy of the window's last run parameters
@@ -821,7 +843,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             resonance_frequencies=dialog_seed_frequencies, # Seed with potentially updated CFs
             dac_scales=self.dac_scales,
             current_module=self.target_module,
-            initial_params=dialog_initial_params # Pass other existing params
+            initial_params=dialog_initial_params, # Pass other existing params
+            load_multisweep = False,
+            fit_frequencies = fit_freqs
         )
 
         if dialog.exec(): # True if user clicked OK

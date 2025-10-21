@@ -72,7 +72,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                  resonance_frequencies: list[float] | None = None, 
                  dac_scales: dict[int, float] = None, 
                  current_module: int | None = None, 
-                 initial_params: dict | None = None, load_multisweep = False):
+                 initial_params: dict | None = None, load_multisweep = False, fit_frequencies: list[float] = None):
         """
         Initializes the Multisweep configuration dialog.
 
@@ -87,6 +87,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.resonance_frequencies = resonance_frequencies or []
         self.current_module = current_module # Store the current module for DAC scale and params
         self.load_multisweep = load_multisweep
+        self.fit_frequencies = fit_frequencies
 
         self.use_data_from_file = False
         self._load_data = {}
@@ -158,7 +159,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         """Update label with resonance count based on QLineEdit content."""
         text = text.strip()
         if not text:
-            self.resonances_info_label.setText("No file loaded. Enter manually if desired.")
+            self.resonances_info_label.setText("No data. Enter manually if desired.")
             return
     
         # Split on commas, ignore empty pieces
@@ -187,7 +188,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             
             self.res_freq_combo = QtWidgets.QComboBox()
             self.res_freq_combo.setEnabled(False)
-            self.res_freq_combo.addItems(["Use resonance central frequency", "Use resonance fit frequency"])
+            self.res_freq_combo.addItems(["Use multisweep central frequency", "Use resonance fit frequency"])
             self.res_freq_combo.setToolTip("Select which resonance frequency type to use.")
             self.res_freq_combo.currentIndexChanged.connect(self._scroll_resonance)
             res_label_layout.addWidget(self.res_freq_combo)
@@ -201,6 +202,32 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             res_info_layout.addWidget(self.resonances_edit)
             layout.addWidget(res_info_group)
 
+        elif self.fit_frequencies is not None:
+            res_info_group = QtWidgets.QGroupBox("Target Resonances")
+            res_info_layout = QtWidgets.QVBoxLayout(res_info_group)
+            
+            res_label_layout = QtWidgets.QHBoxLayout()
+            self.resonances_info_label = QtWidgets.QLabel("Resonance Frequencies for re-run")
+            self.resonances_info_label.setWordWrap(True)
+            res_label_layout.addWidget(self.resonances_info_label, stretch=1)
+            
+            self.res_freq_combo = QtWidgets.QComboBox()
+            self.res_freq_combo.addItems(["Use multisweep central frequency", "Use resonance fit frequency"])
+            self.res_freq_combo.setToolTip("Select which resonance frequency type to use.")
+            self.res_freq_combo.currentIndexChanged.connect(self._scroll_rerun_resonance)
+            self.res_freq_combo.setCurrentIndex(0)
+            res_label_layout.addWidget(self.res_freq_combo)
+            
+            res_info_layout.addLayout(res_label_layout)
+    
+            # Default input fallback (comma-separated resonances in MHz)
+            self.resonances_edit = QtWidgets.QLineEdit()
+            res_freq_rerun = ", ".join([f"{f / 1e6:.9f}" for f in self.resonance_frequencies])
+            self.resonances_edit.setText(res_freq_rerun)
+            self.resonances_edit.textChanged.connect(self._update_resonance_count)
+            res_info_layout.addWidget(self.resonances_edit)
+            layout.addWidget(res_info_group)
+            
         else:
             res_info_group = QtWidgets.QGroupBox("Target Resonances")
             res_info_layout = QtWidgets.QVBoxLayout(res_info_group)
@@ -218,20 +245,6 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.resonances_info_label.setWordWrap(True)
             res_info_layout.addWidget(self.resonances_info_label)
             layout.addWidget(res_info_group)
-            
-            # # Label + scroll button side by side
-            # res_label_layout = QtWidgets.QHBoxLayout()
-            # self.resonances_info_label = QtWidgets.QLabel(res_label_text)
-            # self.resonances_info_label.setWordWrap(True)
-            # res_label_layout.addWidget(self.resonances_info_label, stretch=1)
-            
-            # self.res_freq_combo = QtWidgets.QComboBox()
-            # self.res_freq_combo.addItems(["Use resonance central frequency", "Use resonance fit frequency"])
-            # self.res_freq_combo.setToolTip("Select which resonance frequency type to use.")
-            # self.res_freq_combo.currentIndexChanged.connect(self._scroll_resonance)
-            # res_label_layout.addWidget(self.res_freq_combo)
-            
-            # res_info_layout.addLayout(res_label_layout)
 
         # Sweep parameters group
         param_group = QtWidgets.QGroupBox("Sweep Parameters")
@@ -379,6 +392,18 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.use_raw_frequencies = True
             self.load_btn.setEnabled(True)
             freqs = self._get_frequencies(self._load_data, self.use_raw_frequencies)
+
+        self.resonances_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
+        self.resonances_info_label.setText(f"Loaded {len(freqs)} resonances from file.")
+
+    def _scroll_rerun_resonance(self):
+        selected = self.res_freq_combo.currentText().lower()
+        self.resonances_edit.clear()
+
+        if "fit" in selected:
+            freqs = self.fit_frequencies
+        else:
+            freqs = self.resonance_frequencies
 
         self.resonances_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
         self.resonances_info_label.setText(f"Loaded {len(freqs)} resonances from file.")

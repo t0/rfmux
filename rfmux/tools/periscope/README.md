@@ -115,7 +115,7 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
   1. In the *Network Analysis* dialog, select **Import Data** to load a saved configuration from a `.pkl`/`.pickle` file created by an earlier run.
   2. The dialog non-blockingly opens a file chooser and, once a compatible payload is selected, pre-populates all sweep parameters (modules, amplitudes, frequency span, averaging, cable length, etc.).
   3. After the file is validated, the **Load Analysis** button becomes available, allowing you to immediately reuse the imported settings without re-entering them by hand.
-  4. If the resonance values are available it will also plot in the lines.
+  4. If the resonance values are available it will also re-plot the data in the same way as displayed when it was saved.
 
 - **Network analysis data export**
   1. In the Network Analysis window toolbar, **Export Data** opens a save dialog where you can choose Pickle (`.pkl`) or CSV (`.csv`). The picker is non-blocking so live acquisition continues once the dialog is dismissed.

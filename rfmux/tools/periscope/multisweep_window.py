@@ -135,11 +135,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.bias_kids_btn.setToolTip("Bias detectors at optimal operating points based on multisweep results")
         toolbar.addWidget(self.bias_kids_btn)
 
-        self.take_samp_btn = QtWidgets.QPushButton("Take Noise Samples")
-        self.take_samp_btn.setVisible(self.bias_data_avail)
-        self.take_samp_btn.clicked.connect(self._take_noise_samps)        
-        self.take_samp_btn.setToolTip("Get Noise data to see if detectors were biased correctly.")
-        toolbar.addWidget(self.take_samp_btn)
+        # self.take_samp_btn = QtWidgets.QPushButton("Take Noise Samples")
+        # self.take_samp_btn.setVisible(self.bias_data_avail)
+        # self.take_samp_btn.clicked.connect(self._take_noise_samps)        
+        # self.take_samp_btn.setToolTip("Get Noise data to see if detectors were biased correctly.")
+        # toolbar.addWidget(self.take_samp_btn)
         
         toolbar.addSeparator()
 
@@ -1052,7 +1052,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
     def _take_noise_samps(self):
         total = 100
-        self.take_samp_btn.setEnabled(False)
+        # self.take_samp_btn.setEnabled(False)
 
         try:
             loop = asyncio.get_event_loop()
@@ -1067,7 +1067,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         samples = loop.run_until_complete(self.collecting_samples(self.parent().crs, self.target_module, total))
         self.noise_data = samples
         loop.close()
-        self.take_samp_btn.setEnabled(True)
+        # self.take_samp_btn.setEnabled(True)
         self.samples_taken = True
 
         return self.noise_data

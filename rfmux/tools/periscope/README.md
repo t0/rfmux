@@ -138,10 +138,9 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
   2. When a compatible file is selected, Periscope validates the payload and populates the module, tone list, amplitudes, and span fields. You can edit these values before committing them, or load them exactly as saved. The application programs the CRS with the stored amplitudes, tones, and phases and warns when board DAC scales diverge from the file so you can reconcile units before biasing.
   3. Files missing the expected structure are rejected with a clear warning so you do not accidentally apply partial or incompatible bias information.
 
-- **Take Noise**
-  1. After biasing from a file, the Multisweep window exposes **Take Noise Samples**, which collects a burst of IQ timestream data for the biased module and stores the capture for later inspection. This can be used to investigate if the bias was applied correctly. 
-  2. Opening the Detector Digest on a resonance also provides a **Take Noise** shortcut. The digest overlays the newly acquired noise timestream with the loaded rotation data, letting you confirm phase alignment and overall noise behavior without rerunning the full sweep. One can click it multiple times to see the evolution of noise in their data stream.
-  3. Noise captures are tied to the currently selected detector, making it straightforward to iterate on the bias solution and immediately see the impact on the detector’s timestream statistics.
+- **Take Noise** 
+  1. Opening the Detector Digest on a resonance also provides a **Take Noise** shortcut. The digest overlays the newly acquired noise timestream with the loaded rotation data, letting you confirm phase alignment, biasing and overall noise behavior without rerunning the full sweep. One can click it multiple times to see the evolution of noise in their data stream.
+  2. Noise captures are tied to the currently selected detector, making it straightforward to iterate on the bias solution and immediately see the impact on the detector’s timestream statistics.
 
 All import dialogs validate that the selected file contains the expected data structure and will notify you if a file is missing required sections, helping prevent accidental misuse of unrelated files
 

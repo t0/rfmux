@@ -665,9 +665,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 tod_i_volts = convert_roc_to_volts(rotation_tod_iq.real)
                 tod_q_volts = convert_roc_to_volts(rotation_tod_iq.imag)
 
-                mean_phase_file = np.arctan(np.mean(tod_q_volts/tod_i_volts))
+                mean_phase_file = np.median(np.arctan(tod_q_volts/tod_i_volts))
                 mean_mag_file = np.mean(np.sqrt(tod_i_volts**2 + tod_q_volts**2))
-                # print("Mean phase of the rotation data in file is", np.degrees(mean_phase_file), "degrees")
+                # print("Median phase of the rotation data in file is", np.degrees(mean_phase_file), "degrees")
                 # print("Mean magnitude of the rotation data in file is", mean_mag_file)
 
                 noise_color = 'w' if self.dark_mode else 'k' 
@@ -704,10 +704,10 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 noise_i_volts = convert_roc_to_volts(rotation_noise_i)
                 noise_q_volts = convert_roc_to_volts(rotation_noise_q)
 
-                mean_phase_noise = np.arctan(np.mean(noise_q_volts/noise_i_volts))
+                mean_phase_noise = np.median(np.arctan(noise_q_volts/noise_i_volts))
                 mean_mag_noise = np.mean(np.sqrt(noise_i_volts**2 + noise_q_volts**2))
                 
-                # print("Mean phase of the noise data collected is", np.degrees(mean_phase_noise), "degrees\n")
+                # print("Median phase of the noise data collected is", np.degrees(mean_phase_noise), "degrees\n")
                 # print("Mean magnitude of the noise data", mean_mag_noise)
 
                 self.plot2_iq_plane.plot(

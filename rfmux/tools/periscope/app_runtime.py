@@ -1100,13 +1100,6 @@ class PeriscopeRuntime:
             crs = self.crs
             asyncio.run(self.set_nco_from_load(crs, nco_freq, target_module)) #### Setting up the nco frequency ######
             
-            # history = {}
-            # resonance_order = iteration_params[0]['data'].keys()
-            # for r in resonance_order:
-            #     history[r-1] = iteration_params[0]['data'][r]['bias_frequency']
-
-            # print("history is", history)
-            
             for i in range(len(iteration_params)):
                 amplitude = iteration_params[i]['amplitude']
                 direction = iteration_params[i]['direction']

@@ -1073,7 +1073,11 @@ class PeriscopeRuntime:
             target_module = params.get('module')
             if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep."); return
             
-            dac_scales_for_window = self.dac_scales if hasattr(self, 'dac_scales') else {}
+            if hasattr(self, 'dac_scales'): 
+                dac_scales_for_window = self.dac_scales
+            else:
+                QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
+                return
 
             dac_scale_for_mod = load_params['dac_scales_used'][target_module]
             dac_scale_for_board = dac_scales_for_window[target_module]

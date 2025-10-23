@@ -208,6 +208,8 @@ class BiasKidsDialog(QDialog):
         layout.addWidget(buttons)
         
     def load_ui(self):
+        """Initialize and load the user interface for the Load Bias dialog, 
+        including input fields, buttons, and layout configuration."""
         
         self.setWindowTitle("Load Bias")
         layout = QtWidgets.QVBoxLayout(self)
@@ -270,6 +272,8 @@ class BiasKidsDialog(QDialog):
         
 
     def _on_set_and_plot_bias(self):
+        """Set flag to use the loaded file and accept the dialog, 
+        triggering both bias setting and plotting actions."""
         self.use_load_file = True
         self.accept()
 
@@ -279,8 +283,9 @@ class BiasKidsDialog(QDialog):
 
 
     def _open_file_dialog_async(self):
+        """Open a non-blocking file dialog for selecting a bias parameter file."""
         if not hasattr(self, "_file_dialog") or self._file_dialog is None:
-            self._file_dialog = QtWidgets.QFileDialog(self, "Load Network Analysis Parameters")
+            self._file_dialog = QtWidgets.QFileDialog(self, "Load Bias Parameters")
             self._file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
             self._file_dialog.setNameFilters([
                 "Pickle Files (*.pkl *.pickle)",
@@ -299,6 +304,7 @@ class BiasKidsDialog(QDialog):
     
     @QtCore.pyqtSlot(str)
     def _on_file_selected(self, path: str):
+        """Handle file selection, load bias data, and populate the UI fields with file contents."""
         payload = load_bias_payload(self, file_path=path)
         if payload is None:
             return
@@ -338,11 +344,14 @@ class BiasKidsDialog(QDialog):
     
     @QtCore.pyqtSlot()
     def _on_file_dialog_closed(self):
+        """Handle the event when the file dialog is closed without selection."""
         pass
 
 
         
     def get_load_param(self) -> dict | None:
+        """Retrieve and validate user input or loaded data, returning parameters as a dictionary.
+        Performs input validation and displays warnings for invalid configurations."""
         params_dict = {}
         try:
             if self.use_load_file:

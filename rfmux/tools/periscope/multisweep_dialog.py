@@ -377,10 +377,12 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.setMinimumWidth(500) # Ensure dialog is wide enough
 
     def _load_data_avail(self):
+        """Mark that data should be loaded from file and accept the dialog."""
         self.use_data_from_file = True
         self.accept()
 
     def _scroll_resonance(self):
+        """Handle resonance selection changes and update displayed frequencies accordingly. Choice between fit or sweep frequencies"""
         selected = self.res_freq_combo.currentText().lower()
         self.resonances_edit.clear()
 
@@ -397,6 +399,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.resonances_info_label.setText(f"Loaded {len(freqs)} resonances from file.")
 
     def _scroll_rerun_resonance(self):
+        """Refresh resonance display when rerunning choice between fit or sweep frequencies."""
         selected = self.res_freq_combo.currentText().lower()
         self.resonances_edit.clear()
 
@@ -416,6 +419,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         QtCore.QTimer.singleShot(0, self._open_file_dialog_async)
 
     def _open_file_dialog_async(self):
+        """Open a non-blocking file dialog to select a multisweep parameter file."""
         if not hasattr(self, "_file_dialog") or self._file_dialog is None:
             self._file_dialog = QtWidgets.QFileDialog(self, "Load Multisweep Parameters")
             self._file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
@@ -436,6 +440,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
     @QtCore.pyqtSlot(str)
     def _on_file_selected(self, path: str):
+        """Load selected multisweep data file, extract parameters, and populate the UI fields."""
         payload = load_multisweep_payload(self, file_path=path)
         if payload is None:
             return
@@ -484,6 +489,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     
     
     def _get_frequencies(self, payload, raw_resonance = True):
+        """Extract resonance frequencies from payload, optionally using fitted or sweep data."""
+        
         params = payload['initial_parameters']
         freqs = params['resonance_frequencies']
         
@@ -514,6 +521,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     
     @QtCore.pyqtSlot()
     def _on_file_dialog_closed(self):
+        """Handle closure of the file dialog without file selection."""
         pass  # Optional: keep or clear dialog
 
     

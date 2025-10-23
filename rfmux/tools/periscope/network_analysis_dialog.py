@@ -175,6 +175,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
 
     
     def _load_data_avail(self):
+        ''' Use loaded file parameters, accept the dialog'''
         self.load_data_available = True
         self.accept()
 
@@ -188,6 +189,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
 
 
     def _open_file_dialog_async(self):
+        """Open a non-blocking file dialog for selecting a Network Analysis parameter file."""
         if not hasattr(self, "_file_dialog") or self._file_dialog is None:
             self._file_dialog = QtWidgets.QFileDialog(self, "Load Network Analysis Parameters")
             self._file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
@@ -214,6 +216,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
 
     @QtCore.pyqtSlot(str)
     def _on_file_selected(self, path: str):
+        """Handle file selection, load bias data, and populate the UI fields with file contents."""
         payload = load_network_analysis_payload(self, file_path=path)
         if payload is None:
             return
@@ -264,6 +267,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
 
     @QtCore.pyqtSlot()
     def _on_file_dialog_closed(self):
+        """Handle the event when the file dialog is closed without selection."""
         pass
         
     def get_parameters(self) -> dict | None:

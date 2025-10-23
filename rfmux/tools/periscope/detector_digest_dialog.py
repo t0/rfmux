@@ -165,6 +165,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         self.refresh_noise_button = QtWidgets.QPushButton("Take Noise")
         self.refresh_noise_button.clicked.connect(self._refresh_noise_samps)
+        self.refresh_noise_button.setToolTip("Captures 100 I,Q points for each detector and over-plots them on the I,Q plot in the detector digest windows. Used to conveniently re-assess detector state.")
         self.refresh_noise_button.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.refresh_noise_button)
         

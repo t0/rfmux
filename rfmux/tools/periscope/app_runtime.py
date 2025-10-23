@@ -1067,11 +1067,11 @@ class PeriscopeRuntime:
         """
         # MultisweepWindow from .ui, MultisweepTask from .tasks, sys, traceback from .utils
         try:
-            if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep."); return
+            if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep. Make sure your board is correctly setup."); return
             window_id = f"multisweep_window_{self.multisweep_window_count}"; self.multisweep_window_count += 1
             params = load_params['initial_parameters']
             target_module = params.get('module')
-            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep."); return
+            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep. Please check your multisweep file."); return
             
             if hasattr(self, 'dac_scales'): 
                 dac_scales_for_window = self.dac_scales

@@ -1064,7 +1064,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             asyncio.set_event_loop(loop)
 
         # Launch async sampler
-        samples = loop.run_until_complete(self.collecting_samples(self.parent().crs, self.target_module, total))
+        samples = loop.run_until_complete(self.parent().crs.get_samples(total, average=False, channel=None, module=self.target_module))
         self.noise_data = samples
         loop.close()
         # self.take_samp_btn.setEnabled(True)

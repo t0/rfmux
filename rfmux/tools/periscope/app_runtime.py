@@ -1048,10 +1048,6 @@ class PeriscopeRuntime:
             error_msg = f"Error starting multisweep analysis: {type(e).__name__}: {str(e)}"
             print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
             QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
-
-
-    async def set_nco_from_load(self, crs, nco_freq, module):
-        await crs.set_nco_frequency(nco_freq, module=module)
         
     
     def _load_multisweep_analysis(self, load_params: dict):
@@ -1102,8 +1098,8 @@ class PeriscopeRuntime:
             nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
 
             crs = self.crs
-            asyncio.run(self.set_nco_from_load(crs, nco_freq, target_module)) #### Setting up the nco frequency ######
-            
+            asyncio.run(crs.set_nco_frequency(nco_freq, module=target_module)) #### Setting up the nco frequency ######
+
             for i in range(len(iteration_params)):
                 amplitude = iteration_params[i]['amplitude']
                 direction = iteration_params[i]['direction']

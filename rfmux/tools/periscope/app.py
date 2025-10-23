@@ -1279,7 +1279,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if bias_freqs:
             # nco_freq = ((min(bias_freqs) - span_hz / 2 + (max(bias_freqs) + span_hz / 2)) / 2
             nco_freq = (min(bias_freqs)  + max(bias_freqs)) / 2
-            asyncio.run(self.set_nco_from_load(self.crs, nco_freq, module))
+            crs = self.crs
+            asyncio.run(crs.set_nco_frequency(nco_freq, module=module)) #### Setting up the nco frequency ######
     
         asyncio.run(self.apply_bias_output(self.crs, module, amplitudes, bias_freqs, channels, phases))
         
@@ -1310,7 +1311,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         #### Making sure the dac scales are set in case unit change is needed somewhere#####
         
-        active_module = self.module
+        active_module = self.module 
 
         try:
             #### Will visualize in the multisweep window ######
@@ -1325,7 +1326,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             if dac_scale_for_mod != dac_scale_for_board:
                 QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
             
-            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep."); return
+            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for Bias."); return
             
             dac_scales_for_window = self.dac_scales if hasattr(self, 'dac_scales') else {}
             window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), 
@@ -1344,7 +1345,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             # nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
             nco_freq = (min(reso_frequencies)  + max(reso_frequencies)) / 2
             crs = self.crs
-            asyncio.run(self.set_nco_from_load(crs, nco_freq, target_module)) #### Setting up the nco frequency ######
+            asyncio.run(crs.set_nco_frequency(nco_freq, module=target_module)) #### Setting up the nco frequency ######
 
             ###### Setting up the bias #######
 

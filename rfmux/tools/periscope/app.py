@@ -1293,7 +1293,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             for i in range(len(amplitudes)):
 
                 quantized_bias = round(bias_freqs[i] / BASE_BAND_STEP_HZ) * BASE_BAND_STEP_HZ
-                # print("Channel", channels[i], "is frequency", quantized_bias)
+
                 ctx.set_frequency(quantized_bias - nco_freq, channel=channels[i], module=module)
                 
                 ctx.set_amplitude(float(amplitudes[i]), channel=channels[i], module=module)
@@ -1303,13 +1303,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         print(f"[Bias] Bias applied for {len(bias_freqs)} frequencies")
     
-        # df_cal = {
-        #     det_idx: data["df_calibration"]
-        #     for det_idx, data in payload["bias_kids_output"].items()
-        #     if data.get("df_calibration") is not None
-        # }
-        # if df_cal and hasattr(self, "_handle_df_calibration_ready"):
-        #     self._handle_df_calibration_ready(module, df_cal)
 
 
     def _set_and_plot_bias(self, load_params):
@@ -1431,35 +1424,30 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             
             phase_after_change = await crs.get_phase(crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
             
-            print(f"[Bias] Phase shift implemented of {phase_after_change} degrees")            
+            print(f"[Bias] Phase shift implemented of {phase_after_change} degrees for channel {channel}")            
             
     def calculate_shift(self, file_samples, noise_i, noise_q, refine):
         i_val_file = convert_roc_to_volts(file_samples.real)
         q_val_file = convert_roc_to_volts(file_samples.imag)
-        phase_file = np.degrees(np.arctan(np.mean(q_val_file/i_val_file)))
+        phase_file = np.degrees(np.median(np.arctan(q_val_file/i_val_file)))
 
         
         i_val_noise = convert_roc_to_volts(np.array(noise_i))
         q_val_noise = convert_roc_to_volts(np.array(noise_q))
-        phase_noise = np.degrees(np.arctan(np.mean(q_val_noise/i_val_noise)))
+        phase_noise = np.degrees(np.median(np.arctan(q_val_noise/i_val_noise)))
 
         phase_shift =  phase_noise - phase_file
 
-        q_noise_mean = np.mean(q_val_noise)
-        i_noise_mean = np.mean(i_val_noise)
+        q_noise_m = np.median(q_val_noise)
+        i_noise_m = np.median(i_val_noise)
 
-        q_file_mean = np.mean(q_val_file)
-        i_file_mean = np.mean(i_val_file)
+        q_file_m = np.median(q_val_file)
+        i_file_m = np.median(i_val_file)
 
 
-        if ((q_noise_mean/q_file_mean) < 0) and ((i_noise_mean/i_file_mean) < 0): ### incase there are in opposite quadrants
+        if ((q_noise_m/q_file_m) < 0) and ((i_noise_m/i_file_m) < 0): ### incase there are in opposite quadrants
             print(f"[Bias] Opposite quadrant shifting by 180")
             phase_shift = phase_shift + 180
-            
-
-
-        # print(f"The phase difference between file and noise is {phase_shift} degrees")
-        # print("The distance is", dist)
 
         return phase_shift
         

@@ -1051,12 +1051,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
 
     def _take_noise_samps(self):
-        total = 50
-        # print(f"[Bias] {total} samples requested")
+        total = 100
         self.take_samp_btn.setEnabled(False)
-        # self.progress_bar.setRange(0, total)
-        # self.progress_bar.setValue(0)
-        # self.current_amp_label.setText("Collecting noise samples...")
 
         try:
             loop = asyncio.get_event_loop()

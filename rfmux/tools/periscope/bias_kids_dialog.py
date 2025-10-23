@@ -235,13 +235,13 @@ class BiasKidsDialog(QDialog):
         amp_layout.addWidget(self.amp_edit)
         layout.addLayout(amp_layout)
 
-        span_layout = QtWidgets.QHBoxLayout()
-        span_label = QtWidgets.QLabel("Span (kHz)")
-        self.span_khz_edit = QtWidgets.QLineEdit(str(50.0))
-        self.span_khz_edit.setValidator(QDoubleValidator(0.1, 10000.0, 2, self)) # Min 0.1 kHz, Max 10 MHz
-        span_layout.addWidget(span_label)
-        span_layout.addWidget(self.span_khz_edit)
-        layout.addLayout(span_layout)
+        # span_layout = QtWidgets.QHBoxLayout()
+        # span_label = QtWidgets.QLabel("Span (kHz)")
+        # self.span_khz_edit = QtWidgets.QLineEdit(str(50.0))
+        # self.span_khz_edit.setValidator(QDoubleValidator(0.1, 10000.0, 2, self)) # Min 0.1 kHz, Max 10 MHz
+        # span_layout.addWidget(span_label)
+        # span_layout.addWidget(self.span_khz_edit)
+        # layout.addLayout(span_layout)
 
         # --- Phase ---
         # phase_layout = QtWidgets.QHBoxLayout()
@@ -335,8 +335,8 @@ class BiasKidsDialog(QDialog):
     
         self.tones_edit.setText(",".join([f"{f/1e6:.6f}" for f in bias_freqs]))
     
-        span_khz = params['span_hz'] / 1e3
-        self.span_khz_edit.setText(str(span_khz))
+        # span_khz = params['span_hz'] / 1e3
+        # self.span_khz_edit.setText(str(span_khz))
     
         self.amp_edit.setText(",".join([f"{a:.3f}" for a in amplitudes]))
         # self.phase_edit.setText(",".join([f"{p:.1f}" for p in phases]))
@@ -371,8 +371,8 @@ class BiasKidsDialog(QDialog):
                 for i in range(len(tone_text)):    
                     params_dict['bias_frequencies'].append(float(tone_text[i])*1e6)
     
-                span_hz = float(self.span_khz_edit.text()) * 1e3
-                params_dict['span_hz'] = span_hz
+                # span_hz = float(self.span_khz_edit.text()) * 1e3
+                # params_dict['span_hz'] = span_hz
     
                 len_amps = len(params_dict['amplitudes'])
                 len_bias = len(params_dict['bias_frequencies'])
@@ -384,9 +384,9 @@ class BiasKidsDialog(QDialog):
                 #     for i in range(len(phase_text)):    
                 #         params_dict['phases'].append(float(phase_text[i]))
     
-                if params_dict['span_hz'] <= 0:
-                    QtWidgets.QMessageBox.warning(self, "Validation Error", "Span must be positive.")
-                    return None
+                # if params_dict['span_hz'] <= 0:
+                #     QtWidgets.QMessageBox.warning(self, "Validation Error", "Span must be positive.")
+                #     return None
                 if params_dict['module'] is None:
                     QtWidgets.QMessageBox.warning(self, "Validation Error", "No module identified.")
                     return None

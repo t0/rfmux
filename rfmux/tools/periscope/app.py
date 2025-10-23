@@ -1264,7 +1264,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
     def _set_bias(self, params):
 
-        span_hz = params.get("span_hz")
+        # span_hz = params.get("span_hz")
         bias_freqs = params.get("bias_frequencies")
         amplitudes = params.get("amplitudes")
         phases = params.get("phases")
@@ -1276,8 +1276,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             QtWidgets.QMessageBox.critical(self, "Missing Module", "The file does not specify which module was biased.")
             return
 
-        if span_hz and bias_freqs:
-            nco_freq = ((min(bias_freqs) - span_hz / 2) + (max(bias_freqs) + span_hz / 2)) / 2
+        if bias_freqs:
+            # nco_freq = ((min(bias_freqs) - span_hz / 2 + (max(bias_freqs) + span_hz / 2)) / 2
+            nco_freq = (min(bias_freqs)  + max(bias_freqs)) / 2
             asyncio.run(self.set_nco_from_load(self.crs, nco_freq, module))
     
         asyncio.run(self.apply_bias_output(self.crs, module, amplitudes, bias_freqs, channels, phases))
@@ -1337,10 +1338,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
             window._hide_progress_bars()
 
-            span_hz = params['span_hz']
+            # span_hz = params['span_hz']
             reso_frequencies = params['resonance_frequencies']
 
-            nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
+            # nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
+            nco_freq = (min(reso_frequencies)  + max(reso_frequencies)) / 2
             crs = self.crs
             asyncio.run(self.set_nco_from_load(crs, nco_freq, target_module)) #### Setting up the nco frequency ######
 

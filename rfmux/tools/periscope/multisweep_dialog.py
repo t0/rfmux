@@ -91,6 +91,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         self.use_data_from_file = False
         self._load_data = {}
+        self.reso_count = 0
 
         self.setWindowTitle("Multisweep Configuration")
         self.setModal(True)
@@ -160,12 +161,14 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         text = text.strip()
         if not text:
             self.resonances_info_label.setText("No data. Enter manually if desired.")
+            self.start_btn.setEnabled(False)
+            self.load_btn.setEnabled(False)
             return
-    
+        self.start_btn.setEnabled(True)
         # Split on commas, ignore empty pieces
         parts = [p.strip() for p in text.split(",") if p.strip()]
-        count = len(parts)
-        self.resonances_info_label.setText(f"Loaded {count} resonance(s).")    
+        self.reso_count = len(parts)
+        self.resonances_info_label.setText(f"Loaded {self.reso_count} resonance(s).")    
     
     def _setup_ui(self):
         """Sets up the user interface elements for the Multisweep dialog."""
@@ -345,6 +348,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         if self.load_multisweep:
             btn_layout = QtWidgets.QHBoxLayout()
             self.start_btn = QtWidgets.QPushButton("Start Multisweep")
+            self.start_btn.setEnabled(False)
             self.load_btn = QtWidgets.QPushButton("Load Multisweep")
             self.load_btn.setEnabled(False) ### Will enable once file is available.
             self.cancel_btn = QtWidgets.QPushButton("Cancel")
@@ -446,46 +450,53 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             return
     
         self.load_btn.setEnabled(True)
+        self.start_btn.setEnabled(True)
         self._load_data = payload.copy()
         self.res_freq_combo.setEnabled(True)
         
-        params = payload['initial_parameters']
-
-        freqs = self._get_frequencies(payload, self.use_raw_frequencies)
+        try:
+            params = payload['initial_parameters']
+    
+            freqs = self._get_frequencies(payload, self.use_raw_frequencies)
+            
+            self.resonances_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
+            self.resonances_info_label.setText(f"Loaded {len(freqs)} resonances from file.")
         
-        self.resonances_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
-        self.resonances_info_label.setText(f"Loaded {len(freqs)} resonances from file.")
-
-
-    
-        # Span per Resonance (Hz -> kHz)
-        span_khz = params['span_hz'] / 1e3
-        self.span_khz_edit.setText(str(span_khz))
-    
-        self.npoints_edit.setText(str(params['npoints_per_sweep']))
-        self.nsamps_edit.setText(str(params['nsamps']))
-    
-        idx = self.recalc_cf_combo.findText(params['bias_frequency_method'], Qt.MatchFlag.MatchFixedString)
-        if idx >= 0:
-            self.recalc_cf_combo.setCurrentIndex(idx)
-    
-        self.rotate_saved_data_checkbox.setChecked(params['rotate_saved_data'])
-    
-        idx = self.sweep_direction_combo.findText(params['sweep_direction'].capitalize(),
-                                                  Qt.MatchFlag.MatchFixedString)
-        if idx >= 0:
-            self.sweep_direction_combo.setCurrentIndex(idx)
-    
-        self.apply_skewed_fit_checkbox.setChecked(params['apply_skewed_fit'])
-        self.apply_nonlinear_fit_checkbox.setChecked(params['apply_nonlinear_fit'])
-    
-        amps = params.get("amps") or ([params["amp"]] if "amp" in params else None)
-        if amps:
-            try:
-                amp_text = ", ".join(f"{float(amp):g}" for amp in amps)
-            except (TypeError, ValueError):
-                amp_text = ", ".join(str(amp) for amp in amps)
-            self.amp_edit.setText(amp_text)
+            # Span per Resonance (Hz -> kHz)
+            span_khz = params['span_hz'] / 1e3
+            self.span_khz_edit.setText(str(span_khz))
+        
+            self.npoints_edit.setText(str(params['npoints_per_sweep']))
+            self.nsamps_edit.setText(str(params['nsamps']))
+        
+            idx = self.recalc_cf_combo.findText(params['bias_frequency_method'], Qt.MatchFlag.MatchFixedString)
+            if idx >= 0:
+                self.recalc_cf_combo.setCurrentIndex(idx)
+        
+            self.rotate_saved_data_checkbox.setChecked(params['rotate_saved_data'])
+        
+            idx = self.sweep_direction_combo.findText(params['sweep_direction'].capitalize(),
+                                                      Qt.MatchFlag.MatchFixedString)
+            if idx >= 0:
+                self.sweep_direction_combo.setCurrentIndex(idx)
+        
+            self.apply_skewed_fit_checkbox.setChecked(params['apply_skewed_fit'])
+            self.apply_nonlinear_fit_checkbox.setChecked(params['apply_nonlinear_fit'])
+        
+            amps = params.get("amps") or ([params["amp"]] if "amp" in params else None)
+            if amps:
+                try:
+                    amp_text = ", ".join(f"{float(amp):g}" for amp in amps)
+                except (TypeError, ValueError):
+                    amp_text = ", ".join(str(amp) for amp in amps)
+                self.amp_edit.setText(amp_text)
+        except KeyError as e:
+            missing = e.args[0]
+            msg = (
+                f"Key '{missing}' is missing in the payload.\n"
+                "Default value will be used where possible."
+            )
+            QtWidgets.QMessageBox.warning(self, "Missing Key", msg)
     
     
     def _get_frequencies(self, payload, raw_resonance = True):

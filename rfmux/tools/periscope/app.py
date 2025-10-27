@@ -137,6 +137,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.frame_cnt: int = 0                 # Counter for GUI frames rendered
         self.pkt_cnt: int = 0                   # Counter for processed UDP packets
         self.t_last: float = time.time()        # Timestamp of the last performance update (time from .utils)
+        self.prev_receive = 0
+        self.prev_drop = 0
 
         # Decimation stage, dynamically updated based on inferred sample rate.
         # This is used for PSD calculations.
@@ -704,6 +706,22 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # `QtWidgets` is from .utils.
         self.setStatusBar(QtWidgets.QStatusBar()) # Create and set a new status bar
 
+        self.fps_label = QtWidgets.QLabel()
+        self.pps_label = QtWidgets.QLabel()
+        self.packet_loss_label = QtWidgets.QLabel()
+        self.dropped_label = QtWidgets.QLabel()
+        self.info_text = QtWidgets.QLabel()
+
+        self.default_packet_loss_color = self.packet_loss_label.palette().color(QtGui.QPalette.WindowText).name()
+
+        # Add them to the status bar
+        self.statusBar().addWidget(self.fps_label)
+        self.statusBar().addWidget(self.pps_label)
+        self.statusBar().addWidget(self.packet_loss_label)
+        self.statusBar().addWidget(self.dropped_label)
+        self.statusBar().addPermanentWidget(self.info_text)
+        
+
     def _show_help(self):
         """
         Display the help dialog with usage instructions and tips.
@@ -760,7 +778,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             "  - Double-click: Show point coordinates\n"
             "- **Interactive Session:** Open an embedded iPython console for direct data access\n"
             "- **Initialize CRS:** Configure the CRS board settings (IRIG source, etc.)\n\n"
-            
+
             "## Programmatic Usage\n"
             "**From IPython/Jupyter:**\n"
             "```python\n"
@@ -780,6 +798,36 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             "- `--buffer <size>`: Buffer size (default: 5000)\n"
             "- `--refresh <ms>`: GUI refresh rate in ms (default: 33)\n"
             "- `--dot-px <size>`: Dot size for IQ density display (default: 1)\n"
+            "\n"
+            "## Packet Loss - Networking settings\n"
+            "Packet loss can occur in the networking between the CRS and your computer, but can also occur onboard your DAQ"
+            "computer if the OS UDP receive buffer is too small to handle the incoming data rate, or if the CPU is too burdened"
+            "by other tasks to drain the existing buffer in time."
+            "\n"
+            "\n"
+            "On macOS and Windows, its recommended, to run with decimation 4 or higher. At lower decimation settings (<= 3), you may experience "
+            "packet loss, especially when the packet rate is comparatively high at decimation 6 itself (> 550 packets/s)."
+            " This behavior is attributed to limited buffer availability on macOS and Windows systems, unlike Linux."
+            "\n"
+            "\n"
+            "The steps below wil help improve the packet loss and get the maximum performance, by increasing the UDP buffer size."
+            "\n"
+            "- **MacOS:**\n"
+            "  Run the following commands to increase the default buffer\n"
+            "```\n"
+            "     sudo sysctl -w kern.ipc.maxsockbuf=16777216\n"
+            "     sudo sysctl -w net.inet.udp.recvspace=16777216\n"
+            "```\n"
+            " - **Linux:**\n"
+            "   Run the following command to increase the default buffer\n"
+            "```\n"
+            "     sudo net.core.rmem_max = 67108864 OR sudo sysctl -w net.core.rmem_max=67108864\n"
+            "```\n"
+            "- **Windows:** \n\n"
+            "   Please consult the README.Windows.md available on rfmux repo on how to increase the buffer size and additional resources."
+            "\n"
+            "\n"
+            "If you are still seeing dropped packets due to UDP overflows in machines with limited UDP buffer sizes (such as OSX and Windows), it can help to reduce the periscope plotting buffer size, or number of plots.\n"            
         )
         help_dialog = QtWidgets.QDialog(self)
         help_dialog.setWindowTitle("Periscope Help")

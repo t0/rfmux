@@ -53,6 +53,8 @@ from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, Initial
                        # (Assumes periscope_ui.py has been refactored into ui.py and exports these).
 from .app_runtime import PeriscopeRuntime
 from .mock_configuration_dialog import MockConfigurationDialog
+from rfmux.core.transferfunctions import convert_roc_to_volts
+
 
 # Note: The original commented-out lines for specific UI class imports
 # (e.g., NetworkAnalysisDialog) have been removed, as these are expected
@@ -151,6 +153,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.show_q: bool = True                # Visibility of 'Q' component traces
         self.show_m: bool = True                # Visibility of 'Magnitude' component traces
         self.zoom_box_mode: bool = True         # Default mouse mode for plots (zoom vs pan)
+
+
+        self.test_noise_samples = {}           ##### debugging purposes 
+        self.noise_count = 0                   ##### debugging purposes 
+        self.phase_shifts = []                 ##### debugging purposes 
         
         # --- df Calibration Storage ---
         # Stores calibration factors for frequency shift/dissipation conversion
@@ -432,6 +439,22 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.btn_netanal.setEnabled(False)
             self.btn_netanal.setToolTip("CRS object not available - network analysis disabled.")
 
+        # Button to Load Multisweep Dialog
+        self.btn_load_multi = QtWidgets.QPushButton("Load Multisweep")
+        self.btn_load_multi.setToolTip("Load Multisweep directly from main window.")
+        self.btn_load_multi.clicked.connect(self._load_multisweep_dialog)
+        if self.crs is None: # Disable if no CRS object is available
+            self.btn_load_multi.setEnabled(False)
+            self.btn_load_multi.setToolTip("CRS object not available - load multisweep disabled.")
+
+        # Button to Load Bias KIDS Dialog
+        self.btn_load_bias = QtWidgets.QPushButton("Load Bias")
+        self.btn_load_bias.setToolTip("Bias KIDS directly from the main window.")
+        self.btn_load_bias.clicked.connect(self.handle_bias_from_file)
+        if self.crs is None: # Disable if no CRS object is available
+            self.btn_load_bias.setEnabled(False)
+            self.btn_load_bias.setToolTip("CRS object not available - load Bias disabled.")
+
         # Help button
         self.btn_help = QtWidgets.QPushButton("Help")
         self.btn_help.setToolTip("Show usage instructions, interaction details, and examples.")
@@ -498,9 +521,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         action_buttons_layout.addWidget(self.btn_interactive_session)
 
         action_buttons_layout.addWidget(self.btn_init_crs)
-        action_buttons_layout.addWidget(self.btn_netanal) 
+        action_buttons_layout.addWidget(self.btn_netanal)
+        action_buttons_layout.addWidget(self.btn_load_multi)
+        action_buttons_layout.addWidget(self.btn_load_bias)
         action_buttons_layout.addWidget(self.btn_toggle_cfg)
-        action_buttons_layout.addWidget(self.btn_help)    
+        action_buttons_layout.addWidget(self.btn_help)  
         layout.addWidget(action_buttons_widget)
 
         # --- Collapsible Configuration Panel ---
@@ -866,7 +891,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.dac_scales = dialog.dac_scales.copy()
             params = dialog.get_parameters()
             if params:
-                self._start_network_analysis(params)
+                if "modules" in params.keys():
+                    self._load_network_analysis(params)
+                else:
+                    self._start_network_analysis(params)
 
     def _start_network_analysis(self, params: dict):
         """
@@ -941,6 +969,68 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             print(f"Error in _start_network_analysis: {e}")
             traceback.print_exc() # traceback from .utils
 
+
+    def _load_network_analysis(self, params: dict):
+        """
+        Initialize and start a new network analysis process.
+
+        This method creates a new `NetworkAnalysisWindow` to display the results
+        and a `NetworkAnalysisTask` to perform the sweep in a background thread.
+        It handles single or multiple module sweeps and iterates through specified
+        amplitudes if provided.
+
+        Args:
+            params (dict): A dictionary of parameters for the network analysis,
+                           typically obtained from `NetworkAnalysisDialog`.
+                           Expected keys include 'module' (int or list of ints),
+                           'amps' (list of floats), 'amp' (float, fallback if 'amps'
+                           is not present), and other sweep-specific settings.
+        """
+        try:
+            if self.crs is None:
+                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
+                return
+            selected_module_param = params['parameters'].get('module') # Renamed to avoid conflict
+            if selected_module_param is None:
+                modules_to_run = list(range(1, 9))
+            elif isinstance(selected_module_param, list):
+                modules_to_run = selected_module_param
+            else:
+                modules_to_run = [selected_module_param]
+            if not hasattr(self, 'dac_scales'):
+                QtWidgets.QMessageBox.critical(self, "Error", 
+                    "DAC scales are not available. Please run the network analysis configuration again.")
+                return
+            window_id = f"window_{self.netanal_window_count}"
+            self.netanal_window_count += 1
+            dac_scales_local = self.dac_scales.copy() # Renamed
+            window_signals = NetworkAnalysisSignals()
+            # NetworkAnalysisWindow from .ui
+            window_instance = NetworkAnalysisWindow(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode) # Renamed
+            window_instance._hide_progress_bars() #### Remove the progress bar when loading the data
+            window_instance.set_params(params['parameters'])
+            window_instance.window_id = window_id
+            self.netanal_windows[window_id] = {'window': window_instance, 'signals': window_signals}
+            amplitudes = params['parameters'].get('amps')
+            for mod in modules_to_run:
+                for i in range(len(amplitudes)):
+                    freqs = np.array(params['modules'][mod][i]['frequency']['values'])
+                    amps = np.array(params['modules'][mod][i]['magnitude']['counts']['raw'])
+                    phases = np.array(params['modules'][mod][i]['phase']['values'])
+                    
+                    window_instance.update_data(mod, freqs, amps, phases)
+                    window_instance.update_data_with_amp(mod, freqs, amps, phases, amplitudes[i])
+
+                window_data = self.netanal_windows[window_id]
+                
+                r_freq = params['modules'][mod]['resonances_hz']
+                window_instance._use_loaded_resonances(mod, r_freq)
+                    
+            window_instance.show()
+        except Exception as e:
+            print(f"Error in _start_network_analysis: {e}")
+            traceback.print_exc() # traceback from .utils
+
     def _handle_analysis_completed(self, module_param: int, window_id: str): # Renamed module
         """
         Handle the completion of a network analysis sweep for a specific module.
@@ -982,6 +1072,35 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             print(f"Error in _handle_analysis_completed: {e}")
             traceback.print_exc()
 
+    def check_connection(self, window_data, window_id):
+        
+        window_instance = window_data["window"]
+        window_signals = window_data["signals"]
+        
+        count = window_signals.receivers(window_signals.progress)
+        if count == 0:
+            window_signals.progress.connect(
+                lambda mod, prog: window_instance.update_progress(mod, prog), # mod, prog to avoid conflict
+                QtCore.Qt.ConnectionType.QueuedConnection)
+            window_signals.data_update.connect(
+                lambda mod, freqs, amps, phases: window_instance.update_data(mod, freqs, amps, phases),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+            window_signals.data_update_with_amp.connect(
+                lambda mod, freqs, amps, phases, amp_val:  # amp_val to avoid conflict
+                window_instance.update_data_with_amp(mod, freqs, amps, phases, amp_val),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+            window_signals.completed.connect(
+                lambda mod: self._handle_analysis_completed(mod, window_id),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+            window_signals.error.connect(
+                lambda error_msg: QtWidgets.QMessageBox.critical(window_instance, "Network Analysis Error", error_msg),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+        else:
+            return
+            
+        
+    
+    
     def _start_next_amplitude_task(self, module_param: int, params: dict, window_id: str): # Renamed module
         """
         Start the next network analysis task for a given module and amplitude.
@@ -1001,6 +1120,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         try:
             if window_id not in self.netanal_windows: return
             window_data = self.netanal_windows[window_id]
+            self.check_connection(window_data, window_id)
             signals = window_data['signals']
             if module_param not in window_data['amplitude_queues'] or not window_data['amplitude_queues'][module_param]:
                 return
@@ -1039,14 +1159,19 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             sender_widget = self.sender() # Renamed
             source_window = None
             window_id = None
-            if sender_widget and hasattr(sender_widget, 'window'): source_window = sender_widget.window()
+            if sender_widget and hasattr(sender_widget, 'window'): 
+                source_window = sender_widget.window()
             for w_id, w_data in self.netanal_windows.items():
-                if w_data['window'] == source_window: window_id = w_id; break
-            if not window_id: return
+                if w_data['window'] == source_window: 
+                    window_id = w_id; break
+            if not window_id: 
+                print("No window_id found")
+                return
             window_data = self.netanal_windows[window_id]
             window = window_data['window']
             window.data.clear(); window.raw_data.clear()
-            for mod, pbar in window.progress_bars.items(): pbar.setValue(0) # Renamed module
+            for mod, pbar in window.progress_bars.items(): 
+                pbar.setValue(0) # Renamed module
             window.clear_plots(); window.set_params(params)
             selected_module_param = params.get('module') # Renamed
             if selected_module_param is None: modules_to_run = list(range(1, 9))
@@ -1065,6 +1190,285 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         except Exception as e:
             print(f"Error in _rerun_network_analysis: {e}")
             traceback.print_exc()
+        
+    def _load_multisweep_dialog(self) -> None:
+        """
+        Show the dialog to configure and run multisweep analysis.
+        """
+        # Try to get active module
+        default_dac_scales = {m: -0.5 for m in range(1, 9)}
+        netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
+        netanal_dialog.module_entry.setText(str(self.module))
+        fetcher = DACScaleFetcher(self.crs)
+        fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
+        fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
+        fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
+        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
+        fetcher.start()
+        
+        active_module = self.module
+
+    
+        # Try to get resonances (if available)
+        resonances = []
+        if hasattr(self, "resonance_freqs") and active_module is not None:
+            resonances = self.resonance_freqs.get(active_module, [])
+    
+        
+        # --- Launch dialog even if no resonances yet ---
+        dialog = MultisweepDialog( parent=netanal_dialog, 
+                                   resonance_frequencies=resonances,   # may be []
+                                   dac_scales=netanal_dialog.dac_scales,   # may be {}
+                                   current_module=active_module,       # may be None
+                                   initial_params=None ,                # nothing prefilled
+                                   load_multisweep = True
+                                 )
+
+        
+        if dialog.exec():
+            params = dialog.get_parameters()
+            if params:
+                if "results_by_iteration" in params.keys():
+                    self._load_multisweep_analysis(params)
+                else:
+                    self._start_multisweep_analysis(params)
+    
+    
+    def handle_bias_from_file(self) -> None:
+        """Slot for the 'Load Bias…' button in the main application window."""
+        if self.crs is None:
+            QtWidgets.QMessageBox.warning(self, "CRS Not Available", "Connect to a CRS before loading bias data.")
+            return
+
+
+        default_dac_scales = {m: -0.5 for m in range(1, 9)}
+        netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
+        netanal_dialog.module_entry.setText(str(self.module))
+        fetcher = DACScaleFetcher(self.crs)
+        fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
+        fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
+        fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
+        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
+        fetcher.start()
+        
+        from .bias_kids_dialog import BiasKidsDialog
+        dialog = BiasKidsDialog(self, self.module, True)
+
+        if dialog.exec():
+            params = dialog.get_load_param()
+            if params:
+                if "bias_kids_output" in params.keys():
+                    self._set_and_plot_bias(params)
+                else:
+                    self._set_bias(params)
+
+    def _set_bias(self, params):
+
+        # span_hz = params.get("span_hz")
+        bias_freqs = params.get("bias_frequencies")
+        amplitudes = params.get("amplitudes")
+        phases = params.get("phases")
+        module = params.get("module")
+
+        channels = np.arange(1, len(bias_freqs)+1).tolist()
+
+        if module is None:
+            QtWidgets.QMessageBox.critical(self, "Missing Module", "The file does not specify which module was biased.")
+            return
+
+        if bias_freqs:
+            # nco_freq = ((min(bias_freqs) - span_hz / 2 + (max(bias_freqs) + span_hz / 2)) / 2
+            nco_freq = (min(bias_freqs)  + max(bias_freqs)) / 2
+            crs = self.crs
+            asyncio.run(crs.set_nco_frequency(nco_freq, module=module)) #### Setting up the nco frequency ######
+    
+        asyncio.run(self.apply_bias_output(self.crs, module, amplitudes, bias_freqs, channels, phases))
+        
+    async def apply_bias_output(self, crs, module: int, amplitudes: list, bias_freqs : list,
+                                channels : list, phases : list) -> None:
+    
+        BASE_BAND_STEP_HZ = 298.0232238769531 #### Taken from bias_kids.py
+        if not bias_freqs:
+            return
+        nco_freq = await crs.get_nco_frequency(module=module)
+        async with crs.tuber_context() as ctx:
+            for i in range(len(amplitudes)):
+
+                quantized_bias = round(bias_freqs[i] / BASE_BAND_STEP_HZ) * BASE_BAND_STEP_HZ
+
+                ctx.set_frequency(quantized_bias - nco_freq, channel=channels[i], module=module)
+                
+                ctx.set_amplitude(float(amplitudes[i]), channel=channels[i], module=module)
+                
+                ctx.set_phase(float(phases[i]), units=crs.UNITS.DEGREES, target=crs.TARGET.ADC, channel=channels[i], module=module)
+            await ctx()
+
+        print(f"[Bias] Bias applied for {len(bias_freqs)} frequencies")
+    
+
+
+    def _set_and_plot_bias(self, load_params):
+
+        #### Making sure the dac scales are set in case unit change is needed somewhere#####
+        
+        active_module = self.module 
+
+        try:
+            #### Will visualize in the multisweep window ######
+            if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep."); return
+            window_id = f"multisweep_window_{self.multisweep_window_count}"; self.multisweep_window_count += 1
+            params = load_params['initial_parameters']
+            target_module = params.get('module')
+
+            dac_scale_for_mod = load_params['dac_scales_used'][target_module] 
+            dac_scale_for_board = self.dac_scales[target_module]
+
+            if dac_scale_for_mod != dac_scale_for_board:
+                QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
+            
+            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for Bias."); return
+            
+            dac_scales_for_window = self.dac_scales if hasattr(self, 'dac_scales') else {}
+            window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), 
+                                     dac_scales=dac_scales_for_window, dark_mode=self.dark_mode, loaded_bias=True)
+            self.multisweep_windows[window_id] = {'window': window, 'params': params.copy()}
+            
+            # Connect df_calibration_ready signal if the method exists
+            if hasattr(window, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
+                window.df_calibration_ready.connect(self._handle_df_calibration_ready)
+
+            window._hide_progress_bars()
+
+            # span_hz = params['span_hz']
+            reso_frequencies = params['resonance_frequencies']
+
+            # nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
+            nco_freq = (min(reso_frequencies)  + max(reso_frequencies)) / 2
+            crs = self.crs
+            asyncio.run(crs.set_nco_frequency(nco_freq, module=target_module)) #### Setting up the nco frequency ######
+
+            ###### Setting up the bias #######
+
+            bias_output =load_params['bias_kids_output']
+            
+            bias_freqs = []
+            amplitudes = []
+            phases = []
+            channels = []
+            data_full = {}
+            data_rod = {}
+            
+            for det_idx, det_data in bias_output.items():
+                channel = int(det_data.get("bias_channel", det_idx))
+                channels.append(channel)
+                bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
+                bias_freqs.append(bias_freq)
+                amplitude = det_data.get("sweep_amplitude")
+                amplitudes.append(amplitude)
+                phase = det_data.get("optimal_phase_degrees", 0)
+                phases.append(phase)
+                new_data = {}
+                for k, v in bias_output[det_idx].items():
+                    new_data[k] = v
+                    if k == "rotation_tod":
+                        data_rod[channel] = v
+                    if k == "nonlinear_model_iq":
+                        break
+                data_full[det_idx] = new_data
+
+
+            asyncio.run(self.apply_bias_output(self.crs, target_module, amplitudes, bias_freqs, channels, phases))
+                
+            asyncio.run(self.adjust_phase(target_module, channels, data_rod))
+
+
+            print(f"[Bias] Refining the rotation")
+            self.noise_count = self.noise_count + 1
+            asyncio.run(self.adjust_phase(target_module, channels, data_rod, True))
+            
+            ##### Plotting the bias #######
+
+            direction = load_params['results_by_iteration'][0]['direction'] ### Assuming sweep direction will be same for all 
+            
+            for i in range(len(bias_output)):
+                amplitude = amplitudes[i]
+                direction = direction
+                data = data_full
+                window.update_data(target_module, i, amplitude, direction, data, None)
+            window.show()
+
+            
+        except Exception as e:
+            error_msg = f"Error displaying results: {type(e).__name__}: {str(e)}"
+            print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
+            QtWidgets.QMessageBox.critical(self, "Bias Error", error_msg)
+
+
+
+    async def adjust_phase(self, module, channels, data_rod, refine=False):
+        if self.crs is None: 
+            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for Bias.") 
+            return
+        else:
+            crs = self.crs
+
+        for channel in channels:
+            samples = await self.collecting_samples_chan(crs, module, channel)
+            
+            phase_shift = self.calculate_shift(data_rod[channel], samples.i, samples.q, refine)
+            
+            self.phase_shifts.append(phase_shift)
+            
+            init_phase = await crs.get_phase(crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
+            
+            mod_phase = phase_shift + init_phase 
+            
+            await crs.set_phase(mod_phase, crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
+            
+            phase_after_change = await crs.get_phase(crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
+            
+            print(f"[Bias] Phase shift implemented of {phase_after_change} degrees for channel {channel}")            
+            
+    def calculate_shift(self, file_samples, noise_i, noise_q, refine):
+        i_val_file = convert_roc_to_volts(file_samples.real)
+        q_val_file = convert_roc_to_volts(file_samples.imag)
+        phase_file = np.degrees(np.median(np.arctan(q_val_file/i_val_file)))
+
+        
+        i_val_noise = convert_roc_to_volts(np.array(noise_i))
+        q_val_noise = convert_roc_to_volts(np.array(noise_q))
+        phase_noise = np.degrees(np.median(np.arctan(q_val_noise/i_val_noise)))
+
+        phase_shift =  phase_noise - phase_file
+
+        q_noise_m = np.median(q_val_noise)
+        i_noise_m = np.median(i_val_noise)
+
+        q_file_m = np.median(q_val_file)
+        i_file_m = np.median(i_val_file)
+
+
+        if ((q_noise_m/q_file_m) < 0) and ((i_noise_m/i_file_m) < 0): ### incase there are in opposite quadrants
+            print(f"[Bias] Opposite quadrant shifting by 180")
+            phase_shift = phase_shift + 180
+
+        return phase_shift
+        
+    async def collecting_samples_chan(self, crs, module, channel, total=100):
+        samples = await crs.get_samples(total, average=False, channel=channel, module=module)
+
+        if channel not in self.test_noise_samples:
+            self.test_noise_samples[channel] = {}
+
+        self.test_noise_samples[channel][self.noise_count] = np.array(samples.i) + np.array(samples.q) * 1j
+        return samples
+
+    def get_test_noise(self):
+        return self.test_noise_samples
+
+    def get_phase_shift(self):
+        return self.phase_shifts
+            
     
     def _netanal_progress(self, module_param: int, progress: float):
         """Slot for network analysis progress signals. Currently a placeholder."""
@@ -1275,7 +1679,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 'num_resonances': mc.DEFAULT_NUM_RESONANCES,
                 'base_noise_level': mc.BASE_NOISE_LEVEL,
                 'amplitude_noise_coupling': mc.AMPLITUDE_NOISE_COUPLING,
-                'udp_noise_level': mc.UDP_NOISE_LEVEL
+                'udp_noise_level': mc.UDP_NOISE_LEVEL,
+                'resonator_random_seed' : 42
             }
         except Exception as e:
             print(f"Error getting current mock config: {e}")

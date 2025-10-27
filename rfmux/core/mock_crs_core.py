@@ -429,7 +429,7 @@ class MockCRS(BaseCRS):
         min_freq_hz = -313.5e6
         max_freq_hz = 313.5e6
         if not (min_freq_hz <= frequency <= max_freq_hz):
-            raise ValueError(f"Frequency must be between -313.5 MHz and +313.5 MHz.")
+            raise ValueError(f"The set frequency must be between -313.5 MHz and +313.5 MHz of the NCO frequency.")
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
         self.frequencies[(module, channel)] = frequency
@@ -615,7 +615,7 @@ class MockCRS(BaseCRS):
 
     def get_nco_frequency(self, module=None, target=None): # target unused but for API compat
         assert module is not None and isinstance(module, int)
-        return self.nco_frequencies.get(module)
+        return self.nco_frequencies.get(module, 0)
 
     def set_adc_attenuator(self, attenuation, module=None):
         assert isinstance(attenuation, int) and 0 <= attenuation <= 27

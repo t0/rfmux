@@ -348,7 +348,7 @@ async def bias_kids(
                 ctx.set_amplitude(config['amplitude'], channel=config['channel'], module=module)
                 ctx.set_phase(config['phase'], units=crs.UNITS.DEGREES, target=crs.TARGET.ADC, channel=config['channel'], module=module)
             except Exception as e:
-                warnings.warn(f"Failed to set up detector {det_idx}: {e}")
+                print(f"[Bias] Failed to set up detector {det_idx}: {e}")
                 continue
         await ctx()
     

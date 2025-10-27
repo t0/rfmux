@@ -3,6 +3,7 @@
 from .utils import *
 from .tasks import *
 from .ui import *
+import asyncio
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
@@ -1017,8 +1018,9 @@ class PeriscopeRuntime:
                 self.multisweep_signals.completed_iteration.disconnect()
                 self.multisweep_signals.all_completed.disconnect()
                 self.multisweep_signals.error.disconnect()
-            except TypeError: pass # Raised if signals were not previously connected
-            
+            except TypeError: 
+                pass # Raised if signals were not previously connected
+
             # Connect signals from the MultisweepTask to the new window's slots
             self.multisweep_signals.progress.connect(window.update_progress,
                                                    QtCore.Qt.ConnectionType.QueuedConnection)
@@ -1041,6 +1043,68 @@ class PeriscopeRuntime:
             task_key = f"{window_id}_module_{target_module}"
             self.multisweep_tasks[task_key] = task
             task.start()  # Start the QThread directly
+            window.show()
+        except Exception as e:
+            error_msg = f"Error starting multisweep analysis: {type(e).__name__}: {str(e)}"
+            print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
+            QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
+        
+    
+    def _load_multisweep_analysis(self, load_params: dict):
+        """
+        Start a new multisweep analysis.
+
+        Creates a `MultisweepWindow` and a `MultisweepTask`.
+        Connects signals for progress, data updates, and completion.
+
+        Args:
+            params (dict): Parameters for the multisweep analysis, typically
+                            from a configuration dialog.
+        """
+        # MultisweepWindow from .ui, MultisweepTask from .tasks, sys, traceback from .utils
+        try:
+            if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep. Make sure your board is correctly setup."); return
+            window_id = f"multisweep_window_{self.multisweep_window_count}"; self.multisweep_window_count += 1
+            params = load_params['initial_parameters']
+            target_module = params.get('module')
+            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep. Please check your multisweep file."); return
+            
+            if hasattr(self, 'dac_scales'): 
+                dac_scales_for_window = self.dac_scales
+            else:
+                QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
+                return
+
+            dac_scale_for_mod = load_params['dac_scales_used'][target_module]
+            dac_scale_for_board = dac_scales_for_window[target_module]
+
+            if dac_scale_for_mod != dac_scale_for_board:
+                QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
+                
+            window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), 
+                                     dac_scales=dac_scales_for_window, dark_mode=self.dark_mode)
+            self.multisweep_windows[window_id] = {'window': window, 'params': params.copy()}
+            
+            # Connect df_calibration_ready signal if the method exists
+            if hasattr(window, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
+                window.df_calibration_ready.connect(self._handle_df_calibration_ready)
+
+            window._hide_progress_bars()
+            iteration_params = load_params['results_by_iteration']
+
+            span_hz = params['span_hz']
+            reso_frequencies = params['resonance_frequencies']
+
+            nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
+
+            crs = self.crs
+            asyncio.run(crs.set_nco_frequency(nco_freq, module=target_module)) #### Setting up the nco frequency ######
+
+            for i in range(len(iteration_params)):
+                amplitude = iteration_params[i]['amplitude']
+                direction = iteration_params[i]['direction']
+                data = iteration_params[i]['data']
+                window.update_data(target_module, i, amplitude, direction, data, None)
             window.show()
         except Exception as e:
             error_msg = f"Error starting multisweep analysis: {type(e).__name__}: {str(e)}"
@@ -1072,6 +1136,35 @@ class PeriscopeRuntime:
             
         self.multisweep_windows[window_id]['params'] = params.copy() # Update stored params
         # Pass the window_instance to the task (now starts automatically since it's a QThread)
+        
+        ### This reconnects to signal ####
+        try:
+            self.multisweep_signals.progress.disconnect()
+            self.multisweep_signals.data_update.disconnect()
+            self.multisweep_signals.completed_iteration.disconnect()
+            self.multisweep_signals.all_completed.disconnect()
+            self.multisweep_signals.error.disconnect()
+        except TypeError: 
+            pass # Raised if signals were not previously connected
+
+        # Connect signals from the MultisweepTask to the new window's slots
+        self.multisweep_signals.progress.connect(window_instance.update_progress,
+                                               QtCore.Qt.ConnectionType.QueuedConnection)
+        self.multisweep_signals.starting_iteration.connect(window_instance.handle_starting_iteration,
+                                                         QtCore.Qt.ConnectionType.QueuedConnection)
+        self.multisweep_signals.data_update.connect(window_instance.update_data,
+                                                  QtCore.Qt.ConnectionType.QueuedConnection)
+        self.multisweep_signals.completed_iteration.connect(
+            lambda module, iteration, amplitude, direction: window_instance.completed_amplitude_sweep(module, amplitude),
+            QtCore.Qt.ConnectionType.QueuedConnection)
+        self.multisweep_signals.all_completed.connect(window_instance.all_sweeps_completed,
+                                                    QtCore.Qt.ConnectionType.QueuedConnection)
+        self.multisweep_signals.error.connect(window_instance.handle_error,
+                                            QtCore.Qt.ConnectionType.QueuedConnection)
+        self.multisweep_signals.fitting_progress.connect(window_instance.handle_fitting_progress,
+                                                        QtCore.Qt.ConnectionType.QueuedConnection)
+
+        
         task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window_instance)
         self.multisweep_tasks[old_task_key] = task
         task.start()  # Start the QThread directly

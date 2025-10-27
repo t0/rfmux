@@ -6,7 +6,7 @@ This dialog allows users to configure simulation parameters when running
 Periscope in mock mode (connected to localhost/127.0.0.1).
 """
 
-from .utils import QtWidgets, QtCore, QtGui, QDoubleValidator
+from .utils import QtWidgets, QtCore, QtGui, QDoubleValidator, QIntValidator
 import re
 from rfmux.core import mock_constants
 
@@ -148,6 +148,14 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.freq_end_spin.setValue(mock_constants.DEFAULT_FREQ_END / 1e9)  # Convert Hz to GHz
         self.freq_end_spin.setToolTip("Ending frequency for resonance generation")
         layout.addWidget(self.freq_end_spin, row, 3)
+
+        row += 1
+        # Random seed (optional)
+        layout.addWidget(QtWidgets.QLabel("Random Seed:"), row, 0)
+        self.random_seed_edit = QtWidgets.QLineEdit()
+        self.random_seed_edit.setValidator(QIntValidator(0, 2**31 - 1, self.random_seed_edit))
+        self.random_seed_edit.setText(str(42))
+        layout.addWidget(self.random_seed_edit, row, 1, 1, 3)
         
         return group
         
@@ -452,6 +460,9 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.base_noise_spin.setValue(mock_constants.BASE_NOISE_LEVEL)
         self.amp_noise_spin.setValue(mock_constants.AMPLITUDE_NOISE_COUPLING)
         self.udp_noise_spin.setValue(mock_constants.UDP_NOISE_LEVEL)
+
+        # Seed Parameter
+        self.random_seed_edit.setText(str(42))
         
     def _load_current_values(self):
         """Load current configuration values into the UI."""
@@ -465,6 +476,9 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             self.freq_start_spin.setValue(self.current_config['freq_start'] / 1e9)  # Convert to GHz
         if 'freq_end' in self.current_config:
             self.freq_end_spin.setValue(self.current_config['freq_end'] / 1e9)  # Convert to GHz
+        if 'resonator_random_seed' in self.current_config:
+            seed_val = self.current_config['resonator_random_seed']
+            self.random_seed_edit.setText(str(seed_val))
             
         # Kinetic inductance parameters
         if 'kinetic_inductance_fraction' in self.current_config:
@@ -557,11 +571,15 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         Returns:
             dict: Configuration parameters with keys matching mock_constants.py
         """
+        seed_text = self.random_seed_edit.text().strip()
+        seed_value = int(seed_text)
+        
         return {
             # Basic parameters
             'num_resonances': self.num_resonances_spin.value(),
             'freq_start': self.freq_start_spin.value() * 1e9,  # Convert GHz to Hz
             'freq_end': self.freq_end_spin.value() * 1e9,      # Convert GHz to Hz
+            'resonator_random_seed': seed_value,
             
             # Kinetic inductance parameters
             'kinetic_inductance_fraction': self.kinetic_fraction_spin.value(),

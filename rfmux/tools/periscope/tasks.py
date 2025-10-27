@@ -1037,8 +1037,8 @@ class BiasKidsTask(QtCore.QThread):
         except Exception as e:
             import traceback
             error_msg = f"Error in BiasKidsTask: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-            print(error_msg)  # Also print to console
-            self.signals.error.emit(error_msg)
+            print(error_msg)  # Print detailed message to Console
+            self.signals.error.emit(str(e))
         finally:
             if loop.is_running():
                 loop.stop()

@@ -142,8 +142,21 @@ def convert_volts_to_dbm(volts, termination=50.0):
     return 10.0 * np.log10(watts * 1e3)
 
 
-def decimation_to_sampling(dec):
-    return 625e6 / 256 / 64 / 2**dec
+def decimation_to_sampling(dec_stage):
+    """
+    Convert decimation stage to sampling rate.
+    
+    Parameters
+    ----------
+    dec_stage : int
+        Decimation stage (0-6)
+        
+    Returns
+    -------
+    float
+        Sampling rate in Hz
+    """
+    return 625e6 / 256 / 64 / 2**dec_stage
 
 
 def _general_single_cic_correction(frequencies, f_in, R=64, N=6):
@@ -225,7 +238,7 @@ def compensate_psd_for_cics(frequencies, psd, dec_stage=6, spectrum_cutoff=0.9):
     psd : ndarray
         Input power spectrum or power spectral density
     dec_stage : int
-        Decimation stage used for data. ("FIR stage" in older firmware). (default: 6)
+        Decimation stage used for data (0-6). (default: 6)
     spectrum_cutoff : float
         Fraction of Nyquist frequency to retain in the spectrum (default: 0.9).
 
@@ -266,6 +279,7 @@ def spectrum_from_slow_tod(
     dec_stage: int,
     scaling: Literal["psd", "ps"] = "psd",
     nperseg: Optional[int] = None,
+    nsegments: Optional[int] = None,
     reference: Literal["relative", "absolute"] = "relative",
     spectrum_cutoff: float = 0.9,
     input_units: Literal["adc_counts", "volts"] = "adc_counts",
@@ -284,13 +298,19 @@ def spectrum_from_slow_tod(
     q_data : array-like
         Time-domain Q (imag) samples. Units must match `input_units` parameter.
     dec_stage : int
-        Decimation stage to define the second CIC correction factor.
+        Decimation stage (0-6) to define the second CIC correction factor.
     scaling : {'psd','ps'}, default='psd'
         Whether to compute power spectral density (V²/Hz) or power spectrum (V²).
         - 'psd': Power spectral density in V²/Hz (or equivalent)
         - 'ps': Power spectrum in V²
     nperseg : int, optional
         Number of samples per Welch segment. Default uses all samples (no segmentation).
+        Cannot be used together with nsegments.
+    nsegments : int, optional
+        Number of segments to divide the data into for Welch's method. 
+        This is a more user-friendly alternative to nperseg. 
+        When specified, nperseg = len(data) // nsegments.
+        Cannot be used together with nperseg.
     reference : {'relative','absolute'}, default='relative'
         Reference type for the output spectrum:
         - 'relative': Output in dBc, referencing the DC bin as the carrier
@@ -325,6 +345,7 @@ def spectrum_from_slow_tod(
     ------
     ValueError
         If `input_units` is not one of the allowed values ('adc_counts' or 'volts').
+        If both `nperseg` and `nsegments` are specified.
     
     Notes
     -----
@@ -335,6 +356,24 @@ def spectrum_from_slow_tod(
     For `reference='relative'`, the input units don't affect the output since
     everything is normalized to the carrier (DC bin) power.
     """
+    # Validate that only one of nperseg or nsegments is provided
+    if nperseg is not None and nsegments is not None:
+        raise ValueError(
+            "Cannot specify both 'nperseg' and 'nsegments'. "
+            "Please use only one parameter."
+        )
+    
+    # Convert nsegments to nperseg if provided
+    if nsegments is not None:
+        data_length = len(i_data)
+        nperseg = data_length // nsegments
+        if nperseg < 1:
+            raise ValueError(
+                f"nsegments ({nsegments}) is too large for data length ({data_length}). "
+                f"Each segment must have at least 1 sample."
+            )
+    
+    # Default behavior if neither is specified
     if nperseg is None:
         nperseg = len(i_data)
 

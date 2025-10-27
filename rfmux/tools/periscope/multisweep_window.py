@@ -1071,13 +1071,6 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.samples_taken = True
 
         return self.noise_data
-    
-    async def collecting_samples(self, crs, module, total):
-
-        samples = await self.parent().crs.get_samples(
-            total, average=False, channel=None, module=self.target_module
-        )
-        return samples
         
     
     @QtCore.pyqtSlot(object)

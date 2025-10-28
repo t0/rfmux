@@ -14,6 +14,8 @@ from .utils import (
     TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE
 )
 from .detector_digest_dialog import DetectorDigestWindow
+from .noise_spectrum_dialog import NoiseSpectrumDialog
+
 
 class MultisweepWindow(QtWidgets.QMainWindow):
     """
@@ -140,6 +142,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # self.take_samp_btn.clicked.connect(self._take_noise_samps)        
         # self.take_samp_btn.setToolTip("Get Noise data to see if detectors were biased correctly.")
         # toolbar.addWidget(self.take_samp_btn)
+
+        self.noise_spectrum_btn = QtWidgets.QPushButton("Get Noise Spectrum")
+        self.noise_spectrum_btn.setToolTip("Open a dialog to configure and get the noise spectrum")
+        self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
+        toolbar.addWidget(self.noise_spectrum_btn)
         
         toolbar.addSeparator()
 
@@ -1071,6 +1078,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.samples_taken = True
 
         return self.noise_data
+
+
+    def _open_noise_spectrum_dialog(self):
+        noise_dialog = NoiseSpectrumDialog(self)
+        noise_dialog.exec()
         
     
     @QtCore.pyqtSlot(object)

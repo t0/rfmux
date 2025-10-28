@@ -443,19 +443,19 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
         # Time vs Magnitude plot
         vb_time = ClickableViewBox(); vb_time.parent_window = self
-        self.plot_time_vs_mag = pg.PlotWidget(viewBox=vb_time, name="TimeVsMagnitude")
+        self.plot_time_vs_mag = pg.PlotWidget(viewBox=vb_time, name="TimeVsAmplitude")
         self.plot_time_vs_mag.setBackground(plot_bg_color)
-        self.plot_time_vs_mag.setLabel('left', "Magnitude", units="V")
+        self.plot_time_vs_mag.setLabel('left', "Amplitude", units="V")
         self.plot_time_vs_mag.setLabel('bottom', "Time", units="s")
         self.plot_time_vs_mag.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_time_vs_mag.setTitle("Time vs Magnitude", color=plot_pen_color)
+        self.plot_time_vs_mag.setTitle("TOD", color=plot_pen_color)
         splitter.addWidget(self.plot_time_vs_mag)
     
         # Noise Spectrum plot
         vb_spec = ClickableViewBox(); vb_spec.parent_window = self
         self.plot_noise_spectrum = pg.PlotWidget(viewBox=vb_spec, name="NoiseSpectrum")
         self.plot_noise_spectrum.setBackground(plot_bg_color)
-        self.plot_noise_spectrum.setLabel('left', "Power", units="dB/Hz")
+        self.plot_noise_spectrum.setLabel('left', "Amplitude", units="dB/Hz")
         self.plot_noise_spectrum.setLabel('bottom', "Frequency", units="Hz")
         self.plot_noise_spectrum.showGrid(x=True, y=True, alpha=0.3)
         self.plot_noise_spectrum.setTitle("Noise Spectrum", color=plot_pen_color)

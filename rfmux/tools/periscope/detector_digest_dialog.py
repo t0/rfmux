@@ -66,7 +66,16 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.noise_i_data = None
         self.noise_q_data = None
 
+        #### Noise spectrum Tab #####
+        self.tabs = None
+        self.digest_page = None
+        self.noise_page = None
+        self.noise_iq_plot = None
+        self.noise_psd_plot = None
+        self._noise_plots_built = False
+
         
+        #### Extra debugging step ####
         self.debug = debug
 
         if self.debug:
@@ -113,18 +122,92 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.setWindowFlags(QtCore.Qt.WindowType.Window)
         self.resize(1200, 800) # Increased size to accommodate tables properly
 
+    
     def _setup_ui(self):
-        """Sets up the UI layout with plots and fitting information panel."""
+        """Sets up the UI layout with plots, fitting, and noise information panel."""
+        # Root central widget
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
+    
+        outer_layout = QtWidgets.QVBoxLayout(central_widget)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+    
+        # Tabs
+        self.tabs = QtWidgets.QTabWidget()
+        outer_layout.addWidget(self.tabs)
+    
+        # ---- Tab 1: existing Digest/Fit UI ----
+        self.digest_page = self._build_digest_tab()
+        self.tabs.addTab(self.digest_page, "Fit")
+    
+        # ---- Tab 2: Noise UI ----
+        self.noise_tab = self._build_noise_tab()
+        self.tabs.addTab(self.noise_tab, "Noise")
+    
+        # --- Optional: connect tab change ---
+        self.tabs.currentChanged.connect(self._on_tab_changed if hasattr(self, "_on_tab_changed") else lambda _: None)
+    
+        # --- Apply theme + finish ---
+        self.apply_theme(self.dark_mode)
+        self._update_plots()
+    
+        # Window configuration
+        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
+        self.setWindowFlags(QtCore.Qt.WindowType.Window)
+        self.resize(1200, 800)
+
+
+    def _on_tab_changed(self, index: int):
+        """Handle switching between tabs (Fit and Noise)."""
+        if not hasattr(self, "tabs"):
+            return
+    
+        current_tab_name = self.tabs.tabText(index)
+    
+        # --- When switched to the Fit (Digest) tab ---
+        if current_tab_name == "Fit":
+            # Ensure plots are updated if detector was changed externally
+            if hasattr(self, "_update_plots"):
+                self._update_plots()
+            return
+    
+        # --- When switched to the Noise tab ---
+        if current_tab_name == "Noise":
+            # Update title and count to match the current detector
+            if hasattr(self, "title_label_noise"):
+                title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
+                self.title_label_noise.setText(title_text)
+    
+            if hasattr(self, "detector_count_label_noise") and self.detector_indices:
+                count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
+                self.detector_count_label_noise.setText(count_text)
+
+
+            multiple_detectors = len(self.detector_indices) > 1
+            if hasattr(self, "prev_button_noise"):
+                self.prev_button_noise.setEnabled(multiple_detectors)
+            if hasattr(self, "next_button_noise"):
+                self.next_button_noise.setEnabled(multiple_detectors)
+    
+            # If you later add noise plotting logic, you can enable this:
+            # if hasattr(self, "_update_noise_plots"):
+            #     self._update_noise_plots()
+    
+            # For now, do nothing else — this is just a layout switch.
+            return
+
+    
+    def _build_digest_tab(self):
+        """Sets up the UI layout with plots and fitting information panel."""
+        page = QtWidgets.QWidget()
         
         # Main vertical layout for the entire window content
-        outer_layout = QtWidgets.QVBoxLayout(central_widget)
+        outer_layout = QtWidgets.QVBoxLayout(page)
         outer_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins for cleaner look
         
         # Set the background color of the dialog based on dark mode
         bg_color_hex = "#1C1C1C" if self.dark_mode else "#FFFFFF" # Hex for stylesheet
-        central_widget.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}") # Apply to QWidget base
+        page.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}") # Apply to QWidget base
         
         # Create main splitter for resizable panes
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
@@ -311,6 +394,77 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         self._apply_zoom_box_mode_to_all()
         self.apply_theme(self.dark_mode)
+
+        return page
+
+
+    def _build_noise_tab(self):
+        """Builds the Noise tab."""
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(5, 5, 5, 5)
+    
+        title_color_str = "white" if self.dark_mode else "black"
+        plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+    
+        # --- Navigation Bar (same as Digest tab) ---
+        nav_widget = QtWidgets.QWidget()
+        nav_layout = QtWidgets.QHBoxLayout(nav_widget)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+    
+        self.prev_button_noise = QtWidgets.QPushButton("◀ Previous")
+        self.prev_button_noise.clicked.connect(self._navigate_previous)
+        self.prev_button_noise.setEnabled(len(self.detector_indices) > 1)
+        nav_layout.addWidget(self.prev_button_noise)
+    
+        title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
+        self.title_label_noise = QtWidgets.QLabel(title_text)
+        self.title_label_noise.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        font = self.title_label_noise.font()
+        font.setPointSize(font.pointSize() + 2)
+        self.title_label_noise.setFont(font)
+        self.title_label_noise.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+        nav_layout.addWidget(self.title_label_noise, 1)
+    
+        self.next_button_noise = QtWidgets.QPushButton("Next ▶")
+        self.next_button_noise.clicked.connect(self._navigate_next)
+        self.next_button_noise.setEnabled(len(self.detector_indices) > 1)
+        nav_layout.addWidget(self.next_button_noise)
+    
+        detector_count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})" if self.detector_indices else ""
+        self.detector_count_label_noise = QtWidgets.QLabel(detector_count_text)
+        self.detector_count_label_noise.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+        nav_layout.addWidget(self.detector_count_label_noise)
+    
+        layout.addWidget(nav_widget)
+    
+        # --- Splitter with Two Empty Plots ---
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+    
+        # Time vs Magnitude plot
+        vb_time = ClickableViewBox(); vb_time.parent_window = self
+        self.plot_time_vs_mag = pg.PlotWidget(viewBox=vb_time, name="TimeVsMagnitude")
+        self.plot_time_vs_mag.setBackground(plot_bg_color)
+        self.plot_time_vs_mag.setLabel('left', "Magnitude", units="V")
+        self.plot_time_vs_mag.setLabel('bottom', "Time", units="s")
+        self.plot_time_vs_mag.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_time_vs_mag.setTitle("Time vs Magnitude", color=plot_pen_color)
+        splitter.addWidget(self.plot_time_vs_mag)
+    
+        # Noise Spectrum plot
+        vb_spec = ClickableViewBox(); vb_spec.parent_window = self
+        self.plot_noise_spectrum = pg.PlotWidget(viewBox=vb_spec, name="NoiseSpectrum")
+        self.plot_noise_spectrum.setBackground(plot_bg_color)
+        self.plot_noise_spectrum.setLabel('left', "Power", units="dB/Hz")
+        self.plot_noise_spectrum.setLabel('bottom', "Frequency", units="Hz")
+        self.plot_noise_spectrum.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_noise_spectrum.setTitle("Noise Spectrum", color=plot_pen_color)
+        splitter.addWidget(self.plot_noise_spectrum)
+    
+        splitter.setSizes([400, 400])
+        layout.addWidget(splitter)
+    
+        return page
 
     def _refresh_noise_samps(self):
         self.current_detector = self.detector_id
@@ -782,6 +936,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     self.plot3_bias_opt.plot(x_axis_hz_offset, s21_mag_db, pen=current_pen, name=legend_name)
         self.plot3_bias_opt.autoRange()
         self._update_fitting_info_panel()
+
+        if hasattr(self, "title_label_noise"):
+            title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
+            self.title_label_noise.setText(title_text)
+
+        if hasattr(self, "detector_count_label_noise") and self.detector_indices:
+            count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
+            self.detector_count_label_noise.setText(count_text)
 
     def _update_fitting_info_panel(self):
         """Updates the fitting information panel based on self.active_sweep_data."""

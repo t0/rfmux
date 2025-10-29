@@ -15,6 +15,7 @@ from .utils import (
 )
 from .detector_digest_dialog import DetectorDigestWindow
 from .noise_spectrum_dialog import NoiseSpectrumDialog
+# from rfmux.algorithms.measurement import py_get_samples
 
 
 class MultisweepWindow(QtWidgets.QMainWindow):
@@ -50,6 +51,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.bias_data_avail = loaded_bias
         self.samples_taken = False
         self.noise_data = {}
+        self.spectrum_noise_data = {}
 
         self.debug_noise_data = {}
         self.debug_phase_data = []
@@ -804,7 +806,6 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 
         ref_freqs.sort()
         return ref_freqs
-
     
     
     def _rerun_multisweep(self):
@@ -1082,8 +1083,46 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
     def _open_noise_spectrum_dialog(self):
         noise_dialog = NoiseSpectrumDialog(self)
-        noise_dialog.exec()
+        if noise_dialog.exec():
+            params = noise_dialog.get_parameters()
+            self._get_spectrum(params)
+
+    def _set_decimation(self, crs, decimation):
+        print("Setting decimation to", decimation)
+        if decimation > 4:
+            asyncio.run(crs.set_decimation(decimation , short = False))
+        else:
+            asycio.run(crs.set_decimation(decimation, short = True))
+    
+    def _get_spectrum(self, params):
         
+        if self.parent().crs is None: 
+            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available") 
+            return
+        else:
+            crs = self.parent().crs
+
+        decimation = params['decimation']
+        num_samples = params['num_samples']
+        num_segments = params['num_segments']
+        reference = params['reference']
+        spec_lim = params['spectrum_limit']
+        module = self.parent().module
+
+        curr_decimation = asyncio.run(crs.get_decimation())
+
+        if curr_decimation != decimation:
+            self._set_decimation(crs, decimation)
+
+
+        self.spectrum_noise_data  = asyncio.run(crs.py_get_samples(num_samples, 
+                                                                   return_spectrum=True, 
+                                                                   scaling='psd', 
+                                                                   reference=reference, 
+                                                                   nsegments=num_segments, 
+                                                                   spectrum_cutoff=spec_lim,
+                                                                   channel=None, 
+                                                                   module=module))
     
     @QtCore.pyqtSlot(object)
     def _handle_multisweep_plot_double_click(self, ev):
@@ -1288,6 +1327,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 all_detectors_data=all_detectors_data,  
                 initial_detector_idx=detector_id,
                 noise_data = noise_data,
+                spectrum_data = self.spectrum_noise_data,
                 debug_noise_data = self.debug_noise_data,
                 debug_phase_data = self.debug_phase_data,
                 debug = False            

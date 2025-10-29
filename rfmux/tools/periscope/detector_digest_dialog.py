@@ -29,6 +29,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                  all_detectors_data: dict = None,  
                  initial_detector_idx: int = None,
                  noise_data = None,
+                 spectrum_data = None,
                  debug_noise_data = None,
                  debug_phase_data = None,
                  debug = False): 
@@ -74,6 +75,17 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.noise_psd_plot = None
         self._noise_plots_built = False
 
+        ### Data products for plotting ####
+        if spectrum_data is not None:
+            self.spectrum_data = spectrum_data
+            
+            # ts = self.spectrum_data.ts
+            # frequencies = self.spectrum.freq_iq
+    
+            self.single_psd_i = self.spectrum_data.spectrum.psd_i[self.detector_id - 1]
+            self.single_psd_q = self.spectrum_data.spectrum.psd_q[self.detector_id - 1]
+            self.tod_i = self.spectrum_data.i[self.detector_id - 1]
+            self.tod_q = self.spectrum_data.q[self.detector_id - 1]
         
         #### Extra debugging step ####
         self.debug = debug
@@ -116,7 +128,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
              self.current_plot_offset_hz = self.resonance_frequency_ghz_title * 1e9
 
         self._setup_ui()
-        self._update_plots() 
+        self._update_plots()
 
         self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
         self.setWindowFlags(QtCore.Qt.WindowType.Window)
@@ -166,9 +178,6 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
         # --- When switched to the Fit (Digest) tab ---
         if current_tab_name == "Fit":
-            # Ensure plots are updated if detector was changed externally
-            if hasattr(self, "_update_plots"):
-                self._update_plots()
             return
     
         # --- When switched to the Noise tab ---
@@ -190,8 +199,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 self.next_button_noise.setEnabled(multiple_detectors)
     
             # If you later add noise plotting logic, you can enable this:
-            # if hasattr(self, "_update_noise_plots"):
-            #     self._update_noise_plots()
+            if hasattr(self, "_update_noise_plots"):
+                self._update_noise_plots()
     
             # For now, do nothing else — this is just a layout switch.
             return
@@ -440,6 +449,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
         # --- Splitter with Two Empty Plots ---
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        # plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
     
         # Time vs Magnitude plot
         vb_time = ClickableViewBox(); vb_time.parent_window = self
@@ -449,6 +459,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.plot_time_vs_mag.setLabel('bottom', "Time", units="s")
         self.plot_time_vs_mag.showGrid(x=True, y=True, alpha=0.3)
         self.plot_time_vs_mag.setTitle("TOD", color=plot_pen_color)
+        self.plot_time_vs_mag.addLegend(offset = (30, 10), labelTextColor=plot_pen_color)
         splitter.addWidget(self.plot_time_vs_mag)
     
         # Noise Spectrum plot
@@ -458,7 +469,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.plot_noise_spectrum.setLabel('left', "Amplitude", units="dB/Hz")
         self.plot_noise_spectrum.setLabel('bottom', "Frequency", units="Hz")
         self.plot_noise_spectrum.showGrid(x=True, y=True, alpha=0.3)
+        # self.plot_noise_spectrum.setLogMode(x=True, y=False)
         self.plot_noise_spectrum.setTitle("Noise Spectrum", color=plot_pen_color)
+        self.plot_noise_spectrum.addLegend(offset = (30, 10), labelTextColor=plot_pen_color)
         splitter.addWidget(self.plot_noise_spectrum)
     
         splitter.setSizes([400, 400])
@@ -641,6 +654,13 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.noise_i_data = None
         self.noise_q_data = None
 
+
+        if self.spectrum_data is not None:
+            self.single_psd_i = self.spectrum_data.spectrum.psd_i[self.detector_id - 1]
+            self.single_psd_q = self.spectrum_data.spectrum.psd_q[self.detector_id - 1]
+            self.tod_i = self.spectrum_data.i[self.detector_id - 1]
+            self.tod_q = self.spectrum_data.q[self.detector_id - 1]
+
         
         if self.debug:
             self.debug_noise = self.full_debug[self.detector_id]
@@ -687,8 +707,18 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             detector_count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
             self.detector_count_label.setText(detector_count_text)
         
+        if hasattr(self, "title_label_noise"):
+            title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
+            self.title_label_noise.setText(title_text)
+
+        if hasattr(self, "detector_count_label_noise") and self.detector_indices:
+            count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
+            self.detector_count_label_noise.setText(count_text)
+        
         # Redraw plots with new data
+        
         self._update_plots()
+        self._update_noise_plots()
 
     def _apply_zoom_box_mode_to_all(self):
         """Applies the current zoom_box_mode state to all plot viewboxes."""
@@ -718,6 +748,48 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     self.nl_table.item(row, 1).setText("N/A")
 
 
+    def _get_relative_timestamps(self, ts, num_samples):
+        SS_PER_SECOND = 156250000
+        first = ts[0].h * 3600 + ts[0].m * 60 + ts[0].s + ts[0].ss/SS_PER_SECOND
+        last = ts[-1].h * 3600 + ts[-1].m * 60 + ts[-1].s + ts[-1].ss/SS_PER_SECOND
+        total_time = last - first
+        timeseries = list(np.linspace(0, total_time, num_samples))
+        return timeseries
+    
+    
+    def _update_noise_plots(self):
+        if self.spectrum_data is None:
+            self.plot_time_vs_mag.clear()
+            self.plot_noise_spectrum.clear()
+            return
+        try:
+            self.plot_time_vs_mag.clear()
+            self.plot_noise_spectrum.clear()
+
+            ###### First plot ######
+            ts = self._get_relative_timestamps(self.spectrum_data.ts, len(self.tod_i))
+            tod_i_volts = convert_roc_to_volts(np.array(self.tod_i))
+            tod_q_volts = convert_roc_to_volts(np.array(self.tod_q))
+            complex_volts = tod_i_volts + 1j*tod_q_volts
+            mag_volts = np.abs(complex_volts)
+            
+            
+            self.plot_time_vs_mag.plot(ts, mag_volts, pen=pg.mkPen("g", width=LINE_WIDTH), name="Magnitude")
+            self.plot_time_vs_mag.plot(ts, tod_i_volts, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
+            self.plot_time_vs_mag.plot(ts, tod_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
+            self.plot_time_vs_mag.autoRange()
+
+
+            ###### Second plot ########
+            frequencies = self.spectrum_data.spectrum.freq_iq
+            self.plot_noise_spectrum.plot(frequencies, self.single_psd_i, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
+            self.plot_noise_spectrum.plot(frequencies, self.single_psd_q, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
+            self.plot_noise_spectrum.setLogMode(x=True, y=False)
+            self.plot_noise_spectrum.autoRange()
+
+        except Exception as e:
+            print(f"[Noise Plot Error] {e}")       
+        
     def _update_plots(self):
         """Populates all three plots with data and updates fitting information panel."""
         self._clear_plots() # Clear previous data and fitting info
@@ -937,13 +1009,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.plot3_bias_opt.autoRange()
         self._update_fitting_info_panel()
 
-        if hasattr(self, "title_label_noise"):
-            title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
-            self.title_label_noise.setText(title_text)
 
-        if hasattr(self, "detector_count_label_noise") and self.detector_indices:
-            count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
-            self.detector_count_label_noise.setText(count_text)
 
     def _update_fitting_info_panel(self):
         """Updates the fitting information panel based on self.active_sweep_data."""

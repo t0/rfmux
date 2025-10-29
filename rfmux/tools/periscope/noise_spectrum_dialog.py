@@ -32,6 +32,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         self._setup_ui()
         self._connect_signals()
         self._update_dependent_values()
+        
 
     # ------------------------------------------------------
     # UI Setup
@@ -62,6 +63,11 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         self.decimation_input.setRange(0, 6)
         self.decimation_input.setValue(6)
         layout.addRow("Decimation:", self.decimation_input)
+
+        self.reference_input = QtWidgets.QComboBox()
+        self.reference_input.addItems(["relative", "absolute"])
+        self.reference_input.setCurrentText("relative")
+        layout.addRow("Reference:", self.reference_input)
 
         # Time Taken (s) — Read-only label
         self.time_taken_label = QtWidgets.QLabel("0.00 s")
@@ -101,9 +107,9 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         self._updating = True
 
         # --- Read inputs safely ---
-        samples = int(self.samples_edit.text())
-        segments = int(self.segments_edit.text())
-        spectrum_limit = float(self.spectrum_limit_edit.text())
+        samples = self._safe_int(self.samples_edit.text(), 10000)
+        segments = self._safe_int(self.segments_edit.text(), 20)
+        spectrum_limit = self._safe_float(self.spectrum_limit_edit.text(), 0.9)
         decimation = self.decimation_input.value()
 
         # --- Compute base & effective highest frequency ---
@@ -135,18 +141,37 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         freq = slow_fs/2
         return freq
 
+    #### To avoid none errors, it assumes the default values #####
+    def _safe_int(self, text, default=1):
+        try:
+            return max(1, int(text))
+        except ValueError:
+            return default
+
+    def _safe_float(self, text, default=0.9):
+        try:
+            return float(text)
+        except ValueError:
+            return default
+
 
     # ------------------------------------------------------
     # Get User Parameters
     # ------------------------------------------------------
-    # def get_parameters(self):
-    #     """Return all configuration parameters."""
-    #     return {
-    #         "num_samples": int(self.samples_edit.text()),
-    #         "spectrum_limit": float(self.spectrum_limit_edit.text()),
-    #         "num_segments": int(self.segments_edit.text()),
-    #         "decimation": self.decimation_input.value(),
-    #         "effective_highest_freq": float(self.highest_freq_label.text()),
-    #         "time_taken": float(self.time_taken_label.text()),
-    #         "freq_resolution" : float(self.freq_resolution_label.text()),
-    #     }
+    def get_parameters(self):
+        """Return all configuration parameters."""
+        
+        highest_freq = self.highest_freq_label.text().split()[0]
+        time_taken = self.time_taken_label.text().split()[0]
+        freq_res = self.freq_resolution_label.text().split()[0]
+        
+        return {
+            "num_samples": self._safe_int(self.samples_edit.text(), 10000),
+            "spectrum_limit": self._safe_float(self.spectrum_limit_edit.text(), 0.9),
+            "num_segments": self._safe_int(self.segments_edit.text(), 20),
+            "decimation": self.decimation_input.value(),
+            "reference" : self.reference_input.currentText(),
+            "effective_highest_freq": float(highest_freq),
+            "time_taken": float(time_taken),
+            "freq_resolution" : float(freq_res),
+        }

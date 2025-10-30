@@ -44,7 +44,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.dark_mode = dark_mode 
         self.parent_window = parent
 
-        self.cuurent_detector = self.detector_id
+        self.current_detector = self.detector_id
+
+        self.noise_tab_avail = False
         
         # Navigation support
         self.all_detectors_data = all_detectors_data or {}
@@ -71,17 +73,18 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.tabs = None
         self.digest_page = None
 
+        self.spectrum_data = spectrum_data
+
         ### Data products for plotting ####
-        if spectrum_data is not None:
-            self.spectrum_data = spectrum_data
-            
-            # ts = self.spectrum_data.ts
-            # frequencies = self.spectrum.freq_iq
-    
+        if self.spectrum_data:
+            self.noise_tab_avail = True
             self.single_psd_i = self.spectrum_data.spectrum.psd_i[self.detector_id - 1]
             self.single_psd_q = self.spectrum_data.spectrum.psd_q[self.detector_id - 1]
             self.tod_i = self.spectrum_data.i[self.detector_id - 1]
             self.tod_q = self.spectrum_data.q[self.detector_id - 1]
+            print(self.single_psd_i[0])
+        else:
+            self.noise_tab_avail = False ### You can't access noise tab if no noise data was collected
         
         #### Extra debugging step ####
         self.debug = debug
@@ -151,6 +154,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         # ---- Tab 2: Noise UI ----
         self.noise_tab = self._build_noise_tab()
         self.tabs.addTab(self.noise_tab, "Noise")
+        noise_tab_index = self.tabs.indexOf(self.noise_tab)
+        self.tabs.setTabEnabled(noise_tab_index, self.noise_tab_avail)
     
         # --- Optional: connect tab change ---
         self.tabs.currentChanged.connect(self._on_tab_changed if hasattr(self, "_on_tab_changed") else lambda _: None)
@@ -251,7 +256,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.next_button.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.next_button)
 
-        self.refresh_noise_button = QtWidgets.QPushButton("Take Noise")
+        self.refresh_noise_button = QtWidgets.QPushButton("Check Noise")
         self.refresh_noise_button.setStyleSheet("background-color: #ffcccc; color: black;")
         self.refresh_noise_button.clicked.connect(self._refresh_noise_samps)
         self.refresh_noise_button.setToolTip("Captures 100 I,Q points for each detector and over-plots them on the I,Q plot in the detector digest windows. Used to conveniently re-assess detector state.")
@@ -656,7 +661,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.noise_q_data = None
 
 
-        if self.spectrum_data is not None:
+        if self.spectrum_data:
             self.single_psd_i = self.spectrum_data.spectrum.psd_i[self.detector_id - 1]
             self.single_psd_q = self.spectrum_data.spectrum.psd_q[self.detector_id - 1]
             self.tod_i = self.spectrum_data.i[self.detector_id - 1]
@@ -719,7 +724,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         # Redraw plots with new data
         
         self._update_plots()
-        self._update_noise_plots()
+        if self.spectrum_data:
+            self._update_noise_plots()
 
     def _apply_zoom_box_mode_to_all(self):
         """Applies the current zoom_box_mode state to all plot viewboxes."""
@@ -761,7 +767,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     def _update_noise_plots(self):
         self.apply_theme(self.dark_mode)
 
-        if self.spectrum_data is None:
+        if not self.spectrum_data:
             self.plot_time_vs_mag.clear()
             self.plot_noise_spectrum.clear()
             return

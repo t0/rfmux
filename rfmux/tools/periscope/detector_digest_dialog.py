@@ -70,10 +70,6 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         #### Noise spectrum Tab #####
         self.tabs = None
         self.digest_page = None
-        self.noise_page = None
-        self.noise_iq_plot = None
-        self.noise_psd_plot = None
-        self._noise_plots_built = False
 
         ### Data products for plotting ####
         if spectrum_data is not None:
@@ -412,6 +408,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(5, 5, 5, 5)
+
+        bg_color_hex = "#1C1C1C" if self.dark_mode else "#FFFFFF" # Hex for stylesheet
+        page.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}") # Apply to QWidget base
     
         title_color_str = "white" if self.dark_mode else "black"
         plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
@@ -476,6 +475,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
         splitter.setSizes([400, 400])
         layout.addWidget(splitter)
+        self.apply_theme(self.dark_mode)
+
     
         return page
 
@@ -758,6 +759,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
     
     def _update_noise_plots(self):
+        self.apply_theme(self.dark_mode)
+
         if self.spectrum_data is None:
             self.plot_time_vs_mag.clear()
             self.plot_noise_spectrum.clear()
@@ -765,7 +768,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         try:
             self.plot_time_vs_mag.clear()
             self.plot_noise_spectrum.clear()
-
+    
             ###### First plot ######
             ts = self._get_relative_timestamps(self.spectrum_data.ts, len(self.tod_i))
             tod_i_volts = convert_roc_to_volts(np.array(self.tod_i))
@@ -778,8 +781,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.plot_time_vs_mag.plot(ts, tod_i_volts, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
             self.plot_time_vs_mag.plot(ts, tod_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
             self.plot_time_vs_mag.autoRange()
-
-
+    
+    
             ###### Second plot ########
             frequencies = self.spectrum_data.spectrum.freq_iq
             self.plot_noise_spectrum.plot(frequencies, self.single_psd_i, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
@@ -1172,56 +1175,102 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             central_widget.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}")
         
         title_color_str = "white" if dark_mode else "black"
-        if hasattr(self, 'title_label'):
-            self.title_label.setStyleSheet(f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}")
-        
         plot_bg_color, plot_pen_color = ("k", "w") if dark_mode else ("w", "k")
-        
+    
+        # ----- Titles -----
+        if hasattr(self, 'title_label'):
+            self.title_label.setStyleSheet(
+                f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}"
+            )
+        if hasattr(self, 'title_label_noise'):
+            self.title_label_noise.setStyleSheet(
+                f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}"
+            )
+    
+        # ----- Plots (Digest tab) -----
         plot_widgets_legends = [
             (self.plot1_sweep_vs_freq, self.plot1_legend, "Sweep"),
             (self.plot2_iq_plane, self.plot2_legend, "IQ"),
-            (self.plot3_bias_opt, self.plot3_legend, "Bias amplitude optimization")
+            (self.plot3_bias_opt, self.plot3_legend, "Bias amplitude optimization"),
         ]
-
         for plot_widget, legend_widget, default_title_text in plot_widgets_legends:
             if plot_widget:
                 plot_widget.setBackground(plot_bg_color)
                 plot_item = plot_widget.getPlotItem()
                 if plot_item:
-                    # Titles for plot1 and plot2 are dynamic and set in _update_plots.
-                    # For plot3, its title is static.
                     if plot_widget == self.plot3_bias_opt:
-                         current_title = plot_item.titleLabel.text if plot_item.titleLabel and plot_item.titleLabel.text else default_title_text
-                         plot_item.setTitle(current_title, color=plot_pen_color)
-                    
+                        current_title = (
+                            plot_item.titleLabel.text
+                            if plot_item.titleLabel and plot_item.titleLabel.text
+                            else default_title_text
+                        )
+                        plot_item.setTitle(current_title, color=plot_pen_color)
                     for axis_name in ("left", "bottom", "right", "top"):
                         ax = plot_item.getAxis(axis_name)
-                        if ax: ax.setPen(plot_pen_color); ax.setTextPen(plot_pen_color)
+                        if ax:
+                            ax.setPen(plot_pen_color)
+                            ax.setTextPen(plot_pen_color)
                 if legend_widget:
-                    try: legend_widget.setLabelTextColor(plot_pen_color)
-                    except Exception as e: print(f"Error updating legend color for {default_title_text}: {e}")
-        
+                    try:
+                        legend_widget.setLabelTextColor(plot_pen_color)
+                    except Exception as e:
+                        print(f"Error updating legend color for {default_title_text}: {e}")
+    
+        # ----- Plots (Noise tab) -----
+        if hasattr(self, 'plot_time_vs_mag'):
+            self.plot_time_vs_mag.setBackground(plot_bg_color)
+            plot_item = self.plot_time_vs_mag.getPlotItem()
+            plot_item.setTitle("TOD", color=plot_pen_color)
+            for ax in ("left", "bottom"):
+                axis = plot_item.getAxis(ax)
+                axis.setPen(plot_pen_color)
+                axis.setTextPen(plot_pen_color)
+        if hasattr(self, 'plot_noise_spectrum'):
+            self.plot_noise_spectrum.setBackground(plot_bg_color)
+            plot_item = self.plot_noise_spectrum.getPlotItem()
+            plot_item.setTitle("Noise Spectrum", color=plot_pen_color)
+            for ax in ("left", "bottom"):
+                axis = plot_item.getAxis(ax)
+                axis.setPen(plot_pen_color)
+                axis.setTextPen(plot_pen_color)
+    
+        # ----- Fitting info panel -----
         if hasattr(self, 'fitting_info_group'):
-            self.fitting_info_group.setStyleSheet(f"QGroupBox {{ color: {title_color_str}; border: 1px solid {title_color_str}; margin-top: 0.5em;}} QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 3px 0 3px; }}")
-            sub_group_style = f"QGroupBox {{ color: {title_color_str}; border: none; background-color: transparent; }}"
-            fitting_label_color_style = f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
+            self.fitting_info_group.setStyleSheet(
+                f"QGroupBox {{ color: {title_color_str}; border: 1px solid {title_color_str}; margin-top: 0.5em;}} "
+                f"QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 3px 0 3px; }}"
+            )
+            sub_group_style = (
+                f"QGroupBox {{ color: {title_color_str}; border: none; background-color: transparent; }}"
+            )
+            fitting_label_color_style = (
+                f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
+            )
             fitting_info_main_layout = self.fitting_info_group.layout()
             if fitting_info_main_layout:
-                for i in range(fitting_info_main_layout.count()): 
+                for i in range(fitting_info_main_layout.count()):
                     item = fitting_info_main_layout.itemAt(i)
                     if item and item.widget() and isinstance(item.widget(), QtWidgets.QGroupBox):
                         sub_group_box = item.widget()
                         sub_group_box.setStyleSheet(sub_group_style)
                         form_layout = sub_group_box.layout()
-                        if form_layout and isinstance(form_layout, QtWidgets.QFormLayout):
-                             for row in range(form_layout.rowCount()):
-                                label_widget = form_layout.itemAt(row, QtWidgets.QFormLayout.ItemRole.LabelRole).widget()
-                                if label_widget: label_widget.setStyleSheet(fitting_label_color_style)
-                                field_widget = form_layout.itemAt(row, QtWidgets.QFormLayout.ItemRole.FieldRole).widget()
-                                if field_widget: field_widget.setStyleSheet(fitting_label_color_style)
-        
-        # Update navigation buttons theme
-        button_style = ""
+                        if (
+                            form_layout
+                            and isinstance(form_layout, QtWidgets.QFormLayout)
+                        ):
+                            for row in range(form_layout.rowCount()):
+                                label_widget = form_layout.itemAt(
+                                    row, QtWidgets.QFormLayout.ItemRole.LabelRole
+                                ).widget()
+                                if label_widget:
+                                    label_widget.setStyleSheet(fitting_label_color_style)
+                                field_widget = form_layout.itemAt(
+                                    row, QtWidgets.QFormLayout.ItemRole.FieldRole
+                                ).widget()
+                                if field_widget:
+                                    field_widget.setStyleSheet(fitting_label_color_style)
+    
+        # ----- Button styles -----
         if dark_mode:
             button_style = """
                 QPushButton {
@@ -1262,8 +1311,22 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     color: #999999;
                 }
             """
-        
-        # Update splitter theme
+    
+        # Digest tab buttons
+        if hasattr(self, 'prev_button'):
+            self.prev_button.setStyleSheet(button_style)
+        if hasattr(self, 'next_button'):
+            self.next_button.setStyleSheet(button_style)
+    
+        # Noise tab buttons ✅
+        if hasattr(self, 'prev_button_noise'):
+            self.prev_button_noise.setStyleSheet(button_style)
+        if hasattr(self, 'next_button_noise'):
+            self.next_button_noise.setStyleSheet(button_style)
+        if hasattr(self, 'refresh_noise_button'):
+            self.refresh_noise_button.setStyleSheet(button_style)
+    
+        # ----- Splitter -----
         if hasattr(self, 'main_splitter'):
             splitter_style = f"""
             QSplitter::handle {{
@@ -1274,15 +1337,71 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             }}
             """
             self.main_splitter.setStyleSheet(splitter_style)
-        
-        if hasattr(self, 'prev_button'):
-            self.prev_button.setStyleSheet(button_style)
-        if hasattr(self, 'next_button'):
-            self.next_button.setStyleSheet(button_style)
+    
+        # ----- Labels -----
         if hasattr(self, 'detector_count_label'):
-            self.detector_count_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+            self.detector_count_label.setStyleSheet(
+                f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
+            )
         if hasattr(self, 'trace_hint_label'):
-            self.trace_hint_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; font-size: 10pt; }}")
+            self.trace_hint_label.setStyleSheet(
+                f"QLabel {{ color: {title_color_str}; background-color: transparent; font-size: 10pt; }}"
+            )
+    
+        # Noise tab labels ✅
+        if hasattr(self, 'detector_count_label_noise'):
+            self.detector_count_label_noise.setStyleSheet(
+                f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
+            )
+    
+        if hasattr(self, 'tabs') and isinstance(self.tabs, QtWidgets.QTabWidget):
+            if dark_mode:
+                self.tabs.setStyleSheet("""
+                    QTabWidget::pane {
+                        border: 1px solid #555555;
+                        background: #1C1C1C;
+                    }
+                    QTabBar::tab {
+                        background: #2C2C2C;
+                        color: white;
+                        padding: 8px 16px;
+                        border: 1px solid #444444;
+                        border-top-left-radius: 4px;
+                        border-top-right-radius: 4px;
+                    }
+                    QTabBar::tab:selected {
+                        background: #3C3C3C;
+                        color: white;
+                        border: 1px solid #777777;
+                    }
+                    QTabBar::tab:hover {
+                        background: #4C4C4C;
+                    }
+                """)
+            else:
+                self.tabs.setStyleSheet("""
+                    QTabWidget::pane {
+                        border: 1px solid #CCCCCC;
+                        background: #FFFFFF;
+                    }
+                    QTabBar::tab {
+                        background: #F0F0F0;
+                        color: black;
+                        padding: 8px 16px;
+                        border: 1px solid #CCCCCC;
+                        border-top-left-radius: 4px;
+                        border-top-right-radius: 4px;
+                    }
+                    QTabBar::tab:selected {
+                        background: #FFFFFF;
+                        color: black;
+                        border: 1px solid #888888;
+                    }
+                    QTabBar::tab:hover {
+                        background: #E8E8E8;
+                    }
+                """)
         
-        # Update plots to ensure all colors are refreshed with the new theme
+        # ----- Update plots to reflect new theme -----
         self._update_plots()
+

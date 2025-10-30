@@ -1106,28 +1106,42 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         else:
             crs = self.parent().crs
 
-        decimation = params['decimation']
-        num_samples = params['num_samples']
-        num_segments = params['num_segments']
-        reference = params['reference']
-        spec_lim = params['spectrum_limit']
-        module = self.parent().module
+        time_taken = params['time_taken']
+        # Show a progress dialog
+        progress = QtWidgets.QProgressDialog(f"Getting noise spectrum...\n\nEstimated time {time_taken}s", None, 0, 0, self)
+        progress.setWindowTitle("Please wait")
+        progress.setCancelButton(None)
+        progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        progress.show()
+        
+        QtWidgets.QApplication.processEvents()# Show a simple "busy" message and spinner cursor)
 
-        curr_decimation = asyncio.run(crs.get_decimation())
-
-        if curr_decimation != decimation:
-            self._set_decimation(crs, decimation)
-
-
-        self.spectrum_noise_data  = asyncio.run(crs.py_get_samples(num_samples, 
-                                                                   return_spectrum=True, 
-                                                                   scaling='psd', 
-                                                                   reference=reference, 
-                                                                   nsegments=num_segments, 
-                                                                   spectrum_cutoff=spec_lim,
-                                                                   channel=None, 
-                                                                   module=module))
+        try:
+            decimation = params['decimation']
+            num_samples = params['num_samples']
+            num_segments = params['num_segments']
+            reference = params['reference']
+            spec_lim = params['spectrum_limit']
+            module = self.parent().module
     
+            curr_decimation = asyncio.run(crs.get_decimation())
+    
+            if curr_decimation != decimation:
+                self._set_decimation(crs, decimation)
+    
+            self.spectrum_noise_data  = asyncio.run(crs.py_get_samples(num_samples, 
+                                                                       return_spectrum=True, 
+                                                                       scaling='psd', 
+                                                                       reference=reference, 
+                                                                       nsegments=num_segments, 
+                                                                       spectrum_cutoff=spec_lim,
+                                                                       channel=None, 
+                                                                       module=module))
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", str(e))
+        finally:
+            progress.close()
+
     @QtCore.pyqtSlot(object)
     def _handle_multisweep_plot_double_click(self, ev):
         """

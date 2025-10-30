@@ -146,6 +146,10 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # toolbar.addWidget(self.take_samp_btn)
 
         self.noise_spectrum_btn = QtWidgets.QPushButton("Get Noise Spectrum")
+        if self.bias_data_avail:
+            self.noise_spectrum_btn.setEnabled(True)
+        else:
+            self.noise_spectrum_btn.setEnabled(False)
         self.noise_spectrum_btn.setToolTip("Open a dialog to configure and get the noise spectrum")
         self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
         toolbar.addWidget(self.noise_spectrum_btn)
@@ -1528,6 +1532,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         
         # Reset UI
         self.bias_kids_btn.setEnabled(True)
+        self.noise_spectrum_btn.setEnabled(True)
         self.bias_kids_btn.setText("Bias KIDs")
         
         # Clean up the task

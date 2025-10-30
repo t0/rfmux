@@ -72,6 +72,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         #### Noise spectrum Tab #####
         self.tabs = None
         self.digest_page = None
+        self.mean_subtract_enabled = False
 
         self.spectrum_data = spectrum_data
 
@@ -424,6 +425,23 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         nav_widget = QtWidgets.QWidget()
         nav_layout = QtWidgets.QHBoxLayout(nav_widget)
         nav_layout.setContentsMargins(0, 0, 0, 0)
+
+        #### Mean enabled ######
+        checkbox_widget = QtWidgets.QWidget()
+        checkbox_layout = QtWidgets.QHBoxLayout(checkbox_widget)
+        checkbox_layout.setContentsMargins(5, 0, 5, 0)
+        
+        self.mean_subtract_checkbox = QtWidgets.QCheckBox("Mean Subtracted")
+        self.mean_subtract_checkbox.setToolTip("If checked, TOD data will have its mean subtracted before plotting.")
+        self.mean_subtract_checkbox.stateChanged.connect(self._toggle_mean_subtraction)
+        
+        checkbox_layout.addStretch()
+        checkbox_layout.addWidget(self.mean_subtract_checkbox)
+        checkbox_layout.addStretch()
+        
+        layout.addWidget(checkbox_widget)
+
+        ##### Buttons #####
     
         self.prev_button_noise = QtWidgets.QPushButton("◀ Previous")
         self.prev_button_noise.clicked.connect(self._navigate_previous)
@@ -552,6 +570,11 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self._navigate_next_trace()
         else:
             super().keyPressEvent(event)
+            
+    def _toggle_mean_subtraction(self, state):
+        """Toggles mean subtraction for TOD data and updates plots."""
+        self.mean_subtract_enabled = (state == QtCore.Qt.CheckState.Checked.value)
+        self._update_noise_plots()
     
     def _navigate_previous(self):
         """Navigate to the previous detector."""
@@ -779,6 +802,12 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             ts = self._get_relative_timestamps(self.spectrum_data.ts, len(self.tod_i))
             tod_i_volts = convert_roc_to_volts(np.array(self.tod_i))
             tod_q_volts = convert_roc_to_volts(np.array(self.tod_q))
+
+
+            if self.mean_subtract_enabled:
+                tod_i_volts = tod_i_volts - np.mean(tod_i_volts)
+                tod_q_volts = tod_q_volts - np.mean(tod_q_volts)
+            
             complex_volts = tod_i_volts + 1j*tod_q_volts
             mag_volts = np.abs(complex_volts)
             

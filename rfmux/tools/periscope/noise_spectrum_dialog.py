@@ -47,11 +47,12 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
 
 
         # Spectrum Limit (0–1)
-        self.spectrum_limit_edit = QtWidgets.QLineEdit("0.9")
-        double_validator = QtGui.QDoubleValidator(0.0, 1.0, 3)
-        double_validator.setNotation(QtGui.QDoubleValidator.Notation.StandardNotation)
-        self.spectrum_limit_edit.setValidator(double_validator)
-        layout.addRow("Spectrum Limit:", self.spectrum_limit_edit)
+        self.spectrum_limit_input = QtWidgets.QDoubleSpinBox()
+        self.spectrum_limit_input.setRange(0.05, 1.0)
+        self.spectrum_limit_input.setDecimals(2)
+        self.spectrum_limit_input.setSingleStep(0.05)
+        self.spectrum_limit_input.setValue(0.9)
+        layout.addRow("Spectrum Limit:", self.spectrum_limit_input)
 
         # Number of Segments
         self.segments_edit = QtWidgets.QLineEdit("20")
@@ -93,7 +94,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
     # ------------------------------------------------------
     def _connect_signals(self):
         self.samples_edit.textChanged.connect(self._update_dependent_values)
-        self.spectrum_limit_edit.textChanged.connect(self._update_dependent_values)
+        self.spectrum_limit_input.textChanged.connect(self._update_dependent_values)
         self.segments_edit.textChanged.connect(self._update_dependent_values)
         self.decimation_input.valueChanged.connect(self._update_dependent_values)
 
@@ -109,7 +110,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         # --- Read inputs safely ---
         samples = self._safe_int(self.samples_edit.text(), 10000)
         segments = self._safe_int(self.segments_edit.text(), 20)
-        spectrum_limit = self._safe_float(self.spectrum_limit_edit.text(), 0.9)
+        spectrum_limit = self.spectrum_limit_input.value()
         decimation = self.decimation_input.value()
 
         # --- Compute base & effective highest frequency ---
@@ -121,7 +122,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         # --- Compute estimated time (example heuristic) ---
         time_taken = samples/(base_highest_freq*2)
 
-        nperseg = samples // segments
+        nperseg = self._safe_int(samples // segments, 500)
         freq_resolution = (base_highest_freq*2)/nperseg
 
         # --- Update UI ---
@@ -167,7 +168,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         
         return {
             "num_samples": self._safe_int(self.samples_edit.text(), 10000),
-            "spectrum_limit": self._safe_float(self.spectrum_limit_edit.text(), 0.9),
+            "spectrum_limit": self.spectrum_limit_input.value(),
             "num_segments": self._safe_int(self.segments_edit.text(), 20),
             "decimation": self.decimation_input.value(),
             "reference" : self.reference_input.currentText(),

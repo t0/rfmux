@@ -784,13 +784,21 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             
         try:
             # Prepare data for export
+
+            #### Adding this to handle lack of noise data more gracefully ####
+            if self.spectrum_noise_data:
+                spectrum_data = self.spectrum_noise_data
+            else:
+                spectrum_data = None 
+                
             export_content = {
                 'timestamp': datetime.datetime.now().isoformat(),
                 'target_module': self.target_module,
                 'initial_parameters': self.initial_params,
                 'dac_scales_used': self.dac_scales,
                 'results_by_iteration': self.results_by_iteration,
-                'bias_kids_output': self.bias_kids_output  # Include bias_kids results if available
+                'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
+                'noise_data': spectrum_data
             }
             with open(filename, 'wb') as f: # Write in binary mode for pickle
                 pickle.dump(export_content, f)
@@ -1132,14 +1140,30 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             if curr_decimation != decimation:
                 self._set_decimation(crs, decimation)
     
-            self.spectrum_noise_data  = asyncio.run(crs.py_get_samples(num_samples, 
-                                                                       return_spectrum=True, 
-                                                                       scaling='psd', 
-                                                                       reference=reference, 
-                                                                       nsegments=num_segments, 
-                                                                       spectrum_cutoff=spec_lim,
-                                                                       channel=None, 
-                                                                       module=module))
+            spectrum_data  = asyncio.run(crs.py_get_samples(num_samples, 
+                                                            return_spectrum=True, 
+                                                            scaling='psd', 
+                                                            reference=reference, 
+                                                            nsegments=num_segments, 
+                                                            spectrum_cutoff=spec_lim,
+                                                            channel=None, 
+                                                            module=module))
+
+            self.spectrum_noise_data['noise_parameters'] = params
+            num_res = len(self.conceptual_resonance_frequencies)
+            
+            data = {}
+            data['ts'] = spectrum_data.ts
+            data['I'] = spectrum_data.i[0:num_res]
+            data['Q'] = spectrum_data.q[0:num_res]
+            data['freq_iq'] = spectrum_data.spectrum.freq_iq
+            data['single_psd_i'] = spectrum_data.spectrum.psd_i[0:num_res]
+            data['single_psd_q'] = spectrum_data.spectrum.psd_q[0:num_res]
+            data['freq_dsb'] = spectrum_data.spectrum.freq_dsb
+            data['dual_psd'] = spectrum_data.spectrum.psd_dual_sideband[0:num_res]
+
+            self.spectrum_noise_data['data'] = data
+            
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", str(e))
         finally:
@@ -1334,6 +1358,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                         'conceptual_freq_hz': conceptual_freq_hz
                     }
             
+            if self.spectrum_noise_data:
+                spectrum_data = self.spectrum_noise_data['data']
+            else:
+                spectrum_data = None
+            
             # Create a non-modal window for the detector digest with ALL detector data
             digest_window = DetectorDigestWindow(
                 parent=self, # type: ignore # parent is QWidget, DetectorDigestWindow expects QWidget
@@ -1348,7 +1377,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 all_detectors_data=all_detectors_data,  
                 initial_detector_idx=detector_id,
                 noise_data = noise_data,
-                spectrum_data = self.spectrum_noise_data,
+                spectrum_data = spectrum_data,
                 debug_noise_data = self.debug_noise_data,
                 debug_phase_data = self.debug_phase_data,
                 debug = False            

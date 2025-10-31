@@ -1360,6 +1360,12 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.next_button_noise.setStyleSheet(button_style)
         if hasattr(self, 'refresh_noise_button'):
             self.refresh_noise_button.setStyleSheet(button_style)
+
+        if hasattr(self, 'mean_subtract_checkbox'):
+            if self.dark_mode:
+                self.mean_subtract_checkbox.setStyleSheet("QCheckBox { color: white; }")
+            else:
+                self.mean_subtract_checkbox.setStyleSheet("QCheckBox { color: black; }")
     
         # ----- Splitter -----
         if hasattr(self, 'main_splitter'):

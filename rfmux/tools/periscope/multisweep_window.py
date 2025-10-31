@@ -861,6 +861,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         )
 
         if dialog.exec(): # True if user clicked OK
+            self.noise_spectrum_btn.setEnabled(False)
             new_params_from_dialog = dialog.get_parameters()
             if not new_params_from_dialog:
                 return # Dialog returned None, likely due to validation error
@@ -923,6 +924,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             # Determine initial direction text - consistent with our other direction text logic
             sweep_direction_norm = sweep_direction.lower().strip() if sweep_direction else ""
             direction_text = "Down" if sweep_direction_norm == "downward" else "Up"
+
+            
             
             if self.current_amp_label:
                 if num_amplitudes > 0:

@@ -150,7 +150,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             self.noise_spectrum_btn.setEnabled(True)
         else:
             self.noise_spectrum_btn.setEnabled(False)
-        self.noise_spectrum_btn.setToolTip("Open a dialog to configure and get the noise spectrum")
+        self.noise_spectrum_btn.setToolTip("Open a dialog to configure and get the noise spectrum, will only work if KIDS is biased.")
         self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
         toolbar.addWidget(self.noise_spectrum_btn)
         

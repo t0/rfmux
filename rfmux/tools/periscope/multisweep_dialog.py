@@ -364,14 +364,18 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.cancel_btn.clicked.connect(self.reject) # Connect to QDialog's reject slot
 
         else:
-            # Standard OK and Cancel buttons
-            self.button_box = QtWidgets.QDialogButtonBox(
-                QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
-            )
+            btn_layout = QtWidgets.QHBoxLayout()
+            self.start_btn = QtWidgets.QPushButton("Start Multisweep")
+            self.load_btn = QtWidgets.QPushButton("Load Multisweep")
+            self.load_btn.hide()
+            self.cancel_btn = QtWidgets.QPushButton("Cancel")
+            btn_layout.addWidget(self.start_btn)
+            btn_layout.addWidget(self.cancel_btn)
+            layout.addLayout(btn_layout)
+        
+            self.start_btn.clicked.connect(self.accept) # Connect to QDialog's accept slot            
+            self.cancel_btn.clicked.connect(self.reject) # Connect to QDialog's reject slot
             
-            self.button_box.accepted.connect(self.accept)
-            self.button_box.rejected.connect(self.reject)
-            layout.addWidget(self.button_box)
 
         # Initial update of dBm field if DAC scales are already known
         if self.dac_scales: # Check if dac_scales were passed or fetched synchronously before UI setup

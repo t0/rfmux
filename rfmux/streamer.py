@@ -440,6 +440,11 @@ def get_multicast_socket(crs_hostname):
     # Configure the socket for multicast reception
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1) ### Will only work Linux > 3.9 and Mac > 10.6
+    except:
+        pass
+
     # Bind the socket to all interfaces on the specified port
     sock.bind(("", STREAMER_PORT))
 

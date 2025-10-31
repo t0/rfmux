@@ -1363,9 +1363,41 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         if hasattr(self, 'mean_subtract_checkbox'):
             if self.dark_mode:
-                self.mean_subtract_checkbox.setStyleSheet("QCheckBox { color: white; }")
+                self.mean_subtract_checkbox.setStyleSheet("""
+                    QCheckBox {
+                        color: white;
+                    }
+                    QCheckBox::indicator {
+                        width: 16px;
+                        height: 16px;
+                    }
+                    QCheckBox::indicator:unchecked {
+                        border: 1px solid white;
+                        background-color: transparent;
+                    }
+                    QCheckBox::indicator:checked {
+                        border: 1px solid white;
+                        background-color: white;
+                    }
+                """)
             else:
-                self.mean_subtract_checkbox.setStyleSheet("QCheckBox { color: black; }")
+                self.mean_subtract_checkbox.setStyleSheet("""
+                    QCheckBox {
+                        color: black;
+                    }
+                    QCheckBox::indicator {
+                        width: 16px;
+                        height: 16px;
+                    }
+                    QCheckBox::indicator:unchecked {
+                        border: 1px solid black;
+                        background-color: transparent;
+                    }
+                    QCheckBox::indicator:checked {
+                        border: 1px solid black;
+                        background-color: black;
+                    }
+                """)
     
         # ----- Splitter -----
         if hasattr(self, 'main_splitter'):

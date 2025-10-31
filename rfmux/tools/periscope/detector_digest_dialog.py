@@ -79,11 +79,10 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         ### Data products for plotting ####
         if self.spectrum_data:
             self.noise_tab_avail = True
-            self.single_psd_i = self.spectrum_data.spectrum.psd_i[self.detector_id - 1]
-            self.single_psd_q = self.spectrum_data.spectrum.psd_q[self.detector_id - 1]
-            self.tod_i = self.spectrum_data.i[self.detector_id - 1]
-            self.tod_q = self.spectrum_data.q[self.detector_id - 1]
-            print(self.single_psd_i[0])
+            self.single_psd_i = self.spectrum_data['single_psd_i'][self.detector_id - 1]
+            self.single_psd_q = self.spectrum_data['single_psd_q'][self.detector_id - 1]
+            self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
+            self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
         else:
             self.noise_tab_avail = False ### You can't access noise tab if no noise data was collected
         
@@ -685,11 +684,11 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
 
         if self.spectrum_data:
-            self.single_psd_i = self.spectrum_data.spectrum.psd_i[self.detector_id - 1]
-            self.single_psd_q = self.spectrum_data.spectrum.psd_q[self.detector_id - 1]
-            self.tod_i = self.spectrum_data.i[self.detector_id - 1]
-            self.tod_q = self.spectrum_data.q[self.detector_id - 1]
-
+            self.noise_tab_avail = True
+            self.single_psd_i = self.spectrum_data['single_psd_i'][self.detector_id - 1]
+            self.single_psd_q = self.spectrum_data['single_psd_q'][self.detector_id - 1]
+            self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
+            self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
         
         if self.debug:
             self.debug_noise = self.full_debug[self.detector_id]
@@ -799,7 +798,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.plot_noise_spectrum.clear()
     
             ###### First plot ######
-            ts = self._get_relative_timestamps(self.spectrum_data.ts, len(self.tod_i))
+            ts = self._get_relative_timestamps(self.spectrum_data['ts'], len(self.tod_i))
             tod_i_volts = convert_roc_to_volts(np.array(self.tod_i))
             tod_q_volts = convert_roc_to_volts(np.array(self.tod_q))
 
@@ -812,14 +811,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             mag_volts = np.abs(complex_volts)
             
             
-            self.plot_time_vs_mag.plot(ts, mag_volts, pen=pg.mkPen("g", width=LINE_WIDTH), name="Magnitude")
+            # self.plot_time_vs_mag.plot(ts, mag_volts, pen=pg.mkPen("g", width=LINE_WIDTH), name="Magnitude") ### Removed for now ###
             self.plot_time_vs_mag.plot(ts, tod_i_volts, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
             self.plot_time_vs_mag.plot(ts, tod_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
             self.plot_time_vs_mag.autoRange()
     
     
             ###### Second plot ########
-            frequencies = self.spectrum_data.spectrum.freq_iq
+            frequencies = self.spectrum_data['freq_iq']
             self.plot_noise_spectrum.plot(frequencies, self.single_psd_i, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
             self.plot_noise_spectrum.plot(frequencies, self.single_psd_q, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
             self.plot_noise_spectrum.setLogMode(x=True, y=False)

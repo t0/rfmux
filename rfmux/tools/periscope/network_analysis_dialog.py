@@ -7,8 +7,54 @@ from .utils import (
     DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
     UnitConverter, traceback
 )
+import pickle
 from .tasks import DACScaleFetcher
 from .network_analysis_base import NetworkAnalysisDialogBase
+
+
+def load_network_analysis_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
+
+    # If no filename was passed, fall back to showing a dialog (blocking version)
+    if file_path is None:
+        options = QtWidgets.QFileDialog.Options()
+        options |= QtWidgets.QFileDialog.Option.DontUseNativeDialog
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            parent,
+            "Load Network Analysis Parameters",
+            "",
+            "Pickle Files (*.pkl *.pickle);;All Files (*)",
+            options=options,
+        )
+
+    if not file_path:
+        return None
+
+    try:
+        with open(file_path, "rb") as fh:
+            payload = pickle.load(fh)
+    except Exception as exc:
+        QtWidgets.QMessageBox.critical(
+            parent,
+            "Load Failed",
+            f"Could not read '{file_path}':\n{exc}",
+        )
+        return None
+
+    if (
+        isinstance(payload, dict)
+        and isinstance(payload.get("parameters"), dict)
+        and isinstance(payload.get("modules"), dict)
+    ):
+        return payload
+
+    QtWidgets.QMessageBox.warning(
+        parent,
+        "Invalid File",
+        "The selected file does not contain network-analysis parameters.",
+    )
+    return None
+
+
 
 class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
     """
@@ -30,10 +76,16 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         self.setWindowTitle("Network Analysis Configuration")
         self.setModal(False) # Modeless dialog
         self._setup_ui()
+        self.load_data_available = False
+        self._load_data = {}
         
     def _setup_ui(self):
         """Sets up the user interface elements for the dialog."""
         layout = QtWidgets.QVBoxLayout(self)
+
+        self.import_button = QtWidgets.QPushButton("Import Data")
+        self.import_button.clicked.connect(self._load_netanal_data)
+        layout.addWidget(self.import_button, alignment=QtCore.Qt.AlignLeft)
         
         param_group = QtWidgets.QGroupBox("Analysis Parameters")
         param_layout = QtWidgets.QFormLayout(param_group)
@@ -74,12 +126,18 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         # Buttons for starting or canceling the analysis
         btn_layout = QtWidgets.QHBoxLayout()
         self.start_btn = QtWidgets.QPushButton("Start Analysis")
+        self.load_btn = QtWidgets.QPushButton("Load Analysis")
+        self.load_btn.setEnabled(False) ### Will enable once file is available.
         self.cancel_btn = QtWidgets.QPushButton("Cancel")
         btn_layout.addWidget(self.start_btn)
+        btn_layout.addWidget(self.load_btn)
         btn_layout.addWidget(self.cancel_btn)
         layout.addLayout(btn_layout)
         
         self.start_btn.clicked.connect(self.accept) # Connect to QDialog's accept slot
+
+        self.load_btn.clicked.connect(self._load_data_avail) 
+        
         self.cancel_btn.clicked.connect(self.reject) # Connect to QDialog's reject slot
         
         self._update_dbm_from_normalized() # Initial update of dBm field based on default amplitude
@@ -115,6 +173,103 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         # Remove duplicates and sort, though current logic might not produce duplicates if input is clean.
         return sorted(list(set(selected_modules)))
 
+    
+    def _load_data_avail(self):
+        ''' Use loaded file parameters, accept the dialog'''
+        self.load_data_available = True
+        self.accept()
+
+
+    def _load_netanal_data(self):
+        """
+        Asynchronously trigger a non-blocking QFileDialog using the main thread.
+        Using QTimer avoids interfering with existing threads.
+        """
+        QtCore.QTimer.singleShot(0, self._open_file_dialog_async)
+
+
+    def _open_file_dialog_async(self):
+        """Open a non-blocking file dialog for selecting a Network Analysis parameter file."""
+        if not hasattr(self, "_file_dialog") or self._file_dialog is None:
+            self._file_dialog = QtWidgets.QFileDialog(self, "Load Network Analysis Parameters")
+            self._file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
+    
+            self._file_dialog.setNameFilters([
+                "Pickle Files (*.pkl *.pickle)",
+                "All Files (*)",
+            ])
+    
+            # Force non-native + non-blocking behavior
+            self._file_dialog.setOptions(
+                QtWidgets.QFileDialog.Option.DontUseNativeDialog
+                | QtWidgets.QFileDialog.Option.ReadOnly
+            )
+            self._file_dialog.setModal(False)
+    
+            # Connect signals
+            self._file_dialog.fileSelected.connect(self._on_file_selected)
+            self._file_dialog.rejected.connect(self._on_file_dialog_closed)
+    
+        # Show the dialog async
+        self._file_dialog.open()
+
+
+    @QtCore.pyqtSlot(str)
+    def _on_file_selected(self, path: str):
+        """Handle file selection, load bias data, and populate the UI fields with file contents."""
+        payload = load_network_analysis_payload(self, file_path=path)
+        if payload is None:
+            return
+    
+        self.load_btn.setEnabled(True)
+        self._load_data = payload.copy()
+    
+        params = payload["parameters"]
+    
+        module_value = params.get("module")
+        if module_value is None:
+            module_text = "All"
+        elif isinstance(module_value, (list, tuple, set)):
+            module_text = ", ".join(str(int(m)) for m in module_value)
+        else:
+            module_text = str(module_value)
+        self.module_entry.setText(module_text)
+    
+        amps = params.get("amps") or ([params["amp"]] if "amp" in params else None)
+        if amps:
+            try:
+                amp_text = ", ".join(f"{float(amp):g}" for amp in amps)
+            except (TypeError, ValueError):
+                amp_text = ", ".join(str(amp) for amp in amps)
+            self.amp_edit.setText(amp_text)
+    
+        def set_if_present(key, widget, formatter):
+            if key in params and params[key] is not None:
+                try:
+                    widget.setText(formatter(params[key]))
+                except Exception:
+                    widget.setText(str(params[key]))
+    
+        set_if_present("fmin", self.fmin_edit, lambda v: f"{float(v) / 1e6:g}")
+        set_if_present("fmax", self.fmax_edit, lambda v: f"{float(v) / 1e6:g}")
+        set_if_present("cable_length", self.cable_length_edit, lambda v: f"{float(v):g}")
+        set_if_present("npoints", self.points_edit, lambda v: str(int(float(v))))
+        set_if_present("nsamps", self.samples_edit, lambda v: str(int(float(v))))
+        set_if_present("max_chans", self.max_chans_edit, lambda v: str(int(float(v))))
+        set_if_present("max_span", self.max_span_edit, lambda v: f"{float(v) / 1e6:g}")
+    
+        if "clear_channels" in params:
+            self.clear_channels_cb.setChecked(bool(params["clear_channels"]))
+    
+        self._update_dac_scale_info()
+        self._update_dbm_from_normalized()
+
+
+    @QtCore.pyqtSlot()
+    def _on_file_dialog_closed(self):
+        """Handle the event when the file dialog is closed without selection."""
+        pass
+        
     def get_parameters(self) -> dict | None:
         """
         Retrieves and validates the network analysis parameters from the UI fields.
@@ -124,41 +279,45 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             Shows an error message on invalid input.
         """
         try:
-            module_text = self.module_entry.text().strip()
-            selected_module_param = None # Parameter for 'module' key
-            if module_text.lower() != 'all':
-                parsed_modules = self._get_selected_modules()
-                if parsed_modules:
-                    selected_module_param = parsed_modules
-            
-            amp_text = self.amp_edit.text().strip()
-            # Use parsed amplitude values, or default if input is empty
-            amps_list = self._parse_amplitude_values(amp_text) or [DEFAULT_AMPLITUDE]
-            
-            # Construct parameters dictionary
-            # Using eval for frequency and span allows expressions, but ensure inputs are numbers.
-            # Consider replacing eval with direct float conversion if expressions aren't strictly needed.
-            params_dict = {
-                'amps': amps_list,
-                'module': selected_module_param, # Can be None (interpreted as all by backend) or list of modules
-                'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
-                'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
-                'cable_length': float(self.cable_length_edit.text()),
-                'npoints': int(self.points_edit.text()),
-                'nsamps': int(self.samples_edit.text()),
-                'max_chans': int(self.max_chans_edit.text()),
-                'max_span': float(eval(self.max_span_edit.text())) * 1e6, # Convert MHz to Hz
-                'clear_channels': self.clear_channels_cb.isChecked()
-            }
-            # Basic validation for frequency range
-            if params_dict['fmin'] >= params_dict['fmax']:
-                QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
-                return None
-            return params_dict
+            if self.load_data_available:
+                return self._load_data
+            else:
+                module_text = self.module_entry.text().strip()
+                selected_module_param = None # Parameter for 'module' key
+                if module_text.lower() != 'all':
+                    parsed_modules = self._get_selected_modules()
+                    if parsed_modules:
+                        selected_module_param = parsed_modules
+                
+                amp_text = self.amp_edit.text().strip()
+                # Use parsed amplitude values, or default if input is empty
+                amps_list = self._parse_amplitude_values(amp_text) or [DEFAULT_AMPLITUDE]
+                
+                # Construct parameters dictionary
+                # Using eval for frequency and span allows expressions, but ensure inputs are numbers.
+                # Consider replacing eval with direct float conversion if expressions aren't strictly needed.
+                params_dict = {
+                    'amps': amps_list,
+                    'module': selected_module_param, # Can be None (interpreted as all by backend) or list of modules
+                    'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
+                    'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
+                    'cable_length': float(self.cable_length_edit.text()),
+                    'npoints': int(self.points_edit.text()),
+                    'nsamps': int(self.samples_edit.text()),
+                    'max_chans': int(self.max_chans_edit.text()),
+                    'max_span': float(eval(self.max_span_edit.text())) * 1e6, # Convert MHz to Hz
+                    'clear_channels': self.clear_channels_cb.isChecked()
+                }
+                # Basic validation for frequency range
+                if params_dict['fmin'] >= params_dict['fmax']:
+                    QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
+                    return None
+                return params_dict
         except Exception as e:
             traceback.print_exc() # Log the full traceback for debugging
             QtWidgets.QMessageBox.critical(self, "Error Parsing Parameters", f"Invalid parameter input: {str(e)}")
             return None
+
 
 class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
     """

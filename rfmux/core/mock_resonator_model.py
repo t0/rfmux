@@ -7,8 +7,8 @@ import copy
 from . import mock_constants as const
 
 import sys
-sys.path.append('/home/maclean/code/')
-sys.path.append('/home/maclean/code/mr_resonator/')
+sys.path.append('/home/joshua/code/')
+sys.path.append('/home/joshua/code/mr_resonator/')
 import mr_resonator
 from mr_resonator.mr_complex_resonator import MR_complex_resonator as MR_complex_resonator
 from mr_resonator.mr_lekid import MR_LEKID as MR_LEKID
@@ -107,6 +107,10 @@ class MockResonatorModel:
                 config = mock_crs_helper.DEFAULT_MOCK_CONFIG.copy()
         
         print('Using config:', {k: v for k, v in config.items() if k in ['num_resonances', 'freq_start', 'freq_end', 'T', 'Popt']})
+        
+        # Set random seed for reproducible resonator generation
+        seed = config.get('resonator_random_seed', 42)
+        np.random.seed(seed)
         
         # Extract parameters
         freq_start = config.get('freq_start', 1e9)

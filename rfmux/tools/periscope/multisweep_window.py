@@ -26,7 +26,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
     
     # Signal emitted when bias_kids algorithm completes with df_calibration data
     df_calibration_ready = pyqtSignal(int, dict)  # module, {detector_idx: df_calibration}
-    def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None, dark_mode=False):
+    def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None, dark_mode=False, loaded_bias=False):
         """
         Initializes the MultisweepWindow.
 
@@ -45,6 +45,13 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.initial_params = initial_params or {}  # Store initial parameters for potential re-runs
         self.dac_scales = dac_scales or {}          # DAC scales for unit conversions
         self.dark_mode = dark_mode                 # Store dark mode setting
+        self.bias_data_avail = loaded_bias
+        self.samples_taken = False
+        self.noise_data = {}
+
+        self.debug_noise_data = {}
+        self.debug_phase_data = []
+
         
         # Track open detector digest windows to prevent garbage collection
         self.detector_digest_windows = []
@@ -127,6 +134,12 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.bias_kids_btn.clicked.connect(self._bias_kids)
         self.bias_kids_btn.setToolTip("Bias detectors at optimal operating points based on multisweep results")
         toolbar.addWidget(self.bias_kids_btn)
+
+        # self.take_samp_btn = QtWidgets.QPushButton("Take Noise Samples")
+        # self.take_samp_btn.setVisible(self.bias_data_avail)
+        # self.take_samp_btn.clicked.connect(self._take_noise_samps)        
+        # self.take_samp_btn.setToolTip("Get Noise data to see if detectors were biased correctly.")
+        # toolbar.addWidget(self.take_samp_btn)
         
         toolbar.addSeparator()
 
@@ -357,6 +370,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         progress_layout.addWidget(self.current_amp_label)
         
         layout.addWidget(self.progress_group)
+
+    def _hide_progress_bars(self):
+        """Hide the entire Analysis Progress group."""
+        if self.progress_group:
+            self.progress_group.hide()
 
     def update_progress(self, module, progress_percentage):
         """
@@ -767,6 +785,21 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
 
+    def _get_fit_frequencies(self, freqs):
+        ref_freqs = []
+        for i in range(len(freqs)):
+            if self.results_by_iteration[0]['data'][i+1]['skewed_fit_success']:
+                ref_freqs.append(self.results_by_iteration[0]['data'][i+1]['fit_params']['fr'])
+            elif self.results_by_iteration[0]['data'][i+1]['nonlinear_fit_success']:
+                ref_freqs.append(self.results_by_iteration[0]['data'][i+1]['nonlinear_fit_params']['fr'])
+            else:
+                ref_freqs.append(self.results_by_iteration[0]['data'][i+1]['bias_frequency'])
+                
+        ref_freqs.sort()
+        return ref_freqs
+
+    
+    
     def _rerun_multisweep(self):
         """
         Allows the user to re-run the multisweep analysis, potentially with modified parameters.
@@ -782,6 +815,12 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
         # --- Determine frequencies to seed the dialog ---
         dialog_seed_frequencies = list(self.conceptual_resonance_frequencies) # Start with conceptual
+
+        ##### Getting the fit values for updating in re-run ######
+
+        fit_freqs = self._get_fit_frequencies(dialog_seed_frequencies)
+
+        
         if self.current_run_amps: # If there was a previous/current run configuration
             # Use a representative amplitude from the current/last run to seed the dialog
             # For simplicity, let's use the first amplitude from the current_run_amps.
@@ -790,6 +829,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 remembered_cf = self._get_closest_remembered_cf(idx, representative_amp_for_seeding)
                 if remembered_cf is not None:
                     dialog_seed_frequencies[idx] = remembered_cf
+        
         
         # Prepare other parameters for the dialog
         dialog_initial_params = self.initial_params.copy() # Use a copy of the window's last run parameters
@@ -803,7 +843,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             resonance_frequencies=dialog_seed_frequencies, # Seed with potentially updated CFs
             dac_scales=self.dac_scales,
             current_module=self.target_module,
-            initial_params=dialog_initial_params # Pass other existing params
+            initial_params=dialog_initial_params, # Pass other existing params
+            load_multisweep = False,
+            fit_frequencies = fit_freqs
         )
 
         if dialog.exec(): # True if user clicked OK
@@ -1007,6 +1049,30 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # if it's called for other reasons (data update, unit change, etc.),
         # respecting the checkbox state at that time.
 
+
+    def _take_noise_samps(self):
+        total = 100
+        # self.take_samp_btn.setEnabled(False)
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        # Launch async sampler
+        samples = loop.run_until_complete(self.parent().crs.get_samples(total, average=False, channel=None, module=self.target_module))
+        self.noise_data = samples
+        loop.close()
+        # self.take_samp_btn.setEnabled(True)
+        self.samples_taken = True
+
+        return self.noise_data
+        
+    
     @QtCore.pyqtSlot(object)
     def _handle_multisweep_plot_double_click(self, ev):
         """
@@ -1026,10 +1092,14 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         x_coord = mouse_point.x()
         # y_coord = mouse_point.y() # y_coord is not used for selecting the CF
 
+        self.debug_noise_data = self.parent().get_test_noise()
+        self.debug_phase_data = self.parent().get_phase_shift()
+        
         # --- Find the resonance whose center/bias frequency is closest to the click's X-coordinate ---
         min_distance = np.inf
         clicked_res_idx = None
         clicked_actual_cf = None
+        noise_data = None
 
         # Collect all unique resonances with their center frequencies
         resonance_centers = {}  # {res_idx: center_freq}
@@ -1056,6 +1126,10 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             # --- Determine the conceptual resonance and its ID ---
             # The clicked_res_idx IS the detector ID since results are keyed by index
             detector_id = clicked_res_idx
+
+            if self.samples_taken:
+                noise_data = self.noise_data
+
             
             # Get the conceptual frequency for this resonance index
             # Note: clicked_res_idx is 1-based, but conceptual_resonance_frequencies is 0-based
@@ -1200,7 +1274,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 normalize_plot3=self.normalize_traces,
                 dark_mode=self.dark_mode,
                 all_detectors_data=all_detectors_data,  
-                initial_detector_idx=detector_id 
+                initial_detector_idx=detector_id,
+                noise_data = noise_data,
+                debug_noise_data = self.debug_noise_data,
+                debug_phase_data = self.debug_phase_data,
+                debug = False            
             )
             
             # Add to tracking list to prevent garbage collection
@@ -1324,7 +1402,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         from .bias_kids_dialog import BiasKidsDialog
         
         # Show dialog to get parameters
-        dialog = BiasKidsDialog(self)
+        dialog = BiasKidsDialog(self, self.target_module)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return  # User cancelled
         

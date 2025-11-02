@@ -27,7 +27,11 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                  normalize_plot3: bool = False, 
                  dark_mode: bool = False,
                  all_detectors_data: dict = None,  
-                 initial_detector_idx: int = None):  
+                 initial_detector_idx: int = None,
+                 noise_data = None,
+                 debug_noise_data = None,
+                 debug_phase_data = None,
+                 debug = False): 
         super().__init__(parent)
         self.resonance_data_for_digest = resonance_data_for_digest or {} 
         self.detector_id = detector_id
@@ -38,6 +42,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.normalize_plot3 = normalize_plot3
         self.dark_mode = dark_mode 
         self.parent_window = parent
+
+        self.cuurent_detector = self.detector_id
         
         # Navigation support
         self.all_detectors_data = all_detectors_data or {}
@@ -55,6 +61,23 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.active_sweep_info = None 
         self.active_sweep_data = None 
         self.current_plot_offset_hz = None 
+        
+        self.noise_data = noise_data
+        self.noise_i_data = None
+        self.noise_q_data = None
+
+        
+        self.debug = debug
+
+        if self.debug:
+            self.full_debug = debug_noise_data
+            self.debug_noise = self.full_debug[self.detector_id]
+            self.phase_debug = debug_phase_data
+        
+        if self.noise_data is not None:
+            self.noise_i_data = self.noise_data.i[self.detector_id-1]
+            self.noise_q_data = self.noise_data.q[self.detector_id-1]
+
 
         if self.resonance_data_for_digest:
             try:
@@ -139,6 +162,13 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.next_button.clicked.connect(self._navigate_next)
         self.next_button.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.next_button)
+
+        self.refresh_noise_button = QtWidgets.QPushButton("Take Noise")
+        self.refresh_noise_button.setStyleSheet("background-color: #ffcccc; color: black;")
+        self.refresh_noise_button.clicked.connect(self._refresh_noise_samps)
+        self.refresh_noise_button.setToolTip("Captures 100 I,Q points for each detector and over-plots them on the I,Q plot in the detector digest windows. Used to conveniently re-assess detector state.")
+        self.refresh_noise_button.setEnabled(len(self.detector_indices) > 1)
+        nav_layout.addWidget(self.refresh_noise_button)
         
         # Add detector count label
         detector_count_text = ""
@@ -282,6 +312,16 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self._apply_zoom_box_mode_to_all()
         self.apply_theme(self.dark_mode)
 
+    def _refresh_noise_samps(self):
+        self.current_detector = self.detector_id
+        self.refresh_noise_button.setEnabled(False)
+        self.noise_data = self.parent()._take_noise_samps()
+        self.noise_i_data = self.noise_data.i[self.current_detector - 1]
+        self.noise_q_data = self.noise_data.q[self.current_detector - 1]
+        self.refresh_noise_button.setEnabled(True)
+        self._update_plots()
+    
+    
     def _init_skewed_table_rows(self):
         """Initialize the rows for the skewed fit table."""
         params = [
@@ -435,6 +475,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         # Update detector-specific data
         detector_data = self.all_detectors_data[new_detector_id]
         self.detector_id = new_detector_id
+        self.current_detector = self.detector_id
         self.resonance_data_for_digest = detector_data['resonance_data']
         self.resonance_frequency_ghz_title = detector_data['conceptual_freq_hz'] / 1e9
         
@@ -443,6 +484,17 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.active_sweep_info = None
         self.active_sweep_data = None
         self.current_plot_offset_hz = None
+        self.noise_i_data = None
+        self.noise_q_data = None
+
+        
+        if self.debug:
+            self.debug_noise = self.full_debug[self.detector_id]
+        # print("For detector", self.detector_id, "the noise is", self.debug_noise)
+        
+        if self.noise_data is not None:
+            self.noise_i_data = self.noise_data.i[self.detector_id-1]
+            self.noise_q_data = self.noise_data.q[self.detector_id-1]
         
         # Select the first sweep for this detector
         if self.resonance_data_for_digest:
@@ -611,12 +663,70 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 self.plot1_sweep_vs_freq.autoRange()
 
             rotation_tod_iq = self.active_sweep_data.get('rotation_tod')
+
             if rotation_tod_iq is not None and rotation_tod_iq.size > 0:
                 tod_i_volts = convert_roc_to_volts(rotation_tod_iq.real)
                 tod_q_volts = convert_roc_to_volts(rotation_tod_iq.imag)
+
+                mean_phase_file = np.median(np.arctan(tod_q_volts/tod_i_volts))
+                mean_mag_file = np.mean(np.sqrt(tod_i_volts**2 + tod_q_volts**2))
+                # print("Median phase of the rotation data in file is", np.degrees(mean_phase_file), "degrees")
+                # print("Mean magnitude of the rotation data in file is", mean_mag_file)
+
                 noise_color = 'w' if self.dark_mode else 'k' 
                 self.plot2_iq_plane.plot(tod_i_volts, tod_q_volts, pen=None, symbol='o', symbolBrush=noise_color, symbolPen=noise_color, symbolSize=3, name="Noise at f_bias")
+                
+            if self.debug:
+                test_colors = ['orange', 'y']
+                test_labels = ['Initial Noise', 'Refined Noise']
+                for idx, (key, noise) in enumerate(self.debug_noise.items()):
+                    noise_i = np.array(self.debug_noise[key].real)
+                    noise_q = np.array(self.debug_noise[key].imag)
+                    
+                    noise_i_v = convert_roc_to_volts(noise_i)
+                    noise_q_v = convert_roc_to_volts(noise_q)
+    
+                    test_color = test_colors[idx % len(test_colors)]
+                    test_label = test_labels[idx % len(test_labels)]
+    
+                    self.plot2_iq_plane.plot(
+                        noise_i_v,
+                        noise_q_v,
+                        pen=None,
+                        symbol='o',
+                        symbolBrush=test_color,
+                        symbolPen=test_color,
+                        symbolSize=3,
+                        name=test_label
+                    )
+            
+            if self.noise_i_data is not None and self.noise_q_data is not None:
+                rotation_noise_i = np.array(self.noise_i_data)
+                rotation_noise_q = np.array(self.noise_q_data)
+                
+                noise_i_volts = convert_roc_to_volts(rotation_noise_i)
+                noise_q_volts = convert_roc_to_volts(rotation_noise_q)
+
+                mean_phase_noise = np.median(np.arctan(noise_q_volts/noise_i_volts))
+                mean_mag_noise = np.mean(np.sqrt(noise_i_volts**2 + noise_q_volts**2))
+                
+                # print("Median phase of the noise data collected is", np.degrees(mean_phase_noise), "degrees\n")
+                # print("Mean magnitude of the noise data", mean_mag_noise)
+
+                self.plot2_iq_plane.plot(
+                    noise_i_volts,
+                    noise_q_volts,
+                    pen=None,
+                    symbol='o',
+                    symbolBrush='r',
+                    symbolPen='r',
+                    symbolSize=3,
+                    name="Data after Bias sampling"
+                )
+                
             self.plot2_iq_plane.autoRange()
+
+            
         
         # --- Plot 3: Bias amplitude optimization (remains largely the same logic) ---
         if self.current_plot_offset_hz is not None:

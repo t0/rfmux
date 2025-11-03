@@ -83,6 +83,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.single_psd_q = self.spectrum_data['single_psd_q'][self.detector_id - 1]
             self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
             self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
+            self.reference = self.spectrum_data['reference']
         else:
             self.noise_tab_avail = False ### You can't access noise tab if no noise data was collected
         
@@ -487,7 +488,10 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         vb_spec = ClickableViewBox(); vb_spec.parent_window = self
         self.plot_noise_spectrum = pg.PlotWidget(viewBox=vb_spec, name="NoiseSpectrum")
         self.plot_noise_spectrum.setBackground(plot_bg_color)
-        self.plot_noise_spectrum.setLabel('left', "Amplitude", units="dB/Hz")
+        if self.reference == "relative":
+            self.plot_noise_spectrum.setLabel('left', "Amplitude", units="dBc/Hz")
+        else:
+            self.plot_noise_spectrum.setLabel('left', "Amplitude", units="dBm/Hz")
         self.plot_noise_spectrum.setLabel('bottom', "Frequency", units="Hz")
         self.plot_noise_spectrum.showGrid(x=True, y=True, alpha=0.3)
         # self.plot_noise_spectrum.setLogMode(x=True, y=False)
@@ -689,6 +693,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.single_psd_q = self.spectrum_data['single_psd_q'][self.detector_id - 1]
             self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
             self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
+            self.reference = self.spectrum_data['reference']
         
         if self.debug:
             self.debug_noise = self.full_debug[self.detector_id]

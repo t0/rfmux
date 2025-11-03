@@ -8,6 +8,7 @@ updates others automatically.
 """
 
 from PyQt6 import QtWidgets, QtCore, QtGui
+from rfmux.core.transferfunctions import decimation_to_sampling
 
 
 class NoiseSpectrumDialog(QtWidgets.QDialog):
@@ -42,8 +43,8 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
 
         # Number of Samples
         self.samples_edit = QtWidgets.QLineEdit("10000")
-        self.samples_edit.setValidator(QtGui.QIntValidator(1, 1_000_000))
-        self.samples_edit.setToolTip("Total number of samples to use in the analysis (1–1,000,000).")
+        self.samples_edit.setValidator(QtGui.QIntValidator(1, 10_000_000))
+        self.samples_edit.setToolTip("Total number of samples to use in the analysis (1–10,000,000).")
         layout.addRow("Number of Samples:", self.samples_edit)
 
 
@@ -148,7 +149,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
 
         if decimation <= 1:
             self.status_label.setText(
-                "Decimation ≤ 1: You will drop packets in Mac and Windows, increase buffer in Linux (see Help).\nOnly 128 channels available."
+                "Decimation ≤ 1: You will drop packets in Mac and Windows, increase UDP buffer in Linux (see Help).\nOnly 128 channels available."
             )
             self.status_label.setStyleSheet("background-color: #f8d7da; color: #721c24; padding: 5px; border-radius: 6px;")
         elif 1 < decimation <=3:
@@ -169,7 +170,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
     @staticmethod
     def _get_frequency(decimation_level: int) -> float:
         """Maps decimation level to max measurable frequency (Hz)."""
-        slow_fs = 625e6 / (256 * 64 * (2 ** decimation_level))
+        slow_fs = decimation_to_sampling(decimation_level)
         freq = slow_fs/2
         return freq
 

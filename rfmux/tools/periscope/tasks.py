@@ -60,29 +60,29 @@ class UDPReceiver(QtCore.QThread):
                 try:
                     data = self.sock.recv(streamer.LONG_PACKET_SIZE)
                     pkt = streamer.DfmuxPacket.from_bytes(data)
-                    if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
-                        self.first_packet_received = pkt.seq
+                    if pkt.module == self.module_id - 1:
+                        if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
+                            self.first_packet_received = pkt.seq
+                            self.prev_seq = pkt.seq
+                        self.receive_counter()
+                        self.calc_dropped_packets(self.prev_seq, pkt.seq)
                         self.prev_seq = pkt.seq
-                    self.receive_counter()
-                    self.calc_dropped_packets(self.prev_seq, pkt.seq)
-                    self.prev_seq = pkt.seq
+                        self.queue.put((pkt.seq, pkt))
                 except socket.timeout:
                     continue
                 except OSError:
                     break
-                if pkt.module == self.module_id - 1:
-                    self.queue.put((pkt.seq, pkt))
             else:
                 try:
                     data = self.sock.recv(streamer.LONG_PACKET_SIZE)
                     pkt = streamer.DfmuxPacket.from_bytes(data)
-                    if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
-                        self.first_packet_received = pkt.seq
-                        self.prev_seq = pkt.seq
-                    self.receive_counter()
-                    self.calc_dropped_packets(self.prev_seq, pkt.seq)
-                    self.prev_seq = pkt.seq
                     if pkt.module == self.module_id - 1:
+                        if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
+                            self.first_packet_received = pkt.seq
+                            self.prev_seq = pkt.seq  
+                        self.receive_counter()
+                        self.calc_dropped_packets(self.prev_seq, pkt.seq)
+                        self.prev_seq = pkt.seq
                         self.queue.put((pkt.seq, pkt))
                 except BlockingIOError:
                     # No data available right now — just loop

@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 import pyqtgraph as pg
 import asyncio
 import traceback
+import time
 
 # Imports from within the 'periscope' subpackage
 from .utils import (
@@ -1121,8 +1122,10 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             crs = self.parent().crs
 
         time_taken = params['time_taken']
+        t = time.time() + time_taken
+        formatted_time = time.strftime("%H:%M:%S", time.localtime(t))
         # Show a progress dialog
-        progress = QtWidgets.QProgressDialog(f"Getting noise spectrum...\n\nEstimated time {time_taken}s", None, 0, 0, self)
+        progress = QtWidgets.QProgressDialog(f"Getting noise spectrum...\n\nCompletion time {formatted_time}", None, 0, 0, self)
         progress.setWindowTitle("Please wait")
         progress.setCancelButton(None)
         progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
@@ -1156,6 +1159,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             num_res = len(self.conceptual_resonance_frequencies)
             
             data = {}
+            data['reference'] = reference
             data['ts'] = spectrum_data.ts
             data['I'] = spectrum_data.i[0:num_res]
             data['Q'] = spectrum_data.q[0:num_res]

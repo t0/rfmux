@@ -29,6 +29,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                  all_detectors_data: dict = None,  
                  initial_detector_idx: int = None,
                  noise_data = None,
+                 spectrum_data = None,
                  debug_noise_data = None,
                  debug_phase_data = None,
                  debug = False): 
@@ -43,7 +44,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.dark_mode = dark_mode 
         self.parent_window = parent
 
-        self.cuurent_detector = self.detector_id
+        self.current_detector = self.detector_id
+
+        self.noise_tab_avail = False
         
         # Navigation support
         self.all_detectors_data = all_detectors_data or {}
@@ -66,7 +69,25 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.noise_i_data = None
         self.noise_q_data = None
 
+        #### Noise spectrum Tab #####
+        self.tabs = None
+        self.digest_page = None
+        self.mean_subtract_enabled = False
+
+        self.spectrum_data = spectrum_data
+
+        ### Data products for plotting ####
+        if self.spectrum_data:
+            self.noise_tab_avail = True
+            self.single_psd_i = self.spectrum_data['single_psd_i'][self.detector_id - 1]
+            self.single_psd_q = self.spectrum_data['single_psd_q'][self.detector_id - 1]
+            self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
+            self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
+            self.reference = self.spectrum_data['reference']
+        else:
+            self.noise_tab_avail = False ### You can't access noise tab if no noise data was collected
         
+        #### Extra debugging step ####
         self.debug = debug
 
         if self.debug:
@@ -107,24 +128,97 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
              self.current_plot_offset_hz = self.resonance_frequency_ghz_title * 1e9
 
         self._setup_ui()
-        self._update_plots() 
+        self._update_plots()
 
         self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
         self.setWindowFlags(QtCore.Qt.WindowType.Window)
         self.resize(1200, 800) # Increased size to accommodate tables properly
 
+    
     def _setup_ui(self):
-        """Sets up the UI layout with plots and fitting information panel."""
+        """Sets up the UI layout with plots, fitting, and noise information panel."""
+        # Root central widget
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
+    
+        outer_layout = QtWidgets.QVBoxLayout(central_widget)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+    
+        # Tabs
+        self.tabs = QtWidgets.QTabWidget()
+        outer_layout.addWidget(self.tabs)
+    
+        # ---- Tab 1: existing Digest/Fit UI ----
+        self.digest_page = self._build_digest_tab()
+        self.tabs.addTab(self.digest_page, "Fit")
+    
+        # ---- Tab 2: Noise UI ----
+        self.noise_tab = self._build_noise_tab()
+        self.tabs.addTab(self.noise_tab, "Noise")
+        noise_tab_index = self.tabs.indexOf(self.noise_tab)
+        self.tabs.setTabEnabled(noise_tab_index, self.noise_tab_avail)
+    
+        # --- Optional: connect tab change ---
+        self.tabs.currentChanged.connect(self._on_tab_changed if hasattr(self, "_on_tab_changed") else lambda _: None)
+    
+        # --- Apply theme + finish ---
+        self.apply_theme(self.dark_mode)
+        self._update_plots()
+    
+        # Window configuration
+        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
+        self.setWindowFlags(QtCore.Qt.WindowType.Window)
+        self.resize(1200, 800)
+
+
+    def _on_tab_changed(self, index: int):
+        """Handle switching between tabs (Fit and Noise)."""
+        if not hasattr(self, "tabs"):
+            return
+    
+        current_tab_name = self.tabs.tabText(index)
+    
+        # --- When switched to the Fit (Digest) tab ---
+        if current_tab_name == "Fit":
+            return
+    
+        # --- When switched to the Noise tab ---
+        if current_tab_name == "Noise":
+            # Update title and count to match the current detector
+            if hasattr(self, "title_label_noise"):
+                title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
+                self.title_label_noise.setText(title_text)
+    
+            if hasattr(self, "detector_count_label_noise") and self.detector_indices:
+                count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
+                self.detector_count_label_noise.setText(count_text)
+
+
+            multiple_detectors = len(self.detector_indices) > 1
+            if hasattr(self, "prev_button_noise"):
+                self.prev_button_noise.setEnabled(multiple_detectors)
+            if hasattr(self, "next_button_noise"):
+                self.next_button_noise.setEnabled(multiple_detectors)
+    
+            # If you later add noise plotting logic, you can enable this:
+            if hasattr(self, "_update_noise_plots"):
+                self._update_noise_plots()
+    
+            # For now, do nothing else — this is just a layout switch.
+            return
+
+    
+    def _build_digest_tab(self):
+        """Sets up the UI layout with plots and fitting information panel."""
+        page = QtWidgets.QWidget()
         
         # Main vertical layout for the entire window content
-        outer_layout = QtWidgets.QVBoxLayout(central_widget)
+        outer_layout = QtWidgets.QVBoxLayout(page)
         outer_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins for cleaner look
         
         # Set the background color of the dialog based on dark mode
         bg_color_hex = "#1C1C1C" if self.dark_mode else "#FFFFFF" # Hex for stylesheet
-        central_widget.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}") # Apply to QWidget base
+        page.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}") # Apply to QWidget base
         
         # Create main splitter for resizable panes
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
@@ -163,7 +257,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.next_button.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.next_button)
 
-        self.refresh_noise_button = QtWidgets.QPushButton("Take Noise")
+        self.refresh_noise_button = QtWidgets.QPushButton("Check Noise")
         self.refresh_noise_button.setStyleSheet("background-color: #ffcccc; color: black;")
         self.refresh_noise_button.clicked.connect(self._refresh_noise_samps)
         self.refresh_noise_button.setToolTip("Captures 100 I,Q points for each detector and over-plots them on the I,Q plot in the detector digest windows. Used to conveniently re-assess detector state.")
@@ -312,6 +406,106 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self._apply_zoom_box_mode_to_all()
         self.apply_theme(self.dark_mode)
 
+        return page
+
+
+    def _build_noise_tab(self):
+        """Builds the Noise tab."""
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        bg_color_hex = "#1C1C1C" if self.dark_mode else "#FFFFFF" # Hex for stylesheet
+        page.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}") # Apply to QWidget base
+    
+        title_color_str = "white" if self.dark_mode else "black"
+        plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+    
+        # --- Navigation Bar (same as Digest tab) ---
+        nav_widget = QtWidgets.QWidget()
+        nav_layout = QtWidgets.QHBoxLayout(nav_widget)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+
+        #### Mean enabled ######
+        checkbox_widget = QtWidgets.QWidget()
+        checkbox_layout = QtWidgets.QHBoxLayout(checkbox_widget)
+        checkbox_layout.setContentsMargins(5, 0, 5, 0)
+        
+        self.mean_subtract_checkbox = QtWidgets.QCheckBox("Mean Subtracted")
+        self.mean_subtract_checkbox.setToolTip("If checked, TOD data will have its mean subtracted before plotting.")
+        self.mean_subtract_checkbox.stateChanged.connect(self._toggle_mean_subtraction)
+        
+        checkbox_layout.addStretch()
+        checkbox_layout.addWidget(self.mean_subtract_checkbox)
+        checkbox_layout.addStretch()
+        
+        layout.addWidget(checkbox_widget)
+
+        ##### Buttons #####
+    
+        self.prev_button_noise = QtWidgets.QPushButton("◀ Previous")
+        self.prev_button_noise.clicked.connect(self._navigate_previous)
+        self.prev_button_noise.setEnabled(len(self.detector_indices) > 1)
+        nav_layout.addWidget(self.prev_button_noise)
+    
+        title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
+        self.title_label_noise = QtWidgets.QLabel(title_text)
+        self.title_label_noise.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        font = self.title_label_noise.font()
+        font.setPointSize(font.pointSize() + 2)
+        self.title_label_noise.setFont(font)
+        self.title_label_noise.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+        nav_layout.addWidget(self.title_label_noise, 1)
+    
+        self.next_button_noise = QtWidgets.QPushButton("Next ▶")
+        self.next_button_noise.clicked.connect(self._navigate_next)
+        self.next_button_noise.setEnabled(len(self.detector_indices) > 1)
+        nav_layout.addWidget(self.next_button_noise)
+    
+        detector_count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})" if self.detector_indices else ""
+        self.detector_count_label_noise = QtWidgets.QLabel(detector_count_text)
+        self.detector_count_label_noise.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+        nav_layout.addWidget(self.detector_count_label_noise)
+    
+        layout.addWidget(nav_widget)
+    
+        # --- Splitter with Two Empty Plots ---
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        # plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+    
+        # Time vs Magnitude plot
+        vb_time = ClickableViewBox(); vb_time.parent_window = self
+        self.plot_time_vs_mag = pg.PlotWidget(viewBox=vb_time, name="TimeVsAmplitude")
+        self.plot_time_vs_mag.setBackground(plot_bg_color)
+        self.plot_time_vs_mag.setLabel('left', "Amplitude", units="V")
+        self.plot_time_vs_mag.setLabel('bottom', "Time", units="s")
+        self.plot_time_vs_mag.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_time_vs_mag.setTitle("TOD", color=plot_pen_color)
+        self.plot_time_vs_mag.addLegend(offset = (30, 10), labelTextColor=plot_pen_color)
+        splitter.addWidget(self.plot_time_vs_mag)
+    
+        # Noise Spectrum plot
+        vb_spec = ClickableViewBox(); vb_spec.parent_window = self
+        self.plot_noise_spectrum = pg.PlotWidget(viewBox=vb_spec, name="NoiseSpectrum")
+        self.plot_noise_spectrum.setBackground(plot_bg_color)
+        if self.reference == "relative":
+            self.plot_noise_spectrum.setLabel('left', "Amplitude", units="dBc/Hz")
+        else:
+            self.plot_noise_spectrum.setLabel('left', "Amplitude", units="dBm/Hz")
+        self.plot_noise_spectrum.setLabel('bottom', "Frequency", units="Hz")
+        self.plot_noise_spectrum.showGrid(x=True, y=True, alpha=0.3)
+        # self.plot_noise_spectrum.setLogMode(x=True, y=False)
+        self.plot_noise_spectrum.setTitle("Noise Spectrum", color=plot_pen_color)
+        self.plot_noise_spectrum.addLegend(offset = (30, 10), labelTextColor=plot_pen_color)
+        splitter.addWidget(self.plot_noise_spectrum)
+    
+        splitter.setSizes([400, 400])
+        layout.addWidget(splitter)
+        self.apply_theme(self.dark_mode)
+
+    
+        return page
+
     def _refresh_noise_samps(self):
         self.current_detector = self.detector_id
         self.refresh_noise_button.setEnabled(False)
@@ -379,6 +573,11 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self._navigate_next_trace()
         else:
             super().keyPressEvent(event)
+            
+    def _toggle_mean_subtraction(self, state):
+        """Toggles mean subtraction for TOD data and updates plots."""
+        self.mean_subtract_enabled = (state == QtCore.Qt.CheckState.Checked.value)
+        self._update_noise_plots()
     
     def _navigate_previous(self):
         """Navigate to the previous detector."""
@@ -487,6 +686,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.noise_i_data = None
         self.noise_q_data = None
 
+
+        if self.spectrum_data:
+            self.noise_tab_avail = True
+            self.single_psd_i = self.spectrum_data['single_psd_i'][self.detector_id - 1]
+            self.single_psd_q = self.spectrum_data['single_psd_q'][self.detector_id - 1]
+            self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
+            self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
+            self.reference = self.spectrum_data['reference']
         
         if self.debug:
             self.debug_noise = self.full_debug[self.detector_id]
@@ -533,8 +740,19 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             detector_count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
             self.detector_count_label.setText(detector_count_text)
         
+        if hasattr(self, "title_label_noise"):
+            title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
+            self.title_label_noise.setText(title_text)
+
+        if hasattr(self, "detector_count_label_noise") and self.detector_indices:
+            count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
+            self.detector_count_label_noise.setText(count_text)
+        
         # Redraw plots with new data
+        
         self._update_plots()
+        if self.spectrum_data:
+            self._update_noise_plots()
 
     def _apply_zoom_box_mode_to_all(self):
         """Applies the current zoom_box_mode state to all plot viewboxes."""
@@ -564,6 +782,91 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     self.nl_table.item(row, 1).setText("N/A")
 
 
+    def _get_relative_timestamps(self, ts, num_samples):
+        SS_PER_SECOND = 156250000
+        first = ts[0].h * 3600 + ts[0].m * 60 + ts[0].s + ts[0].ss/SS_PER_SECOND
+        last = ts[-1].h * 3600 + ts[-1].m * 60 + ts[-1].s + ts[-1].ss/SS_PER_SECOND
+        total_time = last - first
+        timeseries = list(np.linspace(0, total_time, num_samples))
+        return timeseries
+    
+    
+    def _update_noise_plots(self):
+        self.apply_theme(self.dark_mode)
+    
+        if not self.spectrum_data:
+            self.plot_time_vs_mag.clear()
+            self.plot_noise_spectrum.clear()
+            return
+    
+        try:
+            self.plot_time_vs_mag.clear()
+            self.plot_noise_spectrum.clear()
+    
+            ###### First plot ######
+            ts = self._get_relative_timestamps(self.spectrum_data['ts'], len(self.tod_i))
+            tod_i_volts = convert_roc_to_volts(np.array(self.tod_i))
+            tod_q_volts = convert_roc_to_volts(np.array(self.tod_q))
+    
+            if self.mean_subtract_enabled:
+                tod_i_volts = tod_i_volts - np.mean(tod_i_volts)
+                tod_q_volts = tod_q_volts - np.mean(tod_q_volts)
+    
+            complex_volts = tod_i_volts + 1j * tod_q_volts
+            mag_volts = np.abs(complex_volts)
+    
+            self.plot_time_vs_mag.plot(ts, tod_i_volts, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
+            self.plot_time_vs_mag.plot(ts, tod_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
+            self.plot_time_vs_mag.autoRange()
+    
+            ###### Second plot ########
+            frequencies = self.spectrum_data['freq_iq']
+            curve_i = self.plot_noise_spectrum.plot(frequencies, self.single_psd_i,
+                                                    pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
+            curve_q = self.plot_noise_spectrum.plot(frequencies, self.single_psd_q,
+                                                    pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
+            self.plot_noise_spectrum.setLogMode(x=True, y=False)
+            self.plot_noise_spectrum.autoRange()
+    
+            # --- Hover label setup ---
+            vb = self.plot_noise_spectrum.getViewBox()
+            self.hover_label = pg.TextItem("", anchor=(0, 1), color='w')
+            self.plot_noise_spectrum.addItem(self.hover_label)
+            self.hover_label.hide()
+
+            log_freqs = np.log10(np.clip(frequencies, 1e-12, None))
+    
+            # --- Mouse move handler ---
+            def on_mouse_move(evt):
+                pos = evt[0]  # current mouse position in scene coordinates
+                if self.plot_noise_spectrum.sceneBoundingRect().contains(pos):
+                    mouse_point = vb.mapSceneToView(pos)
+                    
+                    log_x = mouse_point.x()
+                    x = 10 ** log_x
+                    
+                    if x < np.min(frequencies) or x > np.max(frequencies):
+                        self.hover_label.hide()
+                        return
+                        
+                    y_i = np.interp(log_x, log_freqs, self.single_psd_i)
+                    y_q = np.interp(log_x, log_freqs, self.single_psd_q)
+                    self.hover_label.setHtml(
+                        f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3e}</span><br>"
+                        f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3e}</span><br>"
+                        f"<span style='color:yellow'>Freq: {x:.3f}</span>"
+                    )
+                    self.hover_label.setPos(log_x, max(y_i, y_q))
+                    self.hover_label.show()
+                else:
+                    self.hover_label.hide()
+    
+            self.proxy = pg.SignalProxy(self.plot_noise_spectrum.scene().sigMouseMoved,
+                                        rateLimit=60, slot=on_mouse_move)
+    
+        except Exception as e:
+            print("Error updating noise plots:", e)      
+        
     def _update_plots(self):
         """Populates all three plots with data and updates fitting information panel."""
         self._clear_plots() # Clear previous data and fitting info
@@ -783,6 +1086,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.plot3_bias_opt.autoRange()
         self._update_fitting_info_panel()
 
+
+
     def _update_fitting_info_panel(self):
         """Updates the fitting information panel based on self.active_sweep_data."""
         if not self.active_sweep_data or not hasattr(self, 'skewed_table') or not hasattr(self, 'nl_table'):
@@ -944,56 +1249,102 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             central_widget.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}")
         
         title_color_str = "white" if dark_mode else "black"
-        if hasattr(self, 'title_label'):
-            self.title_label.setStyleSheet(f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}")
-        
         plot_bg_color, plot_pen_color = ("k", "w") if dark_mode else ("w", "k")
-        
+    
+        # ----- Titles -----
+        if hasattr(self, 'title_label'):
+            self.title_label.setStyleSheet(
+                f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}"
+            )
+        if hasattr(self, 'title_label_noise'):
+            self.title_label_noise.setStyleSheet(
+                f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}"
+            )
+    
+        # ----- Plots (Digest tab) -----
         plot_widgets_legends = [
             (self.plot1_sweep_vs_freq, self.plot1_legend, "Sweep"),
             (self.plot2_iq_plane, self.plot2_legend, "IQ"),
-            (self.plot3_bias_opt, self.plot3_legend, "Bias amplitude optimization")
+            (self.plot3_bias_opt, self.plot3_legend, "Bias amplitude optimization"),
         ]
-
         for plot_widget, legend_widget, default_title_text in plot_widgets_legends:
             if plot_widget:
                 plot_widget.setBackground(plot_bg_color)
                 plot_item = plot_widget.getPlotItem()
                 if plot_item:
-                    # Titles for plot1 and plot2 are dynamic and set in _update_plots.
-                    # For plot3, its title is static.
                     if plot_widget == self.plot3_bias_opt:
-                         current_title = plot_item.titleLabel.text if plot_item.titleLabel and plot_item.titleLabel.text else default_title_text
-                         plot_item.setTitle(current_title, color=plot_pen_color)
-                    
+                        current_title = (
+                            plot_item.titleLabel.text
+                            if plot_item.titleLabel and plot_item.titleLabel.text
+                            else default_title_text
+                        )
+                        plot_item.setTitle(current_title, color=plot_pen_color)
                     for axis_name in ("left", "bottom", "right", "top"):
                         ax = plot_item.getAxis(axis_name)
-                        if ax: ax.setPen(plot_pen_color); ax.setTextPen(plot_pen_color)
+                        if ax:
+                            ax.setPen(plot_pen_color)
+                            ax.setTextPen(plot_pen_color)
                 if legend_widget:
-                    try: legend_widget.setLabelTextColor(plot_pen_color)
-                    except Exception as e: print(f"Error updating legend color for {default_title_text}: {e}")
-        
+                    try:
+                        legend_widget.setLabelTextColor(plot_pen_color)
+                    except Exception as e:
+                        print(f"Error updating legend color for {default_title_text}: {e}")
+    
+        # ----- Plots (Noise tab) -----
+        if hasattr(self, 'plot_time_vs_mag'):
+            self.plot_time_vs_mag.setBackground(plot_bg_color)
+            plot_item = self.plot_time_vs_mag.getPlotItem()
+            plot_item.setTitle("TOD", color=plot_pen_color)
+            for ax in ("left", "bottom"):
+                axis = plot_item.getAxis(ax)
+                axis.setPen(plot_pen_color)
+                axis.setTextPen(plot_pen_color)
+        if hasattr(self, 'plot_noise_spectrum'):
+            self.plot_noise_spectrum.setBackground(plot_bg_color)
+            plot_item = self.plot_noise_spectrum.getPlotItem()
+            plot_item.setTitle("Noise Spectrum", color=plot_pen_color)
+            for ax in ("left", "bottom"):
+                axis = plot_item.getAxis(ax)
+                axis.setPen(plot_pen_color)
+                axis.setTextPen(plot_pen_color)
+    
+        # ----- Fitting info panel -----
         if hasattr(self, 'fitting_info_group'):
-            self.fitting_info_group.setStyleSheet(f"QGroupBox {{ color: {title_color_str}; border: 1px solid {title_color_str}; margin-top: 0.5em;}} QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 3px 0 3px; }}")
-            sub_group_style = f"QGroupBox {{ color: {title_color_str}; border: none; background-color: transparent; }}"
-            fitting_label_color_style = f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
+            self.fitting_info_group.setStyleSheet(
+                f"QGroupBox {{ color: {title_color_str}; border: 1px solid {title_color_str}; margin-top: 0.5em;}} "
+                f"QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 3px 0 3px; }}"
+            )
+            sub_group_style = (
+                f"QGroupBox {{ color: {title_color_str}; border: none; background-color: transparent; }}"
+            )
+            fitting_label_color_style = (
+                f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
+            )
             fitting_info_main_layout = self.fitting_info_group.layout()
             if fitting_info_main_layout:
-                for i in range(fitting_info_main_layout.count()): 
+                for i in range(fitting_info_main_layout.count()):
                     item = fitting_info_main_layout.itemAt(i)
                     if item and item.widget() and isinstance(item.widget(), QtWidgets.QGroupBox):
                         sub_group_box = item.widget()
                         sub_group_box.setStyleSheet(sub_group_style)
                         form_layout = sub_group_box.layout()
-                        if form_layout and isinstance(form_layout, QtWidgets.QFormLayout):
-                             for row in range(form_layout.rowCount()):
-                                label_widget = form_layout.itemAt(row, QtWidgets.QFormLayout.ItemRole.LabelRole).widget()
-                                if label_widget: label_widget.setStyleSheet(fitting_label_color_style)
-                                field_widget = form_layout.itemAt(row, QtWidgets.QFormLayout.ItemRole.FieldRole).widget()
-                                if field_widget: field_widget.setStyleSheet(fitting_label_color_style)
-        
-        # Update navigation buttons theme
-        button_style = ""
+                        if (
+                            form_layout
+                            and isinstance(form_layout, QtWidgets.QFormLayout)
+                        ):
+                            for row in range(form_layout.rowCount()):
+                                label_widget = form_layout.itemAt(
+                                    row, QtWidgets.QFormLayout.ItemRole.LabelRole
+                                ).widget()
+                                if label_widget:
+                                    label_widget.setStyleSheet(fitting_label_color_style)
+                                field_widget = form_layout.itemAt(
+                                    row, QtWidgets.QFormLayout.ItemRole.FieldRole
+                                ).widget()
+                                if field_widget:
+                                    field_widget.setStyleSheet(fitting_label_color_style)
+    
+        # ----- Button styles -----
         if dark_mode:
             button_style = """
                 QPushButton {
@@ -1034,8 +1385,60 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     color: #999999;
                 }
             """
-        
-        # Update splitter theme
+    
+        # Digest tab buttons
+        if hasattr(self, 'prev_button'):
+            self.prev_button.setStyleSheet(button_style)
+        if hasattr(self, 'next_button'):
+            self.next_button.setStyleSheet(button_style)
+    
+        # Noise tab buttons ✅
+        if hasattr(self, 'prev_button_noise'):
+            self.prev_button_noise.setStyleSheet(button_style)
+        if hasattr(self, 'next_button_noise'):
+            self.next_button_noise.setStyleSheet(button_style)
+        if hasattr(self, 'refresh_noise_button'):
+            self.refresh_noise_button.setStyleSheet(button_style)
+
+        if hasattr(self, 'mean_subtract_checkbox'):
+            if self.dark_mode:
+                self.mean_subtract_checkbox.setStyleSheet("""
+                    QCheckBox {
+                        color: white;
+                    }
+                    QCheckBox::indicator {
+                        width: 16px;
+                        height: 16px;
+                    }
+                    QCheckBox::indicator:unchecked {
+                        border: 1px solid white;
+                        background-color: transparent;
+                    }
+                    QCheckBox::indicator:checked {
+                        border: 1px solid white;
+                        background-color: white;
+                    }
+                """)
+            else:
+                self.mean_subtract_checkbox.setStyleSheet("""
+                    QCheckBox {
+                        color: black;
+                    }
+                    QCheckBox::indicator {
+                        width: 16px;
+                        height: 16px;
+                    }
+                    QCheckBox::indicator:unchecked {
+                        border: 1px solid black;
+                        background-color: transparent;
+                    }
+                    QCheckBox::indicator:checked {
+                        border: 1px solid black;
+                        background-color: black;
+                    }
+                """)
+    
+        # ----- Splitter -----
         if hasattr(self, 'main_splitter'):
             splitter_style = f"""
             QSplitter::handle {{
@@ -1046,15 +1449,71 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             }}
             """
             self.main_splitter.setStyleSheet(splitter_style)
-        
-        if hasattr(self, 'prev_button'):
-            self.prev_button.setStyleSheet(button_style)
-        if hasattr(self, 'next_button'):
-            self.next_button.setStyleSheet(button_style)
+    
+        # ----- Labels -----
         if hasattr(self, 'detector_count_label'):
-            self.detector_count_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+            self.detector_count_label.setStyleSheet(
+                f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
+            )
         if hasattr(self, 'trace_hint_label'):
-            self.trace_hint_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; font-size: 10pt; }}")
+            self.trace_hint_label.setStyleSheet(
+                f"QLabel {{ color: {title_color_str}; background-color: transparent; font-size: 10pt; }}"
+            )
+    
+        # Noise tab labels ✅
+        if hasattr(self, 'detector_count_label_noise'):
+            self.detector_count_label_noise.setStyleSheet(
+                f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
+            )
+    
+        if hasattr(self, 'tabs') and isinstance(self.tabs, QtWidgets.QTabWidget):
+            if dark_mode:
+                self.tabs.setStyleSheet("""
+                    QTabWidget::pane {
+                        border: 1px solid #555555;
+                        background: #1C1C1C;
+                    }
+                    QTabBar::tab {
+                        background: #2C2C2C;
+                        color: white;
+                        padding: 8px 16px;
+                        border: 1px solid #444444;
+                        border-top-left-radius: 4px;
+                        border-top-right-radius: 4px;
+                    }
+                    QTabBar::tab:selected {
+                        background: #3C3C3C;
+                        color: white;
+                        border: 1px solid #777777;
+                    }
+                    QTabBar::tab:hover {
+                        background: #4C4C4C;
+                    }
+                """)
+            else:
+                self.tabs.setStyleSheet("""
+                    QTabWidget::pane {
+                        border: 1px solid #CCCCCC;
+                        background: #FFFFFF;
+                    }
+                    QTabBar::tab {
+                        background: #F0F0F0;
+                        color: black;
+                        padding: 8px 16px;
+                        border: 1px solid #CCCCCC;
+                        border-top-left-radius: 4px;
+                        border-top-right-radius: 4px;
+                    }
+                    QTabBar::tab:selected {
+                        background: #FFFFFF;
+                        color: black;
+                        border: 1px solid #888888;
+                    }
+                    QTabBar::tab:hover {
+                        background: #E8E8E8;
+                    }
+                """)
         
-        # Update plots to ensure all colors are refreshed with the new theme
+        # ----- Update plots to reflect new theme -----
         self._update_plots()
+

@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 import pyqtgraph as pg
 import asyncio
 import traceback
+import time
 
 # Imports from within the 'periscope' subpackage
 from .utils import (
@@ -14,6 +15,9 @@ from .utils import (
     TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE
 )
 from .detector_digest_dialog import DetectorDigestWindow
+from .noise_spectrum_dialog import NoiseSpectrumDialog
+# from rfmux.algorithms.measurement import py_get_samples
+
 
 class MultisweepWindow(QtWidgets.QMainWindow):
     """
@@ -42,12 +46,14 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         """
         super().__init__(parent)
         self.target_module = target_module
+        print("Target module inside multisweep is", self.target_module)
         self.initial_params = initial_params or {}  # Store initial parameters for potential re-runs
         self.dac_scales = dac_scales or {}          # DAC scales for unit conversions
         self.dark_mode = dark_mode                 # Store dark mode setting
         self.bias_data_avail = loaded_bias
         self.samples_taken = False
         self.noise_data = {}
+        self.spectrum_noise_data = {}
 
         self.debug_noise_data = {}
         self.debug_phase_data = []
@@ -140,6 +146,15 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # self.take_samp_btn.clicked.connect(self._take_noise_samps)        
         # self.take_samp_btn.setToolTip("Get Noise data to see if detectors were biased correctly.")
         # toolbar.addWidget(self.take_samp_btn)
+
+        self.noise_spectrum_btn = QtWidgets.QPushButton("Get Noise Spectrum")
+        if self.bias_data_avail:
+            self.noise_spectrum_btn.setEnabled(True)
+        else:
+            self.noise_spectrum_btn.setEnabled(False)
+        self.noise_spectrum_btn.setToolTip("Open a dialog to configure and get the noise spectrum, will only work if KIDS is biased.")
+        self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
+        toolbar.addWidget(self.noise_spectrum_btn)
         
         toolbar.addSeparator()
 
@@ -771,13 +786,21 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             
         try:
             # Prepare data for export
+
+            #### Adding this to handle lack of noise data more gracefully ####
+            if self.spectrum_noise_data:
+                spectrum_data = self.spectrum_noise_data
+            else:
+                spectrum_data = None 
+                
             export_content = {
                 'timestamp': datetime.datetime.now().isoformat(),
                 'target_module': self.target_module,
                 'initial_parameters': self.initial_params,
                 'dac_scales_used': self.dac_scales,
                 'results_by_iteration': self.results_by_iteration,
-                'bias_kids_output': self.bias_kids_output  # Include bias_kids results if available
+                'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
+                'noise_data': spectrum_data
             }
             with open(filename, 'wb') as f: # Write in binary mode for pickle
                 pickle.dump(export_content, f)
@@ -797,7 +820,6 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 
         ref_freqs.sort()
         return ref_freqs
-
     
     
     def _rerun_multisweep(self):
@@ -849,6 +871,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         )
 
         if dialog.exec(): # True if user clicked OK
+            self.noise_spectrum_btn.setEnabled(False)
             new_params_from_dialog = dialog.get_parameters()
             if not new_params_from_dialog:
                 return # Dialog returned None, likely due to validation error
@@ -911,6 +934,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             # Determine initial direction text - consistent with our other direction text logic
             sweep_direction_norm = sweep_direction.lower().strip() if sweep_direction else ""
             direction_text = "Down" if sweep_direction_norm == "downward" else "Up"
+
+            
             
             if self.current_amp_label:
                 if num_amplitudes > 0:
@@ -1071,8 +1096,86 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.samples_taken = True
 
         return self.noise_data
-        
+
+
+    def _open_noise_spectrum_dialog(self):
+        noise_dialog = NoiseSpectrumDialog(self)
+        if noise_dialog.exec():
+            params = noise_dialog.get_parameters()
+            self._get_spectrum(params)
+
+    def _set_decimation(self, crs, decimation):
+        print("Setting decimation to", decimation)
+        if decimation > 4:
+            asyncio.run(crs.set_decimation(decimation , short = False))
+        elif decimation == 4:
+            asyncio.run(crs.set_decimation(decimation , module = self.target_module, short = False))
+        else:
+            asyncio.run(crs.set_decimation(decimation, module = self.target_module, short = True))
     
+    def _get_spectrum(self, params):
+        
+        if self.parent().crs is None: 
+            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available") 
+            return
+        else:
+            crs = self.parent().crs
+
+        time_taken = params['time_taken']
+        t = time.time() + time_taken
+        formatted_time = time.strftime("%H:%M:%S", time.localtime(t))
+        # Show a progress dialog
+        progress = QtWidgets.QProgressDialog(f"Getting noise spectrum...\n\nCompletion time {formatted_time}", None, 0, 0, self)
+        progress.setWindowTitle("Please wait")
+        progress.setCancelButton(None)
+        progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        progress.show()
+        
+        QtWidgets.QApplication.processEvents()# Show a simple "busy" message and spinner cursor)
+
+        try:
+            decimation = params['decimation']
+            num_samples = params['num_samples']
+            num_segments = params['num_segments']
+            reference = params['reference']
+            spec_lim = params['spectrum_limit']
+            module = self.target_module
+    
+            curr_decimation = asyncio.run(crs.get_decimation())
+    
+            if curr_decimation != decimation:
+                self._set_decimation(crs, decimation)
+    
+            spectrum_data  = asyncio.run(crs.py_get_samples(num_samples, 
+                                                            return_spectrum=True, 
+                                                            scaling='psd', 
+                                                            reference=reference, 
+                                                            nsegments=num_segments, 
+                                                            spectrum_cutoff=spec_lim,
+                                                            channel=None, 
+                                                            module=module))
+
+            self.spectrum_noise_data['noise_parameters'] = params
+            num_res = len(self.conceptual_resonance_frequencies)
+            
+            data = {}
+            data['reference'] = reference
+            data['ts'] = spectrum_data.ts
+            data['I'] = spectrum_data.i[0:num_res]
+            data['Q'] = spectrum_data.q[0:num_res]
+            data['freq_iq'] = spectrum_data.spectrum.freq_iq
+            data['single_psd_i'] = spectrum_data.spectrum.psd_i[0:num_res]
+            data['single_psd_q'] = spectrum_data.spectrum.psd_q[0:num_res]
+            data['freq_dsb'] = spectrum_data.spectrum.freq_dsb
+            data['dual_psd'] = spectrum_data.spectrum.psd_dual_sideband[0:num_res]
+
+            self.spectrum_noise_data['data'] = data
+            
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", str(e))
+        finally:
+            progress.close()
+
     @QtCore.pyqtSlot(object)
     def _handle_multisweep_plot_double_click(self, ev):
         """
@@ -1262,6 +1365,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                         'conceptual_freq_hz': conceptual_freq_hz
                     }
             
+            if self.spectrum_noise_data:
+                spectrum_data = self.spectrum_noise_data['data']
+            else:
+                spectrum_data = None
+            
             # Create a non-modal window for the detector digest with ALL detector data
             digest_window = DetectorDigestWindow(
                 parent=self, # type: ignore # parent is QWidget, DetectorDigestWindow expects QWidget
@@ -1276,6 +1384,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 all_detectors_data=all_detectors_data,  
                 initial_detector_idx=detector_id,
                 noise_data = noise_data,
+                spectrum_data = spectrum_data,
                 debug_noise_data = self.debug_noise_data,
                 debug_phase_data = self.debug_phase_data,
                 debug = False            
@@ -1476,6 +1585,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         
         # Reset UI
         self.bias_kids_btn.setEnabled(True)
+        self.noise_spectrum_btn.setEnabled(True)
         self.bias_kids_btn.setText("Bias KIDs")
         
         # Clean up the task

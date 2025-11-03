@@ -151,8 +151,8 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
                 "Decimation ≤ 3: You will drop packets in Mac and Windows, increase buffer in Linux (see Help).\nOnly 128 channels available."
             )
             self.status_label.setStyleSheet("background-color: #f8d7da; color: #721c24; padding: 5px; border-radius: 6px;")
-        elif decimation <= 4:
-            self.status_label.setText("Decimation ≤ 4: Only 128 channels will be available.")
+        elif decimation == 4:
+            self.status_label.setText("Decimation = 4: 1024 channels but only for the current module.")
             self.status_label.setStyleSheet("background-color: #fff3cd; color: #856404; padding: 5px; border-radius: 6px;")
         else:
             self.status_label.setText("")

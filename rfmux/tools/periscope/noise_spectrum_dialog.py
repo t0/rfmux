@@ -133,8 +133,6 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         # --- Compute base & effective highest frequency ---
         base_highest_freq = self._get_frequency(decimation)
         effective_highest_freq = base_highest_freq * spectrum_limit
-        if effective_highest_freq > 19_072:
-            effective_highest_freq = 19_072.0  # Cap to limit
 
         # --- Compute estimated time (example heuristic) ---
         time_taken = samples/(base_highest_freq*2)

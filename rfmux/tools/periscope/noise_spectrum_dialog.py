@@ -146,11 +146,14 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         self.time_taken_label.setText(f"{time_taken:.2f} s")
         self.freq_resolution_label.setText(f"{freq_resolution:.4f} Hz")
 
-        if decimation <= 3:
+        if decimation <= 1:
             self.status_label.setText(
-                "Decimation ≤ 3: You will drop packets in Mac and Windows, increase buffer in Linux (see Help).\nOnly 128 channels available."
+                "Decimation ≤ 1: You will drop packets in Mac and Windows, increase buffer in Linux (see Help).\nOnly 128 channels available."
             )
             self.status_label.setStyleSheet("background-color: #f8d7da; color: #721c24; padding: 5px; border-radius: 6px;")
+        elif 1 < decimation <=3:
+            self.status_label.setText("Decimation = 2 or 3: 128 channels but only for the current module.")
+            self.status_label.setStyleSheet("background-color: #fff3cd; color: #856404; padding: 5px; border-radius: 6px;")
         elif decimation == 4:
             self.status_label.setText("Decimation = 4: 1024 channels but only for the current module.")
             self.status_label.setStyleSheet("background-color: #fff3cd; color: #856404; padding: 5px; border-radius: 6px;")

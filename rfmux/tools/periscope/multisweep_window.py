@@ -1110,7 +1110,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         elif decimation == 4:
             asyncio.run(crs.set_decimation(decimation , module = self.target_module, short = False))
         else:
-            asycio.run(crs.set_decimation(decimation, short = True))
+            asyncio.run(crs.set_decimation(decimation, module = self.target_module, short = True))
     
     def _get_spectrum(self, params):
         

@@ -1368,6 +1368,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             params = load_params['initial_parameters']
             target_module = params.get('module')
 
+            if active_module != target_module:
+                QtWidgets.QMessageBox.warning(self, "Error", "The module in file doesn't match the active module, the value will be changed.")
+                target_module = active_module
+
             dac_scale_for_mod = load_params['dac_scales_used'][target_module] 
             dac_scale_for_board = self.dac_scales[target_module]
 

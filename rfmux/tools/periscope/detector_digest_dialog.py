@@ -788,11 +788,12 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
     def _update_noise_plots(self):
         self.apply_theme(self.dark_mode)
-
+    
         if not self.spectrum_data:
             self.plot_time_vs_mag.clear()
             self.plot_noise_spectrum.clear()
             return
+    
         try:
             self.plot_time_vs_mag.clear()
             self.plot_noise_spectrum.clear()
@@ -801,31 +802,65 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             ts = self._get_relative_timestamps(self.spectrum_data['ts'], len(self.tod_i))
             tod_i_volts = convert_roc_to_volts(np.array(self.tod_i))
             tod_q_volts = convert_roc_to_volts(np.array(self.tod_q))
-
-
+    
             if self.mean_subtract_enabled:
                 tod_i_volts = tod_i_volts - np.mean(tod_i_volts)
                 tod_q_volts = tod_q_volts - np.mean(tod_q_volts)
-            
-            complex_volts = tod_i_volts + 1j*tod_q_volts
+    
+            complex_volts = tod_i_volts + 1j * tod_q_volts
             mag_volts = np.abs(complex_volts)
-            
-            
-            # self.plot_time_vs_mag.plot(ts, mag_volts, pen=pg.mkPen("g", width=LINE_WIDTH), name="Magnitude") ### Removed for now ###
+    
             self.plot_time_vs_mag.plot(ts, tod_i_volts, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
             self.plot_time_vs_mag.plot(ts, tod_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
             self.plot_time_vs_mag.autoRange()
     
-    
             ###### Second plot ########
             frequencies = self.spectrum_data['freq_iq']
-            self.plot_noise_spectrum.plot(frequencies, self.single_psd_i, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
-            self.plot_noise_spectrum.plot(frequencies, self.single_psd_q, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
+            curve_i = self.plot_noise_spectrum.plot(frequencies, self.single_psd_i,
+                                                    pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
+            curve_q = self.plot_noise_spectrum.plot(frequencies, self.single_psd_q,
+                                                    pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
             self.plot_noise_spectrum.setLogMode(x=True, y=False)
             self.plot_noise_spectrum.autoRange()
+    
+            # --- Hover label setup ---
+            vb = self.plot_noise_spectrum.getViewBox()
+            self.hover_label = pg.TextItem("", anchor=(0, 1), color='w')
+            self.plot_noise_spectrum.addItem(self.hover_label)
+            self.hover_label.hide()
 
+            log_freqs = np.log10(np.clip(frequencies, 1e-12, None))
+    
+            # --- Mouse move handler ---
+            def on_mouse_move(evt):
+                pos = evt[0]  # current mouse position in scene coordinates
+                if self.plot_noise_spectrum.sceneBoundingRect().contains(pos):
+                    mouse_point = vb.mapSceneToView(pos)
+                    
+                    log_x = mouse_point.x()
+                    x = 10 ** log_x
+                    
+                    if x < np.min(frequencies) or x > np.max(frequencies):
+                        self.hover_label.hide()
+                        return
+                        
+                    y_i = np.interp(log_x, log_freqs, self.single_psd_i)
+                    y_q = np.interp(log_x, log_freqs, self.single_psd_q)
+                    self.hover_label.setHtml(
+                        f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3e}</span><br>"
+                        f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3e}</span><br>"
+                        f"<span style='color:yellow'>Freq: {x:.3f}</span>"
+                    )
+                    self.hover_label.setPos(log_x, max(y_i, y_q))
+                    self.hover_label.show()
+                else:
+                    self.hover_label.hide()
+    
+            self.proxy = pg.SignalProxy(self.plot_noise_spectrum.scene().sigMouseMoved,
+                                        rateLimit=60, slot=on_mouse_move)
+    
         except Exception as e:
-            print(f"[Noise Plot Error] {e}")       
+            print("Error updating noise plots:", e)      
         
     def _update_plots(self):
         """Populates all three plots with data and updates fitting information panel."""

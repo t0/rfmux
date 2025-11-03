@@ -1105,7 +1105,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
     def _set_decimation(self, crs, decimation):
         print("Setting decimation to", decimation)
         if decimation > 4:
-            asyncio.run(crs.set_decimation(decimation ,module = self.target_module, short = False))
+            asyncio.run(crs.set_decimation(decimation , short = False))
         elif decimation == 4:
             asyncio.run(crs.set_decimation(decimation ,module = self.target_module, short = False))
         else:

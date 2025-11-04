@@ -319,14 +319,23 @@ async def py_get_samples(crs: CRS,
                 q_data = results["q"][c]
                 
                 # Calculate spectrum for this channel
-                d = spectrum_from_slow_tod(
-                    i_data, q_data, dec_stage,
-                    scaling=scaling,
-                    nperseg=nperseg if nperseg else num_samples,
-                    reference=reference,
-                    spectrum_cutoff=spectrum_cutoff,
-                    input_units="volts"
-                )
+                if reference == "absolute": #### since its in volts
+                    d = spectrum_from_slow_tod(
+                        i_data, q_data, dec_stage,
+                        scaling=scaling,
+                        nperseg=nperseg if nperseg else num_samples,
+                        reference=reference,
+                        spectrum_cutoff=spectrum_cutoff,
+                        input_units="volts"
+                    )
+                else:
+                    d = spectrum_from_slow_tod(
+                        i_data, q_data, dec_stage,
+                        scaling=scaling,
+                        nperseg=nperseg if nperseg else num_samples,
+                        reference=reference,
+                        spectrum_cutoff=spectrum_cutoff
+                    )
                 
                 # Store freq_iq, freq_dsb once
                 if spec_data["freq_iq"] is None:
@@ -346,14 +355,23 @@ async def py_get_samples(crs: CRS,
         else:
             i_data = results["i"]
             q_data = results["q"]
-            d = spectrum_from_slow_tod(
-                i_data, q_data, dec_stage,
-                scaling=scaling,
-                nperseg=nperseg if nperseg else num_samples,
-                reference=reference,
-                spectrum_cutoff=spectrum_cutoff,
-                input_units="volts"
-            )
+            if reference == "absolute": #### since its in volts
+                d = spectrum_from_slow_tod(
+                    i_data, q_data, dec_stage,
+                    scaling=scaling,
+                    nperseg=nperseg if nperseg else num_samples,
+                    reference=reference,
+                    spectrum_cutoff=spectrum_cutoff,
+                    input_units="volts"
+                )
+            else:
+                d = spectrum_from_slow_tod(
+                    i_data, q_data, dec_stage,
+                    scaling=scaling,
+                    nperseg=nperseg if nperseg else num_samples,
+                    reference=reference,
+                    spectrum_cutoff=spectrum_cutoff
+                )
             spec_data["freq_iq"] = d["freq_iq"].tolist()
             spec_data[f"{scaling}_i"] = d["psd_i"].tolist()
             spec_data[f"{scaling}_q"] = d["psd_q"].tolist()

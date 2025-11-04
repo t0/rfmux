@@ -830,7 +830,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             " - **Linux:**\n"
             "   Run the following command to increase the default buffer\n"
             "```\n"
-            "     sudo net.core.rmem_max = 67108864 OR sudo sysctl -w net.core.rmem_max=67108864\n"
+            "     sudo sysctl -w net.core.rmem_max=67108864\n"
             "```\n"
             "- **Windows:** \n\n"
             "   Please consult the README.Windows.md available on rfmux repo on how to increase the buffer size and additional resources."
@@ -849,6 +849,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         help_label.setText(help_text)
         help_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
         help_label.setOpenExternalLinks(True)
+        
+        help_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse |QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard | QtCore.Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        
         scroll_area.setWidget(help_label)
         layout.addWidget(scroll_area)
         close_button = QtWidgets.QPushButton("Close")

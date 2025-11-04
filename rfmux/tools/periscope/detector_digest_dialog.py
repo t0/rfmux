@@ -854,8 +854,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     y_i = np.interp(log_x, log_freqs, self.single_psd_i)
                     y_q = np.interp(log_x, log_freqs, self.single_psd_q)
                     self.hover_label.setHtml(
-                        f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3e}</span><br>"
-                        f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3e}</span><br>"
+                        f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
+                        f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
                         f"<span style='color:yellow'>Freq: {x:.3f}</span>"
                     )
                     self.hover_label.setPos(log_x, max(y_i, y_q))

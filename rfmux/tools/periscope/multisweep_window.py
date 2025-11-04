@@ -1155,9 +1155,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                                                             channel=None, 
                                                             module=module))
 
-            
-            ###### Will add pfb sampling here ######
-            
+
             self.spectrum_noise_data['noise_parameters'] = params
             num_res = len(self.conceptual_resonance_frequencies)
             

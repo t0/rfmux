@@ -47,6 +47,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.current_detector = self.detector_id
 
         self.noise_tab_avail = False
+
+        self.reference = "absolute"
         
         # Navigation support
         self.all_detectors_data = all_detectors_data or {}

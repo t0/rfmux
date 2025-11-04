@@ -350,43 +350,45 @@ class MockResonatorModel:
         
         return self._s21_cache[cache_key]
     
-    def _get_cached_cic_response(self, freq_offset, fir_stage):
+    def _get_cached_cic_response(self, freq_offset, dec_stage):
         """Get CIC response with caching."""
         # Round to nearest 0.1 Hz
         offset_key = round(freq_offset * 10) / 10
-        cache_key = (offset_key, fir_stage)
+        cache_key = (offset_key, dec_stage)
         
         if cache_key not in self._cic_cache:
-            self._cic_cache[cache_key] = self._calculate_cic_response(freq_offset, fir_stage)
+            self._cic_cache[cache_key] = self._calculate_cic_response(freq_offset, dec_stage)
         
         return self._cic_cache[cache_key]
     
-    def _calculate_cic_response(self, freq_offset, fir_stage):
+    def _calculate_cic_response(self, freq_offset, dec_stage):
         """
-        Calculate CIC filter response at a given frequency offset.
+        Calculate actual CIC filter response (with droop) at a given frequency offset.
+        
+        This emulates the actual filter behavior that causes amplitude droop
+        at higher frequencies, which real data exhibits before correction.
         
         Parameters
         ----------
         freq_offset : float
             Frequency offset from channel center in Hz
-        fir_stage : int
-            FIR decimation stage (0-6)
+        dec_stage : int
+            Decimation stage (0-6)
             
         Returns
         -------
         float
-            Filter response (0-1)
+            Filter response (0-1) including droop effect
         """
-        # Import the CIC model from transferfunctions
+        # Import the CIC correction function from transferfunctions
         from . import transferfunctions as tf
         
         # CIC parameters
         R1 = 64  # First stage decimation
-        R2 = 2**fir_stage  # Second stage decimation
+        R2 = 2**dec_stage  # Second stage decimation
         f_in1 = 625e6 / 256  # Input to first CIC
         f_in2 = f_in1 / R1   # Input to second CIC
         
-        # Calculate response for both stages
         # Using absolute value since response is symmetric
         freq_abs = abs(freq_offset)
         
@@ -394,21 +396,28 @@ class MockResonatorModel:
         if freq_abs < 0.01:
             return 1.0
             
-        # First CIC (3 stages)
-        cic1_response = tf._general_single_cic_correction(
+        # Get the correction factors using existing functions
+        cic1_correction = tf._general_single_cic_correction(
             np.array([freq_abs]), f_in1, R=R1, N=3
         )[0]
         
-        # Second CIC (6 stages)  
-        cic2_response = tf._general_single_cic_correction(
+        cic2_correction = tf._general_single_cic_correction(
             np.array([freq_abs]), f_in2, R=R2, N=6
         )[0]
         
-        # Combined response
-        total_response = cic1_response * cic2_response
+        # The actual filter response is the inverse of the correction
+        # (correction compensates for droop, so 1/correction gives us the droop)
+        total_correction = cic1_correction * cic2_correction
         
-        # Clamp to [0, 1] range
-        return np.clip(total_response, 0, 1)
+        # Apply the inverse to get the actual filter response with droop
+        if total_correction > 0:
+            filter_response = 1.0 / total_correction
+        else:
+            filter_response = 0.0
+        
+        # Only clamp to prevent negative values, but don't limit the upper bound
+        # CIC droop can make the response much less than 1 at high frequencies
+        return max(filter_response, 0.0)
     
     def calculate_module_response_coupled(self, module, num_samples=1, sample_rate=None, start_time=0):
         """
@@ -441,12 +450,12 @@ class MockResonatorModel:
         nco_freq = self.mock_crs.nco_frequencies.get(module, 0)
         
         # Get decimation stage for bandwidth calculation
-        fir_stage = self.mock_crs.fir_stage
-        bandwidth = self.cic_bandwidths.get(fir_stage, 298)  # Hz
+        dec_stage = self.mock_crs.fir_stage  # Note: still called fir_stage in MockCRS for compatibility
+        bandwidth = self.cic_bandwidths.get(dec_stage, 298)  # Hz
         
         # Determine sample rate if not provided
         if sample_rate is None:
-            sample_rate = 625e6 / 256 / 64 / (2**fir_stage)
+            sample_rate = 625e6 / 256 / 64 / (2**dec_stage)
         
         # Step 1: Collect active tones and observing channels
         active_tone_freqs = []
@@ -515,13 +524,14 @@ class MockResonatorModel:
             # Complex exponentials for all pairs
             beat_factors = np.exp(1j * phases)
             
-            # Apply CIC response (simplified - just use distance attenuation for now)
-            # For better accuracy, could vectorize the CIC calculation
-            cic_responses = np.where(
-                np.abs(freq_diffs) < 0.1,  # DC components
-                1.0,
-                np.sinc(freq_diffs / bandwidth) ** 2  # Simplified CIC approximation
-            )
+            # Apply proper CIC filter response for each frequency difference
+            # This emulates the actual hardware filter behavior with droop
+            cic_responses = np.zeros_like(freq_diffs)
+            for i in range(len(obs_channels)):
+                for j in range(len(tone_freqs)):
+                    if within_bandwidth[i, j]:
+                        # Use the proper CIC response calculation
+                        cic_responses[i, j] = self._get_cached_cic_response(freq_diffs[i, j], dec_stage)
             
             # Calculate contributions: (n_obs, n_tones)
             contributions = tone_amps[np.newaxis, :] * beat_factors * cic_responses
@@ -550,12 +560,13 @@ class MockResonatorModel:
                     if within_bandwidth[i, j]:
                         freq_diff = freq_diffs[i, j]
                         
+                        # Use proper CIC filter response
+                        cic_response = self._get_cached_cic_response(freq_diff, dec_stage)
+                        
                         if abs(freq_diff) < 0.1:  # DC
-                            signal += tone_amp
+                            signal += tone_amp * cic_response
                         else:
-                            # Simplified CIC response
-                            cic_response = np.sinc(freq_diff / bandwidth) ** 2
-                            # Time-varying beat
+                            # Time-varying beat with proper CIC filtering
                             signal += tone_amp * cic_response * np.exp(1j * 2 * np.pi * freq_diff * t)
                 
                 responses[ch] = signal

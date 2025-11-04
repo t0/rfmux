@@ -43,6 +43,36 @@ class TuberResult:
         "Return a concise representation string"
         return repr(self.__dict__)
 
+    def _todict(self):
+        """Recursively convert TuberResult object to a dictionary."""
+        result = {}
+        for key, value in self.__dict__.items():
+            if isinstance(value, TuberResult):
+                # Recursively convert nested TuberResult
+                result[key] = value._todict()
+            elif isinstance(value, (list, tuple)):
+                # Convert any TuberResult objects in sequences
+                converted = []
+                for item in value:
+                    if isinstance(item, TuberResult):
+                        converted.append(item._todict())
+                    else:
+                        converted.append(item)
+                result[key] = type(value)(converted)  # Preserve list/tuple type
+            elif isinstance(value, dict):
+                # Convert any TuberResult objects in dictionaries
+                converted = {}
+                for k, v in value.items():
+                    if isinstance(v, TuberResult):
+                        converted[k] = v._todict()
+                    else:
+                        converted[k] = v
+                result[key] = converted
+            else:
+                # Keep other types as-is
+                result[key] = value
+        return result
+
 
 def wrap_bytes_for_json(obj):
     """
@@ -201,7 +231,7 @@ def decode_json_client(response_data, encoding):
         if isinstance(obj, Mapping) and "bytes" in obj and (len(obj) == 1 or (len(obj) == 2 and "subtype" in obj)):
             try:
                 return bytes(obj["bytes"])
-            except e as ValueError:
+            except ValueError as e:
                 pass
         return TuberResult(obj)
 

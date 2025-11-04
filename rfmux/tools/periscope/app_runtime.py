@@ -776,7 +776,12 @@ class PeriscopeRuntime:
             ##### Percent calculation #####
             drop_lastsec = dropped - self.prev_drop
             receive_lastsec = received - self.prev_receive
-            percent = (drop_lastsec / (drop_lastsec + receive_lastsec)) * 100
+            # Check for zero denominator to avoid division by zero
+            total_packets = drop_lastsec + receive_lastsec
+            if total_packets > 0:
+                percent = (drop_lastsec / total_packets) * 100
+            else:
+                percent = 0.0  # No packets = no loss
             
             #### Per second metrics #####
             fps = self.frame_cnt / (now - self.t_last)

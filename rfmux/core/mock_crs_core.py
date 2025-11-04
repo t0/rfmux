@@ -71,6 +71,7 @@ class Target(str, Enum):
 class Units(str, Enum):
     HZ = "hz"
     RAW = "raw"
+    ADC_COUNTS = "adc_counts"
     VOLTS = "volts"
     AMPS = "amps"
     WATTS = "watts"
@@ -220,6 +221,7 @@ class MockCRS(BaseCRS):
         return {
             'HZ': Units.HZ.value,
             'RAW': Units.RAW.value,
+            'ADC_COUNTS': Units.ADC_COUNTS.value,
             'VOLTS': Units.VOLTS.value,
             'AMPS': Units.AMPS.value,
             'WATTS': Units.WATTS.value,
@@ -244,7 +246,7 @@ class MockCRS(BaseCRS):
 
     # Static properties for units, targets, sensors, etc. (as dictionaries)
     UNITS_DICT = { # Renamed to avoid conflict with Enum
-        "HZ": "hz", "RAW": "raw", "VOLTS": "volts", "AMPS": "amps",
+        "HZ": "hz", "RAW": "raw", "ADC_COUNTS": "adc_counts", "VOLTS": "volts", "AMPS": "amps",
         "WATTS": "watts", "DEGREES": "degrees", "RADIANS": "radians",
         "OHMS": "ohms", "NORMALIZED": "normalized", "DB": "db", "DBM": "dbm"
     }

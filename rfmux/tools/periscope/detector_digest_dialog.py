@@ -808,8 +808,12 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
             ###### First plot ######
             ts = self._get_relative_timestamps(self.spectrum_data['ts'], len(self.tod_i))
-            tod_i_volts = convert_roc_to_volts(np.array(self.tod_i))
-            tod_q_volts = convert_roc_to_volts(np.array(self.tod_q))
+            if self.reference == "relative":
+                tod_i_volts = convert_roc_to_volts(np.array(self.tod_i))
+                tod_q_volts = convert_roc_to_volts(np.array(self.tod_q))
+            else:
+                tod_i_volts = np.array(self.tod_i)
+                tod_q_volts = np.array(self.tod_q) ##### it is already converted to volts in spectrum_from_slow_tod_function for "absolute"
     
             if self.mean_subtract_enabled:
                 tod_i_volts = tod_i_volts - np.mean(tod_i_volts)

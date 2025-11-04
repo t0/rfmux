@@ -324,7 +324,8 @@ async def py_get_samples(crs: CRS,
                     scaling=scaling,
                     nperseg=nperseg if nperseg else num_samples,
                     reference=reference,
-                    spectrum_cutoff=spectrum_cutoff
+                    spectrum_cutoff=spectrum_cutoff,
+                    input_units="volts"
                 )
                 
                 # Store freq_iq, freq_dsb once
@@ -350,7 +351,8 @@ async def py_get_samples(crs: CRS,
                 scaling=scaling,
                 nperseg=nperseg if nperseg else num_samples,
                 reference=reference,
-                spectrum_cutoff=spectrum_cutoff
+                spectrum_cutoff=spectrum_cutoff,
+                input_units="volts"
             )
             spec_data["freq_iq"] = d["freq_iq"].tolist()
             spec_data[f"{scaling}_i"] = d["psd_i"].tolist()

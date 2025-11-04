@@ -43,19 +43,19 @@ class TuberResult:
         "Return a concise representation string"
         return repr(self.__dict__)
 
-    def todict(self):
+    def _todict(self):
         """Recursively convert TuberResult object to a dictionary."""
         result = {}
         for key, value in self.__dict__.items():
             if isinstance(value, TuberResult):
                 # Recursively convert nested TuberResult
-                result[key] = value.todict()
+                result[key] = value._todict()
             elif isinstance(value, (list, tuple)):
                 # Convert any TuberResult objects in sequences
                 converted = []
                 for item in value:
                     if isinstance(item, TuberResult):
-                        converted.append(item.todict())
+                        converted.append(item._todict())
                     else:
                         converted.append(item)
                 result[key] = type(value)(converted)  # Preserve list/tuple type
@@ -64,7 +64,7 @@ class TuberResult:
                 converted = {}
                 for k, v in value.items():
                     if isinstance(v, TuberResult):
-                        converted[k] = v.todict()
+                        converted[k] = v._todict()
                     else:
                         converted[k] = v
                 result[key] = converted

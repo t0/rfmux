@@ -24,6 +24,10 @@ class PeriscopeRuntime:
         for ch_val in self.all_chs: # Renamed ch
             self.buf[ch_val] = {k: Circular(self.N) for k in ("I", "Q", "M")} # Circular from .utils
             self.tbuf[ch_val] = Circular(self.N)
+        
+        # Initialize simulation speed tracking for mock mode
+        if self.is_mock_mode:
+            self._init_sim_speed_tracking()
 
     def _build_layout(self):
         """
@@ -500,6 +504,10 @@ class PeriscopeRuntime:
                 self.actual_dec_stage = pkt.fir_stage
             t_rel = self._calculate_relative_timestamp(pkt)
             self._update_buffers(pkt, t_rel)
+            
+            # Track simulation time for speed calculation (mock mode only)
+            if self.is_mock_mode and t_rel is not None:
+                self._update_sim_time_tracking(t_rel)
 
     def _calculate_relative_timestamp(self, pkt) -> float | None:
         """
@@ -776,7 +784,9 @@ class PeriscopeRuntime:
             ##### Percent calculation #####
             drop_lastsec = dropped - self.prev_drop
             receive_lastsec = received - self.prev_receive
-            percent = (drop_lastsec / (drop_lastsec + receive_lastsec)) * 100
+            # Avoid division by zero when no packets received
+            total_lastsec = drop_lastsec + receive_lastsec
+            percent = (drop_lastsec / total_lastsec * 100) if total_lastsec > 0 else 0.0
             
             #### Per second metrics #####
             fps = self.frame_cnt / (now - self.t_last)
@@ -785,6 +795,29 @@ class PeriscopeRuntime:
             #### Update labels ####
             self.fps_label.setText(f"FPS: {fps:.1f}")
             self.pps_label.setText(f"Packets/s: {pps:.1f}")
+            
+            # Calculate and display simulation speed for mock mode
+            if self.is_mock_mode and hasattr(self, 'sim_speed_label'):
+                sim_speed = self._calculate_simulation_speed()
+                if sim_speed is not None:
+                    # Format the display
+                    if sim_speed < 0.01:
+                        speed_text = f"Sim Speed: {sim_speed:.3f}x real-time"
+                    else:
+                        speed_text = f"Sim Speed: {sim_speed:.2f}x real-time"
+                    self.sim_speed_label.setText(speed_text)
+                    
+                    # Color code based on speed
+                    if sim_speed < 0.1:
+                        self.sim_speed_label.setStyleSheet("color: orange;")  # Very slow
+                    else:
+                        self.sim_speed_label.setStyleSheet("")  # Normal (near real-time)
+                    # elif sim_speed < 0.9:
+                    #     self.sim_speed_label.setStyleSheet("color: orange;")  # Slow
+                    # elif sim_speed > 1.1:
+                    #     self.sim_speed_label.setStyleSheet("color: green;")  # Fast
+                    # else:
+                    #     
 
             # Color packet loss red if > 1%
             if percent > 1:
@@ -1240,3 +1273,53 @@ class PeriscopeRuntime:
                             "QWidget { background-color: #FFFFFF; color: #000000; } .in-prompt { color: #008800 !important; } .out-prompt { color: #006600 !important; } QPlainTextEdit { background-color: #FFFFFF; color: #000000; }")
             self.jupyter_widget.setStyleSheet(style_sheet)
             self.jupyter_widget.update(); self.jupyter_widget.repaint() # Force repaint
+
+    def _init_sim_speed_tracking(self):
+        """Initialize simulation speed tracking for mock mode."""
+        self.sim_time_history = []  # List of (real_time, sim_time) tuples
+        self.sim_speed_update_counter = 0
+        self.last_sim_speed_update_time = time.time()
+        
+    def _update_sim_time_tracking(self, sim_time: float):
+        """
+        Track simulation time for speed calculation.
+        
+        Args:
+            sim_time: Current simulation time in seconds
+        """
+        # Update every 100 packets as requested
+        self.sim_speed_update_counter += 1
+        if self.sim_speed_update_counter >= 100:
+            real_time = time.time()
+            self.sim_time_history.append((real_time, sim_time))
+            
+            # Keep only last 10 samples for rolling average
+            if len(self.sim_time_history) > 10:
+                self.sim_time_history.pop(0)
+            
+            self.sim_speed_update_counter = 0
+    
+    def _calculate_simulation_speed(self) -> float | None:
+        """
+        Calculate the simulation speed relative to real-time.
+        
+        Returns:
+            float: Speed factor (1.0 = real-time, >1.0 = faster, <1.0 = slower)
+            None: If not enough data to calculate
+        """
+        if len(self.sim_time_history) < 2:
+            return None
+        
+        # Calculate speed from first to last sample
+        first_real, first_sim = self.sim_time_history[0]
+        last_real, last_sim = self.sim_time_history[-1]
+        
+        real_elapsed = last_real - first_real
+        sim_elapsed = last_sim - first_sim
+        
+        # Avoid division by zero
+        if real_elapsed <= 0 or sim_elapsed <= 0:
+            return None
+        
+        # sim_speed = delta_sim_time / delta_real_time
+        return sim_elapsed / real_elapsed

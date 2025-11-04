@@ -180,7 +180,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         return group
         
     def _create_advanced_widget(self) -> QtWidgets.QWidget:
-        """Create the collapsible advanced parameters widget."""
+        """Create the collapsible advanced parameters widget with 2-column layout."""
         # Create a collapsible widget
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
@@ -197,12 +197,24 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         # Container for advanced parameters
         self.advanced_container = QtWidgets.QWidget()
         self.advanced_container.setVisible(False)  # Hidden by default
-        advanced_layout = QtWidgets.QVBoxLayout(self.advanced_container)
         
-        # Add advanced parameter groups
-        advanced_layout.addWidget(self._create_kinetic_group())
-        advanced_layout.addWidget(self._create_resonance_group())
-        advanced_layout.addWidget(self._create_noise_group())
+        # 2-column layout for advanced parameters
+        advanced_layout = QtWidgets.QHBoxLayout(self.advanced_container)
+        
+        # Left column
+        left_column = QtWidgets.QVBoxLayout()
+        left_column.addWidget(self._create_kinetic_group())
+        left_column.addWidget(self._create_resonance_group())
+        left_column.addStretch()
+        
+        # Right column
+        right_column = QtWidgets.QVBoxLayout()
+        right_column.addWidget(self._create_noise_group())
+        right_column.addStretch()
+        
+        # Add columns to container
+        advanced_layout.addLayout(left_column)
+        advanced_layout.addLayout(right_column)
         
         layout.addWidget(self.advanced_container)
         
@@ -292,9 +304,15 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         layout.addWidget(self.bifurcation_iter_spin, row, 1)
         
         layout.addWidget(QtWidgets.QLabel("Convergence Tolerance:"), row, 2)
-        self.bifurcation_tol_edit = QtWidgets.QLineEdit(str(mock_constants.BIFURCATION_CONVERGENCE_TOLERANCE))
+        self.bifurcation_tol_edit = QtWidgets.QLineEdit(str(mock_constants.CONVERGENCE_TOLERANCE))
         self.bifurcation_tol_edit.setValidator(ScientificDoubleValidator())
-        self.bifurcation_tol_edit.setToolTip("Convergence criterion for frequency")
+        self.bifurcation_tol_edit.setToolTip(
+            "Iterative solver tolerance (lower = more accurate but slower)\n"
+            "Used for both bifurcation (if enabled) and current-dependent Lk solver\n"
+            "1e-7: High accuracy (slower, for few channels)\n"
+            "1e-6: Balanced\n"
+            "1e-5: High speed (recommended for 50+ channels)"
+        )
         layout.addWidget(self.bifurcation_tol_edit, row, 3)
         
         row += 1
@@ -396,7 +414,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         
     def _create_noise_group(self) -> QtWidgets.QGroupBox:
         """Create the amplitude and noise parameters group."""
-        group = QtWidgets.QGroupBox("Amplitude and Noise Parameters")
+        group = QtWidgets.QGroupBox("Noise Parameters")
         layout = QtWidgets.QGridLayout(group)
         
         row = 0
@@ -461,10 +479,10 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.freq_shift_mag_edit.setText(str(mock_constants.FREQUENCY_SHIFT_MAGNITUDE))
         self.power_norm_edit.setText(str(mock_constants.POWER_NORMALIZATION))
         
-        # Bifurcation parameters
+        # Bifurcation parameters (use CONVERGENCE_TOLERANCE for unified field)
         self.bifurcation_check.setChecked(mock_constants.ENABLE_BIFURCATION)
         self.bifurcation_iter_spin.setValue(mock_constants.BIFURCATION_ITERATIONS)
-        self.bifurcation_tol_edit.setText(str(mock_constants.BIFURCATION_CONVERGENCE_TOLERANCE))
+        self.bifurcation_tol_edit.setText(str(mock_constants.CONVERGENCE_TOLERANCE))
         self.bifurcation_damp_spin.setValue(mock_constants.BIFURCATION_DAMPING_FACTOR)
         
         # Saturation parameters
@@ -554,6 +572,13 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         if 'coupling_max' in self.current_config:
             self.coupling_max_spin.setValue(self.current_config['coupling_max'])
             
+        # Convergence tolerance (also check bifurcation_convergence_tolerance for backward compat)
+        if 'convergence_tolerance' in self.current_config:
+            self.bifurcation_tol_edit.setText(str(self.current_config['convergence_tolerance']))
+        elif 'bifurcation_convergence_tolerance' in self.current_config:
+            # Fall back to bifurcation tolerance if convergence_tolerance not present
+            pass  # Already loaded above
+            
         # Noise parameters
         if 'base_noise_level' in self.current_config:
             self.base_noise_spin.setValue(self.current_config['base_noise_level'])
@@ -629,6 +654,9 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             'bifurcation_iterations': self.bifurcation_iter_spin.value(),
             'bifurcation_convergence_tolerance': float(self.bifurcation_tol_edit.text()),
             'bifurcation_damping_factor': self.bifurcation_damp_spin.value(),
+            
+            # Convergence tolerance (use same value as bifurcation tolerance)
+            'convergence_tolerance': float(self.bifurcation_tol_edit.text()),
             
             # Saturation parameters
             'saturation_power': self.saturation_power_spin.value(),

@@ -708,13 +708,19 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         Add a status bar to the main window.
 
-        Used to display performance statistics (FPS, PPS).
+        Used to display performance statistics (FPS, PPS, simulation speed in mock mode).
         """
         # `QtWidgets` is from .utils.
         self.setStatusBar(QtWidgets.QStatusBar()) # Create and set a new status bar
 
         self.fps_label = QtWidgets.QLabel()
         self.pps_label = QtWidgets.QLabel()
+        
+        # Add simulation speed label for mock mode
+        if self.is_mock_mode:
+            self.sim_speed_label = QtWidgets.QLabel()
+            self.sim_speed_label.setToolTip("Simulation speed relative to real-time\n>1.0x = faster than real-time\n<1.0x = slower than real-time")
+        
         self.packet_loss_label = QtWidgets.QLabel()
         self.dropped_label = QtWidgets.QLabel()
         self.info_text = QtWidgets.QLabel()
@@ -724,6 +730,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Add them to the status bar
         self.statusBar().addWidget(self.fps_label)
         self.statusBar().addWidget(self.pps_label)
+        
+        # Add simulation speed label if in mock mode
+        if self.is_mock_mode:
+            self.statusBar().addWidget(self.sim_speed_label)
+        
         self.statusBar().addWidget(self.packet_loss_label)
         self.statusBar().addWidget(self.dropped_label)
         self.statusBar().addPermanentWidget(self.info_text)

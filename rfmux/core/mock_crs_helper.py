@@ -68,6 +68,12 @@ DEFAULT_MOCK_CONFIG = {
     'nqp_noise_enabled': True,   # Enable noise on quasiparticle density
     'nqp_noise_std_factor': 0.1, # Standard deviation as fraction of base nqp (10% noise)
     
+    # Convergence parameters
+    'convergence_tolerance': 1e-5,  # Convergence tolerance for iterative solver
+                                     # 1e-7: High accuracy (slower, for few channels)
+                                     # 1e-6: Balanced
+                                     # 1e-5: High speed (faster, for many channels)
+    
     # Automatic KID biasing parameters
     'auto_bias_kids': False,    # Enable automatic channel configuration
     'bias_amplitude': 0.01,    # Bias amplitude in normalized units (=-40 dBm)

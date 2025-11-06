@@ -46,7 +46,6 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         """
         super().__init__(parent)
         self.target_module = target_module
-        print("Target module inside multisweep is", self.target_module)
         self.initial_params = initial_params or {}  # Store initial parameters for potential re-runs
         self.dac_scales = dac_scales or {}          # DAC scales for unit conversions
         self.dark_mode = dark_mode                 # Store dark mode setting
@@ -1106,12 +1105,15 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
     def _set_decimation(self, crs, decimation):
         print("Setting decimation to", decimation)
-        if decimation > 4:
-            asyncio.run(crs.set_decimation(decimation , short = False))
-        elif decimation == 4:
-            asyncio.run(crs.set_decimation(decimation , module = self.target_module, short = False))
+        if crs.serial == "MOCK0001": ### for mock mode ####
+            asyncio.run(crs.set_decimation(decimation))
         else:
-            asyncio.run(crs.set_decimation(decimation, module = self.target_module, short = True))
+            if decimation > 4:
+                asyncio.run(crs.set_decimation(decimation , short = False))
+            elif decimation == 4:
+                asyncio.run(crs.set_decimation(decimation , module = self.target_module, short = False))
+            else:
+                asyncio.run(crs.set_decimation(decimation, module = self.target_module, short = True))
     
     def _get_spectrum(self, params):
         

@@ -491,15 +491,25 @@ class PeriscopeRuntime:
         """Discard all packets currently in the receiver queue (when paused)."""
         while not self.receiver.queue.empty(): self.receiver.queue.get()
 
+
     def _process_incoming_packets(self):
         """Process all packets currently in the receiver queue."""
         while not self.receiver.queue.empty():
-            (seq, pkt) = self.receiver.queue.get(); self.pkt_cnt += 1
-            # Store the actual decimation stage from the packet
-            if hasattr(pkt, 'fir_stage'):
-                self.actual_dec_stage = pkt.fir_stage
-            t_rel = self._calculate_relative_timestamp(pkt)
-            self._update_buffers(pkt, t_rel)
+            try:
+                seq, pkt = self.receiver.queue.get(block=False)
+                self.pkt_cnt += 1
+                if hasattr(pkt, 'fir_stage'):
+                    self.actual_dec_stage = pkt.fir_stage
+                t_rel = self._calculate_relative_timestamp(pkt)
+                self._update_buffers(pkt, t_rel)
+            except:
+                try:
+                    self.receiver.queue.get_nowait()  # pop the bad element
+                except Exception:
+                    pass
+                continue
+
+
 
     def _calculate_relative_timestamp(self, pkt) -> float | None:
         """

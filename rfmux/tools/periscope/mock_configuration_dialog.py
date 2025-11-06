@@ -309,6 +309,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.bifurcation_tol_edit.setToolTip(
             "Iterative solver tolerance (lower = more accurate but slower)\n"
             "Used for both bifurcation (if enabled) and current-dependent Lk solver\n"
+            "1e-9: Ultra high accuracy (default, allows up to 50 iterations)\n"
             "1e-7: High accuracy (slower, for few channels)\n"
             "1e-6: Balanced\n"
             "1e-5: High speed (recommended for 50+ channels)"

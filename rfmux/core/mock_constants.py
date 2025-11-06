@@ -75,10 +75,11 @@ FREQ_TEMP_COEFFICIENT = -1e-4  # df/f per Kelvin
 
 # Convergence tolerance for iterative solver (current-dependent Lk)
 # Lower values = more accuracy but slower
+# 1e-9: Ultra high accuracy (default, allows up to 50 iterations)
 # 1e-7: High accuracy (slower, for few channels)
 # 1e-6: Balanced
 # 1e-5: High speed (faster, for many channels - RECOMMENDED for 50+ channels)
-CONVERGENCE_TOLERANCE = 1e-5
+CONVERGENCE_TOLERANCE = 1e-9
 
 # Resonance spacing to avoid overlap
 MIN_RESONANCE_SPACING_FACTOR = 2.0  # Minimum spacing as multiple of FWHM

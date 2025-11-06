@@ -66,10 +66,12 @@ DEFAULT_MOCK_CONFIG = {
     
     # Quasiparticle density noise parameters
     'nqp_noise_enabled': True,   # Enable noise on quasiparticle density
-    'nqp_noise_std_factor': 0.1, # Standard deviation as fraction of base nqp (10% noise)
+    'nqp_noise_std_factor': 0.001, # Standard deviation as fraction of base nqp (0.1% noise - realistic detector noise)
+                                    # Typical values: 0.0001 (0.01%) for low-noise, 0.001 (0.1%) for typical, 0.01 (1%) for noisy
     
     # Convergence parameters
-    'convergence_tolerance': 1e-5,  # Convergence tolerance for iterative solver
+    'convergence_tolerance': 1e-9,  # Convergence tolerance for iterative solver
+                                     # 1e-9: Ultra high accuracy (default, allows up to 50 iterations)
                                      # 1e-7: High accuracy (slower, for few channels)
                                      # 1e-6: Balanced
                                      # 1e-5: High speed (faster, for many channels)

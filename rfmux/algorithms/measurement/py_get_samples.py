@@ -171,7 +171,12 @@ async def py_get_samples(crs: CRS,
     ts.ss += np.uint32(.02 * streamer.SS_PER_SECOND) # 20ms, per experiments at FIR6
     ts.renormalize()
 
-    with streamer.get_multicast_socket(crs.tuber_hostname) as sock:
+    if crs.tuber_hostname == "rfmuxMOCK0001.local":
+        host = '127.0.0.1'
+    else:
+        host = crs.tuber_hostname
+
+    with streamer.get_multicast_socket(host) as sock:
 
         # To use asyncio, we need a non-blocking socket
         loop = asyncio.get_running_loop()
@@ -189,21 +194,24 @@ async def py_get_samples(crs: CRS,
                 # Parse the received packet
                 p = streamer.DfmuxPacket.from_bytes(data)
 
-                if p.serial != int(crs.serial):
-                    warnings.warn(
-                        f"Packet serial number {p.serial} didn't match CRS serial number {crs.serial}! Two boards on the network? IGMPv3 capable router will fix this warning."
-                    )
+                if crs.serial == "MOCK0001":
+                    packets.append(p)  
+                else:
+                    if p.serial != int(crs.serial):
+                        warnings.warn(
+                            f"Packet serial number {p.serial} didn't match CRS serial number {crs.serial}! Two boards on the network? IGMPv3 capable router will fix this warning."
+                        )
+    
+                    # Filter packets by module
+                    if p.module != module - 1:
+                        continue  # Skip packets from other modules
+    
+                    # Check if this packet is older than our "now" timestamp
+                    assert ts.source == p.ts.source, f"Timestamp source changed! {ts.source} vs {p.ts.source}"
+                    if ts > p.ts:
+                        continue
 
-                # Filter packets by module
-                if p.module != module - 1:
-                    continue  # Skip packets from other modules
-
-                # Check if this packet is older than our "now" timestamp
-                assert ts.source == p.ts.source, f"Timestamp source changed! {ts.source} vs {p.ts.source}"
-                if ts > p.ts:
-                    continue
-
-                packets.append(p)
+                    packets.append(p)
 
             # Sort packets by sequence number
             return sorted(packets, key=lambda p: p.seq)
@@ -303,8 +311,13 @@ async def py_get_samples(crs: CRS,
         nperseg = num_samples // nsegments
 
         # Retrieve decimation stage => helps define final sampling freq
-        dec_stage = await crs.get_decimation()
+        if crs.serial == "MOCK0001":
+            dec_stage = crs.get_decimation()
+        else:
+            dec_stage = await crs.get_decimation()
         fs = 625e6/(256*64*(2**dec_stage))
+
+        
 
         spec_data = {}
         if channel is None:
@@ -382,4 +395,4 @@ async def py_get_samples(crs: CRS,
         # attach spectrum data to results
         results["spectrum"] = TuberResult(spec_data)
 
-    return TuberResult(results)
+        return TuberResult(results)

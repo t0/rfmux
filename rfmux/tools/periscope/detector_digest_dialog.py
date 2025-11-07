@@ -77,6 +77,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.mean_subtract_enabled = False
 
         self.spectrum_data = spectrum_data
+        self.fast_freq = 1.22e6 #### 2.44 MSS = 1.22 MHz nyquist frequency
+        self.slow_freq = 0
 
         ### Data products for plotting ####
         if self.spectrum_data:
@@ -86,6 +88,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
             self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
             self.reference = self.spectrum_data['reference']
+            self.tone_amp = self.spectrum_data['amplitudes'][self.detector_id - 1]
+            self.slow_freq = self.spectrum_data['slow_freq_hz']
         else:
             self.noise_tab_avail = False ### You can't access noise tab if no noise data was collected
         
@@ -687,6 +691,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.current_plot_offset_hz = None
         self.noise_i_data = None
         self.noise_q_data = None
+        self.fast_freq = 1.22e6
 
 
         if self.spectrum_data:
@@ -696,7 +701,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
             self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
             self.reference = self.spectrum_data['reference']
-        
+            self.tone_amp = self.spectrum_data['amplitudes'][self.detector_id - 1]
+            self.slow_freq = self.spectrum_data['slow_freq_hz']
         if self.debug:
             self.debug_noise = self.full_debug[self.detector_id]
         # print("For detector", self.detector_id, "the noise is", self.debug_noise)
@@ -837,6 +843,25 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 freq = frequencies
     
             
+            log_freqs = np.log10(np.clip(freq, 1e-12, None))
+            
+            amplitude = self.tone_amp #### already in dbm
+            slow_freq = self.slow_freq
+            fast_freq = self.fast_freq
+            
+            # Create a text box to show the values
+            summary_text = (
+                f"<span style='font-size:12pt; color:green;'>"
+                f"Tone Amp: {amplitude:.3f} dBm <br>"
+                f"Slow Freq: {slow_freq:.3f} Hz <br>"
+                f"Fast Freq: {fast_freq:.3e} Hz </span>"
+            )
+            
+            self.summary_label = pg.TextItem(html=summary_text, anchor=(0, 0), border='w', fill=(0, 0, 0, 150))
+            self.plot_noise_spectrum.addItem(self.summary_label)
+            self.summary_label.setPos(np.max(log_freqs) * 0.8, np.max(psd_i) * 0.9)
+            
+            
             curve_i = self.plot_noise_spectrum.plot(freq, psd_i,
                                                     pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
             curve_q = self.plot_noise_spectrum.plot(freq, psd_q,
@@ -850,7 +875,6 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.plot_noise_spectrum.addItem(self.hover_label)
             self.hover_label.hide()
 
-            log_freqs = np.log10(np.clip(frequencies, 1e-12, None))
     
             # --- Mouse move handler ---
             def on_mouse_move(evt):
@@ -860,6 +884,12 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     
                     log_x = mouse_point.x()
                     x = 10 ** log_x
+
+                    summary_rect = self.summary_label.boundingRect()
+                    summary_rect = self.summary_label.mapRectToScene(summary_rect)
+                    if summary_rect.contains(pos):
+                        # Mouse is over text box — disable hover update
+                        return
                     
                     if x < np.min(frequencies) or x > np.max(frequencies):
                         self.hover_label.hide()

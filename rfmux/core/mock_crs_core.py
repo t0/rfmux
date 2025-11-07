@@ -8,6 +8,7 @@ from datetime import datetime
 import contextlib # Not used directly, but often useful with context managers
 import atexit
 import weakref
+import time
 
 # Import schema classes
 from .schema import CRS as BaseCRS
@@ -778,12 +779,15 @@ class MockCRS(BaseCRS):
         # Scaling constants
         scale_factor = const.SCALE_FACTOR  # Base scaling
         noise_level = const.UDP_NOISE_LEVEL  # Noise level
+        
+        # Calculate current time for physics updates (similar to UDP streamer)
+        current_time = time.time() - self.mock_start_time
 
         if channel is not None:
             # Single channel logic - use coupled calculation for time-varying signals
             # Get the coupled response (which includes beat frequencies)
             module_responses = self.resonator_model.calculate_module_response_coupled(
-                module, num_samples=num_samples, sample_rate=fs
+                module, num_samples=num_samples, sample_rate=fs, start_time=current_time
             )
             
             if channel in module_responses:
@@ -816,7 +820,7 @@ class MockCRS(BaseCRS):
             
             # Get all channel responses at once (includes coupling)
             module_responses = self.resonator_model.calculate_module_response_coupled(
-                module, num_samples=num_samples, sample_rate=fs
+                module, num_samples=num_samples, sample_rate=fs, start_time=current_time
             )
             
             # Process each channel

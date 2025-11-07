@@ -368,6 +368,7 @@ async def py_get_samples(crs: CRS,
         else:
             i_data = results["i"]
             q_data = results["q"]
+            
             if reference == "absolute": #### since its in volts
                 d = spectrum_from_slow_tod(
                     i_data, q_data, dec_stage,

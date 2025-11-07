@@ -847,14 +847,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             
             amplitude = self.tone_amp #### already in dbm
             slow_freq = self.slow_freq
-            fast_freq = self.fast_freq
+            fast_freq = self.fast_freq/1e6
             
             # Create a text box to show the values
             summary_text = (
                 f"<span style='font-size:12pt; color:green;'>"
                 f"Tone Amp: {amplitude:.3f} dBm <br>"
-                f"Slow Freq: {slow_freq:.3f} Hz <br>"
-                f"Fast Freq: {fast_freq:.3e} Hz </span>"
+                f"Slow Bandwidth: {slow_freq:.3f} Hz <br>"
+                f"Fast Bandwidth: {fast_freq:.2f} MHz </span>"
             )
             
             self.summary_label = pg.TextItem(html=summary_text, anchor=(0, 0), border='w', fill=(0, 0, 0, 150))

@@ -817,7 +817,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             if self.mean_subtract_enabled:
                 tod_i_volts = tod_i_volts - np.mean(tod_i_volts)
                 tod_q_volts = tod_q_volts - np.mean(tod_q_volts)
-    
+
             complex_volts = tod_i_volts + 1j * tod_q_volts
             mag_volts = np.abs(complex_volts)
     
@@ -827,9 +827,19 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
             ###### Second plot ########
             frequencies = self.spectrum_data['freq_iq']
-            curve_i = self.plot_noise_spectrum.plot(frequencies, self.single_psd_i,
+            if self.mean_subtract_enabled:
+                psd_i = self.single_psd_i[1:]
+                psd_q = self.single_psd_q[1:]
+                freq = frequencies[1:]
+            else:
+                psd_i = self.single_psd_i
+                psd_q = self.single_psd_q
+                freq = frequencies
+    
+            
+            curve_i = self.plot_noise_spectrum.plot(freq, psd_i,
                                                     pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
-            curve_q = self.plot_noise_spectrum.plot(frequencies, self.single_psd_q,
+            curve_q = self.plot_noise_spectrum.plot(freq, psd_q,
                                                     pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
             self.plot_noise_spectrum.setLogMode(x=True, y=False)
             self.plot_noise_spectrum.autoRange()

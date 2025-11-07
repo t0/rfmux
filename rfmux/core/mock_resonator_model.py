@@ -98,8 +98,8 @@ class MockResonatorModel:
         # Per-operating-point convergence cache
         # Key: (rounded_freq, rounded_amp), Value: dict with factors and state
         self._convergence_cache = {}
-        self._convergence_cache_max_size = 100  # Limit cache size
-        
+        self._convergence_cache_max_size = 1000000  # Limit cache size to 1 million entries
+
         # Statistics tracking
         self._convergence_stats = {
             'full': 0,
@@ -110,7 +110,7 @@ class MockResonatorModel:
         # Tolerance settings for convergence optimization
         self._tolerance_config = {
             'cache_freq_tolerance': 1e3,    # Hz - how closely frequencies must match 
-            'cache_amp_tolerance': 1e-6,    # Fractional - how closely amplitudes must match
+            'cache_amp_tolerance': 0.00001,   # Fractional - how closely amplitudes must match
             'qp_change_threshold': 0.01,    # 1% - fractional QP change to trigger recalc
             'power_change_threshold': 0.001, # 0.1% - fractional power change to trigger recalc
         }
@@ -465,23 +465,16 @@ class MockResonatorModel:
         Calculate S21 response with optimized convergence.
         
         Includes:
-        - Frequency-selective resonator filtering (only compute nearby resonators)
+        - ALL resonators for continuous S21 (no artificial boundaries)
         - Pulse-modified quasiparticle density (if pulses are active)
         - Fresh noisy quasiparticle density each call
         - Physics-based Lk and R from combined nqp
-        - OPTIMIZED: Skip convergence for noise-only changes
+        - OPTIMIZED: Skip convergence for noise-only changes via caching
         """
         import time
         t_start = time.perf_counter()
         
         if not self.mr_lekids:
-            return 1.0 + 0j
-        
-        # Get relevant resonators
-        relevant_indices = self._get_relevant_resonators(frequency, linewidth_threshold=10)
-        
-        # If no resonators are relevant at this frequency, return unity (no attenuation)
-        if not relevant_indices:
             return 1.0 + 0j
         
         # Calculate effective nqp with fresh noise for ALL resonators
@@ -538,8 +531,12 @@ class MockResonatorModel:
                     max_qp_change = max(max_qp_change, qp_change)
             
             # Check if power changed significantly (frequency or amplitude)
-            freq_change = abs(frequency - freq_key) / freq_key if freq_key > 0 else 0
-            amp_change = abs(amplitude - amp_key) / amp_key if amp_key > 0 else 0
+            # Compare against actual cached values, not rounded keys
+            cached_freq = cached_data.get('frequency', frequency)
+            cached_amp = cached_data.get('amplitude', amplitude)
+            
+            freq_change = abs(frequency - cached_freq) / cached_freq if cached_freq > 0 else 0
+            amp_change = abs(amplitude - cached_amp) / cached_amp if cached_amp > 0 else 0
             
             # Skip convergence only if both QP and power changes are below thresholds
             qp_threshold = self._tolerance_config['qp_change_threshold']
@@ -558,13 +555,15 @@ class MockResonatorModel:
         # Update parameters based on convergence decision
         if not skip_convergence:
             # Run full convergence
-            self.update_lekids_for_current(frequency, amplitude, relevant_indices)
+            self.update_lekids_for_current(frequency, amplitude)
             
             # Cache the convergence factors and QP state for this operating point
-            # Store as a dict with both factors and QP state
+            # Store as a dict with factors, QP state, and actual frequency/amplitude
             self._convergence_cache[cache_key] = {
                 'factors': self.lk_current_factors.copy(),
-                'qp_state': effective_nqp.copy()
+                'qp_state': effective_nqp.copy(),
+                'frequency': frequency,  # Store actual frequency
+                'amplitude': amplitude    # Store actual amplitude
             }
             
             # Limit cache size
@@ -604,27 +603,28 @@ class MockResonatorModel:
             # Update statistics
             self._convergence_stats['skipped'] += 1
         
-        # Extract subset of parameters for relevant resonators
-        n_relevant = len(relevant_indices)
+        # Extract parameters for ALL resonators
+        n_relevant = len(self.mr_lekids)
         L_subset = np.zeros(n_relevant)
         C_subset = np.zeros(n_relevant)
         R_subset = np.zeros(n_relevant)
         Cc_subset = np.zeros(n_relevant)
         L_junk_subset = np.zeros(n_relevant)
         
-        for idx, i in enumerate(relevant_indices):
+        for i in range(n_relevant):
             lekid = self.mr_lekids[i]
-            L_subset[idx] = lekid.L
-            C_subset[idx] = lekid.C
-            R_subset[idx] = lekid.R
-            Cc_subset[idx] = lekid.Cc
-            L_junk_subset[idx] = lekid.L_junk
+            L_subset[i] = lekid.L
+            C_subset[i] = lekid.C
+            R_subset[i] = lekid.R
+            Cc_subset[i] = lekid.Cc
+            L_junk_subset[i] = lekid.L_junk
         
         # Get common parameters from first LEKID (they should all be the same)
         lekid0 = self.mr_lekids[0]
         
-        # JIT-compiled S21 calculation for SUBSET of resonators only!
-        Vout_array = jit_physics.compute_s21_vectorized(
+        # Use new parallel S21 calculation that properly combines all resonators
+        # This calculates the transmission to the load with all resonators in parallel
+        s21_total = jit_physics.compute_s21_parallel(
             fc=frequency,
             Vin=amplitude,
             L_array=L_subset,
@@ -637,10 +637,6 @@ class MockResonatorModel:
             input_atten_dB=lekid0.input_atten_dB,
             system_termination=lekid0.system_termination
         )
-        
-        # Convert to S21 (divide by input voltage) and multiply all together
-        s21_array = Vout_array / amplitude
-        s21_total = np.prod(s21_array)
         
         t_vout = time.perf_counter()
         
@@ -711,12 +707,11 @@ class MockResonatorModel:
         else:
             return [1.0] * len(self.mr_lekids)
 
-    def update_lekids_for_current(self, frequency, amplitude, relevant_indices=None):
+    def update_lekids_for_current(self, frequency, amplitude):
         """
         Update LEKID parameters based on resonator currents.
         
         Uses JIT-compiled convergence loop for 2-5x speedup.
-        Can update all resonators or just a subset for frequency-selective optimization.
         
         Parameters
         ----------
@@ -724,14 +719,12 @@ class MockResonatorModel:
             Probe frequency in Hz
         amplitude : float
             Probe amplitude  
-        relevant_indices : list, optional
-            Indices of resonators to update. If None, updates all resonators.
             
         Convergence tolerance can be configured via physics_config:
+        - 1e-9: Ultra high accuracy (default)
+        - 1e-7: High accuracy 
+        - 1e-5: Balanced
         - 1e-3: Ultra fast (for many channels)
-        - 1e-4: High speed (default, good balance)
-        - 1e-5: Balanced accuracy
-        - 1e-6: High accuracy (slower)
         """
         max_iterations = 50
         tolerance = self.mock_crs.physics_config.get('convergence_tolerance', 1e-9)
@@ -739,53 +732,23 @@ class MockResonatorModel:
         # Get LEKID config from first resonator
         lekid0 = self.mr_lekids[0]
         
-        # Determine which resonators to update
-        if relevant_indices is None:
-            # Update all resonators (original behavior)
+        # Update all resonators
+        self._extract_param_arrays()
+        
+        n = len(self.mr_lekids)
+        
+        # Ensure arrays are initialized
+        if self.L_array is None or self.R_array is None:
             self._extract_param_arrays()
-            
-            n = len(self.mr_lekids)
-            
-            # Ensure arrays are initialized
-            if self.L_array is None or self.R_array is None:
-                self._extract_param_arrays()
-            
-            # Use full arrays
-            L_work = self.L_array
-            R_work = self.R_array
-            C_work = self.C_array
-            Cc_work = self.Cc_array
-            L_junk_work = self.L_junk_array
-            base_Lk = np.array([self.base_lekid_params[i]['Lk'] for i in range(n)])
-            base_Lg = np.array([self.base_lekid_params[i]['Lg'] for i in range(n)])
-            indices_to_update = list(range(n))
-        else:
-            # Update only subset (frequency-selective optimization)
-            if not relevant_indices:
-                return
-            
-            n = len(relevant_indices)
-            
-            # Extract subset of parameters
-            L_work = np.zeros(n)
-            R_work = np.zeros(n)
-            C_work = np.zeros(n)
-            Cc_work = np.zeros(n)
-            L_junk_work = np.zeros(n)
-            base_Lk = np.zeros(n)
-            base_Lg = np.zeros(n)
-            
-            for idx, i in enumerate(relevant_indices):
-                lekid = self.mr_lekids[i]
-                L_work[idx] = lekid.L
-                R_work[idx] = lekid.R
-                C_work[idx] = lekid.C
-                Cc_work[idx] = lekid.Cc
-                L_junk_work[idx] = lekid.L_junk
-                base_Lk[idx] = self.base_lekid_params[i]['Lk']
-                base_Lg[idx] = self.base_lekid_params[i]['Lg']
-            
-            indices_to_update = relevant_indices
+        
+        # Use full arrays
+        L_work = self.L_array
+        R_work = self.R_array
+        C_work = self.C_array
+        Cc_work = self.Cc_array
+        L_junk_work = self.L_junk_array
+        base_Lk = np.array([self.base_lekid_params[i]['Lk'] for i in range(n)])
+        base_Lg = np.array([self.base_lekid_params[i]['Lg'] for i in range(n)])
         
         # Call JIT-compiled convergence loop
         L_converged, R_converged, currents_converged, actual_iterations = \
@@ -803,25 +766,19 @@ class MockResonatorModel:
         current_factors = Lk_converged / base_Lk
         
         # Update LEKID objects with converged values
-        for idx, i in enumerate(indices_to_update):
+        for i in range(n):
             lekid = self.mr_lekids[i]
-            lekid.Lk = Lk_converged[idx]
-            lekid.R = R_converged[idx]
-            lekid.L = L_converged[idx]
-            lekid.alpha_k = Lk_converged[idx] / L_converged[idx]
-            
-            # Update factors for these specific resonators
-            if relevant_indices is not None:
-                # Subset update
-                self.lk_current_factors[i] = current_factors[idx]
+            lekid.Lk = Lk_converged[i]
+            lekid.R = R_converged[i]
+            lekid.L = L_converged[i]
+            lekid.alpha_k = Lk_converged[i] / L_converged[i]
         
-        # Update cached data if we updated all resonators
-        if relevant_indices is None:
-            self.lk_current_factors = current_factors.tolist()
-            self.resonator_currents_array = currents_converged
-            self.resonator_currents = currents_converged.tolist()
-            self.L_array = L_converged
-            self.R_array = R_converged
+        # Update cached data
+        self.lk_current_factors = current_factors.tolist()
+        self.resonator_currents_array = currents_converged
+        self.resonator_currents = currents_converged.tolist()
+        self.L_array = L_converged
+        self.R_array = R_converged
         
         # Log convergence stats occasionally
         if not hasattr(self, '_convergence_counter'):
@@ -829,9 +786,8 @@ class MockResonatorModel:
         self._convergence_counter += 1
         
         # if self._convergence_counter % 1000 == 0:
-        #     n_updated = len(indices_to_update)
         #     print(f"[JIT Convergence] Iterations: {actual_iterations}/{max_iterations} "
-        #           f"at f={frequency/1e9:.3f}GHz, updated {n_updated} resonators")
+        #           f"at f={frequency/1e9:.3f}GHz, updated {n} resonators")
 
     def generate_noisy_nqp_values(self):
         """

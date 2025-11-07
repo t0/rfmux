@@ -1287,9 +1287,9 @@ class PeriscopeRuntime:
         Args:
             sim_time: Current simulation time in seconds
         """
-        # Update every 100 packets as requested
+        # Update every 10 packets
         self.sim_speed_update_counter += 1
-        if self.sim_speed_update_counter >= 100:
+        if self.sim_speed_update_counter >= 10:
             real_time = time.time()
             self.sim_time_history.append((real_time, sim_time))
             

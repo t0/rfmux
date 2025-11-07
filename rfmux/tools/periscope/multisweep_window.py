@@ -1160,6 +1160,18 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
             self.spectrum_noise_data['noise_parameters'] = params
             num_res = len(self.conceptual_resonance_frequencies)
+
+            amplitudes = []
+            dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
+
+            for i in range(num_res):
+                amp = asyncio.run(crs.get_amplitude(channel=i+1, module = module))
+                amp_dmb = UnitConverter.normalize_to_dbm(amp, dac_scale_for_module)
+                amplitudes.append(amp_dmb)
+            
+            slow_freq = max(spectrum_data.spectrum.freq_iq)/spec_lim
+            fast_freq = 1.22e6
+
             
             data = {}
             data['reference'] = reference
@@ -1171,6 +1183,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             data['single_psd_q'] = spectrum_data.spectrum.psd_q[0:num_res]
             data['freq_dsb'] = spectrum_data.spectrum.freq_dsb
             data['dual_psd'] = spectrum_data.spectrum.psd_dual_sideband[0:num_res]
+            data['amplitudes'] = amplitudes
+            data['slow_freq_hz'] = slow_freq
+            data['fast_freq_hz'] = fast_freq
 
             self.spectrum_noise_data['data'] = data
             

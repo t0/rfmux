@@ -823,9 +823,18 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             "by other tasks to drain the existing buffer in time."
             "\n"
             "\n"
-            "On macOS and Windows, its recommended, to run with decimation 4 or higher. At lower decimation settings (<= 3), you may experience "
-            "packet loss, especially when the packet rate is comparatively high at decimation 6 itself (> 550 packets/s)."
-            " This behavior is attributed to limited buffer availability on macOS and Windows systems, unlike Linux."
+            "On macOS and Windows, its recommended, to run with decimation 2 or higher. To avoid dropped packets at decimation <= 4"
+            " use the following commands."
+            "\n"
+            "\n"
+            "For decimation 4. This will give you 1024 channels\n"
+            "```\n"
+            "     crs.set_decimation(4, module=<current_module>, short=False)\n"
+            "```\n"
+            "For decimation 2 and 3. This will give you 128 channels\n"
+            "```\n"
+            "    crs.set_decimation(2 or 3, module=<current_module>, short=True)\n"
+            "```\n"
             "\n"
             "\n"
             "The steps below wil help improve the packet loss and get the maximum performance, by increasing the UDP buffer size."
@@ -839,7 +848,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             " - **Linux:**\n"
             "   Run the following command to increase the default buffer\n"
             "```\n"
-            "     sudo net.core.rmem_max = 67108864 OR sudo sysctl -w net.core.rmem_max=67108864\n"
+            "     sudo sysctl -w net.core.rmem_max=67108864\n"
             "```\n"
             "- **Windows:** \n\n"
             "   Please consult the README.Windows.md available on rfmux repo on how to increase the buffer size and additional resources."
@@ -858,6 +867,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         help_label.setText(help_text)
         help_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
         help_label.setOpenExternalLinks(True)
+        
+        help_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse |QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard | QtCore.Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        
         scroll_area.setWidget(help_label)
         layout.addWidget(scroll_area)
         close_button = QtWidgets.QPushButton("Close")
@@ -1385,6 +1397,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             window_id = f"multisweep_window_{self.multisweep_window_count}"; self.multisweep_window_count += 1
             params = load_params['initial_parameters']
             target_module = params.get('module')
+
+            if active_module != target_module:
+                QtWidgets.QMessageBox.warning(self, "Error", "The module in file doesn't match the active module, the value will be changed.")
+                target_module = active_module
 
             dac_scale_for_mod = load_params['dac_scales_used'][target_module] 
             dac_scale_for_board = self.dac_scales[target_module]

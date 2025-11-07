@@ -393,6 +393,14 @@ def convert_to_serializable(obj):
     elif isinstance(obj, (np.integer, np.floating)):
         # Convert numpy numbers to Python native types
         return obj.item()
+    elif obj.__class__.__name__ == "TuberResult":
+    # flatten it if it has a to_dict() or __dict__
+        if hasattr(obj, "to_dict"):
+            return convert_to_serializable(obj.to_dict())
+        elif hasattr(obj, "__dict__"):
+            return convert_to_serializable(obj.__dict__)
+        else:
+            return str(obj)
     # Add other non-serializable types here if needed
     else:
         return obj

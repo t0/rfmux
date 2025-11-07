@@ -495,19 +495,32 @@ class PeriscopeRuntime:
         """Discard all packets currently in the receiver queue (when paused)."""
         while not self.receiver.queue.empty(): self.receiver.queue.get()
 
+
     def _process_incoming_packets(self):
         """Process all packets currently in the receiver queue."""
         while not self.receiver.queue.empty():
-            (seq, pkt) = self.receiver.queue.get(); self.pkt_cnt += 1
-            # Store the actual decimation stage from the packet
-            if hasattr(pkt, 'fir_stage'):
-                self.actual_dec_stage = pkt.fir_stage
-            t_rel = self._calculate_relative_timestamp(pkt)
-            self._update_buffers(pkt, t_rel)
+            try:
+                seq, pkt = self.receiver.queue.get(block=False)
+                self.pkt_cnt += 1
+                if hasattr(pkt, 'fir_stage'):
+                    self.actual_dec_stage = pkt.fir_stage
+                t_rel = self._calculate_relative_timestamp(pkt)
+                self._update_buffers(pkt, t_rel)
+                
+                # Track simulation time for speed calculation (mock mode only)
+                if self.is_mock_mode and t_rel is not None:
+                    self._update_sim_time_tracking(t_rel)
+
+            except:
+                try:
+                    self.receiver.queue.get_nowait()  # pop the bad element
+                except Exception:
+                    pass
+                continue
+
+
             
-            # Track simulation time for speed calculation (mock mode only)
-            if self.is_mock_mode and t_rel is not None:
-                self._update_sim_time_tracking(t_rel)
+
 
     def _calculate_relative_timestamp(self, pkt) -> float | None:
         """
@@ -784,9 +797,12 @@ class PeriscopeRuntime:
             ##### Percent calculation #####
             drop_lastsec = dropped - self.prev_drop
             receive_lastsec = received - self.prev_receive
-            # Avoid division by zero when no packets received
-            total_lastsec = drop_lastsec + receive_lastsec
-            percent = (drop_lastsec / total_lastsec * 100) if total_lastsec > 0 else 0.0
+            # Check for zero denominator to avoid division by zero
+            total_packets = drop_lastsec + receive_lastsec
+            if total_packets > 0:
+                percent = (drop_lastsec / total_packets) * 100
+            else:
+                percent = 0.0  # No packets = no loss
             
             #### Per second metrics #####
             fps = self.frame_cnt / (now - self.t_last)

@@ -385,8 +385,8 @@ def _set_socket_buffer_size(sock, desired_size=16777216):
     elif actual_size != set_size:
         # Size was accepted but kernel adjusted it
         warnings.warn(
-            f"SO_RCVBUF was adjusted by the kernel from {set_size} to {actual_size} bytes. "
-            f"Consider 'sudo sysctl net.core.rmem_max=67108864' or similar. This setting "
+            f"SO_RCVBUF was adjusted to a smaller buffer size by the kernel from {set_size} to {actual_size} bytes. "
+            f"To avoid packet loss, set 'sudo sysctl net.core.rmem_max=67108864' or similar. This setting "
             f"can be made persistent across reboots by configuring /etc/sysctl.conf or /etc/sysctl.d."
         )
     
@@ -439,6 +439,11 @@ def get_multicast_socket(crs_hostname):
 
     # Configure the socket for multicast reception
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1) ### Will only work Linux > 3.9 and Mac > 10.6
+    except:
+        pass
 
     # Bind the socket to all interfaces on the specified port
     sock.bind(("", STREAMER_PORT))

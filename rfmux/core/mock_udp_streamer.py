@@ -89,6 +89,8 @@ class MockCRSUDPStreamer(threading.Thread):
         # Track total elapsed time for continuous timestamps across decimation changes
         self.total_elapsed_time = {m: 0.0 for m in range(1, 5)}  # Total time elapsed per module
         self.last_decimation = None
+
+        self.timestamp_stream = None
         
         # Register for global cleanup
         global _active_streamers
@@ -436,6 +438,7 @@ class MockCRSUDPStreamer(threading.Thread):
             source=TimestampPort.TEST, # Mock data source
             recent=True
         )
+
         timing_timestamp = time.perf_counter()
         
         packet = DfmuxPacket(
@@ -453,6 +456,7 @@ class MockCRSUDPStreamer(threading.Thread):
         timing_packet_create = time.perf_counter()
         
         packet_bytes = packet.to_bytes()
+        self.mock_crs._last_timestamp = ts
         timing_serialize = time.perf_counter()
         
         # Removed detailed timing logs - no longer needed

@@ -8,6 +8,7 @@ from datetime import datetime
 import contextlib # Not used directly, but often useful with context managers
 import atexit
 import weakref
+import dataclasses
 import time
 
 # Import schema classes
@@ -21,6 +22,9 @@ from .mock_udp_streamer import MockUDPManager # Manages the UDP streamer thread
 
 # Import enhanced scaling constants
 from . import mock_constants as const
+from ..tuber.codecs import TuberResult
+
+
 
 # Module-level cleanup registry for MockCRS instances (to avoid JSON serialization issues)
 _mock_crs_instances = weakref.WeakSet()
@@ -72,6 +76,7 @@ class Target(str, Enum):
 class Units(str, Enum):
     HZ = "hz"
     RAW = "raw"
+    ADC_COUNTS = "adc_counts"
     VOLTS = "volts"
     AMPS = "amps"
     WATTS = "watts"
@@ -161,6 +166,16 @@ class MockCRSContext:
         """Queue a get_samples operation"""
         self.pending_ops.append(('get_samples', kwargs))
         return self  # Enable method chaining
+
+    def get_timestamp(self):
+        """Queue a get_timestamp operation"""
+        self.pending_ops.append(('get_timestamp', {}))
+        return self  # Enable method chaining
+
+    def get_analog_bank(self):
+        """Queue a get_analog_bank operation"""
+        self.pending_ops.append(('get_analog_bank', {}))
+        return self  # Enable method chaining
     
     async def __call__(self):
         """Execute all pending operations"""
@@ -221,6 +236,7 @@ class MockCRS(BaseCRS):
         return {
             'HZ': Units.HZ.value,
             'RAW': Units.RAW.value,
+            'ADC_COUNTS': Units.ADC_COUNTS.value,
             'VOLTS': Units.VOLTS.value,
             'AMPS': Units.AMPS.value,
             'WATTS': Units.WATTS.value,
@@ -245,7 +261,7 @@ class MockCRS(BaseCRS):
 
     # Static properties for units, targets, sensors, etc. (as dictionaries)
     UNITS_DICT = { # Renamed to avoid conflict with Enum
-        "HZ": "hz", "RAW": "raw", "VOLTS": "volts", "AMPS": "amps",
+        "HZ": "hz", "RAW": "raw", "ADC_COUNTS": "adc_counts", "VOLTS": "volts", "AMPS": "amps",
         "WATTS": "watts", "DEGREES": "degrees", "RADIANS": "radians",
         "OHMS": "ohms", "NORMALIZED": "normalized", "DB": "db", "DBM": "dbm"
     }
@@ -298,7 +314,8 @@ class MockCRS(BaseCRS):
         self.clock_source = None
         self.clock_priority = []
         self.timestamp_port = None
-        self.timestamp = {"y": 2024, "d": 1, "h": 0, "m": 0, "s": 0, "c": 0} # Example
+        self.timestamp = {"y": 2024, "d": 1, "h": 0, "m": 0, "s": 0, "c": 0} # 
+        self._last_timestamp = None
         self.max_samples_per_channel = 100000
         self.max_samples_per_module = 30000
 
@@ -308,6 +325,7 @@ class MockCRS(BaseCRS):
         self.tuning_results = {} # Placeholder
 
         self.active_modules = [1, 2, 3, 4]  # FIXME: add set_analog_bank() support
+        self._high_bank = False
         self.fir_stage = 6     # Default FIR stage
         self.streamed_modules = [1, 2, 3, 4]
         self.short_packets = False
@@ -598,6 +616,15 @@ class MockCRS(BaseCRS):
     def get_decimation(self):
         return None if len(self.streamed_modules)==0 else self.fir_stage
 
+    def set_analog_bank(self, high_bank: bool):
+        """Select between the low (modules 1-4) and high (modules 5-8) analog banks."""
+        self._high_bank = bool(high_bank)
+
+    def get_analog_bank(self):
+        """Return True when the high analog bank (modules 5-8) is selected."""
+        return bool(self.__dict__.get("_high_bank", False))
+
+
     async def _thread_lock_acquire(self): # Keep for server compatibility
         await asyncio.sleep(0.001) # Minimal sleep
 
@@ -606,11 +633,16 @@ class MockCRS(BaseCRS):
 
     def get_timestamp(self):
         # Simulate time passing or return a fixed test timestamp
-        now = datetime.now()
-        self.timestamp = {"y": now.year % 100, "d": now.timetuple().tm_yday, 
-                          "h": now.hour, "m": now.minute, "s": now.second, 
-                          "c": int(now.microsecond / 10000)} # Example 'c'
-        return self.timestamp
+        # now = datetime.now()
+        # self.timestamp = {"y": now.year % 100, "d": now.timetuple().tm_yday, 
+        #                   "h": now.hour, "m": now.minute, "s": now.second, 
+        #                   "c": int(now.microsecond / 10000)} # Example 'c'
+        ts = self._last_timestamp
+        ts_obj = dataclasses.replace(ts)
+        ts_dict = dataclasses.asdict(ts_obj)
+        ts_tube = TuberResult(ts_dict)
+        
+        return ts_tube
 
     async def get_pfb_samples(self, num_samples, units=Units.NORMALIZED, channel=None, module=1):
         assert isinstance(num_samples, int) and num_samples > 0

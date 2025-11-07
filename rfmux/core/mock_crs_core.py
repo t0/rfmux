@@ -361,6 +361,9 @@ class MockCRS(BaseCRS):
         from .mock_crs_helper import DEFAULT_MOCK_CONFIG
         self.physics_config = DEFAULT_MOCK_CONFIG.copy()  # Initialize with defaults
         
+        # Initialize mock start time for physics time tracking
+        self.mock_start_time = time.time()
+        
         # Instantiate helpers
         self.resonator_model = MockResonatorModel(self) # Pass self for state access
         self.udp_manager = MockUDPManager(self)         # Pass self for state access

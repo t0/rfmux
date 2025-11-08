@@ -1213,12 +1213,18 @@ class MockResonatorModel:
                 phase_deg = self.mock_crs.phases.get((module, ch), 0)  # No getter for phase yet
                 total_freq = freq + nco_freq
                 
-                # Apply S21 response using FAST path (state already updated for this packet)
-                s21_complex = self._evaluate_s21_at_frequency(total_freq, amp)
-                s21_call_count += 1
-                
-                # Combine amplitude, S21, and phase
-                complex_amplitude = amp * s21_complex * np.exp(1j * np.deg2rad(phase_deg))
+                # For single sample, pre-compute S21. For multiple samples, compute fresh per sample.
+                if num_samples == 1:
+                    # Apply S21 response using FAST path (state already updated for this packet)
+                    s21_complex = self._evaluate_s21_at_frequency(total_freq, amp)
+                    s21_call_count += 1
+                    
+                    # Combine amplitude, S21, and phase
+                    complex_amplitude = amp * s21_complex * np.exp(1j * np.deg2rad(phase_deg))
+                else:
+                    # For multi-sample, just store base amplitude with phase
+                    # S21 will be evaluated fresh for each sample
+                    complex_amplitude = amp * np.exp(1j * np.deg2rad(phase_deg))
                 
                 active_tone_freqs.append(total_freq)
                 active_tone_amps.append(complex_amplitude)
@@ -1296,26 +1302,51 @@ class MockResonatorModel:
                 responses[ch] = complex(signals[i])
         
         else:
-            # Multiple time samples - still vectorized but over time
+            # Multiple time samples - evaluate S21 for each sample to get fresh noise
             t = start_time + np.arange(num_samples) / sample_rate
             responses = {}
             
+            # For each observing channel
             for i, ch in enumerate(obs_channels):
                 signal = np.zeros(num_samples, dtype=complex)
+                obs_freq = obs_freqs_arr[i]
                 
-                # Process tones for this observer
-                for j, tone_amp in enumerate(tone_amps):
-                    if within_bandwidth[i, j]:
-                        freq_diff = freq_diffs[i, j]
-                        
-                        # Use proper CIC filter response
-                        cic_response = self._get_cached_cic_response(freq_diff, dec_stage)
-                        
-                        if abs(freq_diff) < 0.1:  # DC
-                            signal += tone_amp * cic_response
-                        else:
-                            # Time-varying beat with proper CIC filtering
-                            signal += tone_amp * cic_response * np.exp(1j * 2 * np.pi * freq_diff * t)
+                # For each time sample
+                for sample_idx in range(num_samples):
+                    sample_contribution = 0 + 0j
+                    
+                    # Process each active tone with fresh S21 evaluation
+                    for j in range(len(active_tone_freqs)):
+                        if within_bandwidth[i, j]:
+                            tone_freq = active_tone_freqs[j]
+                            tone_amp_base = active_tone_amps[j]
+                            freq_diff = freq_diffs[i, j]
+                            
+                            # Get fresh S21 for this tone at this time sample
+                            # This gives us new QP noise realization for each sample
+                            amp_magnitude = abs(tone_amp_base)
+                            if amp_magnitude > 0:
+                                # Re-evaluate S21 with fresh noise
+                                s21_fresh = self._evaluate_s21_at_frequency(tone_freq, amp_magnitude)
+                                
+                                # Apply phase from original tone
+                                phase_original = np.angle(tone_amp_base)
+                                tone_amp_fresh = amp_magnitude * s21_fresh * np.exp(1j * phase_original)
+                            else:
+                                tone_amp_fresh = 0 + 0j
+                            
+                            # Apply CIC filter response
+                            cic_response = self._get_cached_cic_response(freq_diff, dec_stage)
+                            
+                            # Calculate beat contribution at this time
+                            if abs(freq_diff) < 0.1:  # DC
+                                sample_contribution += tone_amp_fresh * cic_response
+                            else:
+                                # Beat frequency at time t[sample_idx]
+                                beat_phase = 2 * np.pi * freq_diff * t[sample_idx]
+                                sample_contribution += tone_amp_fresh * cic_response * np.exp(1j * beat_phase)
+                    
+                    signal[sample_idx] = sample_contribution
                 
                 responses[ch] = signal
         

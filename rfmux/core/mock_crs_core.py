@@ -24,6 +24,8 @@ from .mock_udp_streamer import MockUDPManager # Manages the UDP streamer thread
 from . import mock_constants as const
 from ..tuber.codecs import TuberResult
 
+# No longer need py_get_samples import
+
 
 
 # Module-level cleanup registry for MockCRS instances (to avoid JSON serialization issues)
@@ -793,13 +795,13 @@ class MockCRS(BaseCRS):
         self.hmc7044_registers[address] = value
 
     async def get_samples(self, num_samples, channel=None, module=1, average=False):
-        """Get sample data for a specific module, delegating to resonator model with enhanced scaling."""
+        """Get sample data for a specific module using direct physics calculations."""
         assert isinstance(num_samples, int), "Number of samples must be an integer"
         assert channel is None or isinstance(channel, int), "Channel must be None or an integer"
         assert module in [1, 2, 3, 4], "Invalid module number"
-        await asyncio.sleep(0.0001) # Simulate hardware delay
+        await asyncio.sleep(0.0001)  # Simulate hardware delay
 
-        overrange = False # Mock flags
+        overrange = False  # Mock flags
         overvoltage = False
         
         # Get sample rate based on decimation
@@ -809,75 +811,84 @@ class MockCRS(BaseCRS):
         fs = 625e6 / 256 / 64 / (2**fir_stage)  # Actual sample rate based on decimation
         t_list = (np.arange(num_samples) / fs).tolist()
 
-        nco_freq = self.get_nco_frequency(module=module) or 0
-        
         # Scaling constants
         scale_factor = const.SCALE_FACTOR  # Base scaling
         noise_level = const.UDP_NOISE_LEVEL  # Noise level
         
-        # Calculate current time for physics updates (similar to UDP streamer)
+        # Use current time for consistent physics state
         current_time = time.time() - self.mock_start_time
 
-        if channel is not None:
-            # Single channel logic - use coupled calculation for time-varying signals
-            # Get the coupled response (which includes beat frequencies)
-            module_responses = self.resonator_model.calculate_module_response_coupled(
-                module, num_samples=num_samples, sample_rate=fs, start_time=current_time
-            )
+        # Get S21 response with QP noise from resonator model
+        # This generates realistic noise through QP density fluctuations
+        # without triggering new convergence calculations
+        
+        # Optimization: When averaging, only calculate one sample to avoid expensive per-sample noise
+        if average:
+            # Just get a single S21 value - much faster, noise would be averaged out anyway
+            effective_num_samples = 1
+        else:
+            # Get full time series with per-sample noise for individual samples
+            effective_num_samples = num_samples
             
+        module_responses = self.resonator_model.calculate_module_response_coupled(
+            module, num_samples=effective_num_samples, sample_rate=fs, start_time=int(current_time)
+        )
+        
+        if channel is not None:
+            # Single channel
             if channel in module_responses:
+                # Get the S21 response with QP noise for this channel
                 response = module_responses[channel]
                 
                 # Handle both single values and arrays
                 if isinstance(response, np.ndarray):
-                    # Time-varying signal (beat frequencies)
-                    i_list = (response.real * scale_factor + np.random.normal(0, noise_level, num_samples)).tolist()
-                    q_list = (response.imag * scale_factor + np.random.normal(0, noise_level, num_samples)).tolist()
+                    # Time-varying signal with QP noise already included
+                    i_list = (response.real * scale_factor).tolist()
+                    q_list = (response.imag * scale_factor).tolist()
                 else:
-                    # Single value - repeat for all samples
+                    # Single value - either from average optimization or single sample request
                     i_base = response.real * scale_factor
                     q_base = response.imag * scale_factor
-                    i_list = [i_base + np.random.normal(0, noise_level) for _ in range(num_samples)]
-                    q_list = [q_base + np.random.normal(0, noise_level) for _ in range(num_samples)]
+                    # Repeat the single value for all samples
+                    # (for averaging case, will be averaged to this same value anyway)
+                    i_list = [i_base] * num_samples
+                    q_list = [q_base] * num_samples
             else:
-                # Channel not configured
-                i_list = [np.random.normal(0, noise_level) for _ in range(num_samples)]
-                q_list = [np.random.normal(0, noise_level) for _ in range(num_samples)]
+                # Channel not configured - just noise
+                i_list = np.random.normal(0, noise_level, num_samples).tolist()
+                q_list = np.random.normal(0, noise_level, num_samples).tolist()
             
             return {
                 "i": i_list, "q": q_list, "ts": t_list,
                 "flags": {"overrange": overrange, "overvoltage": overvoltage}
             }
         else:
-            # All channels logic - use coupled calculation
-            channels_per_module = 1024 # As per NUM_CHANNELS in streamer
+            # All channels
+            channels_per_module = 1024  # As per NUM_CHANNELS in streamer
             i_data, q_data = [], []
             
-            # Get all channel responses at once (includes coupling)
-            module_responses = self.resonator_model.calculate_module_response_coupled(
-                module, num_samples=num_samples, sample_rate=fs, start_time=current_time
-            )
-            
             # Process each channel
-            for ch_idx in range(1, channels_per_module + 1): # 1-based channel
+            for ch_idx in range(1, channels_per_module + 1):  # 1-based channel
                 if ch_idx in module_responses:
                     response = module_responses[ch_idx]
                     
                     # Handle both single values and arrays
                     if isinstance(response, np.ndarray):
-                        # Time-varying signal
-                        i_ch_samples = (response.real * scale_factor + np.random.normal(0, noise_level, num_samples)).tolist()
-                        q_ch_samples = (response.imag * scale_factor + np.random.normal(0, noise_level, num_samples)).tolist()
+                        # Time-varying signal with QP noise already included
+                        i_ch_samples = (response.real * scale_factor).tolist()
+                        q_ch_samples = (response.imag * scale_factor).tolist()
                     else:
-                        # Single value - repeat for all samples
+                        # Single value - either from average optimization or single sample request
                         i_base = response.real * scale_factor
                         q_base = response.imag * scale_factor
-                        i_ch_samples = [i_base + np.random.normal(0, noise_level) for _ in range(num_samples)]
-                        q_ch_samples = [q_base + np.random.normal(0, noise_level) for _ in range(num_samples)]
+                        # Repeat the single value for all samples
+                        # (for averaging case, will be averaged to this same value anyway)
+                        i_ch_samples = [i_base] * num_samples
+                        q_ch_samples = [q_base] * num_samples
                 else:
                     # Channel not configured - just noise
-                    i_ch_samples = [np.random.normal(0, noise_level) for _ in range(num_samples)]
-                    q_ch_samples = [np.random.normal(0, noise_level) for _ in range(num_samples)]
+                    i_ch_samples = np.random.normal(0, noise_level, num_samples).tolist()
+                    q_ch_samples = np.random.normal(0, noise_level, num_samples).tolist()
                 
                 i_data.append(i_ch_samples)
                 q_data.append(q_ch_samples)

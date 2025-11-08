@@ -54,6 +54,7 @@ from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, Initial
 from .app_runtime import PeriscopeRuntime
 from .mock_configuration_dialog import MockConfigurationDialog
 from rfmux.core.transferfunctions import convert_roc_to_volts
+from rfmux.core import mock_config as mc
 
 
 # Note: The original commented-out lines for specific UI class imports
@@ -1732,42 +1733,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             
     def _get_current_mock_config(self) -> dict:
         """
-        Get the current mock configuration from the mock_constants module.
+        Get the current mock configuration from the unified SoT (mock_config).
         
         Returns:
-            dict: Current configuration values
+            dict: Current configuration values compatible with the dialog and MockCRS
         """
         try:
-            import rfmux.core.mock_constants as mc
-            return {
-                'kinetic_inductance_fraction': mc.DEFAULT_KINETIC_INDUCTANCE_FRACTION,
-                'kinetic_inductance_variation': mc.KINETIC_INDUCTANCE_VARIATION,
-                'frequency_shift_power_law': mc.FREQUENCY_SHIFT_POWER_LAW,
-                'frequency_shift_magnitude': mc.FREQUENCY_SHIFT_MAGNITUDE,
-                'power_normalization': mc.POWER_NORMALIZATION,
-                'enable_bifurcation': mc.ENABLE_BIFURCATION,
-                'bifurcation_iterations': mc.BIFURCATION_ITERATIONS,
-                'bifurcation_convergence_tolerance': mc.BIFURCATION_CONVERGENCE_TOLERANCE,
-                'bifurcation_damping_factor': mc.BIFURCATION_DAMPING_FACTOR,
-                'saturation_power': mc.SATURATION_POWER,
-                'saturation_sharpness': mc.SATURATION_SHARPNESS,
-                'q_min': mc.DEFAULT_Q_MIN,
-                'q_max': mc.DEFAULT_Q_MAX,
-                'q_variation': mc.Q_VARIATION,
-                'coupling_min': mc.DEFAULT_COUPLING_MIN,
-                'coupling_max': mc.DEFAULT_COUPLING_MAX,
-                'freq_start': mc.DEFAULT_FREQ_START,
-                'freq_end': mc.DEFAULT_FREQ_END,
-                'num_resonances': mc.DEFAULT_NUM_RESONANCES,
-                'base_noise_level': mc.BASE_NOISE_LEVEL,
-                'amplitude_noise_coupling': mc.AMPLITUDE_NOISE_COUPLING,
-                'udp_noise_level': mc.UDP_NOISE_LEVEL,
-                'resonator_random_seed' : 42
-            }
+            return mc.defaults()
         except Exception as e:
             print(f"Error getting current mock config: {e}")
-            # Return defaults if unable to read current values
-            return {}
+            return mc.defaults()
             
     def _apply_mock_configuration(self, config: dict):
         """

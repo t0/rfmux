@@ -21,7 +21,7 @@ from .mock_resonator_model import MockResonatorModel
 from .mock_udp_streamer import MockUDPManager # Manages the UDP streamer thread
 
 # Import enhanced scaling constants
-from . import mock_constants as const
+from .mock_config import apply_overrides, defaults
 from ..tuber.codecs import TuberResult
 
 # No longer need py_get_samples import
@@ -360,8 +360,8 @@ class MockCRS(BaseCRS):
         self.cable_lengths = {}  # module -> cable length in meters
 
         # Store physics configuration (can be updated via generate_resonators)
-        from .mock_crs_helper import DEFAULT_MOCK_CONFIG
-        self.physics_config = DEFAULT_MOCK_CONFIG.copy()  # Initialize with defaults
+        from .mock_config import defaults
+        self.physics_config = defaults()  # Initialize with unified SoT defaults
         
         # Initialize mock start time for physics time tracking
         self.mock_start_time = time.time()
@@ -811,9 +811,10 @@ class MockCRS(BaseCRS):
         fs = 625e6 / 256 / 64 / (2**fir_stage)  # Actual sample rate based on decimation
         t_list = (np.arange(num_samples) / fs).tolist()
 
-        # Scaling constants
-        scale_factor = const.SCALE_FACTOR  # Base scaling
-        noise_level = const.UDP_NOISE_LEVEL  # Noise level
+        # Scaling constants from unified configuration
+        cfg = self.physics_config if hasattr(self, 'physics_config') else {}
+        scale_factor = cfg.get('scale_factor', 2**21)  # Base scaling
+        noise_level = cfg.get('udp_noise_level', 10.0)  # Noise level
         
         # Use current time for consistent physics state
         current_time = time.time() - self.mock_start_time

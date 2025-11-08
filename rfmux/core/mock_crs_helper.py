@@ -6,6 +6,8 @@ This module provides utilities for creating and configuring a MockCRS instance
 with simulated KID resonators. It's designed to be used by scripts that need
 to test the rfmux algorithms without real hardware.
 
+Now uses the unified Single Source of Truth (SoT) in rfmux.core.mock_config.
+
 Example usage:
     from mock_crs_helper import create_mock_crs
     
@@ -13,7 +15,7 @@ Example usage:
     crs = await create_mock_crs()
     
     # Create with custom configuration
-    crs = await create_mock_crs(num_resonances=20, enable_bifurcation=True)
+    crs = await create_mock_crs(num_resonances=20, auto_bias_kids=True)
 """
 
 import asyncio
@@ -22,64 +24,7 @@ from typing import Optional, Dict, Any
 # Import required rfmux modules
 from rfmux.core.session import load_session
 from rfmux.core.crs import CRS
-
-
-# Default mock configuration parameters
-DEFAULT_MOCK_CONFIG = {
-    # Basic resonator distribution
-    'num_resonances': 5,
-    'freq_start': 1e9,  # Hz
-    'freq_end': 1.5e9,    # Hz
-    
-    # Physics parameters (determine Lk and R via quasiparticle density)
-    'T': 0.12,  # Temperature [K]
-    'Popt': 1e-13,  # Optical power [W]
-    
-    # Circuit parameters (base values for MR_LEKID)
-    'Lg': 10e-9,  # Geometric inductance [H]  
-    'Cc': 0.02e-12,  # Coupling capacitor [F]
-    'L_junk': 0,  # Parasitic inductance [H]
-    
-    # Variations (as fractional standard deviations)
-    'C_variation': 0.01,  # 1% variation in capacitance -> small frequency scatter
-    'Cc_variation': 0.01,  # 10% variation in coupling capacitor
-    
-    # Readout parameters
-    'Vin': 1e-5,  # Input voltage [V]
-    'input_atten_dB': 10,  # Input attenuation [dB]
-    'system_termination': 50,  # System impedance [Ω]
-    'ZLNA': 50,  # LNA input impedance [Ω] (real)
-    'GLNA': 10**(10./20.),  # LNA gain (Vout/Vin)
-    
-    # Simulation noise parameters (for UDP streaming)
-    'base_noise_level': 1e-4,
-    'udp_noise_level': 0.05,
-    
-    # Pulse event parameters (for time-dependent QP density)
-    'pulse_mode': 'none',      # 'periodic', 'random', 'manual', or 'none'
-    'pulse_period': 10,      # seconds between pulses (for periodic mode)
-    'pulse_probability': 0.001, # probability per timestep (for random mode)
-    'pulse_tau_rise': 1e-6,    # rise time constant (seconds)
-    'pulse_tau_decay': 1e-3,   # decay time constant (seconds)  
-    'pulse_amplitude': 2.0,    # multiplicative factor relative to base_nqp (2.0 = double the base nqp)
-    'pulse_resonators': 'all', # 'all' or list of resonator indices
-    
-    # Quasiparticle density noise parameters
-    'nqp_noise_enabled': True,   # Enable noise on quasiparticle density
-    'nqp_noise_std_factor': 0.001, # Standard deviation as fraction of base nqp (0.1% noise - realistic detector noise)
-                                    # Typical values: 0.0001 (0.01%) for low-noise, 0.001 (0.1%) for typical, 0.01 (1%) for noisy
-    
-    # Convergence parameters
-    'convergence_tolerance': 1e-9,  # Convergence tolerance for iterative solver
-                                     # 1e-9: Ultra high accuracy (default, allows up to 50 iterations)
-                                     # 1e-7: High accuracy (slower, for few channels)
-                                     # 1e-6: Balanced
-                                     # 1e-5: High speed (faster, for many channels)
-    
-    # Automatic KID biasing parameters
-    'auto_bias_kids': False,    # Enable automatic channel configuration
-    'bias_amplitude': 0.01,    # Bias amplitude in normalized units (=-40 dBm)
-}
+from rfmux.core import mock_config as mc
 
 
 async def create_mock_crs(
@@ -102,8 +47,8 @@ async def create_mock_crs(
         module: Module number to use (default: 1)
         udp_host: Host for UDP streaming (default: '127.0.0.1')
         udp_port: Port for UDP streaming (default: 9876)
-        config: Optional custom configuration dict. If None, uses defaults.
-                Keys can include any parameters from DEFAULT_MOCK_CONFIG.
+        config: Optional custom configuration dict. If None, uses unified defaults.
+                Keys should match rfmux.core.mock_config.MOCK_DEFAULTS.
         verbose: Whether to print status messages (default: True)
     
     Returns:
@@ -113,19 +58,17 @@ async def create_mock_crs(
         Exception: If MockCRS creation or configuration fails
     """
     
-    # Merge custom config with defaults
-    mock_config = DEFAULT_MOCK_CONFIG.copy()
-    if config:
-        mock_config.update(config)
-    
+    # Merge custom config with SoT defaults
+    merged = mc.apply_overrides(config)
+
     if verbose:
         print("="*60)
         print("Creating Mock CRS")
         print("="*60)
         print(f"Module: {module}")
         print(f"UDP Streaming: {udp_host}:{udp_port}")
-        print(f"Resonators: {mock_config['num_resonances']}")
-        print(f"Frequency Range: {mock_config['freq_start']/1e9:.1f} - {mock_config['freq_end']/1e9:.1f} GHz")
+        print(f"Resonators: {merged['num_resonances']}")
+        print(f"Frequency Range: {merged['freq_start']/1e9:.1f} - {merged['freq_end']/1e9:.1f} GHz")
         print("="*60)
     
     try:
@@ -149,9 +92,9 @@ async def create_mock_crs(
         
         # Configure resonators
         if verbose:
-            print(f"3. Generating {mock_config['num_resonances']} simulated resonators...")
+            print(f"3. Generating {merged['num_resonances']} simulated resonators...")
         
-        resonator_count = await crs.generate_resonators(mock_config)
+        resonator_count = await crs.generate_resonators(merged)
         
         if verbose:
             print(f"   ✓ Generated {resonator_count} resonators")
@@ -199,15 +142,14 @@ async def reconfigure_mock_crs(
     Raises:
         Exception: If reconfiguration fails
     """
-    if config is None:
-        config = DEFAULT_MOCK_CONFIG
+    merged = mc.apply_overrides(config or mc.defaults())
     
     if verbose:
         print("\nReconfiguring Mock CRS...")
-        print(f"New parameters: {len(config)} settings")
+        print(f"New parameters: {len(merged)} settings")
     
     try:
-        resonator_count = await crs.generate_resonators(config)
+        resonator_count = await crs.generate_resonators(merged)
         
         if verbose:
             print(f"✓ Regenerated {resonator_count} resonators")

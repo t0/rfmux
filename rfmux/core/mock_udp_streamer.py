@@ -24,8 +24,6 @@ from ..streamer import (
     STREAMER_PORT, # Default port for streaming
 )
 
-# Import enhanced scaling constants
-from . import mock_constants as const
 
 # Global registry to track all active UDP streamers for cleanup
 _active_streamers = []
@@ -328,9 +326,11 @@ class MockCRSUDPStreamer(threading.Thread):
         iq_data_arr = array.array("i", [0] * (num_channels * 2))
         timing_array_create = time.perf_counter()
         
-        # Pre-calculate constants
-        full_scale_counts = const.SCALE_FACTOR * 2**8  # 32 bit number instead of 24 bit
-        noise_level = const.UDP_NOISE_LEVEL  # Base noise level (in ADC counts)
+        # Pre-calculate constants from unified configuration (SoT)
+        cfg = getattr(self.mock_crs, "physics_config", {}) or {}
+        scale_factor = cfg.get("scale_factor", 2**21)
+        full_scale_counts = scale_factor * 2**8  # 32 bit number instead of 24 bit
+        noise_level = cfg.get("udp_noise_level", 10.0)  # Base noise level (in ADC counts)
         
         # OPTIMIZED: Generate and clip noise using numpy, then convert to array.array
         # This is MUCH faster than looping

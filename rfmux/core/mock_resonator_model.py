@@ -3,7 +3,6 @@ Mock CRS Device - Resonator Physics Model.
 Encapsulates the logic for resonator physics simulation, including S21 response.
 """
 import numpy as np
-from . import mock_constants as const
 
 # Import from mr_resonator subpackage using relative imports
 from ..mr_resonator.mr_complex_resonator import MR_complex_resonator
@@ -185,12 +184,12 @@ class MockResonatorModel:
         '''
         # Get configuration
         if config is None:
-            # Use physics_config from MockCRS if available, otherwise use defaults
+            # Use physics_config from MockCRS if available, otherwise use unified defaults
             if hasattr(self.mock_crs, 'physics_config') and self.mock_crs.physics_config:
                 config = self.mock_crs.physics_config
             else:
-                from . import mock_crs_helper
-                config = mock_crs_helper.DEFAULT_MOCK_CONFIG.copy()
+                from .mock_config import defaults
+                config = defaults()
         
         print('Using config:', {k: v for k, v in config.items() if k in ['num_resonances', 'freq_start', 'freq_end', 'T', 'Popt']})
         
@@ -575,16 +574,16 @@ class MockResonatorModel:
             # Update statistics
             self._convergence_stats['full'] += 1
             
-            # Debug print for convergence trigger
-            if self._convergence_stats['full'] % 100 == 0:  # Print every 100th convergence
-                total_calls = self._convergence_stats['full'] + self._convergence_stats['skipped']
-                skip_rate = (self._convergence_stats['skipped'] / total_calls * 100) if total_calls > 0 else 0
+            # # Debug print for convergence trigger
+            # if self._convergence_stats['full'] % 100 == 0:  # Print every 100th convergence
+            #     total_calls = self._convergence_stats['full'] + self._convergence_stats['skipped']
+            #     skip_rate = (self._convergence_stats['skipped'] / total_calls * 100) if total_calls > 0 else 0
                     
-                print(f"[Convergence Triggered] f={frequency/1e9:.6f}GHz, amp={amplitude:.6f} | "
-                      f"Cache size: {len(self._convergence_cache)} | "
-                      f"Stats: {self._convergence_stats['full']} full, "
-                      f"{self._convergence_stats['skipped']} skipped ({skip_rate:.1f}% skip rate) | "
-                      f"Reason: {self._convergence_stats.get('last_reason', 'N/A')}")
+            #     print(f"[Convergence Triggered] f={frequency/1e9:.6f}GHz, amp={amplitude:.6f} | "
+            #           f"Cache size: {len(self._convergence_cache)} | "
+            #           f"Stats: {self._convergence_stats['full']} full, "
+            #           f"{self._convergence_stats['skipped']} skipped ({skip_rate:.1f}% skip rate) | "
+            #           f"Reason: {self._convergence_stats.get('last_reason', 'N/A')}")
         else:
             # Reuse cached convergence factors - apply to ALL resonators
             cached_factors = cached_data.get('factors') if isinstance(cached_data, dict) else cached_data

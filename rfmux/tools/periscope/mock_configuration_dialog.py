@@ -184,6 +184,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         # Right column
         right = QtWidgets.QVBoxLayout()
         right.addWidget(self._create_readout_group())
+        right.addWidget(self._create_qp_pulses_group())
         right.addWidget(self._create_noise_group())
         right.addWidget(self._create_convergence_group())
         right.addStretch()
@@ -320,15 +321,132 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
         return group
 
+    def _create_qp_pulses_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("QP Pulses")
+        layout = QtWidgets.QGridLayout(group)
+        row = 0
+
+        layout.addWidget(QtWidgets.QLabel("Period (s):"), row, 0)
+        self.pulse_period_edit = QtWidgets.QLineEdit()
+        self.pulse_period_edit.setValidator(ScientificDoubleValidator())
+        self.pulse_period_edit.setToolTip("Pulse period in seconds (used in periodic mode).")
+        layout.addWidget(self.pulse_period_edit, row, 1)
+
+        layout.addWidget(QtWidgets.QLabel("Probability (/s):"), row, 2)
+        self.pulse_probability_edit = QtWidgets.QLineEdit()
+        self.pulse_probability_edit.setValidator(ScientificDoubleValidator())
+        self.pulse_probability_edit.setToolTip("Per-resonator per-second probability (random mode).\nEffective per-update chance ≈ probability × dt.")
+        layout.addWidget(self.pulse_probability_edit, row, 3)
+
+        row += 1
+        layout.addWidget(QtWidgets.QLabel("Tau rise (s):"), row, 0)
+        self.pulse_tau_rise_edit = QtWidgets.QLineEdit()
+        self.pulse_tau_rise_edit.setValidator(ScientificDoubleValidator())
+        self.pulse_tau_rise_edit.setToolTip("Exponential rise time constant (seconds).")
+        layout.addWidget(self.pulse_tau_rise_edit, row, 1)
+
+        layout.addWidget(QtWidgets.QLabel("Tau decay (s):"), row, 2)
+        self.pulse_tau_decay_edit = QtWidgets.QLineEdit()
+        self.pulse_tau_decay_edit.setValidator(ScientificDoubleValidator())
+        self.pulse_tau_decay_edit.setToolTip("Exponential decay time constant (seconds).")
+        layout.addWidget(self.pulse_tau_decay_edit, row, 3)
+
+        row += 1
+        layout.addWidget(QtWidgets.QLabel("Amplitude (× base nqp):"), row, 0)
+        self.pulse_amplitude_edit = QtWidgets.QLineEdit()
+        self.pulse_amplitude_edit.setValidator(ScientificDoubleValidator())
+        self.pulse_amplitude_edit.setToolTip("Multiplicative factor relative to base quasiparticle density.\nExample: 2.0 doubles base nqp.")
+        layout.addWidget(self.pulse_amplitude_edit, row, 1)
+
+        layout.addWidget(QtWidgets.QLabel("Resonators:"), row, 2)
+        self.pulse_resonators_edit = QtWidgets.QLineEdit()
+        self.pulse_resonators_edit.setToolTip('Target resonators: "all" or CSV of 0-based indices (e.g., 0,1,7).')
+        layout.addWidget(self.pulse_resonators_edit, row, 3)
+
+        # Random amplitude distribution (random mode)
+        row += 1
+        layout.addWidget(QtWidgets.QLabel("Random amplitude mode:"), row, 0)
+        self.random_amp_mode_combo = QtWidgets.QComboBox()
+        self.random_amp_mode_combo.addItems(["fixed", "uniform", "lognormal"])
+        self.random_amp_mode_combo.setToolTip('Random pulse amplitude distribution in "random" mode.')
+        layout.addWidget(self.random_amp_mode_combo, row, 1)
+
+        row += 1
+        layout.addWidget(QtWidgets.QLabel("Uniform min:"), row, 0)
+        self.random_amp_min_edit = QtWidgets.QLineEdit()
+        self.random_amp_min_edit.setValidator(ScientificDoubleValidator())
+        self.random_amp_min_edit.setToolTip("Minimum amplitude (× base nqp) for uniform distribution (≥ 1.0).")
+        layout.addWidget(self.random_amp_min_edit, row, 1)
+
+        layout.addWidget(QtWidgets.QLabel("Uniform max:"), row, 2)
+        self.random_amp_max_edit = QtWidgets.QLineEdit()
+        self.random_amp_max_edit.setValidator(ScientificDoubleValidator())
+        self.random_amp_max_edit.setToolTip("Maximum amplitude (× base nqp) for uniform distribution (≥ min).")
+        layout.addWidget(self.random_amp_max_edit, row, 3)
+
+        row += 1
+        layout.addWidget(QtWidgets.QLabel("Lognormal mean (μ):"), row, 0)
+        self.random_amp_logmean_edit = QtWidgets.QLineEdit()
+        self.random_amp_logmean_edit.setValidator(ScientificDoubleValidator())
+        self.random_amp_logmean_edit.setToolTip("Mean parameter μ for lognormal amplitude distribution.")
+        layout.addWidget(self.random_amp_logmean_edit, row, 1)
+
+        layout.addWidget(QtWidgets.QLabel("Lognormal sigma (σ):"), row, 2)
+        self.random_amp_logsigma_edit = QtWidgets.QLineEdit()
+        self.random_amp_logsigma_edit.setValidator(ScientificDoubleValidator())
+        self.random_amp_logsigma_edit.setToolTip("Sigma parameter σ (≥ 0) for lognormal amplitude distribution.")
+        layout.addWidget(self.random_amp_logsigma_edit, row, 3)
+
+        # Connect mode change to toggling of fields
+        self.random_amp_mode_combo.currentTextChanged.connect(self._on_random_amp_mode_changed)
+
+        return group
+
+    def _on_random_amp_mode_changed(self, mode: str):
+        # Enable/disable distribution-specific fields
+        mode = (mode or "").lower()
+        is_uniform = mode == "uniform"
+        is_lognormal = mode == "lognormal"
+        # Uniform fields
+        for w in (self.random_amp_min_edit, self.random_amp_max_edit):
+            w.setEnabled(is_uniform)
+        # Lognormal fields
+        for w in (self.random_amp_logmean_edit, self.random_amp_logsigma_edit):
+            w.setEnabled(is_lognormal)
+
     def _create_convergence_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Convergence")
+        group = QtWidgets.QGroupBox("Physics Realism")
         layout = QtWidgets.QGridLayout(group)
 
-        layout.addWidget(QtWidgets.QLabel("convergence_tolerance:"), 0, 0)
+        # Convergence tolerance (solver accuracy)
+        layout.addWidget(QtWidgets.QLabel("Convergence tolerance:"), 0, 0)
         self.conv_tol_edit = QtWidgets.QLineEdit()
         self.conv_tol_edit.setValidator(ScientificDoubleValidator())
-        self.conv_tol_edit.setToolTip("Lower = more accurate but slower (e.g., 1e-9 default)")
+        self.conv_tol_edit.setToolTip("Solver accuracy: lower = more accurate, slower (e.g., 1e-9 default).")
         layout.addWidget(self.conv_tol_edit, 0, 1)
+
+        # Cache frequency tolerance (Hz)
+        layout.addWidget(QtWidgets.QLabel("Cache freq tolerance (Hz):"), 1, 0)
+        self.cache_freq_tol_edit = QtWidgets.QLineEdit()
+        self.cache_freq_tol_edit.setValidator(ScientificDoubleValidator())
+        self.cache_freq_tol_edit.setToolTip("Frequency rounding granularity for cache key (Hz). Larger = more reuse.")
+        layout.addWidget(self.cache_freq_tol_edit, 1, 1)
+
+
+        # QP change threshold (fraction)
+        layout.addWidget(QtWidgets.QLabel("QP change threshold (frac):"), 3, 0)
+        self.qp_change_thresh_edit = QtWidgets.QLineEdit()
+        self.qp_change_thresh_edit.setValidator(ScientificDoubleValidator())
+        self.qp_change_thresh_edit.setToolTip("Max fractional change in nqp allowed to reuse cached convergence.")
+        layout.addWidget(self.qp_change_thresh_edit, 3, 1)
+
+        # Power change threshold (fraction)
+        layout.addWidget(QtWidgets.QLabel("Bias change threshold (frac):"), 4, 0)
+        self.power_change_thresh_edit = QtWidgets.QLineEdit()
+        self.power_change_thresh_edit.setValidator(ScientificDoubleValidator())
+        self.power_change_thresh_edit.setToolTip("Max fractional change allowed in both frequency and amplitude to reuse cache. Both must be below this to reuse; if either exceeds, trigger full convergence. Complements cache freq tolerance rounding.")
+        layout.addWidget(self.power_change_thresh_edit, 4, 1)
+
         return group
 
     def _reset_to_defaults(self):
@@ -365,8 +483,33 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.nqp_noise_enabled_cb.setChecked(bool(cfg["nqp_noise_enabled"]))
         self.nqp_noise_std_edit.setText(str(cfg["nqp_noise_std_factor"]))
         self.udp_noise_edit.setText(str(cfg["udp_noise_level"]))
-        # Convergence
+        # Physics Realism
         self.conv_tol_edit.setText(str(cfg["convergence_tolerance"]))
+        self.cache_freq_tol_edit.setText(str(cfg["cache_freq_tolerance"]))
+        self.qp_change_thresh_edit.setText(str(cfg["qp_change_threshold"]))
+        self.power_change_thresh_edit.setText(str(cfg["power_change_threshold"]))
+
+        # QP Pulses
+        self.pulse_period_edit.setText(str(cfg["pulse_period"]))
+        self.pulse_probability_edit.setText(str(cfg["pulse_probability"]))
+        self.pulse_tau_rise_edit.setText(str(cfg["pulse_tau_rise"]))
+        self.pulse_tau_decay_edit.setText(str(cfg["pulse_tau_decay"]))
+        self.pulse_amplitude_edit.setText(str(cfg["pulse_amplitude"]))
+        resonators = cfg.get("pulse_resonators", "all")
+        if isinstance(resonators, list):
+            self.pulse_resonators_edit.setText(",".join(str(int(r)) for r in resonators))
+        else:
+            self.pulse_resonators_edit.setText(str(resonators))
+
+        # Random amplitude distribution
+        ram = str(cfg.get("pulse_random_amp_mode"))
+        idx_ram = max(0, self.random_amp_mode_combo.findText(ram))
+        self.random_amp_mode_combo.setCurrentIndex(idx_ram)
+        self.random_amp_min_edit.setText(str(cfg.get("pulse_random_amp_min")))
+        self.random_amp_max_edit.setText(str(cfg.get("pulse_random_amp_max")))
+        self.random_amp_logmean_edit.setText(str(cfg.get("pulse_random_amp_logmean")))
+        self.random_amp_logsigma_edit.setText(str(cfg.get("pulse_random_amp_logsigma")))
+        self._on_random_amp_mode_changed(self.random_amp_mode_combo.currentText())
 
     def _load_current_values(self):
         if not self.current_config:
@@ -413,8 +556,33 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.nqp_noise_std_edit.setText(str(cfg.get("nqp_noise_std_factor")))
         self.udp_noise_edit.setText(str(cfg.get("udp_noise_level")))
 
-        # Convergence
+        # Physics Realism
         self.conv_tol_edit.setText(str(cfg.get("convergence_tolerance")))
+        self.cache_freq_tol_edit.setText(str(cfg.get("cache_freq_tolerance")))
+        self.qp_change_thresh_edit.setText(str(cfg.get("qp_change_threshold")))
+        self.power_change_thresh_edit.setText(str(cfg.get("power_change_threshold")))
+
+        # QP Pulses
+        self.pulse_period_edit.setText(str(cfg.get("pulse_period")))
+        self.pulse_probability_edit.setText(str(cfg.get("pulse_probability")))
+        self.pulse_tau_rise_edit.setText(str(cfg.get("pulse_tau_rise")))
+        self.pulse_tau_decay_edit.setText(str(cfg.get("pulse_tau_decay")))
+        self.pulse_amplitude_edit.setText(str(cfg.get("pulse_amplitude")))
+        resonators = cfg.get("pulse_resonators", "all")
+        if isinstance(resonators, list):
+            self.pulse_resonators_edit.setText(",".join(str(int(r)) for r in resonators))
+        else:
+            self.pulse_resonators_edit.setText(str(resonators))
+
+        # Random amplitude distribution
+        ram = str(cfg.get("pulse_random_amp_mode"))
+        idx_ram = max(0, self.random_amp_mode_combo.findText(ram))
+        self.random_amp_mode_combo.setCurrentIndex(idx_ram)
+        self.random_amp_min_edit.setText(str(cfg.get("pulse_random_amp_min")))
+        self.random_amp_max_edit.setText(str(cfg.get("pulse_random_amp_max")))
+        self.random_amp_logmean_edit.setText(str(cfg.get("pulse_random_amp_logmean")))
+        self.random_amp_logsigma_edit.setText(str(cfg.get("pulse_random_amp_logsigma")))
+        self._on_random_amp_mode_changed(self.random_amp_mode_combo.currentText())
 
     def _validate_and_accept(self):
         # Frequency range
@@ -432,8 +600,19 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             # Readout
             float(self.Vin_edit.text()); float(self.input_atten_edit.text())
             float(self.system_termination_edit.text()); float(self.ZLNA_edit.text()); float(self.GLNA_db_spin.value())
-            # Noise and convergence
+            # Noise and physics realism
             float(self.nqp_noise_std_edit.text()); float(self.udp_noise_edit.text()); float(self.conv_tol_edit.text())
+            float(self.cache_freq_tol_edit.text())
+            float(self.qp_change_thresh_edit.text()); float(self.power_change_thresh_edit.text())
+            # QP Pulses
+            float(self.pulse_period_edit.text())
+            float(self.pulse_probability_edit.text())
+            float(self.pulse_tau_rise_edit.text())
+            float(self.pulse_tau_decay_edit.text())
+            float(self.pulse_amplitude_edit.text())
+            # Random distribution fields (parse regardless; defaults present)
+            float(self.random_amp_min_edit.text()); float(self.random_amp_max_edit.text())
+            float(self.random_amp_logmean_edit.text()); float(self.random_amp_logsigma_edit.text())
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Invalid Input", "Please enter valid numeric values for all fields.")
             return
@@ -481,6 +660,26 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             "nqp_noise_std_factor": float(self.nqp_noise_std_edit.text()),
             "udp_noise_level": float(self.udp_noise_edit.text()),
 
-            # Convergence
+            # Physics Realism
             "convergence_tolerance": float(self.conv_tol_edit.text()),
+            "cache_freq_tolerance": float(self.cache_freq_tol_edit.text()),
+            "qp_change_threshold": float(self.qp_change_thresh_edit.text()),
+            "power_change_threshold": float(self.power_change_thresh_edit.text()),
+
+            # QP Pulses
+            "pulse_period": float(self.pulse_period_edit.text()),
+            "pulse_probability": float(self.pulse_probability_edit.text()),
+            "pulse_tau_rise": float(self.pulse_tau_rise_edit.text()),
+            "pulse_tau_decay": float(self.pulse_tau_decay_edit.text()),
+            "pulse_amplitude": float(self.pulse_amplitude_edit.text()),
+            "pulse_resonators": (lambda txt: "all" if txt.strip().lower() == "all" or txt.strip()=="" else [
+                int(s) for s in [p.strip() for p in txt.split(",")] if s.isdigit()
+            ])(self.pulse_resonators_edit.text()),
+
+            # Random amplitude distribution (random mode)
+            "pulse_random_amp_mode": str(self.random_amp_mode_combo.currentText()),
+            "pulse_random_amp_min": float(self.random_amp_min_edit.text()),
+            "pulse_random_amp_max": float(self.random_amp_max_edit.text()),
+            "pulse_random_amp_logmean": float(self.random_amp_logmean_edit.text()),
+            "pulse_random_amp_logsigma": float(self.random_amp_logsigma_edit.text()),
         }

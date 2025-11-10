@@ -57,10 +57,6 @@ from rfmux.core.transferfunctions import convert_roc_to_volts
 from rfmux.core import mock_config as mc
 
 
-# Note: The original commented-out lines for specific UI class imports
-# (e.g., NetworkAnalysisDialog) have been removed, as these are expected
-# to be covered by 'from .ui import *'.
-
 
 class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     """
@@ -1772,7 +1768,43 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     # Apply configuration to server
                     future = asyncio.ensure_future(self.crs.generate_resonators(config))
                     resonator_count = loop.run_until_complete(future)
-                    
+
+                    # If QP pulses are currently active, re-apply the same mode with updated parameters
+                    try:
+                        if hasattr(self.crs, "set_pulse_mode") and getattr(self, "qp_pulse_mode", "none") in ("periodic", "random"):
+                            try:
+                                cfg = mc.apply_overrides(self.mock_config) if self.mock_config else mc.defaults()
+                            except Exception:
+                                cfg = mc.defaults()
+                            if self.qp_pulse_mode == "periodic":
+                                loop.run_until_complete(self.crs.set_pulse_mode(
+                                    "periodic",
+                                    period=cfg.get("pulse_period", 10.0),
+                                    tau_rise=cfg.get("pulse_tau_rise", 1e-6),
+                                    tau_decay=cfg.get("pulse_tau_decay", 1e-1),
+                                    amplitude=cfg.get("pulse_amplitude", 2.0),
+                                    resonators=cfg.get("pulse_resonators", "all"),
+                                ))
+                                print("[Periscope] Re-applied periodic QP pulses with updated parameters")
+                            elif self.qp_pulse_mode == "random":
+                                loop.run_until_complete(self.crs.set_pulse_mode(
+                                    "random",
+                                    probability=cfg.get("pulse_probability", 0.001),
+                                    tau_rise=cfg.get("pulse_tau_rise", 1e-6),
+                                    tau_decay=cfg.get("pulse_tau_decay", 1e-1),
+                                    amplitude=cfg.get("pulse_amplitude", 2.0),
+                                    resonators=cfg.get("pulse_resonators", "all"),
+                                    # Random amplitude distribution
+                                    random_amp_mode=cfg.get("pulse_random_amp_mode", "fixed"),
+                                    random_amp_min=cfg.get("pulse_random_amp_min", 1.5),
+                                    random_amp_max=cfg.get("pulse_random_amp_max", 3.0),
+                                    random_amp_logmean=cfg.get("pulse_random_amp_logmean", 0.7),
+                                    random_amp_logsigma=cfg.get("pulse_random_amp_logsigma", 0.3),
+                                ))
+                                print("[Periscope] Re-applied random QP pulses with updated parameters")
+                    except Exception as e2:
+                        print(f"[Periscope] Warning: failed to re-apply QP pulse mode after reconfigure: {e2}")
+
                     print(f"Regenerated {resonator_count} resonators with new parameters")
                     QtWidgets.QMessageBox.information(self, "Configuration Applied", 
                                                    f"Mock KID parameters have been updated.\n"
@@ -1824,37 +1856,63 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 # Create new event loop for this thread
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
+
+                # Use current mock configuration (dialog) or defaults
+                try:
+                    cfg = mc.apply_overrides(self.mock_config) if self.mock_config else mc.defaults()
+                except Exception:
+                    cfg = mc.defaults()
                 
                 # Cycle through pulse modes
                 if self.qp_pulse_mode == 'none':
                     # Switch to periodic mode
                     self.qp_pulse_mode = 'periodic'
                     
-                    # Configure periodic pulses with reasonable parameters
+                    # Configure periodic pulses using unified config
                     loop.run_until_complete(self.crs.set_pulse_mode(
                         'periodic',
-                        period=10.0,        # 10 second intervals
-                        tau_rise=1e-6,      # 1 microsecond rise time
-                        tau_decay=1e-1,     # 1 millisecond decay time
-                        amplitude=10.0,      # Double the base QP density
-                        resonators='all'    # Apply to all resonators
+                        period=cfg.get('pulse_period', 10.0),
+                        tau_rise=cfg.get('pulse_tau_rise', 1e-6),
+                        tau_decay=cfg.get('pulse_tau_decay', 1e-1),
+                        amplitude=cfg.get('pulse_amplitude', 2.0),
+                        resonators=cfg.get('pulse_resonators', 'all')
                     ))
-                    print("[Periscope] Enabled periodic QP pulses (10s intervals)")
+                    # Sync SoT
+                    try:
+                        if self.mock_config is None:
+                            self.mock_config = mc.defaults()
+                        self.mock_config['pulse_mode'] = 'periodic'
+                    except Exception:
+                        pass
+                    print(f"[Periscope] Enabled periodic QP pulses (period={cfg.get('pulse_period', 10.0)}s)")
                     
                 elif self.qp_pulse_mode == 'periodic':
                     # Switch to random mode
                     self.qp_pulse_mode = 'random'
                     
-                    # Configure random pulses with low probability
+                    # Configure random pulses using unified config
                     loop.run_until_complete(self.crs.set_pulse_mode(
                         'random',
-                        probability=0.001,  # 0.1% chance per timestep
-                        tau_rise=1e-6,      # 1 microsecond rise time
-                        tau_decay=1e-1,     # 1 millisecond decay time
-                        amplitude=10.0,      # Double the base QP density
-                        resonators='all'    # Apply to all resonators
+                        probability=cfg.get('pulse_probability', 0.001),
+                        tau_rise=cfg.get('pulse_tau_rise', 1e-6),
+                        tau_decay=cfg.get('pulse_tau_decay', 1e-1),
+                        amplitude=cfg.get('pulse_amplitude', 2.0),
+                        resonators=cfg.get('pulse_resonators', 'all'),
+                        # Random amplitude distribution (random mode)
+                        random_amp_mode=cfg.get('pulse_random_amp_mode', 'fixed'),
+                        random_amp_min=cfg.get('pulse_random_amp_min', 1.5),
+                        random_amp_max=cfg.get('pulse_random_amp_max', 3.0),
+                        random_amp_logmean=cfg.get('pulse_random_amp_logmean', 0.7),
+                        random_amp_logsigma=cfg.get('pulse_random_amp_logsigma', 0.3),
                     ))
-                    print("[Periscope] Enabled random QP pulses (0.1% probability)")
+                    # Sync SoT
+                    try:
+                        if self.mock_config is None:
+                            self.mock_config = mc.defaults()
+                        self.mock_config['pulse_mode'] = 'random'
+                    except Exception:
+                        pass
+                    print(f"[Periscope] Enabled random QP pulses (prob={cfg.get('pulse_probability', 0.001)}/s)")
                     
                 elif self.qp_pulse_mode == 'random':
                     # Switch back to off
@@ -1862,6 +1920,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     
                     # Disable pulses
                     loop.run_until_complete(self.crs.set_pulse_mode('none'))
+                    try:
+                        if self.mock_config is None:
+                            self.mock_config = mc.defaults()
+                        self.mock_config['pulse_mode'] = 'none'
+                    except Exception:
+                        pass
                     print("[Periscope] Disabled QP pulses")
                 
                 # Update UI on main thread
@@ -1897,10 +1961,48 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.btn_qp_pulses.setText("QP Pulses: Off")
         
         # Update tooltip to show current state
+        # Compose tooltip including active parameters
+        try:
+            cfg = mc.apply_overrides(self.mock_config) if self.mock_config else mc.defaults()
+        except Exception:
+            cfg = mc.defaults()
+        extra = ""
+        if self.qp_pulse_mode == 'periodic':
+            extra = f"\nPeriod={cfg.get('pulse_period', 10.0)} s, tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, tau_decay={cfg.get('pulse_tau_decay', 1e-1)} s, amp={cfg.get('pulse_amplitude', 2.0)}, res={cfg.get('pulse_resonators', 'all')}"
+        elif self.qp_pulse_mode == 'random':
+            ram = cfg.get('pulse_random_amp_mode', 'fixed')
+            if ram == 'uniform':
+                amin = cfg.get('pulse_random_amp_min', 1.5)
+                amax = cfg.get('pulse_random_amp_max', 3.0)
+                extra = (
+                    f"\nProb={cfg.get('pulse_probability', 0.001)}/s, "
+                    f"tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, "
+                    f"tau_decay={cfg.get('pulse_tau_decay', 1e-1)} s, "
+                    f"ampMode=uniform[{amin},{amax}], "
+                    f"res={cfg.get('pulse_resonators', 'all')}"
+                )
+            elif ram == 'lognormal':
+                mu = cfg.get('pulse_random_amp_logmean', 0.7)
+                sigma = cfg.get('pulse_random_amp_logsigma', 0.3)
+                extra = (
+                    f"\nProb={cfg.get('pulse_probability', 0.001)}/s, "
+                    f"tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, "
+                    f"tau_decay={cfg.get('pulse_tau_decay', 1e-1)} s, "
+                    f"ampMode=lognormal[μ={mu},σ={sigma}], "
+                    f"res={cfg.get('pulse_resonators', 'all')}"
+                )
+            else:
+                extra = (
+                    f"\nProb={cfg.get('pulse_probability', 0.001)}/s, "
+                    f"tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, "
+                    f"tau_decay={cfg.get('pulse_tau_decay', 1e-1)} s, "
+                    f"amp=fixed({cfg.get('pulse_amplitude', 2.0)}), "
+                    f"res={cfg.get('pulse_resonators', 'all')}"
+                )
         tooltip_text = (
             f"Toggle quasiparticle pulses in mock mode\n"
             f"Current: {self.qp_pulse_mode.title()}\n"
-            f"Cycles through: Off → Periodic → Random → Off"
+            f"Cycles through: Off → Periodic → Random → Off{extra}"
         )
         self.btn_qp_pulses.setToolTip(tooltip_text)
     

@@ -80,8 +80,15 @@ class MockResonatorModel:
             'probability': 0.001, # per-timestep probability (for random mode)
             'tau_rise': 1e-6,    # rise time constant (seconds)
             'tau_decay': 1e-1,   # decay time constant (seconds)
-            'amplitude': 10.0,    # multiplicative factor relative to base_nqp (2.0 = double the base nqp)
+            'amplitude': 10.0,    # multiplicative factor relative to base nqp (2.0 = double the base nqp)
             'resonators': 'all', # 'all' or list of resonator indices
+
+            # Random pulse amplitude distribution (random mode only)
+            'random_amp_mode': 'fixed',   # 'fixed' | 'uniform' | 'lognormal'
+            'random_amp_min': 1.5,        # for uniform mode
+            'random_amp_max': 3.0,        # for uniform mode
+            'random_amp_logmean': 0.7,    # for lognormal mode
+            'random_amp_logsigma': 0.3,   # for lognormal mode
         }
         self.last_pulse_time = {}  # Track last pulse time for each resonator
         self.last_update_time = 0  # Track last time we updated QP densities
@@ -251,6 +258,8 @@ class MockResonatorModel:
         # Clear convergence state when resonators change
         self._last_convergence = {'freq': None, 'amp': None, 'nqp_snapshot': None}
         self._convergence_stats = {'full': 0, 'skipped': 0, 'last_reason': None}
+        # Also clear convergence cache to avoid size mismatches after reconfiguration
+        self._convergence_cache.clear()
         
         # Configure noise parameters from config
         # Uses defaults from mock_crs_helper.py if not specified
@@ -453,7 +462,13 @@ class MockResonatorModel:
                 tau_rise=config.get('pulse_tau_rise', 1e-6),
                 tau_decay=config.get('pulse_tau_decay', 1e-3),
                 amplitude=config.get('pulse_amplitude', 2.0),
-                resonators=config.get('pulse_resonators', 'all')
+                resonators=config.get('pulse_resonators', 'all'),
+                # Random amplitude distribution (random mode)
+                random_amp_mode=config.get('pulse_random_amp_mode', 'fixed'),
+                random_amp_min=config.get('pulse_random_amp_min', 1.5),
+                random_amp_max=config.get('pulse_random_amp_max', 3.0),
+                random_amp_logmean=config.get('pulse_random_amp_logmean', 0.7),
+                random_amp_logsigma=config.get('pulse_random_amp_logsigma', 0.3),
             )
         
         self.invalidate_caches()
@@ -522,12 +537,16 @@ class MockResonatorModel:
             # Compare current QP state to cached QP state
             cached_qp = cached_data.get('qp_state', effective_nqp) if isinstance(cached_data, dict) else effective_nqp
             
-            # Calculate maximum QP change fraction across all resonators
+            # Calculate maximum QP change fraction across all resonators (handle size mismatches safely)
             max_qp_change = 0.0
-            for i in range(len(effective_nqp)):
+            n_compare = min(len(effective_nqp), len(cached_qp))
+            for i in range(n_compare):
                 if cached_qp[i] > 0:
                     qp_change = abs(effective_nqp[i] - cached_qp[i]) / cached_qp[i]
                     max_qp_change = max(max_qp_change, qp_change)
+            # If sizes differ, force full convergence
+            if len(effective_nqp) != len(cached_qp):
+                max_qp_change = 1.0  # exceeds any reasonable threshold to trigger recalc
             
             # Check if power changed significantly (frequency or amplitude)
             # Compare against actual cached values, not rounded keys
@@ -935,6 +954,22 @@ class MockResonatorModel:
         self.pulse_events = [p for p in self.pulse_events 
                            if current_time - p['start_time'] < p['tau_rise'] + p['tau_decay'] * 15]
     
+    def _sample_random_pulse_amplitude(self):
+        """Sample a pulse amplitude for random mode based on configured distribution."""
+        mode = self.pulse_config.get('random_amp_mode', 'fixed')
+        if mode == 'uniform':
+            amin = float(self.pulse_config.get('random_amp_min', 1.5))
+            amax = float(self.pulse_config.get('random_amp_max', 3.0))
+            amp = np.random.uniform(amin, amax)
+        elif mode == 'lognormal':
+            mu = float(self.pulse_config.get('random_amp_logmean', 0.7))
+            sigma = float(self.pulse_config.get('random_amp_logsigma', 0.3))
+            amp = np.random.lognormal(mean=mu, sigma=sigma)
+        else:
+            amp = float(self.pulse_config.get('amplitude', 2.0))
+        # Enforce non-decreasing QP unless explicitly configured otherwise
+        return max(1.0, amp)
+
     def _check_trigger_pulses(self, current_time, dt):
         """Check if new pulses should be triggered based on mode.
         
@@ -970,7 +1005,8 @@ class MockResonatorModel:
             prob = self.pulse_config['probability']
             for res_idx in target_resonators:
                 if np.random.random() < prob * dt:
-                    self.add_pulse_event(res_idx, current_time)
+                    amp = self._sample_random_pulse_amplitude()
+                    self.add_pulse_event(res_idx, current_time, amplitude=amp)
                     self.last_pulse_time[res_idx] = current_time
     
     def add_pulse_event(self, resonator_index, start_time, amplitude=None):

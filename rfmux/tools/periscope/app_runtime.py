@@ -828,12 +828,6 @@ class PeriscopeRuntime:
                         self.sim_speed_label.setStyleSheet("color: orange;")  # Very slow
                     else:
                         self.sim_speed_label.setStyleSheet("")  # Normal (near real-time)
-                    # elif sim_speed < 0.9:
-                    #     self.sim_speed_label.setStyleSheet("color: orange;")  # Slow
-                    # elif sim_speed > 1.1:
-                    #     self.sim_speed_label.setStyleSheet("color: green;")  # Fast
-                    # else:
-                    #     
 
             # Color packet loss red if > 1%
             if percent > 1:

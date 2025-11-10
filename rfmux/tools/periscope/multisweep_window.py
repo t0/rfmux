@@ -1099,7 +1099,13 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
     def _open_noise_spectrum_dialog(self):
         num_res = len(self.conceptual_resonance_frequencies)
-        noise_dialog = NoiseSpectrumDialog(self, num_res)
+        if self.parent().crs is None: 
+            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available") 
+            return
+        else:
+            crs = self.parent().crs
+            
+        noise_dialog = NoiseSpectrumDialog(self, num_res, crs)
         if noise_dialog.exec():
             params = noise_dialog.get_parameters()
             self._get_spectrum(params)
@@ -1125,8 +1131,13 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             crs = self.parent().crs
 
         time_taken = params['time_taken']
-        pfb_time_taken = params['pfb_time']
-        print("The total time will also pfb time of", pfb_time_taken, "s")
+        pfb_enabled = params['pfb_enabled']
+        
+        if pfb_enabled:
+            pfb_time_taken = params['pfb_time']
+        else:
+            pfb_time_taken = 0
+            
         t = time.time() + time_taken + pfb_time_taken
         formatted_time = time.strftime("%H:%M:%S", time.localtime(t))
         # Show a progress dialog
@@ -1146,8 +1157,10 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             spec_lim = params['spectrum_limit']
             module = self.target_module
             curr_decimation = asyncio.run(crs.get_decimation())
-            overlap = params['overlap']
-            pfb_samples = params['pfb_samples']
+
+            if pfb_enabled:
+                overlap = params['overlap']
+                pfb_samples = params['pfb_samples']
     
             if curr_decimation != decimation:
                 self._set_decimation(crs, decimation)
@@ -1182,46 +1195,47 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 amplitudes.append(amp_dmb)
 
                 #### Also running pfb_samples ####
-                pfb_data = asyncio.run(crs.py_get_pfb_samples(pfb_samples,
-                                                              channel = i + 1,
-                                                              module = module,
-                                                              binlim = 1e6,
-                                                              trim = True,
-                                                              nsegments = num_segments,
-                                                              reference = reference,
-                                                              reset_NCO = False))
-
-                psd_i = pfb_data.spectrum.psd_i
-                pfb_psd_i.append(psd_i)
-                
-                psd_q = pfb_data.spectrum.psd_q
-                pfb_psd_q.append(psd_q)
-                
-                I = pfb_data.i
-                pfb_i.append(I)
-                
-                Q = pfb_data.q
-                pfb_q.append(Q)
-                
-                dual = pfb_data.spectrum.psd_dual_sideband
-                pfb_dual.append(dual)
-                
-                freq_iq = pfb_data.spectrum.freq_iq
-                pfb_freq_iq.append(freq_iq)
-                
-                freq_dsb = pfb_data.spectrum.freq_dsb
-                pfb_freq_dsb.append(freq_dsb)
+                if pfb_enabled:
+                    pfb_data = asyncio.run(crs.py_get_pfb_samples(pfb_samples,
+                                                                  channel = i + 1,
+                                                                  module = module,
+                                                                  binlim = 1e6,
+                                                                  trim = True,
+                                                                  nsegments = num_segments,
+                                                                  reference = reference,
+                                                                  reset_NCO = False))
+    
+                    psd_i = pfb_data.spectrum.psd_i
+                    pfb_psd_i.append(psd_i)
+                    
+                    psd_q = pfb_data.spectrum.psd_q
+                    pfb_psd_q.append(psd_q)
+                    
+                    I = pfb_data.i
+                    pfb_i.append(I)
+                    
+                    Q = pfb_data.q
+                    pfb_q.append(Q)
+                    
+                    dual = pfb_data.spectrum.psd_dual_sideband
+                    pfb_dual.append(dual)
+                    
+                    freq_iq = pfb_data.spectrum.freq_iq
+                    pfb_freq_iq.append(freq_iq)
+                    
+                    freq_dsb = pfb_data.spectrum.freq_dsb
+                    pfb_freq_dsb.append(freq_dsb)
 
                 #### Getting pfb time stamps for plotting #####
 
-            total_time = 1/2.44e6 * pfb_samples #### 2.44 MSS is the rate 
-            ts_pfb = list(np.linspace(0, total_time, pfb_samples))
+            if pfb_enabled:
+                total_time = 1/2.44e6 * pfb_samples #### 2.44 MSS is the rate 
+                ts_pfb = list(np.linspace(0, total_time, pfb_samples))
                 
             
             slow_freq = max(spectrum_data.spectrum.freq_iq)/spec_lim
             fast_freq = 1.22e6   
 
-            print("Final length of frequencies", len(pfb_freq_iq))
 
             
             data = {}
@@ -1238,16 +1252,22 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             data['slow_freq_hz'] = slow_freq
             data['fast_freq_hz'] = fast_freq
 
+
             ##### pfb data ####
-            data['pfb_ts'] = ts_pfb
-            data['pfb_I'] = pfb_i
-            data['pfb_Q'] = pfb_q
-            data['pfb_freq_iq'] = pfb_freq_iq
-            data['pfb_psd_i'] = pfb_psd_i
-            data['pfb_psd_q'] = pfb_psd_q
-            data['pfb_freq_dsb'] = pfb_freq_dsb
-            data['pfb_dual_psd'] = pfb_dual
-            data['overlap'] = overlap
+            if pfb_enabled:
+                data['pfb_enabled'] = True
+                data['pfb_ts'] = ts_pfb
+                data['pfb_I'] = pfb_i
+                data['pfb_Q'] = pfb_q
+                data['pfb_freq_iq'] = pfb_freq_iq
+                data['pfb_psd_i'] = pfb_psd_i
+                data['pfb_psd_q'] = pfb_psd_q
+                data['pfb_freq_dsb'] = pfb_freq_dsb
+                data['pfb_dual_psd'] = pfb_dual
+                data['overlap'] = overlap
+
+            else:
+                data['pfb_enabled'] = False
             
             self.spectrum_noise_data['data'] = data
             

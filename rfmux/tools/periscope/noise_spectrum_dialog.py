@@ -16,7 +16,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
     Dialog for configuring noise spectrum parameters with live dependency updates.
     """
 
-    def __init__(self, parent=None, num_resonances = 0): #### Remmove the decimation function
+    def __init__(self, parent=None, num_resonances = 0, crs = None): #### Remmove the decimation function
         """
         Args:
             parent: Parent QWidget.
@@ -32,9 +32,15 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         
         self.nres = num_resonances
 
+        if crs is not None:
+            self.crs = crs
+        else:
+            print("Error no crs object found!")
+
         self._setup_ui()
         self._connect_signals()
         self._update_dependent_values()
+
 
 
         ##### Add here the number of resonances/frequencies here ####
@@ -105,20 +111,39 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         layout.addRow(status_label, self.status_label)
 
 
-        pfb_samples = 100000 ### Can do million but plotting slows down
-        time_pfb = 0.041 * self.nres ##### it takes 1/2.44e6 seconds to get one sample for one resonance, so 0.041 for 100,000 * nres ####
-
-        self.pfb_time_taken_label = QtWidgets.QLabel(f"{str(time_pfb)} s")
-        self.pfb_time_taken_label.setToolTip("Displays estimated capture time (in seconds) for pfb, provided no failures.")
-        layout.addRow("Estimated PFB Time:", self.pfb_time_taken_label)
-
+        # ------------------------------------------------------
+        # PFB Section (hidden under checkbox)
+        # ------------------------------------------------------
+        self.pfb_checkbox = QtWidgets.QCheckBox("Enable PFB spectrum")
+        self.pfb_checkbox.setToolTip("Get PFB spectrum as well.")
+        if self.crs.serial == "MOCK0001":
+            self.pfb_checkbox.hide()
+        layout.addRow(self.pfb_checkbox)
+        
+        # Create a sub-layout for PFB-related info
+        self.pfb_group = QtWidgets.QWidget()
+        pfb_layout = QtWidgets.QFormLayout(self.pfb_group)
+        
+        # PFB Calculations
+        pfb_samples = 100_000
+        time_pfb = 0.041 * self.nres  # Example computation
+        
+        self.pfb_time_taken_label = QtWidgets.QLabel(f"{time_pfb:.3f} s")
+        self.pfb_time_taken_label.setToolTip("Displays estimated capture time (in seconds) for PFB, provided no failures.")
+        pfb_layout.addRow("Estimated PFB Time:", self.pfb_time_taken_label)
+        
         self.pfb_samples = QtWidgets.QLabel(str(pfb_samples))
-        self.pfb_samples.setToolTip("Number of pfb samples")
-        layout.addRow("PFB samples:", self.pfb_samples)
-
+        self.pfb_samples.setToolTip("Number of PFB samples.")
+        pfb_layout.addRow("PFB Samples:", self.pfb_samples)
+        
         self.overlap_sample = QtWidgets.QLabel("0")
-        self.overlap_sample.setToolTip("Internally estimated overlapping frequency samples in the final spectrum, decrease segment or decimation to get more overlap.")
-        layout.addRow("Overlapping samples:", self.overlap_sample)
+        self.overlap_sample.setToolTip("Internally estimated overlapping frequency samples. Reduce decimation or segments for more overlap.")
+        pfb_layout.addRow("Overlapping Samples:", self.overlap_sample)
+
+        
+        # Hide by default
+        self.pfb_group.setVisible(False)
+        layout.addRow(self.pfb_group)
 
 
         # Dialog Buttons
@@ -130,6 +155,8 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
 
+        self.pfb_checkbox.toggled.connect(self._toggle_pfb_section)
+
         self.resize(500, 500)
 
     # ------------------------------------------------------
@@ -140,6 +167,10 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         self.spectrum_limit_input.valueChanged.connect(self._update_dependent_values)
         self.segments_edit.textChanged.connect(self._update_dependent_values)
         self.decimation_input.valueChanged.connect(self._update_dependent_values)
+
+    def _toggle_pfb_section(self, checked: bool):
+        """Show or hide the PFB configuration section."""
+        self.pfb_group.setVisible(checked)
 
 
     # ------------------------------------------------------
@@ -175,8 +206,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
 
         samp_ratio = 1000000/int(pfb_samps)
 
-        overlap = ((7840 * spectrum_limit)/(2**decimation * segments * samp_ratio)) * 0.6
-
+        overlap = ((7840 * spectrum_limit)/(2**decimation * segments * samp_ratio)) * 0.6            
 
         # --- Update UI ---
         self.highest_freq_label.setText(f"{effective_highest_freq:.2f} Hz")
@@ -234,11 +264,12 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         highest_freq = self.highest_freq_label.text().split()[0]
         time_taken = self.time_taken_label.text().split()[0]
         freq_res = self.freq_resolution_label.text().split()[0]
+        
         pfb_samps = self.pfb_samples.text()
         pfb_time = self.pfb_time_taken_label.text().split()[0]
         overlap_samps = self.overlap_sample.text()
         
-        return {
+        params = {
             "num_samples": self._safe_int(self.samples_edit.text(), 10000),
             "spectrum_limit": self.spectrum_limit_input.value(),
             "num_segments": self._safe_int(self.segments_edit.text(), 10),
@@ -246,8 +277,14 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
             "reference" : self.reference_input.currentText(),
             "effective_highest_freq": float(highest_freq),
             "time_taken": float(time_taken),
-            "freq_resolution" : float(freq_res),
-            "pfb_samples" : self._safe_int(pfb_samps, 1000000),
-            "pfb_time" : float(pfb_time),
-            "overlap" : int(overlap_samps),
+            "freq_resolution" : float(freq_res)
         }
+        if self.pfb_checkbox.isChecked():
+            params["pfb_enabled"] = True
+            params["pfb_samples"] = self._safe_int(pfb_samps, 1000000)
+            params["pfb_time"] = float(pfb_time)
+            params["overlap"] = int(overlap_samps)
+        else:
+            params["pfb_enabled"] = False
+
+        return params

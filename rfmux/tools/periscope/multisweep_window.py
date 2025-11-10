@@ -1098,7 +1098,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
 
     def _open_noise_spectrum_dialog(self):
-        noise_dialog = NoiseSpectrumDialog(self)
+        num_res = len(self.conceptual_resonance_frequencies)
+        noise_dialog = NoiseSpectrumDialog(self, num_res)
         if noise_dialog.exec():
             params = noise_dialog.get_parameters()
             self._get_spectrum(params)
@@ -1124,7 +1125,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             crs = self.parent().crs
 
         time_taken = params['time_taken']
-        t = time.time() + time_taken
+        pfb_time_taken = params['pfb_time']
+        print("The total time will also pfb time of", pfb_time_taken, "s")
+        t = time.time() + time_taken + pfb_time_taken
         formatted_time = time.strftime("%H:%M:%S", time.localtime(t))
         # Show a progress dialog
         progress = QtWidgets.QProgressDialog(f"Getting noise spectrum...\n\nCompletion time {formatted_time}", None, 0, 0, self)
@@ -1142,8 +1145,9 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             reference = params['reference']
             spec_lim = params['spectrum_limit']
             module = self.target_module
-    
             curr_decimation = asyncio.run(crs.get_decimation())
+            overlap = params['overlap']
+            pfb_samples = params['pfb_samples']
     
             if curr_decimation != decimation:
                 self._set_decimation(crs, decimation)
@@ -1164,13 +1168,60 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             amplitudes = []
             dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
 
+            pfb_psd_i = []
+            pfb_psd_q = []
+            pfb_dual = []
+            pfb_i = []
+            pfb_q = []
+            pfb_freq_iq = []
+            pfb_freq_dsb = []
+
             for i in range(num_res):
                 amp = asyncio.run(crs.get_amplitude(channel=i+1, module = module))
                 amp_dmb = UnitConverter.normalize_to_dbm(amp, dac_scale_for_module)
                 amplitudes.append(amp_dmb)
+
+                #### Also running pfb_samples ####
+                pfb_data = asyncio.run(crs.py_get_pfb_samples(pfb_samples,
+                                                              channel = i + 1,
+                                                              module = module,
+                                                              binlim = 1e6,
+                                                              trim = True,
+                                                              nsegments = num_segments,
+                                                              reference = reference,
+                                                              reset_NCO = False))
+
+                psd_i = pfb_data.spectrum.psd_i
+                pfb_psd_i.append(psd_i)
+                
+                psd_q = pfb_data.spectrum.psd_q
+                pfb_psd_q.append(psd_q)
+                
+                I = pfb_data.i
+                pfb_i.append(I)
+                
+                Q = pfb_data.q
+                pfb_q.append(Q)
+                
+                dual = pfb_data.spectrum.psd_dual_sideband
+                pfb_dual.append(dual)
+                
+                freq_iq = pfb_data.spectrum.freq_iq
+                pfb_freq_iq.append(freq_iq)
+                
+                freq_dsb = pfb_data.spectrum.freq_dsb
+                pfb_freq_dsb.append(freq_dsb)
+
+                #### Getting pfb time stamps for plotting #####
+
+            total_time = 1/2.44e6 * pfb_samples #### 2.44 MSS is the rate 
+            ts_pfb = list(np.linspace(0, total_time, pfb_samples))
+                
             
             slow_freq = max(spectrum_data.spectrum.freq_iq)/spec_lim
-            fast_freq = 1.22e6
+            fast_freq = 1.22e6   
+
+            print("Final length of frequencies", len(pfb_freq_iq))
 
             
             data = {}
@@ -1183,10 +1234,21 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             data['single_psd_q'] = spectrum_data.spectrum.psd_q[0:num_res]
             data['freq_dsb'] = spectrum_data.spectrum.freq_dsb
             data['dual_psd'] = spectrum_data.spectrum.psd_dual_sideband[0:num_res]
-            data['amplitudes'] = amplitudes
+            data['amplitudes_dbm'] = amplitudes
             data['slow_freq_hz'] = slow_freq
             data['fast_freq_hz'] = fast_freq
 
+            ##### pfb data ####
+            data['pfb_ts'] = ts_pfb
+            data['pfb_I'] = pfb_i
+            data['pfb_Q'] = pfb_q
+            data['pfb_freq_iq'] = pfb_freq_iq
+            data['pfb_psd_i'] = pfb_psd_i
+            data['pfb_psd_q'] = pfb_psd_q
+            data['pfb_freq_dsb'] = pfb_freq_dsb
+            data['pfb_dual_psd'] = pfb_dual
+            data['overlap'] = overlap
+            
             self.spectrum_noise_data['data'] = data
             
         except Exception as e:

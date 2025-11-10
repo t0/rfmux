@@ -29,6 +29,10 @@ class MockResonatorModel:
             An instance of the MockCRS to access its state (frequencies, amplitudes, etc.)
         """
         self.mock_crs = mock_crs  # Store a reference to the main MockCRS instance
+        
+        # Import default configuration from Single Source of Truth
+        from .mock_config import defaults as get_defaults
+        default_config = get_defaults()
 
         # Store persistent mr_resonator objects to avoid memory leaks
         self.mr_lekids = []  # List of persistent MR_LEKID objects
@@ -40,15 +44,15 @@ class MockResonatorModel:
         # Store base nqp values computed from physics
         self.base_nqp_values = []    # Base quasiparticle density for each resonator
         
-        # Noise configuration
-        self.nqp_noise_enabled = True
-        self.nqp_noise_std_factor = 0.001  # Default 0.1% noise (realistic for detectors)
+        # Noise configuration from SoT
+        self.nqp_noise_enabled = default_config['nqp_noise_enabled']
+        self.nqp_noise_std_factor = default_config['nqp_noise_std_factor']
         
         # Current effects (affects Lk only, applied after physics-based base params)
         self.lk_current_factors = []  # Lk_total = Lk_base * lk_current_factor
         
         # Physical constants
-        self.Istar = 5e-3  # Characteristic current [A]
+        self.Istar = 5e-3  # Characteristic current [A] - This is a physical constant, not a config param
         
         # Resonator metadata (parallel arrays to mr_lekids)
         self.resonator_frequencies = []  # Resonance frequencies for each LEKID
@@ -72,23 +76,22 @@ class MockResonatorModel:
         self._cic_cache = {}  # Cache CIC filter responses
         self._cache_valid = False
         
-        # Pulse event tracking for time-dependent QP density
+        # Pulse event tracking for time-dependent QP density - from SoT
         self.pulse_events = []  # List of active pulses
         self.pulse_config = {
-            'mode': 'none',      # 'periodic', 'random', 'manual', or 'none'
-            'period': 10.0,      # seconds (for periodic mode)
-            'probability': 0.001, # per-timestep probability (for random mode)
-            'tau_rise': 1e-6,    # rise time constant (seconds)
-            'tau_decay': 1e-1,   # decay time constant (seconds)
-            'amplitude': 10.0,    # multiplicative factor relative to base nqp (2.0 = double the base nqp)
-            'resonators': 'all', # 'all' or list of resonator indices
-
-            # Random pulse amplitude distribution (random mode only)
-            'random_amp_mode': 'fixed',   # 'fixed' | 'uniform' | 'lognormal'
-            'random_amp_min': 1.5,        # for uniform mode
-            'random_amp_max': 3.0,        # for uniform mode
-            'random_amp_logmean': 0.7,    # for lognormal mode
-            'random_amp_logsigma': 0.3,   # for lognormal mode
+            'mode': default_config['pulse_mode'],
+            'period': default_config['pulse_period'],
+            'probability': default_config['pulse_probability'],
+            'tau_rise': default_config['pulse_tau_rise'],
+            'tau_decay': default_config['pulse_tau_decay'],
+            'amplitude': default_config['pulse_amplitude'],
+            'resonators': default_config['pulse_resonators'],
+            # Random pulse amplitude distribution
+            'random_amp_mode': default_config['pulse_random_amp_mode'],
+            'random_amp_min': default_config['pulse_random_amp_min'],
+            'random_amp_max': default_config['pulse_random_amp_max'],
+            'random_amp_logmean': default_config['pulse_random_amp_logmean'],
+            'random_amp_logsigma': default_config['pulse_random_amp_logsigma'],
         }
         self.last_pulse_time = {}  # Track last pulse time for each resonator
         self.last_update_time = 0  # Track last time we updated QP densities
@@ -101,10 +104,9 @@ class MockResonatorModel:
         self.Cc_array = None
         self.L_junk_array = None
         
-        # Per-operating-point convergence cache
-        # Key: (rounded_freq, rounded_amp), Value: dict with factors and state
+        # Per-operating-point convergence cache from SoT
         self._convergence_cache = {}
-        self._convergence_cache_max_size = 1000000  # Limit cache size to 1 million entries
+        self._convergence_cache_max_size = default_config['convergence_cache_max_size']
 
         # Statistics tracking
         self._convergence_stats = {
@@ -113,13 +115,16 @@ class MockResonatorModel:
             'last_reason': None
         }
         
-        # Tolerance settings for convergence optimization
+        # Tolerance settings from SoT - note: these use the old names for backward compat
+        # but will be overridden in generate_resonators with new names
         self._tolerance_config = {
-            'cache_freq_tolerance': 1e3,    # Hz - how closely frequencies must match 
-            'cache_amp_tolerance': 0.00001,   # Fractional - how closely amplitudes must match
-            'qp_change_threshold': 0.01,    # 1% - fractional QP change to trigger recalc
-            'power_change_threshold': 0.001, # 0.1% - fractional power change to trigger recalc
+            'cache_freq_tolerance': default_config.get('cache_freq_step', 1e3),
+            'cache_amp_tolerance': default_config.get('cache_amp_step', 1e-5),
+            'qp_change_threshold': default_config.get('cache_qp_step', 0.001),
         }
+        # Cache/logging controls from SoT
+        self._resonator_gen = 0
+        self._cache_log_counter = 0
 
     def _extract_param_arrays(self):
         """Extract LEKID parameters into numpy arrays for vectorized calculations."""
@@ -260,6 +265,10 @@ class MockResonatorModel:
         self._convergence_stats = {'full': 0, 'skipped': 0, 'last_reason': None}
         # Also clear convergence cache to avoid size mismatches after reconfiguration
         self._convergence_cache.clear()
+        # Bump generation and clear pulses/schedules
+        self._resonator_gen += 1
+        self.pulse_events = []
+        self.last_pulse_time = {}
         
         # Configure noise parameters from config
         # Uses defaults from mock_crs_helper.py if not specified
@@ -270,7 +279,6 @@ class MockResonatorModel:
         self._tolerance_config['cache_freq_tolerance'] = config.get('cache_freq_tolerance', self._tolerance_config['cache_freq_tolerance'])
         self._tolerance_config['cache_amp_tolerance'] = config.get('cache_amp_tolerance', self._tolerance_config['cache_amp_tolerance'])
         self._tolerance_config['qp_change_threshold'] = config.get('qp_change_threshold', self._tolerance_config['qp_change_threshold'])
-        self._tolerance_config['power_change_threshold'] = config.get('power_change_threshold', self._tolerance_config['power_change_threshold'])
         
         print(f"Tolerance settings: freq={self._tolerance_config['cache_freq_tolerance']} Hz, "
               f"amp={self._tolerance_config['cache_amp_tolerance']}, "
@@ -520,76 +528,105 @@ class MockResonatorModel:
         # Always update R,Lk from physics (fast, preserves IQ behavior)
         self.update_base_params_from_nqp(effective_nqp)
         
-        # === OPTIMIZATION: Check if we need convergence ===
-        # Create cache key for this operating point using configurable tolerances
-        freq_tol = self._tolerance_config['cache_freq_tolerance']
-        amp_tol = self._tolerance_config['cache_amp_tolerance']
-        freq_key = round(frequency / freq_tol) * freq_tol
-        amp_key = round(amplitude / amp_tol) * amp_tol
-        cache_key = (freq_key, amp_key)
+        # === OPTIMIZATION: Check if we need convergence (per-resonator qp-aware key) ===
+        # Compute nearest resonator by current f0 estimate
+        f0_list = []
+        for lek in self.mr_lekids:
+            try:
+                L_eff = max(lek.L, 1e-30)
+                C_eff = max(lek.C, 1e-30)
+                f0_list.append(1.0 / (2.0 * np.pi * np.sqrt(L_eff * C_eff)))
+            except Exception:
+                f0_list.append(0.0)
+        if f0_list:
+            nearest_idx = int(np.argmin(np.abs(np.array(f0_list) - frequency)))
+        else:
+            nearest_idx = 0
+
+        # Get cache parameters from config
+        phys = getattr(self.mock_crs, 'physics_config', {}) or {}
         
-        # Check if we have cached convergence for this operating point
+        # Frequency step from config
+        freq_step = phys.get('cache_freq_step', 1e1)  # Default 10 Hz
+        if freq_step <= 0:
+            freq_step = 1e3
+        freq_key = round(frequency / freq_step) * freq_step
+
+        # Amplitude step from config
+        amp_step = phys.get('cache_amp_step', 1e-5)  # Default 1e-5
+        if amp_step <= 0:
+            amp_step = 1e-5
+        amp_key = round(amplitude / amp_step) * amp_step
+
+        # QP step from config (as fraction of base QP)
+        qp_step_fraction = phys.get('cache_qp_step', 0.001)  # Default 0.1%
+        if qp_step_fraction <= 0:
+            qp_step_fraction = 0.001
+        
+        # Calculate absolute QP step based on median base value
+        if self.base_nqp_values:
+            base_med = float(np.median(np.array(self.base_nqp_values, dtype=float)))
+            qp_step = max(1e-300, abs(base_med) * qp_step_fraction)
+        else:
+            qp_step = 1e-6  # Fallback
+        
+        qp_val = effective_nqp[nearest_idx] if 0 <= nearest_idx < len(effective_nqp) else 0.0
+        qp_key = round(qp_val / qp_step) * qp_step
+
+        cache_key = (nearest_idx, freq_key, amp_key, qp_key)
+
+        # Check cache
         skip_convergence = False
         cached_data = self._convergence_cache.get(cache_key)
-        
+        reason = 'miss'
         if cached_data is not None:
-            # Improved logic: Check if QP changed significantly from all sources
-            # Compare current QP state to cached QP state
-            cached_qp = cached_data.get('qp_state', effective_nqp) if isinstance(cached_data, dict) else effective_nqp
-            
-            # Calculate maximum QP change fraction across all resonators (handle size mismatches safely)
-            max_qp_change = 0.0
-            n_compare = min(len(effective_nqp), len(cached_qp))
-            for i in range(n_compare):
-                if cached_qp[i] > 0:
-                    qp_change = abs(effective_nqp[i] - cached_qp[i]) / cached_qp[i]
-                    max_qp_change = max(max_qp_change, qp_change)
-            # If sizes differ, force full convergence
-            if len(effective_nqp) != len(cached_qp):
-                max_qp_change = 1.0  # exceeds any reasonable threshold to trigger recalc
-            
-            # Check if power changed significantly (frequency or amplitude)
-            # Compare against actual cached values, not rounded keys
-            cached_freq = cached_data.get('frequency', frequency)
-            cached_amp = cached_data.get('amplitude', amplitude)
-            
-            freq_change = abs(frequency - cached_freq) / cached_freq if cached_freq > 0 else 0
-            amp_change = abs(amplitude - cached_amp) / cached_amp if cached_amp > 0 else 0
-            
-            # Skip convergence only if both QP and power changes are below thresholds
-            qp_threshold = self._tolerance_config['qp_change_threshold']
-            power_threshold = self._tolerance_config['power_change_threshold']
-            
-            skip_convergence = (max_qp_change < qp_threshold and 
-                               freq_change < power_threshold and 
-                               amp_change < power_threshold)
-            
-            # Store reason for statistics
-            if skip_convergence:
-                self._convergence_stats['last_reason'] = f"QP:{max_qp_change:.3f}<{qp_threshold:.3f}"
+            if cached_data.get('gen') != getattr(self, '_resonator_gen', 0):
+                reason = 'gen_changed'
+            elif cached_data.get('lekid_count') != len(self.mr_lekids):
+                reason = 'count_changed'
             else:
-                self._convergence_stats['last_reason'] = f"QP:{max_qp_change:.3f}>={qp_threshold:.3f}"
+                skip_convergence = True
+                reason = 'hit'
+        self._convergence_stats['last_reason'] = reason
         
         # Update parameters based on convergence decision
         if not skip_convergence:
             # Run full convergence
             self.update_lekids_for_current(frequency, amplitude)
-            
-            # Cache the convergence factors and QP state for this operating point
-            # Store as a dict with factors, QP state, and actual frequency/amplitude
+
+            # Update cache capacity from config if provided
+            phys = getattr(self.mock_crs, 'physics_config', {}) or {}
+            max_size = phys.get('convergence_cache_max_size', self._convergence_cache_max_size)
+            if isinstance(max_size, int) and max_size > 0:
+                self._convergence_cache_max_size = max_size
+
+            # Cache the actual converged values (not factors) for this operating point
             self._convergence_cache[cache_key] = {
-                'factors': self.lk_current_factors.copy(),
-                'qp_state': effective_nqp.copy(),
-                'frequency': frequency,  # Store actual frequency
-                'amplitude': amplitude    # Store actual amplitude
+                'Lk_values': [lekid.Lk for lekid in self.mr_lekids],
+                'R_values': [lekid.R for lekid in self.mr_lekids],
+                'L_values': [lekid.L for lekid in self.mr_lekids],
+                'frequency': frequency,
+                'amplitude': amplitude,
+                'qp_key': qp_key,
+                'nearest_idx': nearest_idx,
+                'gen': getattr(self, '_resonator_gen', 0),
+                'lekid_count': len(self.mr_lekids)
             }
-            
+
             # Limit cache size
             if len(self._convergence_cache) > self._convergence_cache_max_size:
-                # Remove oldest entry (dict preserves insertion order in Python 3.7+)
                 oldest_key = next(iter(self._convergence_cache))
                 del self._convergence_cache[oldest_key]
-            
+
+            # Logging (rate-limited)
+            self._cache_log_counter += 1
+            log_enabled = phys.get('log_cache_decisions', False)
+            log_every = phys.get('cache_log_interval', 100)
+            if log_enabled and (self._cache_log_counter % max(1, int(log_every)) == 0):
+                print(f"[Cache] full convergence: reason={self._convergence_stats.get('last_reason','N/A')} "
+                      f"key=(idx={nearest_idx}, f={freq_key:.6g}, a={amp_key:.6g}, qp={qp_key:.3e}) "
+                      f"freq_step={freq_step:.6g}, amp_step={amp_step:.1e}, qp_step={qp_step:.3e}")
+
             # Update statistics
             self._convergence_stats['full'] += 1
             
@@ -604,19 +641,22 @@ class MockResonatorModel:
             #           f"{self._convergence_stats['skipped']} skipped ({skip_rate:.1f}% skip rate) | "
             #           f"Reason: {self._convergence_stats.get('last_reason', 'N/A')}")
         else:
-            # Reuse cached convergence factors - apply to ALL resonators
-            cached_factors = cached_data.get('factors') if isinstance(cached_data, dict) else cached_data
+            # Restore cached converged values - apply to ALL resonators
+            cached_Lk = cached_data.get('Lk_values')
+            cached_R = cached_data.get('R_values')
+            cached_L = cached_data.get('L_values')
             
             for i in range(len(self.mr_lekids)):
                 lekid = self.mr_lekids[i]
-                base = self.base_lekid_params[i]
-                factor = cached_factors[i] if (cached_factors and i < len(cached_factors)) else 1.0
                 
-                # Apply cached factor to current base values (updated for noise)
-                lekid.Lk = base['Lk'] * factor
-                lekid.R = base['R']
-                lekid.L = lekid.Lk + lekid.Lg
-                lekid.alpha_k = lekid.Lk / lekid.L
+                # Restore the exact cached physics state
+                if cached_Lk and i < len(cached_Lk):
+                    lekid.Lk = cached_Lk[i]
+                if cached_R and i < len(cached_R):
+                    lekid.R = cached_R[i]
+                if cached_L and i < len(cached_L):
+                    lekid.L = cached_L[i]
+                    lekid.alpha_k = lekid.Lk / lekid.L
             
             # Update statistics
             self._convergence_stats['skipped'] += 1
@@ -744,7 +784,7 @@ class MockResonatorModel:
         - 1e-5: Balanced
         - 1e-3: Ultra fast (for many channels)
         """
-        max_iterations = 50
+        max_iterations = 500
         tolerance = self.mock_crs.physics_config.get('convergence_tolerance', 1e-9)
         
         # Get LEKID config from first resonator
@@ -783,20 +823,40 @@ class MockResonatorModel:
         Lk_converged = L_converged - base_Lg
         current_factors = Lk_converged / base_Lk
         
-        # Update LEKID objects with converged values
-        for i in range(n):
+        # Update LEKID objects with converged values (guard against concurrent reconfigure)
+        m = min(n, len(self.mr_lekids))
+        for i in range(m):
             lekid = self.mr_lekids[i]
             lekid.Lk = Lk_converged[i]
             lekid.R = R_converged[i]
             lekid.L = L_converged[i]
             lekid.alpha_k = Lk_converged[i] / L_converged[i]
-        
-        # Update cached data
-        self.lk_current_factors = current_factors.tolist()
-        self.resonator_currents_array = currents_converged
-        self.resonator_currents = currents_converged.tolist()
-        self.L_array = L_converged
-        self.R_array = R_converged
+
+        # Update cached data sized to current resonator count
+        mlen = len(self.mr_lekids)
+        try:
+            base_factors = current_factors[:m].tolist()
+        except Exception:
+            base_factors = [1.0] * m
+        if mlen > m:
+            base_factors += [1.0] * (mlen - m)
+        self.lk_current_factors = base_factors
+
+        try:
+            # Ensure a flat list[float] regardless of the dtype/shape returned by JIT
+            vec = np.asarray(currents_converged, dtype=float).reshape(-1)
+            curr_list = vec[:m].tolist()
+        except Exception:
+            curr_list = [0.0] * m
+        pad_len = mlen - m
+        if pad_len > 0:
+            curr_list = list(curr_list) + [0.0] * pad_len
+        self.resonator_currents_array = np.array(curr_list, dtype=float)
+        self.resonator_currents = curr_list
+
+        # Refresh L/R arrays from current objects
+        self.L_array = np.array([lek.L for lek in self.mr_lekids])
+        self.R_array = np.array([lek.R for lek in self.mr_lekids])
         
         # Log convergence stats occasionally
         if not hasattr(self, '_convergence_counter'):
@@ -1062,6 +1122,13 @@ class MockResonatorModel:
                 self.pulse_config[key] = value
         
         print(f"Pulse mode set to '{mode}' with config: {self.pulse_config}")
+        # Reset pulse schedules so new parameters take effect immediately
+        if mode in ('periodic', 'random'):
+            self.pulse_events = []
+            self.last_pulse_time = {}
+        elif mode == 'none':
+            self.pulse_events = []
+            self.last_pulse_time = {}
     
     def _evaluate_s21_at_frequency(self, frequency, amplitude):
         """

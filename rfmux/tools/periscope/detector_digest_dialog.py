@@ -80,6 +80,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.fast_freq = 1.22e6 #### 2.44 MSS = 1.22 MHz nyquist frequency
         self.slow_freq = 0
 
+        self.show_fast_tod = True
+
+
         ### Data products for plotting ####
         if self.spectrum_data:
             self.noise_tab_avail = True
@@ -88,8 +91,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
             self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
             self.reference = self.spectrum_data['reference']
-            self.tone_amp = self.spectrum_data['amplitudes'][self.detector_id - 1]
+            self.tone_amp = self.spectrum_data['amplitudes_dbm'][self.detector_id - 1]
             self.slow_freq = self.spectrum_data['slow_freq_hz']
+
+            self.pfb_psd_i = self.spectrum_data['pfb_psd_i'][self.detector_id - 1]
+            self.pfb_psd_q = self.spectrum_data['pfb_psd_q'][self.detector_id - 1]
+            self.pfb_tod_i = self.spectrum_data['pfb_I'][self.detector_id - 1]
+            self.pfb_tod_q = self.spectrum_data['pfb_Q'][self.detector_id - 1]
+            self.pfb_freq_iq = self.spectrum_data['pfb_freq_iq'][self.detector_id - 1]
         else:
             self.noise_tab_avail = False ### You can't access noise tab if no noise data was collected
         
@@ -475,11 +484,16 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
         layout.addWidget(nav_widget)
     
-        # --- Splitter with Two Empty Plots ---
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        # plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-    
-        # Time vs Magnitude plot
+        # --- Splitter with Conditional Fast TOD Plot ---
+        splitter_main = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        
+        # --- Top Splitter (Horizontal) ---
+        splitter_top = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        
+        # Plot colors
+        plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        
+        # --- Top Left Plot (Time vs Magnitude) ---
         vb_time = ClickableViewBox(); vb_time.parent_window = self
         self.plot_time_vs_mag = pg.PlotWidget(viewBox=vb_time, name="TimeVsAmplitude")
         self.plot_time_vs_mag.setBackground(plot_bg_color)
@@ -487,10 +501,23 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.plot_time_vs_mag.setLabel('bottom', "Time", units="s")
         self.plot_time_vs_mag.showGrid(x=True, y=True, alpha=0.3)
         self.plot_time_vs_mag.setTitle("TOD", color=plot_pen_color)
-        self.plot_time_vs_mag.addLegend(offset = (30, 10), labelTextColor=plot_pen_color)
-        splitter.addWidget(self.plot_time_vs_mag)
-    
-        # Noise Spectrum plot
+        self.plot_time_vs_mag.addLegend(offset=(30, 10), labelTextColor=plot_pen_color)
+        splitter_top.addWidget(self.plot_time_vs_mag)
+
+        
+        # --- Conditionally Add Fast TOD Plot ---
+        if self.show_fast_tod:  # your condition flag
+            vb_fast_tod = ClickableViewBox(); vb_fast_tod.parent_window = self
+            self.plot_fast_tod = pg.PlotWidget(viewBox=vb_fast_tod, name="FastTOD")
+            self.plot_fast_tod.setBackground(plot_bg_color)
+            self.plot_fast_tod.setLabel('left', "Amplitude", units="V")
+            self.plot_fast_tod.setLabel('bottom', "Time", units="s")
+            self.plot_fast_tod.showGrid(x=True, y=True, alpha=0.3)
+            self.plot_fast_tod.setTitle("Fast TOD", color=plot_pen_color)
+            self.plot_fast_tod.addLegend(offset=(30, 10), labelTextColor=plot_pen_color)
+            splitter_top.addWidget(self.plot_fast_tod)
+        
+        # --- Bottom Plot (Noise Spectrum) ---
         vb_spec = ClickableViewBox(); vb_spec.parent_window = self
         self.plot_noise_spectrum = pg.PlotWidget(viewBox=vb_spec, name="NoiseSpectrum")
         self.plot_noise_spectrum.setBackground(plot_bg_color)
@@ -500,13 +527,15 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.plot_noise_spectrum.setLabel('left', "Amplitude", units="dBm/Hz")
         self.plot_noise_spectrum.setLabel('bottom', "Frequency", units="Hz")
         self.plot_noise_spectrum.showGrid(x=True, y=True, alpha=0.3)
-        # self.plot_noise_spectrum.setLogMode(x=True, y=False)
         self.plot_noise_spectrum.setTitle("Noise Spectrum", color=plot_pen_color)
-        self.plot_noise_spectrum.addLegend(offset = (30, 10), labelTextColor=plot_pen_color)
-        splitter.addWidget(self.plot_noise_spectrum)
-    
-        splitter.setSizes([400, 400])
-        layout.addWidget(splitter)
+        self.plot_noise_spectrum.addLegend(offset=(30, 10), labelTextColor=plot_pen_color)
+        
+        # --- Combine Splitters ---
+        splitter_main.addWidget(splitter_top)
+        splitter_main.addWidget(self.plot_noise_spectrum)
+        splitter_main.setSizes([400, 400])
+        
+        layout.addWidget(splitter_main)
         self.apply_theme(self.dark_mode)
 
     
@@ -701,8 +730,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
             self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
             self.reference = self.spectrum_data['reference']
-            self.tone_amp = self.spectrum_data['amplitudes'][self.detector_id - 1]
+            self.tone_amp = self.spectrum_data['amplitudes_dbm'][self.detector_id - 1]
             self.slow_freq = self.spectrum_data['slow_freq_hz']
+
+            self.pfb_psd_i = self.spectrum_data['pfb_psd_i'][self.detector_id - 1]
+            self.pfb_psd_q = self.spectrum_data['pfb_psd_q'][self.detector_id - 1]
+            self.pfb_tod_i = self.spectrum_data['pfb_I'][self.detector_id - 1]
+            self.pfb_tod_q = self.spectrum_data['pfb_Q'][self.detector_id - 1]
+            self.pfb_freq_iq = self.spectrum_data['pfb_freq_iq'][self.detector_id - 1]
         if self.debug:
             self.debug_noise = self.full_debug[self.detector_id]
         # print("For detector", self.detector_id, "the noise is", self.debug_noise)
@@ -810,6 +845,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         try:
             self.plot_time_vs_mag.clear()
             self.plot_noise_spectrum.clear()
+            if self.show_fast_tod:
+                self.plot_fast_tod.clear()
     
             ###### First plot ######
             ts = self._get_relative_timestamps(self.spectrum_data['ts'], len(self.tod_i))
@@ -823,13 +860,28 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             if self.mean_subtract_enabled:
                 tod_i_volts = tod_i_volts - np.mean(tod_i_volts)
                 tod_q_volts = tod_q_volts - np.mean(tod_q_volts)
-
+    
             complex_volts = tod_i_volts + 1j * tod_q_volts
             mag_volts = np.abs(complex_volts)
     
             self.plot_time_vs_mag.plot(ts, tod_i_volts, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
             self.plot_time_vs_mag.plot(ts, tod_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
             self.plot_time_vs_mag.autoRange()
+    
+            if self.show_fast_tod:
+                pfb_ts = self.spectrum_data['pfb_ts']
+    
+                tod_pfb_i_volts = convert_roc_to_volts(np.array(self.pfb_tod_i))
+                tod_pfb_q_volts = convert_roc_to_volts(np.array(self.pfb_tod_q))
+    
+                if self.mean_subtract_enabled:
+                    tod_pfb_i_volts = tod_pfb_i_volts - np.mean(tod_pfb_i_volts)
+                    tod_pfb_q_volts = tod_pfb_q_volts - np.mean(tod_pfb_q_volts)
+    
+    
+                self.plot_fast_tod.plot(pfb_ts, tod_pfb_i_volts, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="PFB I")
+                self.plot_fast_tod.plot(pfb_ts, tod_pfb_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="PFB Q")
+                self.plot_fast_tod.autoRange()
     
             ###### Second plot ########
             frequencies = self.spectrum_data['freq_iq']
@@ -842,8 +894,21 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 psd_q = self.single_psd_q
                 freq = frequencies
     
+    
+            #### pfb_data ####
+    
+            overlap = self.spectrum_data['overlap'] #### Overlapping points with the slow spectrum, just for plotting
+    
+            pfb_psd_i = self.pfb_psd_i[overlap:]
+            pfb_psd_q = self.pfb_psd_q[overlap:]
+            pfb_freq = self.pfb_freq_iq[overlap:]
+    
+    
+            full_freq = freq + pfb_freq
+            full_psd_i = psd_i + pfb_psd_i
+            full_psd_q = psd_q + pfb_psd_q
             
-            log_freqs = np.log10(np.clip(freq, 1e-12, None))
+            log_freqs = np.log10(np.clip(full_freq, 1e-12, None))
             
             amplitude = self.tone_amp #### already in dbm
             slow_freq = self.slow_freq
@@ -866,6 +931,15 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                                                     pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
             curve_q = self.plot_noise_spectrum.plot(freq, psd_q,
                                                     pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
+    
+            # --- New PFB curves ---
+            curve_pfb_i = self.plot_noise_spectrum.plot(pfb_freq, pfb_psd_i,
+                                                        pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH, style=QtCore.Qt.DashLine),
+                                                        name="PFB I")
+            curve_pfb_q = self.plot_noise_spectrum.plot(pfb_freq, pfb_psd_q,
+                                                        pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH, style=QtCore.Qt.DashLine),
+                                                        name="PFB Q")
+            
             self.plot_noise_spectrum.setLogMode(x=True, y=False)
             self.plot_noise_spectrum.autoRange()
     
@@ -874,7 +948,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.hover_label = pg.TextItem("", anchor=(0, 1), color='w')
             self.plot_noise_spectrum.addItem(self.hover_label)
             self.hover_label.hide()
-
+    
     
             # --- Mouse move handler ---
             def on_mouse_move(evt):
@@ -884,19 +958,19 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     
                     log_x = mouse_point.x()
                     x = 10 ** log_x
-
+    
                     summary_rect = self.summary_label.boundingRect()
                     summary_rect = self.summary_label.mapRectToScene(summary_rect)
                     if summary_rect.contains(pos):
                         # Mouse is over text box — disable hover update
                         return
                     
-                    if x < np.min(frequencies) or x > np.max(frequencies):
+                    if x < np.min(full_freq) or x > np.max(full_freq):
                         self.hover_label.hide()
                         return
                         
-                    y_i = np.interp(log_x, log_freqs, self.single_psd_i)
-                    y_q = np.interp(log_x, log_freqs, self.single_psd_q)
+                    y_i = np.interp(log_x, log_freqs, full_psd_i)
+                    y_q = np.interp(log_x, log_freqs, full_psd_q)
                     self.hover_label.setHtml(
                         f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
                         f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
@@ -909,7 +983,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
             self.proxy = pg.SignalProxy(self.plot_noise_spectrum.scene().sigMouseMoved,
                                         rateLimit=60, slot=on_mouse_move)
-    
+        
         except Exception as e:
             print("Error updating noise plots:", e)      
         

@@ -1200,7 +1200,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                                                                   channel = i + 1,
                                                                   module = module,
                                                                   binlim = 1e6,
-                                                                  trim = True,
+                                                                  trim = False,
                                                                   nsegments = num_segments,
                                                                   reference = reference,
                                                                   reset_NCO = False))

@@ -104,6 +104,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 self.pfb_tod_i = self.spectrum_data['pfb_I'][self.detector_id - 1]
                 self.pfb_tod_q = self.spectrum_data['pfb_Q'][self.detector_id - 1]
                 self.pfb_freq_iq = self.spectrum_data['pfb_freq_iq'][self.detector_id - 1]
+                self.pfb_freq_dsb = self.spectrum_data['pfb_freq_dsb'][self.detector_id - 1]
+                self.pfb_dual_psd = self.spectrum_data['pfb_dual_psd'][self.detector_id - 1]
         else:
             self.noise_tab_avail = False ### You can't access noise tab if no noise data was collected
         
@@ -539,6 +541,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.plot_noise_spectrum.setLabel('bottom', "Frequency", units="Hz")
         self.plot_noise_spectrum.showGrid(x=True, y=True, alpha=0.3)
         self.plot_noise_spectrum.setTitle("Noise Spectrum", color=plot_pen_color)
+        self.plot_noise_spectrum.setYRange(-180, 0)
         self.plot_noise_spectrum.addLegend(offset=(30, 10), labelTextColor=plot_pen_color)
         
         # --- Combine Splitters ---
@@ -758,6 +761,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 self.pfb_tod_i = self.spectrum_data['pfb_I'][self.detector_id - 1]
                 self.pfb_tod_q = self.spectrum_data['pfb_Q'][self.detector_id - 1]
                 self.pfb_freq_iq = self.spectrum_data['pfb_freq_iq'][self.detector_id - 1]
+                self.pfb_freq_dsb = self.spectrum_data['pfb_freq_dsb'][self.detector_id - 1]
+                self.pfb_dual_psd = self.spectrum_data['pfb_dual_psd'][self.detector_id - 1]
         if self.debug:
             self.debug_noise = self.full_debug[self.detector_id]
         # print("For detector", self.detector_id, "the noise is", self.debug_noise)
@@ -922,6 +927,29 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             pfb_psd_i = self.pfb_psd_i[overlap:]
             pfb_psd_q = self.pfb_psd_q[overlap:]
             pfb_freq = self.pfb_freq_iq[overlap:]
+
+            ##### For the magnitude part ####
+            freq_dsb = np.array(self.pfb_freq_dsb[overlap:])
+            psd_dsb = np.array(self.pfb_dual_psd[overlap:])
+            min_f_abs = abs(np.min(freq_dsb))
+            max_f_abs = abs(np.max(freq_dsb))
+            
+            if max_f_abs >= min_f_abs:
+                # Keep positive side
+                mask = freq_dsb >= 0
+                freq_sel = freq_dsb[mask]
+                psd_sel  = psd_dsb[mask]
+            else:
+                # Keep negative side, convert to positive
+                mask = freq_dsb <= 0
+                freq_sel = np.abs(freq_dsb[mask])
+                psd_sel  = psd_dsb[mask]
+            
+            # Sort ascending
+            sort_idx = np.argsort(freq_sel)
+            freq_sel = freq_sel[sort_idx]
+            psd_sel  = psd_sel[sort_idx]
+            
         else:
             pfb_freq = []
             pfb_psd_i = []
@@ -963,8 +991,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
             if self.show_fast_tod:
                 # --- New PFB curves ---
-                pfb_f_bin_i, pfb_psd_i_bin = exp_bin_noise_data(pfb_freq, pfb_psd_i, 100) #### fixing bins to 50
+                pfb_f_bin_i, pfb_psd_i_bin = exp_bin_noise_data(pfb_freq, pfb_psd_i, 100) #### fixing bins to 100
                 pfb_f_bin_q, pfb_psd_q_bin = exp_bin_noise_data(pfb_freq, pfb_psd_q, 100)
+                pfb_f_bin_mag, pfb_psd_mag_bin = exp_bin_noise_data(freq_sel, psd_sel, 100)
 
                 
                 curve_pfb_i = self.plot_noise_spectrum.plot(pfb_f_bin_i, pfb_psd_i_bin,
@@ -973,6 +1002,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 curve_pfb_q = self.plot_noise_spectrum.plot(pfb_f_bin_q, pfb_psd_q_bin,
                                                             pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH, style=QtCore.Qt.DashLine),
                                                             name="PFB Q")
+                curve_pfb_mag = self.plot_noise_spectrum.plot(pfb_f_bin_mag, pfb_psd_mag_bin,
+                                                              pen=pg.mkPen(color = (255, 0, 0, 100), width=LINE_WIDTH, style=QtCore.Qt.DashLine),
+                                                              name="PFB Mag")
             
             self.plot_noise_spectrum.setLogMode(x=True, y=False)
             self.plot_noise_spectrum.autoRange()
@@ -992,6 +1024,10 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 curve_pfb_q = self.plot_noise_spectrum.plot(pfb_freq, pfb_psd_q,
                                                             pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH, style=QtCore.Qt.DashLine),
                                                             name="PFB Q")
+
+                curve_pfb_mag = self.plot_noise_spectrum.plot(freq_sel, psd_sel,
+                                                              pen=pg.mkPen(color = (255, 0, 0, 100), width=LINE_WIDTH, style=QtCore.Qt.DashLine),
+                                                              name="PFB Mag")
             
             self.plot_noise_spectrum.setLogMode(x=True, y=False)
             self.plot_noise_spectrum.autoRange()

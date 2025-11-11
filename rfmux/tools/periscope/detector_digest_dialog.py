@@ -929,8 +929,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             pfb_freq = self.pfb_freq_iq[overlap:]
 
             ##### For the magnitude part ####
-            freq_dsb = np.array(self.pfb_freq_dsb[overlap:])
-            psd_dsb = np.array(self.pfb_dual_psd[overlap:])
+            freq_dsb = np.array(self.pfb_freq_dsb)
+            psd_dsb = np.array(self.pfb_dual_psd)
             min_f_abs = abs(np.min(freq_dsb))
             max_f_abs = abs(np.max(freq_dsb))
             
@@ -949,6 +949,10 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             sort_idx = np.argsort(freq_sel)
             freq_sel = freq_sel[sort_idx]
             psd_sel  = psd_sel[sort_idx]
+
+            freq_sel = freq_sel[2:] ### Removing DC bin info
+            psd_sel = psd_sel[2:]
+
             
         else:
             pfb_freq = []
@@ -1004,7 +1008,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                                                             name="PFB Q")
                 curve_pfb_mag = self.plot_noise_spectrum.plot(pfb_f_bin_mag, pfb_psd_mag_bin,
                                                               pen=pg.mkPen(color = (255, 0, 0, 100), width=LINE_WIDTH, style=QtCore.Qt.DashLine),
-                                                              name="PFB Mag")
+                                                              name="wideband linear combination (I,Q)")
             
             self.plot_noise_spectrum.setLogMode(x=True, y=False)
             self.plot_noise_spectrum.autoRange()
@@ -1027,7 +1031,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
                 curve_pfb_mag = self.plot_noise_spectrum.plot(freq_sel, psd_sel,
                                                               pen=pg.mkPen(color = (255, 0, 0, 100), width=LINE_WIDTH, style=QtCore.Qt.DashLine),
-                                                              name="PFB Mag")
+                                                              name="wideband linear combination (I,Q)")
             
             self.plot_noise_spectrum.setLogMode(x=True, y=False)
             self.plot_noise_spectrum.autoRange()

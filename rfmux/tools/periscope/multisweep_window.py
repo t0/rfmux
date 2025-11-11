@@ -1122,159 +1122,163 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             else:
                 asyncio.run(crs.set_decimation(decimation, module = self.target_module, short = True))
     
-    def _get_spectrum(self, params):
-        
-        if self.parent().crs is None: 
-            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available") 
-            return
+    def _get_spectrum(self, params, use_loaded_noise = False):
+        if use_loaded_noise:
+            print(f"[Bias] Plotting noise data taken at decimation {params['noise_parameters']['decimation']}")
+            self.spectrum_noise_data['noise_parameters'] = params['noise_parameters']
+            self.spectrum_noise_data['data'] = params['data']
         else:
-            crs = self.parent().crs
-
-        time_taken = params['time_taken']
-        pfb_enabled = params['pfb_enabled']
-        
-        if pfb_enabled:
-            pfb_time_taken = params['pfb_time']
-        else:
-            pfb_time_taken = 0
-            
-        t = time.time() + time_taken + pfb_time_taken
-        formatted_time = time.strftime("%H:%M:%S", time.localtime(t))
-        # Show a progress dialog
-        progress = QtWidgets.QProgressDialog(f"Getting noise spectrum...\n\nCompletion time {formatted_time}", None, 0, 0, self)
-        progress.setWindowTitle("Please wait")
-        progress.setCancelButton(None)
-        progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
-        progress.show()
-        
-        QtWidgets.QApplication.processEvents()# Show a simple "busy" message and spinner cursor)
-
-        try:
-            decimation = params['decimation']
-            num_samples = params['num_samples']
-            num_segments = params['num_segments']
-            reference = params['reference']
-            spec_lim = params['spectrum_limit']
-            module = self.target_module
-            curr_decimation = asyncio.run(crs.get_decimation())
-
-            if pfb_enabled:
-                overlap = params['overlap']
-                pfb_samples = params['pfb_samples']
-    
-            if curr_decimation != decimation:
-                self._set_decimation(crs, decimation)
-    
-            spectrum_data  = asyncio.run(crs.py_get_samples(num_samples, 
-                                                            return_spectrum=True, 
-                                                            scaling='psd', 
-                                                            reference=reference, 
-                                                            nsegments=num_segments, 
-                                                            spectrum_cutoff=spec_lim,
-                                                            channel=None, 
-                                                            module=module))
-
-
-            self.spectrum_noise_data['noise_parameters'] = params
-            num_res = len(self.conceptual_resonance_frequencies)
-
-            amplitudes = []
-            dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
-
-            pfb_psd_i = []
-            pfb_psd_q = []
-            pfb_dual = []
-            pfb_i = []
-            pfb_q = []
-            pfb_freq_iq = []
-            pfb_freq_dsb = []
-
-            for i in range(num_res):
-                amp = asyncio.run(crs.get_amplitude(channel=i+1, module = module))
-                amp_dmb = UnitConverter.normalize_to_dbm(amp, dac_scale_for_module)
-                amplitudes.append(amp_dmb)
-
-                #### Also running pfb_samples ####
-                if pfb_enabled:
-                    pfb_data = asyncio.run(crs.py_get_pfb_samples(pfb_samples,
-                                                                  channel = i + 1,
-                                                                  module = module,
-                                                                  binlim = 1e6,
-                                                                  trim = False,
-                                                                  nsegments = num_segments,
-                                                                  reference = reference,
-                                                                  reset_NCO = False))
-    
-                    psd_i = pfb_data.spectrum.psd_i
-                    pfb_psd_i.append(psd_i)
-                    
-                    psd_q = pfb_data.spectrum.psd_q
-                    pfb_psd_q.append(psd_q)
-                    
-                    I = pfb_data.i
-                    pfb_i.append(I)
-                    
-                    Q = pfb_data.q
-                    pfb_q.append(Q)
-                    
-                    dual = pfb_data.spectrum.psd_dual_sideband
-                    pfb_dual.append(dual)
-                    
-                    freq_iq = pfb_data.spectrum.freq_iq
-                    pfb_freq_iq.append(freq_iq)
-                    
-                    freq_dsb = pfb_data.spectrum.freq_dsb
-                    pfb_freq_dsb.append(freq_dsb)
-
-                #### Getting pfb time stamps for plotting #####
-
-            if pfb_enabled:
-                total_time = 1/2.44e6 * pfb_samples #### 2.44 MSS is the rate 
-                ts_pfb = list(np.linspace(0, total_time, pfb_samples))
-                
-            
-            slow_freq = max(spectrum_data.spectrum.freq_iq)/spec_lim
-            fast_freq = 1.22e6   
-
-
-            
-            data = {}
-            data['reference'] = reference
-            data['ts'] = spectrum_data.ts
-            data['I'] = spectrum_data.i[0:num_res]
-            data['Q'] = spectrum_data.q[0:num_res]
-            data['freq_iq'] = spectrum_data.spectrum.freq_iq
-            data['single_psd_i'] = spectrum_data.spectrum.psd_i[0:num_res]
-            data['single_psd_q'] = spectrum_data.spectrum.psd_q[0:num_res]
-            data['freq_dsb'] = spectrum_data.spectrum.freq_dsb
-            data['dual_psd'] = spectrum_data.spectrum.psd_dual_sideband[0:num_res]
-            data['amplitudes_dbm'] = amplitudes
-            data['slow_freq_hz'] = slow_freq
-            data['fast_freq_hz'] = fast_freq
-
-
-            ##### pfb data ####
-            if pfb_enabled:
-                data['pfb_enabled'] = True
-                data['pfb_ts'] = ts_pfb
-                data['pfb_I'] = pfb_i
-                data['pfb_Q'] = pfb_q
-                data['pfb_freq_iq'] = pfb_freq_iq
-                data['pfb_psd_i'] = pfb_psd_i
-                data['pfb_psd_q'] = pfb_psd_q
-                data['pfb_freq_dsb'] = pfb_freq_dsb
-                data['pfb_dual_psd'] = pfb_dual
-                data['overlap'] = overlap
-
+            if self.parent().crs is None: 
+                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available") 
+                return
             else:
-                data['pfb_enabled'] = False
+                crs = self.parent().crs
+    
+            time_taken = params['time_taken']
+            pfb_enabled = params['pfb_enabled']
             
-            self.spectrum_noise_data['data'] = data
+            if pfb_enabled:
+                pfb_time_taken = params['pfb_time']
+            else:
+                pfb_time_taken = 0
+                
+            t = time.time() + time_taken + pfb_time_taken
+            formatted_time = time.strftime("%H:%M:%S", time.localtime(t))
+            # Show a progress dialog
+            progress = QtWidgets.QProgressDialog(f"Getting noise spectrum...\n\nCompletion time {formatted_time}", None, 0, 0, self)
+            progress.setWindowTitle("Please wait")
+            progress.setCancelButton(None)
+            progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+            progress.show()
             
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Error", str(e))
-        finally:
-            progress.close()
+            QtWidgets.QApplication.processEvents()# Show a simple "busy" message and spinner cursor)
+    
+            try:
+                decimation = params['decimation']
+                num_samples = params['num_samples']
+                num_segments = params['num_segments']
+                reference = params['reference']
+                spec_lim = params['spectrum_limit']
+                module = self.target_module
+                curr_decimation = asyncio.run(crs.get_decimation())
+    
+                if pfb_enabled:
+                    overlap = params['overlap']
+                    pfb_samples = params['pfb_samples']
+        
+                if curr_decimation != decimation:
+                    self._set_decimation(crs, decimation)
+        
+                spectrum_data  = asyncio.run(crs.py_get_samples(num_samples, 
+                                                                return_spectrum=True, 
+                                                                scaling='psd', 
+                                                                reference=reference, 
+                                                                nsegments=num_segments, 
+                                                                spectrum_cutoff=spec_lim,
+                                                                channel=None, 
+                                                                module=module))
+    
+    
+                self.spectrum_noise_data['noise_parameters'] = params
+                num_res = len(self.conceptual_resonance_frequencies)
+    
+                amplitudes = []
+                dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
+    
+                pfb_psd_i = []
+                pfb_psd_q = []
+                pfb_dual = []
+                pfb_i = []
+                pfb_q = []
+                pfb_freq_iq = []
+                pfb_freq_dsb = []
+    
+                for i in range(num_res):
+                    amp = asyncio.run(crs.get_amplitude(channel=i+1, module = module))
+                    amp_dmb = UnitConverter.normalize_to_dbm(amp, dac_scale_for_module)
+                    amplitudes.append(amp_dmb)
+    
+                    #### Also running pfb_samples ####
+                    if pfb_enabled:
+                        pfb_data = asyncio.run(crs.py_get_pfb_samples(pfb_samples,
+                                                                      channel = i + 1,
+                                                                      module = module,
+                                                                      binlim = 1e6,
+                                                                      trim = False,
+                                                                      nsegments = num_segments,
+                                                                      reference = reference,
+                                                                      reset_NCO = False))
+        
+                        psd_i = pfb_data.spectrum.psd_i
+                        pfb_psd_i.append(psd_i)
+                        
+                        psd_q = pfb_data.spectrum.psd_q
+                        pfb_psd_q.append(psd_q)
+                        
+                        I = pfb_data.i
+                        pfb_i.append(I)
+                        
+                        Q = pfb_data.q
+                        pfb_q.append(Q)
+                        
+                        dual = pfb_data.spectrum.psd_dual_sideband
+                        pfb_dual.append(dual)
+                        
+                        freq_iq = pfb_data.spectrum.freq_iq
+                        pfb_freq_iq.append(freq_iq)
+                        
+                        freq_dsb = pfb_data.spectrum.freq_dsb
+                        pfb_freq_dsb.append(freq_dsb)
+    
+                    #### Getting pfb time stamps for plotting #####
+    
+                if pfb_enabled:
+                    total_time = 1/2.44e6 * pfb_samples #### 2.44 MSS is the rate 
+                    ts_pfb = list(np.linspace(0, total_time, pfb_samples))
+                    
+                
+                slow_freq = max(spectrum_data.spectrum.freq_iq)/spec_lim
+                fast_freq = 1.22e6   
+    
+    
+                
+                data = {}
+                data['reference'] = reference
+                data['ts'] = spectrum_data.ts
+                data['I'] = spectrum_data.i[0:num_res]
+                data['Q'] = spectrum_data.q[0:num_res]
+                data['freq_iq'] = spectrum_data.spectrum.freq_iq
+                data['single_psd_i'] = spectrum_data.spectrum.psd_i[0:num_res]
+                data['single_psd_q'] = spectrum_data.spectrum.psd_q[0:num_res]
+                data['freq_dsb'] = spectrum_data.spectrum.freq_dsb
+                data['dual_psd'] = spectrum_data.spectrum.psd_dual_sideband[0:num_res]
+                data['amplitudes_dbm'] = amplitudes
+                data['slow_freq_hz'] = slow_freq
+                data['fast_freq_hz'] = fast_freq
+    
+    
+                ##### pfb data ####
+                if pfb_enabled:
+                    data['pfb_enabled'] = True
+                    data['pfb_ts'] = ts_pfb
+                    data['pfb_I'] = pfb_i
+                    data['pfb_Q'] = pfb_q
+                    data['pfb_freq_iq'] = pfb_freq_iq
+                    data['pfb_psd_i'] = pfb_psd_i
+                    data['pfb_psd_q'] = pfb_psd_q
+                    data['pfb_freq_dsb'] = pfb_freq_dsb
+                    data['pfb_dual_psd'] = pfb_dual
+                    data['overlap'] = overlap
+    
+                else:
+                    data['pfb_enabled'] = False
+                
+                self.spectrum_noise_data['data'] = data
+                
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Error", str(e))
+            finally:
+                progress.close()
 
     @QtCore.pyqtSlot(object)
     def _handle_multisweep_plot_double_click(self, ev):

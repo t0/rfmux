@@ -83,8 +83,6 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         self.show_fast_tod = False
 
-        if self.spectrum_data['pfb_enabled']:
-            self.show_fast_tod = True
 
 
         ### Data products for plotting ####
@@ -97,6 +95,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.reference = self.spectrum_data['reference']
             self.tone_amp = self.spectrum_data['amplitudes_dbm'][self.detector_id - 1]
             self.slow_freq = self.spectrum_data['slow_freq_hz']
+            if self.spectrum_data['pfb_enabled']:
+                self.show_fast_tod = True
             
             if self.show_fast_tod:
                 self.pfb_psd_i = self.spectrum_data['pfb_psd_i'][self.detector_id - 1]
@@ -741,9 +741,6 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.noise_q_data = None
         self.fast_freq = 1.22e6
 
-        if self.spectrum_data['pfb_enabled']:
-            self.show_fast_tod = True
-
 
         if self.spectrum_data:
             self.noise_tab_avail = True
@@ -754,6 +751,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.reference = self.spectrum_data['reference']
             self.tone_amp = self.spectrum_data['amplitudes_dbm'][self.detector_id - 1]
             self.slow_freq = self.spectrum_data['slow_freq_hz']
+            if self.spectrum_data['pfb_enabled']:
+                self.show_fast_tod = True
             
             if self.show_fast_tod:
                 self.pfb_psd_i = self.spectrum_data['pfb_psd_i'][self.detector_id - 1]
@@ -955,11 +954,6 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             freq_sel = freq_sel[2:] ### Removing DC bin info
             psd_sel = psd_sel[2:]
 
-            #### Finding remaining frequency for the hover ######
-            
-            # max_pfb = max(pfb_freq)
-            # max_idx = np.where(freq_sel > max_pfb)[0]
-
             
         else:
             pfb_freq = []
@@ -974,6 +968,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         full_psd_q = list(psd_q) + list(pfb_psd_q)
         full_lin_comb = list(psd_sel)
         freq_lin_comb = list(freq_sel)
+
         
         log_freqs = np.log10(np.clip(full_freq, 1e-12, None))
         
@@ -1085,31 +1080,42 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     freq_l = freq_lin_comb
 
 
+                if self.show_fast_tod:
+                    if x > max(freq_l):
+                        self.hover_label.hide()
+                        return
 
-
-                if x > max(freq_l):
-                    self.hover_label.hide()
-                    return
-
-
-                if log_x < max(freq_i):      
-                    y_i = np.interp(log_x, freq_i, psd_i_vals)
-                    y_q = np.interp(log_x, freq_i, psd_q_vals)
-                    y_d = np.interp(log_x, freq_l, psd_dual_vals)
-                    self.hover_label.setHtml(
-                        f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
-                        f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
-                        f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
-                        f"<span style='color:yellow'>Freq: {x:.3f}</span>"
-                    )
-                    self.hover_label.setPos(log_x * 0.9, max(y_i, y_q, y_d)*0.9)
+                        
+                if self.show_fast_tod:
+                    if log_x < max(freq_i):
+                        y_i = np.interp(log_x, freq_i, psd_i_vals)
+                        y_q = np.interp(log_x, freq_i, psd_q_vals)
+                        y_d = np.interp(log_x, freq_l, psd_dual_vals)
+                        self.hover_label.setHtml(
+                            f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
+                            f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
+                            f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
+                            f"<span style='color:yellow'>Freq: {x:.3f}</span>"
+                        )
+                        self.hover_label.setPos(log_x * 0.9, max(y_i, y_q, y_d)*0.9)
+                    else:
+                        y_d = np.interp(log_x, freq_l, psd_dual_vals)
+                        self.hover_label.setHtml(
+                            f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
+                            f"<span style='color:yellow'> Freq: {x:.3f}</span>"
+                        )
+                        self.hover_label.setPos(log_x * 0.9, y_d * 0.9)
                 else:
-                    y_d = np.interp(log_x, freq_l, psd_dual_vals)
-                    self.hover_label.setHtml(
-                        f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
-                        f"<span style='color:yellow'> Freq: {x:.3f}</span>"
-                    )
-                    self.hover_label.setPos(log_x * 0.9, y_d * 0.9)
+                    if log_x < max(freq_i):      
+                        y_i = np.interp(log_x, freq_i, psd_i_vals)
+                        y_q = np.interp(log_x, freq_i, psd_q_vals)
+                        self.hover_label.setHtml(
+                            f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
+                            f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
+                            f"<span style='color:yellow'>Freq: {x:.3f}</span>"
+                        )
+                        self.hover_label.setPos(log_x * 0.9, max(y_i, y_q)*0.9)
+                        
                 self.hover_label.show() 
             else:
                 self.hover_label.hide()

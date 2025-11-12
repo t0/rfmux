@@ -923,6 +923,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         if self.show_fast_tod:
             overlap = self.spectrum_data['overlap'] #### Overlapping points with the slow spectrum, just for plotting
+            if overlap < 2: ### Incase the calculation doesn't pick up any overlapping samples and also to remove the dc bin
+                overlap = 2
             pfb_psd_i = self.pfb_psd_i[overlap:]
             pfb_psd_q = self.pfb_psd_q[overlap:]
             pfb_freq = self.pfb_freq_iq[overlap:]

@@ -939,11 +939,13 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 mask = freq_dsb >= 0
                 freq_sel = freq_dsb[mask]
                 psd_sel  = psd_dsb[mask]
+                h_label = "(I-Q)/2"
             else:
                 # Keep negative side, convert to positive
                 mask = freq_dsb <= 0
                 freq_sel = np.abs(freq_dsb[mask])
                 psd_sel  = psd_dsb[mask]
+                h_label = "(I+Q)/2"
             
             # Sort ascending
             sort_idx = np.argsort(freq_sel)
@@ -953,16 +955,25 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             freq_sel = freq_sel[2:] ### Removing DC bin info
             psd_sel = psd_sel[2:]
 
+            #### Finding remaining frequency for the hover ######
+            
+            # max_pfb = max(pfb_freq)
+            # max_idx = np.where(freq_sel > max_pfb)[0]
+
             
         else:
             pfb_freq = []
             pfb_psd_i = []
             pfb_psd_q = []
+            psd_sel = []
+            freq_sel = []
 
 
         full_freq = list(freq) + list(pfb_freq)
         full_psd_i = list(psd_i) + list(pfb_psd_i)
         full_psd_q = list(psd_q) + list(pfb_psd_q)
+        full_lin_comb = list(psd_sel)
+        freq_lin_comb = list(freq_sel)
         
         log_freqs = np.log10(np.clip(full_freq, 1e-12, None))
         
@@ -1063,25 +1074,43 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     freq_i = np.log10(np.clip(np.concatenate((f_bin_i, pfb_f_bin_i if self.show_fast_tod else [])), 1e-12, None))
                     psd_i_vals = np.concatenate((psd_i_bin, pfb_psd_i_bin if self.show_fast_tod else []))
                     psd_q_vals = np.concatenate((psd_q_bin, pfb_psd_q_bin if self.show_fast_tod else []))
+                    psd_dual_vals = pfb_psd_mag_bin
+                    freq_l = pfb_f_bin_mag
                 else:
                     # Use the original data
                     freq_i = log_freqs
                     psd_i_vals = full_psd_i
                     psd_q_vals = full_psd_q
-        
-                if x < 10 ** np.min(freq_i) or x > 10 ** np.max(freq_i):
+                    psd_dual_vals = full_lin_comb
+                    freq_l = freq_lin_comb
+
+
+
+
+                if x > max(freq_l):
                     self.hover_label.hide()
                     return
-                    
-                y_i = np.interp(log_x, freq_i, psd_i_vals)
-                y_q = np.interp(log_x, freq_i, psd_q_vals)
-                self.hover_label.setHtml(
-                    f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
-                    f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
-                    f"<span style='color:yellow'>Freq: {x:.3f}</span>"
-                )
-                self.hover_label.setPos(log_x, max(y_i, y_q))
-                self.hover_label.show()
+
+
+                if log_x < max(freq_i):      
+                    y_i = np.interp(log_x, freq_i, psd_i_vals)
+                    y_q = np.interp(log_x, freq_i, psd_q_vals)
+                    y_d = np.interp(log_x, freq_l, psd_dual_vals)
+                    self.hover_label.setHtml(
+                        f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
+                        f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
+                        f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
+                        f"<span style='color:yellow'>Freq: {x:.3f}</span>"
+                    )
+                    self.hover_label.setPos(log_x * 0.9, max(y_i, y_q, y_d)*0.9)
+                else:
+                    y_d = np.interp(log_x, freq_l, psd_dual_vals)
+                    self.hover_label.setHtml(
+                        f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
+                        f"<span style='color:yellow'> Freq: {x:.3f}</span>"
+                    )
+                    self.hover_label.setPos(log_x * 0.9, y_d * 0.9)
+                self.hover_label.show() 
             else:
                 self.hover_label.hide()
 

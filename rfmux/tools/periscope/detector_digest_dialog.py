@@ -9,7 +9,7 @@ from .utils import (
     IQ_COLORS, SCATTER_COLORS, DISTINCT_PLOT_COLORS, COLORMAP_CHOICES,
     UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE, FITTING_COLORS
 )
-from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm, exp_bin_noise_data
+from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm, exp_bin_noise_data, PFB_SAMPLING_FREQ
 
 class DetectorDigestWindow(QtWidgets.QMainWindow):
     """
@@ -78,7 +78,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.exp_binning_enabled = False
 
         self.spectrum_data = spectrum_data
-        self.fast_freq = 1.22e6 #### 2.44 MSS = 1.22 MHz nyquist frequency
+        self.fast_freq = PFB_SAMPLING_FREQ/2 #### 2.44 MSS = 1.22 MHz nyquist frequency
         self.slow_freq = 0
 
         self.show_fast_tod = False
@@ -867,6 +867,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             return
     
         # try:
+        exp_bins = 100
         self.plot_time_vs_mag.clear()
         self.plot_noise_spectrum.clear()
         if self.show_fast_tod:
@@ -992,8 +993,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         
         if self.exp_binning_enabled:
 
-            f_bin_i, psd_i_bin = exp_bin_noise_data(freq, psd_i, 100) #### fixing bins to 50
-            f_bin_q, psd_q_bin = exp_bin_noise_data(freq, psd_q, 100)
+            f_bin_i, psd_i_bin = exp_bin_noise_data(freq, psd_i, exp_bins) #### fixing bins to 50
+            f_bin_q, psd_q_bin = exp_bin_noise_data(freq, psd_q, exp_bins)
 
             
             curve_i = self.plot_noise_spectrum.plot(f_bin_i, psd_i_bin,
@@ -1003,9 +1004,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
             if self.show_fast_tod:
                 # --- New PFB curves ---
-                pfb_f_bin_i, pfb_psd_i_bin = exp_bin_noise_data(pfb_freq, pfb_psd_i, 100) #### fixing bins to 100
-                pfb_f_bin_q, pfb_psd_q_bin = exp_bin_noise_data(pfb_freq, pfb_psd_q, 100)
-                pfb_f_bin_mag, pfb_psd_mag_bin = exp_bin_noise_data(freq_sel, psd_sel, 100)
+                pfb_f_bin_i, pfb_psd_i_bin = exp_bin_noise_data(pfb_freq, pfb_psd_i, exp_bins) #### fixing bins to 100
+                pfb_f_bin_q, pfb_psd_q_bin = exp_bin_noise_data(pfb_freq, pfb_psd_q, exp_bins)
+                pfb_f_bin_mag, pfb_psd_mag_bin = exp_bin_noise_data(freq_sel, psd_sel, exp_bins)
 
                 
                 curve_pfb_i = self.plot_noise_spectrum.plot(pfb_f_bin_i, pfb_psd_i_bin,

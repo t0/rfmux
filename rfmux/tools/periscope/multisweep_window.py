@@ -16,6 +16,7 @@ from .utils import (
 )
 from .detector_digest_dialog import DetectorDigestWindow
 from .noise_spectrum_dialog import NoiseSpectrumDialog
+from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
 
 
@@ -1232,7 +1233,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                     #### Getting pfb time stamps for plotting #####
     
                 if pfb_enabled:
-                    total_time = 1/2.44e6 * pfb_samples #### 2.44 MSS is the rate 
+                    total_time = (1/PFB_SAMPLING_FREQ) * pfb_samples #### 2.44 MSS is the rate 
                     ts_pfb = list(np.linspace(0, total_time, pfb_samples))
                     
                 

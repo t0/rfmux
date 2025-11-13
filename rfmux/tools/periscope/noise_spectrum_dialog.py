@@ -116,7 +116,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         # ------------------------------------------------------
         self.pfb_checkbox = QtWidgets.QCheckBox("Enable PFB spectrum")
         self.pfb_checkbox.setToolTip("Get PFB spectrum as well.")
-        if self.crs.serial == "MOCK0001":
+        if self.crs.serial == "0000": ### Don't take pfb for mock mode
             self.pfb_checkbox.hide()
         layout.addRow(self.pfb_checkbox)
         
@@ -125,8 +125,8 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         pfb_layout = QtWidgets.QFormLayout(self.pfb_group)
         
         # PFB Calculations
-        pfb_samples = 100_000
-        time_pfb = 0.041 * self.nres  # Example computation
+        pfb_samples = 100_000 ### Change time_pfb as well if you change the number of samples
+        time_pfb = 0.28 * self.nres  # Example computation, was timed in a notebook takes around 0.28 seconds for 100000 samples
         
         self.pfb_time_taken_label = QtWidgets.QLabel(f"{time_pfb:.3f} s")
         self.pfb_time_taken_label.setToolTip("Displays estimated capture time (in seconds) for PFB, provided no failures.")

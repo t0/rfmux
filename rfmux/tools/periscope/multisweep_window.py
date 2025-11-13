@@ -1238,7 +1238,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                     
                 
                 slow_freq = max(spectrum_data.spectrum.freq_iq)/spec_lim
-                fast_freq = 1.22e6   
+                fast_freq = PFB_SAMPLING_FREQ/2   
     
     
                 

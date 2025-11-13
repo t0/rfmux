@@ -1466,7 +1466,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 noise_data = load_params['noise_data']
                 window._get_spectrum(noise_data, use_loaded_noise=True)
             else:
-                print("There is no noise data in the file")
+                print("[Bias] There is no noise data in the file")
             
             window.show()
 

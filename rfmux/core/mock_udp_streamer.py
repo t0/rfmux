@@ -368,13 +368,19 @@ class MockCRSUDPStreamer(threading.Thread):
                 start_time=t   # Pass the current time for this packet
             )
             timing_physics = time.perf_counter()
-            
+
+
+            if self.mock_crs.short_packets and len(channel_responses) > 128: 
+                channel_responses = {k: v for k, v in channel_responses.items() if 1 <= int(k) <= 128}
+
+                    
             # Debug: log if physics is slow
             physics_time = (timing_physics - timing_noise) * 1000
             if physics_time > 1.0 and self.packets_sent % 100 == 0:
                 print(f"[UDP] Physics slow: {physics_time:.2f}ms with {num_configured} channels configured, {len(channel_responses)} responses")
             
             # Process each channel's response
+            
             for ch_num_1 in channel_responses:
                 ch_idx_0 = ch_num_1 - 1  # Convert to 0-based index
                 

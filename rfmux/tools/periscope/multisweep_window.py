@@ -1145,7 +1145,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             t = time.time() + time_taken + pfb_time_taken
             formatted_time = time.strftime("%H:%M:%S", time.localtime(t))
             # Show a progress dialog
-            progress = QtWidgets.QProgressDialog(f"Getting noise spectrum...\n\nCompletion time {formatted_time}", None, 0, 0, self)
+            progress = QtWidgets.QProgressDialog(f"Getting noise spectrum...\n\nEstimated Completion Time {formatted_time}", None, 0, 0, self)
             progress.setWindowTitle("Please wait")
             progress.setCancelButton(None)
             progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)

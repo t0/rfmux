@@ -551,21 +551,29 @@ class MockCRS(BaseCRS):
         return self.rails.get(rail, {}).get("current")
 
     def set_decimation(self, stage: int=6,
-                       short_packets: bool=False,
-                       modules: list[int] | None=None):
+                       short: bool=False,
+                       module: int | list[int] | None=None):
 
         assert isinstance(stage, int) and 0 <= stage <= 6, \
                 "FIR stage must be an integer between 0 and 6 (inclusive)"
 
-        if modules is None:
-            modules = list(self.active_modules)
-
-        if not isinstance(modules, list) or set(modules) > set(self.active_modules):
-            raise ValueError("Invalid 'modules' argument to set_decimation!")
+        # Default to all active modules if none provided
+        if module is None:
+            module = list(self.active_modules)
+    
+        # Convert single int to list
+        if isinstance(module, int):
+            module = [module]
+    
+        # Validate type and membership
+        if (not isinstance(module, list)
+            or not all(isinstance(m, int) for m in module)
+            or not set(module) <= set(self.active_modules)):
+            raise ValueError("Invalid 'module' argument to set_decimation! Must be int or list[int] within active modules.")
 
         self.fir_stage = stage
-        self.short_packets = short_packets
-        self.streamed_modules = modules
+        self.short_packets = short
+        self.streamed_modules = module
 
     def get_decimation(self):
         return None if len(self.streamed_modules)==0 else self.fir_stage
@@ -586,11 +594,6 @@ class MockCRS(BaseCRS):
         pass
 
     def get_timestamp(self):
-        # Simulate time passing or return a fixed test timestamp
-        # now = datetime.now()
-        # self.timestamp = {"y": now.year % 100, "d": now.timetuple().tm_yday, 
-        #                   "h": now.hour, "m": now.minute, "s": now.second, 
-        #                   "c": int(now.microsecond / 10000)} # Example 'c'
         ts = self._last_timestamp
         ts_obj = dataclasses.replace(ts)
         ts_dict = dataclasses.asdict(ts_obj)

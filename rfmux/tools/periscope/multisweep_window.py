@@ -1112,16 +1112,15 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
     def _set_decimation(self, crs, decimation):
         print("Setting decimation to", decimation)
-        if crs.serial == "MOCK0001": ### for mock mode ####
-            asyncio.run(crs.set_decimation(decimation))
+
+        if decimation > 4:
+            asyncio.run(crs.set_decimation(decimation , short = False))
+        elif decimation == 4:
+            asyncio.run(crs.set_decimation(decimation , module = self.target_module, short = False))
         else:
-            if decimation > 4:
-                asyncio.run(crs.set_decimation(decimation , short = False))
-            elif decimation == 4:
-                asyncio.run(crs.set_decimation(decimation , module = self.target_module, short = False))
-            else:
-                asyncio.run(crs.set_decimation(decimation, module = self.target_module, short = True))
-    
+            
+            asyncio.run(crs.set_decimation(decimation, module = self.target_module, short = True))
+
     def _get_spectrum(self, params, use_loaded_noise = False):
         if use_loaded_noise:
             print(f"[Bias] Plotting noise data taken at decimation {params['noise_parameters']['decimation']}")

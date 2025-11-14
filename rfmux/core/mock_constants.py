@@ -42,9 +42,9 @@ DEFAULT_COUPLING_MIN = 0.68
 DEFAULT_COUPLING_MAX = 0.97
 
 # Frequency range for resonance generation
-DEFAULT_FREQ_START = 0.5e9  # 1 GHz
-DEFAULT_FREQ_END = 1e9    # 2 GHz
-DEFAULT_NUM_RESONANCES = 50
+DEFAULT_FREQ_START = 1.1e9  # 1.1 GHz 
+DEFAULT_FREQ_END = 1.5e9   # 1.5 GHz
+DEFAULT_NUM_RESONANCES = 2
 
 # =============================================================================
 # Amplitude and Noise Parameters
@@ -72,6 +72,14 @@ FREQ_TEMP_COEFFICIENT = -1e-4  # df/f per Kelvin
 # =============================================================================
 # Performance and Numerical Parameters
 # =============================================================================
+
+# Convergence tolerance for iterative solver (current-dependent Lk)
+# Lower values = more accuracy but slower
+# 1e-9: Ultra high accuracy (default, allows up to 50 iterations)
+# 1e-7: High accuracy (slower, for few channels)
+# 1e-6: Balanced
+# 1e-5: High speed (faster, for many channels - RECOMMENDED for 50+ channels)
+CONVERGENCE_TOLERANCE = 1e-9
 
 # Resonance spacing to avoid overlap
 MIN_RESONANCE_SPACING_FACTOR = 2.0  # Minimum spacing as multiple of FWHM

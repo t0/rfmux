@@ -3,13 +3,21 @@ Mock CRS Device - Resonator Physics Model.
 Encapsulates the logic for resonator physics simulation, including S21 response.
 """
 import numpy as np
-from . import mock_constants as const
+
+# Import from mr_resonator subpackage using relative imports
+from ..mr_resonator.mr_complex_resonator import MR_complex_resonator
+from ..mr_resonator.mr_lekid import MR_LEKID
+
+# Import JIT-compiled physics functions (numba is required)
+from ..mr_resonator import jit_physics
+print("[Physics] JIT-compiled physics loaded successfully")
 
 
 class MockResonatorModel:
     """
-    Handles resonator physics simulation for MockCRS.
-    Includes both the original S21 model and the newer LC resonance model.
+    Handles resonator physics simulation for MockCRS using mr_resonator objects.
+    This class now exclusively uses persistent MR_LEKID objects to avoid memory leaks
+    and provide resonator physics simulation.
     """
     def __init__(self, mock_crs):
         """
@@ -20,26 +28,37 @@ class MockResonatorModel:
         mock_crs : MockCRS
             An instance of the MockCRS to access its state (frequencies, amplitudes, etc.)
         """
-        self.mock_crs = mock_crs # Store a reference to the main MockCRS instance
-
-        # Parameters for the original S21 model (dynamic resonators)
-        self.resonator_frequencies = np.array([]) # Populated by generate_resonators
-        self.resonator_Q_factors = np.array([])   # Populated by generate_resonators
-        self.num_resonators = 0
-        self.ff_factor = 0.01  # Frequency shift scaling factor
-        self.p_sky = 0         # External fixed power source
-        self.resonator_current_f0s = np.array([])
-        self.resonator_pe = np.array([])
-        self.resonator_f0_history = []
-
-        # Parameters for the LC resonance model
-        self.lc_resonances = [] # List of dicts: {'f0', 'Q', 'coupling'}
+        self.mock_crs = mock_crs  # Store a reference to the main MockCRS instance
         
-        # Note: Removed system_gain - S21 should be dimensionless transfer function
-        # Final scaling to ADC counts happens in UDP streamer
+        # Import default configuration from Single Source of Truth
+        from .mock_config import defaults as get_defaults
+        default_config = get_defaults()
+
+        # Store persistent mr_resonator objects to avoid memory leaks
+        self.mr_lekids = []  # List of persistent MR_LEKID objects
+        self.mr_complex_resonators = []  # List of persistent MR_complex_resonator objects
         
-        # Initialize kinetic inductance parameters for each resonator
+        # Store base parameters for each LEKID (as fabricated)
+        self.base_lekid_params = []  # Original R, Lk values at T=0, nqp=0
+        
+        # Store base nqp values computed from physics
+        self.base_nqp_values = []    # Base quasiparticle density for each resonator
+        
+        # Noise configuration from SoT
+        self.nqp_noise_enabled = default_config['nqp_noise_enabled']
+        self.nqp_noise_std_factor = default_config['nqp_noise_std_factor']
+        
+        # Current effects (affects Lk only, applied after physics-based base params)
+        self.lk_current_factors = []  # Lk_total = Lk_base * lk_current_factor
+        
+        # Physical constants
+        self.Istar = 5e-3  # Characteristic current [A] - This is a physical constant, not a config param
+        
+        # Resonator metadata (parallel arrays to mr_lekids)
+        self.resonator_frequencies = []  # Resonance frequencies for each LEKID
         self.kinetic_inductance_fractions = []  # Per-resonator kinetic inductance fraction
+        self.resonator_q_values = []  # Pre-calculated Q values for each resonator
+        self.resonator_linewidths = []  # Pre-computed linewidths (f0/Q) for filtering
         
         # CIC bandwidth cache for different decimation stages
         self.cic_bandwidths = {
@@ -56,281 +75,823 @@ class MockResonatorModel:
         self._s21_cache = {}  # Cache S21 responses
         self._cic_cache = {}  # Cache CIC filter responses
         self._cache_valid = False
+        
+        # Pulse event tracking for time-dependent QP density - from SoT
+        self.pulse_events = []  # List of active pulses
+        self.pulse_config = {
+            'mode': default_config['pulse_mode'],
+            'period': default_config['pulse_period'],
+            'probability': default_config['pulse_probability'],
+            'tau_rise': default_config['pulse_tau_rise'],
+            'tau_decay': default_config['pulse_tau_decay'],
+            'amplitude': default_config['pulse_amplitude'],
+            'resonators': default_config['pulse_resonators'],
+            # Random pulse amplitude distribution
+            'random_amp_mode': default_config['pulse_random_amp_mode'],
+            'random_amp_min': default_config['pulse_random_amp_min'],
+            'random_amp_max': default_config['pulse_random_amp_max'],
+            'random_amp_logmean': default_config['pulse_random_amp_logmean'],
+            'random_amp_logsigma': default_config['pulse_random_amp_logsigma'],
+        }
+        self.last_pulse_time = {}  # Track last pulse time for each resonator
+        self.last_update_time = 0  # Track last time we updated QP densities
+        
+        # Vectorized parameter arrays (populated by _extract_param_arrays)
+        self._param_arrays_cached = False
+        self.L_array = None
+        self.R_array = None
+        self.C_array = None
+        self.Cc_array = None
+        self.L_junk_array = None
+        
+        # Per-operating-point convergence cache from SoT
+        self._convergence_cache = {}
+        self._convergence_cache_max_size = default_config['convergence_cache_max_size']
 
-        # Initialize with default LC resonances upon creation
-        # self.generate_lc_resonances() # Or let MockCRS call this
+        # Statistics tracking
+        self._convergence_stats = {
+            'full': 0,
+            'skipped': 0,
+            'last_reason': None
+        }
+        
+        # Rolling cache statistics (last 100 calls)
+        self._recent_cache_results = []  # List of True/False for cache hits
+        self._stats_counter = 0
+        
+        # Tolerance settings from SoT - note: these use the old names for backward compat
+        # but will be overridden in generate_resonators with new names
+        self._tolerance_config = {
+            'cache_freq_tolerance': default_config.get('cache_freq_step', 0.0001),
+            'cache_amp_tolerance': default_config.get('cache_amp_step', 1e-8),
+            'qp_change_threshold': default_config.get('cache_qp_step', 0.0001),
+        }
+        # Cache/logging controls from SoT
+        self._resonator_gen = 0
+        self._cache_log_counter = 0
 
-    # --- Original S21 Model Methods (Dynamic Resonators) ---
-    def initialize_dynamic_resonators(self):
-        """Initialize dynamic resonance parameters based on generated resonators."""
-        if not self.resonator_frequencies.size or not self.resonator_Q_factors.size:
-            self.num_resonators = 0
-            self.resonator_current_f0s = np.array([])
-            self.resonator_pe = np.array([])
-            self.resonator_f0_history = []
+    def _extract_param_arrays(self):
+        """Extract LEKID parameters into numpy arrays for vectorized calculations."""
+        if not self.mr_lekids:
             return
         
-        self.num_resonators = len(self.resonator_frequencies)
-        self.resonator_current_f0s = np.copy(self.resonator_frequencies)
-        self.resonator_pe = np.zeros(self.num_resonators)
-        self.resonator_f0_history = [[] for _ in range(self.num_resonators)]
-
-    def generate_resonators(self, num_resonators=10, f_start=1e9, f_end=2e9, 
-                            nominal_Q=1000, min_spacing=0.3e6):
-        """Generate random resonator frequencies and Q factors for the original model."""
-        frequencies = []
-        Q_factors = []
-        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
+        n = len(self.mr_lekids)
+        self.L_array = np.zeros(n)
+        self.R_array = np.zeros(n)
+        self.C_array = np.zeros(n)
+        self.Cc_array = np.zeros(n)
+        self.L_junk_array = np.zeros(n)
+        
+        for i, lekid in enumerate(self.mr_lekids):
+            self.L_array[i] = lekid.L
+            self.R_array[i] = lekid.R
+            self.C_array[i] = lekid.C
+            self.Cc_array[i] = lekid.Cc
+            self.L_junk_array[i] = lekid.L_junk
+        
+        self._param_arrays_cached = True
+    
+    # --- MR_Resonator Methods ---
+    def generate_resonators(self, num_resonances=2, config=None):
+        '''
+        Generate mr_resonator objects with circuit parameters.
+        
+        Parameters
+        ----------
+        num_resonances : int
+            Number of resonators to generate
+        config : dict, optional
+            Configuration dictionary with circuit parameters and variations
+        '''
+        # Get configuration
+        if config is None:
+            # Use physics_config from MockCRS if available, otherwise use unified defaults
+            if hasattr(self.mock_crs, 'physics_config') and self.mock_crs.physics_config:
+                config = self.mock_crs.physics_config
+            else:
+                from .mock_config import defaults
+                config = defaults()
+        
+        print('Using config:', {k: v for k, v in config.items() if k in ['num_resonances', 'freq_start', 'freq_end', 'T', 'Popt']})
+        
+        # Set random seed for reproducible resonator generation
         seed = config.get('resonator_random_seed', 42)
-        np.random.seed(seed) #### Fixing the seed so that we can recreate the randomness
+        np.random.seed(seed)
         
+        # Extract parameters
+        freq_start = config.get('freq_start', 1e9)
+        freq_end = config.get('freq_end', 1.5e9)
         
-        freq_range = f_end - f_start
-        if num_resonators * min_spacing > freq_range and num_resonators > 0 : # check num_resonators > 0
-             max_resonators = int(freq_range / min_spacing) if min_spacing > 0 else np.inf
-             raise ValueError(
-                f"Cannot fit {num_resonators} resonators with min_spacing {min_spacing}Hz "
-                f"in range {freq_range}Hz. Max possible: {max_resonators}"
-            )
-
-        attempts = 0
-        max_attempts = num_resonators * 100
-        while len(frequencies) < num_resonators and attempts < max_attempts:
-            freq = np.random.uniform(f_start, f_end)
-            if all(abs(freq - f) >= min_spacing for f in frequencies):
-                frequencies.append(freq)
-                Q = nominal_Q * np.random.uniform(0.9, 1.1)
-                Q_factors.append(Q)
-            attempts += 1
-
-        if len(frequencies) < num_resonators:
-            raise ValueError("Could not generate the required number of resonators with given constraints.")
-
-        if frequencies: # Ensure not empty before sorting
-            sorted_pairs = sorted(zip(frequencies, Q_factors))
-            self.resonator_frequencies = np.array([p[0] for p in sorted_pairs])
-            self.resonator_Q_factors = np.array([p[1] for p in sorted_pairs])
-        else:
-            self.resonator_frequencies = np.array([])
-            self.resonator_Q_factors = np.array([])
-            
-        self.initialize_dynamic_resonators()
-        self.invalidate_caches()
-
-    def s21_response(self, frequency):
-        """Compute the combined S21 response of the original resonator comb."""
-        if self.num_resonators == 0:
-            return 1.0, 0.0 # No attenuation, zero phase if no resonators
-
-        s21 = 1.0 + 0j
-        for idx in range(self.num_resonators):
-            f0 = self.resonator_current_f0s[idx]
-            Q = self.resonator_Q_factors[idx]
-            delta_f = frequency - f0
-            s21_resonator = 1 - (1 / (1 + 2j * Q * delta_f / f0))
-            s21 *= s21_resonator
+        # Physics parameters (determine Lk and R via quasiparticle density)
+        T = config.get('T', 0.12)
+        Popt = config.get('Popt', 1e-18)
         
-        return abs(s21), np.angle(s21) # Magnitude and phase in radians
-
-    def update_resonator_frequencies(self, s21_mag_array):
-        """Update original model resonance frequencies based on power estimates."""
-        if not self.resonator_current_f0s.size:
-            return
-
-        pe = (s21_mag_array) ** 2 # Simplified power estimate
-        self.resonator_pe = pe
-        self.resonator_current_f0s *= (1 - (self.resonator_pe + self.p_sky) * self.ff_factor)
-
-    # --- LC Resonance Model Methods ---
-    def generate_lc_resonances(self):
-        """Generate LC resonances distributed across spectrum with kinetic inductance parameters."""
-        # Get ALL values from stored config or defaults
-        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
-        seed = config.get('resonator_random_seed', 42)
-
-        np.random.seed(seed) #### Fixing the seed so that we can recreate the randomness
+        # Base circuit parameters
+        Lg_base = config.get('Lg', 10e-9)
+        Cc_base = config.get('Cc', 5e-15)
+        L_junk = config.get('L_junk', 0)
         
-        num_resonances = config.get('num_resonances', const.DEFAULT_NUM_RESONANCES)
-        f_start = config.get('freq_start', const.DEFAULT_FREQ_START)
-        f_end = config.get('freq_end', const.DEFAULT_FREQ_END)
-            
-        self.lc_resonances = []
+        # Variations
+        C_variation = config.get('C_variation', 0.01)
+        Cc_variation = config.get('Cc_variation', 0.1)
+        
+        # Readout parameters
+        Vin = config.get('Vin', 1e-5)
+        input_atten_dB = config.get('input_atten_dB', 10)
+        system_termination = config.get('system_termination', 50)
+        ZLNA = config.get('ZLNA', 50)  # Now a real number
+        GLNA = config.get('GLNA', 1.0)
+        
+        # Clear existing objects to prevent memory leaks
+        self.mr_lekids = []
+        self.mr_complex_resonators = []
+        self.resonator_frequencies = []
         self.kinetic_inductance_fractions = []
+        self.resonator_q_values = []  # Clear Q values
+        self.resonator_linewidths = []  # Clear linewidths
         
-        if num_resonances == 0:
-            return
+        # Clear layered parameter tracking
+        self.base_lekid_params = []
+        self.base_nqp_values = []  # Clear base nqp values
+        self.lk_current_factors = []
+        self.resonator_currents = []
+        
+        # Clear cached parameter arrays - CRITICAL for reconfiguration
+        # This fixes the array size mismatch when going from more to fewer resonators
+        self._param_arrays_cached = False
+        self.L_array = None
+        self.R_array = None
+        self.C_array = None
+        self.Cc_array = None
+        self.L_junk_array = None
+        
+        # Also clear the resonator currents array if it exists
+        if hasattr(self, 'resonator_currents_array'):
+            self.resonator_currents_array = None
+        
+        # Clear convergence state when resonators change
+        self._last_convergence = {'freq': None, 'amp': None, 'nqp_snapshot': None}
+        self._convergence_stats = {'full': 0, 'skipped': 0, 'last_reason': None}
+        # Also clear convergence cache to avoid size mismatches after reconfiguration
+        self._convergence_cache.clear()
+        # Bump generation and clear pulses/schedules
+        self._resonator_gen += 1
+        self.pulse_events = []
+        self.last_pulse_time = {}
+        
+        # Configure noise parameters from config
+        # Uses defaults from mock_crs_helper.py if not specified
+        self.nqp_noise_enabled = config.get('nqp_noise_enabled', True)
+        self.nqp_noise_std_factor = config.get('nqp_noise_std_factor', 0.001)  # Default 0.1% noise if not in config
+        
+        # Update tolerance settings from config (keep existing if not specified or None)
+        self._tolerance_config['cache_freq_tolerance'] = config.get('cache_freq_tolerance', self._tolerance_config['cache_freq_tolerance'])
+        self._tolerance_config['cache_amp_tolerance'] = config.get('cache_amp_tolerance', self._tolerance_config['cache_amp_tolerance'])
+        self._tolerance_config['qp_change_threshold'] = config.get('qp_change_threshold', self._tolerance_config['qp_change_threshold'])
+        
+        print(f"Tolerance settings: freq={self._tolerance_config['cache_freq_tolerance']} Hz, "
+              f"amp={self._tolerance_config['cache_amp_tolerance']}, "
+              f"QP threshold={self._tolerance_config['qp_change_threshold']*100:.1f}%")
 
-        # Use the parameter num_resonances for min_spacing calculation
-        min_spacing = (f_end - f_start) / (num_resonances * 2) if num_resonances > 0 else 0
-        frequencies = []
+        # Update pulse configuration with all pulse parameters from config
+        # This ensures tau values persist through reconfiguration
+        self.pulse_config.update({
+            'mode': config.get('pulse_mode', 'none'),
+            'period': config.get('pulse_period', 10.0),
+            'probability': config.get('pulse_probability', 0.001),
+            'tau_rise': config.get('pulse_tau_rise', 1e-6),
+            'tau_decay': config.get('pulse_tau_decay', 1e-1),
+            'amplitude': config.get('pulse_amplitude', 2.0),
+            'resonators': config.get('pulse_resonators', 'all'),
+            'random_amp_mode': config.get('pulse_random_amp_mode', 'fixed'),
+            'random_amp_min': config.get('pulse_random_amp_min', 1.5),
+            'random_amp_max': config.get('pulse_random_amp_max', 3.0),
+            'random_amp_logmean': config.get('pulse_random_amp_logmean', 0.7),
+            'random_amp_logsigma': config.get('pulse_random_amp_logsigma', 0.3),
+        })
         
-        attempts = 0
-        max_attempts = num_resonances * 100
-        while len(frequencies) < num_resonances and attempts < max_attempts:
-            f = np.random.uniform(f_start, f_end)
-            if all(abs(f - existing) > min_spacing for existing in frequencies):
-                frequencies.append(f)
-            attempts += 1
-        
-        if len(frequencies) < num_resonances:
-            if const.DEBUG_RESONATOR_GENERATION:
-                print(f"Warning: Could only generate {len(frequencies)} LC resonances out of {num_resonances} requested.")
-            if not frequencies and num_resonances > 0:
-                frequencies = np.linspace(f_start, f_end, num_resonances)
+        print(f"Pulse config updated: tau_rise={self.pulse_config['tau_rise']}, tau_decay={self.pulse_config['tau_decay']}")
 
-        frequencies.sort()
+        # Step 1: Create a reference MR_complex_resonator to compute Lk and R from T and Popt
+        print(f"Computing Lk and R from T={T} K and Popt={Popt} W")
         
-        # Get config values from MockCRS physics_config or fallback to constants
-        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
-        q_min = config.get('q_min', const.DEFAULT_Q_MIN)
-        q_max = config.get('q_max', const.DEFAULT_Q_MAX)
-        q_variation = config.get('q_variation', const.Q_VARIATION)
-        coupling_min = config.get('coupling_min', const.DEFAULT_COUPLING_MIN)
-        coupling_max = config.get('coupling_max', const.DEFAULT_COUPLING_MAX)
-        ki_fraction_default = config.get('kinetic_inductance_fraction', const.DEFAULT_KINETIC_INDUCTANCE_FRACTION)
-        ki_variation = config.get('kinetic_inductance_variation', const.KINETIC_INDUCTANCE_VARIATION)
+        # Create reference resonator with dummy C value to get physics-computed Lk and R
+        reference_params = {
+            'T': T,
+            'Popt': Popt,
+            'C': 1e-12,  # Dummy value, just to create the object
+            'Cc': Cc_base,
+            'fix_Lg': Lg_base,  # Fix Lg to our desired value
+            'Vin': Vin,
+            'input_atten_dB': input_atten_dB,
+            'base_readout_f': (freq_start + freq_end) / 2,  # Middle frequency as initial guess
+            'verbose': False,
+            'ZLNA': complex(ZLNA, 0),
+            'GLNA': GLNA
+        }
         
-        for f0_val in frequencies:
-            # Use config values for Q factor range
-            Q_val = np.random.uniform(q_min, q_max)
-            Q_val *= np.random.uniform(1 - q_variation, 1 + q_variation)
-            
-            # Use config values for coupling range
-            coupling_val = np.random.uniform(coupling_min, coupling_max)
-            
-            # Generate kinetic inductance fraction for this resonator
-            ki_fraction = ki_fraction_default
-            ki_fraction *= np.random.uniform(1 - ki_variation, 1 + ki_variation)
-            
-            self.lc_resonances.append({
-                'f0': f0_val, 
-                'Q': Q_val, 
-                'coupling': coupling_val
-            })
-            self.kinetic_inductance_fractions.append(ki_fraction)
+        # Create reference resonator to get physics-computed Lk and R
+        ref_resonator = MR_complex_resonator(**reference_params)
+        computed_Lk = ref_resonator.lekid.Lk
+        computed_R = ref_resonator.lekid.R
+        
+        print(f"Physics-computed values: Lk={computed_Lk*1e9:.2f} nH, R={computed_R*1e6:.2f} µΩ")
+        
+        # Step 2: Generate resonators with computed Lk and R, solving for C to get target frequencies
+        print(f"Generating {num_resonances} resonators from {freq_start/1e9:.2f} GHz to {freq_end/1e9:.2f} GHz")
+        
+        for x in range(num_resonances):
+            try:
+                # Calculate target frequency for this resonator
+                if num_resonances == 1:
+                    target_freq = (freq_start + freq_end) / 2  # Middle frequency
+                else:
+                    target_freq = freq_start + (freq_end - freq_start) * x / (num_resonances - 1)
+                
+                # Calculate C required for target frequency using computed Lk
+                # fr = 1/(2π√(LC)) where L = Lk + Lg
+                L_total = computed_Lk + Lg_base
+                C_required = 1 / (4 * np.pi**2 * target_freq**2 * L_total)
+                
+                # Apply variations using normal distribution
+                C_actual = C_required * (1 + np.random.normal(0, C_variation))
+                Cc_actual = Cc_base * (1 + np.random.normal(0, Cc_variation))
+                
+                # Ensure positive values
+                C_actual = max(C_actual, C_required * 0.1)  # At least 10% of required value
+                Cc_actual = max(Cc_actual, Cc_base * 0.1)
+                
+                print(f"Resonator {x}: target_freq={target_freq/1e9:.3f} GHz, C={C_actual*1e12:.2f} pF")
+                
+                # Create MR_complex_resonator with T, Popt, and calculated C
+                complex_res_params = {
+                    'T': T,
+                    'Popt': Popt,
+                    'C': C_actual,
+                    'Cc': Cc_actual,
+                    'fix_Lg': Lg_base,  # Fix Lg to our desired value
+                    'L_junk': L_junk,
+                    'Vin': Vin,
+                    'input_atten_dB': input_atten_dB,
+                    'base_readout_f': target_freq,  # Initial guess for readout frequency
+                    'verbose': False,  # Suppress individual resonator output
+                    'ZLNA': complex(ZLNA, 0),  # Convert real ZLNA to complex for MR_complex_resonator
+                    'GLNA': GLNA
+                }
+                
+                # Create the full MR_complex_resonator (includes physics modeling)
+                complex_res = MR_complex_resonator(**complex_res_params)
+                
+                # Extract the LEKID from the complex resonator
+                lekid = complex_res.lekid
+                
+                # Calculate and store actual resonance frequency
+                actual_freq = lekid.compute_fr()
+                print(f"  Actual frequency: {actual_freq/1e9:.3f} GHz")
+                print(f"  Actual Lk: {lekid.Lk*1e9:.2f} nH, R: {lekid.R*1e6:.2f} µΩ")
+                
+                # Store the persistent objects (this fixes the memory leak)
+                self.mr_lekids.append(lekid)
+                self.mr_complex_resonators.append(complex_res)  # Keep for future QP tracking
+                
+                # Compute and store base nqp using calc_nqp() method
+                base_nqp = complex_res.calc_nqp()
+                self.base_nqp_values.append(base_nqp)
+                print(f"  Base nqp: {base_nqp:.2e}")
+                
+                # Store base parameters (as-fabricated values)
+                self.base_lekid_params.append({
+                    'R': lekid.R,
+                    'Lk': lekid.Lk,
+                    'Lg': lekid.Lg,
+                    'C': lekid.C,
+                    'Cc': lekid.Cc
+                })
+                
+                # Initialize current factors to 1 (no modification)
+                self.lk_current_factors.append(1.0)
+                self.resonator_currents.append(0.)
+                
+                # Store metadata (use actual computed frequency)
+                self.resonator_frequencies.append(actual_freq)
+                self.kinetic_inductance_fractions.append(lekid.alpha_k)
+                
+                # Pre-calculate and store Q value
+                try:
+                    Q_value = lekid.compute_Qi()
+                    print(f"  Q value: {Q_value:.0f}")
+                except:
+                    Q_value = 1000  # Fallback Q if calculation fails
+                    print(f"  Q value: {Q_value:.0f} (fallback)")
+                self.resonator_q_values.append(Q_value)
+                
+                # Pre-compute and store linewidth
+                linewidth = actual_freq / Q_value
+                self.resonator_linewidths.append(linewidth)
+                print(f"  Linewidth: {linewidth/1e3:.2f} kHz")
+                
+            except Exception as e:
+                print(f"Warning: Failed to create resonator {x}: {e}")
+                import traceback
+                traceback.print_exc()
+                # Continue with other resonators
+                continue
+        
+        print(f"Successfully created {len(self.mr_lekids)} persistent LEKID objects")
+        print(f"Successfully created {len(self.mr_complex_resonators)} persistent MR_complex_resonator objects")
+
+        # Configure pulse events if specified in config
+        pulse_mode = config.get('pulse_mode', 'none')
+        if pulse_mode != 'none':
+            self.set_pulse_mode(
+                pulse_mode,
+                period=config.get('pulse_period', 10.0),
+                probability=config.get('pulse_probability', 0.001),
+                tau_rise=config.get('pulse_tau_rise', 1e-6),
+                tau_decay=config.get('pulse_tau_decay', 1e-3),
+                amplitude=config.get('pulse_amplitude', 2.0),
+                resonators=config.get('pulse_resonators', 'all'),
+                # Random amplitude distribution (random mode)
+                random_amp_mode=config.get('pulse_random_amp_mode', 'fixed'),
+                random_amp_min=config.get('pulse_random_amp_min', 1.5),
+                random_amp_max=config.get('pulse_random_amp_max', 3.0),
+                random_amp_logmean=config.get('pulse_random_amp_logmean', 0.7),
+                random_amp_logsigma=config.get('pulse_random_amp_logsigma', 0.3),
+            )
         
         self.invalidate_caches()
+
 
     def s21_lc_response(self, frequency, amplitude=1.0):
-        """Calculate S21 response for the LC model with kinetic inductance effects and bifurcation."""
-        if not self.lc_resonances:
-            return 1.0 + 0j # No attenuation if no LC resonators
+        """
+        Calculate S21 response with optimized convergence.
+        
+        Includes:
+        - ALL resonators for continuous S21 (no artificial boundaries)
+        - Pulse-modified quasiparticle density (if pulses are active)
+        - Fresh noisy quasiparticle density each call
+        - Physics-based Lk and R from combined nqp
+        - OPTIMIZED: Skip convergence for noise-only changes via caching
+        """
+        import time
+        t_start = time.perf_counter()
+        
+        if not self.mr_lekids:
+            return 1.0 + 0j
+        
+        # Calculate effective nqp with fresh noise for ALL resonators (vectorized)
+        base_nqp_array = np.array(self.base_nqp_values, dtype=np.float64)
+        
+        # Start with base values
+        effective_nqp_array = base_nqp_array.copy()
+        
+        # Add pulse contributions (only loop through active pulses)
+        for pulse in self.pulse_events:
+            i = pulse['resonator_index']
+            if i < len(effective_nqp_array):
+                pulse_dt = self.last_update_time - pulse['start_time']
+                if pulse_dt >= 0:
+                    if pulse_dt < pulse['tau_rise']:
+                        time_factor = (1 - np.exp(-pulse_dt / pulse['tau_rise']))
+                    else:
+                        decay_dt = pulse_dt - pulse['tau_rise']
+                        time_factor = np.exp(-decay_dt / pulse['tau_decay'])
+                    excess_factor = (pulse['amplitude'] - 1.0) * time_factor
+                    effective_nqp_array[i] += excess_factor * base_nqp_array[i]
+        
+        # Add fresh noise (vectorized)
+        if self.nqp_noise_enabled:
+            # Generate noise for all resonators at once
+            noise_array = np.random.normal(0, base_nqp_array * self.nqp_noise_std_factor, len(base_nqp_array))
+            effective_nqp_array = np.maximum(0, effective_nqp_array + noise_array)
+        else:
+            # Ensure non-negative even without noise
+            effective_nqp_array = np.maximum(0, effective_nqp_array)
+        
+        # Convert to list for compatibility with existing code
+        effective_nqp = effective_nqp_array.tolist()
+        
+        # Always update R,Lk from physics (fast, preserves IQ behavior)
+        self.update_base_params_from_nqp(effective_nqp)
+        
+        # === OPTIMIZATION: Check if we need convergence (per-resonator qp-aware key) ===
+        # Compute nearest resonator by current f0 estimate
+        f0_list = []
+        for lek in self.mr_lekids:
+            try:
+                L_eff = max(lek.L, 1e-30)
+                C_eff = max(lek.C, 1e-30)
+                f0_list.append(1.0 / (2.0 * np.pi * np.sqrt(L_eff * C_eff)))
+            except Exception:
+                f0_list.append(0.0)
+        if f0_list:
+            nearest_idx = int(np.argmin(np.abs(np.array(f0_list) - frequency)))
+        else:
+            nearest_idx = 0
 
-        # Get config values from MockCRS physics_config or fallback to constants
-        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
-        enable_bifurcation = config.get('enable_bifurcation', const.ENABLE_BIFURCATION)
-        base_noise_level = config.get('base_noise_level', const.BASE_NOISE_LEVEL)
-        amplitude_noise_coupling = config.get('amplitude_noise_coupling', const.AMPLITUDE_NOISE_COUPLING)
+        # Get cache parameters from config
+        phys = getattr(self.mock_crs, 'physics_config', {})
+        if not isinstance(phys, dict):
+            phys = {}
         
-        s21_total = 1.0 + 0j
+        # Frequency step from config
+        freq_step = phys.get('cache_freq_step', 0.0001)  # Default 0.0001 Hz
+        if freq_step <= 0:
+            freq_step = 0.0001
+        freq_key = round(frequency / freq_step) * freq_step
+
+        # Amplitude step from config
+        amp_step = phys.get('cache_amp_step', 1e-8)  # Default 1e-8
+        if amp_step <= 0:
+            amp_step = 1e-8
+        amp_key = round(amplitude / amp_step) * amp_step
+
+        # QP step from config (as fraction of base QP)
+        qp_step_fraction = phys.get('cache_qp_step', 0.001)  # Default 0.1%
+        if qp_step_fraction <= 0:
+            qp_step_fraction = 0.001
         
-        for idx, res in enumerate(self.lc_resonances):
-            f0 = res['f0']
-            Q = res['Q']
-            k = res['coupling']
-            
-            # Get kinetic inductance fraction for this resonator
-            ki_fraction = self.kinetic_inductance_fractions[idx] if idx < len(self.kinetic_inductance_fractions) else const.DEFAULT_KINETIC_INDUCTANCE_FRACTION
-            
-            if enable_bifurcation:
-                # Self-consistent calculation with bifurcation capability
-                f0_eff = self._calculate_self_consistent_frequency(frequency, f0, Q, k, amplitude, ki_fraction)
+        # Calculate absolute QP step based on median base value
+        if self.base_nqp_values:
+            base_med = float(np.median(np.array(self.base_nqp_values, dtype=float)))
+            qp_step = max(1e-300, abs(base_med) * qp_step_fraction)
+        else:
+            qp_step = 1e-6  # Fallback
+        
+        qp_val = effective_nqp[nearest_idx] if 0 <= nearest_idx < len(effective_nqp) else 0.0
+        qp_key = round(qp_val / qp_step) * qp_step
+
+        cache_key = (nearest_idx, freq_key, amp_key, qp_key)
+
+        # Check cache
+        skip_convergence = False
+        cached_data = self._convergence_cache.get(cache_key)
+        reason = 'miss'
+        if cached_data is not None:
+            if cached_data.get('gen') != getattr(self, '_resonator_gen', 0):
+                reason = 'gen_changed'
+            elif cached_data.get('lekid_count') != len(self.mr_lekids):
+                reason = 'count_changed'
             else:
-                # Simple frequency shift without self-consistency
-                f0_eff = self._calculate_simple_frequency_shift(f0, amplitude, ki_fraction)
-            
-            # Q degradation at high power
-            Q_eff = Q / (1 + amplitude**2 * 0.1)
-            
-            # Calculate S21 for this resonator
-            delta = (frequency - f0_eff) / f0_eff
-            denom = 1 + 2j * Q_eff * delta
-            s21_res = 1 - k / denom
-            s21_total *= s21_res
+                skip_convergence = True
+                reason = 'hit'
+        self._convergence_stats['last_reason'] = reason
         
-        # Add measurement noise (dimensionless, relative to S21)
-        noise_level = base_noise_level * (1 + amplitude * amplitude_noise_coupling)
-        noise = noise_level * (np.random.randn() + 1j * np.random.randn())
+        # Track cache hit/miss for rolling statistics
+        self._recent_cache_results.append(skip_convergence)
+        if len(self._recent_cache_results) > 100:
+            self._recent_cache_results.pop(0)  # Keep only last 100
         
-        return s21_total + noise
-    
-    def _calculate_simple_frequency_shift(self, f0, amplitude, ki_fraction):
-        """Calculate frequency shift without self-consistency (faster)."""
-        # Get config values from MockCRS physics_config or fallback to constants
-        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
-        power_norm_const = config.get('power_normalization', const.POWER_NORMALIZATION)
-        freq_shift_power_law = config.get('frequency_shift_power_law', const.FREQUENCY_SHIFT_POWER_LAW)
-        freq_shift_mag = config.get('frequency_shift_magnitude', const.FREQUENCY_SHIFT_MAGNITUDE)
-        saturation_power = config.get('saturation_power', const.SATURATION_POWER)
-        saturation_sharpness = config.get('saturation_sharpness', const.SATURATION_SHARPNESS)
+        # Print cache statistics every 100 calls (if logging enabled)
+        self._stats_counter += 1
+        log_enabled = phys.get('log_cache_decisions', False) if isinstance(phys, dict) else False
+        log_every = phys.get('cache_log_interval', 100) if isinstance(phys, dict) else 100
+        if log_enabled and (self._stats_counter % max(1, int(log_every)) == 0):
+            recent_hits = sum(self._recent_cache_results)
+            recent_total = len(self._recent_cache_results)
+            hit_rate = (recent_hits / recent_total * 100) if recent_total > 0 else 0
+            print(f"[Cache Stats] Last {recent_total} calls: {hit_rate:.1f}% cache hits ({recent_hits} hits, {recent_total - recent_hits} misses)")
         
-        # Normalized power
-        power_norm = (amplitude / power_norm_const) ** freq_shift_power_law
+        # Update parameters based on convergence decision
+        if not skip_convergence:
+            # Run full convergence
+            self.update_lekids_for_current(frequency, amplitude)
+
+            # Update cache capacity from config if provided
+            phys = getattr(self.mock_crs, 'physics_config', {})
+            if isinstance(phys, dict):
+                max_size = phys.get('convergence_cache_max_size', self._convergence_cache_max_size)
+            else:
+                max_size = self._convergence_cache_max_size
+            if isinstance(max_size, int) and max_size > 0:
+                self._convergence_cache_max_size = max_size
+
+            # Cache the actual converged values (not factors) for this operating point
+            self._convergence_cache[cache_key] = {
+                'Lk_values': [lekid.Lk for lekid in self.mr_lekids],
+                'R_values': [lekid.R for lekid in self.mr_lekids],
+                'L_values': [lekid.L for lekid in self.mr_lekids],
+                'frequency': frequency,
+                'amplitude': amplitude,
+                'qp_key': qp_key,
+                'nearest_idx': nearest_idx,
+                'gen': getattr(self, '_resonator_gen', 0),
+                'lekid_count': len(self.mr_lekids)
+            }
+
+            # Limit cache size
+            if len(self._convergence_cache) > self._convergence_cache_max_size:
+                oldest_key = next(iter(self._convergence_cache))
+                del self._convergence_cache[oldest_key]
+
+            # Update statistics
+            self._convergence_stats['full'] += 1
+
+        else:
+            # Restore cached converged values - apply to ALL resonators
+            cached_Lk = cached_data.get('Lk_values')
+            cached_R = cached_data.get('R_values')
+            cached_L = cached_data.get('L_values')
+            
+            for i in range(len(self.mr_lekids)):
+                lekid = self.mr_lekids[i]
+                
+                # Restore the exact cached physics state
+                if cached_Lk and i < len(cached_Lk):
+                    lekid.Lk = cached_Lk[i]
+                if cached_R and i < len(cached_R):
+                    lekid.R = cached_R[i]
+                if cached_L and i < len(cached_L):
+                    lekid.L = cached_L[i]
+                    lekid.alpha_k = lekid.Lk / lekid.L
+            
+            # Update statistics
+            self._convergence_stats['skipped'] += 1
         
-        # Apply saturation
-        if power_norm > saturation_power:
-            saturation_factor = saturation_power + (power_norm - saturation_power) / (1 + (power_norm / saturation_power) ** saturation_sharpness)
-            power_norm = saturation_factor
+        # Extract parameters for ALL resonators
+        n_relevant = len(self.mr_lekids)
+        L_subset = np.zeros(n_relevant)
+        C_subset = np.zeros(n_relevant)
+        R_subset = np.zeros(n_relevant)
+        Cc_subset = np.zeros(n_relevant)
+        L_junk_subset = np.zeros(n_relevant)
         
-        # Frequency shift (downward for KIDs)
-        freq_shift_fraction = -freq_shift_mag * ki_fraction * power_norm
-        return f0 * (1 + freq_shift_fraction)
-    
-    def _calculate_self_consistent_frequency(self, frequency, f0, Q, k, amplitude, ki_fraction):
-        """Calculate self-consistent frequency with potential bifurcation using damped iteration."""
-        # Get config values from MockCRS physics_config or fallback to constants
-        config = self.mock_crs.physics_config if hasattr(self.mock_crs, 'physics_config') else {}
-        power_norm_const = config.get('power_normalization', const.POWER_NORMALIZATION)
-        freq_shift_power_law = config.get('frequency_shift_power_law', const.FREQUENCY_SHIFT_POWER_LAW)
-        freq_shift_mag = config.get('frequency_shift_magnitude', const.FREQUENCY_SHIFT_MAGNITUDE)
-        saturation_power = config.get('saturation_power', const.SATURATION_POWER)
-        saturation_sharpness = config.get('saturation_sharpness', const.SATURATION_SHARPNESS)
-        bifurcation_iterations = config.get('bifurcation_iterations', const.BIFURCATION_ITERATIONS)
-        bifurcation_tolerance = config.get('bifurcation_convergence_tolerance', const.BIFURCATION_CONVERGENCE_TOLERANCE)
-        bifurcation_damping = config.get('bifurcation_damping_factor', const.BIFURCATION_DAMPING_FACTOR)
+        for i in range(n_relevant):
+            lekid = self.mr_lekids[i]
+            L_subset[i] = lekid.L
+            C_subset[i] = lekid.C
+            R_subset[i] = lekid.R
+            Cc_subset[i] = lekid.Cc
+            L_junk_subset[i] = lekid.L_junk
         
-        # Initial guess
-        f0_eff = f0
-        convergence_history = []
+        # Get common parameters from first LEKID (they should all be the same)
+        lekid0 = self.mr_lekids[0]
         
-        for iteration in range(bifurcation_iterations):
-            # Calculate S21 magnitude at current effective frequency
-            delta = (frequency - f0_eff) / f0_eff
-            denom = 1 + 2j * Q * delta
-            s21_res = 1 - k / denom
-            circulating_power = abs(s21_res)**2 * amplitude**2
-            
-            # Calculate new frequency based on circulating power
-            power_norm = (circulating_power / power_norm_const) ** freq_shift_power_law
-            
-            # Apply saturation
-            if power_norm > saturation_power:
-                saturation_factor = saturation_power + (power_norm - saturation_power) / (1 + (power_norm / saturation_power) ** saturation_sharpness)
-                power_norm = saturation_factor
-            
-            # New effective frequency (downward shift for KIDs)
-            freq_shift_fraction = -freq_shift_mag * ki_fraction * power_norm
-            f0_new = f0 * (1 + freq_shift_fraction)
-            
-            # Check convergence
-            convergence_error = abs(f0_new - f0_eff) / f0
-            convergence_history.append(convergence_error)
-            
-            if const.DEBUG_BIFURCATION:
-                print(f"DEBUG: CONVERGENCE iter {iteration}: error = {convergence_error:.2e}")
-            
-            if convergence_error < bifurcation_tolerance:
-                if const.DEBUG_BIFURCATION:
-                    print(f"Bifurcation converged in {iteration + 1} iterations")
-                break
-            
-            # Apply damped iteration to prevent oscillation
-            f0_eff = (1 - bifurcation_damping) * f0_eff + bifurcation_damping * f0_new
+        # Use new parallel S21 calculation that properly combines all resonators
+        # This calculates the transmission to the load with all resonators in parallel
+        s21_total = jit_physics.compute_s21_parallel(
+            fc=frequency,
+            Vin=amplitude,
+            L_array=L_subset,
+            C_array=C_subset,
+            R_array=R_subset,
+            Cc_array=Cc_subset,
+            L_junk_array=L_junk_subset,
+            ZLNA=complex(lekid0.ZLNA),
+            GLNA=lekid0.GLNA,
+            input_atten_dB=lekid0.input_atten_dB,
+            system_termination=lekid0.system_termination
+        )
         
-        if const.DEBUG_BIFURCATION and iteration == bifurcation_iterations - 1:
-            print(f"Warning: Bifurcation did not converge after {bifurcation_iterations} iterations")
+        t_vout = time.perf_counter()
+        
+        # Diagnostic timing (commented out - timing vars removed for optimization)
+        # if not hasattr(self, '_timing_counter'):
+        #     self._timing_counter = 0
+        # self._timing_counter += 1
+        # 
+        # if self._timing_counter % 10 == 0:  # Log every 10th call
+        #     total_ms = (t_vout - t_start) * 1000
+        #     # Additional timing would require adding timing points back
+        
+        return s21_total
+
+    def update_lekid_parameters(self, lekid_index):
+        """
+        Apply current-dependent modifications to a LEKID's parameters.
+        
+        Order of operations:
+        1. Start with base parameters (already updated by physics from nqp)
+        2. Apply current-dependent modifications to Lk only
+        """
+        base_params = self.base_lekid_params[lekid_index]
+        lekid = self.mr_lekids[lekid_index]
+        
+        # Apply current effects to Lk (R is not affected by current)
+        Lk_total = base_params['Lk'] * self.lk_current_factors[lekid_index]
+        R_total = base_params['R']  # R comes directly from physics calculation
+        
+        # Update the LEKID object
+        lekid.Lk = Lk_total
+        lekid.R = R_total
+        lekid.L = lekid.Lk + lekid.Lg
+        lekid.alpha_k = lekid.Lk / lekid.L
+
+
+    def calculate_resonator_currents(self, frequency, Vin, damp=0.1):
+        """
+        Calculate the current through each resonator.
+        
+        This is now handled inside the JIT-compiled convergence loop for efficiency.
+        This method is kept for compatibility but just returns the cached currents.
+        """
+        if not self.mr_lekids:
+            return []
+        
+        # Return cached currents from last convergence
+        if hasattr(self, 'resonator_currents'):
+            return self.resonator_currents
+        else:
+            return [0] * len(self.mr_lekids)
+
+    def calculate_current_factors(self, frequency, amplitude):
+        """
+        Calculate current-dependent Lk factors for all resonators.
+        
+        Uses JIT-compiled helper for maximum performance.
+        """
+        # This is now handled inside the convergence loop
+        # Return cached factors if available
+        if hasattr(self, 'lk_current_factors'):
+            return self.lk_current_factors
+        
+        # Otherwise calculate using JIT helper
+        if hasattr(self, 'resonator_currents_array'):
+            factors = jit_physics.current_factors(self.resonator_currents_array, self.Istar)
+            return factors.tolist()
+        else:
+            return [1.0] * len(self.mr_lekids)
+
+    def update_lekids_for_current(self, frequency, amplitude):
+        """
+        Update LEKID parameters based on resonator currents.
+        
+        Uses JIT-compiled convergence loop for 2-5x speedup.
+        
+        Parameters
+        ----------
+        frequency : float
+            Probe frequency in Hz
+        amplitude : float
+            Probe amplitude  
             
-        return f0_eff
+        Convergence tolerance can be configured via physics_config:
+        - 1e-9: Ultra high accuracy (default)
+        - 1e-7: High accuracy 
+        - 1e-5: Balanced
+        - 1e-3: Ultra fast (for many channels)
+        """
+        max_iterations = 500
+        tolerance = self.mock_crs.physics_config.get('convergence_tolerance', 1e-9)
+        
+        # Get LEKID config from first resonator
+        lekid0 = self.mr_lekids[0]
+        
+        # Update all resonators
+        self._extract_param_arrays()
+        
+        n = len(self.mr_lekids)
+        
+        # Ensure arrays are initialized
+        if self.L_array is None or self.R_array is None:
+            self._extract_param_arrays()
+        
+        # Use full arrays
+        L_work = self.L_array
+        R_work = self.R_array
+        C_work = self.C_array
+        Cc_work = self.Cc_array
+        L_junk_work = self.L_junk_array
+        base_Lk = np.array([self.base_lekid_params[i]['Lk'] for i in range(n)])
+        base_Lg = np.array([self.base_lekid_params[i]['Lg'] for i in range(n)])
+        
+        # Call JIT-compiled convergence loop
+        L_converged, R_converged, currents_converged, actual_iterations = \
+            jit_physics.converged_lekid_parameters(
+                frequency, amplitude,
+                L_work, R_work, C_work,
+                Cc_work, L_junk_work,
+                base_Lk, base_Lg,
+                lekid0.input_atten_dB, complex(lekid0.ZLNA),
+                self.Istar, tolerance, max_iterations, damp=0.1
+            )
+        
+        # Extract current factors from converged inductances
+        Lk_converged = L_converged - base_Lg
+        current_factors = Lk_converged / base_Lk
+        
+        # Update LEKID objects with converged values (guard against concurrent reconfigure)
+        m = min(n, len(self.mr_lekids))
+        for i in range(m):
+            lekid = self.mr_lekids[i]
+            lekid.Lk = Lk_converged[i]
+            lekid.R = R_converged[i]
+            lekid.L = L_converged[i]
+            lekid.alpha_k = Lk_converged[i] / L_converged[i]
+
+        # Update cached data sized to current resonator count
+        mlen = len(self.mr_lekids)
+        try:
+            # Convert numpy array to list
+            factors_array = current_factors[:m]
+            base_factors = [float(x) for x in factors_array]
+        except Exception:
+            base_factors = [1.0] * m
+        
+        # Extend if needed
+        if mlen > m:
+            for _ in range(mlen - m):
+                base_factors.append(1.0)
+        
+        self.lk_current_factors = base_factors
+
+        try:
+            # Ensure a flat list[float] regardless of the dtype/shape returned by JIT
+            vec = np.asarray(currents_converged, dtype=float).reshape(-1)
+            curr_list = vec[:m].tolist()
+        except Exception:
+            curr_list = [0.0] * m
+        pad_len = mlen - m
+        if pad_len > 0:
+            curr_list = curr_list + [0.0] * pad_len
+        self.resonator_currents_array = np.array(curr_list, dtype=float)
+        self.resonator_currents = curr_list
+
+        # Refresh L/R arrays from current objects
+        self.L_array = np.array([lek.L for lek in self.mr_lekids])
+        self.R_array = np.array([lek.R for lek in self.mr_lekids])
+        
+        # Log convergence stats occasionally
+        if not hasattr(self, '_convergence_counter'):
+            self._convergence_counter = 0
+        self._convergence_counter += 1
+
+    def generate_noisy_nqp_values(self):
+        """
+        Generate fresh noisy nqp values for all resonators.
+        
+        Returns
+        -------
+        list
+            List of noisy nqp values, one per resonator
+        """
+        noisy_nqp = []
+        for base_nqp in self.base_nqp_values:
+            if self.nqp_noise_enabled and base_nqp > 0:
+                # Generate Gaussian noise with std = base_nqp * noise_factor
+                noise = np.random.normal(0, base_nqp * self.nqp_noise_std_factor)
+                # Ensure non-negative nqp
+                noisy_value = max(0, base_nqp + noise)
+                noisy_nqp.append(noisy_value)
+            else:
+                noisy_nqp.append(base_nqp)
+        return noisy_nqp
+
+    def update_base_params_from_nqp(self, noisy_nqp_values):
+        """
+        Update base Lk and R values using physics calculations.
+        
+        Uses JIT-compiled parallel vectorized calculations for 15-25x speedup.
+        
+        Parameters
+        ----------
+        noisy_nqp_values : list
+            List of noisy nqp values, one per resonator
+        """
+        # Prepare arrays for vectorized calculation
+        n = len(self.mr_complex_resonators)
+        nqp_array = np.array(noisy_nqp_values, dtype=np.float64)
+        readout_freqs = np.array([cr.readout_f for cr in self.mr_complex_resonators], dtype=np.float64)
+        T_array = np.full(n, self.mr_complex_resonators[0].T, dtype=np.float64)
+        Delta0_array = np.full(n, self.mr_complex_resonators[0].Delta0, dtype=np.float64)
+        N0_array = np.full(n, self.mr_complex_resonators[0].N0, dtype=np.float64)
+        sigmaN_array = np.full(n, self.mr_complex_resonators[0].sigmaN, dtype=np.float64)
+        thickness_array = np.full(n, self.mr_complex_resonators[0].thickness, dtype=np.float64)
+        width_array = np.full(n, self.mr_complex_resonators[0].width, dtype=np.float64)
+        length_array = np.full(n, self.mr_complex_resonators[0].length, dtype=np.float64)
+        R_spoiler_array = np.full(n, self.mr_complex_resonators[0].R_spoiler, dtype=np.float64)
+        
+        # Call JIT-compiled function - computes ALL resonators in parallel
+        R_array, Lk_array = jit_physics.vectorized_update_params_from_nqp(
+            nqp_array, readout_freqs, T_array, Delta0_array,
+            N0_array, sigmaN_array, thickness_array,
+            width_array, length_array, R_spoiler_array
+        )
+        
+        # Update all base parameters
+        for i in range(n):
+            self.base_lekid_params[i]['R'] = R_array[i]
+            self.base_lekid_params[i]['Lk'] = Lk_array[i]
+
+    def set_istar(self, istar):
+        """Set the characteristic current for all resonators."""
+        self.Istar = istar
+        self.invalidate_caches()
+
+    def get_parameter_summary(self, lekid_index):
+        """
+        Get a summary of all parameter modifications for debugging.
+        """
+        base = self.base_lekid_params[lekid_index]
+        current = self.mr_lekids[lekid_index]
+        
+        return {
+            'base_Lk': base['Lk'],
+            'base_R': base['R'],
+            'current_factor_Lk': self.lk_current_factors[lekid_index],
+            'final_Lk': current.Lk,
+            'final_R': current.R
+        }
     
     def invalidate_caches(self):
         """Clear caches when resonator parameters change."""
@@ -338,9 +899,217 @@ class MockResonatorModel:
         self._cic_cache.clear()
         self._cache_valid = False
     
+    def update_qp_densities_for_time(self, current_time):
+        """Update all resonator QP densities based on active pulses.
+        
+        Parameters
+        ----------
+        current_time : float
+            Current time in seconds since streaming started
+        """
+        # Only update if time has advanced
+        if current_time <= self.last_update_time:
+            return
+        
+        dt = current_time - self.last_update_time
+        self.last_update_time = current_time
+        
+        # Check if we should trigger new pulses
+        self._check_trigger_pulses(current_time, dt)
+        
+        # Calculate QP densities for all resonators based on active pulses
+        pulse_nqp_values = []
+        
+        for i in range(len(self.mr_lekids)):
+            # Get base nqp for this resonator
+            base_nqp = self.base_nqp_values[i] if i < len(self.base_nqp_values) else 0
+            
+            # Calculate total excess QP contribution from all active pulses
+            excess_qp = 0
+            
+            # Filter active pulses for this resonator
+            for pulse in self.pulse_events:
+                if pulse['resonator_index'] == i:
+                    # Calculate pulse contribution at current time
+                    pulse_dt = current_time - pulse['start_time']
+                    if pulse_dt >= 0:
+                        # Exponential rise and decay model
+                        if pulse_dt < pulse['tau_rise']:  # Rising edge
+                            time_factor = (1 - np.exp(-pulse_dt / pulse['tau_rise']))
+                        else:  # Decay phase
+                            rise_time = pulse['tau_rise']
+                            decay_dt = pulse_dt - rise_time
+                            time_factor = np.exp(-decay_dt / pulse['tau_decay'])
+                        
+                        # Calculate excess QP relative to base_nqp
+                        # amplitude=2.0 means total_nqp = base_nqp + 1.0*base_nqp = 2*base_nqp
+                        excess_factor = (pulse['amplitude'] - 1.0) * time_factor
+                        excess_qp += excess_factor * base_nqp
+            
+            # Calculate total absolute QP density
+            total_nqp = base_nqp + excess_qp
+            
+            # Ensure non-negative QP density
+            total_nqp = max(0, total_nqp)
+            
+            pulse_nqp_values.append(total_nqp)
+        
+        # Update base parameters using physics-based method (same as noise)
+        if pulse_nqp_values:
+            self.update_base_params_from_nqp(pulse_nqp_values)
+            self.invalidate_caches()
+        
+        # Clean up old pulses (after n decay constants)
+        self.pulse_events = [p for p in self.pulse_events 
+                           if current_time - p['start_time'] < p['tau_rise'] + p['tau_decay'] * 15]
+    
+    def _sample_random_pulse_amplitude(self):
+        """Sample a pulse amplitude for random mode based on configured distribution."""
+        mode = self.pulse_config.get('random_amp_mode', 'fixed')
+        if mode == 'uniform':
+            amin = float(self.pulse_config.get('random_amp_min', 1.5))
+            amax = float(self.pulse_config.get('random_amp_max', 3.0))
+            amp = np.random.uniform(amin, amax)
+        elif mode == 'lognormal':
+            mu = float(self.pulse_config.get('random_amp_logmean', 0.7))
+            sigma = float(self.pulse_config.get('random_amp_logsigma', 0.3))
+            amp = np.random.lognormal(mean=mu, sigma=sigma)
+        else:
+            amp = float(self.pulse_config.get('amplitude', 2.0))
+        # Enforce non-decreasing QP unless explicitly configured otherwise
+        return max(1.0, amp)
+
+    def _check_trigger_pulses(self, current_time, dt):
+        """Check if new pulses should be triggered based on mode.
+        
+        Parameters
+        ----------
+        current_time : float
+            Current time in seconds
+        dt : float
+            Time step since last update
+        """
+        mode = self.pulse_config['mode']
+        
+        if mode == 'none' or mode == 'manual':
+            return
+        
+        # Determine which resonators can receive pulses
+        if self.pulse_config['resonators'] == 'all':
+            target_resonators = list(range(len(self.mr_lekids)))
+        else:
+            target_resonators = self.pulse_config['resonators']
+        
+        if mode == 'periodic':
+            # Check each resonator for periodic pulses
+            period = self.pulse_config['period']
+            for res_idx in target_resonators:
+                last_time = self.last_pulse_time.get(res_idx, -period)
+                if current_time - last_time >= period:
+                    self.add_pulse_event(res_idx, current_time)
+                    self.last_pulse_time[res_idx] = current_time
+        
+        elif mode == 'random':
+            # Random pulses based on probability per timestep
+            prob = self.pulse_config['probability']
+            for res_idx in target_resonators:
+                if np.random.random() < prob * dt:
+                    amp = self._sample_random_pulse_amplitude()
+                    self.add_pulse_event(res_idx, current_time, amplitude=amp)
+                    self.last_pulse_time[res_idx] = current_time
+    
+    def add_pulse_event(self, resonator_index, start_time, amplitude=None):
+        """Manually add a pulse event to a specific resonator.
+        
+        Parameters
+        ----------
+        resonator_index : int
+            Index of the resonator (0-based)
+        start_time : float
+            Time when the pulse starts (seconds)
+        amplitude : float, optional
+            Maximum QP density increase. If None, uses config default.
+        """
+        if resonator_index >= len(self.mr_lekids):
+            print(f"Warning: Resonator index {resonator_index} out of range")
+            return
+        
+        pulse = {
+            'resonator_index': resonator_index,
+            'start_time': start_time,
+            'amplitude': amplitude or self.pulse_config['amplitude'],
+            'tau_rise': self.pulse_config['tau_rise'],
+            'tau_decay': self.pulse_config['tau_decay'],
+        }
+        self.pulse_events.append(pulse)
+        
+        # Invalidate caches since parameters will change
+        self.invalidate_caches()
+    
+    def set_pulse_mode(self, mode, **kwargs):
+        """Configure pulse generation mode and parameters.
+        
+        Parameters
+        ----------
+        mode : str
+            Pulse mode: 'periodic', 'random', 'manual', or 'none'
+        **kwargs : dict
+            Additional configuration parameters:
+            - period: Period in seconds (for periodic mode)
+            - probability: Probability per timestep (for random mode)
+            - tau_rise: Rise time constant in seconds
+            - tau_decay: Decay time constant in seconds
+            - amplitude: Maximum QP density increase
+            - resonators: 'all' or list of resonator indices
+        """
+        self.pulse_config['mode'] = mode
+        
+        # Update any provided parameters
+        for key, value in kwargs.items():
+            if key in self.pulse_config:
+                self.pulse_config[key] = value
+        
+        print(f"Pulse mode set to '{mode}' with config: {self.pulse_config}")
+        # Reset pulse schedules so new parameters take effect immediately
+        if mode in ('periodic', 'random'):
+            self.pulse_events = []
+            self.last_pulse_time = {}
+        elif mode == 'none':
+            self.pulse_events = []
+            self.last_pulse_time = {}
+    
+    def _evaluate_s21_at_frequency(self, frequency, amplitude):
+        """
+        S21 evaluation at a specific frequency - properly handles pulses + noise.
+        
+        This now properly calls s21_lc_response to ensure each evaluation gets:
+        - Fresh QP noise 
+        - Current pulse state
+        - Vectorized convergence (performance improvement retained)
+        
+        Parameters
+        ----------
+        frequency : float
+            Probe frequency in Hz
+        amplitude : float
+            Probe amplitude
+            
+        Returns
+        -------
+        complex
+            S21 response
+        """
+        # Use the full physics path that handles pulses + noise + convergence
+        # Each channel gets its own fresh QP state as the physics requires
+        return self.s21_lc_response(frequency, amplitude)
+    
     def _get_cached_s21(self, frequency, amplitude):
-        """Get S21 response with caching."""
-        # Round frequency to nearest Hz for cache key
+        """Get S21 response with caching disabled when noise is enabled."""
+        # Disable caching when noise is enabled to ensure fresh noise each call
+        if self.nqp_noise_enabled:
+            return self.s21_lc_response(frequency, amplitude)
+        
+        # Use caching when noise is disabled for performance
         freq_key = round(frequency)
         amp_key = round(amplitude * 1000) / 1000  # 3 decimal places
         
@@ -427,6 +1196,10 @@ class MockResonatorModel:
         contribute to a composite signal that each channel then observes
         through its own demodulation.
         
+        Each channel evaluation gets proper pulse handling and fresh noise through
+        s21_lc_response, maintaining physics accuracy while keeping the vectorized
+        convergence optimization for performance.
+        
         Parameters
         ----------
         module : int
@@ -446,8 +1219,16 @@ class MockResonatorModel:
             - A complex number (if num_samples=1)
             - A complex array of length num_samples (if num_samples>1)
         """
-        # Get NCO frequency for this module
-        nco_freq = self.mock_crs.nco_frequencies.get(module, 0)
+        import time
+        t_packet_start = time.perf_counter()
+        
+        # Update QP densities based on current time (for pulses)
+        self.update_qp_densities_for_time(start_time)
+        
+        t_state_update = time.perf_counter()
+        
+        # Get NCO frequency for this module using the proper getter
+        nco_freq = self.mock_crs.get_nco_frequency(module=module)
         
         # Get decimation stage for bandwidth calculation
         dec_stage = self.mock_crs.fir_stage  # Note: still called fir_stage in MockCRS for compatibility
@@ -472,23 +1253,33 @@ class MockResonatorModel:
             if mod == module:
                 configured_channels.add(ch)
         
-        # Collect active tones (transmitting channels)
+        # Collect active tones (transmitting channels) using proper getter methods
+        s21_call_count = 0
         for ch in configured_channels:
-            freq = self.mock_crs.frequencies.get((module, ch))
-            amp = self.mock_crs.amplitudes.get((module, ch))
+            freq = self.mock_crs.get_frequency(channel=ch, module=module)
+            amp = self.mock_crs.get_amplitude(channel=ch, module=module)
             
             if freq is not None and amp is not None and amp != 0:
-                phase_deg = self.mock_crs.phases.get((module, ch), 0)
+                phase_deg = self.mock_crs.phases.get((module, ch), 0)  # No getter for phase yet
                 total_freq = freq + nco_freq
                 
-                # Apply S21 response
-                s21_complex = self._get_cached_s21(total_freq, amp)
-                
-                # Combine amplitude, S21, and phase
-                complex_amplitude = amp * s21_complex * np.exp(1j * np.deg2rad(phase_deg))
+                # For single sample, pre-compute S21. For multiple samples, compute fresh per sample.
+                if num_samples == 1:
+                    # Apply S21 response using FAST path (state already updated for this packet)
+                    s21_complex = self._evaluate_s21_at_frequency(total_freq, amp)
+                    s21_call_count += 1
+                    
+                    # Combine amplitude, S21, and phase
+                    complex_amplitude = amp * s21_complex * np.exp(1j * np.deg2rad(phase_deg))
+                else:
+                    # For multi-sample, just store base amplitude with phase
+                    # S21 will be evaluated fresh for each sample
+                    complex_amplitude = amp * np.exp(1j * np.deg2rad(phase_deg))
                 
                 active_tone_freqs.append(total_freq)
                 active_tone_amps.append(complex_amplitude)
+        
+        t_s21_calc = time.perf_counter()
         
         # Collect observing channels
         for ch in configured_channels:
@@ -500,6 +1291,19 @@ class MockResonatorModel:
         # If no active tones or observers, return empty
         if not active_tone_freqs or not obs_channels:
             return {}
+        
+        # Diagnostic logging
+        if not hasattr(self, '_packet_timing_counter'):
+            self._packet_timing_counter = 0
+        self._packet_timing_counter += 1
+        
+        # if self._packet_timing_counter % 10 == 0:
+        #     state_ms = (t_state_update - t_packet_start) * 1000
+        #     s21_ms = (t_s21_calc - t_state_update) * 1000
+        #     total_ms = (t_s21_calc - t_packet_start) * 1000
+        #     print(f"[Packet Timing] Total: {total_ms:.1f}ms | "
+        #           f"state_update: {state_ms:.1f}ms | "
+        #           f"s21_calculations: {s21_ms:.1f}ms ({s21_call_count} calls)")
         
         # Convert to numpy arrays for vectorization
         tone_freqs = np.array(active_tone_freqs)  # Shape: (n_tones,)
@@ -548,26 +1352,51 @@ class MockResonatorModel:
                 responses[ch] = complex(signals[i])
         
         else:
-            # Multiple time samples - still vectorized but over time
+            # Multiple time samples - evaluate S21 for each sample to get fresh noise
             t = start_time + np.arange(num_samples) / sample_rate
             responses = {}
             
+            # For each observing channel
             for i, ch in enumerate(obs_channels):
                 signal = np.zeros(num_samples, dtype=complex)
+                obs_freq = obs_freqs_arr[i]
                 
-                # Process tones for this observer
-                for j, tone_amp in enumerate(tone_amps):
-                    if within_bandwidth[i, j]:
-                        freq_diff = freq_diffs[i, j]
-                        
-                        # Use proper CIC filter response
-                        cic_response = self._get_cached_cic_response(freq_diff, dec_stage)
-                        
-                        if abs(freq_diff) < 0.1:  # DC
-                            signal += tone_amp * cic_response
-                        else:
-                            # Time-varying beat with proper CIC filtering
-                            signal += tone_amp * cic_response * np.exp(1j * 2 * np.pi * freq_diff * t)
+                # For each time sample
+                for sample_idx in range(num_samples):
+                    sample_contribution = 0 + 0j
+                    
+                    # Process each active tone with fresh S21 evaluation
+                    for j in range(len(active_tone_freqs)):
+                        if within_bandwidth[i, j]:
+                            tone_freq = active_tone_freqs[j]
+                            tone_amp_base = active_tone_amps[j]
+                            freq_diff = freq_diffs[i, j]
+                            
+                            # Get fresh S21 for this tone at this time sample
+                            # This gives us new QP noise realization for each sample
+                            amp_magnitude = abs(tone_amp_base)
+                            if amp_magnitude > 0:
+                                # Re-evaluate S21 with fresh noise
+                                s21_fresh = self._evaluate_s21_at_frequency(tone_freq, amp_magnitude)
+                                
+                                # Apply phase from original tone
+                                phase_original = np.angle(tone_amp_base)
+                                tone_amp_fresh = amp_magnitude * s21_fresh * np.exp(1j * phase_original)
+                            else:
+                                tone_amp_fresh = 0 + 0j
+                            
+                            # Apply CIC filter response
+                            cic_response = self._get_cached_cic_response(freq_diff, dec_stage)
+                            
+                            # Calculate beat contribution at this time
+                            if abs(freq_diff) < 0.1:  # DC
+                                sample_contribution += tone_amp_fresh * cic_response
+                            else:
+                                # Beat frequency at time t[sample_idx]
+                                beat_phase = 2 * np.pi * freq_diff * t[sample_idx]
+                                sample_contribution += tone_amp_fresh * cic_response * np.exp(1j * beat_phase)
+                    
+                    signal[sample_idx] = sample_contribution
                 
                 responses[ch] = signal
         

@@ -9,7 +9,7 @@ from .utils import (
     IQ_COLORS, SCATTER_COLORS, DISTINCT_PLOT_COLORS, COLORMAP_CHOICES,
     UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE, FITTING_COLORS
 )
-from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm
+from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm, exp_bin_noise_data, PFB_SAMPLING_FREQ
 
 class DetectorDigestWindow(QtWidgets.QMainWindow):
     """
@@ -47,7 +47,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.current_detector = self.detector_id
 
         self.noise_tab_avail = False
-
+        
+        # Set default reference mode (will be updated if spectrum_data exists)
         self.reference = "absolute"
         
         # Navigation support
@@ -75,8 +76,15 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.tabs = None
         self.digest_page = None
         self.mean_subtract_enabled = False
+        self.exp_binning_enabled = False
 
         self.spectrum_data = spectrum_data
+        self.fast_freq = PFB_SAMPLING_FREQ/2 #### 2.44 MSS = 1.22 MHz nyquist frequency
+        self.slow_freq = 0
+
+        self.show_fast_tod = False
+
+
 
         ### Data products for plotting ####
         if self.spectrum_data:
@@ -86,6 +94,19 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
             self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
             self.reference = self.spectrum_data['reference']
+            self.tone_amp = self.spectrum_data['amplitudes_dbm'][self.detector_id - 1]
+            self.slow_freq = self.spectrum_data['slow_freq_hz']
+            if self.spectrum_data['pfb_enabled']:
+                self.show_fast_tod = True
+            
+            if self.show_fast_tod:
+                self.pfb_psd_i = self.spectrum_data['pfb_psd_i'][self.detector_id - 1]
+                self.pfb_psd_q = self.spectrum_data['pfb_psd_q'][self.detector_id - 1]
+                self.pfb_tod_i = self.spectrum_data['pfb_I'][self.detector_id - 1]
+                self.pfb_tod_q = self.spectrum_data['pfb_Q'][self.detector_id - 1]
+                self.pfb_freq_iq = self.spectrum_data['pfb_freq_iq'][self.detector_id - 1]
+                self.pfb_freq_dsb = self.spectrum_data['pfb_freq_dsb'][self.detector_id - 1]
+                self.pfb_dual_psd = self.spectrum_data['pfb_dual_psd'][self.detector_id - 1]
         else:
             self.noise_tab_avail = False ### You can't access noise tab if no noise data was collected
         
@@ -436,9 +457,15 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.mean_subtract_checkbox = QtWidgets.QCheckBox("Mean Subtracted")
         self.mean_subtract_checkbox.setToolTip("If checked, TOD data will have its mean subtracted before plotting.")
         self.mean_subtract_checkbox.stateChanged.connect(self._toggle_mean_subtraction)
+
+        self.exp_binning_checkbox = QtWidgets.QCheckBox("Exponential Binning")
+        self.exp_binning_checkbox.setToolTip("If checked, noise spectrum will use exponential binning.")
+        self.exp_binning_checkbox.toggled.connect(self._toggle_exp_binning)
         
         checkbox_layout.addStretch()
         checkbox_layout.addWidget(self.mean_subtract_checkbox)
+        checkbox_layout.addSpacing(20)
+        checkbox_layout.addWidget(self.exp_binning_checkbox)
         checkbox_layout.addStretch()
         
         layout.addWidget(checkbox_widget)
@@ -471,11 +498,16 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     
         layout.addWidget(nav_widget)
     
-        # --- Splitter with Two Empty Plots ---
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        # plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-    
-        # Time vs Magnitude plot
+        # --- Splitter with Conditional Fast TOD Plot ---
+        splitter_main = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        
+        # --- Top Splitter (Horizontal) ---
+        splitter_top = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        
+        # Plot colors
+        plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        
+        # --- Top Left Plot (Time vs Magnitude) ---
         vb_time = ClickableViewBox(); vb_time.parent_window = self
         self.plot_time_vs_mag = pg.PlotWidget(viewBox=vb_time, name="TimeVsAmplitude")
         self.plot_time_vs_mag.setBackground(plot_bg_color)
@@ -483,10 +515,23 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.plot_time_vs_mag.setLabel('bottom', "Time", units="s")
         self.plot_time_vs_mag.showGrid(x=True, y=True, alpha=0.3)
         self.plot_time_vs_mag.setTitle("TOD", color=plot_pen_color)
-        self.plot_time_vs_mag.addLegend(offset = (30, 10), labelTextColor=plot_pen_color)
-        splitter.addWidget(self.plot_time_vs_mag)
-    
-        # Noise Spectrum plot
+        self.plot_time_vs_mag.addLegend(offset=(30, 10), labelTextColor=plot_pen_color)
+        splitter_top.addWidget(self.plot_time_vs_mag)
+
+        
+        # --- Conditionally Add Fast TOD Plot ---
+        if self.show_fast_tod:  # your condition flag
+            vb_fast_tod = ClickableViewBox(); vb_fast_tod.parent_window = self
+            self.plot_fast_tod = pg.PlotWidget(viewBox=vb_fast_tod, name="FastTOD")
+            self.plot_fast_tod.setBackground(plot_bg_color)
+            self.plot_fast_tod.setLabel('left', "Amplitude", units="V")
+            self.plot_fast_tod.setLabel('bottom', "Time", units="s")
+            self.plot_fast_tod.showGrid(x=True, y=True, alpha=0.3)
+            self.plot_fast_tod.setTitle("Fast TOD", color=plot_pen_color)
+            self.plot_fast_tod.addLegend(offset=(30, 10), labelTextColor=plot_pen_color)
+            splitter_top.addWidget(self.plot_fast_tod)
+        
+        # --- Bottom Plot (Noise Spectrum) ---
         vb_spec = ClickableViewBox(); vb_spec.parent_window = self
         self.plot_noise_spectrum = pg.PlotWidget(viewBox=vb_spec, name="NoiseSpectrum")
         self.plot_noise_spectrum.setBackground(plot_bg_color)
@@ -496,13 +541,16 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.plot_noise_spectrum.setLabel('left', "Amplitude", units="dBm/Hz")
         self.plot_noise_spectrum.setLabel('bottom', "Frequency", units="Hz")
         self.plot_noise_spectrum.showGrid(x=True, y=True, alpha=0.3)
-        # self.plot_noise_spectrum.setLogMode(x=True, y=False)
         self.plot_noise_spectrum.setTitle("Noise Spectrum", color=plot_pen_color)
-        self.plot_noise_spectrum.addLegend(offset = (30, 10), labelTextColor=plot_pen_color)
-        splitter.addWidget(self.plot_noise_spectrum)
-    
-        splitter.setSizes([400, 400])
-        layout.addWidget(splitter)
+        self.plot_noise_spectrum.setYRange(-180, 0)
+        self.plot_noise_spectrum.addLegend(offset=(30, 10), labelTextColor=plot_pen_color)
+        
+        # --- Combine Splitters ---
+        splitter_main.addWidget(splitter_top)
+        splitter_main.addWidget(self.plot_noise_spectrum)
+        splitter_main.setSizes([400, 400])
+        
+        layout.addWidget(splitter_main)
         self.apply_theme(self.dark_mode)
 
     
@@ -579,6 +627,11 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
     def _toggle_mean_subtraction(self, state):
         """Toggles mean subtraction for TOD data and updates plots."""
         self.mean_subtract_enabled = (state == QtCore.Qt.CheckState.Checked.value)
+        self._update_noise_plots()
+
+    def _toggle_exp_binning(self, checked: bool):
+        """Handles checkbox toggle to enable/disable exponential binning."""
+        self.exp_binning_enabled = checked
         self._update_noise_plots()
     
     def _navigate_previous(self):
@@ -687,6 +740,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.current_plot_offset_hz = None
         self.noise_i_data = None
         self.noise_q_data = None
+        self.fast_freq = 1.22e6
 
 
         if self.spectrum_data:
@@ -696,7 +750,19 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
             self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
             self.reference = self.spectrum_data['reference']
-        
+            self.tone_amp = self.spectrum_data['amplitudes_dbm'][self.detector_id - 1]
+            self.slow_freq = self.spectrum_data['slow_freq_hz']
+            if self.spectrum_data['pfb_enabled']:
+                self.show_fast_tod = True
+            
+            if self.show_fast_tod:
+                self.pfb_psd_i = self.spectrum_data['pfb_psd_i'][self.detector_id - 1]
+                self.pfb_psd_q = self.spectrum_data['pfb_psd_q'][self.detector_id - 1]
+                self.pfb_tod_i = self.spectrum_data['pfb_I'][self.detector_id - 1]
+                self.pfb_tod_q = self.spectrum_data['pfb_Q'][self.detector_id - 1]
+                self.pfb_freq_iq = self.spectrum_data['pfb_freq_iq'][self.detector_id - 1]
+                self.pfb_freq_dsb = self.spectrum_data['pfb_freq_dsb'][self.detector_id - 1]
+                self.pfb_dual_psd = self.spectrum_data['pfb_dual_psd'][self.detector_id - 1]
         if self.debug:
             self.debug_noise = self.full_debug[self.detector_id]
         # print("For detector", self.detector_id, "the noise is", self.debug_noise)
@@ -801,87 +867,268 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.plot_noise_spectrum.clear()
             return
     
-        try:
-            self.plot_time_vs_mag.clear()
-            self.plot_noise_spectrum.clear()
-    
-            ###### First plot ######
-            ts = self._get_relative_timestamps(self.spectrum_data['ts'], len(self.tod_i))
-            if self.reference == "relative":
-                tod_i_volts = convert_roc_to_volts(np.array(self.tod_i))
-                tod_q_volts = convert_roc_to_volts(np.array(self.tod_q))
-            else:
-                tod_i_volts = np.array(self.tod_i)
-                tod_q_volts = np.array(self.tod_q) ##### it is already converted to volts in spectrum_from_slow_tod_function for "absolute"
-    
-            if self.mean_subtract_enabled:
-                tod_i_volts = tod_i_volts - np.mean(tod_i_volts)
-                tod_q_volts = tod_q_volts - np.mean(tod_q_volts)
+        # try:
+        exp_bins = 100
+        self.plot_time_vs_mag.clear()
+        self.plot_noise_spectrum.clear()
+        if self.show_fast_tod:
+            self.plot_fast_tod.clear()
 
-            complex_volts = tod_i_volts + 1j * tod_q_volts
-            mag_volts = np.abs(complex_volts)
-    
-            self.plot_time_vs_mag.plot(ts, tod_i_volts, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
-            self.plot_time_vs_mag.plot(ts, tod_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
-            self.plot_time_vs_mag.autoRange()
-    
-            ###### Second plot ########
-            frequencies = self.spectrum_data['freq_iq']
+        ###### First plot ######
+        ts = self._get_relative_timestamps(self.spectrum_data['ts'], len(self.tod_i))
+        if self.reference == "relative":
+            tod_i_volts = convert_roc_to_volts(np.array(self.tod_i))
+            tod_q_volts = convert_roc_to_volts(np.array(self.tod_q))
+        else:
+            tod_i_volts = np.array(self.tod_i)
+            tod_q_volts = np.array(self.tod_q) ##### it is already converted to volts in spectrum_from_slow_tod_function for "absolute"
+
+        if self.mean_subtract_enabled:
+            tod_i_volts = tod_i_volts - np.mean(tod_i_volts)
+            tod_q_volts = tod_q_volts - np.mean(tod_q_volts)
+
+        complex_volts = tod_i_volts + 1j * tod_q_volts
+        mag_volts = np.abs(complex_volts)
+
+        self.plot_time_vs_mag.plot(ts, tod_i_volts, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
+        self.plot_time_vs_mag.plot(ts, tod_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
+        self.plot_time_vs_mag.autoRange()
+
+        if self.show_fast_tod:
+            pfb_ts = self.spectrum_data['pfb_ts']
+
+            tod_pfb_i_volts = convert_roc_to_volts(np.array(self.pfb_tod_i))
+            tod_pfb_q_volts = convert_roc_to_volts(np.array(self.pfb_tod_q))
+
             if self.mean_subtract_enabled:
-                psd_i = self.single_psd_i[1:]
-                psd_q = self.single_psd_q[1:]
-                freq = frequencies[1:]
-            else:
-                psd_i = self.single_psd_i
-                psd_q = self.single_psd_q
-                freq = frequencies
-    
+                tod_pfb_i_volts = tod_pfb_i_volts - np.mean(tod_pfb_i_volts)
+                tod_pfb_q_volts = tod_pfb_q_volts - np.mean(tod_pfb_q_volts)
+
+
+            self.plot_fast_tod.plot(pfb_ts, tod_pfb_i_volts, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="PFB I")
+            self.plot_fast_tod.plot(pfb_ts, tod_pfb_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="PFB Q")
+            self.plot_fast_tod.autoRange()
+
+        ###### Second plot ########
+        frequencies = self.spectrum_data['freq_iq']
+        if self.mean_subtract_enabled:
+            psd_i = self.single_psd_i[1:]
+            psd_q = self.single_psd_q[1:]
+            freq = frequencies[1:]
+        else:
+            psd_i = self.single_psd_i
+            psd_q = self.single_psd_q
+            freq = frequencies
+
+
+        #### pfb_data ####
+
+        if self.show_fast_tod:
+            overlap = self.spectrum_data['overlap'] #### Overlapping points with the slow spectrum, just for plotting
+            if overlap < 2: ### Incase the calculation doesn't pick up any overlapping samples and also to remove the dc bin
+                overlap = 2
+            pfb_psd_i = self.pfb_psd_i[overlap:]
+            pfb_psd_q = self.pfb_psd_q[overlap:]
+            pfb_freq = self.pfb_freq_iq[overlap:]
+
+            ##### For the magnitude part ####
+            freq_dsb = np.array(self.pfb_freq_dsb)
+            psd_dsb = np.array(self.pfb_dual_psd)
+            min_f_abs = abs(np.min(freq_dsb))
+            max_f_abs = abs(np.max(freq_dsb))
             
+            if max_f_abs >= min_f_abs:
+                # Keep positive side
+                mask = freq_dsb >= 0
+                freq_sel = freq_dsb[mask]
+                psd_sel  = psd_dsb[mask]
+                h_label = "(I-Q)/2"
+            else:
+                # Keep negative side, convert to positive
+                mask = freq_dsb <= 0
+                freq_sel = np.abs(freq_dsb[mask])
+                psd_sel  = psd_dsb[mask]
+                h_label = "(I+Q)/2"
+            
+            # Sort ascending
+            sort_idx = np.argsort(freq_sel)
+            freq_sel = freq_sel[sort_idx]
+            psd_sel  = psd_sel[sort_idx]
+
+            freq_sel = freq_sel[2:] ### Removing DC bin info
+            psd_sel = psd_sel[2:]
+
+            
+        else:
+            pfb_freq = []
+            pfb_psd_i = []
+            pfb_psd_q = []
+            psd_sel = []
+            freq_sel = []
+
+
+        full_freq = list(freq) + list(pfb_freq)
+        full_psd_i = list(psd_i) + list(pfb_psd_i)
+        full_psd_q = list(psd_q) + list(pfb_psd_q)
+        full_lin_comb = list(psd_sel)
+        freq_lin_comb = list(freq_sel)
+
+        
+        log_freqs = np.log10(np.clip(full_freq, 1e-12, None))
+        
+        amplitude = self.tone_amp #### already in dbm
+        slow_freq = self.slow_freq
+        fast_freq = self.fast_freq/1e6
+        
+        # Create a text box to show the values
+        summary_text = (
+            f"<span style='font-size:12pt; color:green;'>"
+            f"Tone Amp: {amplitude:.3f} dBm <br>"
+            f"Slow Bandwidth: {slow_freq:.3f} Hz <br>"
+            f"Fast Bandwidth: {fast_freq:.2f} MHz </span>"
+        )
+        
+        self.summary_label = pg.TextItem(html=summary_text, anchor=(0, 0), border='w', fill=(0, 0, 0, 150))
+        self.plot_noise_spectrum.addItem(self.summary_label)
+        self.summary_label.setPos(np.max(log_freqs) * 0.8, np.max(psd_i) * 0.9)
+        
+        if self.exp_binning_enabled:
+
+            f_bin_i, psd_i_bin = exp_bin_noise_data(freq, psd_i, exp_bins) #### fixing bins to 50
+            f_bin_q, psd_q_bin = exp_bin_noise_data(freq, psd_q, exp_bins)
+
+            
+            curve_i = self.plot_noise_spectrum.plot(f_bin_i, psd_i_bin,
+                                                    pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
+            curve_q = self.plot_noise_spectrum.plot(f_bin_q, psd_q_bin,
+                                                    pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
+    
+            if self.show_fast_tod:
+                # --- New PFB curves ---
+                pfb_f_bin_i, pfb_psd_i_bin = exp_bin_noise_data(pfb_freq, pfb_psd_i, exp_bins) #### fixing bins to 100
+                pfb_f_bin_q, pfb_psd_q_bin = exp_bin_noise_data(pfb_freq, pfb_psd_q, exp_bins)
+                pfb_f_bin_mag, pfb_psd_mag_bin = exp_bin_noise_data(freq_sel, psd_sel, exp_bins)
+
+                
+                curve_pfb_i = self.plot_noise_spectrum.plot(pfb_f_bin_i, pfb_psd_i_bin,
+                                                            pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH, style=QtCore.Qt.DashLine),
+                                                            name="PFB I")
+                curve_pfb_q = self.plot_noise_spectrum.plot(pfb_f_bin_q, pfb_psd_q_bin,
+                                                            pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH, style=QtCore.Qt.DashLine),
+                                                            name="PFB Q")
+                curve_pfb_mag = self.plot_noise_spectrum.plot(pfb_f_bin_mag, pfb_psd_mag_bin,
+                                                              pen=pg.mkPen(color = (255, 0, 0, 100), width=LINE_WIDTH, style=QtCore.Qt.DashLine),
+                                                              name="wideband linear combination (I,Q)")
+            
+            self.plot_noise_spectrum.setLogMode(x=True, y=False)
+            self.plot_noise_spectrum.autoRange()
+
+        else:
             curve_i = self.plot_noise_spectrum.plot(freq, psd_i,
                                                     pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
             curve_q = self.plot_noise_spectrum.plot(freq, psd_q,
                                                     pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
+
+    
+            if self.show_fast_tod:
+                # --- New PFB curves ---
+                curve_pfb_i = self.plot_noise_spectrum.plot(pfb_freq, pfb_psd_i,
+                                                            pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH, style=QtCore.Qt.DashLine),
+                                                            name="PFB I")
+                curve_pfb_q = self.plot_noise_spectrum.plot(pfb_freq, pfb_psd_q,
+                                                            pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH, style=QtCore.Qt.DashLine),
+                                                            name="PFB Q")
+
+                curve_pfb_mag = self.plot_noise_spectrum.plot(freq_sel, psd_sel,
+                                                              pen=pg.mkPen(color = (255, 0, 0, 100), width=LINE_WIDTH, style=QtCore.Qt.DashLine),
+                                                              name="wideband linear combination (I,Q)")
+            
             self.plot_noise_spectrum.setLogMode(x=True, y=False)
             self.plot_noise_spectrum.autoRange()
-    
-            # --- Hover label setup ---
-            vb = self.plot_noise_spectrum.getViewBox()
-            self.hover_label = pg.TextItem("", anchor=(0, 1), color='w')
-            self.plot_noise_spectrum.addItem(self.hover_label)
-            self.hover_label.hide()
 
-            log_freqs = np.log10(np.clip(frequencies, 1e-12, None))
-    
-            # --- Mouse move handler ---
-            def on_mouse_move(evt):
-                pos = evt[0]  # current mouse position in scene coordinates
-                if self.plot_noise_spectrum.sceneBoundingRect().contains(pos):
-                    mouse_point = vb.mapSceneToView(pos)
-                    
-                    log_x = mouse_point.x()
-                    x = 10 ** log_x
-                    
-                    if x < np.min(frequencies) or x > np.max(frequencies):
+        # --- Hover label setup ---
+        vb = self.plot_noise_spectrum.getViewBox()
+        self.hover_label = pg.TextItem("", anchor=(0, 1), color='w')
+        self.plot_noise_spectrum.addItem(self.hover_label)
+        self.hover_label.hide()
+
+
+        # --- Mouse move handler ---
+        def on_mouse_move(evt):
+            pos = evt[0]  # current mouse position in scene coordinates
+            if self.plot_noise_spectrum.sceneBoundingRect().contains(pos):
+                mouse_point = vb.mapSceneToView(pos)
+                
+                log_x = mouse_point.x()
+                x = 10 ** log_x
+
+                summary_rect = self.summary_label.boundingRect()
+                summary_rect = self.summary_label.mapRectToScene(summary_rect)
+                if summary_rect.contains(pos):
+                    # Mouse is over text box — disable hover update
+                    return
+                
+                if self.exp_binning_enabled:
+                    # Use the binned frequency and PSD data
+                    freq_i = np.log10(np.clip(np.concatenate((f_bin_i, pfb_f_bin_i if self.show_fast_tod else [])), 1e-12, None))
+                    psd_i_vals = np.concatenate((psd_i_bin, pfb_psd_i_bin if self.show_fast_tod else []))
+                    psd_q_vals = np.concatenate((psd_q_bin, pfb_psd_q_bin if self.show_fast_tod else []))
+                    psd_dual_vals = pfb_psd_mag_bin
+                    freq_l = pfb_f_bin_mag
+                else:
+                    # Use the original data
+                    freq_i = log_freqs
+                    psd_i_vals = full_psd_i
+                    psd_q_vals = full_psd_q
+                    psd_dual_vals = full_lin_comb
+                    freq_l = freq_lin_comb
+
+
+                if self.show_fast_tod:
+                    if x > max(freq_l):
                         self.hover_label.hide()
                         return
+
                         
-                    y_i = np.interp(log_x, log_freqs, self.single_psd_i)
-                    y_q = np.interp(log_x, log_freqs, self.single_psd_q)
-                    self.hover_label.setHtml(
-                        f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
-                        f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
-                        f"<span style='color:yellow'>Freq: {x:.3f}</span>"
-                    )
-                    self.hover_label.setPos(log_x, max(y_i, y_q))
-                    self.hover_label.show()
+                if self.show_fast_tod:
+                    if log_x < max(freq_i):
+                        y_i = np.interp(log_x, freq_i, psd_i_vals)
+                        y_q = np.interp(log_x, freq_i, psd_q_vals)
+                        y_d = np.interp(log_x, freq_l, psd_dual_vals)
+                        self.hover_label.setHtml(
+                            f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
+                            f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
+                            f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
+                            f"<span style='color:yellow'>Freq: {x:.3f}</span>"
+                        )
+                        self.hover_label.setPos(log_x * 0.9, max(y_i, y_q, y_d)*0.9)
+                    else:
+                        y_d = np.interp(log_x, freq_l, psd_dual_vals)
+                        self.hover_label.setHtml(
+                            f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
+                            f"<span style='color:yellow'> Freq: {x:.3f}</span>"
+                        )
+                        self.hover_label.setPos(log_x * 0.9, y_d * 0.9)
                 else:
-                    self.hover_label.hide()
-    
-            self.proxy = pg.SignalProxy(self.plot_noise_spectrum.scene().sigMouseMoved,
-                                        rateLimit=60, slot=on_mouse_move)
-    
-        except Exception as e:
-            print("Error updating noise plots:", e)      
+                    if log_x < max(freq_i):      
+                        y_i = np.interp(log_x, freq_i, psd_i_vals)
+                        y_q = np.interp(log_x, freq_i, psd_q_vals)
+                        self.hover_label.setHtml(
+                            f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
+                            f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
+                            f"<span style='color:yellow'>Freq: {x:.3f}</span>"
+                        )
+                        self.hover_label.setPos(log_x * 0.9, max(y_i, y_q)*0.9)
+                        
+                self.hover_label.show() 
+            else:
+                self.hover_label.hide()
+
+        self.proxy = pg.SignalProxy(self.plot_noise_spectrum.scene().sigMouseMoved,
+                                    rateLimit=60, slot=on_mouse_move)
+        
+        # except Exception as e:
+        #     print("Error updating noise plots:", e)      
         
     def _update_plots(self):
         """Populates all three plots with data and updates fitting information panel."""
@@ -1453,6 +1700,44 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                         background-color: black;
                     }
                 """)
+
+        if hasattr(self, 'exp_binning_checkbox'):
+            if self.dark_mode:
+                self.exp_binning_checkbox.setStyleSheet("""
+                    QCheckBox {
+                        color: white;
+                    }
+                    QCheckBox::indicator {
+                        width: 16px;
+                        height: 16px;
+                    }
+                    QCheckBox::indicator:unchecked {
+                        border: 1px solid white;
+                        background-color: transparent;
+                    }
+                    QCheckBox::indicator:checked {
+                        border: 1px solid white;
+                        background-color: white;
+                    }
+                """)
+            else:
+                self.exp_binning_checkbox.setStyleSheet("""
+                    QCheckBox {
+                        color: black;
+                    }
+                    QCheckBox::indicator {
+                        width: 16px;
+                        height: 16px;
+                    }
+                    QCheckBox::indicator:unchecked {
+                        border: 1px solid black;
+                        background-color: transparent;
+                    }
+                    QCheckBox::indicator:checked {
+                        border: 1px solid black;
+                        background-color: black;
+                    }
+                """)
     
         # ----- Splitter -----
         if hasattr(self, 'main_splitter'):
@@ -1532,4 +1817,5 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         
         # ----- Update plots to reflect new theme -----
         self._update_plots()
+
 

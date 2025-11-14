@@ -75,11 +75,11 @@ async def create_mock_crs(
         # Create MockCRS using the proper flavour syntax
         if verbose:
             print("\n1. Creating MockCRS session...")
-        
+
         session = load_session("""
 !HardwareMap
 - !flavour "rfmux.core.mock"
-- !CRS { serial: "MOCK0001", hostname: "127.0.0.1" }
+- !CRS { serial: "0000", hostname: "127.0.0.1" }
 """)
         
         # Get the CRS object

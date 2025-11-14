@@ -1474,6 +1474,15 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 direction = direction
                 data = data_full
                 window.update_data(target_module, i, amplitude, direction, data, None)
+
+            #### Using noise data from the file to generate noise plots ####
+
+            if load_params.get('noise_data') is not None:
+                noise_data = load_params['noise_data']
+                window._get_spectrum(noise_data, use_loaded_noise=True)
+            else:
+                print("[Bias] There is no noise data in the file")
+            
             window.show()
 
             

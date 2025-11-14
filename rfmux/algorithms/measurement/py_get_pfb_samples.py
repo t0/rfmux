@@ -68,11 +68,33 @@ def separate_iq_fft_to_i_and_q_linear(freqs, iqfft, fs, U):
     """
 
     N = len(iqfft)
-    iqfft_conj = np.conj(iqfft[-1: -(N // 2 + 1): -1])
 
-    # Reconstruct real components: ibatch => "I", qbatch => "Q"
-    ibatch = 0.5 * (iqfft[: N // 2] + iqfft_conj)
-    qbatch = -0.5j * (iqfft[: N // 2] - iqfft_conj)
+    # Handle DC separately (it's purely real for real signals)
+    dc_i = iqfft[0].real
+    dc_q = iqfft[0].imag
+    
+    # For k from 1 to N//2-1, we need indices N-k
+    # This gives us [N-1, N-2, ..., N//2+1]
+    k_indices = np.arange(1, N // 2)
+    neg_k_indices = N - k_indices  # This gives [N-1, N-2, ..., N//2+1]
+    
+    # Extract positive and negative frequency components
+    z_pos = iqfft[k_indices]
+    z_neg = iqfft[neg_k_indices]
+    
+    # Reconstruct I and Q using vectorized operations
+    # For I: real parts add, imaginary parts subtract
+    ibatch = 0.5 * (z_pos + np.conj(z_neg))
+    
+    # For Q: we need to be careful with the formula
+    # Q[k] = 0.5 * ((z_pos - conj(z_neg)) / j)
+    # which is: 0.5 * j * (conj(z_neg) - z_pos)
+    qbatch = 0.5j * (np.conj(z_neg) - z_pos)
+    
+    # Prepend DC values
+    ibatch = np.concatenate([[dc_i], ibatch])
+    qbatch = np.concatenate([[dc_q], qbatch])
+    
 
     # Factor of 2 for real signals, dividing out 50 ohms * U
     re_ps = 2 * (np.abs(ibatch) ** 2) / (50.0 * U)

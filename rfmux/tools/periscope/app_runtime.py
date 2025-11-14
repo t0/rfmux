@@ -519,8 +519,6 @@ class PeriscopeRuntime:
                 continue
 
 
-            
-
 
     def _calculate_relative_timestamp(self, pkt) -> float | None:
         """

@@ -179,7 +179,7 @@ def main():
             s = load_session("""
 !HardwareMap
 - !flavour "rfmux.core.mock"
-- !CRS { serial: "MOCK0001", hostname: "127.0.0.1" }
+- !CRS { serial: "0000", hostname: "127.0.0.1" }
 """)
             crs_obj = s.query(CRS).one()
             

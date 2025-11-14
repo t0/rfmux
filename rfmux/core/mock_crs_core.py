@@ -8,6 +8,7 @@ from datetime import datetime
 import contextlib # Not used directly, but often useful with context managers
 import atexit
 import weakref
+import dataclasses
 
 # Import schema classes
 from .schema import CRS as BaseCRS
@@ -20,6 +21,9 @@ from .mock_udp_streamer import MockUDPManager # Manages the UDP streamer thread
 
 # Import enhanced scaling constants
 from . import mock_constants as const
+from ..tuber.codecs import TuberResult
+
+
 
 # Module-level cleanup registry for MockCRS instances (to avoid JSON serialization issues)
 _mock_crs_instances = weakref.WeakSet()
@@ -161,6 +165,16 @@ class MockCRSContext:
         """Queue a get_samples operation"""
         self.pending_ops.append(('get_samples', kwargs))
         return self  # Enable method chaining
+
+    def get_timestamp(self):
+        """Queue a get_timestamp operation"""
+        self.pending_ops.append(('get_timestamp', {}))
+        return self  # Enable method chaining
+
+    def get_analog_bank(self):
+        """Queue a get_analog_bank operation"""
+        self.pending_ops.append(('get_analog_bank', {}))
+        return self  # Enable method chaining
     
     async def __call__(self):
         """Execute all pending operations"""
@@ -299,7 +313,8 @@ class MockCRS(BaseCRS):
         self.clock_source = None
         self.clock_priority = []
         self.timestamp_port = None
-        self.timestamp = {"y": 2024, "d": 1, "h": 0, "m": 0, "s": 0, "c": 0} # Example
+        self.timestamp = {"y": 2024, "d": 1, "h": 0, "m": 0, "s": 0, "c": 0} # 
+        self._last_timestamp = None
         self.max_samples_per_channel = 100000
         self.max_samples_per_module = 30000
 
@@ -309,6 +324,7 @@ class MockCRS(BaseCRS):
         self.tuning_results = {} # Placeholder
 
         self.active_modules = [1, 2, 3, 4]  # FIXME: add set_analog_bank() support
+        self._high_bank = False
         self.fir_stage = 6     # Default FIR stage
         self.streamed_modules = [1, 2, 3, 4]
         self.short_packets = False
@@ -535,24 +551,41 @@ class MockCRS(BaseCRS):
         return self.rails.get(rail, {}).get("current")
 
     def set_decimation(self, stage: int=6,
-                       short_packets: bool=False,
-                       modules: list[int] | None=None):
+                       short: bool=False,
+                       module: int | list[int] | None=None):
 
         assert isinstance(stage, int) and 0 <= stage <= 6, \
                 "FIR stage must be an integer between 0 and 6 (inclusive)"
 
-        if modules is None:
-            modules = list(self.active_modules)
-
-        if not isinstance(modules, list) or set(modules) > set(self.active_modules):
-            raise ValueError("Invalid 'modules' argument to set_decimation!")
+        # Default to all active modules if none provided
+        if module is None:
+            module = list(self.active_modules)
+    
+        # Convert single int to list
+        if isinstance(module, int):
+            module = [module]
+    
+        # Validate type and membership
+        if (not isinstance(module, list)
+            or not all(isinstance(m, int) for m in module)
+            or not set(module) <= set(self.active_modules)):
+            raise ValueError("Invalid 'module' argument to set_decimation! Must be int or list[int] within active modules.")
 
         self.fir_stage = stage
-        self.short_packets = short_packets
-        self.streamed_modules = modules
+        self.short_packets = short
+        self.streamed_modules = module
 
     def get_decimation(self):
         return None if len(self.streamed_modules)==0 else self.fir_stage
+
+    def set_analog_bank(self, high_bank: bool):
+        """Select between the low (modules 1-4) and high (modules 5-8) analog banks."""
+        self._high_bank = bool(high_bank)
+
+    def get_analog_bank(self):
+        """Return True when the high analog bank (modules 5-8) is selected."""
+        return bool(self.__dict__.get("_high_bank", False))
+
 
     async def _thread_lock_acquire(self): # Keep for server compatibility
         await asyncio.sleep(0.001) # Minimal sleep
@@ -561,12 +594,12 @@ class MockCRS(BaseCRS):
         pass
 
     def get_timestamp(self):
-        # Simulate time passing or return a fixed test timestamp
-        now = datetime.now()
-        self.timestamp = {"y": now.year % 100, "d": now.timetuple().tm_yday, 
-                          "h": now.hour, "m": now.minute, "s": now.second, 
-                          "c": int(now.microsecond / 10000)} # Example 'c'
-        return self.timestamp
+        ts = self._last_timestamp
+        ts_obj = dataclasses.replace(ts)
+        ts_dict = dataclasses.asdict(ts_obj)
+        ts_tube = TuberResult(ts_dict)
+        
+        return ts_tube
 
     async def get_pfb_samples(self, num_samples, units=Units.NORMALIZED, channel=None, module=1):
         assert isinstance(num_samples, int) and num_samples > 0

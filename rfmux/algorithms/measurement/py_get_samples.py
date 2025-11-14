@@ -26,7 +26,7 @@ The final output:
 """
 
 import array
-import asyncio
+import asyncio, inspect
 import contextlib
 import dataclasses
 import enum
@@ -40,6 +40,11 @@ from ...core.schema import CRS
 from ...tuber.codecs import TuberResult
 from ...core.transferfunctions import VOLTS_PER_ROC, spectrum_from_slow_tod
 from ... import streamer
+
+async def maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 @macro(CRS, register=True)
@@ -171,7 +176,12 @@ async def py_get_samples(crs: CRS,
     ts.ss += np.uint32(.02 * streamer.SS_PER_SECOND) # 20ms, per experiments at FIR6
     ts.renormalize()
 
-    with streamer.get_multicast_socket(crs.tuber_hostname) as sock:
+    if crs.tuber_hostname == "rfmux0000.local":
+        host = '127.0.0.1'
+    else:
+        host = crs.tuber_hostname
+
+    with streamer.get_multicast_socket(host) as sock:
 
         # To use asyncio, we need a non-blocking socket
         loop = asyncio.get_running_loop()
@@ -302,9 +312,10 @@ async def py_get_samples(crs: CRS,
         # Convert nsegments => nperseg for Welch
         nperseg = num_samples // nsegments
 
-        # Retrieve decimation stage => helps define final sampling freq
-        dec_stage = await crs.get_decimation()
+        dec_stage = await maybe_await(crs.get_decimation())
         fs = 625e6/(256*64*(2**dec_stage))
+
+        
 
         spec_data = {}
         if channel is None:

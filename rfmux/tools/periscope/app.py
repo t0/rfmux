@@ -830,7 +830,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             " - **Linux:**\n"
             "   Run the following command to increase the default buffer\n"
             "```\n"
-            "     sudo net.core.rmem_max = 67108864 OR sudo sysctl -w net.core.rmem_max=67108864\n"
+            "     sudo sysctl -w net.core.rmem_max=67108864\n"
             "```\n"
             "- **Windows:** \n\n"
             "   Please consult the README.Windows.md available on rfmux repo on how to increase the buffer size and additional resources."
@@ -849,6 +849,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         help_label.setText(help_text)
         help_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
         help_label.setOpenExternalLinks(True)
+        
+        help_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse |QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard | QtCore.Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        
         scroll_area.setWidget(help_label)
         layout.addWidget(scroll_area)
         close_button = QtWidgets.QPushButton("Close")
@@ -1456,6 +1459,15 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 direction = direction
                 data = data_full
                 window.update_data(target_module, i, amplitude, direction, data, None)
+
+            #### Using noise data from the file to generate noise plots ####
+
+            if load_params.get('noise_data') is not None:
+                noise_data = load_params['noise_data']
+                window._get_spectrum(noise_data, use_loaded_noise=True)
+            else:
+                print("[Bias] There is no noise data in the file")
+            
             window.show()
 
             

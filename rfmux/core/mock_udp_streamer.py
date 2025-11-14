@@ -89,6 +89,8 @@ class MockCRSUDPStreamer(threading.Thread):
         # Track total elapsed time for continuous timestamps across decimation changes
         self.total_elapsed_time = {m: 0.0 for m in range(1, 5)}  # Total time elapsed per module
         self.last_decimation = None
+
+        self.timestamp_stream = None
         
         # Register for global cleanup
         global _active_streamers
@@ -366,13 +368,20 @@ class MockCRSUDPStreamer(threading.Thread):
                 start_time=t   # Pass the current time for this packet
             )
             timing_physics = time.perf_counter()
-            
+
+
+            ###### This is a temporary fix, will throw error on the first packet. Will be updated once mock mode is fixed 
+            if self.mock_crs.short_packets and len(channel_responses) > 128: 
+                channel_responses = {k: v for k, v in channel_responses.items() if 1 <= int(k) <= 128}
+
+                    
             # Debug: log if physics is slow
             physics_time = (timing_physics - timing_noise) * 1000
             if physics_time > 1.0 and self.packets_sent % 100 == 0:
                 print(f"[UDP] Physics slow: {physics_time:.2f}ms with {num_configured} channels configured, {len(channel_responses)} responses")
             
             # Process each channel's response
+            
             for ch_num_1 in channel_responses:
                 ch_idx_0 = ch_num_1 - 1  # Convert to 0-based index
                 
@@ -469,6 +478,7 @@ class MockCRSUDPStreamer(threading.Thread):
             source=TimestampPort.TEST, # Mock data source
             recent=True
         )
+
         timing_timestamp = time.perf_counter()
         
         packet = DfmuxPacket(
@@ -486,6 +496,7 @@ class MockCRSUDPStreamer(threading.Thread):
         timing_packet_create = time.perf_counter()
         
         packet_bytes = packet.to_bytes()
+        self.mock_crs._last_timestamp = ts
         timing_serialize = time.perf_counter()
         
         # Removed detailed timing logs - no longer needed

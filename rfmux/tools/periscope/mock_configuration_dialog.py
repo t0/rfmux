@@ -425,26 +425,12 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.conv_tol_edit.setToolTip("Solver accuracy: lower = more accurate, slower (e.g., 1e-9 default).")
         layout.addWidget(self.conv_tol_edit, 0, 1)
 
-        # Cache frequency step (Hz)
-        layout.addWidget(QtWidgets.QLabel("Cache freq step (Hz):"), 1, 0)
-        self.cache_freq_step_edit = QtWidgets.QLineEdit()
-        self.cache_freq_step_edit.setValidator(ScientificDoubleValidator())
-        self.cache_freq_step_edit.setToolTip("Frequency quantization step for cache key (Hz). Larger = coarser = more reuse.")
-        layout.addWidget(self.cache_freq_step_edit, 1, 1)
-
-        # Cache amplitude step (fraction)
-        layout.addWidget(QtWidgets.QLabel("Cache amp step (frac):"), 2, 0)
-        self.cache_amp_step_edit = QtWidgets.QLineEdit()
-        self.cache_amp_step_edit.setValidator(ScientificDoubleValidator())
-        self.cache_amp_step_edit.setToolTip("Amplitude quantization step for cache key (e.g., 1e-5). Larger = coarser = more reuse.")
-        layout.addWidget(self.cache_amp_step_edit, 2, 1)
-
         # Cache QP step (fraction)
-        layout.addWidget(QtWidgets.QLabel("Cache QP step (frac):"), 3, 0)
+        layout.addWidget(QtWidgets.QLabel("Cache QP step (frac):"), 1, 0)
         self.cache_qp_step_edit = QtWidgets.QLineEdit()
         self.cache_qp_step_edit.setValidator(ScientificDoubleValidator())
         self.cache_qp_step_edit.setToolTip("QP quantization as fraction of base QP (e.g., 0.001 = 0.1%). Larger = coarser = more reuse.")
-        layout.addWidget(self.cache_qp_step_edit, 3, 1)
+        layout.addWidget(self.cache_qp_step_edit, 1, 1)
 
         return group
 
@@ -484,8 +470,6 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.udp_noise_edit.setText(str(cfg["udp_noise_level"]))
         # Physics Realism & Cache
         self.conv_tol_edit.setText(str(cfg["convergence_tolerance"]))
-        self.cache_freq_step_edit.setText(str(cfg["cache_freq_step"]))
-        self.cache_amp_step_edit.setText(str(cfg["cache_amp_step"]))
         self.cache_qp_step_edit.setText(str(cfg["cache_qp_step"]))
 
         # QP Pulses
@@ -557,8 +541,6 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
         # Physics Realism & Cache
         self.conv_tol_edit.setText(str(cfg.get("convergence_tolerance")))
-        self.cache_freq_step_edit.setText(str(cfg.get("cache_freq_step")))
-        self.cache_amp_step_edit.setText(str(cfg.get("cache_amp_step")))
         self.cache_qp_step_edit.setText(str(cfg.get("cache_qp_step")))
 
         # QP Pulses
@@ -601,8 +583,6 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             float(self.system_termination_edit.text()); float(self.ZLNA_edit.text()); float(self.GLNA_db_spin.value())
             # Noise and physics realism
             float(self.nqp_noise_std_edit.text()); float(self.udp_noise_edit.text()); float(self.conv_tol_edit.text())
-            float(self.cache_freq_step_edit.text())
-            float(self.cache_amp_step_edit.text())
             float(self.cache_qp_step_edit.text())
             # QP Pulses
             float(self.pulse_period_edit.text())
@@ -662,8 +642,6 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
             # Physics Realism & Cache
             "convergence_tolerance": float(self.conv_tol_edit.text()),
-            "cache_freq_step": float(self.cache_freq_step_edit.text()),
-            "cache_amp_step": float(self.cache_amp_step_edit.text()),
             "cache_qp_step": float(self.cache_qp_step_edit.text()),
 
             # QP Pulses

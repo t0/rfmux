@@ -1239,6 +1239,7 @@ class MockResonatorModel:
             sample_rate = 625e6 / 256 / 64 / (2**dec_stage)
         
         # Step 1: Collect active tones and observing channels
+        max_channels = self.mock_crs.channels_per_module()
         active_tone_freqs = []
         active_tone_amps = []
         obs_channels = []
@@ -1247,10 +1248,10 @@ class MockResonatorModel:
         # Find all configured channels in this module
         configured_channels = set()
         for (mod, ch) in self.mock_crs.frequencies.keys():
-            if mod == module:
+            if (mod == module) and (ch <= max_channels):
                 configured_channels.add(ch)
         for (mod, ch) in self.mock_crs.amplitudes.keys():
-            if mod == module:
+            if (mod == module) and (ch <= max_channels):
                 configured_channels.add(ch)
         
         # Collect active tones (transmitting channels) using proper getter methods

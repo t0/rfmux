@@ -25,6 +25,8 @@ from .mock_udp_streamer import MockUDPManager # Manages the UDP streamer thread
 from .mock_config import apply_overrides, defaults
 from ..tuber.codecs import TuberResult
 
+from ..streamer import LONG_PACKET_CHANNELS, SHORT_PACKET_CHANNELS
+
 # Module-level cleanup registry for MockCRS instances (to avoid JSON serialization issues)
 _mock_crs_instances = weakref.WeakSet()
 _cleanup_registered = False
@@ -339,6 +341,7 @@ class MockCRS(BaseCRS):
         self.streamed_modules = [1, 2, 3, 4]
         self.short_packets = False
 
+
         self.temperature_sensors = {
             "MOTHERBOARD_TEMPERATURE_POWER": 30.0, "MOTHERBOARD_TEMPERATURE_ARM": 35.0,
             "MOTHERBOARD_TEMPERATURE_FPGA": 40.0, "MOTHERBOARD_TEMPERATURE_PHY": 45.0,
@@ -366,9 +369,13 @@ class MockCRS(BaseCRS):
         self.hmc7044_registers = {} # address -> value
         self.cable_lengths = {}  # module -> cable length in meters
 
+        
+
         # Store physics configuration (can be updated via generate_resonators)
         from .mock_config import defaults
         self.physics_config = defaults()  # Initialize with unified SoT defaults
+
+        self._prune_channels_over_limit()
         
         # Initialize mock start time for physics time tracking
         self.mock_start_time = time.time()
@@ -380,6 +387,19 @@ class MockCRS(BaseCRS):
         # Don't generate resonators automatically - let create_mock_crs handle it
         # This prevents double generation and uses the correct configuration
 
+    def channels_per_module(self):
+        if self.short_packets:
+            return SHORT_PACKET_CHANNELS
+        else:
+            return LONG_PACKET_CHANNELS
+
+
+    def _prune_channels_over_limit(self):
+        max_channels = self.channels_per_module()
+        for store in (self.frequencies, self.amplitudes, self.phases):
+            for key in [k for k in store.keys() if k[1] > max_channel]:
+                store.pop(key, None)
+    
     async def generate_resonators(self, config=None):
         """Generate/regenerate resonators with current or provided parameters.
         
@@ -465,8 +485,9 @@ class MockCRS(BaseCRS):
             await self.set_nco_frequency(nco_freq, module=module)
             
             # Configure channels for each resonator (up to 256 channels per module)
+            chan_limit = min(self.channels_per_module(), 256)
             configured_count = 0
-            for i, freq_Hz in enumerate(resonance_frequencies[:256]):
+            for i, freq_Hz in enumerate(resonance_frequencies[:chan_limit]):
                 channel = i + 1  # Channels are 1-indexed
                 
                 # Set frequency relative to NCO
@@ -506,6 +527,11 @@ class MockCRS(BaseCRS):
         max_freq_hz = 313.5e6
         if not (min_freq_hz <= frequency <= max_freq_hz):
             raise ValueError(f"The set frequency must be between -313.5 MHz and +313.5 MHz of the NCO frequency.")
+        max_channel = self.channels_per_module()
+        if not 1 <= channel <= max_channel:
+            raise ValueError(
+                f"Channel must be between 1 and {max_channel} for the current packet length."
+            )
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
         self.frequencies[(module, channel)] = frequency
@@ -519,6 +545,12 @@ class MockCRS(BaseCRS):
         assert isinstance(amplitude, (int, float)), "Amplitude must be a number"
         if not (-1.0 <= amplitude <= 1.0): # Normalized
             raise ValueError("Amplitude must be between -1.0 and +1.0.")
+
+        max_channel = self.channels_per_module()
+        if not 1 <= channel <= max_channel:
+            raise ValueError(
+                f"Channel must be between 1 and {max_channel} for the current packet length."
+            )
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
         self.amplitudes[(module, channel)] = amplitude
@@ -532,6 +564,12 @@ class MockCRS(BaseCRS):
         assert isinstance(phase, (int, float)), "Phase must be a number"
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
+
+        max_channel = self.channels_per_module()
+        if not 1 <= channel <= max_channel:
+            raise ValueError(
+                f"Channel must be between 1 and {max_channel} for the current packet length."
+            )
         
         # Validate units if provided as string
         if isinstance(units, str):
@@ -629,9 +667,13 @@ class MockCRS(BaseCRS):
             or not set(module) <= set(self.active_modules)):
             raise ValueError("Invalid 'module' argument to set_decimation! Must be int or list[int] within active modules.")
 
+        if (stage <= 3) and (short == False):
+            print(f"[Decimation<=3] Streaming only 128 channels")
+            short = True
+
         self.fir_stage = stage
         self.short_packets = short
-        self.streamed_modules = module
+        self.streamed_modules = module            
 
     async def get_decimation(self):
         return None if len(self.streamed_modules)==0 else self.fir_stage
@@ -884,7 +926,7 @@ class MockCRS(BaseCRS):
             }
         else:
             # All channels
-            channels_per_module = 1024  # As per NUM_CHANNELS in streamer
+            channels_per_module = self.channels_per_module()  # As per NUM_CHANNELS in streamer
             i_data, q_data = [], []
             
             # Process each channel

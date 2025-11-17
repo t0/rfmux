@@ -239,7 +239,12 @@ async def multisweep(
         return {}
     
     # Check if number of resonances exceeds maximum channels
-    max_channels = 1024  # Standard max channels per module
+    dec = await crs.get_decimation()
+    if dec <=3:
+        max_channels = 128
+    else:
+        max_channels = 1024
+        
     if len(center_frequencies) > max_channels:
         raise ValueError(f"Number of resonances ({len(center_frequencies)}) exceeds maximum channels ({max_channels})")
     

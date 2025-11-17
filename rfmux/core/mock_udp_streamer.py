@@ -373,10 +373,9 @@ class MockCRSUDPStreamer(threading.Thread):
             )
             timing_physics = time.perf_counter()
 
-
             ###### This is a temporary fix, will throw error on the first packet. Will be updated once mock mode is fixed 
-            if self.mock_crs.short_packets and len(channel_responses) > 128: 
-                channel_responses = {k: v for k, v in channel_responses.items() if 1 <= int(k) <= 128}
+            # if self.mock_crs.short_packets and len(channel_responses) > 128: 
+            #     channel_responses = {k: v for k, v in channel_responses.items() if 1 <= int(k) <= 128}
 
                     
             # # Debug: log if physics is slow

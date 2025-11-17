@@ -191,7 +191,7 @@ class MockCRSUDPStreamer(threading.Thread):
         global _active_streamers
         if self in _active_streamers:
             _active_streamers.remove(self)
-        
+    
     def run(self):
         """Stream UDP packets at the configured sample rate with proper cleanup."""
         self.running = True
@@ -210,7 +210,7 @@ class MockCRSUDPStreamer(threading.Thread):
                     start_time_loop = time.perf_counter()
                     
                     # Get current decimation (dynamically check each iteration)
-                    fir_stage = self.mock_crs.get_decimation()
+                    fir_stage = asyncio.run(self.mock_crs.get_decimation())
                     if fir_stage is None:
                         fir_stage = 6  # Default only if None, not if 0
                     sample_rate = 625e6 / (256 * 64 * (2**fir_stage))
@@ -344,7 +344,7 @@ class MockCRSUDPStreamer(threading.Thread):
         # NEW: Use module-wide coupled calculation if available
         if hasattr(self.mock_crs.resonator_model, 'calculate_module_response_coupled'):
             # Get sample rate for time-varying signals
-            fir_stage = self.mock_crs.get_decimation()
+            fir_stage = asyncio.run(self.mock_crs.get_decimation())
             if fir_stage is None:
                 fir_stage = 6  # Default only if None, not if 0
             sample_rate = 625e6 / 256 / 64 / (2**fir_stage)
@@ -409,7 +409,7 @@ class MockCRSUDPStreamer(threading.Thread):
         
         # Calculate deterministic timestamp based on sequence number and sampling rate
         # Get the decimation stage and calculate sample rate
-        fir_stage = self.mock_crs.get_decimation()
+        fir_stage = asyncio.run(self.mock_crs.get_decimation())
         if fir_stage is None:
             fir_stage = 6  # Default only if None, not if 0
         sample_rate = 625e6 / 256 / 64 / (2**fir_stage)
@@ -454,7 +454,7 @@ class MockCRSUDPStreamer(threading.Thread):
             serial=np.uint16(int(self.mock_crs.serial) if self.mock_crs.serial and self.mock_crs.serial.isdigit() else 0),
             num_modules=np.uint8(1), # Packet is for one module's data
             block=np.uint8(0), # Block number, typically 0 for continuous streaming
-            fir_stage=self.mock_crs.get_decimation(),
+            fir_stage=fir_stage,
             module=np.uint8(module_num - 1),  # DfmuxPacket module is 0-indexed
             seq=np.uint32(seq),
             s=iq_data_arr, # This should be the array.array('i')

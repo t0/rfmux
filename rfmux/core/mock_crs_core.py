@@ -633,7 +633,7 @@ class MockCRS(BaseCRS):
         self.short_packets = short
         self.streamed_modules = module
 
-    def get_decimation(self):
+    async def get_decimation(self):
         return None if len(self.streamed_modules)==0 else self.fir_stage
 
     def set_analog_bank(self, high_bank: bool):
@@ -824,7 +824,7 @@ class MockCRS(BaseCRS):
         overvoltage = False
         
         # Get sample rate based on decimation
-        fir_stage = self.get_decimation()
+        fir_stage = await self.get_decimation()
         if fir_stage is None:
             fir_stage = 6  # Default only if None, not if 0
         fs = 625e6 / 256 / 64 / (2**fir_stage)  # Actual sample rate based on decimation

@@ -441,7 +441,8 @@ def get_multicast_socket(crs_hostname):
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1) ### Will only work Linux > 3.9 and Mac > 10.6
+        # Will only work Linux > 3.9 and Mac > 10.6
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     except:
         pass
 

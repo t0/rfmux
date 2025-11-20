@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.3.3", "pybind11"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "rfmux"
@@ -13,13 +13,13 @@ authors = [
 dependencies = [
   "PyQt6",
   "aiohttp",
-  "ipython",
   "ipykernel<7",  # Pin to 6.x for qtconsole in-process kernel compatibility (ipykernel 7.x has a bug)
+  "ipython",
   "jupyterlab",
   "matplotlib",
   "numba",  # Required for high-performance physics calculations in MockCRS
   "numpy",
-#  "pygetdata", # This is not yet in PyPI. Should be added back when available.
+  "psutil",
   "pyqtgraph",
   "pytest",
   "pytest-asyncio",
@@ -36,12 +36,25 @@ dependencies = [
 # for py_get_samples: 3.12.0 introduced socket.IP_ADD_SOURCE_MEMBERSHIP
 requires-python = ">=3.12"
 
+[project.optional-dependencies]
+
+# pygetdata is not on PyPI, must be installed via system package manager
+# Debian/Ubuntu: apt-get install python3-pygetdata
+dirfile = []
+
+[project.scripts]
+parser = "rfmux.tools.parser:main"
+
 [project.gui-scripts]
 periscope = "rfmux.tools.periscope.__main__:main"
 
 [project.urls]
 homepage = "https://github.com/t0/rfmux"
 repository = "https://github.com/t0/rfmux"
+
+[tool.scikit-build]
+cmake.source-dir = "rfmux/packets"
+wheel.packages = ["rfmux"]
 
 [tool.setuptools]
 packages = ["rfmux"]

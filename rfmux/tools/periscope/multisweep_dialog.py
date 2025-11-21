@@ -633,7 +633,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 if params_dict['nsamps'] < 1:
                     QtWidgets.QMessageBox.warning(self, "Validation Error", "Samples to average must be at least 1.")
                     return None
-                if len(params_dict['resonance_frequencies']) <= 1:
+                if len(params_dict['resonance_frequencies']) < 1:
                      QtWidgets.QMessageBox.warning(self, "Configuration Error", "No target resonances specified for multisweep.")
                      return None
     

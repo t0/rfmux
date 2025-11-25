@@ -109,11 +109,7 @@ def main():
     real_dir = dir(crs_real)
     print("REAL_LEN:", len(real_dir))
     
-    result = compare_attributes(mock_dir, real_dir)
-    if result is None:
-        print("Mock and real attribute lengths are equal")
-    else:
-        mock_diff, real_diff, same = result
+    mock_diff, real_diff, same = compare_attributes(mock_dir, real_dir)
     
     print("\nAttributes - REAL_NOT_IN_MOCK\n")
     for r in real_diff:

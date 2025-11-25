@@ -546,6 +546,7 @@ class MockResonatorModel:
         self._stats_counter += 1
         log_enabled = phys.get('log_cache_decisions', False) if isinstance(phys, dict) else False
         log_every = phys.get('cache_log_interval', 100) if isinstance(phys, dict) else 100
+        log_enabled = False ### switching it off to avoid many print statements
         if log_enabled and (self._stats_counter % max(1, int(log_every)) == 0):
             recent_hits = sum(self._recent_cache_results)
             recent_total = len(self._recent_cache_results)

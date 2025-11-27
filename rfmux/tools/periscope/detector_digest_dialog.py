@@ -910,14 +910,10 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         ###### Second plot ########
         frequencies = self.spectrum_data['freq_iq']
-        if self.mean_subtract_enabled: ### Removing DC bin
-            psd_i = self.single_psd_i[3:]
-            psd_q = self.single_psd_q[3:]
-            freq = frequencies[3:]
-        else:
-            psd_i = self.single_psd_i[3:]
-            psd_q = self.single_psd_q[3:]
-            freq = frequencies[3:]
+        psd_i = self.single_psd_i[3:] #### Remove DC bin
+        psd_q = self.single_psd_q[3:]
+        freq = frequencies[3:]
+
 
 
         #### pfb_data ####

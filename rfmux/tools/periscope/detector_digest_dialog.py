@@ -744,7 +744,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         if self.spectrum_data:
             self.noise_tab_avail = True
-            self.single_psd_i = self.spectrum_data['single_psd_i'][self.detector_id - 1]
+            self.single_psd_i = self.spectrum_data['single_psd_i'][self.detector_id - 1] 
             self.single_psd_q = self.spectrum_data['single_psd_q'][self.detector_id - 1]
             self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
             self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
@@ -910,14 +910,10 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         ###### Second plot ########
         frequencies = self.spectrum_data['freq_iq']
-        if self.mean_subtract_enabled:
-            psd_i = self.single_psd_i[1:]
-            psd_q = self.single_psd_q[1:]
-            freq = frequencies[1:]
-        else:
-            psd_i = self.single_psd_i
-            psd_q = self.single_psd_q
-            freq = frequencies
+        psd_i = self.single_psd_i[3:] #### Remove DC bin
+        psd_q = self.single_psd_q[3:]
+        freq = frequencies[3:]
+
 
 
         #### pfb_data ####

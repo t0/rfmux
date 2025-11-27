@@ -62,7 +62,7 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "cache_freq_step": 0.0001,         # Hz - frequency quantization step for cache key (10 Hz for high fidelity)
     "cache_amp_step": 1e-8,         # Amplitude quantization step (1e-6 for minimal structure)
     "cache_qp_step": 0.0001,        # QP quantization as fraction of base QP (0.0001 = 0.01% for smooth noise)
-    "log_cache_decisions": True,    # enable cache decision logging (rate-limited)
+    "log_cache_decisions": False,    # enable cache decision logging (rate-limited)
     "cache_log_interval": 100,       # log every N convergence events
     "convergence_cache_max_size": 10000000,  # max cache entries
 

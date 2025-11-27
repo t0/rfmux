@@ -320,8 +320,10 @@ class MockCRSUDPStreamer(threading.Thread):
         # This array should store int32 values.
         if self.mock_crs.short_packets:
             num_channels = SHORT_PACKET_CHANNELS
+            version = SHORT_PACKET_VERSION
         else:
             num_channels = LONG_PACKET_CHANNELS
+            version = LONG_PACKET_VERSION
 
         iq_data_arr = array.array("i", [0] * (num_channels * 2))
         timing_array_create = time.perf_counter()
@@ -372,6 +374,8 @@ class MockCRSUDPStreamer(threading.Thread):
                 start_time=t   # Pass the current time for this packet
             )
             timing_physics = time.perf_counter()
+
+
 
             ###### This is a temporary fix, will throw error on the first packet. Will be updated once mock mode is fixed 
             # if self.mock_crs.short_packets and len(channel_responses) > 128: 
@@ -446,10 +450,10 @@ class MockCRSUDPStreamer(threading.Thread):
         )
 
         timing_timestamp = time.perf_counter()
-        
+
         packet = DfmuxPacket(
             magic=np.uint32(STREAMER_MAGIC),
-            version=np.uint16(SHORT_PACKET_VERSION if self.mock_crs.short_packets else LONG_PACKET_VERSION),
+            version=np.uint16(version),
             serial=np.uint16(int(self.mock_crs.serial) if self.mock_crs.serial and self.mock_crs.serial.isdigit() else 0),
             num_modules=np.uint8(1), # Packet is for one module's data
             block=np.uint8(0), # Block number, typically 0 for continuous streaming

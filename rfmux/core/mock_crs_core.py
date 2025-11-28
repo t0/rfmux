@@ -22,7 +22,6 @@ from .mock_resonator_model import MockResonatorModel
 from .mock_udp_streamer import MockUDPManager # Manages the UDP streamer thread
 
 # Import enhanced scaling constants
-from .mock_config import apply_overrides, defaults
 from ..tuber.codecs import TuberResult
 
 from ..streamer import LONG_PACKET_CHANNELS, SHORT_PACKET_CHANNELS

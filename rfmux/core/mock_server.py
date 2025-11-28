@@ -210,9 +210,6 @@ class ServerProcess(mp_ctx.Process):
     async def __single_handler(self, model, request):
         """Handle a single Tuber request"""
         
-        # Debug logging
-        #print(f"[DEBUG] Tuber request: {request}")
-        
         # Handle resolve requests first
         if request.get("resolve", False):
             # Return object metadata
@@ -221,9 +218,6 @@ class ServerProcess(mp_ctx.Process):
         if "method" in request and request["method"] is not None:
             method_name = request["method"]
             object_name = request.get("object")
-            
-            # Debug log
-            #print(f"[DEBUG] Method request: method={method_name}, object={object_name}")
             
             # List of algorithm methods that should NOT be executed on the server
             # These should only run on the client side
@@ -264,9 +258,6 @@ class ServerProcess(mp_ctx.Process):
             if hasattr(model, prop_name):
                 prop = getattr(model, prop_name)
                 if callable(prop):
-                    # Debug logging for method property requests
-                    #print(f"[DEBUG] Property request for callable '{prop_name}'")
-                    
                     # Return metadata for methods
                     import inspect
                     sig = None
@@ -301,7 +292,6 @@ class ServerProcess(mp_ctx.Process):
                 # Check if this is actually a method on our model
                 if hasattr(model, method_name) and callable(getattr(model, method_name)):
                     # This is actually a method call! Redirect to method handler
-                    #print(f"[DEBUG] Redirecting object request {obj_name} to method call")
                     return await self.__single_handler(model, {
                         "method": method_name,
                         "args": request.get("args", []),

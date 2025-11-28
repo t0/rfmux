@@ -417,7 +417,6 @@ class MockCRS(BaseCRS):
             # Initialize resonator model if needed
             if not hasattr(self, 'resonator_model') or self.resonator_model is None:
                 self.resonator_model = MockResonatorModel(self)
-                #rint('initialized resonator model')
             
             # If config provided, store it permanently in the instance
             if config:
@@ -441,8 +440,6 @@ class MockCRS(BaseCRS):
             
             # Get resonance frequencies for return value
             resonance_frequencies = self.resonator_model.resonator_frequencies.copy()
-            
-            #rint(f'Updated! Generated {resonator_count} mr_resonator objects')
 
             # Auto-configure channels if requested
             auto_bias = active_config.get('auto_bias_kids', True)

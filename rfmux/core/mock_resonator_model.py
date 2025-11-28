@@ -6,11 +6,9 @@ import numpy as np
 
 # Import from mr_resonator subpackage using relative imports
 from ..mr_resonator.mr_complex_resonator import MR_complex_resonator
-from ..mr_resonator.mr_lekid import MR_LEKID
 
 # Import JIT-compiled physics functions (numba is required)
 from ..mr_resonator import jit_physics
-print("[Physics] JIT-compiled physics loaded successfully")
 
 
 class MockResonatorModel:
@@ -644,15 +642,6 @@ class MockResonatorModel:
         )
         
         t_vout = time.perf_counter()
-        
-        # Diagnostic timing (commented out - timing vars removed for optimization)
-        # if not hasattr(self, '_timing_counter'):
-        #     self._timing_counter = 0
-        # self._timing_counter += 1
-        # 
-        # if self._timing_counter % 10 == 0:  # Log every 10th call
-        #     total_ms = (t_vout - t_start) * 1000
-        #     # Additional timing would require adding timing points back
         
         return s21_total
 

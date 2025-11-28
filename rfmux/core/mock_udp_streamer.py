@@ -33,7 +33,6 @@ def _emergency_cleanup():
     """Emergency cleanup function called on program exit."""
     global _active_streamers
     if _active_streamers:
-        #print(f"[UDP] Emergency cleanup: stopping {len(_active_streamers)} active UDP streamers")
         for streamer in _active_streamers[:]:  # Copy list to avoid modification during iteration
             try:
                 streamer.emergency_stop()
@@ -265,10 +264,6 @@ class MockCRSUDPStreamer(threading.Thread):
                             self.seq_counters[module_num] += 1
                             self.packets_sent += 1
                             
-                            # if self.packets_sent <= 3: # Log first few packets only
-                            #     destination = f"{self.multicast_group}:{self.multicast_port}" if self.use_multicast else f"{self.unicast_host}:{self.unicast_port}"
-                            #     print(f"[UDP] Sent packet #{self.packets_sent}: module={module_num}, seq={self.seq_counters[module_num]-1}, size={bytes_sent} bytes to {destination}")
-                            
                         except Exception as e:
                             if self.running:  # Only log if we're still supposed to be running
                                 print(f"[UDP] ERROR generating/sending packet for module {module_num}: {e}")
@@ -377,16 +372,6 @@ class MockCRSUDPStreamer(threading.Thread):
 
 
 
-            ###### This is a temporary fix, will throw error on the first packet. Will be updated once mock mode is fixed 
-            # if self.mock_crs.short_packets and len(channel_responses) > 128: 
-            #     channel_responses = {k: v for k, v in channel_responses.items() if 1 <= int(k) <= 128}
-
-                    
-            # # Debug: log if physics is slow
-            # physics_time = (timing_physics - timing_noise) * 1000
-            # if physics_time > 1.0 and self.packets_sent % 100 == 0:
-            #     print(f"[UDP] Physics slow: {physics_time:.2f}ms with {num_configured} channels configured, {len(channel_responses)} responses")
-            
             # Process each channel's response
             
             for ch_num_1 in channel_responses:

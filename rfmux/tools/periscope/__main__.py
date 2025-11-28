@@ -201,9 +201,12 @@ def main():
             # Show mock configuration dialog
             print("Opening mock configuration dialog...")
             config_dialog = MockConfigurationDialog()
+            initial_mock_config = None  # Store for later
+            
             if config_dialog.exec():
                 # Get configuration
                 mock_config = config_dialog.get_configuration()
+                initial_mock_config = mock_config  # Save for viewer
                 
                 try:
                     # Apply configuration to the server
@@ -275,6 +278,10 @@ def main():
         dot_px=args.density_dot,
         crs=crs_obj  # Pass the CRS object
     )
+    
+    # Store the initial mock configuration if in mock mode
+    if is_mock and initial_mock_config is not None:
+        viewer.mock_config = initial_mock_config
     # --- Application Execution ---
     # Set the icon for the main Periscope window, show it, and start the Qt event loop.
     # sys.exit(app.exec()) ensures that the application's exit code is propagated.

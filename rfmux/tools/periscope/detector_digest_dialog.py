@@ -47,7 +47,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.current_detector = self.detector_id
 
         self.noise_tab_avail = False
-
+        
+        # Set default reference mode (will be updated if spectrum_data exists)
         self.reference = "absolute"
         
         # Navigation support
@@ -1812,4 +1813,5 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         
         # ----- Update plots to reflect new theme -----
         self._update_plots()
+
 

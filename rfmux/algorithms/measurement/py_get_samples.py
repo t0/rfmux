@@ -391,4 +391,4 @@ async def py_get_samples(crs: CRS,
         # attach spectrum data to results
         results["spectrum"] = TuberResult(spec_data)
 
-        return TuberResult(results)
+    return TuberResult(results)

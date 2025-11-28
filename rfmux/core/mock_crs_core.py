@@ -383,9 +383,6 @@ class MockCRS(BaseCRS):
         self.resonator_model = MockResonatorModel(self) # Pass self for state access
         self.udp_manager = MockUDPManager(self)         # Pass self for state access
 
-        # Don't generate resonators automatically - let create_mock_crs handle it
-        # This prevents double generation and uses the correct configuration
-
     def channels_per_module(self):
         if self.short_packets:
             return SHORT_PACKET_CHANNELS
@@ -420,7 +417,7 @@ class MockCRS(BaseCRS):
             # Initialize resonator model if needed
             if not hasattr(self, 'resonator_model') or self.resonator_model is None:
                 self.resonator_model = MockResonatorModel(self)
-                print('initialized resonator model')
+                #rint('initialized resonator model')
             
             # If config provided, store it permanently in the instance
             if config:
@@ -445,7 +442,7 @@ class MockCRS(BaseCRS):
             # Get resonance frequencies for return value
             resonance_frequencies = self.resonator_model.resonator_frequencies.copy()
             
-            print(f'Updated! Generated {resonator_count} mr_resonator objects')
+            #rint(f'Updated! Generated {resonator_count} mr_resonator objects')
 
             # Auto-configure channels if requested
             auto_bias = active_config.get('auto_bias_kids', True)

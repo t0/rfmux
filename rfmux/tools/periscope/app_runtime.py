@@ -511,10 +511,7 @@ class PeriscopeRuntime:
                 if self.is_mock_mode and t_rel is not None:
                     self._update_sim_time_tracking(t_rel)
             except:
-                try:
-                    self.receiver.queue.get_nowait()  # pop the bad element
-                except Exception:
-                    pass
+                self.receiver.queue.get_nowait()  # pop the bad element
                 continue
 
     def _calculate_relative_timestamp(self, pkt) -> float | None:

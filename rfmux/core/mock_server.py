@@ -109,7 +109,7 @@ class ServerProcess(mp_ctx.Process):
         shutdown_event = asyncio.Event()
         
         def signal_handler():
-            print("[MockCRS Server] Received shutdown signal")
+            #print("[MockCRS Server] Received shutdown signal")
             shutdown_event.set()
         
         # Register signal handlers
@@ -169,7 +169,7 @@ class ServerProcess(mp_ctx.Process):
                 print(f"[MockCRS Server] Error cleaning up runner: {e}")
         
         loop.close()
-        print("[MockCRS Server] Shutdown complete")
+        #print("[MockCRS Server] Shutdown complete")
 
     async def post_handler(self, request):
         port = request.url.port
@@ -321,7 +321,8 @@ class ServerProcess(mp_ctx.Process):
                 "adc_calibration_mode", "adc_calibration_coefficients",
                 "nyquist_zones", "hmc7044_registers",
                 # Exclude helper objects that can't be serialized
-                "resonator_model", "udp_manager", "timestamp"
+                "resonator_model", "udp_manager", "timestamp",
+                "_config_lock"
             }
             
             # Special enum properties that should be included even though they're callables

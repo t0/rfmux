@@ -11,6 +11,7 @@ import weakref
 import dataclasses
 import time
 import dataclasses
+import threading
 
 # Import schema classes
 from .schema import CRS as BaseCRS
@@ -39,7 +40,7 @@ def _cleanup_all_mock_crs_instances():
             asyncio.set_event_loop(loop)
             loop.run_until_complete(instance.stop_udp_streaming())
             loop.close()
-            print(f"[CLEANUP] Emergency cleanup completed for MockCRS instance {id(instance)}")
+            print(f"[CLEANUP] Shutdown completed for MockCRS instance {id(instance)}")
         except Exception as e:
             print(f"[CLEANUP] Error during emergency cleanup: {e}")
 
@@ -379,6 +380,9 @@ class MockCRS(BaseCRS):
         # Initialize mock start time for physics time tracking
         self.mock_start_time = time.time()
         
+        # Configuration lock to ensure atomic updates
+        self._config_lock = threading.RLock()
+        
         # Instantiate helpers
         self.resonator_model = MockResonatorModel(self) # Pass self for state access
         self.udp_manager = MockUDPManager(self)         # Pass self for state access
@@ -527,11 +531,16 @@ class MockCRS(BaseCRS):
             )
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
-        self.frequencies[(module, channel)] = frequency
+        
+        with self._config_lock:
+            self.frequencies[(module, channel)] = frequency
 
     def get_frequency(self, channel=None, module=None):
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
+        # Reading single value is atomic, but lock ensures consistency if needed
+        # We don't lock simple getters to avoid overhead, relying on the fact that
+        # dict reads are atomic. The critical part is atomic updates or multi-step reads.
         return self.frequencies.get((module, channel))
 
     def set_amplitude(self, amplitude, channel=None, module=None):
@@ -546,7 +555,9 @@ class MockCRS(BaseCRS):
             )
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
-        self.amplitudes[(module, channel)] = amplitude
+        
+        with self._config_lock:
+            self.amplitudes[(module, channel)] = amplitude
 
     def get_amplitude(self, channel=None, module=None):
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
@@ -576,7 +587,8 @@ class MockCRS(BaseCRS):
         else:
             phase_degrees = phase
             
-        self.phases[(module, channel)] = phase_degrees
+        with self._config_lock:
+            self.phases[(module, channel)] = phase_degrees
 
     def get_phase(self, units='DEGREES', target=None, channel=None, module=None):
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
@@ -968,15 +980,16 @@ class MockCRS(BaseCRS):
         keys_to_delete_amp = []
         keys_to_delete_phase = []
 
-        for m in modules_to_clear:
-            for ch in range(1, 1025): # Channels 1-1024
-                if (m, ch) in self.frequencies: keys_to_delete_freq.append((m,ch))
-                if (m, ch) in self.amplitudes: keys_to_delete_amp.append((m,ch))
-                if (m, ch) in self.phases: keys_to_delete_phase.append((m,ch))
-        
-        for key in keys_to_delete_freq: self.frequencies.pop(key, None)
-        for key in keys_to_delete_amp: self.amplitudes.pop(key, None)
-        for key in keys_to_delete_phase: self.phases.pop(key, None)
+        with self._config_lock:
+            for m in modules_to_clear:
+                for ch in range(1, 1025): # Channels 1-1024
+                    if (m, ch) in self.frequencies: keys_to_delete_freq.append((m,ch))
+                    if (m, ch) in self.amplitudes: keys_to_delete_amp.append((m,ch))
+                    if (m, ch) in self.phases: keys_to_delete_phase.append((m,ch))
+            
+            for key in keys_to_delete_freq: self.frequencies.pop(key, None)
+            for key in keys_to_delete_amp: self.amplitudes.pop(key, None)
+            for key in keys_to_delete_phase: self.phases.pop(key, None)
 
 
     def set_cable_length(self, length, module):

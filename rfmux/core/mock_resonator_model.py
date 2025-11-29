@@ -3,6 +3,7 @@ Mock CRS Device - Resonator Physics Model.
 Encapsulates the logic for resonator physics simulation, including S21 response.
 """
 import numpy as np
+import threading
 
 # Import from mr_resonator subpackage using relative imports
 from ..mr_resonator.mr_complex_resonator import MR_complex_resonator
@@ -127,6 +128,9 @@ class MockResonatorModel:
         # Cache/logging controls from SoT
         self._resonator_gen = 0
         self._cache_log_counter = 0
+        
+        # Physics lock to serialize state updates (prevent race conditions)
+        self._physics_lock = threading.RLock()
 
     def _extract_param_arrays(self):
         """Extract LEKID parameters into numpy arrays for vectorized calculations."""
@@ -298,6 +302,10 @@ class MockResonatorModel:
         # Step 2: Generate resonators with computed Lk and R, solving for C to get target frequencies
         print(f"Generating {num_resonances} resonators from {freq_start/1e9:.2f} GHz to {freq_end/1e9:.2f} GHz")
         
+        # Determine bounds for frequency correction
+        f_min_bound = min(freq_start, freq_end)
+        f_max_bound = max(freq_start, freq_end)
+        
         for x in range(num_resonances):
             try:
                 # Calculate target frequency for this resonator
@@ -345,17 +353,66 @@ class MockResonatorModel:
                 
                 # Calculate and store actual resonance frequency
                 actual_freq = lekid.compute_fr()
+                
+                # Feedback loop to ensure frequency stays within bounds
+                # This handles shifts due to loading (Cc), random scatter, or other physics effects
+                for _ in range(3):  # Max 3 attempts to correct
+                    needs_correction = False
+                    target_correction = 0.0
+                    
+                    if actual_freq < f_min_bound:
+                        # Frequency too low -> Decrease C to increase f
+                        # Target slightly inside the boundary (0.1%) to be safe
+                        target_correction = f_min_bound * 1.001
+                        needs_correction = True
+                    elif actual_freq > f_max_bound:
+                        # Frequency too high -> Increase C to decrease f
+                        target_correction = f_max_bound * 0.999
+                        needs_correction = True
+                    
+                    if needs_correction:
+                        print(f"  Correction needed: {actual_freq/1e9:.4f} GHz out of bounds [{f_min_bound/1e9:.3f}, {f_max_bound/1e9:.3f}]")
+                        # Calculate required C scaling: f ~ 1/sqrt(C) => C_new = C_old * (f_old / f_new)^2
+                        correction_factor = (actual_freq / target_correction)**2
+                        
+                        # Update C in params
+                        complex_res_params['C'] = complex_res_params['C'] * correction_factor
+                        
+                        # Re-create resonator with corrected C
+                        complex_res = MR_complex_resonator(**complex_res_params)
+                        lekid = complex_res.lekid
+                        actual_freq = lekid.compute_fr()
+                        print(f"  Corrected to: {actual_freq/1e9:.4f} GHz")
+                    else:
+                        break
+
                 print(f"  Actual frequency: {actual_freq/1e9:.3f} GHz")
                 print(f"  Actual Lk: {lekid.Lk*1e9:.2f} nH, R: {lekid.R*1e6:.2f} µΩ")
                 
+                # Compute all derived values BEFORE appending to lists to ensure atomicity
+                # This prevents partial updates if a calculation fails
+                
+                # Compute base nqp using calc_nqp() method
+                base_nqp = complex_res.calc_nqp()
+                print(f"  Base nqp: {base_nqp:.2e}")
+                
+                # Pre-calculate Q value
+                try:
+                    Q_value = lekid.compute_Qi()
+                    print(f"  Q value: {Q_value:.0f}")
+                except:
+                    Q_value = 1000  # Fallback Q if calculation fails
+                    print(f"  Q value: {Q_value:.0f} (fallback)")
+                
+                # Pre-compute linewidth
+                linewidth = actual_freq / Q_value
+                print(f"  Linewidth: {linewidth/1e3:.2f} kHz")
+                
+                # --- ATOMIC UPDATE START ---
                 # Store the persistent objects (this fixes the memory leak)
                 self.mr_lekids.append(lekid)
                 self.mr_complex_resonators.append(complex_res)  # Keep for future QP tracking
-                
-                # Compute and store base nqp using calc_nqp() method
-                base_nqp = complex_res.calc_nqp()
                 self.base_nqp_values.append(base_nqp)
-                print(f"  Base nqp: {base_nqp:.2e}")
                 
                 # Store base parameters (as-fabricated values)
                 self.base_lekid_params.append({
@@ -373,20 +430,9 @@ class MockResonatorModel:
                 # Store metadata (use actual computed frequency)
                 self.resonator_frequencies.append(actual_freq)
                 self.kinetic_inductance_fractions.append(lekid.alpha_k)
-                
-                # Pre-calculate and store Q value
-                try:
-                    Q_value = lekid.compute_Qi()
-                    print(f"  Q value: {Q_value:.0f}")
-                except:
-                    Q_value = 1000  # Fallback Q if calculation fails
-                    print(f"  Q value: {Q_value:.0f} (fallback)")
                 self.resonator_q_values.append(Q_value)
-                
-                # Pre-compute and store linewidth
-                linewidth = actual_freq / Q_value
                 self.resonator_linewidths.append(linewidth)
-                print(f"  Linewidth: {linewidth/1e3:.2f} kHz")
+                # --- ATOMIC UPDATE END ---
                 
             except Exception as e:
                 print(f"Warning: Failed to create resonator {x}: {e}")
@@ -395,8 +441,7 @@ class MockResonatorModel:
                 # Continue with other resonators
                 continue
         
-        print(f"Successfully created {len(self.mr_lekids)} persistent LEKID objects")
-        print(f"Successfully created {len(self.mr_complex_resonators)} persistent MR_complex_resonator objects")
+        print(f"Created {len(self.mr_lekids)} persistent LEKID objects")
 
         # Configure pulse events if specified in config
         pulse_mode = config.get('pulse_mode', 'none')
@@ -430,7 +475,17 @@ class MockResonatorModel:
         - Fresh noisy quasiparticle density each call
         - Physics-based Lk and R from combined nqp
         - OPTIMIZED: Skip convergence for noise-only changes via caching
+        
+        THREAD SAFETY: This method is protected by _physics_lock because it 
+        updates the shared state (self.mr_lekids) during calculation.
         """
+        # Acquire lock to prevent race conditions with other threads (e.g. Streamer vs get_samples)
+        # This is critical because update_lekids_for_current modifies shared state.
+        with self._physics_lock:
+            return self._s21_lc_response_internal(frequency, amplitude)
+
+    def _s21_lc_response_internal(self, frequency, amplitude=1.0):
+        """Internal implementation of s21_lc_response (assumes lock held)."""
         import time
         t_start = time.perf_counter()
         
@@ -785,15 +840,17 @@ class MockResonatorModel:
         self.lk_current_factors = base_factors
 
         try:
-            # Ensure a flat list[float] regardless of the dtype/shape returned by JIT
-            vec = np.asarray(currents_converged, dtype=float).reshape(-1)
+            # Ensure a flat list[complex] regardless of the dtype/shape returned by JIT
+            # NOTE: currents_converged contains complex values (phasors).
+            # We preserve them as complex to maintain phase information and correct magnitude calculations.
+            vec = np.asarray(currents_converged, dtype=complex).reshape(-1)
             curr_list = vec[:m].tolist()
         except Exception:
-            curr_list = [0.0] * m
+            curr_list = [0j] * m
         pad_len = mlen - m
         if pad_len > 0:
-            curr_list = curr_list + [0.0] * pad_len
-        self.resonator_currents_array = np.array(curr_list, dtype=float)
+            curr_list = curr_list + [0j] * pad_len
+        self.resonator_currents_array = np.array(curr_list, dtype=complex)
         self.resonator_currents = curr_list
 
         # Refresh L/R arrays from current objects
@@ -1228,55 +1285,65 @@ class MockResonatorModel:
             sample_rate = 625e6 / 256 / 64 / (2**dec_stage)
         
         # Step 1: Collect active tones and observing channels
-        max_channels = self.mock_crs.channels_per_module()
+        # Acquire configuration lock to ensure atomic read of frequencies and amplitudes
         active_tone_freqs = []
         active_tone_amps = []
         obs_channels = []
         obs_freqs = []
         
-        # Find all configured channels in this module
-        configured_channels = set()
-        for (mod, ch) in self.mock_crs.frequencies.keys():
-            if (mod == module) and (ch <= max_channels):
-                configured_channels.add(ch)
-        for (mod, ch) in self.mock_crs.amplitudes.keys():
-            if (mod == module) and (ch <= max_channels):
-                configured_channels.add(ch)
-        
-        # Collect active tones (transmitting channels) using proper getter methods
-        s21_call_count = 0
-        for ch in configured_channels:
-            freq = self.mock_crs.get_frequency(channel=ch, module=module)
-            amp = self.mock_crs.get_amplitude(channel=ch, module=module)
+        # Use config lock to ensure we get a consistent snapshot of the channel configuration
+        with getattr(self.mock_crs, '_config_lock', threading.RLock()): # Fallback if lock missing
+            max_channels = self.mock_crs.channels_per_module()
             
-            if freq is not None and amp is not None and amp != 0:
-                phase_deg = self.mock_crs.phases.get((module, ch), 0)  # No getter for phase yet
-                total_freq = freq + nco_freq
+            # Find all configured channels in this module
+            configured_channels = set()
+            for (mod, ch) in self.mock_crs.frequencies.keys():
+                if (mod == module) and (ch <= max_channels):
+                    configured_channels.add(ch)
+            for (mod, ch) in self.mock_crs.amplitudes.keys():
+                if (mod == module) and (ch <= max_channels):
+                    configured_channels.add(ch)
+            
+            # Collect active tones (transmitting channels) using proper getter methods
+            # We must do this while holding the lock to prevent "frequency set but amplitude missing" race
+            raw_channel_configs = []
+            
+            for ch in configured_channels:
+                freq = self.mock_crs.get_frequency(channel=ch, module=module)
+                amp = self.mock_crs.get_amplitude(channel=ch, module=module)
+                phase_deg = self.mock_crs.phases.get((module, ch), 0)
                 
-                # For single sample, pre-compute S21. For multiple samples, compute fresh per sample.
-                if num_samples == 1:
-                    # Apply S21 response using FAST path (state already updated for this packet)
-                    s21_complex = self._evaluate_s21_at_frequency(total_freq, amp)
-                    s21_call_count += 1
-                    
-                    # Combine amplitude, S21, and phase
-                    complex_amplitude = amp * s21_complex * np.exp(1j * np.deg2rad(phase_deg))
-                else:
-                    # For multi-sample, just store base amplitude with phase
-                    # S21 will be evaluated fresh for each sample
-                    complex_amplitude = amp * np.exp(1j * np.deg2rad(phase_deg))
+                if freq is not None and amp is not None and amp != 0:
+                    raw_channel_configs.append((ch, freq, amp, phase_deg))
                 
-                active_tone_freqs.append(total_freq)
-                active_tone_amps.append(complex_amplitude)
+                # Also collect observing channels (if freq exists)
+                if freq is not None:
+                    obs_channels.append(ch)
+                    obs_freqs.append(freq + nco_freq)
+
+        # Process the collected configuration (outside lock where possible, though S21 calculation needs physics lock)
+        s21_call_count = 0
+        for ch, freq, amp, phase_deg in raw_channel_configs:
+            total_freq = freq + nco_freq
+            
+            # For single sample, pre-compute S21. For multiple samples, compute fresh per sample.
+            if num_samples == 1:
+                # Apply S21 response using FAST path (state already updated for this packet)
+                # Note: _evaluate_s21_at_frequency now acquires _physics_lock internally
+                s21_complex = self._evaluate_s21_at_frequency(total_freq, amp)
+                s21_call_count += 1
+                
+                # Combine amplitude, S21, and phase
+                complex_amplitude = amp * s21_complex * np.exp(1j * np.deg2rad(phase_deg))
+            else:
+                # For multi-sample, just store base amplitude with phase
+                # S21 will be evaluated fresh for each sample
+                complex_amplitude = amp * np.exp(1j * np.deg2rad(phase_deg))
+            
+            active_tone_freqs.append(total_freq)
+            active_tone_amps.append(complex_amplitude)
         
         t_s21_calc = time.perf_counter()
-        
-        # Collect observing channels
-        for ch in configured_channels:
-            freq = self.mock_crs.frequencies.get((module, ch))
-            if freq is not None:
-                obs_channels.append(ch)
-                obs_freqs.append(freq + nco_freq)
         
         # If no active tones or observers, return empty
         if not active_tone_freqs or not obs_channels:

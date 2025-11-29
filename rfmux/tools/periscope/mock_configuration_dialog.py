@@ -20,7 +20,10 @@ Groups:
 from .utils import QtWidgets, QtCore, QtGui
 import re
 import math
+import numpy as np
 from rfmux.core import mock_config as mc
+from rfmux.mr_resonator.mr_complex_resonator import MR_complex_resonator
+from rfmux.mr_resonator.mr_lekid import MR_LEKID
 
 
 class ScientificDoubleValidator(QtGui.QDoubleValidator):
@@ -40,7 +43,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Mock Mode Configuration")
         self.setModal(True)
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(800)
 
         # Store current configuration or use defaults
         self.current_config = current_config or {}
@@ -50,6 +53,20 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
         # Load current or default values
         self._load_current_values()
+
+        # Connect signals for interactions
+        self._connect_signals()
+
+        # Trigger initial Q update
+        self._update_q_estimate()
+
+    def _connect_signals(self):
+        """Connect signals for live Q update and other interactions."""
+        # Connect signals for live Q update
+        for widget in [self.T_edit, self.Popt_edit, self.Lg_edit, self.Cc_edit, 
+                       self.L_junk_edit, self.Vin_edit, self.input_atten_edit, self.ZLNA_edit]:
+            widget.textChanged.connect(self._update_q_estimate)
+        self.freq_start_spin.valueChanged.connect(self._update_q_estimate)
 
     def _create_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -158,6 +175,118 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.auto_bias_check.toggled.connect(self.bias_amplitude_spin.setEnabled)
         return group
 
+    def _create_performance_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("Approximate Q values")
+        layout = QtWidgets.QVBoxLayout(group)
+        
+        self.q_table = QtWidgets.QTableWidget()
+        self.q_table.setColumnCount(2)
+        self.q_table.setHorizontalHeaderLabels(["Param", "Value"])
+        self.q_table.verticalHeader().setVisible(False)
+        self.q_table.horizontalHeader().setStretchLastSection(True)
+        self.q_table.setRowCount(3)
+        self.q_table.setItem(0, 0, QtWidgets.QTableWidgetItem("Qr (Total)"))
+        self.q_table.setItem(1, 0, QtWidgets.QTableWidgetItem("Qi (Internal)"))
+        self.q_table.setItem(2, 0, QtWidgets.QTableWidgetItem("Qc (Coupling)"))
+        
+        # Set initial values
+        for i in range(3):
+            item = QtWidgets.QTableWidgetItem("N/A")
+            # Make read-only
+            item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            self.q_table.setItem(i, 1, item)
+            
+        # Adjust height to fit rows
+        self.q_table.setFixedHeight(110) 
+        
+        layout.addWidget(self.q_table)
+
+        # Add explanatory label
+        hint_label = QtWidgets.QLabel(
+            "<small>"
+            "<b>Key Dependencies:</b><br>"
+            "• <b>Lk</b> (Kinetic Inductance) increases with T and Popt.<br>"
+            "• <b>Qi</b> (Internal Q) depends on total inductance (L_k + L_g) and loss.<br>"
+            "&nbsp;&nbsp;• <b>Increases</b> with larger L_g (dilution effect).<br>"
+            "&nbsp;&nbsp;• <b>Decreases</b> with higher T or Popt (increased loss).<br>"
+            "• <b>Qc</b> (Coupling Q) increases as Cc decreases.<br>"
+            "• <b>Qr</b> (Total Q) is dominated by the lowest Q factor."
+            "</small>"
+        )
+        hint_label.setWordWrap(True)
+        layout.addWidget(hint_label)
+
+        return group
+
+    def _update_q_estimate(self):
+        """Calculate and update Q factor estimates based on current UI values."""
+        if not hasattr(self, 'q_table'): return
+
+        try:
+            # Read parameters (with defaults if parsing fails)
+            try: T = float(self.T_edit.text())
+            except ValueError: return
+            
+            try: Popt = float(self.Popt_edit.text())
+            except ValueError: return
+            
+            try: Lg = float(self.Lg_edit.text())
+            except ValueError: return
+            
+            try: Cc = float(self.Cc_edit.text())
+            except ValueError: return
+            
+            try: L_junk = float(self.L_junk_edit.text())
+            except ValueError: L_junk = 0.0
+            
+            try: Vin = float(self.Vin_edit.text())
+            except ValueError: Vin = 1e-5
+            
+            try: input_atten_dB = float(self.input_atten_edit.text())
+            except ValueError: input_atten_dB = 20.0
+            
+            try: ZLNA = float(self.ZLNA_edit.text())
+            except ValueError: ZLNA = 50.0
+
+            # Get start frequency as representative
+            freq = self.freq_start_spin.value() * 1e9
+            if freq <= 0: return
+
+            # Step 1: Get Lk and R from physics model (using reference params)
+            ref_params = {
+                'T': T, 'Popt': Popt, 'C': 1e-12, 'Cc': Cc, 'fix_Lg': Lg,
+                'L_junk': L_junk, 'Vin': Vin, 'input_atten_dB': input_atten_dB,
+                'base_readout_f': freq, 'verbose': False,
+                'ZLNA': complex(ZLNA, 0), 'GLNA': 1.0
+            }
+            ref_res = MR_complex_resonator(**ref_params)
+            Lk = ref_res.lekid.Lk
+            R = ref_res.lekid.R
+            
+            # Step 2: Calculate required C
+            L_total = Lk + Lg
+            C = 1.0 / ((2 * np.pi * freq)**2 * L_total)
+            
+            # Step 3: Calculate Q values
+            lekid = MR_LEKID(
+                C=C, Lk=Lk, Lg=Lg, R=R, Cc=Cc, 
+                L_junk=L_junk, Vin=Vin, 
+                system_termination=50.0, input_atten_dB=input_atten_dB,
+                ZLNA=complex(ZLNA, 0)
+            )
+            
+            Qr, Qi, Qc = lekid.compute_Q_values()
+            
+            # Update Table
+            self.q_table.item(0, 1).setText(f"{Qr:,.0f}")
+            self.q_table.item(1, 1).setText(f"{Qi:,.0f}")
+            self.q_table.item(2, 1).setText(f"{Qc:,.0f}")
+            
+        except Exception as e:
+            # If calculation fails, clear values or show error? Keep existing or N/A?
+            # print(f"Q Calc Error: {e}")
+            pass
+
     def _create_advanced_widget(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         vbox = QtWidgets.QVBoxLayout(widget)
@@ -179,6 +308,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         left = QtWidgets.QVBoxLayout()
         left.addWidget(self._create_physics_group())
         left.addWidget(self._create_circuit_group())
+        left.addWidget(self._create_performance_group())
         left.addStretch()
 
         # Right column
@@ -493,6 +623,9 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.random_amp_logmean_edit.setText(str(cfg.get("pulse_random_amp_logmean")))
         self.random_amp_logsigma_edit.setText(str(cfg.get("pulse_random_amp_logsigma")))
         self._on_random_amp_mode_changed(self.random_amp_mode_combo.currentText())
+        
+        # Trigger Q update
+        self._update_q_estimate()
 
     def _load_current_values(self):
         if not self.current_config:

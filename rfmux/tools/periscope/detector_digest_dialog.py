@@ -178,8 +178,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         # ---- Tab 2: Noise UI ----
         self.noise_tab = self._build_noise_tab()
         self.tabs.addTab(self.noise_tab, "Noise")
-        noise_tab_index = self.tabs.indexOf(self.noise_tab)
-        self.tabs.setTabEnabled(noise_tab_index, self.noise_tab_avail)
+        # Noise tab is always enabled now, with placeholder if no data
     
         # --- Optional: connect tab change ---
         self.tabs.currentChanged.connect(self._on_tab_changed if hasattr(self, "_on_tab_changed") else lambda _: None)
@@ -550,7 +549,18 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         splitter_main.addWidget(self.plot_noise_spectrum)
         splitter_main.setSizes([400, 400])
         
+        # Placeholder label for when no data is available
+        self.noise_placeholder_label = QtWidgets.QLabel("This data is populated once 'Get Noise Spectrum' is run from the multisweep panel")
+        self.noise_placeholder_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.noise_placeholder_label.setStyleSheet("font-size: 14pt; color: gray;")
+        self.noise_placeholder_label.hide() # Hidden by default
+        
         layout.addWidget(splitter_main)
+        layout.addWidget(self.noise_placeholder_label)
+        
+        # Keep reference to splitter to hide/show it
+        self.noise_splitter = splitter_main
+        
         self.apply_theme(self.dark_mode)
 
     
@@ -563,7 +573,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.noise_i_data = self.noise_data.i[self.current_detector - 1]
         self.noise_q_data = self.noise_data.q[self.current_detector - 1]
         self.refresh_noise_button.setEnabled(True)
-        self._update_plots()
+        # Don't auto-range when refreshing noise - preserve user zoom
+        self._update_plots(auto_range=False)
     
     
     def _init_skewed_table_rows(self):
@@ -863,9 +874,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.apply_theme(self.dark_mode)
     
         if not self.spectrum_data:
+            if hasattr(self, 'noise_splitter'): self.noise_splitter.hide()
+            if hasattr(self, 'noise_placeholder_label'): self.noise_placeholder_label.show()
             self.plot_time_vs_mag.clear()
             self.plot_noise_spectrum.clear()
             return
+            
+        if hasattr(self, 'noise_splitter'): self.noise_splitter.show()
+        if hasattr(self, 'noise_placeholder_label'): self.noise_placeholder_label.hide()
     
         # try:
         exp_bins = 100
@@ -1130,8 +1146,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         # except Exception as e:
         #     print("Error updating noise plots:", e)      
         
-    def _update_plots(self):
-        """Populates all three plots with data and updates fitting information panel."""
+    def _update_plots(self, auto_range=True):
+        """
+        Populates all three plots with data and updates fitting information panel.
+        
+        Args:
+            auto_range (bool): If True (default), auto-scale plots to fit data.
+                              If False, preserve current view ranges (useful for updates).
+        """
         self._clear_plots() # Clear previous data and fitting info
         if not self.active_sweep_data or not self.resonance_data_for_digest or self.active_sweep_info is None:
             # If no active sweep data, ensure fitting panel also shows "N/A" or "Not Applied"
@@ -1226,7 +1248,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                         nl_q_volts = convert_roc_to_volts(nl_model_iq_physical.imag)
                         self.plot1_sweep_vs_freq.plot(x_axis_hz_offset, nl_mag_volts, pen=pg.mkPen(FITTING_COLORS["NONLINEAR"], width=LINE_WIDTH, style=QtCore.Qt.PenStyle.DashDotLine), name="Nonlinear Fit Mag")
                         self.plot2_iq_plane.plot(nl_i_volts, nl_q_volts, pen=pg.mkPen(FITTING_COLORS["NONLINEAR"], width=LINE_WIDTH, style=QtCore.Qt.PenStyle.DashDotLine), name="Nonlinear Fit IQ")
-                self.plot1_sweep_vs_freq.autoRange()
+                if auto_range:
+                    self.plot1_sweep_vs_freq.autoRange()
 
             rotation_tod_iq = self.active_sweep_data.get('rotation_tod')
 
@@ -1289,8 +1312,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     symbolSize=3,
                     name="Data after Bias sampling"
                 )
-                
-            self.plot2_iq_plane.autoRange()
+            
+            if auto_range:
+                self.plot2_iq_plane.autoRange()
 
             
         
@@ -1346,7 +1370,8 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     legend_name += " (Down)" if direction == "downward" else " (Up)"
                     if is_bifurcated: legend_name += " (bifurcated)"
                     self.plot3_bias_opt.plot(x_axis_hz_offset, s21_mag_db, pen=current_pen, name=legend_name)
-        self.plot3_bias_opt.autoRange()
+        if auto_range:
+            self.plot3_bias_opt.autoRange()
         self._update_fitting_info_panel()
 
 
@@ -1433,14 +1458,23 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 
                 # Bifurcation threshold is 4*sqrt(3)/9 ≈ 0.77
                 bifurcation_threshold = 4 * np.sqrt(3) / 9
-                if a_value > bifurcation_threshold:
-                    a_item.setForeground(QtGui.QBrush(QtGui.QColor("red")))
-                    self.nl_table.item(NL_BIFURCATION_ROW, 1).setText("Yes")
-                else:
-                    # Reset to default color (based on dark mode)
-                    default_color = QtGui.QColor("white" if self.dark_mode else "black")
-                    a_item.setForeground(QtGui.QBrush(default_color))
-                    self.nl_table.item(NL_BIFURCATION_ROW, 1).setText("No")
+                
+                # Reset styling to ensure "milder" colors are used without complex highlighting
+                # This avoids rendering issues on some OS/themes
+                default_bg_brush = QtGui.QBrush(QtGui.QColor("transparent")) 
+                default_text_color = QtGui.QColor("white" if self.dark_mode else "black")
+                
+                # Reset 'a' parameter styling
+                a_item.setBackground(default_bg_brush)
+                a_item.setForeground(QtGui.QBrush(default_text_color))
+                
+                # Set bifurcation status text
+                is_bifurcated = a_value > bifurcation_threshold
+                self.nl_table.item(NL_BIFURCATION_ROW, 1).setText("Yes" if is_bifurcated else "No")
+                
+                # Reset bifurcation row styling
+                self.nl_table.item(NL_BIFURCATION_ROW, 1).setBackground(default_bg_brush)
+                self.nl_table.item(NL_BIFURCATION_ROW, 1).setForeground(QtGui.QBrush(default_text_color))
                 
                 self.nl_table.item(NL_PHI_ROW, 1).setText(f"{np.degrees(nl_params_dict.get('phi', 0)):.2f}")
                 self.nl_table.item(NL_I0_ROW, 1).setText(f"{nl_params_dict.get('i0', 0):.3e}")
@@ -1649,6 +1683,58 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 }
             """
     
+        # Style for QTableWidget using Palette (better for item-specific coloring)
+        if dark_mode:
+            # Header style only (stylesheets often needed for headers)
+            header_style = """
+                QHeaderView::section {
+                    background-color: #3C3C3C;
+                    color: #E0E0E0;
+                    border: 1px solid #555555;
+                    padding: 4px;
+                }
+                QTableCornerButton::section {
+                    background-color: #3C3C3C;
+                    border: 1px solid #555555;
+                }
+            """
+            # Palette for the table content
+            p = QtGui.QPalette()
+            p.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor("#2C2C2C"))
+            p.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor("#353535"))
+            p.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor("#E0E0E0"))
+            p.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor("#4C4C4C"))
+            p.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor("white"))
+        else:
+            # Header style only
+            header_style = """
+                QHeaderView::section {
+                    background-color: #F0F0F0;
+                    color: #000000;
+                    border: 1px solid #CCCCCC;
+                    padding: 4px;
+                }
+                QTableCornerButton::section {
+                    background-color: #F0F0F0;
+                    border: 1px solid #CCCCCC;
+                }
+            """
+            # Palette for the table content
+            p = QtGui.QPalette()
+            p.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor("#FFFFFF"))
+            p.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor("#F9F9F9"))
+            p.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor("#000000"))
+            p.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor("#E0F0FF"))
+            p.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor("black"))
+
+        if hasattr(self, 'skewed_table'):
+            self.skewed_table.setStyleSheet(header_style)
+            self.skewed_table.setPalette(p)
+
+        if hasattr(self, 'nl_table'):
+            self.nl_table.setStyleSheet(header_style)
+            self.nl_table.setPalette(p)
+
         # Digest tab buttons
         if hasattr(self, 'prev_button'):
             self.prev_button.setStyleSheet(button_style)
@@ -1817,5 +1903,3 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         
         # ----- Update plots to reflect new theme -----
         self._update_plots()
-
-

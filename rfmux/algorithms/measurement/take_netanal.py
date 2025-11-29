@@ -213,11 +213,13 @@ async def take_netanal(
                         chunk_fs.append(freq_val)
                         # Set amplitude/frequency for this used channel
                         ctx.set_frequency(freq_val - nco_freq, channel=j, module=module)
-                        ctx.set_amplitude(amp, channel=j, module=module)
+                        if not it:  # only set amplitude once per chunk
+                            ctx.set_amplitude(amp, channel=j, module=module)
                     else:
-                        # Zero out all leftover channels
-                        ctx.set_frequency(0, channel=j, module=module)
-                        ctx.set_amplitude(0, channel=j, module=module)
+                        if not it: # only zero unused channels once per chunk
+                            # Zero out all leftover channels
+                            ctx.set_frequency(0, channel=j, module=module)
+                            ctx.set_amplitude(0, channel=j, module=module)
 
                 await ctx()
 

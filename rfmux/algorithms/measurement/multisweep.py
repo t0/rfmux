@@ -357,7 +357,8 @@ async def multisweep(
                     freq = resonance_data[idx]['frequencies'][point_idx]
                     freq_rel = freq - current_nco_freq # Use current_nco_freq
                     ctx.set_frequency(freq_rel, channel=channel, module=module)
-                    ctx.set_amplitude(amp, channel=channel, module=module)
+                    if not point_idx: # only set amplitude once per sweep
+                        ctx.set_amplitude(amp, channel=channel, module=module)
 
                 # Zero out unused resonance channels
                 active_res_channels = set(channel_mapping.values())

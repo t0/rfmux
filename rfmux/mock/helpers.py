@@ -6,7 +6,7 @@ This module provides utilities for creating and configuring a MockCRS instance
 with simulated KID resonators. It's designed to be used by scripts that need
 to test the rfmux algorithms without real hardware.
 
-Now uses the unified Single Source of Truth (SoT) in rfmux.core.mock_config.
+Now uses the unified Single Source of Truth (SoT) in rfmux.mock.config.
 
 Example usage:
     from mock_crs_helper import create_mock_crs
@@ -24,7 +24,7 @@ from typing import Optional, Dict, Any
 # Import required rfmux modules
 from rfmux.core.session import load_session
 from rfmux.core.crs import CRS
-from rfmux.core import mock_config as mc
+from rfmux.mock import config as mc
 
 
 async def create_mock_crs(
@@ -48,7 +48,7 @@ async def create_mock_crs(
         udp_host: Host for UDP streaming (default: '127.0.0.1')
         udp_port: Port for UDP streaming (default: 9876)
         config: Optional custom configuration dict. If None, uses unified defaults.
-                Keys should match rfmux.core.mock_config.MOCK_DEFAULTS.
+                Keys should match rfmux.mock.config.MOCK_DEFAULTS.
         verbose: Whether to print status messages (default: True)
     
     Returns:
@@ -78,7 +78,7 @@ async def create_mock_crs(
 
         session = load_session("""
 !HardwareMap
-- !flavour "rfmux.core.mock"
+- !flavour "rfmux.mock"
 - !CRS { serial: "0000", hostname: "127.0.0.1" }
 """)
         

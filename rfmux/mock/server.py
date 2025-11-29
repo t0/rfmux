@@ -11,15 +11,17 @@ import atexit
 import signal
 import numpy as np
 
-# Import MockCRS from its new location
-from .mock_crs_core import MockCRS
+# Import MockCRS from the crs module within this package
+from .crs import MockCRS
 # Import BaseCRS for type hinting or direct use if necessary
-from .schema import CRS as BaseCRS
+from ..core.schema import CRS as BaseCRS
 
 # DO NOT import algorithms on the server side
 # Algorithms should only run on the client side
 
 mp_ctx = multiprocessing.get_context()
+
+
 def yaml_hook(hwm):
     """Patch up the HWM using mock Dfmuxes instead of real ones.
 
@@ -36,7 +38,7 @@ def yaml_hook(hwm):
     # Find all CRS objects in the database and patch up their hostnames to
     # something local.
     sockets = []
-    for d in hwm.query(BaseCRS): # Query for BaseCRS, as MockCRS might not be in DB yet
+    for d in hwm.query(BaseCRS):  # Query for BaseCRS, as MockCRS might not be in DB yet
 
         # Create a socket to be shared with the server process.
         s = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
@@ -45,7 +47,7 @@ def yaml_hook(hwm):
 
         sockets.append(s)
         d.hostname = f"{hostname}:{port}"
-        # Instantiate MockCRS from mock_crs_core
+        # Instantiate MockCRS
         models[port] = MockCRS(
             serial=d.serial if d.serial else ("%05d" % port),
             slot=d.slot if d.crate else None,
@@ -71,7 +73,7 @@ def yaml_hook(hwm):
                 p.join(timeout=2.0)
             except:
                 pass
-            
+
             # If still alive, force kill
             if p.is_alive():
                 print("[MockCRS] Force killing server process...")
@@ -80,7 +82,7 @@ def yaml_hook(hwm):
                     p.join(timeout=2.0)
                 except:
                     pass
-            
+
             print("[MockCRS] Server process shutdown complete")
 
     atexit.register(cleanup_server_process)
@@ -104,14 +106,13 @@ class ServerProcess(mp_ctx.Process):
     def run(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+
         # Set up signal handlers for graceful shutdown
         shutdown_event = asyncio.Event()
-        
+
         def signal_handler():
-            #print("[MockCRS Server] Received shutdown signal")
             shutdown_event.set()
-        
+
         # Register signal handlers
         try:
             loop.add_signal_handler(signal.SIGTERM, signal_handler)
@@ -119,7 +120,7 @@ class ServerProcess(mp_ctx.Process):
         except (ValueError, NotImplementedError):
             # Signal handling may not be available in all contexts
             pass
-        
+
         # Do NOT load algorithms on server side - they should only run on client
 
         app = web.Application()
@@ -127,7 +128,7 @@ class ServerProcess(mp_ctx.Process):
 
         runners = []
         sites = []
-        
+
         for s in self.sockets:
             runner = web.AppRunner(app)
             loop.run_until_complete(runner.setup())
@@ -137,16 +138,16 @@ class ServerProcess(mp_ctx.Process):
             sites.append(site)
 
         self.lock.release()
-        
+
         # Wait for shutdown signal instead of running forever
         try:
             loop.run_until_complete(shutdown_event.wait())
         except KeyboardInterrupt:
             print("[MockCRS Server] Received KeyboardInterrupt")
-        
+
         # Clean shutdown
         print("[MockCRS Server] Shutting down...")
-        
+
         # Stop UDP streaming for all models
         for model in self.models.values():
             if hasattr(model, 'udp_manager') and model.udp_manager:
@@ -154,26 +155,25 @@ class ServerProcess(mp_ctx.Process):
                     loop.run_until_complete(model.udp_manager.stop_udp_streaming())
                 except Exception as e:
                     print(f"[MockCRS Server] Error stopping UDP streaming: {e}")
-        
+
         # Clean up web sites and runners
         for site in sites:
             try:
                 loop.run_until_complete(site.stop())
             except Exception as e:
                 print(f"[MockCRS Server] Error stopping site: {e}")
-        
+
         for runner in runners:
             try:
                 loop.run_until_complete(runner.cleanup())
             except Exception as e:
                 print(f"[MockCRS Server] Error cleaning up runner: {e}")
-        
+
         loop.close()
-        #print("[MockCRS Server] Shutdown complete")
 
     async def post_handler(self, request):
         port = request.url.port
-        model = self.models[port] # This is an instance of MockCRS
+        model = self.models[port]  # This is an instance of MockCRS
 
         body = await request.text()
 
@@ -198,18 +198,16 @@ class ServerProcess(mp_ctx.Process):
         except Exception as e:
             # It's better to log the exception on the server and return a generic error
             # to the client, or a specific error structure Tuber expects.
-            print(f"Error in post_handler: {e}") # Basic logging
+            print(f"Error in post_handler: {e}")
             import traceback
             traceback.print_exc()
-            # Re-raise to let aiohttp handle it or return a structured error
-            # For now, re-raising to see default aiohttp behavior
             raise e
         finally:
             model._thread_lock_release()
 
     async def __single_handler(self, model, request):
         """Handle a single Tuber request"""
-        
+
         # Handle resolve requests first
         if request.get("resolve", False):
             # Return object metadata
@@ -218,26 +216,26 @@ class ServerProcess(mp_ctx.Process):
         if "method" in request and request["method"] is not None:
             method_name = request["method"]
             object_name = request.get("object")
-            
+
             # List of algorithm methods that should NOT be executed on the server
             # These should only run on the client side
             algorithm_methods = {
                 'take_netanal', 'multisweep'
                 # Add other algorithm names here as needed
             }
-            
+
             # Check if this is an algorithm method
             if method_name in algorithm_methods:
                 return {"error": {"message": f"Method '{method_name}' is an algorithm that should run on the client side, not the server"}}
-            
+
             # Look for the method on the instance
             m = None
             if hasattr(model, method_name):
                 m = getattr(model, method_name)
-            
+
             if m is None:
                 return {"error": {"message": f"Method '{method_name}' not found"}}
-            
+
             a = request.get("args", [])
             k = request.get("kwargs", {})
             r = e = None
@@ -265,9 +263,9 @@ class ServerProcess(mp_ctx.Process):
                         sig = str(inspect.signature(prop))
                     except:
                         sig = "(...)"
-                    
+
                     doc = inspect.getdoc(prop) or f"Method {prop_name}"
-                    
+
                     # Return a TuberResult-like structure for method metadata
                     return {
                         "result": {
@@ -284,7 +282,7 @@ class ServerProcess(mp_ctx.Process):
 
         elif "object" in request:
             obj_name = request["object"]
-            
+
             # CRITICAL FIX: Handle case where object is a list like ['get_frequency']
             # This happens when Tuber client calls methods - it puts the method name in object field
             if isinstance(obj_name, list) and len(obj_name) == 1:
@@ -297,14 +295,14 @@ class ServerProcess(mp_ctx.Process):
                         "args": request.get("args", []),
                         "kwargs": request.get("kwargs", {})
                     })
-            
+
             # Normal object metadata request
             # We need to provide some metadata to TuberObject so it can populate
             # properties and methods on the client-side object.
             illegal_prefixes = ("__", "_MockCRS__", "_thread_lock_", "_resolve", "_sa_")
             # Also exclude Tuber-specific methods and SQLAlchemy properties that shouldn't be exposed
             exclude_methods = {
-                "tuber_resolve", "tuber_context", "object_factory", 
+                "tuber_resolve", "tuber_context", "object_factory",
                 "_resolve_meta", "_resolve_method", "_resolve_object",
                 "_context_class", "reconstruct", "to_query",
                 # Exclude algorithms that should run on client side
@@ -324,22 +322,22 @@ class ServerProcess(mp_ctx.Process):
                 "resonator_model", "udp_manager", "timestamp",
                 "_config_lock"
             }
-            
+
             # Special enum properties that should be included even though they're callables
             special_enum_properties = {
                 "TIMESTAMP_PORT", "CLOCKSOURCE", "UNITS", "TARGET"
             }
-            
+
             names = set(
-                filter(lambda s: not any(s.startswith(p) for p in illegal_prefixes) 
+                filter(lambda s: not any(s.startswith(p) for p in illegal_prefixes)
                                  and s not in exclude_methods
-                                 and s not in exclude_properties, 
+                                 and s not in exclude_properties,
                        dir(model))
             )
-            
+
             methods = []
             properties = []
-            
+
             for name in names:
                 try:
                     attr = getattr(model, name)
@@ -348,7 +346,7 @@ class ServerProcess(mp_ctx.Process):
                         properties.append(name)
                     elif callable(attr):
                         # Only include methods that are not coroutines from parent classes
-                        if not (asyncio.iscoroutinefunction(attr) and 
+                        if not (asyncio.iscoroutinefunction(attr) and
                                 name in ['tuber_resolve', 'resolve']):
                             methods.append(name)
                     else:
@@ -361,7 +359,7 @@ class ServerProcess(mp_ctx.Process):
 
             return {
                 "result": {
-                    "name": "TuberObject", # Or model.__class__.__name__ if more specific
+                    "name": "TuberObject",
                     "summary": "",
                     "explanation": "",
                     "properties": sorted(properties),
@@ -385,13 +383,12 @@ def convert_to_serializable(obj):
         # Convert numpy numbers to Python native types
         return obj.item()
     elif obj.__class__.__name__ == "TuberResult":
-    # flatten it if it has a to_dict() or __dict__
+        # flatten it if it has a to_dict() or __dict__
         if hasattr(obj, "to_dict"):
             return convert_to_serializable(obj.to_dict())
         elif hasattr(obj, "__dict__"):
             return convert_to_serializable(obj.__dict__)
         else:
             return str(obj)
-    # Add other non-serializable types here if needed
     else:
         return obj

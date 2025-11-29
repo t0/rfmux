@@ -54,7 +54,7 @@ from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, Initial
 from .app_runtime import PeriscopeRuntime
 from .mock_configuration_dialog import MockConfigurationDialog
 from rfmux.core.transferfunctions import convert_roc_to_volts
-from rfmux.core import mock_config as mc
+from rfmux.mock import config as mc
 
 
 

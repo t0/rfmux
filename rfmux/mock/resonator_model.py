@@ -30,7 +30,7 @@ class MockResonatorModel:
         self.mock_crs = mock_crs  # Store a reference to the main MockCRS instance
         
         # Import default configuration from Single Source of Truth
-        from .mock_config import defaults as get_defaults
+        from .config import defaults as get_defaults
         default_config = get_defaults()
 
         # Store persistent mr_resonator objects to avoid memory leaks
@@ -171,7 +171,7 @@ class MockResonatorModel:
             if hasattr(self.mock_crs, 'physics_config') and self.mock_crs.physics_config:
                 config = self.mock_crs.physics_config
             else:
-                from .mock_config import defaults
+                from .config import defaults
                 config = defaults()
         
         print('Using config:', {k: v for k, v in config.items() if k in ['num_resonances', 'freq_start', 'freq_end', 'T', 'Popt']})
@@ -1196,7 +1196,7 @@ class MockResonatorModel:
             Filter response (0-1) including droop effect
         """
         # Import the CIC correction function from transferfunctions
-        from . import transferfunctions as tf
+        from ..core import transferfunctions as tf
         
         # CIC parameters
         R1 = 64  # First stage decimation

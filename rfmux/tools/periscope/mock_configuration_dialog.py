@@ -2,7 +2,7 @@
 Mock Configuration Dialog for Periscope (Unified SoT)
 =====================================================
 
-This dialog exposes only the parameters defined in rfmux.core.mock_config
+This dialog exposes only the parameters defined in rfmux.mock.config
 (Single Source of Truth). It returns a configuration dict that can be passed
 directly to MockCRS.generate_resonators().
 
@@ -21,7 +21,7 @@ from .utils import QtWidgets, QtCore, QtGui
 import re
 import math
 import numpy as np
-from rfmux.core import mock_config as mc
+from rfmux.mock import config as mc
 from rfmux.mr_resonator.mr_complex_resonator import MR_complex_resonator
 from rfmux.mr_resonator.mr_lekid import MR_LEKID
 
@@ -734,7 +734,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
     def get_configuration(self) -> dict:
         """
-        Return a dictionary of all parameter values matching mock_config.MOCK_DEFAULTS keys.
+        Return a dictionary of all parameter values matching config.MOCK_DEFAULTS keys.
         """
         seed_text = self.random_seed_edit.text().strip()
         seed_value = int(seed_text) if seed_text != "" else None

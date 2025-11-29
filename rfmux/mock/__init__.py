@@ -17,7 +17,7 @@ Usage:
     Add to hardware map YAML:
     ```yaml
     !HardwareMap
-    - !flavour "rfmux.core.mock"
+    - !flavour "rfmux.mock"
     - !CRS { serial: "0001", hostname: "127.0.0.1" }
     ```
 
@@ -31,25 +31,26 @@ Usage:
     ```
 
 Configuration:
-    Customize behavior by modifying rfmux/core/mock_constants.py:
+    Customize behavior by modifying rfmux/mock/config.py or passing
+    configuration to generate_resonators():
     - Resonator properties (frequency range, Q factors, coupling)
     - Power dependence parameters (kinetic inductance, saturation)
     - Physics model settings (bifurcation, debug flags)
 
 See Also:
-    - README_MockCRS.md: Comprehensive documentation
-    - mock_constants.py: Configuration parameters
-    - mock_resonator_model.py: Physics implementation
+    - README.md: Comprehensive documentation
+    - config.py: Configuration parameters (Single Source of Truth)
+    - resonator_model.py: Physics implementation
 """
 
-# Import the yaml_hook from the new mock_server module
-from .mock_server import yaml_hook
+# Import the yaml_hook from the server module
+from .server import yaml_hook
 
 # Import base CRS from schema - client should use base class, not MockCRS
-from .schema import CRS
+from ..core.schema import CRS
 
 # Import schema elements that were part of the original mock.py's __all__
-from .schema import (
+from ..core.schema import (
     Crate,
     ReadoutModule,
     ReadoutChannel,
@@ -57,6 +58,9 @@ from .schema import (
     Resonator,
     ChannelMapping
 )
+
+# Import configuration module for convenience
+from . import config
 
 # Don't import enums on client side - they come through Tuber as properties
 # The server-side MockCRS exposes these as properties that return TuberResult-compatible objects
@@ -70,5 +74,6 @@ __all__ = [
     "Wafer",
     "Resonator",
     "ChannelMapping",
-    "yaml_hook"
+    "yaml_hook",
+    "config"
 ]

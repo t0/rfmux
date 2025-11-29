@@ -240,6 +240,7 @@ class MockResonatorModel:
         self._resonator_gen += 1
         self.pulse_events = []
         self.last_pulse_time = {}
+        self.last_update_time = 0  # Reset time tracking so pulses work after reconfiguration
         
         # Configure noise parameters from config
         # Uses defaults from mock_crs_helper.py if not specified

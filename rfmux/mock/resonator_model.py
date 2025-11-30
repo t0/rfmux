@@ -1236,14 +1236,6 @@ class MockResonatorModel:
             self._packet_timing_counter = 0
         self._packet_timing_counter += 1
         
-        # if self._packet_timing_counter % 10 == 0:
-        #     state_ms = (t_state_update - t_packet_start) * 1000
-        #     s21_ms = (t_s21_calc - t_state_update) * 1000
-        #     total_ms = (t_s21_calc - t_packet_start) * 1000
-        #     print(f"[Packet Timing] Total: {total_ms:.1f}ms | "
-        #           f"state_update: {state_ms:.1f}ms | "
-        #           f"s21_calculations: {s21_ms:.1f}ms ({s21_call_count} calls)")
-        
         # Convert to numpy arrays for vectorization
         tone_freqs = np.array(active_tone_freqs)  # Shape: (n_tones,)
         tone_amps = np.array(active_tone_amps)     # Shape: (n_tones,)

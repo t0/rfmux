@@ -6,17 +6,11 @@ Maclean Rouble
 maclean.rouble@mail.mcgill.ca
 '''
 
-
 import numpy as np
 from scipy.optimize import curve_fit
 
-
-
 def calc_Cc(C, f0, Qc, Z0=50):
     return np.sqrt((8*C) / (2*np.pi*f0*Qc*Z0))
-
-
-
 
 #################
 # UTILS
@@ -55,12 +49,10 @@ def circle_fit_pratt(x, y):
 
     return x0, y0, R
 
-
 def normalize(data, new_min=0, new_max=1):
     """Normalize data to the range [new_min, new_max]."""
     old_min, old_max = np.min(data), np.max(data)
     return (data - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
-
 
 def square_axes(x):
     '''
@@ -81,7 +73,6 @@ def square_axes(x):
     y_mid = (y_limits[0] + y_limits[1]) / 2
     x.set_xlim([x_mid - max_extent / 2, x_mid + max_extent / 2])
     x.set_ylim([y_mid - max_extent / 2, y_mid + max_extent / 2])
-
 
 def exp_bin_noise_data(f, psd, nbins=100):
     '''
@@ -124,8 +115,6 @@ def exp_bin_noise_data(f, psd, nbins=100):
     cavg = np.asarray(cavg)
     
     return fbinned, cavg
-
-
 
 def rotate_iq_plane(iqdata, n_thetas=50, enforce_positive_i=True, use_mean_value=False, make_plots=False, plot_save_dir=None):
 
@@ -198,7 +187,6 @@ def rotate_iq_plane(iqdata, n_thetas=50, enforce_positive_i=True, use_mean_value
         theta_best += np.pi
 
     return iqrot, theta_best 
-
 
 def s21_skewed(f, f0, Qr, Qcre, Qcim, A):
     if abs(Qcre + 1j*Qcim)**2/Qcre < Qr: # prevents negative Qi values
@@ -286,16 +274,13 @@ def fit_skewed(freq, s21_iq, approxQr=1e4, normalize=True, fr_lim=None):
         for i in range(len(param_names)):
             fit_dict[param_names[i]] = 'nan'
             fit_dict['%s_err'%(param_names[i])] = 'nan'
-
-                
+              
     return fit_dict
-
 
 
 ##############
 # timestreams etc
 ###################
-
 
 def calc_rbw(fs, N):
 	'''
@@ -303,8 +288,6 @@ def calc_rbw(fs, N):
 	'''
 
 	return fs / N
-
-
 
 def make_nqp_timestream_from_Nqp_spectrum(res, frequencies, Nqp_spectrum, rbw, baseline_nqp=None):
     '''

@@ -17,7 +17,6 @@ All functions are JIT-compiled for 10-25x speedup over pure Python.
 Numba is a required dependency for this module.
 """
 import numpy as np
-import numba
 from numba import jit, prange
 import os
 import platform

@@ -86,9 +86,9 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         layout.addRow("Decimation:", self.decimation_input)
 
         self.reference_input = QtWidgets.QComboBox()
-        self.reference_input.addItems(["relative", "absolute"])
-        self.reference_input.setCurrentText("relative")
-        layout.addRow("Reference:", self.reference_input)
+        self.reference_input.addItems(["dBc", "dBm"])
+        self.reference_input.setCurrentText("dBc")
+        layout.addRow("Units:", self.reference_input)
 
         # Time Taken (s) — Read-only label
         self.time_taken_label = QtWidgets.QLabel("0.00 s")
@@ -269,12 +269,17 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         pfb_time = self.pfb_time_taken_label.text().split()[0]
         overlap_samps = self.overlap_sample.text()
         
+        # Map UI units back to backend reference mode
+        # dBc -> relative, dBm -> absolute
+        ref_text = self.reference_input.currentText()
+        reference_mode = "relative" if ref_text == "dBc" else "absolute"
+        
         params = {
             "num_samples": self._safe_int(self.samples_edit.text(), 10000),
             "spectrum_limit": self.spectrum_limit_input.value(),
             "num_segments": self._safe_int(self.segments_edit.text(), 10),
             "decimation": self.decimation_input.value(),
-            "reference" : self.reference_input.currentText(),
+            "reference" : reference_mode,
             "effective_highest_freq": float(highest_freq),
             "time_taken": float(time_taken),
             "freq_resolution" : float(freq_res)

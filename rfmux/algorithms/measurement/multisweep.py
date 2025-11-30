@@ -239,7 +239,12 @@ async def multisweep(
         return {}
     
     # Check if number of resonances exceeds maximum channels
-    max_channels = 1024  # Standard max channels per module
+    dec = await crs.get_decimation()
+    if dec <=3:
+        max_channels = 128
+    else:
+        max_channels = 1024
+        
     if len(center_frequencies) > max_channels:
         raise ValueError(f"Number of resonances ({len(center_frequencies)}) exceeds maximum channels ({max_channels})")
     
@@ -338,8 +343,6 @@ async def multisweep(
         # Create channel mapping for this region's resonances
         # Map from center frequency to channel number
         channel_mapping = {cf: i+1 for i, cf in enumerate(region_cfs)}
-        # Also need to map indices for this region
-        region_indices = [cf_to_index[cf] for cf in region_cfs]
 
         # Loop through sweep points
         for point_idx in range(npoints_per_sweep):
@@ -352,13 +355,15 @@ async def multisweep(
                     freq = resonance_data[idx]['frequencies'][point_idx]
                     freq_rel = freq - current_nco_freq # Use current_nco_freq
                     ctx.set_frequency(freq_rel, channel=channel, module=module)
-                    ctx.set_amplitude(amp, channel=channel, module=module)
+                    if not point_idx: # only set amplitude once per sweep
+                        ctx.set_amplitude(amp, channel=channel, module=module)
 
                 # Zero out unused resonance channels
-                active_res_channels = set(channel_mapping.values())
-                for ch in range(1, max_channels + 1): # max_channels still relevant for general channel count
-                     if ch not in active_res_channels:
-                          ctx.set_amplitude(0, channel=ch, module=module) # Zeros freq implicitly if amp=0
+                if not point_idx: # only need to do this once per sweep
+                    active_res_channels = set(channel_mapping.values())
+                    for ch in range(1, max_channels + 1): # max_channels still relevant for general channel count
+                        if ch not in active_res_channels:
+                            ctx.set_amplitude(0, channel=ch, module=module) # Zeros freq implicitly if amp=0
                 await ctx()
 
             # Acquire samples for all active resonance channels

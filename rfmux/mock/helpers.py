@@ -6,6 +6,8 @@ This module provides utilities for creating and configuring a MockCRS instance
 with simulated KID resonators. It's designed to be used by scripts that need
 to test the rfmux algorithms without real hardware.
 
+Now uses the unified Single Source of Truth (SoT) in rfmux.mock.config.
+
 Example usage:
     from mock_crs_helper import create_mock_crs
     
@@ -13,7 +15,7 @@ Example usage:
     crs = await create_mock_crs()
     
     # Create with custom configuration
-    crs = await create_mock_crs(num_resonances=20, enable_bifurcation=True)
+    crs = await create_mock_crs(num_resonances=20, auto_bias_kids=True)
 """
 
 import asyncio
@@ -22,44 +24,7 @@ from typing import Optional, Dict, Any
 # Import required rfmux modules
 from rfmux.core.session import load_session
 from rfmux.core.crs import CRS
-
-
-# Default mock configuration parameters
-DEFAULT_MOCK_CONFIG = {
-    # Resonator generation parameters
-    'num_resonances': 10,
-    'freq_start': 4e9,  # 4 GHz
-    'freq_end': 8e9,    # 8 GHz
-    
-    # Quality factor parameters
-    'q_min': 1e4,
-    'q_max': 1e5,
-    'q_variation': 0.3,
-    
-    # Coupling parameters
-    'coupling_min': 0.5,
-    'coupling_max': 2.0,
-    
-    # Nonlinearity parameters
-    'kinetic_inductance_fraction': 0.05,
-    'kinetic_inductance_variation': 0.2,
-    'frequency_shift_power_law': 0.5,
-    'frequency_shift_magnitude': 0.01,
-    'power_normalization': 1e-12,
-    
-    # Bifurcation parameters
-    'enable_bifurcation': False,
-    'bifurcation_iterations': 10,
-    'bifurcation_convergence_tolerance': 1e-6,
-    'bifurcation_damping_factor': 0.5,
-    'saturation_power': 1e-13,
-    'saturation_sharpness': 2.0,
-    
-    # Noise parameters
-    'base_noise_level': 1e-4,
-    'amplitude_noise_coupling': 0.01,
-    'udp_noise_level': 0.1
-}
+from rfmux.mock import config as mc
 
 
 async def create_mock_crs(
@@ -82,8 +47,8 @@ async def create_mock_crs(
         module: Module number to use (default: 1)
         udp_host: Host for UDP streaming (default: '127.0.0.1')
         udp_port: Port for UDP streaming (default: 9876)
-        config: Optional custom configuration dict. If None, uses defaults.
-                Keys can include any parameters from DEFAULT_MOCK_CONFIG.
+        config: Optional custom configuration dict. If None, uses unified defaults.
+                Keys should match rfmux.mock.config.MOCK_DEFAULTS.
         verbose: Whether to print status messages (default: True)
     
     Returns:
@@ -93,20 +58,17 @@ async def create_mock_crs(
         Exception: If MockCRS creation or configuration fails
     """
     
-    # Merge custom config with defaults
-    mock_config = DEFAULT_MOCK_CONFIG.copy()
-    if config:
-        mock_config.update(config)
-    
+    # Merge custom config with SoT defaults
+    merged = mc.apply_overrides(config)
+
     if verbose:
         print("="*60)
         print("Creating Mock CRS")
         print("="*60)
         print(f"Module: {module}")
         print(f"UDP Streaming: {udp_host}:{udp_port}")
-        print(f"Resonators: {mock_config['num_resonances']}")
-        print(f"Frequency Range: {mock_config['freq_start']/1e9:.1f} - {mock_config['freq_end']/1e9:.1f} GHz")
-        print(f"Bifurcation: {'Enabled' if mock_config['enable_bifurcation'] else 'Disabled'}")
+        print(f"Resonators: {merged['num_resonances']}")
+        print(f"Frequency Range: {merged['freq_start']/1e9:.1f} - {merged['freq_end']/1e9:.1f} GHz")
         print("="*60)
     
     try:
@@ -116,7 +78,7 @@ async def create_mock_crs(
 
         session = load_session("""
 !HardwareMap
-- !flavour "rfmux.core.mock"
+- !flavour "rfmux.mock"
 - !CRS { serial: "0000", hostname: "127.0.0.1" }
 """)
         
@@ -130,9 +92,9 @@ async def create_mock_crs(
         
         # Configure resonators
         if verbose:
-            print(f"3. Generating {mock_config['num_resonances']} simulated resonators...")
+            print(f"3. Generating {merged['num_resonances']} simulated resonators...")
         
-        resonator_count = await crs.generate_resonators(mock_config)
+        resonator_count = await crs.generate_resonators(merged)
         
         if verbose:
             print(f"   ✓ Generated {resonator_count} resonators")
@@ -180,15 +142,14 @@ async def reconfigure_mock_crs(
     Raises:
         Exception: If reconfiguration fails
     """
-    if config is None:
-        config = DEFAULT_MOCK_CONFIG
+    merged = mc.apply_overrides(config or mc.defaults())
     
     if verbose:
         print("\nReconfiguring Mock CRS...")
-        print(f"New parameters: {len(config)} settings")
+        print(f"New parameters: {len(merged)} settings")
     
     try:
-        resonator_count = await crs.generate_resonators(config)
+        resonator_count = await crs.generate_resonators(merged)
         
         if verbose:
             print(f"✓ Regenerated {resonator_count} resonators")

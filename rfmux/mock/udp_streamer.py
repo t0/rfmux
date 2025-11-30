@@ -24,8 +24,6 @@ from ..streamer import (
     STREAMER_PORT, # Default port for streaming
 )
 
-# Import enhanced scaling constants
-from . import mock_constants as const
 
 # Global registry to track all active UDP streamers for cleanup
 _active_streamers = []
@@ -35,7 +33,6 @@ def _emergency_cleanup():
     """Emergency cleanup function called on program exit."""
     global _active_streamers
     if _active_streamers:
-        #print(f"[UDP] Emergency cleanup: stopping {len(_active_streamers)} active UDP streamers")
         for streamer in _active_streamers[:]:  # Copy list to avoid modification during iteration
             try:
                 streamer.emergency_stop()
@@ -193,7 +190,7 @@ class MockCRSUDPStreamer(threading.Thread):
         global _active_streamers
         if self in _active_streamers:
             _active_streamers.remove(self)
-        
+    
     def run(self):
         """Stream UDP packets at the configured sample rate with proper cleanup."""
         self.running = True
@@ -212,7 +209,7 @@ class MockCRSUDPStreamer(threading.Thread):
                     start_time_loop = time.perf_counter()
                     
                     # Get current decimation (dynamically check each iteration)
-                    fir_stage = self.mock_crs.get_decimation()
+                    fir_stage = asyncio.run(self.mock_crs.get_decimation())
                     if fir_stage is None:
                         fir_stage = 6  # Default only if None, not if 0
                     sample_rate = 625e6 / (256 * 64 * (2**fir_stage))
@@ -267,10 +264,6 @@ class MockCRSUDPStreamer(threading.Thread):
                             self.seq_counters[module_num] += 1
                             self.packets_sent += 1
                             
-                            # if self.packets_sent <= 3: # Log first few packets only
-                            #     destination = f"{self.multicast_group}:{self.multicast_port}" if self.use_multicast else f"{self.unicast_host}:{self.unicast_port}"
-                            #     print(f"[UDP] Sent packet #{self.packets_sent}: module={module_num}, seq={self.seq_counters[module_num]-1}, size={bytes_sent} bytes to {destination}")
-                            
                         except Exception as e:
                             if self.running:  # Only log if we're still supposed to be running
                                 print(f"[UDP] ERROR generating/sending packet for module {module_num}: {e}")
@@ -322,15 +315,19 @@ class MockCRSUDPStreamer(threading.Thread):
         # This array should store int32 values.
         if self.mock_crs.short_packets:
             num_channels = SHORT_PACKET_CHANNELS
+            version = SHORT_PACKET_VERSION
         else:
             num_channels = LONG_PACKET_CHANNELS
+            version = LONG_PACKET_VERSION
 
         iq_data_arr = array.array("i", [0] * (num_channels * 2))
         timing_array_create = time.perf_counter()
         
-        # Pre-calculate constants
-        full_scale_counts = const.SCALE_FACTOR * 2**8  # 32 bit number instead of 24 bit
-        noise_level = const.UDP_NOISE_LEVEL  # Base noise level (in ADC counts)
+        # Pre-calculate constants from unified configuration (SoT)
+        cfg = getattr(self.mock_crs, "physics_config", {}) or {}
+        scale_factor = cfg.get("scale_factor", 2**21)
+        full_scale_counts = scale_factor * 2**8  # 32 bit number instead of 24 bit
+        noise_level = cfg.get("udp_noise_level", 10.0)  # Base noise level (in ADC counts)
         
         # OPTIMIZED: Generate and clip noise using numpy, then convert to array.array
         # This is MUCH faster than looping
@@ -344,7 +341,7 @@ class MockCRSUDPStreamer(threading.Thread):
         # NEW: Use module-wide coupled calculation if available
         if hasattr(self.mock_crs.resonator_model, 'calculate_module_response_coupled'):
             # Get sample rate for time-varying signals
-            fir_stage = self.mock_crs.get_decimation()
+            fir_stage = asyncio.run(self.mock_crs.get_decimation())
             if fir_stage is None:
                 fir_stage = 6  # Default only if None, not if 0
             sample_rate = 625e6 / 256 / 64 / (2**fir_stage)
@@ -352,6 +349,10 @@ class MockCRSUDPStreamer(threading.Thread):
             # Calculate time for this packet (based on sequence number)
             # Each packet represents one sample in time
             t = seq / sample_rate
+            
+            # Update QP densities based on current time (for pulse events)
+            if hasattr(self.mock_crs.resonator_model, 'update_qp_densities_for_time'):
+                self.mock_crs.resonator_model.update_qp_densities_for_time(t)
             
             # Count configured channels for debugging
             num_configured = 0
@@ -370,16 +371,7 @@ class MockCRSUDPStreamer(threading.Thread):
             timing_physics = time.perf_counter()
 
 
-            ###### This is a temporary fix, will throw error on the first packet. Will be updated once mock mode is fixed 
-            if self.mock_crs.short_packets and len(channel_responses) > 128: 
-                channel_responses = {k: v for k, v in channel_responses.items() if 1 <= int(k) <= 128}
 
-                    
-            # Debug: log if physics is slow
-            physics_time = (timing_physics - timing_noise) * 1000
-            if physics_time > 1.0 and self.packets_sent % 100 == 0:
-                print(f"[UDP] Physics slow: {physics_time:.2f}ms with {num_configured} channels configured, {len(channel_responses)} responses")
-            
             # Process each channel's response
             
             for ch_num_1 in channel_responses:
@@ -402,47 +394,10 @@ class MockCRSUDPStreamer(threading.Thread):
             print("ERROR WITH COUPLING CODE - this shouldn't happen with updated resonator model")
             non_zero_channels_count = 0
             timing_physics = timing_fill_array = time.perf_counter()
-            # # Fallback to original implementation (shouldn't happen with updated code)
-            # configured_channels = set()
-            # for (mod, ch) in self.mock_crs.frequencies.keys():
-            #     if mod == module_num:
-            #         configured_channels.add(ch)
-            # for (mod, ch) in self.mock_crs.amplitudes.keys():
-            #     if mod == module_num:
-            #         configured_channels.add(ch)
-            
-            # nco_freq = self.mock_crs.get_nco_frequency(module=module_num) or 0
-            # non_zero_channels_count = len(configured_channels)
-            
-            # # Process configured channels individually
-            # for channel_num_1_based in configured_channels:
-            #     ch_idx_0_based = channel_num_1_based - 1
-                
-            #     freq = self.mock_crs.frequencies.get((module_num, channel_num_1_based), 0)
-            #     amp = self.mock_crs.amplitudes.get((module_num, channel_num_1_based), 0)
-            #     phase_deg = self.mock_crs.phases.get((module_num, channel_num_1_based), 0)
-                
-            #     if amp == 0:
-            #         continue
-                    
-            #     total_freq = freq + nco_freq
-            #     s21_complex = self.mock_crs.resonator_model.calculate_channel_response(
-            #         module_num, channel_num_1_based, total_freq, amp, phase_deg
-            #     )
-                
-            #     i_val_scaled = s21_complex.real * full_scale_counts + iq_data_arr[ch_idx_0_based * 2]
-            #     q_val_scaled = s21_complex.imag * full_scale_counts + iq_data_arr[ch_idx_0_based * 2 + 1]
-                
-            #     iq_data_arr[ch_idx_0_based * 2] = int(np.clip(i_val_scaled, -2147483648, 2147483647))
-            #     iq_data_arr[ch_idx_0_based * 2 + 1] = int(np.clip(q_val_scaled, -2147483648, 2147483647))
-        
-        # if seq == 0 and module_num == 1: # Log for first packet of first module
-        #     print(f"[UDP] First packet details (module {module_num}): {non_zero_channels_count} non-zero channels.")
-        #     print(f"[UDP] Using enhanced scale factor: {full_scale_counts:.2e}")
         
         # Calculate deterministic timestamp based on sequence number and sampling rate
         # Get the decimation stage and calculate sample rate
-        fir_stage = self.mock_crs.get_decimation()
+        fir_stage = asyncio.run(self.mock_crs.get_decimation())
         if fir_stage is None:
             fir_stage = 6  # Default only if None, not if 0
         sample_rate = 625e6 / 256 / 64 / (2**fir_stage)
@@ -480,14 +435,14 @@ class MockCRSUDPStreamer(threading.Thread):
         )
 
         timing_timestamp = time.perf_counter()
-        
+
         packet = DfmuxPacket(
             magic=np.uint32(STREAMER_MAGIC),
-            version=np.uint16(SHORT_PACKET_VERSION if self.mock_crs.short_packets else LONG_PACKET_VERSION),
+            version=np.uint16(version),
             serial=np.uint16(int(self.mock_crs.serial) if self.mock_crs.serial and self.mock_crs.serial.isdigit() else 0),
             num_modules=np.uint8(1), # Packet is for one module's data
             block=np.uint8(0), # Block number, typically 0 for continuous streaming
-            fir_stage=self.mock_crs.get_decimation(),
+            fir_stage=fir_stage,
             module=np.uint8(module_num - 1),  # DfmuxPacket module is 0-indexed
             seq=np.uint32(seq),
             s=iq_data_arr, # This should be the array.array('i')

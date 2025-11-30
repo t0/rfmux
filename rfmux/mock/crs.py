@@ -5,54 +5,51 @@ import asyncio
 import numpy as np
 from enum import Enum
 from datetime import datetime
-import contextlib # Not used directly, but often useful with context managers
+import contextlib
 import atexit
 import weakref
 import dataclasses
+import time
+import threading
 
 # Import schema classes
-from .schema import CRS as BaseCRS
-# Potentially other schema items if MockCRS directly uses them, e.g. ReadoutModule
-# from .schema import ReadoutModule, Crate # etc.
+from ..core.schema import CRS as BaseCRS
 
-# Import helper classes from their new locations
-from .mock_resonator_model import MockResonatorModel
-from .mock_udp_streamer import MockUDPManager # Manages the UDP streamer thread
+# Import helper classes from this package
+from .resonator_model import MockResonatorModel
+from .udp_streamer import MockUDPManager
 
 # Import enhanced scaling constants
-from . import mock_constants as const
 from ..tuber.codecs import TuberResult
+from ..streamer import LONG_PACKET_CHANNELS, SHORT_PACKET_CHANNELS
 
-
-
-# Module-level cleanup registry for MockCRS instances (to avoid JSON serialization issues)
+# Module-level cleanup registry for MockCRS instances
 _mock_crs_instances = weakref.WeakSet()
 _cleanup_registered = False
+
 
 def _cleanup_all_mock_crs_instances():
     """Emergency cleanup for all MockCRS instances at program exit"""
     for instance in list(_mock_crs_instances):
         try:
-            # Stop UDP streaming synchronously
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(instance.stop_udp_streaming())
             loop.close()
-            print(f"[CLEANUP] Emergency cleanup completed for MockCRS instance {id(instance)}")
+            print(f"[CLEANUP] Shutdown completed for MockCRS instance {id(instance)}")
         except Exception as e:
             print(f"[CLEANUP] Error during emergency cleanup: {e}")
 
-# Enums (as defined in the original mock.py)
+# Enums
 class ClockSource(str, Enum):
     VCXO = "VCXO"
     SMA = "SMA"
     BACKPLANE = "Backplane"
 
-class TimestampPort(str, Enum): # This was imported from streamer, defining here for self-containment
+class TimestampPort(str, Enum):
     BACKPLANE = "BACKPLANE"
     TEST = "TEST"
     SMA = "SMA"
-    # GND = "GND" # Original streamer.py had GND, mock.py used TEST as default
 
 class FrequencyUnit(str, Enum):
     HZ = "hz"
@@ -97,88 +94,64 @@ class ADCCalibrationBlock(str, Enum):
     GCB = "GCB"
     TSCB = "TSCB"
 
-
 class MockCRSContext:
     """Async context manager for batched CRS operations"""
-    
+
     def __init__(self, mock_crs):
         self.mock_crs = mock_crs
         self.pending_ops = []
-    
+
     async def __aenter__(self):
-        """Async context manager entry"""
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit - execute all pending operations"""
         await self()
-        return False # Do not suppress exceptions
-    
+        return False
+
     def _add_call(self, **kwargs):
-        """Add a call to the context (for Tuber compatibility)"""
         if 'resolve' in kwargs and kwargs['resolve']:
-            # This is a resolve operation
             self.pending_ops.append(('_resolve', {}))
         elif 'method' in kwargs:
-            # This is a method call
             method_name = kwargs['method']
             call_kwargs = kwargs.get('kwargs', {})
             self.pending_ops.append((method_name, call_kwargs))
-    
+
     def set_frequency(self, frequency, channel=None, module=None):
-        """Queue a frequency setting operation"""
         self.pending_ops.append(('set_frequency', {
-            'frequency': frequency,
-            'channel': channel,
-            'module': module
+            'frequency': frequency, 'channel': channel, 'module': module
         }))
-        return self  # Enable method chaining
-    
+        return self
+
     def set_amplitude(self, amplitude, channel=None, module=None):
-        """Queue an amplitude setting operation"""
         self.pending_ops.append(('set_amplitude', {
-            'amplitude': amplitude,
-            'channel': channel,
-            'module': module
+            'amplitude': amplitude, 'channel': channel, 'module': module
         }))
-        return self  # Enable method chaining
-    
+        return self
+
     def set_phase(self, phase, units='DEGREES', target=None, channel=None, module=None):
-        """Queue a phase setting operation"""
         self.pending_ops.append(('set_phase', {
-            'phase': phase,
-            'units': units,
-            'target': target,
-            'channel': channel,
-            'module': module
+            'phase': phase, 'units': units, 'target': target,
+            'channel': channel, 'module': module
         }))
-        return self  # Enable method chaining
-    
+        return self
+
     def clear_channels(self, module=None):
-        """Queue a clear channels operation"""
-        self.pending_ops.append(('clear_channels', {
-            'module': module
-        }))
-        return self  # Enable method chaining
-    
+        self.pending_ops.append(('clear_channels', {'module': module}))
+        return self
+
     def get_samples(self, *args, **kwargs):
-        """Queue a get_samples operation"""
         self.pending_ops.append(('get_samples', kwargs))
-        return self  # Enable method chaining
+        return self
 
     def get_timestamp(self):
-        """Queue a get_timestamp operation"""
         self.pending_ops.append(('get_timestamp', {}))
-        return self  # Enable method chaining
+        return self
 
     def get_analog_bank(self):
-        """Queue a get_analog_bank operation"""
         self.pending_ops.append(('get_analog_bank', {}))
-        return self  # Enable method chaining
-    
+        return self
+
     async def __call__(self):
-        """Execute all pending operations"""
-        # Execute all operations directly on the server-side MockCRS instance
         results = []
         for op_name, kwargs in self.pending_ops:
             method = getattr(self.mock_crs, op_name)
@@ -187,16 +160,13 @@ class MockCRSContext:
             else:
                 result = method(**kwargs)
             results.append(result)
-        
         self.pending_ops.clear()
         return results
 
-
 class MockCRS(BaseCRS):
     """Mock MKIDS device emulation class."""
-    _num_tuber_calls = 0 # Class attribute for server to increment
-    
-    # Override polymorphic identity
+    _num_tuber_calls = 0
+
     __mapper_args__ = {"polymorphic_identity": "MockCRS"}
 
     # Expose Enums as class attributes
@@ -209,71 +179,54 @@ class MockCRS(BaseCRS):
     PhaseUnit = PhaseUnit
     ADCCalibrationMode = ADCCalibrationMode
     ADCCalibrationBlock = ADCCalibrationBlock
-    
-    # Create properties that return simple dicts for Tuber serialization
+
     @property
     def TIMESTAMP_PORT(self):
-        """Return a dict with TIMESTAMP_PORT enum values as strings"""
         return {
             'BACKPLANE': TimestampPort.BACKPLANE.value,
             'TEST': TimestampPort.TEST.value,
             'SMA': TimestampPort.SMA.value
         }
-    
+
     @property
     def CLOCKSOURCE(self):
-        """Return a dict with CLOCKSOURCE enum values as strings"""
         return {
             'VCXO': ClockSource.VCXO.value,
             'SMA': ClockSource.SMA.value,
             'BACKPLANE': ClockSource.BACKPLANE.value
         }
-    
+
     @property
     def UNITS(self):
-        """Return a dict with UNITS enum values as strings"""
         return {
-            'HZ': Units.HZ.value,
-            'RAW': Units.RAW.value,
-            'ADC_COUNTS': Units.ADC_COUNTS.value,
-            'VOLTS': Units.VOLTS.value,
-            'AMPS': Units.AMPS.value,
-            'WATTS': Units.WATTS.value,
-            'DEGREES': Units.DEGREES.value,
-            'RADIANS': Units.RADIANS.value,
-            'OHMS': Units.OHMS.value,
-            'NORMALIZED': Units.NORMALIZED.value,
-            'DB': Units.DB.value,
-            'DBM': Units.DBM.value
+            'HZ': Units.HZ.value, 'RAW': Units.RAW.value,
+            'ADC_COUNTS': Units.ADC_COUNTS.value, 'VOLTS': Units.VOLTS.value,
+            'AMPS': Units.AMPS.value, 'WATTS': Units.WATTS.value,
+            'DEGREES': Units.DEGREES.value, 'RADIANS': Units.RADIANS.value,
+            'OHMS': Units.OHMS.value, 'NORMALIZED': Units.NORMALIZED.value,
+            'DB': Units.DB.value, 'DBM': Units.DBM.value
         }
-    
+
     @property
     def TARGET(self):
-        """Return a dict with TARGET enum values as strings"""
         return {
-            'CARRIER': Target.CARRIER.value,
-            'NULLER': Target.NULLER.value,
-            'DEMOD': Target.DEMOD.value,
-            'ADC': Target.ADC.value,
+            'CARRIER': Target.CARRIER.value, 'NULLER': Target.NULLER.value,
+            'DEMOD': Target.DEMOD.value, 'ADC': Target.ADC.value,
             'DAC': Target.DAC.value
         }
 
     # Static properties for units, targets, sensors, etc. (as dictionaries)
-    UNITS_DICT = { # Renamed to avoid conflict with Enum
-        "HZ": "hz", "RAW": "raw", "ADC_COUNTS": "adc_counts", "VOLTS": "volts", "AMPS": "amps",
-        "WATTS": "watts", "DEGREES": "degrees", "RADIANS": "radians",
+    UNITS_DICT = {
+        "HZ": "hz", "RAW": "raw", "ADC_COUNTS": "adc_counts", "VOLTS": "volts",
+        "AMPS": "amps", "WATTS": "watts", "DEGREES": "degrees", "RADIANS": "radians",
         "OHMS": "ohms", "NORMALIZED": "normalized", "DB": "db", "DBM": "dbm"
     }
     TARGET_DICT = {
         "CARRIER": "carrier", "NULLER": "nuller", "DEMOD": "demod",
-        "DAC" : "dac", "ADC" : "adc"
+        "DAC": "dac", "ADC": "adc"
     }
-    CLOCK_SOURCE_DICT = {
-        "XTAL": "XTAL", "SMA": "SMA", "BACKPLANE": "Backplane"
-    }
-    TIMESTAMP_PORT_DICT = {
-        "BACKPLANE": "BACKPLANE", "SMA": "SMA", "TEST": "TEST"
-    }
+    CLOCK_SOURCE_DICT = {"XTAL": "XTAL", "SMA": "SMA", "BACKPLANE": "Backplane"}
+    TIMESTAMP_PORT_DICT = {"BACKPLANE": "BACKPLANE", "SMA": "SMA", "TEST": "TEST"}
     TEMPERATURE_SENSOR_DICT = {
         "MOTHERBOARD_POWER": "MOTHERBOARD_TEMPERATURE_POWER",
         "MOTHERBOARD_ARM": "MOTHERBOARD_TEMPERATURE_ARM",
@@ -287,45 +240,35 @@ class MockCRS(BaseCRS):
         "MB_VCC1V5": "MOTHERBOARD_RAIL_VCC1V5", "MB_VCC1V8": "MOTHERBOARD_RAIL_VCC1V8",
         "MB_VADJ": "MOTHERBOARD_RAIL_VADJ",
     }
-    ADCCALIBRATIONMODE_DICT = {
-        "AUTO": "AUTO", "MODE1": "MODE1", "MODE2": "MODE2"
-    }
-    ADCCALIBRATIONBLOCK_DICT = {
-        "OCB1": "OCB1", "OCB2": "OCB2", "GCB": "GCB", "TSCB": "TSCB"
-    }
+    ADCCALIBRATIONMODE_DICT = {"AUTO": "AUTO", "MODE1": "MODE1", "MODE2": "MODE2"}
+    ADCCALIBRATIONBLOCK_DICT = {"OCB1": "OCB1", "OCB2": "OCB2", "GCB": "GCB", "TSCB": "TSCB"}
 
     def __init__(self, serial, slot=None, crate=None, **kwargs):
         super().__init__(serial=serial, slot=slot, crate=crate, **kwargs)
-        
-        # Register this instance for cleanup using module-level registry
+
         global _mock_crs_instances, _cleanup_registered
         _mock_crs_instances.add(self)
-        
-        # Register global cleanup handler (only once)
+
         if not _cleanup_registered:
             atexit.register(_cleanup_all_mock_crs_instances)
             _cleanup_registered = True
-        
-        # self._tuber_host = "127.0.0.1" # Default, can be updated by yaml_hook
-        # self._tuber_objname = "Dfmux" # Tuber object name
-        #self._context_class = MockCRSContext # For `async with crs.tuber_context():`
-        
+
         self.clock_source = None
         self.clock_priority = []
         self.timestamp_port = None
-        self.timestamp = {"y": 2024, "d": 1, "h": 0, "m": 0, "s": 0, "c": 0} # 
+        self.timestamp = {"y": 2024, "d": 1, "h": 0, "m": 0, "s": 0, "c": 0}
         self._last_timestamp = None
         self.max_samples_per_channel = 100000
         self.max_samples_per_module = 30000
 
-        self.frequencies = {}  # (module, channel) -> frequency
-        self.amplitudes = {}   # (module, channel) -> amplitude
-        self.phases = {}       # (module, channel) -> phase
-        self.tuning_results = {} # Placeholder
+        self.frequencies = {}
+        self.amplitudes = {}
+        self.phases = {}
+        self.tuning_results = {}
 
-        self.active_modules = [1, 2, 3, 4]  # FIXME: add set_analog_bank() support
+        self.active_modules = [1, 2, 3, 4]
         self._high_bank = False
-        self.fir_stage = 6     # Default FIR stage
+        self.fir_stage = 6
         self.streamed_modules = [1, 2, 3, 4]
         self.short_packets = False
 
@@ -346,100 +289,112 @@ class MockCRS(BaseCRS):
         }
 
         self.rfdc_initialized = False
-        self.nco_frequencies = {} # module -> nco_frequency
+        self.nco_frequencies = {}
         self.adc_attenuators = {m: {"amplitude": 0.0, "units": self.Units.DB} for m in range(1, 5)}
         self.dac_scales = {m: {"amplitude": 1.0, "units": self.Units.DBM} for m in range(1, 5)}
         self.adc_autocal = {m: True for m in range(1, 5)}
         self.adc_calibration_mode = {m: self.ADCCalibrationMode.AUTO for m in range(1, 5)}
-        self.adc_calibration_coefficients = {} # module -> {block: [coeffs]}
-        self.nyquist_zones = {} # module -> {target: zone}
-        self.hmc7044_registers = {} # address -> value
-        self.cable_lengths = {}  # module -> cable length in meters
+        self.adc_calibration_coefficients = {}
+        self.nyquist_zones = {}
+        self.hmc7044_registers = {}
+        self.cable_lengths = {}
 
-        # Store physics configuration (can be updated via generate_resonators)
-        self.physics_config = {}  # Will store active physics configuration
-        
+        # Store physics configuration
+        from .config import defaults
+        self.physics_config = defaults()
+
+        self._prune_channels_over_limit()
+        self.mock_start_time = time.time()
+        self._config_lock = threading.RLock()
+
         # Instantiate helpers
-        self.resonator_model = MockResonatorModel(self) # Pass self for state access
-        self.udp_manager = MockUDPManager(self)         # Pass self for state access
+        self.resonator_model = MockResonatorModel(self)
+        self.udp_manager = MockUDPManager(self)
 
-        # Initialize resonator parameters via the model
-        self.resonator_model.generate_lc_resonances() # Default LC model init
+    def channels_per_module(self):
+        if self.short_packets:
+            return SHORT_PACKET_CHANNELS
+        else:
+            return LONG_PACKET_CHANNELS
+
+    def _prune_channels_over_limit(self):
+        max_channels = self.channels_per_module()
+        for store in (self.frequencies, self.amplitudes, self.phases):
+            for key in [k for k in store.keys() if k[1] > max_channels]:
+                store.pop(key, None)
 
     async def generate_resonators(self, config=None):
-        """Generate/regenerate resonators with current or provided parameters.
-        
-        Parameters
-        ----------
-        config : dict, optional
-            Configuration parameters to use. If not provided, uses defaults.
-            Keys can include:
-            - num_resonances
-            - freq_start
-            - freq_end
-            - kinetic_inductance_fraction
-            - kinetic_inductance_variation
-            - q_min
-            - q_max
-            - q_variation
-            - coupling_min
-            - coupling_max
-            etc.
-        """
+        """Generate/regenerate resonators with current or provided parameters."""
         try:
-            # Initialize resonator model if needed
             if not hasattr(self, 'resonator_model') or self.resonator_model is None:
                 self.resonator_model = MockResonatorModel(self)
-                
-            # Ensure lists are initialized
-            if not hasattr(self.resonator_model, 'lc_resonances'):
-                self.resonator_model.lc_resonances = []
-            if self.resonator_model.lc_resonances is None:
-                self.resonator_model.lc_resonances = []
-                
-            if not hasattr(self.resonator_model, 'kinetic_inductance_fractions'):
-                self.resonator_model.kinetic_inductance_fractions = []
-            if self.resonator_model.kinetic_inductance_fractions is None:
-                self.resonator_model.kinetic_inductance_fractions = []
-                
-            # Clear existing resonators
-            self.resonator_model.lc_resonances = []
-            self.resonator_model.kinetic_inductance_fractions = []
-            
-            # If config provided, store it permanently in the instance
+
             if config:
-                # Update our physics configuration (permanent storage)
-                self.physics_config = config.copy()
-                
-                # Generate with new parameters - the model will use self.physics_config
-                self.resonator_model.generate_lc_resonances()
-            else:
-                # Generate with defaults
-                self.resonator_model.generate_lc_resonances()
-            
-            # Validate result
-            if self.resonator_model.lc_resonances is None:
-                self.resonator_model.lc_resonances = []
-                
-            return len(self.resonator_model.lc_resonances)
-            
+                self.physics_config.update(config)
+
+            active_config = self.physics_config
+            num_resonances = active_config.get('num_resonances', 2)
+
+            self.resonator_model.generate_resonators(
+                num_resonances=num_resonances,
+                config=active_config
+            )
+
+            resonator_count = len(self.resonator_model.mr_lekids)
+            resonance_frequencies = self.resonator_model.resonator_frequencies.copy()
+
+            auto_bias = active_config.get('auto_bias_kids', True)
+            if auto_bias and resonance_frequencies:
+                await self._auto_bias_kids(active_config, resonance_frequencies)
+
+            return resonator_count, resonance_frequencies
+
         except Exception as e:
             print(f"Error in generate_resonators: {e}")
             import traceback
             traceback.print_exc()
-            raise  # Re-raise to send error back to client
+            raise
+
+    async def _auto_bias_kids(self, config, resonance_frequencies, amplitude=None):
+        """Automatically configure channels at resonator frequencies."""
+        try:
+            if amplitude is None:
+                amplitude = config.get('bias_amplitude', 0.01)
+            module = 1
+
+            print(f"[MockCRS] Auto-biasing {len(resonance_frequencies)} KIDs with amplitude {amplitude}")
+
+            nco_freq = np.mean(resonance_frequencies)
+            print(f"[MockCRS] Setting NCO frequency to {nco_freq:.3e} Hz")
+            await self.set_nco_frequency(nco_freq, module=module)
+
+            chan_limit = min(self.channels_per_module(), 256)
+            configured_count = 0
+            for i, freq_Hz in enumerate(resonance_frequencies[:chan_limit]):
+                channel = i + 1
+                relative_freq = freq_Hz - nco_freq
+                self.set_frequency(relative_freq, channel=channel, module=module)
+                self.set_amplitude(amplitude, channel=channel, module=module)
+                self.set_phase(0, channel=channel, module=module)
+                configured_count += 1
+
+            print(f"[MockCRS] Configured {configured_count} channels with automatic KID biasing")
+
+        except Exception as e:
+            print(f"[MockCRS] Error in auto-bias KIDs: {e}")
+            import traceback
+            traceback.print_exc()
 
     def validate_enum_member(self, value, enum_class, name):
-        """Validate that value is a member of enum_class, converting strings if necessary."""
         if isinstance(value, str):
             try:
-                return enum_class(value) # Return the enum member
+                return enum_class(value)
             except ValueError:
                 valid_values = [e.value for e in enum_class]
                 raise ValueError(f"Invalid {name} '{value}'. Must be one of {valid_values}")
         elif not isinstance(value, enum_class):
             raise TypeError(f"{name.capitalize()} must be a {enum_class.__name__} enum member or a valid string.")
-        return value # Already an enum member
+        return value
 
     # --- Core CRS Methods ---
     def set_frequency(self, frequency, channel=None, module=None):
@@ -448,63 +403,64 @@ class MockCRS(BaseCRS):
         max_freq_hz = 313.5e6
         if not (min_freq_hz <= frequency <= max_freq_hz):
             raise ValueError(f"The set frequency must be between -313.5 MHz and +313.5 MHz of the NCO frequency.")
+        max_channel = self.channels_per_module()
+        if not 1 <= channel <= max_channel:
+            raise ValueError(f"Channel must be between 1 and {max_channel} for the current packet length.")
         assert channel is not None and isinstance(channel, int), "Channel must be an integer"
         assert module is not None and isinstance(module, int), "Module must be an integer"
-        self.frequencies[(module, channel)] = frequency
+        with self._config_lock:
+            self.frequencies[(module, channel)] = frequency
 
     def get_frequency(self, channel=None, module=None):
-        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
-        assert module is not None and isinstance(module, int), "Module must be an integer"
+        assert channel is not None and isinstance(channel, int)
+        assert module is not None and isinstance(module, int)
         return self.frequencies.get((module, channel))
 
     def set_amplitude(self, amplitude, channel=None, module=None):
         assert isinstance(amplitude, (int, float)), "Amplitude must be a number"
-        if not (-1.0 <= amplitude <= 1.0): # Normalized
+        if not (-1.0 <= amplitude <= 1.0):
             raise ValueError("Amplitude must be between -1.0 and +1.0.")
-        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
-        assert module is not None and isinstance(module, int), "Module must be an integer"
-        self.amplitudes[(module, channel)] = amplitude
+        max_channel = self.channels_per_module()
+        if not 1 <= channel <= max_channel:
+            raise ValueError(f"Channel must be between 1 and {max_channel} for the current packet length.")
+        assert channel is not None and isinstance(channel, int)
+        assert module is not None and isinstance(module, int)
+        with self._config_lock:
+            self.amplitudes[(module, channel)] = amplitude
 
     def get_amplitude(self, channel=None, module=None):
-        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
-        assert module is not None and isinstance(module, int), "Module must be an integer"
+        assert channel is not None and isinstance(channel, int)
+        assert module is not None and isinstance(module, int)
         return self.amplitudes.get((module, channel))
 
     def set_phase(self, phase, units='DEGREES', target=None, channel=None, module=None):
         assert isinstance(phase, (int, float)), "Phase must be a number"
-        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
-        assert module is not None and isinstance(module, int), "Module must be an integer"
-        
-        # Validate units if provided as string
+        assert channel is not None and isinstance(channel, int)
+        assert module is not None and isinstance(module, int)
+        max_channel = self.channels_per_module()
+        if not 1 <= channel <= max_channel:
+            raise ValueError(f"Channel must be between 1 and {max_channel} for the current packet length.")
         if isinstance(units, str):
             units = units.upper()
             if units not in ['DEGREES', 'RADIANS']:
                 raise ValueError(f"Invalid phase units '{units}'. Must be 'DEGREES' or 'RADIANS'")
-        
-        # Convert to degrees for internal storage
         if units == 'RADIANS' or (hasattr(units, 'value') and units.value == 'radians'):
             phase_degrees = phase * 180.0 / np.pi
         else:
             phase_degrees = phase
-            
-        self.phases[(module, channel)] = phase_degrees
+        with self._config_lock:
+            self.phases[(module, channel)] = phase_degrees
 
     def get_phase(self, units='DEGREES', target=None, channel=None, module=None):
-        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
-        assert module is not None and isinstance(module, int), "Module must be an integer"
-        
-        # Get phase in degrees (internal storage)
+        assert channel is not None and isinstance(channel, int)
+        assert module is not None and isinstance(module, int)
         phase_degrees = self.phases.get((module, channel))
         if phase_degrees is None:
             return None
-            
-        # Validate units if provided as string
         if isinstance(units, str):
             units = units.upper()
             if units not in ['DEGREES', 'RADIANS']:
                 raise ValueError(f"Invalid phase units '{units}'. Must be 'DEGREES' or 'RADIANS'")
-        
-        # Convert based on requested units
         if units == 'RADIANS' or (hasattr(units, 'value') and units.value == 'radians'):
             return phase_degrees * np.pi / 180.0
         else:
@@ -524,7 +480,7 @@ class MockCRS(BaseCRS):
 
     def get_clock_source(self):
         return self.clock_source
-    
+
     def set_clock_priority(self, clock_priority=None):
         if clock_priority is not None:
             clock_priority = [self.validate_enum_member(cs, ClockSource, "clock source") for cs in clock_priority]
@@ -534,11 +490,9 @@ class MockCRS(BaseCRS):
         return self.clock_priority
 
     def get_motherboard_temperature(self, sensor):
-        # sensor should be a string key from TEMPERATURE_SENSOR_DICT
-        if sensor not in self.TEMPERATURE_SENSOR_DICT.values(): # Check against values
-             raise ValueError(f"Invalid sensor '{sensor}'. Must be one of {list(self.TEMPERATURE_SENSOR_DICT.values())}")
+        if sensor not in self.TEMPERATURE_SENSOR_DICT.values():
+            raise ValueError(f"Invalid sensor '{sensor}'. Must be one of {list(self.TEMPERATURE_SENSOR_DICT.values())}")
         return self.temperature_sensors.get(sensor)
-
 
     def get_motherboard_voltage(self, rail):
         if rail not in self.RAIL_DICT.values():
@@ -550,47 +504,35 @@ class MockCRS(BaseCRS):
             raise ValueError(f"Invalid rail '{rail}'. Must be one of {list(self.RAIL_DICT.values())}")
         return self.rails.get(rail, {}).get("current")
 
-    def set_decimation(self, stage: int=6,
-                       short: bool=False,
-                       module: int | list[int] | None=None):
-
-        assert isinstance(stage, int) and 0 <= stage <= 6, \
-                "FIR stage must be an integer between 0 and 6 (inclusive)"
-
-        # Default to all active modules if none provided
+    def set_decimation(self, stage: int = 6, short: bool = False, module: int | list[int] | None = None):
+        assert isinstance(stage, int) and 0 <= stage <= 6
         if module is None:
             module = list(self.active_modules)
-    
-        # Convert single int to list
         if isinstance(module, int):
             module = [module]
-    
-        # Validate type and membership
-        if (not isinstance(module, list)
-            or not all(isinstance(m, int) for m in module)
-            or not set(module) <= set(self.active_modules)):
-            raise ValueError("Invalid 'module' argument to set_decimation! Must be int or list[int] within active modules.")
-
+        if (not isinstance(module, list) or not all(isinstance(m, int) for m in module)
+                or not set(module) <= set(self.active_modules)):
+            raise ValueError("Invalid 'module' argument to set_decimation!")
+        if (stage <= 3) and (short == False):
+            print(f"[Decimation<=3] Streaming only 128 channels")
+            short = True
         self.fir_stage = stage
         self.short_packets = short
         self.streamed_modules = module
 
-    def get_decimation(self):
-        return None if len(self.streamed_modules)==0 else self.fir_stage
+    async def get_decimation(self):
+        return None if len(self.streamed_modules) == 0 else self.fir_stage
 
     def set_analog_bank(self, high_bank: bool):
-        """Select between the low (modules 1-4) and high (modules 5-8) analog banks."""
         self._high_bank = bool(high_bank)
 
     def get_analog_bank(self):
-        """Return True when the high analog bank (modules 5-8) is selected."""
         return bool(self.__dict__.get("_high_bank", False))
 
+    async def _thread_lock_acquire(self):
+        await asyncio.sleep(0.001)
 
-    async def _thread_lock_acquire(self): # Keep for server compatibility
-        await asyncio.sleep(0.001) # Minimal sleep
-
-    def _thread_lock_release(self): # Keep for server compatibility
+    def _thread_lock_release(self):
         pass
 
     def get_timestamp(self):
@@ -598,26 +540,23 @@ class MockCRS(BaseCRS):
         ts_obj = dataclasses.replace(ts)
         ts_dict = dataclasses.asdict(ts_obj)
         ts_tube = TuberResult(ts_dict)
-        
         return ts_tube
 
     async def get_pfb_samples(self, num_samples, units=Units.NORMALIZED, channel=None, module=1):
         assert isinstance(num_samples, int) and num_samples > 0
         assert channel is not None and isinstance(channel, int)
-        assert 0 <= channel < 1024 # Assuming 0-indexed for internal consistency
+        assert 0 <= channel < 1024
         assert module in [1, 2, 3, 4]
         units = self.validate_enum_member(units, Units, "units")
         assert units in [Units.NORMALIZED, Units.RAW]
-        await asyncio.sleep(0.001) # Simulate delay
-
-        i_vals, q_vals = [], []
+        await asyncio.sleep(0.001)
         if units == Units.NORMALIZED:
             i_vals = np.random.uniform(-1.0, 1.0, num_samples).tolist()
             q_vals = np.random.uniform(-1.0, 1.0, num_samples).tolist()
-        else: # RAW
-            max_val = 2**23 -1 
-            i_vals = np.random.randint(-max_val-1, max_val+1, num_samples).tolist()
-            q_vals = np.random.randint(-max_val-1, max_val+1, num_samples).tolist()
+        else:
+            max_val = 2 ** 23 - 1
+            i_vals = np.random.randint(-max_val - 1, max_val + 1, num_samples).tolist()
+            q_vals = np.random.randint(-max_val - 1, max_val + 1, num_samples).tolist()
         return list(zip(i_vals, q_vals))
 
     async def get_fast_samples(self, num_samples, units=Units.NORMALIZED, module=1):
@@ -626,29 +565,22 @@ class MockCRS(BaseCRS):
         units = self.validate_enum_member(units, Units, "units")
         assert units in [Units.NORMALIZED, Units.RAW]
         await asyncio.sleep(0.001)
-
-        i_vals, q_vals = [], []
         if units == Units.NORMALIZED:
             i_vals = np.random.uniform(-1.0, 1.0, num_samples).tolist()
             q_vals = np.random.uniform(-1.0, 1.0, num_samples).tolist()
-        else: # RAW
-            max_val = 2**15 - 1
-            i_vals = np.random.randint(-max_val-1, max_val+1, num_samples).tolist()
-            q_vals = np.random.randint(-max_val-1, max_val+1, num_samples).tolist()
+        else:
+            max_val = 2 ** 15 - 1
+            i_vals = np.random.randint(-max_val - 1, max_val + 1, num_samples).tolist()
+            q_vals = np.random.randint(-max_val - 1, max_val + 1, num_samples).tolist()
         return {"i": i_vals, "q": q_vals}
 
     async def set_nco_frequency(self, frequency, module=None):
-        """Set NCO frequency - ASYNC method as it's called directly with await."""
         assert isinstance(frequency, (int, float))
         assert module is not None and isinstance(module, int)
-        
-        # Simulate hardware communication delay
         await asyncio.sleep(0.001)
-        
-        # Set NCO frequency for the module
         self.nco_frequencies[module] = frequency
 
-    def get_nco_frequency(self, module=None, target=None): # target unused but for API compat
+    def get_nco_frequency(self, module=None, target=None):
         assert module is not None and isinstance(module, int)
         return self.nco_frequencies.get(module, 0)
 
@@ -657,21 +589,16 @@ class MockCRS(BaseCRS):
         assert module is not None and isinstance(module, int)
         self.adc_attenuators[module] = {"amplitude": float(attenuation), "units": self.Units.DB}
 
-
     def get_adc_attenuator(self, module=None):
         assert module is not None and isinstance(module, int)
         return self.adc_attenuators.get(module, {}).get("amplitude")
 
-
     def set_dac_scale(self, amplitude, units='DBM', module=None):
         assert isinstance(amplitude, (int, float))
-        # units = self.validate_enum_member(units, Units, "units") # Original didn't validate strictly
         assert module is not None and isinstance(module, int)
         self.dac_scales[module] = {"amplitude": amplitude, "units": units}
 
-
     def get_dac_scale(self, units='DBM', module=None):
-        # units = self.validate_enum_member(units, Units, "units") # Original didn't validate
         assert module is not None and isinstance(module, int)
         return self.dac_scales.get(module, {}).get("amplitude")
 
@@ -682,7 +609,7 @@ class MockCRS(BaseCRS):
 
     def get_adc_autocal(self, module=None):
         assert module is not None and isinstance(module, int)
-        return self.adc_autocal.get(module, False) # Default to False if not set
+        return self.adc_autocal.get(module, False)
 
     def set_adc_calibration_mode(self, mode, module=None):
         mode = self.validate_enum_member(mode, ADCCalibrationMode, "ADC calibration mode")
@@ -714,16 +641,15 @@ class MockCRS(BaseCRS):
 
     def set_nyquist_zone(self, zone, target=None, module=None):
         assert isinstance(zone, int) and zone in [1, 2, 3]
-        if target is not None: # target is optional
+        if target is not None:
             target = self.validate_enum_member(target, Target, "target")
         assert module is not None and isinstance(module, int)
         if module not in self.nyquist_zones:
             self.nyquist_zones[module] = {}
         self.nyquist_zones[module][target] = zone
 
-
     def get_nyquist_zone(self, target=None, module=None):
-        if target is not None: # target is optional
+        if target is not None:
             target = self.validate_enum_member(target, Target, "target")
         assert module is not None and isinstance(module, int)
         return self.nyquist_zones.get(module, {}).get(target)
@@ -739,97 +665,80 @@ class MockCRS(BaseCRS):
 
     def hmc7044_peek(self, address):
         assert isinstance(address, int)
-        return self.hmc7044_registers.get(address, 0x00) # Default to 0 if not poked
+        return self.hmc7044_registers.get(address, 0x00)
 
     def hmc7044_poke(self, address, value):
         assert isinstance(address, int)
-        assert isinstance(value, int) # Assuming byte value
+        assert isinstance(value, int)
         self.hmc7044_registers[address] = value
 
     async def get_samples(self, num_samples, channel=None, module=1, average=False):
-        """Get sample data for a specific module, delegating to resonator model with enhanced scaling."""
-        assert isinstance(num_samples, int), "Number of samples must be an integer"
-        assert channel is None or isinstance(channel, int), "Channel must be None or an integer"
-        assert module in [1, 2, 3, 4], "Invalid module number"
-        await asyncio.sleep(0.0001) # Simulate hardware delay
+        """Get sample data for a specific module using direct physics calculations."""
+        assert isinstance(num_samples, int)
+        assert channel is None or isinstance(channel, int)
+        assert module in [1, 2, 3, 4]
+        await asyncio.sleep(0.0001)
 
-        overrange = False # Mock flags
+        overrange = False
         overvoltage = False
-        
-        # Get sample rate based on decimation
-        fir_stage = self.get_decimation()
+
+        fir_stage = await self.get_decimation()
         if fir_stage is None:
-            fir_stage = 6  # Default only if None, not if 0
-        fs = 625e6 / 256 / 64 / (2**fir_stage)  # Actual sample rate based on decimation
+            fir_stage = 6
+        fs = 625e6 / 256 / 64 / (2 ** fir_stage)
         t_list = (np.arange(num_samples) / fs).tolist()
 
-        nco_freq = self.get_nco_frequency(module=module) or 0
-        
-        # Scaling constants
-        scale_factor = const.SCALE_FACTOR  # Base scaling
-        noise_level = const.UDP_NOISE_LEVEL  # Noise level
+        cfg = self.physics_config if hasattr(self, 'physics_config') else {}
+        scale_factor = cfg.get('scale_factor', 2 ** 21)
+        noise_level = cfg.get('udp_noise_level', 10.0)
+        current_time = time.time() - self.mock_start_time
+
+        if average:
+            effective_num_samples = 1
+        else:
+            effective_num_samples = num_samples
+
+        module_responses = self.resonator_model.calculate_module_response_coupled(
+            module, num_samples=effective_num_samples, sample_rate=fs, start_time=int(current_time)
+        )
 
         if channel is not None:
-            # Single channel logic - use coupled calculation for time-varying signals
-            # Get the coupled response (which includes beat frequencies)
-            module_responses = self.resonator_model.calculate_module_response_coupled(
-                module, num_samples=num_samples, sample_rate=fs
-            )
-            
             if channel in module_responses:
                 response = module_responses[channel]
-                
-                # Handle both single values and arrays
                 if isinstance(response, np.ndarray):
-                    # Time-varying signal (beat frequencies)
-                    i_list = (response.real * scale_factor + np.random.normal(0, noise_level, num_samples)).tolist()
-                    q_list = (response.imag * scale_factor + np.random.normal(0, noise_level, num_samples)).tolist()
+                    i_list = (response.real * scale_factor).tolist()
+                    q_list = (response.imag * scale_factor).tolist()
                 else:
-                    # Single value - repeat for all samples
                     i_base = response.real * scale_factor
                     q_base = response.imag * scale_factor
-                    i_list = [i_base + np.random.normal(0, noise_level) for _ in range(num_samples)]
-                    q_list = [q_base + np.random.normal(0, noise_level) for _ in range(num_samples)]
+                    i_list = [i_base] * num_samples
+                    q_list = [q_base] * num_samples
             else:
-                # Channel not configured
-                i_list = [np.random.normal(0, noise_level) for _ in range(num_samples)]
-                q_list = [np.random.normal(0, noise_level) for _ in range(num_samples)]
-            
+                i_list = np.random.normal(0, noise_level, num_samples).tolist()
+                q_list = np.random.normal(0, noise_level, num_samples).tolist()
+
             return {
                 "i": i_list, "q": q_list, "ts": t_list,
                 "flags": {"overrange": overrange, "overvoltage": overvoltage}
             }
         else:
-            # All channels logic - use coupled calculation
-            channels_per_module = 1024 # As per NUM_CHANNELS in streamer
+            channels_per_module = self.channels_per_module()
             i_data, q_data = [], []
-            
-            # Get all channel responses at once (includes coupling)
-            module_responses = self.resonator_model.calculate_module_response_coupled(
-                module, num_samples=num_samples, sample_rate=fs
-            )
-            
-            # Process each channel
-            for ch_idx in range(1, channels_per_module + 1): # 1-based channel
+
+            for ch_idx in range(1, channels_per_module + 1):
                 if ch_idx in module_responses:
                     response = module_responses[ch_idx]
-                    
-                    # Handle both single values and arrays
                     if isinstance(response, np.ndarray):
-                        # Time-varying signal
-                        i_ch_samples = (response.real * scale_factor + np.random.normal(0, noise_level, num_samples)).tolist()
-                        q_ch_samples = (response.imag * scale_factor + np.random.normal(0, noise_level, num_samples)).tolist()
+                        i_ch_samples = (response.real * scale_factor).tolist()
+                        q_ch_samples = (response.imag * scale_factor).tolist()
                     else:
-                        # Single value - repeat for all samples
                         i_base = response.real * scale_factor
                         q_base = response.imag * scale_factor
-                        i_ch_samples = [i_base + np.random.normal(0, noise_level) for _ in range(num_samples)]
-                        q_ch_samples = [q_base + np.random.normal(0, noise_level) for _ in range(num_samples)]
+                        i_ch_samples = [i_base] * num_samples
+                        q_ch_samples = [q_base] * num_samples
                 else:
-                    # Channel not configured - just noise
-                    i_ch_samples = [np.random.normal(0, noise_level) for _ in range(num_samples)]
-                    q_ch_samples = [np.random.normal(0, noise_level) for _ in range(num_samples)]
-                
+                    i_ch_samples = np.random.normal(0, noise_level, num_samples).tolist()
+                    q_ch_samples = np.random.normal(0, noise_level, num_samples).tolist()
                 i_data.append(i_ch_samples)
                 q_data.append(q_ch_samples)
 
@@ -853,37 +762,39 @@ class MockCRS(BaseCRS):
         keys_to_delete_amp = []
         keys_to_delete_phase = []
 
-        for m in modules_to_clear:
-            for ch in range(1, 1025): # Channels 1-1024
-                if (m, ch) in self.frequencies: keys_to_delete_freq.append((m,ch))
-                if (m, ch) in self.amplitudes: keys_to_delete_amp.append((m,ch))
-                if (m, ch) in self.phases: keys_to_delete_phase.append((m,ch))
-        
-        for key in keys_to_delete_freq: self.frequencies.pop(key, None)
-        for key in keys_to_delete_amp: self.amplitudes.pop(key, None)
-        for key in keys_to_delete_phase: self.phases.pop(key, None)
+        with self._config_lock:
+            for m in modules_to_clear:
+                for ch in range(1, 1025):
+                    if (m, ch) in self.frequencies:
+                        keys_to_delete_freq.append((m, ch))
+                    if (m, ch) in self.amplitudes:
+                        keys_to_delete_amp.append((m, ch))
+                    if (m, ch) in self.phases:
+                        keys_to_delete_phase.append((m, ch))
 
+            for key in keys_to_delete_freq:
+                self.frequencies.pop(key, None)
+            for key in keys_to_delete_amp:
+                self.amplitudes.pop(key, None)
+            for key in keys_to_delete_phase:
+                self.phases.pop(key, None)
 
     def set_cable_length(self, length, module):
         assert isinstance(length, (int, float))
         assert isinstance(module, int)
-        # Store the cable length for the module
         self.cable_lengths[module] = length
-        return None # Important for Tuber serialization
-    
+        return None
+
     def get_cable_length(self, module):
-        """Get the cable length for a module."""
         assert isinstance(module, int)
-        # Return stored cable length or default to 0.0
         return self.cable_lengths.get(module, 0.0)
 
-    def raise_periscope(self, module=1, channels="1", 
-                        buf_size=5000, fps=30.0, 
-                        density_dot=1, blocking=None):
+    def raise_periscope(self, module=1, channels="1", buf_size=5000, fps=30.0, density_dot=1, blocking=None):
         from ..tools.periscope.__main__ import raise_periscope as base_raise_periscope
-        from .. import streamer # For get_local_ip patching
-        
+        from .. import streamer
+
         original_get_local_ip = streamer.get_local_ip
+
         def mock_get_local_ip(crs_hostname):
             if any(host_part in str(crs_hostname) for host_part in ["127.0.0.1", "localhost", "::1"]):
                 return "127.0.0.1"
@@ -891,16 +802,9 @@ class MockCRS(BaseCRS):
 
         try:
             streamer.get_local_ip = mock_get_local_ip
-            # base_raise_periscope is async, need to run it in an event loop if called synchronously
-            # For simplicity, assuming this MockCRS method might be called from async context
-            # or the caller handles the event loop.
-            # If this method itself needs to be async: `async def raise_periscope...`
-            # and then `await base_raise_periscope(...)`
-            
-            # If this method must remain synchronous but call an async one:
             try:
                 loop = asyncio.get_running_loop()
-            except RuntimeError: # No running event loop
+            except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 created_loop = True
@@ -909,17 +813,16 @@ class MockCRS(BaseCRS):
 
             result = loop.run_until_complete(base_raise_periscope(
                 self, module=module, channels=channels,
-                buf_size=buf_size, fps=fps, 
+                buf_size=buf_size, fps=fps,
                 density_dot=density_dot, blocking=blocking
             ))
-            
+
             if created_loop:
                 loop.close()
             return result
-
         finally:
             streamer.get_local_ip = original_get_local_ip
-            
+
     # --- UDP Streaming Control ---
     async def start_udp_streaming(self, host='127.0.0.1', port=9876):
         return await self.udp_manager.start_udp_streaming(host, port)
@@ -927,12 +830,42 @@ class MockCRS(BaseCRS):
     async def stop_udp_streaming(self):
         return await self.udp_manager.stop_udp_streaming()
 
-    def get_udp_streaming_status(self): # This was not async in original
+    def get_udp_streaming_status(self):
         return self.udp_manager.get_udp_streaming_status()
-    
+
+    # --- Quasiparticle Pulse Control ---
+    async def set_pulse_mode(self, mode, **kwargs):
+        if not hasattr(self, 'resonator_model') or self.resonator_model is None:
+            raise RuntimeError("Resonator model not available.")
+        if not hasattr(self.resonator_model, 'set_pulse_mode'):
+            raise RuntimeError("Resonator model does not support pulse functionality.")
+        await asyncio.sleep(0.001)
+        return self.resonator_model.set_pulse_mode(mode, **kwargs)
+
+    async def add_pulse_event(self, resonator_index, start_time, amplitude=None):
+        if not hasattr(self, 'resonator_model') or self.resonator_model is None:
+            raise RuntimeError("Resonator model not available.")
+        if not hasattr(self.resonator_model, 'add_pulse_event'):
+            raise RuntimeError("Resonator model does not support pulse functionality.")
+        await asyncio.sleep(0.001)
+        return self.resonator_model.add_pulse_event(resonator_index, start_time, amplitude)
+
+    async def get_pulse_status(self):
+        if not hasattr(self, 'resonator_model') or self.resonator_model is None:
+            return {'mode': 'unavailable', 'active_pulses': 0, 'error': 'Resonator model not available'}
+        if not hasattr(self.resonator_model, 'pulse_config'):
+            return {'mode': 'unsupported', 'active_pulses': 0, 'error': 'Pulse functionality not supported'}
+        await asyncio.sleep(0.001)
+        return {
+            'mode': self.resonator_model.pulse_config.get('mode', 'unknown'),
+            'config': self.resonator_model.pulse_config.copy(),
+            'active_pulses': len(getattr(self.resonator_model, 'pulse_events', [])),
+            'error': None
+        }
+
     def tuber_context(self, **kwargs):
-        """Return a context manager for batched operations (server-side use)"""
         return MockCRSContext(self)
+
 
 # Export MockCRS as CRS for the flavour system
 CRS = MockCRS

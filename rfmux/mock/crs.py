@@ -40,33 +40,27 @@ def _cleanup_all_mock_crs_instances():
         except Exception as e:
             print(f"[CLEANUP] Error during emergency cleanup: {e}")
 
-
 # Enums
 class ClockSource(str, Enum):
     VCXO = "VCXO"
     SMA = "SMA"
     BACKPLANE = "Backplane"
 
-
 class TimestampPort(str, Enum):
     BACKPLANE = "BACKPLANE"
     TEST = "TEST"
     SMA = "SMA"
 
-
 class FrequencyUnit(str, Enum):
     HZ = "hz"
-
 
 class AmplitudeUnit(str, Enum):
     NORMALIZED = "normalized"
     RAW = "raw"
 
-
 class PhaseUnit(str, Enum):
     DEGREES = "degrees"
     RADIANS = "radians"
-
 
 class Target(str, Enum):
     CARRIER = "carrier"
@@ -74,7 +68,6 @@ class Target(str, Enum):
     DEMOD = "demod"
     ADC = "adc"
     DAC = "dac"
-
 
 class Units(str, Enum):
     HZ = "hz"
@@ -90,19 +83,16 @@ class Units(str, Enum):
     DB = "db"
     DBM = "dbm"
 
-
 class ADCCalibrationMode(str, Enum):
     AUTO = "AUTO"
     MODE1 = "MODE1"
     MODE2 = "MODE2"
-
 
 class ADCCalibrationBlock(str, Enum):
     OCB1 = "OCB1"
     OCB2 = "OCB2"
     GCB = "GCB"
     TSCB = "TSCB"
-
 
 class MockCRSContext:
     """Async context manager for batched CRS operations"""
@@ -172,7 +162,6 @@ class MockCRSContext:
             results.append(result)
         self.pending_ops.clear()
         return results
-
 
 class MockCRS(BaseCRS):
     """Mock MKIDS device emulation class."""

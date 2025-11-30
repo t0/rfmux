@@ -465,7 +465,6 @@ class MockResonatorModel:
         
         self.invalidate_caches()
 
-
     def s21_lc_response(self, frequency, amplitude=1.0):
         """
         Calculate S21 response with optimized convergence.
@@ -701,62 +700,6 @@ class MockResonatorModel:
         
         return s21_total
 
-    def update_lekid_parameters(self, lekid_index):
-        """
-        Apply current-dependent modifications to a LEKID's parameters.
-        
-        Order of operations:
-        1. Start with base parameters (already updated by physics from nqp)
-        2. Apply current-dependent modifications to Lk only
-        """
-        base_params = self.base_lekid_params[lekid_index]
-        lekid = self.mr_lekids[lekid_index]
-        
-        # Apply current effects to Lk (R is not affected by current)
-        Lk_total = base_params['Lk'] * self.lk_current_factors[lekid_index]
-        R_total = base_params['R']  # R comes directly from physics calculation
-        
-        # Update the LEKID object
-        lekid.Lk = Lk_total
-        lekid.R = R_total
-        lekid.L = lekid.Lk + lekid.Lg
-        lekid.alpha_k = lekid.Lk / lekid.L
-
-
-    def calculate_resonator_currents(self, frequency, Vin, damp=0.1):
-        """
-        Calculate the current through each resonator.
-        
-        This is now handled inside the JIT-compiled convergence loop for efficiency.
-        This method is kept for compatibility but just returns the cached currents.
-        """
-        if not self.mr_lekids:
-            return []
-        
-        # Return cached currents from last convergence
-        if hasattr(self, 'resonator_currents'):
-            return self.resonator_currents
-        else:
-            return [0] * len(self.mr_lekids)
-
-    def calculate_current_factors(self, frequency, amplitude):
-        """
-        Calculate current-dependent Lk factors for all resonators.
-        
-        Uses JIT-compiled helper for maximum performance.
-        """
-        # This is now handled inside the convergence loop
-        # Return cached factors if available
-        if hasattr(self, 'lk_current_factors'):
-            return self.lk_current_factors
-        
-        # Otherwise calculate using JIT helper
-        if hasattr(self, 'resonator_currents_array'):
-            factors = jit_physics.current_factors(self.resonator_currents_array, self.Istar)
-            return factors.tolist()
-        else:
-            return [1.0] * len(self.mr_lekids)
-
     def update_lekids_for_current(self, frequency, amplitude):
         """
         Update LEKID parameters based on resonator currents.
@@ -862,27 +805,6 @@ class MockResonatorModel:
         if not hasattr(self, '_convergence_counter'):
             self._convergence_counter = 0
         self._convergence_counter += 1
-
-    def generate_noisy_nqp_values(self):
-        """
-        Generate fresh noisy nqp values for all resonators.
-        
-        Returns
-        -------
-        list
-            List of noisy nqp values, one per resonator
-        """
-        noisy_nqp = []
-        for base_nqp in self.base_nqp_values:
-            if self.nqp_noise_enabled and base_nqp > 0:
-                # Generate Gaussian noise with std = base_nqp * noise_factor
-                noise = np.random.normal(0, base_nqp * self.nqp_noise_std_factor)
-                # Ensure non-negative nqp
-                noisy_value = max(0, base_nqp + noise)
-                noisy_nqp.append(noisy_value)
-            else:
-                noisy_nqp.append(base_nqp)
-        return noisy_nqp
 
     def update_base_params_from_nqp(self, noisy_nqp_values):
         """
@@ -1125,47 +1047,6 @@ class MockResonatorModel:
             self.pulse_events = []
             self.last_pulse_time = {}
     
-    def _evaluate_s21_at_frequency(self, frequency, amplitude):
-        """
-        S21 evaluation at a specific frequency - properly handles pulses + noise.
-        
-        This now properly calls s21_lc_response to ensure each evaluation gets:
-        - Fresh QP noise 
-        - Current pulse state
-        - Vectorized convergence (performance improvement retained)
-        
-        Parameters
-        ----------
-        frequency : float
-            Probe frequency in Hz
-        amplitude : float
-            Probe amplitude
-            
-        Returns
-        -------
-        complex
-            S21 response
-        """
-        # Use the full physics path that handles pulses + noise + convergence
-        # Each channel gets its own fresh QP state as the physics requires
-        return self.s21_lc_response(frequency, amplitude)
-    
-    def _get_cached_s21(self, frequency, amplitude):
-        """Get S21 response with caching disabled when noise is enabled."""
-        # Disable caching when noise is enabled to ensure fresh noise each call
-        if self.nqp_noise_enabled:
-            return self.s21_lc_response(frequency, amplitude)
-        
-        # Use caching when noise is disabled for performance
-        freq_key = round(frequency)
-        amp_key = round(amplitude * 1000) / 1000  # 3 decimal places
-        
-        cache_key = (freq_key, amp_key)
-        if cache_key not in self._s21_cache:
-            self._s21_cache[cache_key] = self.s21_lc_response(frequency, amplitude)
-        
-        return self._s21_cache[cache_key]
-    
     def _get_cached_cic_response(self, freq_offset, dec_stage):
         """Get CIC response with caching."""
         # Round to nearest 0.1 Hz
@@ -1330,8 +1211,8 @@ class MockResonatorModel:
             # For single sample, pre-compute S21. For multiple samples, compute fresh per sample.
             if num_samples == 1:
                 # Apply S21 response using FAST path (state already updated for this packet)
-                # Note: _evaluate_s21_at_frequency now acquires _physics_lock internally
-                s21_complex = self._evaluate_s21_at_frequency(total_freq, amp)
+                # Note: s21_lc_response acquires _physics_lock internally
+                s21_complex = self.s21_lc_response(total_freq, amp)
                 s21_call_count += 1
                 
                 # Combine amplitude, S21, and phase
@@ -1435,7 +1316,7 @@ class MockResonatorModel:
                             amp_magnitude = abs(tone_amp_base)
                             if amp_magnitude > 0:
                                 # Re-evaluate S21 with fresh noise
-                                s21_fresh = self._evaluate_s21_at_frequency(tone_freq, amp_magnitude)
+                                s21_fresh = self.s21_lc_response(tone_freq, amp_magnitude)
                                 
                                 # Apply phase from original tone
                                 phase_original = np.angle(tone_amp_base)

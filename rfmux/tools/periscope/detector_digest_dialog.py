@@ -525,7 +525,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.plot_fast_tod.setBackground(plot_bg_color)
             self.plot_fast_tod.setLabel('left', "Amplitude", units="V")
             self.plot_fast_tod.setLabel('bottom', "Time", units="s")
-            self.plot_fast_tod.showGrid(x=True, y=True, alpha=0.3)
+            self.plot_fast_tod.showGrid(x=True, y=True, alpha=0.2)
             self.plot_fast_tod.setTitle("Fast TOD", color=plot_pen_color)
             self.plot_fast_tod.addLegend(offset=(30, 10), labelTextColor=plot_pen_color)
             splitter_top.addWidget(self.plot_fast_tod)
@@ -539,7 +539,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         else:
             self.plot_noise_spectrum.setLabel('left', "Amplitude", units="dBm/Hz")
         self.plot_noise_spectrum.setLabel('bottom', "Frequency", units="Hz")
-        self.plot_noise_spectrum.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_noise_spectrum.showGrid(x=True, y=True, alpha=0.2)
         self.plot_noise_spectrum.setTitle("Noise Spectrum", color=plot_pen_color)
         self.plot_noise_spectrum.setYRange(-180, 0)
         self.plot_noise_spectrum.addLegend(offset=(30, 10), labelTextColor=plot_pen_color)
@@ -998,9 +998,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         
         # Create a text box to show the values
         summary_text = (
-            f"<span style='font-size:12pt; color:green;'>"
-            f"Tone Amp: {amplitude:.3f} dBm <br>"
-            f"Slow Bandwidth: {slow_freq:.3f} Hz <br>"
+            f"<span style='font-size:12pt; color:grey;'>"
+            f"Tone Amp: {amplitude:.1f} dBm <br>"
+            f"Slow Bandwidth: {slow_freq:.0f} Hz <br>"
             f"Fast Bandwidth: {fast_freq:.2f} MHz </span>"
         )
         

@@ -18,7 +18,7 @@ Usage:
     ```yaml
     !HardwareMap
     - !flavour "rfmux.mock"
-    - !CRS { serial: "0001", hostname: "127.0.0.1" }
+    - !CRS { serial: "0000", hostname: "127.0.0.1" }
     ```
 
     Then use normally:

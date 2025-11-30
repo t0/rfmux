@@ -193,24 +193,21 @@ async def py_get_samples(crs: CRS,
                 # Parse the received packet
                 p = streamer.DfmuxPacket.from_bytes(data)
 
-                if crs.serial == "MOCK0001":
-                    packets.append(p)  
-                else:
-                    if p.serial != int(crs.serial):
-                        warnings.warn(
-                            f"Packet serial number {p.serial} didn't match CRS serial number {crs.serial}! Two boards on the network? IGMPv3 capable router will fix this warning."
-                        )
-    
-                    # Filter packets by module
-                    if p.module != module - 1:
-                        continue  # Skip packets from other modules
-    
-                    # Check if this packet is older than our "now" timestamp
-                    assert ts.source == p.ts.source, f"Timestamp source changed! {ts.source} vs {p.ts.source}"
-                    if ts > p.ts:
-                        continue
+                if p.serial != int(crs.serial):
+                    warnings.warn(
+                        f"Packet serial number {p.serial} didn't match CRS serial number {crs.serial}! Two boards on the network? IGMPv3 capable router will fix this warning."
+                    )
 
-                    packets.append(p)
+                # Filter packets by module
+                if p.module != module - 1:
+                    continue  # Skip packets from other modules
+
+                # Check if this packet is older than our "now" timestamp
+                assert ts.source == p.ts.source, f"Timestamp source changed! {ts.source} vs {p.ts.source}"
+                if ts > p.ts:
+                    continue
+
+                packets.append(p)
 
             # Sort packets by sequence number
             return sorted(packets, key=lambda p: p.seq)

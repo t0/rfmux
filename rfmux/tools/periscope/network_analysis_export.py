@@ -714,11 +714,17 @@ class NetworkAnalysisExportMixin:
                 f"No resonances for Module {active_module}. Run 'Find Resonances'."
             )
             return
-            
-        # Get DAC scales
+        
+        # Walk up parent hierarchy to find Periscope instance
+        # (panel may be wrapped in QDockWidget, so parent() might not be Periscope directly)
+        periscope_parent = self.parent()
+        while periscope_parent and not hasattr(periscope_parent, 'dac_scales'):
+            periscope_parent = periscope_parent.parent()
+        
+        # Get DAC scales from the Periscope instance
         dac_scales_for_dialog = {}
-        if hasattr(self.parent(), 'dac_scales'):
-            dac_scales_for_dialog = self.parent().dac_scales
+        if periscope_parent and hasattr(periscope_parent, 'dac_scales'):
+            dac_scales_for_dialog = periscope_parent.dac_scales
         elif hasattr(self, 'dac_scales'):
             dac_scales_for_dialog = self.dac_scales
         
@@ -733,11 +739,24 @@ class NetworkAnalysisExportMixin:
         # Process dialog result
         if dialog.exec():
             params = dialog.get_parameters()
-            if params and hasattr(self.parent(), '_start_multisweep_analysis'):
-                self.parent()._start_multisweep_analysis(params)
-            elif not hasattr(self.parent(), '_start_multisweep_analysis'):
-                QtWidgets.QMessageBox.critical(
-                    self, 
-                    "Error", 
-                    "Cannot start multisweep: Parent integration missing."
-                )
+            if not params:
+                return
+                
+            # Find Periscope parent (walk up hierarchy if needed)
+            parent = self.parent()
+            while parent and not hasattr(parent, '_start_multisweep_analysis'):
+                parent = parent.parent()
+            
+            if parent:
+                try:
+                    parent._start_multisweep_analysis(params)
+                except Exception as e:
+                    error_msg = f"Error starting multisweep: {type(e).__name__}: {str(e)}"
+                    print(error_msg, file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
+                    QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
+            else:
+                error_msg = "Cannot start multisweep: Parent integration missing (could not find Periscope parent)"
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+                traceback.print_stack(file=sys.stderr)
+                QtWidgets.QMessageBox.critical(self, "Error", error_msg)

@@ -87,7 +87,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
 
         self.reference_input = QtWidgets.QComboBox()
         self.reference_input.addItems(["dBc", "dBm"])
-        self.reference_input.setCurrentText("dBc")
+        self.reference_input.setCurrentText("dBm")
         layout.addRow("Units:", self.reference_input)
 
         # Time Taken (s) — Read-only label

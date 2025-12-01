@@ -16,11 +16,18 @@ from .network_analysis_export import NetworkAnalysisExportMixin
 class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin):
     """
     Dockable panel for displaying network analysis results with real units support.
-    
+
     This panel can be wrapped in a QDockWidget for tabbed/floating display within
     the main Periscope window. All functionality from the original NetworkAnalysisWindow
     is preserved.
+    
+    Signals:
+        data_ready: Emitted when analysis completes with full export data dict
     """
+    
+    # Signal for session auto-export
+    data_ready = QtCore.pyqtSignal(dict)  # Full export data dictionary
+    
     def __init__(self, parent=None, modules=None, dac_scales=None, dark_mode=False, is_loaded_data=False):
         super().__init__(parent)
         self.modules = modules or []
@@ -1033,10 +1040,21 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin):
             self.progress_bars[module].setValue(int(progress))
     
     def complete_analysis(self, module: int):
-        """Mark analysis as complete for a module."""
+        """Mark analysis as complete for a module and emit data_ready signal."""
         if module in self.progress_bars:
             self.progress_bars[module].setValue(100)
             self._check_all_complete()
+            
+        # Emit data_ready signal for session auto-export
+        if self._all_modules_complete():
+            export_data = self.build_export_dict()  # Use inherited method from mixin
+            self.data_ready.emit(export_data)
+    
+    def _all_modules_complete(self) -> bool:
+        """Check if all modules have completed analysis."""
+        if not self.progress_bars:
+            return False
+        return all(pbar.value() == 100 for pbar in self.progress_bars.values())
             
     def apply_theme(self, dark_mode: bool):
         """Apply the dark/light theme to all plots in this window."""

@@ -141,19 +141,21 @@ class NetworkAnalysisExportMixin:
                 f"Error exporting data: {str(e)}"
             )
     
-    def _export_to_pickle(self, filename: str) -> None:
+    def build_export_dict(self) -> dict:
         """
-        Export data to a pickle file with comprehensive metadata.
+        Build the export data dictionary with comprehensive metadata.
         
         This method creates a hierarchical dictionary structure containing all measurement
-        data, parameters, and module information, then serializes it to a pickle file.
+        data, parameters, and module information. Can be used for both file export and
+        session auto-export.
         
-        Args:
-            filename: The path to the pickle file to create
+        Returns:
+            Dictionary containing all export data
         """
         export_data = {
             'timestamp': datetime.datetime.now().isoformat(),
             'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
+            'dac_scales_used': self.dac_scales.copy() if hasattr(self, 'dac_scales') else {},
             'modules': {}
         }
         
@@ -201,6 +203,19 @@ class NetworkAnalysisExportMixin:
             
             # Include resonance frequencies for the module
             export_data['modules'][module]['resonances_hz'] = self.resonance_freqs.get(module, [])
+        
+        return export_data
+    
+    def _export_to_pickle(self, filename: str) -> None:
+        """
+        Export data to a pickle file with comprehensive metadata.
+        
+        Uses build_export_dict() to create the data structure, then saves to file.
+        
+        Args:
+            filename: The path to the pickle file to create
+        """
+        export_data = self.build_export_dict()
         
         # Write the data to file
         with open(filename, 'wb') as f:

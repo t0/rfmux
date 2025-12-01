@@ -55,8 +55,12 @@ from .app_runtime import PeriscopeRuntime
 from .mock_configuration_dialog import MockConfigurationDialog
 from .dock_manager import PeriscopeDockManager
 from .main_plot_panel import MainPlotPanel
+from .session_manager import SessionManager
+from .session_browser_panel import SessionBrowserPanel
+from .session_startup_dialog import SessionStartupDialog
 from rfmux.core.transferfunctions import convert_roc_to_volts
 from rfmux.mock import config as mc
+import datetime
 
 
 
@@ -192,6 +196,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Create the main plot panel in its dock
         self._add_plot_container(None)  # Layout not needed, using dock
         
+        # Add session browser dock (after Main dock exists so splitDockWidget works)
+        self._add_session_browser_dock()
+        
         # Create the Window menu for dock management
         self._create_window_menu()
 
@@ -206,6 +213,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         # Set initial window size (wider and taller for better visibility)
         self.resize(1400, 900)
+        
+        # Show session startup dialog
+        QtCore.QTimer.singleShot(100, self._show_session_startup_dialog)
 
     def _init_workers(self):
         """
@@ -461,11 +471,24 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Args:
             chan_str (str): The initial channel string (passed to MainPlotPanel)
         """
+        # Initialize session manager
+        self.session_manager = SessionManager(self)
+        
         # Add status bar
         self._add_status_bar()
         
         # Add interactive console dock
         self._add_interactive_console_dock()
+        
+        # Add session menu
+        self._create_session_menu()
+        
+        # Note: Session browser dock will be added after Main dock is created
+        
+        # Connect session manager to status bar
+        self.session_manager.session_started.connect(self._update_session_status)
+        self.session_manager.session_ended.connect(self._update_session_status)
+        self.session_manager.file_exported.connect(self._on_file_exported_status)
 
     def _add_toolbar(self, layout: QtWidgets.QVBoxLayout, chan_str: str):
         """
@@ -1181,6 +1204,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 lambda error_msg: QtWidgets.QMessageBox.critical(panel, "Network Analysis Error", error_msg),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             
+            # Connect data_ready signal for session auto-export
+            panel.data_ready.connect(
+                lambda data: self._handle_netanal_data_ready(modules_to_run, data)
+            )
+            
             amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)])
             window_data = self.netanal_windows[window_id]
             window_data['amplitude_queues'] = {mod: list(amplitudes) for mod in modules_to_run}
@@ -1220,10 +1248,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 modules_to_run = selected_module_param
             else:
                 modules_to_run = [selected_module_param]
-            if not hasattr(self, 'dac_scales'):
-                QtWidgets.QMessageBox.critical(self, "Error", 
-                    "DAC scales are not available. Please run the network analysis configuration again.")
-                return
+            
+            # Restore DAC scales from loaded data (using existing 'dac_scales_used' key)
+            self.dac_scales = params['dac_scales_used']
             
             # Create unique ID for this analysis
             window_id = f"netanal_{self.netanal_window_count}"
@@ -1747,6 +1774,27 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     def _netanal_error(self, error_msg: str):
         """Slot for network analysis error signals. Displays a critical message box."""
         QtWidgets.QMessageBox.critical(self, "Network Analysis Error", error_msg)
+    
+    def _handle_netanal_data_ready(self, modules: list, data: dict):
+        """
+        Handle data_ready signal from NetworkAnalysisPanel for session auto-export.
+        
+        Args:
+            modules: List of module IDs that were analyzed
+            data: Full export data dictionary
+        """
+        if not self.session_manager.is_active or not self.session_manager.auto_export_enabled:
+            return
+        
+        # Create identifier from module list
+        if len(modules) == 1:
+            identifier = f"module{modules[0]}"
+        else:
+            identifier = f"modules_{'_'.join(map(str, modules))}"
+        
+        # Export via session manager
+        self.session_manager.export_data('netanal', identifier, data)
+        print(f"[Session] Auto-exported network analysis: {identifier}")
 
     def _crs_init_success(self, message: str):
         """Slot for CRS initialization success signals. Displays an information message box."""
@@ -2305,3 +2353,373 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 )
                 
                 self.list_panels_menu.addAction(action)
+
+    # ─────────────────────────────────────────────────────────────────
+    # Session Management Methods
+    # ─────────────────────────────────────────────────────────────────
+    
+    def _create_session_menu(self):
+        """
+        Create the Session menu in the menu bar.
+        
+        Provides options to start/load sessions, toggle auto-export,
+        manually export data, and end sessions.
+        """
+        session_menu = self.menuBar().addMenu("&Session")
+        
+        # Start New Session
+        start_action = QtGui.QAction("&Start New Session...", self)
+        start_action.setShortcut("Ctrl+Shift+N")
+        start_action.setToolTip("Start a new session to auto-export analysis data")
+        start_action.triggered.connect(self._start_new_session)
+        session_menu.addAction(start_action)
+        
+        # Load Session
+        load_action = QtGui.QAction("&Load Session...", self)
+        load_action.setShortcut("Ctrl+Shift+O")
+        load_action.setToolTip("Load an existing session folder")
+        load_action.triggered.connect(self._load_session)
+        session_menu.addAction(load_action)
+        
+        session_menu.addSeparator()
+        
+        # Auto-Export Toggle
+        self.auto_export_action = QtGui.QAction("&Auto-Export Enabled", self)
+        self.auto_export_action.setCheckable(True)
+        self.auto_export_action.setChecked(True)
+        self.auto_export_action.setToolTip("Toggle automatic export of analysis data when session is active")
+        self.auto_export_action.triggered.connect(self._toggle_auto_export)
+        session_menu.addAction(self.auto_export_action)
+        
+        session_menu.addSeparator()
+        
+        # End Session
+        end_action = QtGui.QAction("&End Session", self)
+        end_action.setToolTip("End the current session")
+        end_action.triggered.connect(self._end_session)
+        session_menu.addAction(end_action)
+    
+    def _add_session_browser_dock(self):
+        """
+        Add the session browser panel as a dock on the left side.
+        
+        Creates a SessionBrowserPanel and wraps it in a collapsible dock widget
+        positioned on the left side of the main window.
+        """
+        # Create the session browser panel
+        self.session_browser = SessionBrowserPanel(self.session_manager, self)
+        
+        # Apply current theme
+        self.session_browser.apply_theme(self.dark_mode)
+        
+        # Connect the file load request signal
+        self.session_browser.file_load_requested.connect(self._load_session_file)
+        
+        # Create dock widget
+        dock = QtWidgets.QDockWidget("Session Files", self)
+        dock.setWidget(self.session_browser)
+        dock.setObjectName("session_browser_dock")
+        
+        # Configure dock features - allow close, move, but not float by default
+        dock.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable |
+            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+        )
+        
+        # Add to left dock area
+        self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+        
+        # Split the Main dock to put session browser on the left side
+        # This ensures both docks are visible side-by-side instead of tabified
+        main_dock = self.dock_manager.get_dock("main_plots")
+        if main_dock:
+            # splitDockWidget(first, second, orientation) - second goes on the right with Horizontal
+            # So put session browser first to make it appear on the left
+            self.splitDockWidget(dock, main_dock, QtCore.Qt.Orientation.Horizontal)
+        
+        # Set reasonable size constraints
+        dock.setMinimumWidth(200)
+        dock.setMaximumWidth(400)
+        
+        # Store reference
+        self.session_browser_dock = dock
+        
+        # Start collapsed (hidden) by default - user can show via Session menu or Window menu
+        dock.hide()
+    
+    def _start_new_session(self):
+        """
+        Start a new session with folder selection dialog.
+        
+        Shows a folder selection dialog, then lets the user customize
+        the session folder name before creating it.
+        """
+        # Show folder selection dialog
+        # Use Qt dialog (not native) to prevent hanging on some systems
+        base_path = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select Session Location",
+            "",  # Start in current directory
+            QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
+        )
+        
+        if not base_path:
+            return
+        
+        # Generate default folder name with timestamp
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"session_{timestamp}"
+        
+        # Let user rename
+        folder_name, ok = QtWidgets.QInputDialog.getText(
+            self, 
+            "Session Name",
+            "Enter session folder name:",
+            QtWidgets.QLineEdit.EchoMode.Normal,
+            default_name
+        )
+        
+        if ok and folder_name:
+            try:
+                self.session_manager.start_session(base_path, folder_name)
+                
+                # Show the session browser dock
+                if hasattr(self, 'session_browser_dock'):
+                    self.session_browser_dock.show()
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Session Error",
+                    f"Failed to start session:\n{str(e)}"
+                )
+    
+    def _load_session(self):
+        """
+        Load an existing session folder.
+        
+        Shows a folder selection dialog to choose an existing session folder.
+        """
+        # Use Qt dialog (not native) to prevent hanging on some systems
+        session_path = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select Session Folder",
+            "",
+            QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
+        )
+        
+        if session_path:
+            success = self.session_manager.load_session(session_path)
+            
+            if success:
+                # Show the session browser dock
+                if hasattr(self, 'session_browser_dock'):
+                    self.session_browser_dock.show()
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Load Session Failed",
+                    f"Could not load session from:\n{session_path}"
+                )
+    
+    def _show_session_startup_dialog(self):
+        """
+        Show the session startup dialog to prompt user for session choice.
+        
+        This is shown automatically when Periscope launches.
+        """
+        dialog = SessionStartupDialog(self)
+        if dialog.exec():
+            choice = dialog.get_choice()
+            
+            if choice == SessionStartupDialog.START_NEW:
+                # Start new session
+                self._start_new_session()
+            elif choice == SessionStartupDialog.LOAD_EXISTING:
+                # Load existing session
+                self._load_session()
+            elif choice == SessionStartupDialog.NO_SESSION:
+                # Continue without session - disable auto-export
+                self.session_manager.auto_export_enabled = False
+                self.auto_export_action.setChecked(False)
+                print("[Session] Continuing without session (auto-export disabled)")
+    
+    def _toggle_auto_export(self, checked: bool):
+        """
+        Toggle auto-export on/off.
+        
+        Args:
+            checked: True to enable auto-export, False to disable
+        """
+        self.session_manager.auto_export_enabled = checked
+        
+        status = "enabled" if checked else "disabled"
+        print(f"[Session] Auto-export {status}")
+    
+    def _end_session(self):
+        """
+        End the current session with confirmation.
+        """
+        if not self.session_manager.is_active:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No Active Session",
+                "There is no active session to end."
+            )
+            return
+        
+        # Confirm with user
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "End Session",
+            f"End the current session?\n\n"
+            f"Session: {self.session_manager.session_name}\n"
+            f"Files exported: {self.session_manager.export_count}",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No
+        )
+        
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.session_manager.end_session()
+    
+    def _load_session_file(self, file_path: str):
+        """
+        Load a session file into a new analysis panel.
+        
+        This is called when the user double-clicks a file in the session browser.
+        
+        Args:
+            file_path: Path to the pickle file to load
+        """
+        # Identify file type from filename
+        file_type = self.session_manager.identify_file_type(file_path)
+        
+        if file_type is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Unknown File Type",
+                f"Cannot identify the type of file:\n{file_path}\n\n"
+                "Expected filename format: timestamp_type_identifier.pkl"
+            )
+            return
+        
+        # Load the data
+        data = self.session_manager.load_file(file_path)
+        
+        if data is None:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Load Error",
+                f"Failed to load file:\n{file_path}"
+            )
+            return
+        
+        # Create appropriate panel based on file type
+        try:
+            if file_type == 'netanal':
+                self._load_netanal_from_session(data, file_path)
+            elif file_type == 'multisweep':
+                self._load_multisweep_from_session(data, file_path)
+            elif file_type == 'bias':
+                self._load_bias_from_session(data, file_path)
+            elif file_type == 'noise':
+                self._load_noise_from_session(data, file_path)
+            else:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "File Loaded",
+                    f"Loaded {file_type} data from session.\n"
+                    f"(Panel creation for this type not yet implemented)"
+                )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Load Error",
+                f"Error creating panel for {file_type} data:\n{str(e)}"
+            )
+            traceback.print_exc()
+    
+    def _load_netanal_from_session(self, data: dict, file_path: str):
+        """Load network analysis data from session file into a new panel."""
+        # Check if data has the expected structure
+        if 'parameters' not in data and 'modules' not in data:
+            # Try to wrap it in expected format
+            QtWidgets.QMessageBox.information(
+                self,
+                "Network Analysis Loaded",
+                f"Loaded network analysis data.\n"
+                f"File: {file_path}\n\n"
+                "(Direct panel display not yet implemented for this format)"
+            )
+            return
+        
+        # Use existing load mechanism
+        self._load_network_analysis(data)
+    
+    def _load_multisweep_from_session(self, data: dict, file_path: str):
+        """Load multisweep data from session file into a new panel."""
+        if 'results_by_iteration' not in data:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Multisweep Loaded",
+                f"Loaded multisweep data.\n"
+                f"File: {file_path}\n\n"
+                "(Direct panel display not yet implemented for this format)"
+            )
+            return
+        
+        # Use existing load mechanism
+        self._load_multisweep_analysis(data)
+    
+    def _load_bias_from_session(self, data: dict, file_path: str):
+        """Load bias data from session file."""
+        QtWidgets.QMessageBox.information(
+            self,
+            "Bias Data Loaded",
+            f"Loaded bias KIDs data.\n"
+            f"File: {file_path}\n\n"
+            "(Direct panel display not yet implemented)"
+        )
+    
+    def _load_noise_from_session(self, data: dict, file_path: str):
+        """Load noise spectrum data from session file."""
+        QtWidgets.QMessageBox.information(
+            self,
+            "Noise Data Loaded",
+            f"Loaded noise spectrum data.\n"
+            f"File: {file_path}\n\n"
+            "(Direct panel display not yet implemented)"
+        )
+    
+    @QtCore.pyqtSlot()
+    @QtCore.pyqtSlot(str)
+    def _update_session_status(self, session_path: str = None):
+        """
+        Update the status bar with session information.
+        
+        Args:
+            session_path: Path to session (provided on session start)
+        """
+        if self.session_manager.is_active:
+            name = self.session_manager.session_name or "Active"
+            count = self.session_manager.export_count
+            self.info_text.setText(f"📁 Session: {name} | {count} files")
+            self.info_text.setToolTip(f"Session path: {self.session_manager.session_path}")
+        else:
+            self.info_text.setText("")
+            self.info_text.setToolTip("")
+    
+    @QtCore.pyqtSlot(str, str)
+    def _on_file_exported_status(self, file_path: str, data_type: str):
+        """
+        Update status bar when a file is exported.
+        
+        Args:
+            file_path: Path to the exported file
+            data_type: Type of data exported
+        """
+        self._update_session_status()
+        
+        # Brief flash message in status bar
+        from pathlib import Path
+        filename = Path(file_path).name
+        self.statusBar().showMessage(f"Exported: {filename}", 3000)  # Show for 3 seconds

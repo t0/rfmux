@@ -21,47 +21,16 @@ from numba import jit, prange
 import os
 import platform
 import subprocess
+import numba
 
 # Physical constants
 H = 6.626e-34  # Planck constant
 KB = 1.38e-23  # Boltzmann constant
 MU0 = 8.85e-12  # Permeability (note: this appears to be using permittivity value from original)
 
-
 # ============================================================================
 # Bessel Function Approximations
 # ============================================================================
-
-
-def setup_numba_openmp_env():
-    """Set NUMBA threading environment variables for macOS (Intel or ARM)."""
-    try:
-        system = platform.system()
-    
-        if system != "Darwin":
-            #Not macOS — skipping OpenMP setup
-            return
-    
-        # Always use OpenMP on macOS
-        os.environ["NUMBA_THREADING_LAYER"] = "omp"
-    
-        # Detect architecture: 'arm64' (Apple Silicon) or 'x86_64' (Intel)
-        machine = platform.machine().lower()
-    
-        if "arm" in machine or "aarch64" in machine:
-            omp_path = "/opt/homebrew/opt/libomp/lib"
-        else:
-            omp_path = "/usr/local/opt/libomp/lib"
-    
-        # Safely append the path if not already there
-        current = os.environ.get("DYLD_LIBRARY_PATH", "")
-        if omp_path not in current.split(":"):
-            os.environ["DYLD_LIBRARY_PATH"] = f"{omp_path}:{current}" if current else omp_path
-    except:
-        print(f"Couldn't find openmp. This is needed on Mac OS. Run 'brew install libomp'")
-
-setup_numba_openmp_env()
-
 
 @jit(nopython=True, cache=True, fastmath=True)
 def bessel_k0(x):

@@ -15,10 +15,14 @@ import numpy as np
 from .crs import MockCRS
 # Import BaseCRS for type hinting or direct use if necessary
 from ..core.schema import CRS as BaseCRS
+import sys
 
 # DO NOT import algorithms on the server side
 # Algorithms should only run on the client side
 
+
+if sys.platform != "linux":
+    multiprocessing.set_start_method("fork", force=True)
 mp_ctx = multiprocessing.get_context()
 
 

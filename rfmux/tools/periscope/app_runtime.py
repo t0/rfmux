@@ -1089,6 +1089,10 @@ class PeriscopeRuntime:
             if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
                 panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
             
+            # Connect data_ready signal for session auto-export
+            if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
+                panel.data_ready.connect(self.session_manager.handle_data_ready)
+            
             # Disconnect any previous signal connections to avoid multiple calls
             try:
                 self.multisweep_signals.progress.disconnect()
@@ -1155,10 +1159,14 @@ class PeriscopeRuntime:
             target_module = params.get('module')
             if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep. Please check your multisweep file."); return
             
-            if hasattr(self, 'dac_scales'): 
+            # Restore DAC scales from loaded data (same pattern as netanal)
+            if 'dac_scales_used' in load_params:
+                self.dac_scales = load_params['dac_scales_used']
+                dac_scales_for_window = self.dac_scales
+            elif hasattr(self, 'dac_scales'):
                 dac_scales_for_window = self.dac_scales
             else:
-                QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
+                QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales from file or board.")
                 return
 
             dac_scale_for_mod = load_params['dac_scales_used'][target_module]
@@ -1190,6 +1198,10 @@ class PeriscopeRuntime:
             # Connect df_calibration_ready signal if the method exists
             if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
                 panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
+            
+            # Connect data_ready signal for session auto-export
+            if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
+                panel.data_ready.connect(self.session_manager.handle_data_ready)
 
             panel._hide_progress_bars()
             iteration_params = load_params['results_by_iteration']
@@ -1207,6 +1219,19 @@ class PeriscopeRuntime:
                 direction = iteration_params[i]['direction']
                 data = iteration_params[i]['data']
                 panel.update_data(target_module, i, amplitude, direction, data, None)
+            
+            # Extract and load df_calibrations if bias_kids_output exists
+            if 'bias_kids_output' in load_params and load_params['bias_kids_output']:
+                bias_output = load_params['bias_kids_output']
+                df_calibrations = {}
+                for det_idx, det_data in bias_output.items():
+                    if 'df_calibration' in det_data:
+                        df_calibrations[det_idx] = det_data['df_calibration']
+                
+                # Load calibrations into main window
+                if df_calibrations and hasattr(self, '_handle_df_calibration_ready'):
+                    self._handle_df_calibration_ready(target_module, df_calibrations)
+                    print(f"[Session] Loaded df calibrations for {len(df_calibrations)} detectors from session file")
             
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
@@ -1312,6 +1337,9 @@ class PeriscopeRuntime:
         self.multisweep_signals.fitting_progress.connect(window_instance.handle_fitting_progress,
                                                         QtCore.Qt.ConnectionType.QueuedConnection)
 
+        # Connect data_ready signal for session auto-export
+        if hasattr(window_instance, 'data_ready') and hasattr(self, 'session_manager'):
+            window_instance.data_ready.connect(self.session_manager.handle_data_ready)
         
         task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window_instance)
         self.multisweep_tasks[old_task_key] = task

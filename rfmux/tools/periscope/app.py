@@ -2671,24 +2671,44 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._load_multisweep_analysis(data)
     
     def _load_bias_from_session(self, data: dict, file_path: str):
-        """Load bias data from session file."""
-        QtWidgets.QMessageBox.information(
-            self,
-            "Bias Data Loaded",
-            f"Loaded bias KIDs data.\n"
-            f"File: {file_path}\n\n"
-            "(Direct panel display not yet implemented)"
-        )
+        """
+        Load bias data from session file.
+        
+        Bias files contain complete multisweep data plus bias_kids_output,
+        so we load them as multisweep files. The df_calibrations will be
+        automatically loaded into the main window.
+        """
+        if 'results_by_iteration' not in data:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid Bias File",
+                f"File does not contain multisweep data:\n{file_path}\n\n"
+                "Cannot load this bias file."
+            )
+            return
+        
+        # Load as a multisweep file - this will create the panel with bias data
+        self._load_multisweep_analysis(data)
     
     def _load_noise_from_session(self, data: dict, file_path: str):
-        """Load noise spectrum data from session file."""
-        QtWidgets.QMessageBox.information(
-            self,
-            "Noise Data Loaded",
-            f"Loaded noise spectrum data.\n"
-            f"File: {file_path}\n\n"
-            "(Direct panel display not yet implemented)"
-        )
+        """
+        Load noise spectrum data from session file.
+        
+        Noise files contain complete multisweep data plus noise spectrum data,
+        so we load them as multisweep files. The noise data will be available
+        in detector digest panels.
+        """
+        if 'results_by_iteration' not in data:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid Noise File",
+                f"File does not contain multisweep data:\n{file_path}\n\n"
+                "Cannot load this noise file."
+            )
+            return
+        
+        # Load as a multisweep file - this will create the panel with noise data
+        self._load_multisweep_analysis(data)
     
     @QtCore.pyqtSlot()
     @QtCore.pyqtSlot(str)

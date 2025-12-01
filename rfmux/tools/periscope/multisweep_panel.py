@@ -32,6 +32,9 @@ class MultisweepPanel(QtWidgets.QWidget):
     
     # Signal emitted when bias_kids algorithm completes with df_calibration data
     df_calibration_ready = pyqtSignal(int, dict)  # module, {detector_idx: df_calibration}
+    
+    # Signal for session auto-export
+    data_ready = pyqtSignal(str, str, dict)  # type, identifier, data
     def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None, dark_mode=False, loaded_bias=False, is_loaded_data=False):
         """
         Initializes the MultisweepWindow.
@@ -698,6 +701,12 @@ class MultisweepPanel(QtWidgets.QWidget):
         self._check_all_complete()
         self.current_amp_label.setText("All Amplitudes Processed")
         
+        # Emit data_ready signal for session auto-export
+        if self.results_by_iteration:
+            export_data = self._prepare_export_data()
+            identifier = f"module{self.target_module}"
+            self.data_ready.emit("multisweep", identifier, export_data)
+        
     def _check_all_complete(self):
         """
         Check if all progress is at 100% and hide the progress group when analysis is complete.
@@ -788,29 +797,36 @@ class MultisweepPanel(QtWidgets.QWidget):
         if hasattr(self, 'combined_phase_plot') and self.combined_phase_plot:
             self.combined_phase_plot.setUpdatesEnabled(True)
     
+    def _prepare_export_data(self) -> dict:
+        """
+        Prepare data dictionary for export.
+        
+        Returns:
+            Dictionary containing all multisweep data for export
+        """
+        # Handle lack of noise data more gracefully
+        if self.spectrum_noise_data:
+            spectrum_data = self.spectrum_noise_data
+        else:
+            spectrum_data = None 
+            
+        return {
+            'timestamp': datetime.datetime.now().isoformat(),
+            'target_module': self.target_module,
+            'initial_parameters': self.initial_params,
+            'dac_scales_used': self.dac_scales,
+            'results_by_iteration': self.results_by_iteration,
+            'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
+            'noise_data': spectrum_data
+        }
+    
     def _handle_export_file_selected(self, filename):
         """Handle the file selection from the non-blocking dialog."""
         if not filename:
             return
             
         try:
-            # Prepare data for export
-
-            #### Adding this to handle lack of noise data more gracefully ####
-            if self.spectrum_noise_data:
-                spectrum_data = self.spectrum_noise_data
-            else:
-                spectrum_data = None 
-                
-            export_content = {
-                'timestamp': datetime.datetime.now().isoformat(),
-                'target_module': self.target_module,
-                'initial_parameters': self.initial_params,
-                'dac_scales_used': self.dac_scales,
-                'results_by_iteration': self.results_by_iteration,
-                'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
-                'noise_data': spectrum_data
-            }
+            export_content = self._prepare_export_data()
             with open(filename, 'wb') as f: # Write in binary mode for pickle
                 pickle.dump(export_content, f)
             QtWidgets.QMessageBox.information(self, "Export Complete", f"Data exported to {filename}")
@@ -1303,6 +1319,11 @@ class MultisweepPanel(QtWidgets.QWidget):
                 
                 self.spectrum_noise_data['data'] = data
                 
+                # Emit data_ready signal for session auto-export
+                export_data = self._prepare_export_data()
+                identifier = f"module{module}_noise"
+                self.data_ready.emit("noise", identifier, export_data)
+                
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", str(e))
             finally:
@@ -1726,6 +1747,12 @@ class MultisweepPanel(QtWidgets.QWidget):
         # Emit signal with df_calibration data
         if df_calibrations:
             self.df_calibration_ready.emit(module, df_calibrations)
+        
+        # Emit data_ready signal for session auto-export
+        if biased_results:
+            export_data = self._prepare_export_data()
+            identifier = f"module{module}"
+            self.data_ready.emit("bias", identifier, export_data)
         
         # Show success dialog
         num_biased = len(biased_results)

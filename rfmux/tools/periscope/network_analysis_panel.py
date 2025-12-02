@@ -13,7 +13,7 @@ from .tasks import SetCableLengthSignals # Added import
 from .dialogs import NetworkAnalysisParamsDialog, FindResonancesDialog, MultisweepDialog
 from .network_analysis_export import NetworkAnalysisExportMixin
 
-class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin):
+class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, ScreenshotMixin):
     """
     Dockable panel for displaying network analysis results with real units support.
 
@@ -88,6 +88,12 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin):
         export_btn = QtWidgets.QPushButton("Export Data")
         export_btn.clicked.connect(self._export_data)
         toolbar_global_layout.addWidget(export_btn)
+        
+        # Screenshot button
+        screenshot_btn = QtWidgets.QPushButton("📷")
+        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        screenshot_btn.clicked.connect(self._export_screenshot)
+        toolbar_global_layout.addWidget(screenshot_btn)
 
         # Edit Other Parameters button (renamed to Re-run Analysis)
         edit_params_btn = QtWidgets.QPushButton("Re-run analysis")

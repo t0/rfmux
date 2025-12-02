@@ -146,8 +146,8 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         self.tree_view.setColumnWidth(1, 60)   # Size
         self.tree_view.setColumnWidth(3, 120)  # Date Modified
         
-        # Sort by name descending (newest first due to timestamp naming)
-        self.tree_view.sortByColumn(0, QtCore.Qt.SortOrder.DescendingOrder)
+        # Sort by Date Modified descending (newest first)
+        self.tree_view.sortByColumn(3, QtCore.Qt.SortOrder.DescendingOrder)
         
         # Connect double-click
         self.tree_view.doubleClicked.connect(self._on_file_double_clicked)
@@ -296,11 +296,10 @@ class SessionBrowserPanel(QtWidgets.QWidget):
             self.status_label.setText(f"📁 {self.session_manager.session_name}")
             self.status_label.setStyleSheet("font-weight: bold; color: green;")
             
-            path = str(self.session_manager.session_path)
-            # Truncate long paths
-            if len(path) > 40:
-                path = "..." + path[-37:]
-            self.path_label.setText(path)
+            # Show parent folder + session name for clarity
+            full_path = Path(self.session_manager.session_path)
+            display_path = str(Path(full_path.parent.name) / full_path.name)
+            self.path_label.setText(display_path)
             self.path_label.setToolTip(str(self.session_manager.session_path))
         else:
             self.status_label.setText("No active session")
@@ -340,8 +339,9 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         if filter_type == "all":
             self.file_model.setNameFilters(["*.pkl"])
         else:
-            # Filter by data type in filename
-            self.file_model.setNameFilters([f"*_{filter_type}_*.pkl"])
+            # Filter by data type in filename (new format: type_identifier_HHMMSS.pkl)
+            # Also support old format for backwards compatibility
+            self.file_model.setNameFilters([f"{filter_type}_*.pkl", f"*_{filter_type}_*.pkl"])
     
     # ─────────────────────────────────────────────────────────────────
     # File Operations

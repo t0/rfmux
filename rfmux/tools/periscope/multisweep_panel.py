@@ -12,7 +12,8 @@ import time
 # Imports from within the 'periscope' subpackage
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
-    TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE
+    TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
+    ScreenshotMixin
 )
 from .detector_digest_panel import DetectorDigestPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
@@ -20,7 +21,7 @@ from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
 
 
-class MultisweepPanel(QtWidgets.QWidget):
+class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     """
     A dockable panel for displaying and interacting with multisweep analysis results.
 
@@ -138,6 +139,12 @@ class MultisweepPanel(QtWidgets.QWidget):
         self.export_btn = QtWidgets.QPushButton("Export Data")
         self.export_btn.clicked.connect(self._export_data)
         toolbar_layout.addWidget(self.export_btn)
+        
+        # Screenshot button
+        screenshot_btn = QtWidgets.QPushButton("📷")
+        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        screenshot_btn.clicked.connect(self._export_screenshot)
+        toolbar_layout.addWidget(screenshot_btn)
 
         # Re-run Multisweep Button
         self.rerun_btn = QtWidgets.QPushButton("Re-run Multisweep")
@@ -285,18 +292,6 @@ class MultisweepPanel(QtWidgets.QWidget):
             if isinstance(view_box_phase, ClickableViewBox):
                 view_box_phase.doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
 
-
-    def _get_periscope_parent(self):
-        """
-        Get the Periscope parent instance by walking up the parent hierarchy.
-        
-        Returns:
-            The Periscope instance or None if not found
-        """
-        parent = self.parent()
-        while parent and not hasattr(parent, 'crs'):
-            parent = parent.parent()
-        return parent
 
     def _toggle_trace_normalization(self, checked):
         """

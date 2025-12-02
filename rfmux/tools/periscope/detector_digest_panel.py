@@ -7,11 +7,12 @@ from PyQt6 import QtCore, QtWidgets, QtGui
 from .utils import (
     ClickableViewBox, UnitConverter, LINE_WIDTH,
     IQ_COLORS, SCATTER_COLORS, DISTINCT_PLOT_COLORS, COLORMAP_CHOICES,
-    UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE, FITTING_COLORS
+    UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE, FITTING_COLORS,
+    ScreenshotMixin
 )
 from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm, exp_bin_noise_data, PFB_SAMPLING_FREQ
 
-class DetectorDigestPanel(QtWidgets.QWidget):
+class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
     """
     A dockable panel that displays a detailed "digest" of a single detector resonance,
     including three plots: Sweep (vs freq.), Sweep (IQ plane), Bias amplitude optimization,
@@ -254,6 +255,12 @@ class DetectorDigestPanel(QtWidgets.QWidget):
         self.prev_button.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.prev_button)
         
+        # Screenshot button (left side)
+        self.screenshot_btn = QtWidgets.QPushButton("📷")
+        self.screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        self.screenshot_btn.clicked.connect(self._export_screenshot)
+        nav_layout.addWidget(self.screenshot_btn)
+
         # Title in the center
         title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
         self.title_label = QtWidgets.QLabel(title_text)
@@ -290,7 +297,7 @@ class DetectorDigestPanel(QtWidgets.QWidget):
         self.trace_hint_label = QtWidgets.QLabel(trace_hint_text)
         self.trace_hint_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; font-size: 10pt; }}")
         nav_layout.addWidget(self.trace_hint_label)
-        
+
         top_layout.addWidget(nav_widget)
         
         plots_layout = QtWidgets.QHBoxLayout()
@@ -466,6 +473,12 @@ class DetectorDigestPanel(QtWidgets.QWidget):
         self.prev_button_noise.clicked.connect(self._navigate_previous)
         self.prev_button_noise.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.prev_button_noise)
+        
+        # Screenshot button for noise tab (left side)
+        self.screenshot_btn_noise = QtWidgets.QPushButton("📷")
+        self.screenshot_btn_noise.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        self.screenshot_btn_noise.clicked.connect(self._export_screenshot)
+        nav_layout.addWidget(self.screenshot_btn_noise)
     
         title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
         self.title_label_noise = QtWidgets.QLabel(title_text)

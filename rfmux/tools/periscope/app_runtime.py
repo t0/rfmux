@@ -1153,7 +1153,10 @@ class PeriscopeRuntime:
         """
         # MultisweepWindow from .ui, MultisweepTask from .tasks, sys, traceback from .utils
         try:
-            if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep. Make sure your board is correctly setup."); return
+            # Allow loading without CRS in offline mode
+            if self.crs is None and self.host != "OFFLINE": 
+                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep. Make sure your board is correctly setup.")
+                return
             window_id = f"multisweep_window_{self.multisweep_window_count}"; self.multisweep_window_count += 1
             params = load_params['initial_parameters']
             target_module = params.get('module')
@@ -1211,8 +1214,12 @@ class PeriscopeRuntime:
 
             nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
 
-            crs = self.crs
-            asyncio.run(crs.set_nco_frequency(nco_freq, module=target_module)) #### Setting up the nco frequency ######
+            # Only set NCO frequency if CRS is available (skip in offline mode)
+            if self.crs is not None:
+                crs = self.crs
+                asyncio.run(crs.set_nco_frequency(nco_freq, module=target_module)) #### Setting up the nco frequency ######
+            else:
+                print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
             for i in range(len(iteration_params)):
                 amplitude = iteration_params[i]['amplitude']

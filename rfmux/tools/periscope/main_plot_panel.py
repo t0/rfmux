@@ -2,7 +2,7 @@
 
 from .utils import *
 
-class MainPlotPanel(QtWidgets.QWidget):
+class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
     """
     Dockable panel containing the main TOD/IQ/FFT/PSD plots for Periscope.
     
@@ -74,6 +74,12 @@ class MainPlotPanel(QtWidgets.QWidget):
         if self.periscope.is_mock_mode:
             toolbar_layout.addWidget(self.periscope.btn_reconfigure_mock)
             toolbar_layout.addWidget(self.periscope.btn_qp_pulses)
+        
+        # Add screenshot button
+        self.screenshot_btn = QtWidgets.QPushButton("📷")
+        self.screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        self.screenshot_btn.clicked.connect(self._export_screenshot)
+        toolbar_layout.addWidget(self.screenshot_btn)
         
         layout.addWidget(toolbar_widget)
     

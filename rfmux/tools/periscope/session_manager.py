@@ -345,21 +345,23 @@ class SessionManager(QtCore.QObject):
         """
         Generate a timestamped filename for data export.
         
+        Uses time-only suffix since files are already in a timestamped session folder.
+        
         Args:
             data_type: Type of data (netanal, multisweep, bias, noise)
             identifier: Additional identifier (e.g., module1, detector3)
         
         Returns:
-            Filename in format: YYYYMMDD_HHMMSS_<type>_<identifier>.pkl
+            Filename in format: <type>_<identifier>_HHMMSS.pkl
         
         Example:
             >>> session_mgr.generate_filename('netanal', 'module1')
-            '20251201_092000_netanal_module1.pkl'
+            'netanal_module1_092000.pkl'
         """
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.datetime.now().strftime("%H%M%S")
         # Clean the identifier (replace spaces with underscores)
         clean_identifier = identifier.replace(' ', '_').replace('/', '_')
-        return f"{timestamp}_{data_type}_{clean_identifier}.pkl"
+        return f"{data_type}_{clean_identifier}_{timestamp}.pkl"
     
     # ─────────────────────────────────────────────────────────────────
     # Session Query Methods
@@ -475,6 +477,8 @@ class SessionManager(QtCore.QObject):
         """
         Identify the data type of a session file from its name.
         
+        Filename format: <type>_<identifier>_HHMMSS.pkl
+        
         Args:
             file_path: Path to the file
         
@@ -484,6 +488,10 @@ class SessionManager(QtCore.QObject):
         filename = Path(file_path).name
         
         for data_type in self.DATA_TYPES:
+            # Check if filename starts with the data type
+            if filename.startswith(f'{data_type}_'):
+                return data_type
+            # Also check old format for backwards compatibility
             if f'_{data_type}_' in filename:
                 return data_type
         

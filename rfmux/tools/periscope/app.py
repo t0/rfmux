@@ -57,12 +57,22 @@ from .dock_manager import PeriscopeDockManager
 from .main_plot_panel import MainPlotPanel
 from .session_manager import SessionManager
 from .session_browser_panel import SessionBrowserPanel
-from .session_startup_dialog import SessionStartupDialog
+from .session_startup_dialog import UnifiedStartupDialog
 from rfmux.core.transferfunctions import convert_roc_to_volts
 from rfmux.mock import config as mc
 import datetime
 
 
+
+class DummyReceiver:
+    """A dummy receiver for Offline mode that provides the expected interface."""
+    def __init__(self):
+        self.queue = queue.Queue()
+    def start(self): pass
+    def stop(self): pass
+    def wait(self): pass
+    def get_dropped_packets(self): return 0
+    def get_received_packets(self): return 0
 
 class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     """
@@ -110,6 +120,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         refresh_ms: int = DEFAULT_REFRESH_MS, # Constant from .utils
         dot_px: int = DENSITY_DOT_SIZE,       # Constant from .utils
         crs=None, # CRS object, type hint likely from .utils or a core module
+        skip_startup_dialog: bool = False,  # Skip dialog if already handled by launcher
     ):
         """
         Initializes the Periscope main window.
@@ -214,8 +225,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Set initial window size (wider and taller for better visibility)
         self.resize(1400, 900)
         
-        # Show session startup dialog
-        QtCore.QTimer.singleShot(100, self._show_session_startup_dialog)
+        # Show session startup dialog (unless already handled by launcher)
+        self._skip_startup_dialog = skip_startup_dialog
+        if not skip_startup_dialog:
+            QtCore.QTimer.singleShot(100, self._show_session_startup_dialog)
 
     def _init_workers(self):
         """
@@ -338,7 +351,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.btn_init_crs = QtWidgets.QPushButton("Initialize CRS Board")
         self.btn_init_crs.setToolTip("Open a dialog to initialize the CRS board (e.g., set IRIG source).")
         self.btn_init_crs.clicked.connect(self._show_initialize_crs_dialog)
-        if self.crs is None:
+        if self.crs is None: # Disable if no CRS object is available
             self.btn_init_crs.setEnabled(False)
             self.btn_init_crs.setToolTip("CRS object not available - cannot initialize board.")
 
@@ -346,20 +359,24 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.btn_netanal.setToolTip("Open the network analysis configuration window to perform sweeps.")
         self.btn_netanal.clicked.connect(self._show_netanal_dialog)
         if self.crs is None:
-            self.btn_netanal.setEnabled(False)
-            self.btn_netanal.setToolTip("CRS object not available - network analysis disabled.")
+            # In Offline Mode, allow opening dialog to load data
+            if self.host == "OFFLINE":
+                self.btn_netanal.setToolTip("Network Analyzer (Offline Mode - Loading Only)")
+            else:
+                self.btn_netanal.setEnabled(False)
+                self.btn_netanal.setToolTip("CRS object not available - network analysis disabled.")
 
         self.btn_load_multi = QtWidgets.QPushButton("Load Multisweep")
         self.btn_load_multi.setToolTip("Load Multisweep directly from main window.")
         self.btn_load_multi.clicked.connect(self._load_multisweep_dialog)
-        if self.crs is None:
+        if self.crs is None and self.host != "OFFLINE":
             self.btn_load_multi.setEnabled(False)
             self.btn_load_multi.setToolTip("CRS object not available - load multisweep disabled.")
 
         self.btn_load_bias = QtWidgets.QPushButton("Load Bias")
         self.btn_load_bias.setToolTip("Bias KIDS directly from the main window.")
         self.btn_load_bias.clicked.connect(self.handle_bias_from_file)
-        if self.crs is None:
+        if self.crs is None and self.host != "OFFLINE":
             self.btn_load_bias.setEnabled(False)
             self.btn_load_bias.setToolTip("CRS object not available - load Bias disabled.")
 
@@ -429,8 +446,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         The `UDPReceiver` class (from .tasks) handles receiving packets
         from the specified host and module in a separate thread.
         """
-        self.receiver = UDPReceiver(self.host, self.module) # Instantiate the receiver
-        self.receiver.start()  # Start the receiver thread
+        if self.host == "OFFLINE":
+            self.receiver = DummyReceiver()
+        else:
+            self.receiver = UDPReceiver(self.host, self.module) # Instantiate the receiver
+            self.receiver.start()  # Start the receiver thread
 
     def _start_timer(self):
         """
@@ -444,7 +464,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.timer.timeout.connect(self._update_gui)   # Connect timeout signal to GUI update method
         self.timer.start(self.refresh_ms)             # Start the timer
         # Set window title with CRS serial/module info
-        if self.crs is not None and hasattr(self.crs, 'serial'):
+        if self.host == "OFFLINE":
+            title = "Periscope - Offline Mode"
+        elif self.crs is not None and hasattr(self.crs, 'serial'):
             serial = str(self.crs.serial)
             if serial == "0000":
                 title = f"Periscope - Mock CRS, Module {self.module}"
@@ -482,6 +504,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         # Add session menu
         self._create_session_menu()
+        
+        # Add view menu (contains Dark Mode)
+        self._create_view_menu()
         
         # Note: Session browser dock will be added after Main dock is created
         
@@ -807,7 +832,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         Create the 'General Display' group box for the configuration panel.
 
-        Contains checkboxes for zoom box mode, dark mode, and auto-scaling plots.
+        Contains checkboxes for zoom box mode and auto-scaling plots.
+        Note: Dark mode is now in the View menu.
 
         Returns:
             QtWidgets.QGroupBox: The configured group box.
@@ -821,13 +847,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.cb_zoom_box.setToolTip("Enable: Left-click drag creates a zoom box.\nDisable: Left-click drag pans the plot.")
         self.cb_zoom_box.toggled.connect(self._toggle_zoom_box_mode)
         layout.addWidget(self.cb_zoom_box)
-
-        # Checkbox for dark mode theme
-        self.cb_dark = QtWidgets.QCheckBox("Dark Mode", checked=self.dark_mode)
-        self.cb_dark.setToolTip("Switch between dark and light UI themes.")
-        self.cb_dark.toggled.connect(self._toggle_dark_mode) # Rebuilds layout
-        self.cb_dark.toggled.connect(self._update_console_style) # Updates console style if active
-        layout.addWidget(self.cb_dark)
 
         # Checkbox for auto-scaling plots (excluding TOD)
         self.cb_auto_scale = QtWidgets.QCheckBox("Auto Scale", checked=self.auto_scale_plots)
@@ -858,9 +877,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             area=QtCore.Qt.DockWidgetArea.LeftDockWidgetArea  # Main plots on left/center
         )
         
-        # Show the main dock immediately
-        main_dock.show()
-        main_dock.raise_()
+        # Show the main dock immediately, unless in offline mode (no data streaming)
+        if self.host != "OFFLINE":
+            main_dock.show()
+            main_dock.raise_()
+        else:
+            # In offline mode, hide main dock since there's no data streaming
+            main_dock.hide()
 
     def _add_status_bar(self):
         """
@@ -1109,20 +1132,28 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         estimations. If the user confirms the dialog with valid parameters,
         a new network analysis process is started via `_start_network_analysis`.
         """
-        if self.crs is None:
+        if self.crs is None and self.host != "OFFLINE":
             QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
             return
+            
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
         # NetworkAnalysisDialog from .ui (which imports from .dialogs)
         dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
         dialog.module_entry.setText(str(self.module))
-        # DACScaleFetcher from .tasks
-        fetcher = DACScaleFetcher(self.crs)
-        fetcher.dac_scales_ready.connect(lambda scales: dialog.dac_scales.update(scales))
-        fetcher.dac_scales_ready.connect(dialog._update_dac_scale_info)
-        fetcher.dac_scales_ready.connect(dialog._update_dbm_from_normalized)
-        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
-        fetcher.start()
+        
+        # Only fetch DAC scales if CRS is available
+        if self.crs is not None:
+            # DACScaleFetcher from .tasks
+            fetcher = DACScaleFetcher(self.crs)
+            fetcher.dac_scales_ready.connect(lambda scales: dialog.dac_scales.update(scales))
+            fetcher.dac_scales_ready.connect(dialog._update_dac_scale_info)
+            fetcher.dac_scales_ready.connect(dialog._update_dbm_from_normalized)
+            fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
+            fetcher.start()
+        else:
+            # Use defaults or empty dict if offline
+            self.dac_scales = default_dac_scales.copy()
+            
         if dialog.exec():
             self.dac_scales = dialog.dac_scales.copy()
             params = dialog.get_parameters()
@@ -1130,6 +1161,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 if "modules" in params.keys():
                     self._load_network_analysis(params)
                 else:
+                    if self.crs is None:
+                        QtWidgets.QMessageBox.warning(self, "Offline Mode", "Cannot start new network analysis without CRS hardware. Loading data only.")
+                        return
                     self._start_network_analysis(params)
 
     def _start_network_analysis(self, params: dict):
@@ -1238,9 +1272,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             params (dict): Loaded network analysis data with 'parameters' and 'modules' keys
         """
         try:
-            if self.crs is None:
+            # Allow loading without CRS in offline mode
+            if self.crs is None and self.host != "OFFLINE":
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
+                
             selected_module_param = params['parameters'].get('module')
             if selected_module_param is None:
                 modules_to_run = list(range(1, 9))
@@ -1471,12 +1507,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
         netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
         netanal_dialog.module_entry.setText(str(self.module))
-        fetcher = DACScaleFetcher(self.crs)
-        fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
-        fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
-        fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
-        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
-        fetcher.start()
+        
+        if self.crs is not None:
+            fetcher = DACScaleFetcher(self.crs)
+            fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
+            fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
+            fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
+            fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
+            fetcher.start()
+        else:
+            self.dac_scales = default_dac_scales.copy()
         
         active_module = self.module
 
@@ -1503,12 +1543,15 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 if "results_by_iteration" in params.keys():
                     self._load_multisweep_analysis(params)
                 else:
+                    if self.crs is None:
+                        QtWidgets.QMessageBox.warning(self, "Offline Mode", "Cannot start new multisweep analysis without CRS hardware. Loading data only.")
+                        return
                     self._start_multisweep_analysis(params)
     
     
     def handle_bias_from_file(self) -> None:
         """Slot for the 'Load Bias…' button in the main application window."""
-        if self.crs is None:
+        if self.crs is None and self.host != "OFFLINE":
             QtWidgets.QMessageBox.warning(self, "CRS Not Available", "Connect to a CRS before loading bias data.")
             return
 
@@ -1516,12 +1559,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
         netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
         netanal_dialog.module_entry.setText(str(self.module))
-        fetcher = DACScaleFetcher(self.crs)
-        fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
-        fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
-        fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
-        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
-        fetcher.start()
+        
+        if self.crs is not None:
+            fetcher = DACScaleFetcher(self.crs)
+            fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
+            fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
+            fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
+            fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
+            fetcher.start()
+        else:
+            self.dac_scales = default_dac_scales.copy()
         
         from .bias_kids_dialog import BiasKidsDialog
         dialog = BiasKidsDialog(self, self.module, True)
@@ -1548,13 +1595,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             QtWidgets.QMessageBox.critical(self, "Missing Module", "The file does not specify which module was biased.")
             return
 
-        if bias_freqs:
+        if bias_freqs and self.crs is not None:
             # nco_freq = ((min(bias_freqs) - span_hz / 2 + (max(bias_freqs) + span_hz / 2)) / 2
             nco_freq = (min(bias_freqs)  + max(bias_freqs)) / 2
             crs = self.crs
             asyncio.run(crs.set_nco_frequency(nco_freq, module=module)) #### Setting up the nco frequency ######
     
-        asyncio.run(self.apply_bias_output(self.crs, module, amplitudes, bias_freqs, channels, phases))
+        if self.crs is not None:
+            asyncio.run(self.apply_bias_output(self.crs, module, amplitudes, bias_freqs, channels, phases))
+        else:
+            print("[Offline] Skipping hardware bias application")
         
     async def apply_bias_output(self, crs, module: int, amplitudes: list, bias_freqs : list,
                                 channels : list, phases : list) -> None:
@@ -1621,7 +1671,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             # nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
             nco_freq = (min(reso_frequencies)  + max(reso_frequencies)) / 2
             crs = self.crs
-            asyncio.run(crs.set_nco_frequency(nco_freq, module=target_module)) #### Setting up the nco frequency ######
+            
+            if crs is not None:
+                asyncio.run(crs.set_nco_frequency(nco_freq, module=target_module)) #### Setting up the nco frequency ######
 
             ###### Setting up the bias #######
 
@@ -1652,15 +1704,17 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                         break
                 data_full[det_idx] = new_data
 
+            if crs is not None:
+                asyncio.run(self.apply_bias_output(self.crs, target_module, amplitudes, bias_freqs, channels, phases))
+                    
+                asyncio.run(self.adjust_phase(target_module, channels, data_rod))
 
-            asyncio.run(self.apply_bias_output(self.crs, target_module, amplitudes, bias_freqs, channels, phases))
-                
-            asyncio.run(self.adjust_phase(target_module, channels, data_rod))
 
-
-            print(f"[Bias] Refining the rotation")
-            self.noise_count = self.noise_count + 1
-            asyncio.run(self.adjust_phase(target_module, channels, data_rod, True))
+                print(f"[Bias] Refining the rotation")
+                self.noise_count = self.noise_count + 1
+                asyncio.run(self.adjust_phase(target_module, channels, data_rod, True))
+            else:
+                print("[Offline] Skipping hardware bias application and phase adjustment")
             
             ##### Plotting the bias #######
 
@@ -1998,7 +2052,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
                     # If QP pulses are currently active, re-apply the same mode with updated parameters
                     try:
-                        if hasattr(self.crs, "set_pulse_mode") and getattr(self, "qp_pulse_mode", "none") in ("periodic", "random"):
+                        if self.crs is not None and hasattr(self.crs, "set_pulse_mode") and getattr(self, "qp_pulse_mode", "none") in ("periodic", "random"):
                             try:
                                 cfg = mc.apply_overrides(self.mock_config) if self.mock_config else mc.defaults()
                             except Exception:
@@ -2074,6 +2128,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             return
         
+        # Capture reference to avoid closure issues
+        crs = self.crs
+        
         # Run the async pulse mode setting in a separate thread
         import asyncio
         import threading
@@ -2096,7 +2153,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     self.qp_pulse_mode = 'periodic'
                     
                     # Configure periodic pulses using unified config
-                    loop.run_until_complete(self.crs.set_pulse_mode(
+                    loop.run_until_complete(crs.set_pulse_mode(
                         'periodic',
                         period=cfg.get('pulse_period', 10.0),
                         tau_rise=cfg.get('pulse_tau_rise', 1e-6),
@@ -2118,7 +2175,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     self.qp_pulse_mode = 'random'
                     
                     # Configure random pulses using unified config
-                    loop.run_until_complete(self.crs.set_pulse_mode(
+                    loop.run_until_complete(crs.set_pulse_mode(
                         'random',
                         probability=cfg.get('pulse_probability', 0.001),
                         tau_rise=cfg.get('pulse_tau_rise', 1e-6),
@@ -2146,7 +2203,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     self.qp_pulse_mode = 'none'
                     
                     # Disable pulses
-                    loop.run_until_complete(self.crs.set_pulse_mode('none'))
+                    loop.run_until_complete(crs.set_pulse_mode('none'))
                     try:
                         if self.mock_config is None:
                             self.mock_config = mc.defaults()
@@ -2242,6 +2299,21 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             f"Failed to set pulse mode.\n\nError: {error_msg}"
         )
     
+    def _create_view_menu(self):
+        """
+        Create the View menu for display settings like dark mode.
+        """
+        view_menu = self.menuBar().addMenu("&View")
+        
+        # Dark Mode toggle action
+        self.dark_mode_action = QtGui.QAction("&Dark Mode", self)
+        self.dark_mode_action.setCheckable(True)
+        self.dark_mode_action.setChecked(self.dark_mode)
+        self.dark_mode_action.setToolTip("Switch between dark and light UI themes")
+        self.dark_mode_action.triggered.connect(self._toggle_dark_mode)
+        self.dark_mode_action.triggered.connect(self._update_console_style)
+        view_menu.addAction(self.dark_mode_action)
+
     def _create_window_menu(self):
         """
         Create the Window menu for managing dockable analysis panels.
@@ -2523,25 +2595,66 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     
     def _show_session_startup_dialog(self):
         """
-        Show the session startup dialog to prompt user for session choice.
+        Show the unified startup dialog to configure connection and session.
         
-        This is shown automatically when Periscope launches.
+        This is shown automatically when Periscope launches, unless a session
+        has already been configured (e.g., from command-line launch).
         """
-        dialog = SessionStartupDialog(self)
+        # Skip dialog if session is already active or configured
+        # (e.g., when launched via command-line with startup dialog)
+        if self.session_manager.is_active:
+            return
+        
+        dialog = UnifiedStartupDialog(self)
         if dialog.exec():
-            choice = dialog.get_choice()
+            config = dialog.get_configuration()
             
-            if choice == SessionStartupDialog.START_NEW:
-                # Start new session
-                self._start_new_session()
-            elif choice == SessionStartupDialog.LOAD_EXISTING:
+            # Handle connection mode
+            connection_mode = config['connection_mode']
+            session_mode = config['session_mode']
+            
+            # For now, just handle session management
+            # TODO: In the future, implement offline mode and use the IP/module from config
+            
+            if session_mode == UnifiedStartupDialog.SESS_NEW:
+                # Start new session with provided path and folder name
+                try:
+                    self.session_manager.start_session(
+                        config['session_path'], 
+                        config['session_folder_name']
+                    )
+                    # Show the session browser dock
+                    if hasattr(self, 'session_browser_dock'):
+                        self.session_browser_dock.show()
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "Session Error",
+                        f"Failed to start session:\n{str(e)}"
+                    )
+            elif session_mode == UnifiedStartupDialog.SESS_LOAD:
                 # Load existing session
-                self._load_session()
-            elif choice == SessionStartupDialog.NO_SESSION:
+                success = self.session_manager.load_session(config['session_path'])
+                if success:
+                    # Show the session browser dock
+                    if hasattr(self, 'session_browser_dock'):
+                        self.session_browser_dock.show()
+                else:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Load Session Failed",
+                        f"Could not load session from:\n{config['session_path']}"
+                    )
+            elif session_mode == UnifiedStartupDialog.SESS_NONE:
                 # Continue without session - disable auto-export
                 self.session_manager.auto_export_enabled = False
                 self.auto_export_action.setChecked(False)
                 print("[Session] Continuing without session (auto-export disabled)")
+            
+            # TODO: Handle connection mode (CONN_OFFLINE, etc.)
+            if connection_mode == UnifiedStartupDialog.CONN_OFFLINE:
+                print("[Connection] Offline mode selected - feature not yet implemented")
+                # Future: Initialize in offline mode, disable CRS-dependent features
     
     def _toggle_auto_export(self, checked: bool):
         """
@@ -2712,7 +2825,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     
     @QtCore.pyqtSlot()
     @QtCore.pyqtSlot(str)
-    def _update_session_status(self, session_path: str = None):
+    def _update_session_status(self, session_path: str | None = None):
         """
         Update the status bar with session information.
         

@@ -13,38 +13,43 @@ The DockManager enables:
 - Tiling docks horizontally or vertically
 - Floating/docking operations
 - Cleanup and removal of docks
+- Screenshot export of panel contents
 """
 
 from PyQt6 import QtCore, QtWidgets, QtGui
 from PyQt6.QtCore import Qt
 from typing import Dict, List, Optional
+import datetime
+import os
 
 
 class RenamableDockWidget(QtWidgets.QDockWidget):
     """
-    Custom QDockWidget that allows users to rename it via right-click context menu.
+    Custom QDockWidget that allows users to rename it via double-click on the title bar.
+    
+    Double-click on the title bar (when floating or docked alone) triggers the rename dialog.
+    For tabified docks, the PeriscopeDockManager handles double-click on the tab bar.
     """
     
     def __init__(self, title: str, parent: QtWidgets.QWidget = None):
         super().__init__(title, parent)
         
-    def contextMenuEvent(self, event: QtGui.QContextMenuEvent):
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent):
         """
-        Handle right-click context menu on the dock title bar.
+        Handle double-click on the dock title bar to trigger rename.
         
-        Adds a "Rename" option to the context menu.
+        Only triggers rename if the click is on the title bar area (top ~30 pixels),
+        not on the content area.
         """
-        # Create context menu
-        menu = QtWidgets.QMenu(self)
+        # Get the title bar height - approximate or use actual if available
+        title_bar_height = 30  # Typical title bar height
         
-        # Add rename action
-        rename_action = menu.addAction("Rename Tab...")
-        
-        # Show menu and get selected action
-        action = menu.exec(event.globalPos())
-        
-        if action == rename_action:
+        # Check if click is in the title bar area
+        if event.position().y() < title_bar_height:
             self._show_rename_dialog()
+        else:
+            # Pass to parent for normal handling
+            super().mouseDoubleClickEvent(event)
     
     def _show_rename_dialog(self):
         """Show a dialog to rename the dock widget."""
@@ -64,7 +69,7 @@ class RenamableDockWidget(QtWidgets.QDockWidget):
             self.setWindowTitle(new_title.strip())
 
 
-class PeriscopeDockManager:
+class PeriscopeDockManager(QtCore.QObject):
     """
     Manages the lifecycle and organization of dock widgets in Periscope.
     
@@ -84,9 +89,76 @@ class PeriscopeDockManager:
         Args:
             main_window: The main Periscope QMainWindow instance
         """
+        super().__init__(main_window)
         self.main_window = main_window
         self.dock_widgets: Dict[str, QtWidgets.QDockWidget] = {}
         self.dock_counter = 0
+        self._monitored_tab_bars: set = set()
+        
+        # Install event filter on main window to detect tab bar creation
+        self.main_window.installEventFilter(self)
+        
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        """
+        Event filter to handle tab bar double-clicks for rename.
+        
+        Also monitors for child events to detect new tab bars.
+        """
+        # Handle tab bar double-click
+        if isinstance(obj, QtWidgets.QTabBar):
+            if event.type() == QtCore.QEvent.Type.MouseButtonDblClick:
+                mouse_event = event
+                tab_index = obj.tabAt(mouse_event.position().toPoint())
+                if tab_index >= 0:
+                    self._rename_tab_at_index(obj, tab_index)
+                    return True
+        
+        # Monitor for new child widgets (to detect tab bars)
+        if obj == self.main_window and event.type() == QtCore.QEvent.Type.ChildAdded:
+            # Use a timer to check for tab bars after the event is processed
+            QtCore.QTimer.singleShot(100, self._scan_for_tab_bars)
+        
+        return False
+    
+    def _scan_for_tab_bars(self):
+        """Scan for any new QTabBar widgets in the main window and install event filter."""
+        for tab_bar in self.main_window.findChildren(QtWidgets.QTabBar):
+            if id(tab_bar) not in self._monitored_tab_bars:
+                tab_bar.installEventFilter(self)
+                self._monitored_tab_bars.add(id(tab_bar))
+    
+    def _rename_tab_at_index(self, tab_bar: QtWidgets.QTabBar, index: int):
+        """
+        Rename the dock widget corresponding to a tab at the given index.
+        
+        Args:
+            tab_bar: The QTabBar containing the tab
+            index: The index of the tab to rename
+        """
+        # Get the tab text (current title)
+        current_title = tab_bar.tabText(index)
+        
+        # Show input dialog
+        new_title, ok = QtWidgets.QInputDialog.getText(
+            self.main_window,
+            "Rename Tab",
+            "Enter new name for this tab:",
+            QtWidgets.QLineEdit.EchoMode.Normal,
+            current_title
+        )
+        
+        # Update title if user confirmed and provided non-empty text
+        if ok and new_title.strip():
+            new_title = new_title.strip()
+            # Update the tab text
+            tab_bar.setTabText(index, new_title)
+            
+            # Also update the corresponding dock widget's window title
+            # Find the dock by matching the old title
+            for dock in self.dock_widgets.values():
+                if dock.windowTitle() == current_title:
+                    dock.setWindowTitle(new_title)
+                    break
         
     def create_dock(self, 
                    widget: QtWidgets.QWidget, 
@@ -152,6 +224,9 @@ class PeriscopeDockManager:
         
         # Store in tracking dictionary
         self.dock_widgets[unique_id] = dock
+        
+        # Scan for any new tab bars after adding dock
+        QtCore.QTimer.singleShot(100, self._scan_for_tab_bars)
         
         return dock
     
@@ -238,6 +313,9 @@ class PeriscopeDockManager:
         # Tabify them together (first dock becomes the base)
         for i in range(1, len(docks)):
             self.main_window.tabifyDockWidget(docks[0], docks[i])
+        
+        # Scan for any new tab bars after tabifying
+        QtCore.QTimer.singleShot(100, self._scan_for_tab_bars)
         
         return True
     
@@ -326,6 +404,125 @@ class PeriscopeDockManager:
         dock_ids = list(self.dock_widgets.keys())
         for dock_id in dock_ids:
             self.remove_dock(dock_id)
+    
+    def export_screenshot(self, dock_id: str, filepath: str = None, 
+                          session_manager=None, scale: int = 2) -> Optional[str]:
+        """
+        Export a screenshot of a dock widget's content as PNG with high DPI support.
+        
+        Args:
+            dock_id: The unique identifier of the dock to screenshot
+            filepath: Optional explicit filepath. If None and session_manager is provided,
+                     auto-generates path in session folder. If both are None, prompts user.
+            session_manager: Optional SessionManager for auto-export to session folder
+            scale: Resolution scale factor (default 2 for 2x resolution)
+            
+        Returns:
+            The filepath where the screenshot was saved, or None if user dialog is shown
+            (async) or if cancelled/failed. When a dialog is shown, the screenshot is
+            saved via callback and this method returns None immediately.
+        """
+        dock = self.get_dock(dock_id)
+        if not dock:
+            return None
+        
+        # Get the content widget
+        widget = dock.widget()
+        if not widget:
+            return None
+        
+        # Generate filename based on dock title and timestamp
+        dock_title = dock.windowTitle()
+        # Clean the title for use as filename
+        clean_title = "".join(c if c.isalnum() or c in " _-" else "_" for c in dock_title)
+        clean_title = clean_title.replace(" ", "_")
+        timestamp = datetime.datetime.now().strftime("%H%M%S")
+        filename = f"screenshot_{clean_title}_{timestamp}.png"
+        
+        # Determine filepath
+        if filepath is None:
+            if session_manager is not None and session_manager.session_path:
+                # Auto-save to session folder
+                filepath = os.path.join(session_manager.session_path, filename)
+            else:
+                # Prompt user for location with non-blocking dialog
+                # Store state for the callback
+                self._pending_screenshot_widget = widget
+                self._pending_screenshot_scale = scale
+                
+                # Create non-blocking file dialog (prevents hanging on Linux)
+                dlg = QtWidgets.QFileDialog(self.main_window, "Save Screenshot")
+                dlg.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
+                dlg.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
+                dlg.setNameFilters(["PNG Images (*.png)", "All Files (*)"])
+                dlg.setDefaultSuffix("png")
+                dlg.selectFile(filename)
+                
+                # Connect signal for handling file selection
+                dlg.fileSelected.connect(self._handle_screenshot_file_selected)
+                
+                # Show the dialog non-modally (returns immediately, doesn't block)
+                dlg.open()
+                return None  # Return immediately, save happens in callback
+        
+        # Capture the widget as a high-DPI pixmap (synchronous path)
+        return self._save_screenshot(widget, filepath, scale)
+    
+    def _handle_screenshot_file_selected(self, filepath: str):
+        """
+        Handle file selection from the non-blocking screenshot dialog.
+        
+        Args:
+            filepath: The path selected by the user
+        """
+        if not filepath:
+            return
+        
+        widget = getattr(self, '_pending_screenshot_widget', None)
+        scale = getattr(self, '_pending_screenshot_scale', 2)
+        
+        if widget:
+            self._save_screenshot(widget, filepath, scale)
+        
+        # Clean up state
+        self._pending_screenshot_widget = None
+        self._pending_screenshot_scale = 2
+    
+    def _save_screenshot(self, widget: QtWidgets.QWidget, filepath: str, scale: int) -> Optional[str]:
+        """
+        Save a screenshot of a widget to a file.
+        
+        Args:
+            widget: The widget to capture
+            filepath: Path to save the PNG file
+            scale: Resolution scale factor
+            
+        Returns:
+            The filepath if successful, None on failure
+        """
+        try:
+            size = widget.size()
+            # Create a pixmap at the scaled resolution
+            pixmap = QtGui.QPixmap(size.width() * scale, size.height() * scale)
+            pixmap.setDevicePixelRatio(scale)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            
+            # Render the widget to the pixmap
+            painter = QtGui.QPainter(pixmap)
+            widget.render(painter)
+            painter.end()
+            
+            pixmap.save(filepath, "PNG")
+            print(f"[Screenshot] Saved: {filepath} ({size.width() * scale}x{size.height() * scale} px)")
+            return filepath
+        except Exception as e:
+            print(f"[Screenshot] Error saving screenshot: {e}")
+            QtWidgets.QMessageBox.warning(
+                self.main_window,
+                "Screenshot Error",
+                f"Failed to save screenshot:\n{str(e)}"
+            )
+            return None
     
     def _on_dock_visibility_changed(self, dock_id: str, visible: bool) -> None:
         """

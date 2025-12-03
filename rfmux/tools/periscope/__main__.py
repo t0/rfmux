@@ -55,13 +55,15 @@ def main():
     The application runs in a blocking mode until the GUI is closed.
 
     The application can be launched in two ways:
-    - After installation with pip: `periscope <crs_board> [options]`
-    - As a Python module: `python -m rfmux.tools.periscope <crs_board> [options]`
+    - After installation with pip: `periscope [crs_board] [options]`
+    - As a Python module: `python -m rfmux.tools.periscope [crs_board] [options]`
 
     The CRS board identifier can be specified in three formats:
     - A hostname in the format rfmux####.local (e.g., "rfmux0042.local")
     - Just the serial number (e.g., "0042") 
     - A direct IP address (e.g., "192.168.2.100")
+    
+    If no arguments are provided, a configuration dialog will be shown.
     """
     # --- Argument Parsing ---
     # Set up command-line argument parsing with a detailed description and examples.
@@ -108,15 +110,83 @@ def main():
         Run with -h / --help for the full option list.
     """))
 
-    ap.add_argument("crs_board", metavar="CRS_BOARD", 
+    ap.add_argument("crs_board", metavar="CRS_BOARD", nargs='?',
                     help="CRS board identifier: can be a hostname (rfmux####.local), "
-                         "a serial number (####), an IP address, or 'MOCK' for demo mode")
+                         "a serial number (####), an IP address, or 'MOCK' for demo mode. "
+                         "If omitted, a configuration dialog will be shown.")
     ap.add_argument("-m", "--module", type=int, default=1)
     ap.add_argument("-c", "--channels", default="1")
     ap.add_argument("-n", "--num-samples", type=int, default=DEFAULT_BUFFER_SIZE)
     ap.add_argument("-f", "--fps", type=float, default=30.0)
     ap.add_argument("-d", "--density-dot", type=int, default=DENSITY_DOT_SIZE)
     args = ap.parse_args()
+    
+    # Initialize Qt application first for the dialog
+    app = QtWidgets.QApplication(sys.argv[:1])
+    app_icon = QIcon(ICON_PATH)
+    app.setWindowIcon(app_icon)
+    
+    # Import the unified startup dialog
+    from .session_startup_dialog import UnifiedStartupDialog
+    
+    # Build pre-fill values from command-line arguments
+    prefill = {}
+    if args.crs_board is not None:
+        crs_board = args.crs_board
+        
+        # Determine connection mode from CLI arg
+        if crs_board.upper() == "MOCK":
+            prefill['connection_mode'] = UnifiedStartupDialog.CONN_MOCK
+        elif crs_board.upper() == "OFFLINE":
+            prefill['connection_mode'] = UnifiedStartupDialog.CONN_OFFLINE
+        else:
+            prefill['connection_mode'] = UnifiedStartupDialog.CONN_HARDWARE
+            # Extract serial from various formats
+            if "rfmux" in crs_board and ".local" in crs_board:
+                # Format: rfmux0042.local
+                serial = crs_board.replace("rfmux", "").replace(".local", "")
+                prefill['crs_serial'] = serial
+            elif crs_board.isdigit() or (crs_board.startswith("0") and len(crs_board) > 1 and crs_board[1:].isdigit()):
+                # Format: 0042 or 42
+                prefill['crs_serial'] = crs_board
+            else:
+                # Direct hostname/IP - use as serial
+                prefill['crs_serial'] = crs_board
+        
+        prefill['module'] = args.module
+    
+    # Show the startup dialog with pre-filled values
+    dialog = UnifiedStartupDialog(None, prefill=prefill if prefill else None)
+    
+    if not dialog.exec():
+        # User cancelled - exit
+        sys.exit(0)
+    
+    # Get configuration from dialog
+    config = dialog.get_configuration()
+    
+    # Override command-line args with dialog values
+    connection_mode = config['connection_mode']
+    
+    if connection_mode == UnifiedStartupDialog.CONN_HARDWARE:
+        args.crs_board = config.get('crs_serial', '0042')  # Use serial from dialog
+        args.module = config.get('module', 1)
+    elif connection_mode == UnifiedStartupDialog.CONN_MOCK:
+        args.crs_board = "MOCK"
+        args.module = config.get('module', 1)
+    elif connection_mode == UnifiedStartupDialog.CONN_OFFLINE:
+        # Offline mode - disable hardware connection
+        print("[Periscope] Starting in Offline Mode")
+        args.crs_board = "OFFLINE"
+        args.module = 1
+    
+    # Store session configuration for later use
+    session_mode = config['session_mode']
+    session_config = {
+        'mode': session_mode,
+        'path': config.get('session_path'),
+        'folder_name': config.get('session_folder_name')
+    }
 
     if args.fps <= 0:
         ap.error("FPS must be positive.")
@@ -126,13 +196,6 @@ def main():
         ap.error("Density-dot size must be ≥1 pixel.")
 
     refresh_ms = int(round(1000.0 / args.fps))
-    # Initialize the Qt application. sys.argv[:1] is used to prevent Qt
-    # from trying to parse Periscope's own command-line arguments.
-    app = QtWidgets.QApplication(sys.argv[:1])
-    
-    # Set the application icon. ICON_PATH is imported from .utils.
-    app_icon = QIcon(ICON_PATH)
-    app.setWindowIcon(app_icon)
 
     # --- Global Exception Hook Setup ---
     # Installs a global exception hook to catch any unhandled exceptions
@@ -262,11 +325,14 @@ def main():
     # Special handling for MOCK mode - always use localhost
     if args.crs_board.upper() == "MOCK":
         udp_hostname = "127.0.0.1"
+    elif args.crs_board.upper() == "OFFLINE":
+        udp_hostname = "OFFLINE"
     elif args.crs_board.isdigit() or (args.crs_board.startswith("0") and args.crs_board[1:].isdigit()):
         # If it's just a serial number, construct the proper hostname
         udp_hostname = f"rfmux{args.crs_board}.local"
         
     # Create the main Periscope window instance with configured parameters.
+    # Skip the startup dialog if session_config was already set by the launcher dialog
     viewer = Periscope(
         host=udp_hostname,
         module=args.module,
@@ -274,12 +340,54 @@ def main():
         buf_size=args.num_samples,
         refresh_ms=refresh_ms,
         dot_px=args.density_dot,
-        crs=crs_obj  # Pass the CRS object
+        crs=crs_obj,  # Pass the CRS object
+        skip_startup_dialog=(session_config is not None),  # Skip dialog if already shown
     )
     
     # Store the initial mock configuration if in mock mode
     if is_mock and initial_mock_config is not None:
         viewer.mock_config = initial_mock_config
+    
+    # Apply session configuration from the startup dialog if provided
+    if session_config is not None:
+        from .session_startup_dialog import UnifiedStartupDialog
+        session_mode = session_config['mode']
+        
+        if session_mode == UnifiedStartupDialog.SESS_NEW:
+            # Start new session
+            try:
+                viewer.session_manager.start_session(
+                    session_config['path'],
+                    session_config['folder_name']
+                )
+                # Show the session browser dock
+                if hasattr(viewer, 'session_browser_dock'):
+                    viewer.session_browser_dock.show()
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    viewer,
+                    "Session Error",
+                    f"Failed to start session:\n{str(e)}"
+                )
+        elif session_mode == UnifiedStartupDialog.SESS_LOAD:
+            # Load existing session
+            success = viewer.session_manager.load_session(session_config['path'])
+            if success:
+                # Show the session browser dock
+                if hasattr(viewer, 'session_browser_dock'):
+                    viewer.session_browser_dock.show()
+            else:
+                QtWidgets.QMessageBox.warning(
+                    viewer,
+                    "Load Session Failed",
+                    f"Could not load session from:\n{session_config['path']}"
+                )
+        elif session_mode == UnifiedStartupDialog.SESS_NONE:
+            # Continue without session - disable auto-export
+            viewer.session_manager.auto_export_enabled = False
+            viewer.auto_export_action.setChecked(False)
+            print("[Session] Continuing without session (auto-export disabled)")
+    
     # --- Application Execution ---
     # Set the icon for the main Periscope window, show it, and start the Qt event loop.
     # sys.exit(app.exec()) ensures that the application's exit code is propagated.

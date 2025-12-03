@@ -14,7 +14,10 @@ from .dialogs import ( # Assuming periscope_dialogs.py becomes dialogs.py
 )
 # network_analysis_window.py and multisweep_window.py are sibling modules now
 from .network_analysis_window import NetworkAnalysisWindow
+from .network_analysis_panel import NetworkAnalysisPanel
 from .multisweep_window import MultisweepWindow
+from .multisweep_panel import MultisweepPanel
+from .detector_digest_panel import DetectorDigestPanel
 
 __all__ = [
     # From dialogs.py
@@ -25,9 +28,12 @@ __all__ = [
     "FindResonancesDialog",
     "MultisweepDialog",
     
-    # From window files
+    # From window/panel files
     "NetworkAnalysisWindow",
+    "NetworkAnalysisPanel",
     "MultisweepWindow",
+    "MultisweepPanel",
+    "DetectorDigestPanel",
 
     # Potentially re-exporting things from .utils or .tasks if they are considered part of the UI's public API
     # For example, if UI elements directly use constants from .utils:

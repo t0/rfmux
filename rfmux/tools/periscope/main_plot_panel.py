@@ -70,17 +70,6 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
             toolbar_layout.addWidget(cb)
         toolbar_layout.addStretch(1)
         
-        # Add mock-specific buttons if in mock mode
-        if self.periscope.is_mock_mode:
-            toolbar_layout.addWidget(self.periscope.btn_reconfigure_mock)
-            toolbar_layout.addWidget(self.periscope.btn_qp_pulses)
-        
-        # Add screenshot button
-        self.screenshot_btn = QtWidgets.QPushButton("📷")
-        self.screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
-        self.screenshot_btn.clicked.connect(self._export_screenshot)
-        toolbar_layout.addWidget(self.screenshot_btn)
-        
         layout.addWidget(toolbar_widget)
     
     def _add_config_panel(self, layout):
@@ -99,6 +88,18 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
         action_buttons_layout.addWidget(self.periscope.btn_load_bias)
         action_buttons_layout.addWidget(self.periscope.btn_toggle_cfg)
         action_buttons_layout.addWidget(self.periscope.btn_help)
+        
+        # Add mock-specific buttons if in mock mode
+        if self.periscope.is_mock_mode:
+            action_buttons_layout.addWidget(self.periscope.btn_reconfigure_mock)
+            action_buttons_layout.addWidget(self.periscope.btn_qp_pulses)
+        
+        # Add screenshot button
+        self.screenshot_btn = QtWidgets.QPushButton("📷")
+        self.screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        self.screenshot_btn.clicked.connect(self._export_screenshot)
+        action_buttons_layout.addWidget(self.screenshot_btn)
+        
         layout.addWidget(action_buttons_widget)
 
         # Add the collapsible configuration panel

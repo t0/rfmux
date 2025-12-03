@@ -50,6 +50,9 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.faux_resonance_legend_items_phase = {} # For Req 3
         self.dark_mode = dark_mode  # Store dark mode setting
         self.is_loaded_data = is_loaded_data  # Track if this is from loaded data
+        
+        # Track last session export filename for overwriting
+        self._last_export_filename: Optional[str] = None
 
         # Initialize signals for SetCableLengthTask
         self.set_cable_length_signals = SetCableLengthSignals()
@@ -750,6 +753,13 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             self._update_resonance_legend_entry(active_module) 
             self._toggle_resonances_visible(self.show_resonances_cb.isChecked()) 
         self._update_multisweep_button_state(active_module)
+        
+        # Emit data_ready signal for session auto-export after finding resonances
+        # Include filename override if this panel has exported before (to update existing file)
+        export_data = self.build_export_dict()  # Use inherited method from mixin
+        if self._last_export_filename:
+            export_data['_filename_override'] = self._last_export_filename
+        self.data_ready.emit(export_data)
         
     def _use_loaded_resonances(self, active_module: int, load_resonance_freqs: list):
         if active_module in self.plots:

@@ -188,7 +188,7 @@ class SessionManager(QtCore.QObject):
         # Emit signal
         self.session_started.emit(str(session_path))
         
-        print(f"[Session] Started new session: {session_path}")
+        #print(f"[Session] Started new session: {session_path}")
         return session_path
     
     def load_session(self, session_path: str) -> bool:
@@ -239,7 +239,7 @@ class SessionManager(QtCore.QObject):
         # Emit signal
         self.session_started.emit(str(path))
         
-        print(f"[Session] Loaded session: {path}")
+        #print(f"[Session] Loaded session: {path}")
         return True
     
     def end_session(self):
@@ -274,24 +274,35 @@ class SessionManager(QtCore.QObject):
     # Data Export Methods
     # ─────────────────────────────────────────────────────────────────
     
-    def export_data(self, data_type: str, identifier: str, data: Dict[str, Any]) -> Optional[Path]:
+    def export_data(self, data_type: str, identifier: str, data: Dict[str, Any], 
+                    filename_override: Optional[str] = None) -> Optional[Path]:
         """
         Export data to the session folder with timestamped filename.
         
         This is the main method for exporting analysis data. It generates
         a timestamped filename and saves the data as a pickle file.
         
+        If filename_override is provided, that filename is used instead of
+        generating a new one. This enables natural file overwriting when
+        a panel re-exports updated data (e.g., after Find Resonances).
+        
         Args:
             data_type: Type of data being exported (netanal, multisweep, bias, noise)
             identifier: Additional identifier (e.g., 'module1', 'module1_det3')
             data: Dictionary of data to export
+            filename_override: If provided, use this filename instead of generating
+                              a new timestamped one. Enables natural overwriting.
         
         Returns:
             Path to the exported file, or None if session not active or export disabled
         
         Example:
             >>> session_mgr.export_data('netanal', 'module1', netanal_data)
-            Path('/data/session_20251201/20251201_092000_netanal_module1.pkl')
+            Path('/data/session_20251201/netanal_module1_092000.pkl')
+            
+            # Re-export with same filename to overwrite:
+            >>> session_mgr.export_data('netanal', 'module1', updated_data, 
+            ...                         filename_override='netanal_module1_092000.pkl')
         """
         if not self.is_active or self._session_path is None:
             print(f"[Session] No active session - skipping export of {data_type}")
@@ -301,8 +312,13 @@ class SessionManager(QtCore.QObject):
             print(f"[Session] Auto-export disabled - skipping export of {data_type}")
             return None
         
-        # Generate filename
-        filename = self.generate_filename(data_type, identifier)
+        # Use override filename if provided, otherwise generate new one
+        if filename_override:
+            filename = filename_override
+            is_overwrite = True
+        else:
+            filename = self.generate_filename(data_type, identifier)
+            is_overwrite = False
         file_path = self._session_path / filename
         
         # Add export metadata to the data
@@ -334,7 +350,7 @@ class SessionManager(QtCore.QObject):
             self.file_exported.emit(str(file_path), data_type)
             self.session_updated.emit()
             
-            print(f"[Session] Exported: {filename}")
+            #print(f"[Session] Exported: {filename}")
             return file_path
             
         except Exception as e:

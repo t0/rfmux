@@ -223,7 +223,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._start_timer()
         
         # Set initial window size (wider and taller for better visibility)
-        self.resize(1400, 900)
+        self.resize(1400, 450)
         
         # Show session startup dialog (unless already handled by launcher)
         self._skip_startup_dialog = skip_startup_dialog
@@ -1239,8 +1239,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 QtCore.Qt.ConnectionType.QueuedConnection)
             
             # Connect data_ready signal for session auto-export
+            # Use default arg to capture panel reference for filename storage
             panel.data_ready.connect(
-                lambda data: self._handle_netanal_data_ready(modules_to_run, data)
+                lambda data, p=panel: self._handle_netanal_data_ready(modules_to_run, data, panel=p)
             )
             
             amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)])
@@ -1829,26 +1830,38 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """Slot for network analysis error signals. Displays a critical message box."""
         QtWidgets.QMessageBox.critical(self, "Network Analysis Error", error_msg)
     
-    def _handle_netanal_data_ready(self, modules: list, data: dict):
+    def _handle_netanal_data_ready(self, modules: list, data: dict, panel=None):
         """
         Handle data_ready signal from NetworkAnalysisPanel for session auto-export.
-        
+
         Args:
             modules: List of module IDs that were analyzed
-            data: Full export data dictionary
+            data: Full export data dictionary (may contain '_filename_override' key)
+            panel: Optional reference to the NetworkAnalysisPanel for storing export filename
         """
         if not self.session_manager.is_active or not self.session_manager.auto_export_enabled:
             return
-        
+
         # Create identifier from module list
         if len(modules) == 1:
             identifier = f"module{modules[0]}"
         else:
             identifier = f"modules_{'_'.join(map(str, modules))}"
-        
+
+        # Extract filename override if present (for overwriting previous export)
+        filename_override = data.pop('_filename_override', None)
+
         # Export via session manager
-        self.session_manager.export_data('netanal', identifier, data)
-        print(f"[Session] Auto-exported network analysis: {identifier}")
+        exported_path = self.session_manager.export_data(
+            'netanal', identifier, data, filename_override=filename_override
+        )
+        
+        # Store the exported filename on the panel for future overwrites
+        if exported_path and panel and hasattr(panel, '_last_export_filename'):
+            panel._last_export_filename = exported_path.name
+        
+        action = "updated" if filename_override else "exported"
+        print(f"[Session] Auto-{action} network analysis: {identifier}")
 
     def _crs_init_success(self, message: str):
         """Slot for CRS initialization success signals. Displays an information message box."""

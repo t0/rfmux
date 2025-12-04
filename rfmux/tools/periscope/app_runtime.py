@@ -4,6 +4,12 @@ from .utils import *
 from .tasks import *
 from .ui import *
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch, AsyncMock
+from contextlib import contextmanager
+import inspect
+import ast
+from .extract_params import ParamKeyExtractor
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
@@ -1328,3 +1334,480 @@ class PeriscopeRuntime:
         
         # sim_speed = delta_sim_time / delta_real_time
         return sim_elapsed / real_elapsed
+
+    @contextmanager
+    def _ui_mock_context(self):
+        """
+        Mock all dialogs, windows, tasks, and signals used by Periscope UI helpers.
+
+        This context manager replaces Qt dialogs, background tasks, and signal
+        classes with lightweight :class:`unittest.mock.MagicMock` instances so UI
+        entry points can be invoked without spinning up threads or opening
+        windows. It is intended for quick smoke-testing of control flow.
+        """
+
+        from importlib import import_module
+
+        periscope_app = import_module("rfmux.tools.periscope.app")
+        utils_mod = import_module("rfmux.tools.periscope.utils")
+
+        def _assert_param_keys(expected_dict: dict, module_path: str, class_name: str):
+            """Ensure mock parameter keys match the dialog's real `get_parameters` keys."""
+        
+            extractor = ParamKeyExtractor(module_path, class_name)
+            actual_keys = extractor.extract()
+            expected_keys = set(expected_dict.keys())
+                
+            # Continue with strict mismatch check
+            if actual_keys != expected_keys:
+                missing = expected_keys - actual_keys
+                unexpected = actual_keys - expected_keys
+                raise AssertionError(
+                    f"Mock parameter keys for {class_name} do not match test dialog. "
+                    f"Missing from actual: {sorted(missing)} Actual Key is: {sorted(unexpected)}"
+                )
+                
+
+        default_resonances = (
+            self.resonance_freqs.get(self.module) if getattr(self, "resonance_freqs", None) else None
+        ) or [90e6, 91e6]
+        if len(default_resonances) < 2:
+            default_resonances = list(default_resonances) + [default_resonances[0] + 1e6]
+
+        init_params = {
+            "irig_source": getattr(self.crs.TIMESTAMP_PORT, "TEST", "TEST"),
+            "clear_channels": True,
+        }
+
+        netanal_params = {
+            "amps": [DEFAULT_AMPLITUDE],
+            "module": None,
+            "fmin": DEFAULT_MIN_FREQ,
+            "fmax": DEFAULT_MAX_FREQ,
+            "cable_length": DEFAULT_CABLE_LENGTH,
+            "npoints": DEFAULT_NPOINTS,
+            "nsamps": DEFAULT_NSAMPLES,
+            "max_chans": DEFAULT_MAX_CHANNELS,
+            "max_span": DEFAULT_MAX_SPAN,
+            "clear_channels": True,
+        }
+        _assert_param_keys(
+            netanal_params,
+            "rfmux.tools.periscope.network_analysis_dialog",
+            "NetworkAnalysisDialog",
+        )
+
+        find_params = {
+            "expected_resonances": DEFAULT_EXPECTED_RESONANCES,
+            "min_dip_depth_db": DEFAULT_MIN_DIP_DEPTH_DB,
+            "min_Q": DEFAULT_MIN_Q,
+            "max_Q": DEFAULT_MAX_Q,
+            "min_resonance_separation_hz": DEFAULT_MIN_RESONANCE_SEPARATION_HZ,
+            "data_exponent": DEFAULT_DATA_EXPONENT,
+        }
+        _assert_param_keys(
+            find_params,
+            "rfmux.tools.periscope.find_resonances_dialog",
+            "FindResonancesDialog",
+        )
+
+        multisweep_params = {
+            "amps": [MULTISWEEP_DEFAULT_AMPLITUDE],
+            "amp": MULTISWEEP_DEFAULT_AMPLITUDE,
+            "span_hz": MULTISWEEP_DEFAULT_SPAN_HZ,
+            "npoints_per_sweep": MULTISWEEP_DEFAULT_NPOINTS,
+            "nsamps": MULTISWEEP_DEFAULT_NSAMPLES,
+            "bias_frequency_method": None,
+            "rotate_saved_data": False,
+            "sweep_direction": "upward",
+            "resonance_frequencies": {self.module: default_resonances},
+            "module": self.module,
+            "apply_skewed_fit": False,
+            "apply_nonlinear_fit": False,
+        }
+        _assert_param_keys(
+            multisweep_params,
+            "rfmux.tools.periscope.multisweep_dialog",
+            "MultisweepDialog",
+        )
+
+        bias_params = {
+            "nonlinear_threshold": 0.77,
+            "fallback_to_lowest": True,
+            "optimize_phase": True,
+            "num_phase_samples": 300,
+            "phase_step": 5,
+            "bandpass_params": {
+                "apply_bandpass": True,
+                "lowcut": 5.0,
+                "highcut": 20.0,
+                "fs": 597.0,
+            },
+            "apply_bandpass": True,
+            "lowcut": 5.0,
+            "highcut": 20.0,
+            "fs": 597.0,
+        }
+        
+        _assert_param_keys(
+            bias_params,
+            "rfmux.tools.periscope.bias_kids_dialog",
+            "BiasKidsDialog",
+        )
+
+        noise_params = {
+            "num_samples": 10000,
+            "spectrum_limit": 0.9,
+            "num_segments": 10,
+            "decimation": 6,
+            "reference": "relative",
+            "effective_highest_freq": 10.0,
+            "time_taken": 1.0,
+            "freq_resolution": 0.1,
+            "pfb_enabled": False,
+            "overlap" : 2,
+            "pfb_samples": 210000,
+            "pfb_time" : 0.41
+        }
+        _assert_param_keys(
+            noise_params,
+            "rfmux.tools.periscope.noise_spectrum_dialog",
+            "NoiseSpectrumDialog",
+        )
+
+        fake_init_dialog = MagicMock()
+        fake_init_dialog.exec.return_value = True
+        fake_init_dialog.get_parameters.return_value = init_params
+        fake_init_dialog.get_selected_irig_source.return_value = init_params["irig_source"]
+        fake_init_dialog.get_clear_channels_state.return_value = init_params["clear_channels"]
+        fake_init_dialog.module_entry = MagicMock()
+        fake_init_dialog.module_entry.setText = MagicMock()
+        fake_init_dialog.dac_scales = {}
+
+        fake_netanal_dialog = MagicMock()
+        fake_netanal_dialog.exec.return_value = True
+        fake_netanal_dialog.get_parameters.return_value = netanal_params
+        fake_netanal_dialog.module_entry = MagicMock()
+        fake_netanal_dialog.module_entry.setText = MagicMock()
+        fake_netanal_dialog.dac_scales = {}
+
+        fake_find_dialog = MagicMock()
+        fake_find_dialog.exec.return_value = True
+        fake_find_dialog.get_parameters.return_value = find_params
+
+        fake_netanal_window = MagicMock()
+        fake_netanal_window._show_find_resonances_dialog = MagicMock()
+        fake_netanal_window._show_multisweep_dialog = MagicMock()
+        fake_netanal_window.show = MagicMock()
+
+        fake_multisweep_window = MagicMock()
+        fake_multisweep_window._bias_kids = MagicMock()
+        fake_multisweep_window._open_noise_spectrum_dialog = MagicMock()
+        fake_multisweep_window._open_detector_digest_window = MagicMock()
+        fake_multisweep_window.show = MagicMock()
+
+        fake_bias_dialog = MagicMock()
+        fake_bias_dialog.exec.return_value = True
+        fake_bias_dialog.get_parameters.return_value = bias_params
+
+        fake_noise_dialog = MagicMock()
+        fake_noise_dialog.exec.return_value = True
+        fake_noise_dialog.get_parameters.return_value = noise_params
+
+        fake_digest_window = MagicMock()
+        fake_digest_window.tabs = MagicMock()
+        fake_digest_window.tabs.setCurrentIndex = MagicMock()
+        fake_digest_window.show = MagicMock()
+
+        fake_mock_config_dialog = MagicMock()
+        fake_mock_config_dialog.exec.return_value = True
+        fake_mock_config_dialog.get_configuration.return_value = {"mock": True}
+
+        fake_signals = MagicMock()
+        fake_signals.receivers.return_value = 0
+        for sig_name in (
+            "progress",
+            "data_update",
+            "data_update_with_amp",
+            "completed",
+            "error",
+        ):
+            signal = MagicMock()
+            signal.connect = MagicMock()
+            setattr(fake_signals, sig_name, signal)
+
+        fake_multi_signals = MagicMock()
+        for sig_name in (
+            "progress",
+            "starting_iteration",
+            "data_update",
+            "completed_iteration",
+            "all_completed",
+            "error",
+            "fitting_progress",
+        ):
+            signal = MagicMock()
+            signal.connect = MagicMock()
+            setattr(fake_multi_signals, sig_name, signal)
+
+        fake_bias_signals = MagicMock()
+        fake_bias_signals.progress.connect = MagicMock()
+        fake_bias_signals.error.connect = MagicMock()
+
+        fetcher_signal = MagicMock()
+        fetcher_signal.connect = MagicMock()
+        fake_fetcher = MagicMock()
+        fake_fetcher.start = MagicMock()
+        fake_fetcher.dac_scales_ready = fetcher_signal
+
+        MockInitCRS = MagicMock(return_value=fake_init_dialog)
+        MockNetAnal = MagicMock(return_value=fake_netanal_dialog)
+        MockFindRes = MagicMock(return_value=fake_find_dialog)
+        MockMulti = MagicMock(return_value=MagicMock(exec=MagicMock(return_value=True), get_parameters=MagicMock(return_value=multisweep_params)))
+        MockNAWindow = MagicMock(return_value=fake_netanal_window)
+        MockMultiWindow = MagicMock(return_value=fake_multisweep_window)
+        MockBiasDialog = MagicMock(return_value=fake_bias_dialog)
+        MockNoiseDialog = MagicMock(return_value=fake_noise_dialog)
+        MockDigestWindow = MagicMock(return_value=fake_digest_window)
+        MockConfigDialog = MagicMock(return_value=fake_mock_config_dialog)
+        MockCRSInitTask = MagicMock(return_value=MagicMock(start=MagicMock()))
+        MockFetcher = MagicMock(return_value=fake_fetcher)
+        MockNASignals = MagicMock(return_value=fake_signals)
+        MockNATask = MagicMock(return_value=MagicMock(start=MagicMock()))
+        MockMultiTask = MagicMock(return_value=MagicMock(start=MagicMock()))
+        MockMultiSignals = MagicMock(return_value=fake_multi_signals)
+        MockBiasTask = MagicMock(return_value=MagicMock(start=MagicMock()))
+        MockBiasSignals = MagicMock(return_value=fake_bias_signals)
+
+        qt_suppression_patchers = [
+            patch.object(
+                utils_mod.QtWidgets.QDialog,
+                "exec",
+                MagicMock(return_value=utils_mod.QtWidgets.QDialog.Accepted),
+                create=True,
+            ),
+            patch.object(utils_mod.QtWidgets.QDialog, "show", MagicMock(), create=True),
+            patch.object(utils_mod.QtWidgets.QWidget, "show", MagicMock(), create=True),
+            patch.object(
+                utils_mod.QtWidgets.QMainWindow, "show", MagicMock(), create=True
+            ),
+            patch.object(utils_mod.QtWidgets.QMessageBox, "information", MagicMock(), create=True),
+            patch.object(utils_mod.QtWidgets.QMessageBox, "warning", MagicMock(), create=True),
+            patch.object(utils_mod.QtWidgets.QMessageBox, "critical", MagicMock(), create=True),
+            patch.object(utils_mod.QtWidgets.QMessageBox, "question", MagicMock(), create=True),
+        ]
+
+        module_patchers = [
+            patch(
+                "rfmux.tools.periscope.initialize_crs_dialog.InitializeCRSDialog",
+                MockInitCRS,
+                create=True,
+            ),
+            patch(
+                "rfmux.tools.periscope.network_analysis_dialog.NetworkAnalysisDialog",
+                MockNetAnal,
+                create=True,
+            ),
+            patch(
+                "rfmux.tools.periscope.find_resonances_dialog.FindResonancesDialog",
+                MockFindRes,
+                create=True,
+            ),
+            patch(
+                "rfmux.tools.periscope.multisweep_dialog.MultisweepDialog",
+                MockMulti,
+                create=True,
+            ),
+            patch(
+                "rfmux.tools.periscope.network_analysis_window.NetworkAnalysisWindow",
+                MockNAWindow,
+                create=True,
+            ),
+            patch(
+                "rfmux.tools.periscope.multisweep_window.MultisweepWindow",
+                MockMultiWindow,
+                create=True,
+            ),
+            patch(
+                "rfmux.tools.periscope.bias_kids_dialog.BiasKidsDialog",
+                MockBiasDialog,
+                create=True,
+            ),
+            patch(
+                "rfmux.tools.periscope.noise_spectrum_dialog.NoiseSpectrumDialog",
+                MockNoiseDialog,
+                create=True,
+            ),
+            patch(
+                "rfmux.tools.periscope.detector_digest_dialog.DetectorDigestWindow",
+                MockDigestWindow,
+                create=True,
+            ),
+            patch(
+                "rfmux.tools.periscope.mock_configuration_dialog.MockConfigurationDialog",
+                MockConfigDialog,
+                create=True,
+            ),
+            patch("rfmux.tools.periscope.tasks.CRSInitializeTask", MockCRSInitTask, create=True),
+            patch("rfmux.tools.periscope.tasks.DACScaleFetcher", MockFetcher, create=True),
+            patch(
+                "rfmux.tools.periscope.tasks.NetworkAnalysisSignals",
+                MockNASignals,
+                create=True,
+            ),
+            patch("rfmux.tools.periscope.tasks.NetworkAnalysisTask", MockNATask, create=True),
+            patch("rfmux.tools.periscope.tasks.MultisweepTask", MockMultiTask, create=True),
+            patch("rfmux.tools.periscope.tasks.MultisweepSignals", MockMultiSignals, create=True),
+            patch("rfmux.tools.periscope.tasks.BiasKidsTask", MockBiasTask, create=True),
+            patch("rfmux.tools.periscope.tasks.BiasKidsSignals", MockBiasSignals, create=True),
+        ]
+
+        app_patchers = [
+            patch.object(periscope_app, "InitializeCRSDialog", MockInitCRS, create=True),
+            patch.object(periscope_app, "NetworkAnalysisDialog", MockNetAnal, create=True),
+            patch.object(periscope_app, "FindResonancesDialog", MockFindRes, create=True),
+            patch.object(periscope_app, "MultisweepDialog", MockMulti, create=True),
+            patch.object(periscope_app, "NetworkAnalysisWindow", MockNAWindow, create=True),
+            patch.object(periscope_app, "MultisweepWindow", MockMultiWindow, create=True),
+            patch.object(periscope_app, "BiasKidsDialog", MockBiasDialog, create=True),
+            patch.object(periscope_app, "NoiseSpectrumDialog", MockNoiseDialog, create=True),
+            patch.object(periscope_app, "DetectorDigestWindow", MockDigestWindow, create=True),
+            patch.object(periscope_app, "MockConfigurationDialog", MockConfigDialog, create=True),
+            patch.object(periscope_app.Periscope, "_apply_mock_configuration", MagicMock()),
+            patch.object(periscope_app, "CRSInitializeTask", MockCRSInitTask, create=True),
+            patch.object(periscope_app, "DACScaleFetcher", MockFetcher, create=True),
+            patch.object(periscope_app, "NetworkAnalysisSignals", MockNASignals, create=True),
+            patch.object(periscope_app, "NetworkAnalysisTask", MockNATask, create=True),
+            patch.object(periscope_app, "MultisweepTask", MockMultiTask, create=True),
+            patch.object(periscope_app, "MultisweepSignals", MockMultiSignals, create=True),
+            patch.object(periscope_app, "BiasKidsTask", MockBiasTask, create=True),
+            patch.object(periscope_app, "BiasKidsSignals", MockBiasSignals, create=True),
+        ]
+
+        patchers = qt_suppression_patchers + module_patchers + app_patchers
+        try:
+            for patcher in patchers:
+                patcher.start()
+            yield
+        finally:
+            for patcher in reversed(patchers):
+                patcher.stop()
+
+    def run_ui_mock_smoke_test(self):
+        """
+        Execute key UI flows with all dialogs and tasks mocked out.
+
+        This helper initializes required attributes with safe defaults and then
+        exercises the dialog- and window-opening methods within
+        :meth:`_ui_mock_context` so no real Qt widgets or threads are spawned.
+        """
+
+        self.crs = getattr(self, "crs", None) or MagicMock()
+        self.crs.generate_resonators = AsyncMock(return_value=None)
+        self.crs.set_pulse_mode = AsyncMock(return_value=None)
+        if not hasattr(self.crs, "TIMESTAMP_PORT"):
+            self.crs.TIMESTAMP_PORT = SimpleNamespace(
+                BACKPLANE="BACKPLANE", TEST="TEST", SMA="SMA"
+            )
+
+        self.pool = getattr(self, "pool", None) or MagicMock()
+        if not hasattr(self.pool, "start"):
+            self.pool.start = MagicMock()
+        self.module = getattr(self, "module", 1)
+        self.netanal_window_count = getattr(self, "netanal_window_count", 0)
+        self.netanal_windows = getattr(self, "netanal_windows", {})
+        self.netanal_tasks = getattr(self, "netanal_tasks", {})
+        self.multisweep_window_count = getattr(self, "multisweep_window_count", 0)
+        self.multisweep_windows = getattr(self, "multisweep_windows", {})
+        self.multisweep_tasks = getattr(self, "multisweep_tasks", {})
+        self.raw_data = getattr(self, "raw_data", {self.module: [1, 2, 3]})
+        self.resonance_freqs = getattr(
+            self, "resonance_freqs", {self.module: [90e6, 91e6]}
+        )
+        self.dac_scales = getattr(self, "dac_scales", {self.module: -0.5})
+        self.dark_mode = getattr(self, "dark_mode", False)
+        self.channel_list = getattr(self, "channel_list", [[self.module]])
+        self.tabs = getattr(self, "tabs", MagicMock())
+        self.tabs.currentIndex.return_value = 0
+        self.tabs.tabText.return_value = f"Module {self.module}"
+        self.is_mock_mode = getattr(self, "is_mock_mode", True)
+        self.mock_config = getattr(self, "mock_config", {"mock": True})
+        self.qp_pulse_mode = getattr(self, "qp_pulse_mode", "none")
+
+        if not hasattr(self, "crs_init_signals"):
+            self.crs_init_signals = MagicMock()
+        for sig_name in ("success", "error"):
+            if not hasattr(self.crs_init_signals, sig_name):
+                signal = MagicMock()
+                signal.connect = MagicMock()
+                setattr(self.crs_init_signals, sig_name, signal)
+
+        if not hasattr(self, "multisweep_signals"):
+            self.multisweep_signals = MagicMock()
+        for sig_name in (
+            "progress",
+            "starting_iteration",
+            "data_update",
+            "completed_iteration",
+            "all_completed",
+            "error",
+            "fitting_progress",
+        ):
+            if not hasattr(self.multisweep_signals, sig_name):
+                setattr(self.multisweep_signals, sig_name, MagicMock())
+
+        with self._ui_mock_context():
+            print(">>> Testing Mock Configuration Dialog")
+            if hasattr(self, "_show_mock_config_dialog"):
+                self._show_mock_config_dialog()
+
+            print(">>> Testing Initialize CRS Dialog")
+            self._show_initialize_crs_dialog()
+
+            print(">>> Testing Network Analysis Dialog")
+            self._show_netanal_dialog()
+
+            print(">>> Testing Network Analysis Window Logic")
+            self._start_network_analysis({"module": self.module, "amp": 0.1, "amps": [0.1]})
+
+            netanal_window = None
+            if getattr(self, "netanal_windows", None):
+                netanal_window = next(iter(self.netanal_windows.values())).get("window")
+
+            if netanal_window:
+                print(">>> Testing Find Resonances Dialog")
+                getattr(netanal_window, "_show_find_resonances_dialog", MagicMock())()
+
+                print(">>> Testing Multisweep Dialog")
+                getattr(netanal_window, "_show_multisweep_dialog", MagicMock())()
+
+            multisweep_params = {
+                "module": self.module,
+                "resonance_frequencies": {self.module: self.resonance_freqs.get(self.module, [90e6])},
+                "amps": [0.1],
+            }
+            print(">>> Testing Multisweep Window")
+            self._start_multisweep_analysis(multisweep_params)
+
+            multisweep_window = None
+            if getattr(self, "multisweep_windows", None):
+                multisweep_window = next(iter(self.multisweep_windows.values())).get("window")
+
+            if multisweep_window:
+                print(">>> Testing Bias KIDs Dialog")
+                getattr(multisweep_window, "_bias_kids", MagicMock())()
+
+                print(">>> Testing Noise Spectrum Dialog")
+                getattr(multisweep_window, "_open_noise_spectrum_dialog", MagicMock())()
+
+                from . import app as periscope_app
+
+                print(">>> Testing Detector Digest Window (Fit tab)")
+                digest_window = periscope_app.DetectorDigestWindow()
+                digest_window.tabs.setCurrentIndex(0)
+
+                print(">>> Testing Detector Digest Window (Noise tab)")
+                digest_window.tabs.setCurrentIndex(1)
+
+        print("\n✓ ALL dialog / window functions executed successfully (mocked)\n")
+

@@ -17,7 +17,6 @@ All functions are JIT-compiled for 10-25x speedup over pure Python.
 Numba is a required dependency for this module.
 """
 import numpy as np
-import numba
 from numba import jit, prange
 import os
 import platform
@@ -40,7 +39,7 @@ def setup_numba_openmp_env():
         system = platform.system()
     
         if system != "Darwin":
-            print("Not macOS — skipping OpenMP setup.")
+            #Not macOS — skipping OpenMP setup
             return
     
         # Always use OpenMP on macOS
@@ -59,7 +58,7 @@ def setup_numba_openmp_env():
         if omp_path not in current.split(":"):
             os.environ["DYLD_LIBRARY_PATH"] = f"{omp_path}:{current}" if current else omp_path
     except:
-        print(f"Couldn't find openmp, run 'brew install libomp'")
+        print(f"Couldn't find openmp. This is needed on Mac OS. Run 'brew install libomp'")
 
 setup_numba_openmp_env()
 

@@ -29,7 +29,7 @@ from rfmux.algorithms.measurement.fitting_nonlinear import fit_nonlinear_iq_mult
 from rfmux.algorithms.measurement.bias_kids import bias_kids
 
 # Import mock mode support
-from rfmux.core.mock_crs_helper import create_mock_crs
+from rfmux.mock.helpers import create_mock_crs
 
 
 async def main(serial="MOCK"):

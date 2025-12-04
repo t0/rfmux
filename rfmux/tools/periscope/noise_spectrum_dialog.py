@@ -86,9 +86,9 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         layout.addRow("Decimation:", self.decimation_input)
 
         self.reference_input = QtWidgets.QComboBox()
-        self.reference_input.addItems(["relative", "absolute"])
-        self.reference_input.setCurrentText("relative")
-        layout.addRow("Reference:", self.reference_input)
+        self.reference_input.addItems(["dBc", "dBm"])
+        self.reference_input.setCurrentText("dBc")
+        layout.addRow("Units:", self.reference_input)
 
         # Time Taken (s) — Read-only label
         self.time_taken_label = QtWidgets.QLabel("0.00 s")
@@ -125,8 +125,8 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         pfb_layout = QtWidgets.QFormLayout(self.pfb_group)
         
         # PFB Calculations
-        pfb_samples = 100_000 ### Change time_pfb as well if you change the number of samples
-        time_pfb = 0.28 * self.nres  # Example computation, was timed in a notebook takes around 0.28 seconds for 100000 samples
+        pfb_samples = 210_000 ### Change time_pfb as well if you change the number of samples
+        time_pfb = 0.4 * self.nres  # Example computation, was timed in a notebook takes around 0.28 seconds for 100000 samples
         
         self.pfb_time_taken_label = QtWidgets.QLabel(f"{time_pfb:.3f} s")
         self.pfb_time_taken_label.setToolTip("Displays estimated capture time (in seconds) for PFB, provided no failures.")
@@ -269,12 +269,17 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         pfb_time = self.pfb_time_taken_label.text().split()[0]
         overlap_samps = self.overlap_sample.text()
         
+        # Map UI units back to backend reference mode
+        # dBc -> relative, dBm -> absolute
+        ref_text = self.reference_input.currentText()
+        reference_mode = "relative" if ref_text == "dBc" else "absolute"
+        
         params = {
             "num_samples": self._safe_int(self.samples_edit.text(), 10000),
             "spectrum_limit": self.spectrum_limit_input.value(),
             "num_segments": self._safe_int(self.segments_edit.text(), 10),
             "decimation": self.decimation_input.value(),
-            "reference" : self.reference_input.currentText(),
+            "reference" : reference_mode,
             "effective_highest_freq": float(highest_freq),
             "time_taken": float(time_taken),
             "freq_resolution" : float(freq_res)

@@ -178,7 +178,7 @@ def main():
             # Use the mock flavour to create a MockCRS instance
             s = load_session("""
 !HardwareMap
-- !flavour "rfmux.core.mock"
+- !flavour "rfmux.mock"
 - !CRS { serial: "0000", hostname: "127.0.0.1" }
 """)
             crs_obj = s.query(CRS).one()
@@ -198,8 +198,6 @@ def main():
             print("Starting MockCRS UDP streaming...")
             loop.run_until_complete(crs_obj.start_udp_streaming(host='127.0.0.1', port=9876))
             
-            # Show mock configuration dialog
-            print("Opening mock configuration dialog...")
             config_dialog = MockConfigurationDialog()
             initial_mock_config = None  # Store for later
             
@@ -211,7 +209,7 @@ def main():
                 try:
                     # Apply configuration to the server
                     resonator_count = loop.run_until_complete(crs_obj.generate_resonators(mock_config))
-                    print(f"Mock configuration applied successfully. Generated {resonator_count} resonators.")
+                    #print(f"Mock configuration applied successfully. Generated {resonator_count} resonators.")
                 except Exception as e:
                     import traceback
                     print(f"Error applying mock configuration: {e}")

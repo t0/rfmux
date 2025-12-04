@@ -52,8 +52,8 @@ Instantiating a hardware map using mock mode also allows for offline algorithm d
 ```python
 s = load_session("""
 !HardwareMap
-- !flavour "rfmux.core.mock"
-- !CRS { serial: "MOCK0001", hostname: "127.0.0.1" }
+- !flavour "rfmux.mock"
+- !CRS { serial: "0000", hostname: "127.0.0.1" }
 """)
 ```
 

@@ -89,9 +89,11 @@ DEFAULT_MAX_CHANNELS = 1024
 DEFAULT_MAX_SPAN = 500e6  # 500 MHz
 DEFAULT_NPOINTS = 50000
 DEFAULT_NSAMPLES = 10
+
+# Default linspace settings for amplitude sweeps
 DEFAULT_AMP_START = 0.001  # Default start for amplitude linspace
 DEFAULT_AMP_STOP = 0.01     # Default stop for amplitude linspace
-DEFAULT_AMP_ITERATIONS = 1  # Default number of iterations for linspace
+DEFAULT_AMP_ITERATIONS = 3  # Default number of iterations for linspace
 
 # Multisweep defaults
 MULTISWEEP_DEFAULT_AMPLITUDE = DEFAULT_AMPLITUDE  # Same as network analysis default

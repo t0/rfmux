@@ -9,13 +9,20 @@
 #endif
 
 /* Packet magic numbers */
-#define READOUT_PACKET_MAGIC 0x5344494b  /* Readout packets */
-#define FAST_PACKET_MAGIC 0xfa57b175  /* Fast capture */
-#define PFB_PACKET_MAGIC 0x736e6962  /* Fast stream */
+#define READOUT_PACKET_MAGIC 0x5344494b
+#define PFB_PACKET_MAGIC 0x736e6162
 
 /* Readout packet constants */
 #define STREAMER_PORT 9876
 #define PFB_STREAMER_PORT 9877
+
+/* Cross-platform packed struct support */
+#ifdef _MSC_VER
+# pragma pack(push, 1)
+# define PACKED
+#else
+# define PACKED __attribute__((packed))
+#endif
 
 /* IRIG-B timestamp structure */
 struct irigb_timestamp {
@@ -27,28 +34,9 @@ struct irigb_timestamp {
 	uint32_t ss;
 	uint32_t c; /* Bits [17:0]=count, [30:29]=source, [31]=recent */
 	uint32_t sbs;
-} __attribute__((packed));
+} PACKED;
 
-/* Fast Capture Packets */
-
-#define FASTPACKET_NSAMP 4000
-
-struct fast_packet_sample {
-	int16_t i;
-	int16_t q;
-} __attribute__((packed));
-
-struct fast_packet {
-	uint32_t magic;
-	uint16_t seq;
-	uint16_t tag;
-	struct fast_packet_sample s[FASTPACKET_NSAMP];
-} __attribute__((packed));
-
-#define FAST_PACKET_SIZE sizeof(struct fast_packet)
-
-/* Fast Stream Packets */
-
+/* PFB Stream Packets */
 struct pfb_packet_header {
 	uint32_t magic;
 	uint8_t version;
@@ -62,9 +50,9 @@ struct pfb_packet_header {
 
 	uint16_t num_samples; /* sample count in this packet */
 	uint8_t module;
-	uint8_t __reserved;  /* unused, reads 0 */
+	uint8_t _reserved;  /* unused, reads 0 */
 	uint32_t seq;
-} __attribute__((packed));
+} PACKED;
 
 /* Maximum sample count for PFB packets */
 #define PFBPACKET_NSAMP_MAX 2000
@@ -75,7 +63,7 @@ struct pfb_packet_buffer {
 	struct pfb_packet_header hdr;
 	int32_t samples[PFBPACKET_NSAMP_MAX * 2];  /* I/Q pairs */
 	struct irigb_timestamp ts;
-} __attribute__((packed));
+} PACKED;
 
 struct readout_packet_header {
 	uint32_t magic;
@@ -88,7 +76,7 @@ struct readout_packet_header {
 	uint8_t module;
 
 	uint32_t seq;
-} __attribute__((packed));
+} PACKED;
 
 #define LONG_PACKET_CHANNELS 1024
 #define SHORT_PACKET_CHANNELS 128
@@ -107,3 +95,7 @@ struct readout_packet_header {
 #define PFB_PACKET_SIZE(__nsamp) (sizeof(struct pfb_packet_header) + \
 		((__nsamp)*8) + \
 		sizeof(struct irigb_timestamp))
+
+#ifdef _MSC_VER
+# pragma pack(pop)
+#endif

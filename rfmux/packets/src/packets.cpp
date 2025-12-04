@@ -3,9 +3,14 @@
 #include <iostream>
 #include <chrono>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <unistd.h>
+#endif
 
 namespace packets {
 	uint16_t Packet::serial() const {
@@ -277,11 +282,18 @@ namespace packets {
 			if (ready <= 0)
 				break;  // Timeout or error
 
-			ssize_t n = recv(sockfd_, buffer.data(), MAX_PACKET_SIZE, 0);
+			int n = recv(sockfd_, buffer.data(), MAX_PACKET_SIZE, 0);
 			if (n < 0) {
+#ifdef _WIN32
+				int err = WSAGetLastError();
+				if (err == WSAEWOULDBLOCK)
+					break;  // No more packets
+				throw std::runtime_error("recv failed: " + std::to_string(err));
+#else
 				if (errno == EAGAIN || errno == EWOULDBLOCK)
 					break;  // No more packets
 				throw std::runtime_error(std::string("recv failed: ") + strerror(errno));
+#endif
 			}
 
 			if (n == 0)

@@ -151,20 +151,21 @@ PYBIND11_MODULE(_packets, m) {
 			 "reorder_window"_a = 256,
 			 "Create PFB packet receiver");
 
-	/* Cross-platform wrapper for IP_ADD_SOURCE_MEMBERSHIP structure. */
-	struct IpMreqSource {
-		ip_mreq_source mreq;
-		IpMreqSource(const std::string& multiaddr,
+	/* Cross-platform wrapper for IP_ADD_SOURCE_MEMBERSHIP structure.
+	 * Linux/macOS/Windows all have struct ip_mreq_source with the same fields
+	 * but in different orders - this provides a consistent constructor. */
+	struct IpMreqSource : ip_mreq_source {
+		IpMreqSource() = delete;
+		explicit IpMreqSource(const std::string& multiaddr,
 					 const std::string& sourceaddr,
-					 const std::string& interface) {
-			memset(&mreq, 0, sizeof(mreq));
-			inet_pton(AF_INET, multiaddr.c_str(), &mreq.imr_multiaddr);
-			inet_pton(AF_INET, sourceaddr.c_str(), &mreq.imr_sourceaddr);
-			inet_pton(AF_INET, interface.c_str(), &mreq.imr_interface);
+					 const std::string& interface_addr) {
+			inet_pton(AF_INET, multiaddr.c_str(), &imr_multiaddr);
+			inet_pton(AF_INET, sourceaddr.c_str(), &imr_sourceaddr);
+			inet_pton(AF_INET, interface_addr.c_str(), &imr_interface);
 		}
 
 		py::bytes to_bytes() const {
-			return py::bytes(reinterpret_cast<const char*>(&mreq), sizeof(mreq));
+			return py::bytes(reinterpret_cast<const char*>(this), sizeof(*this));
 		}
 	};
 	py::class_<IpMreqSource>(m, "ip_mreq_source",

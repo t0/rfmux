@@ -30,6 +30,11 @@ pybind11_add_module(_packets ${SOURCES})
 target_include_directories(_packets PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(_packets PRIVATE fmt::fmt)
 
+# Link Winsock on Windows
+if(WIN32)
+    target_link_libraries(_packets PRIVATE ws2_32)
+endif()
+
 # Compiler warnings (cross-platform)
 if(MSVC)
     target_compile_options(_packets PRIVATE /W4)

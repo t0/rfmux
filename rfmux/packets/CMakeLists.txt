@@ -6,7 +6,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
-find_package(fmt CONFIG REQUIRED)
+
+# Try to find fmt first, otherwise fetch from source
+find_package(fmt CONFIG QUIET)
+if(NOT fmt_FOUND)
+	include(FetchContent)
+	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+	FetchContent_Declare(
+		fmt
+		GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+		GIT_TAG 11.0.2
+	)
+	FetchContent_MakeAvailable(fmt)
+endif()
 
 set(SOURCES
     src/packets.cpp

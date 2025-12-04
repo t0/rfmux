@@ -209,7 +209,7 @@ class MockCRSUDPStreamer(threading.Thread):
                     start_time_loop = time.perf_counter()
                     
                     # Get current decimation (dynamically check each iteration)
-                    fir_stage = asyncio.run(self.mock_crs.get_decimation())
+                    fir_stage = self.mock_crs.fir_stage
                     if fir_stage is None:
                         fir_stage = 6  # Default only if None, not if 0
                     sample_rate = 625e6 / (256 * 64 * (2**fir_stage))
@@ -248,7 +248,8 @@ class MockCRSUDPStreamer(threading.Thread):
                             
                         try:
                             # Generate and send packet
-                            packet_bytes = self.generate_packet_for_module(module_num, self.seq_counters[module_num])
+                            s_time = time.perf_counter()
+                            packet_bytes = self.generate_packet_for_module(module_num, self.seq_counters[module_num], fir_stage)
                             
                             if self.use_multicast:
                                 if self.socket:
@@ -304,7 +305,7 @@ class MockCRSUDPStreamer(threading.Thread):
             if self in _active_streamers:
                 _active_streamers.remove(self)
     
-    def generate_packet_for_module(self, module_num, seq):
+    def generate_packet_for_module(self, module_num, seq, fir_stage):
         """Generate a DfmuxPacket for a specific module with coupled channels."""
         import time
         
@@ -341,7 +342,7 @@ class MockCRSUDPStreamer(threading.Thread):
         # NEW: Use module-wide coupled calculation if available
         if hasattr(self.mock_crs.resonator_model, 'calculate_module_response_coupled'):
             # Get sample rate for time-varying signals
-            fir_stage = asyncio.run(self.mock_crs.get_decimation())
+            fir_stage = fir_stage
             if fir_stage is None:
                 fir_stage = 6  # Default only if None, not if 0
             sample_rate = 625e6 / 256 / 64 / (2**fir_stage)
@@ -369,9 +370,8 @@ class MockCRSUDPStreamer(threading.Thread):
                 start_time=t   # Pass the current time for this packet
             )
             timing_physics = time.perf_counter()
-
-            # Process each channel's response
             
+            # Process each channel's response
             for ch_num_1 in channel_responses:
                 ch_idx_0 = ch_num_1 - 1  # Convert to 0-based index
                 
@@ -395,7 +395,7 @@ class MockCRSUDPStreamer(threading.Thread):
         
         # Calculate deterministic timestamp based on sequence number and sampling rate
         # Get the decimation stage and calculate sample rate
-        fir_stage = asyncio.run(self.mock_crs.get_decimation())
+        fir_stage = fir_stage
         if fir_stage is None:
             fir_stage = 6  # Default only if None, not if 0
         sample_rate = 625e6 / 256 / 64 / (2**fir_stage)
@@ -433,7 +433,6 @@ class MockCRSUDPStreamer(threading.Thread):
         )
 
         timing_timestamp = time.perf_counter()
-
         packet = DfmuxPacket(
             magic=np.uint32(STREAMER_MAGIC),
             version=np.uint16(version),

@@ -17,6 +17,18 @@ cd rfmux
 pip install -e .
 ```
 
+For MacOS, you need to run the following to make sure threading works for the mock mode
+
+```bash
+brew install libomp
+### Now in your .zshrc file add following 
+export NUMBA_THREADING_LAYER=omp
+export DYLD_LIBRARY_PATH="/opt/homebrew/opt/libomp/lib:$DYLD_LIBRARY_PATH"
+### if you have older Mac (Intel chip) your path might be - /usr/local/opt/libomp/lib/:$DYLD_LIBRARY_PATH
+### save and run 
+source ~/.zshrc
+```
+
 Note that rfmux requires Python 3.12 or later
 
 ## Periscope

@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.15)
-project(packets)
+project(packets LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 
@@ -16,7 +16,14 @@ set(SOURCES
 pybind11_add_module(_packets ${SOURCES})
 
 target_include_directories(_packets PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(_packets PRIVATE pthread fmt)
-target_compile_options(_packets PRIVATE -Wall -Wextra)
+target_link_libraries(_packets PRIVATE fmt::fmt)
 
-install(TARGETS _packets LIBRARY DESTINATION .)
+# Compiler warnings (cross-platform)
+if(MSVC)
+    target_compile_options(_packets PRIVATE /W4)
+else()
+    target_compile_options(_packets PRIVATE -Wall -Wextra)
+endif()
+
+# Install to rfmux/packets subdirectory
+install(TARGETS _packets LIBRARY DESTINATION rfmux/packets)

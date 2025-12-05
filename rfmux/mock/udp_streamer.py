@@ -256,7 +256,7 @@ class MockCRSUDPStreamer(threading.Thread):
                                     try:
                                         bytes_sent = self.socket.sendto(packet_bytes, (self.multicast_group, self.multicast_port))
                                     except OSError as e:
-                                        if e.errorno == 10051: ## unreachable network on Windows, corner case on first start and for tests
+                                        if e.errno == 10051: ## unreachable network on Windows, corner case on first start and for tests
                                             continue
                                         else:
                                             raise

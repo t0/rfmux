@@ -38,6 +38,11 @@ endif()
 # Compiler warnings (cross-platform)
 if(MSVC)
     target_compile_options(_packets PRIVATE /W4)
+    # Workaround for MSVC 17.10+ constexpr mutex breaking change
+    # See: https://github.com/microsoft/STL/issues/4730
+    #      https://github.com/microsoft/STL/issues/4875
+    # Without this, mutexes crash when Python uses older VC++ runtime
+    target_compile_definitions(_packets PRIVATE _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 else()
     target_compile_options(_packets PRIVATE -Wall -Wextra)
 endif()

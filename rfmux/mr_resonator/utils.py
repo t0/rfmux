@@ -116,6 +116,7 @@ def exp_bin_noise_data(f, psd, nbins=100):
     
     return fbinned, cavg
 
+
 def rotate_iq_plane(iqdata, n_thetas=50, enforce_positive_i=True, use_mean_value=False, make_plots=False, plot_save_dir=None):
 
     '''
@@ -324,12 +325,3 @@ def make_nqp_timestream_from_Nqp_spectrum(res, frequencies, Nqp_spectrum, rbw, b
     timestream_N = np.fft.ifft(amplitude_spectrum_N).real * len(SN)
     
     return timestream_N / res.VL_um3
-
-
-
-
-
-
-
-
-

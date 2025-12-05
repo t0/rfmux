@@ -51,8 +51,8 @@ jobs:
     
           - name: Run test_measurement_flow.py
             run: |
-              pytest -v -s tests/test_measurement_flow.py
+              pytest -v -s test/test_measurement_flow.py
     
           - name: Run test_periscope_flow.py
             run: |
-              pytest -v -s tests/test_periscope_flow.py
+              pytest -v -s test/test_periscope_flow.py

@@ -52,7 +52,7 @@ jobs:
           echo "NUMBA_THREADING_LAYER=omp" >> $GITHUB_ENV
           echo "DYLD_LIBRARY_PATH=/opt/homebrew/opt/libomp/lib:/usr/local/opt/libomp/lib:$DYLD_LIBRARY_PATH" >> $GITHUB_ENV
           
-    - name: Install Linux GUI dependencies
+      - name: Install Linux GUI dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update

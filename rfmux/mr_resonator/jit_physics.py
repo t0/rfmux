@@ -32,6 +32,17 @@ MU0 = 8.85e-12  # Permeability (note: this appears to be using permittivity valu
 # Bessel Function Approximations
 # ============================================================================
 
+if platform.system() == "Darwin":
+    numba.get_num_threads()
+    layer = numba.config.THREADING_LAYER
+
+    if layer != "omp":
+        print(">>>>>>>>>> You are on Mac with no libomp, the processing will fail <<<<<<<<<<")
+        print(">>>>>>>>>> Consult the README.MD <<<<<<<<<<<<<<\n")
+    else:
+        print("MacOS numba threading layer:", layer)
+
+
 @jit(nopython=True, cache=True, fastmath=True)
 def bessel_k0(x):
     """

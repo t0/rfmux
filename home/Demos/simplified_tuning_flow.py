@@ -9,6 +9,8 @@ This script executes the complete measurement sequence:
 5. Take multisweep
 6. Do fitting
 7. Bias the kids
+8. Get slow samples
+9. Get PFB samples (only for real boards)
 
 Usage:
     python simplified_tuning_flow.py MOCK         # Run with mock CRS

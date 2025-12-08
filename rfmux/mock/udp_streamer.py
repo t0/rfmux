@@ -253,7 +253,13 @@ class MockCRSUDPStreamer(threading.Thread):
                             
                             if self.use_multicast:
                                 if self.socket:
-                                    bytes_sent = self.socket.sendto(packet_bytes, (self.multicast_group, self.multicast_port))
+                                    try:
+                                        bytes_sent = self.socket.sendto(packet_bytes, (self.multicast_group, self.multicast_port))
+                                    except OSError as e:
+                                        if e.errno == 10051: ## unreachable network on Windows, corner case on first start and for tests
+                                            continue
+                                        else:
+                                            raise
                                 else:
                                     raise RuntimeError("Socket not initialized")
                             else:

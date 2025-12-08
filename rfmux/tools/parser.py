@@ -25,8 +25,11 @@ import numpy as np
 
 from rfmux.packets import (
     ReadoutPacketReceiver,
+    PFBPacketReceiver,
     create_multicast_socket,
     STREAMER_PORT,
+    PFB_STREAMER_PORT,
+    PFBPACKET_NSAMP_MAX,
 )
 
 
@@ -236,11 +239,14 @@ def main(*args):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Dump packets to text (by hostname)
+  # Dump readout packets to text (by hostname)
   %(prog)s -H rfmux0033.local -t
 
-  # Write to dirfile, filter specific channels (by interface name)
+  # Write readout packets to dirfile, filter specific channels (by interface name)
   %(prog)s -i eth0 -d ~/data/test.dirfile -c 1-10,50-100
+
+  # Parse PFB packets instead of readout packets
+  %(prog)s -H rfmux0033.local --pfb -d ~/data/pfb.dirfile
 
   # Write to dirfile using interface IP directly
   %(prog)s --interface-ip 192.168.1.100 -d ~/data/test.dirfile
@@ -270,6 +276,12 @@ Examples:
         "--interface-ip",
         metavar="IP",
         help="Local interface IP address for multicast (receives from all sources)",
+    )
+
+    parser.add_argument(
+        "--pfb",
+        action="store_true",
+        help="Parse PFB packets instead of readout packets (port 9877)",
     )
 
     parser.add_argument(
@@ -362,6 +374,15 @@ Examples:
     # Statistics tracking
     board_stats: dict[int, BoardStats] = defaultdict(BoardStats)
 
+    # Dispatch to appropriate mode
+    if args.pfb:
+        return main_pfb(args, serials, modules, channels, interface_ip, board_stats)
+    else:
+        return main_readout(args, serials, modules, channels, interface_ip, board_stats)
+
+
+def main_readout(args, serials, modules, channels, interface_ip, board_stats):
+    """Main loop for readout packet parsing"""
     # Signal handler for clean exit
     def signal_handler(signum, frame):
         if args.drop_stats:
@@ -541,6 +562,340 @@ Examples:
 
                             # Increment per-module frame counter
                             mstats.dirfile_frame += 1
+
+
+def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
+    """Main loop for PFB packet parsing"""
+    # Signal handler for clean exit
+    def signal_handler(signum, frame):
+        print("\n=== Receiver Statistics ===", file=sys.stderr)
+        if args.drop_stats:
+            for serial, bstats in board_stats.items():
+                for module, mstats in bstats.module_stats.items():
+                    print(
+                        f"Serial {serial} module {module}: "
+                        f"{mstats.packets_seen} packets seen "
+                        f"({mstats.packets_dropped} dropped)",
+                        file=sys.stderr,
+                    )
+
+        # Print receiver stats on exit
+        stats = receiver.get_stats()
+        print(
+            f"Total packets received: {stats.total_packets_received}\n"
+            f"Total bytes received: {stats.total_bytes_received}\n"
+            f"Invalid packets: {stats.invalid_packets}\n"
+            f"Wrong magic: {stats.wrong_magic}",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Main receive loop
+    chunk_size = 256
+    receiver = None
+
+    # Setup packet receiver with large buffer to reduce drops
+    with (
+        closing(
+            create_multicast_socket(
+                hostname=args.hostname,
+                interface=interface_ip,
+                port=PFB_STREAMER_PORT,
+                buffer_size=67108864,
+            )
+        ) as sock,
+        closing(
+            gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
+            if args.dirfile
+            else tempfile.TemporaryFile()
+        ) as main_dirfile,
+    ):
+        receiver = PFBPacketReceiver(sock, reorder_window=args.reorder_window)
+
+        while True:
+            # Receive batch of packets
+            n = receiver.receive_batch(chunk_size, timeout_ms=1000)
+
+            # Process all queues
+            for serial, module, queue in receiver.get_all_queues():
+                # Filter by serial
+                if serials and serial not in serials:
+                    continue
+
+                # Filter by module
+                if not any(module in r for r in modules):
+                    continue
+
+                # Get/create statistics
+                bstats = board_stats[serial]
+                mstats = bstats.module_stats[module]
+
+                # Process packets from this queue
+                while packet := queue.try_pop():
+                    pkt = packet.to_python()
+
+                    # Track statistics
+                    mstats.packets_seen += 1
+
+                    if args.num_frames and mstats.packets_seen > args.num_frames:
+                        signal_handler(signal.SIGTERM, None)
+
+                    # Drop detection
+                    if args.drop_stats and mstats.last_seq is not None:
+                        expected_seq = (mstats.last_seq + 1) & 0xFFFFFFFF
+                        if pkt.seq != expected_seq:
+                            gap = (pkt.seq - expected_seq) & 0xFFFFFFFF
+                            print(
+                                f"Dropped packet: module {module}, "
+                                f"seq {mstats.last_seq:08x} -> {pkt.seq:08x} "
+                                f"({gap} lost)"
+                            )
+                            mstats.packets_dropped += gap
+                    mstats.last_seq = pkt.seq
+
+                    # Text dump
+                    if args.text:
+                        mode_names = {0: "PFB1", 1: "PFB2", 2: "PFB4"}
+                        mode_str = mode_names.get(pkt.mode, f"UNKNOWN({pkt.mode})")
+
+                        print(
+                            f"PFBPacket(magic=0x{pkt.magic:08x} version={pkt.version} "
+                            f"mode={mode_str} serial={pkt.serial} module={pkt.module} "
+                            f"seq={pkt.seq} num_samples={pkt.num_samples})"
+                        )
+                        print(
+                            f"  Slots: slot1={pkt.slot1} slot2={pkt.slot2} "
+                            f"slot3={pkt.slot3} slot4={pkt.slot4}"
+                        )
+
+                        ts = pkt.timestamp
+                        print(
+                            f"  Timestamp(source={ts.get_source()} y={ts.y} d={ts.d} "
+                            f"h:m:s={ts.h}:{ts.m}:{ts.s} ss={ts.ss} "
+                            f"sbs={ts.sbs} c={ts.c & 0x1fffffff} "
+                            f"recent={'Y' if ts.is_recent() else 'N'})"
+                        )
+
+                        # Determine number of active slots based on mode
+                        num_slots = {0: 1, 1: 2, 2: 4}.get(pkt.mode, 4)
+                        slot_channels = [pkt.slot1, pkt.slot2, pkt.slot3, pkt.slot4][:num_slots]
+
+                        # Sample a few interleaved values
+                        samples = pkt.samples
+                        max_display = min(8, pkt.num_samples)
+                        for i in range(max_display):
+                            # Samples are interleaved across slots
+                            slot_idx = i % num_slots
+                            ch = slot_channels[slot_idx]
+                            sample = samples[i]
+                            print(
+                                f"  Sample[{i}] slot{slot_idx+1}->ch{ch+1}: "
+                                f"i={sample.real:.3f} q={sample.imag:.3f} abs={abs(sample):.3f}"
+                            )
+
+                        if pkt.num_samples > max_display:
+                            print(f"  ... ({pkt.num_samples - max_display} more samples)")
+
+                    # Dirfile output
+                    if args.dirfile:
+                        # Create board dirfile if needed
+                        if bstats.dirfile is None:
+                            setup_pfb_dirfile_for_board(
+                                bstats, serial, main_dirfile, channels
+                            )
+
+                        # Create module fields if needed
+                        if mstats.dirfile_fields is None:
+                            setup_pfb_dirfile_for_module(bstats, mstats, module, channels)
+
+                        df = bstats.dirfile
+                        fields = mstats.dirfile_fields
+
+                        # Use per-module frame counter
+                        frame = mstats.dirfile_frame
+
+                        # Write timestamp
+                        ts = pkt.timestamp
+                        df.putdata(
+                            fields["ts_sbs"],
+                            np.array([ts.sbs], dtype=np.int32),
+                            first_frame=frame,
+                        )
+                        df.putdata(
+                            fields["ts_ss"],
+                            np.array([ts.ss], dtype=np.int32),
+                            first_frame=frame,
+                        )
+
+                        # Write slot headers (which channels are in each slot)
+                        slots = np.array([pkt.slot1, pkt.slot2, pkt.slot3, pkt.slot4], dtype=np.uint16)
+                        df.putdata(fields["slots"], slots, first_frame=frame)
+
+                        # Write mode
+                        df.putdata(
+                            fields["mode"],
+                            np.array([pkt.mode], dtype=np.uint8),
+                            first_frame=frame,
+                        )
+
+                        # Determine number of active slots based on mode
+                        num_slots = {0: 1, 1: 2, 2: 4}.get(pkt.mode, 4)
+
+                        # Create slot_idx for MPLEX indexing (similar to readout mplex_idx)
+                        # For PFB4: [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, ...]
+                        # Where: 0=slot1_I, 1=slot1_Q, 2=slot2_I, 3=slot2_Q, ...
+                        # This repeats with period = 2 * num_slots
+                        num_samples = len(pkt.samples)
+                        period = 2 * num_slots
+                        slot_idx = np.tile(np.arange(period, dtype=np.uint16), (num_samples * 2 + period - 1) // period)[:2 * num_samples]
+
+                        df.putdata(fields["slot_idx"], slot_idx, first_frame=frame)
+
+                        # Write samples (interleaved I/Q format, scaled by 256)
+                        samples = pkt.samples
+                        raw_data = np.empty(2 * len(samples), dtype=np.int32)
+                        raw_data[0::2] = (np.real(samples) * 256).astype(np.int32)
+                        raw_data[1::2] = (np.imag(samples) * 256).astype(np.int32)
+
+                        df.putdata(fields["raw"], raw_data, first_frame=frame)
+
+                        # Increment per-module frame counter
+                        mstats.dirfile_frame += 1
+
+
+def setup_pfb_dirfile_for_board(
+    board_stats: BoardStats,
+    serial: int,
+    main_dirfile: gd.dirfile,
+    channels: list[range],
+):
+    """Create a subdirfile for a specific CRS board (PFB mode)"""
+    board_ns = f"serial_{serial:04d}"
+    board_path = f"{main_dirfile.name}/{board_ns}"
+
+    board_stats.dirfile = gd.dirfile(
+        board_path, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT
+    )
+
+    # Link from main dirfile
+    main_dirfile.include(f"{board_ns}/format", 0, 0, board_ns)
+    main_dirfile.metaflush()
+
+
+def setup_pfb_dirfile_for_module(
+    board_stats: BoardStats,
+    module_stats: ModuleStats,
+    module: int,
+    channels: list[range],
+):
+    """Create dirfile fields for a specific module (PFB mode)"""
+    df = board_stats.dirfile
+
+    # Field names
+    raw_field = f"m{module+1:02d}_pfb_raw32"
+    slots_field = f"m{module+1:02d}_pfb_slots"
+    slot_idx_field = f"m{module+1:02d}_pfb_slot_idx"
+    mode_field = f"m{module+1:02d}_pfb_mode"
+    ts_sbs_field = f"m{module+1:02d}_ts_sbs"
+    ts_ss_field = f"m{module+1:02d}_ts_ss"
+
+    module_stats.dirfile_fields = {
+        "raw": raw_field,
+        "slots": slots_field,
+        "slot_idx": slot_idx_field,
+        "mode": mode_field,
+        "ts_sbs": ts_sbs_field,
+        "ts_ss": ts_ss_field,
+    }
+
+    # Add timestamp fields
+    df.add(gd.entry(gd.RAW_ENTRY, ts_sbs_field, 0, (gd.INT32, 1)))
+    df.add(gd.entry(gd.RAW_ENTRY, ts_ss_field, 0, (gd.INT32, 1)))
+
+    # Add mode field
+    df.add(gd.entry(gd.RAW_ENTRY, mode_field, 0, (gd.UINT8, 1)))
+
+    # Add slot header field (4 uint16 values: slot1, slot2, slot3, slot4)
+    # This tells which channel each slot corresponds to
+    df.add(gd.entry(gd.RAW_ENTRY, slots_field, 0, (gd.UINT16, 4)))
+    df.hide(slots_field)
+
+    # Add slot index field (repeating pattern [0,1,2,3,0,1,2,3,...] for MPLEX)
+    # Maximum PFB packet has PFBPACKET_NSAMP_MAX samples
+    df.add(gd.entry(gd.RAW_ENTRY, slot_idx_field, 0, (gd.UINT16, PFBPACKET_NSAMP_MAX)))
+    df.hide(slot_idx_field)
+
+    # Add raw multiplexed field (variable length, but we'll make it large enough)
+    # Each sample is 2 int32 values (I and Q)
+    df.add(gd.entry(gd.RAW_ENTRY, raw_field, 0, (gd.INT32, 2 * PFBPACKET_NSAMP_MAX)))
+    df.hide(raw_field)
+
+    # Create demultiplexed fields for each slot
+    # PFB packets interleave samples across active slots (1, 2, or 4)
+    # We create MPLEX fields to extract each slot's samples from the raw field
+    # The slot_idx field repeats [0,1,2,3,...] and we MPLEX on that
+    # The slot header fields (slot1-slot4) tell which channel each slot corresponds to
+    NUM_SLOTS=4
+
+    for slot_idx in range(NUM_SLOTS):
+        slot_num = slot_idx + 1
+
+        # Create I and Q fields for this slot using MPLEX
+        # slot_idx cycles through [0, 1, 2, ..., 2*num_slots-1]
+        # For PFB4: 0=slot1_I, 1=slot1_Q, 2=slot2_I, 3=slot2_Q, ...
+        # We extract where slot_idx == 2*slot_idx for I, 2*slot_idx+1 for Q
+
+        i_field_raw = f"m{module+1:02d}_slot{slot_num}_i_raw"
+        q_field_raw = f"m{module+1:02d}_slot{slot_num}_q_raw"
+
+        df.add(
+            gd.entry(
+                gd.MPLEX_ENTRY,
+                i_field_raw,
+                0,
+                (raw_field, slot_idx_field, 2 * slot_idx, 2*NUM_SLOTS),
+            )
+        )
+
+        df.add(
+            gd.entry(
+                gd.MPLEX_ENTRY,
+                q_field_raw,
+                0,
+                (raw_field, slot_idx_field, 2 * slot_idx + 1, 2*NUM_SLOTS),
+            )
+        )
+
+        # Create scaled complex field combining I and Q
+        slot_field = f"m{module+1:02d}_slot{slot_num}"
+        df.add(
+            gd.entry(
+                gd.LINCOM_ENTRY,
+                slot_field,
+                0,
+                ((i_field_raw, q_field_raw), (1 / 256.0 + 0j, 1j / 256.0), (0, 0)),
+            )
+        )
+
+        # Hide raw I/Q fields, keep the complex field visible
+        df.hide(i_field_raw)
+        df.hide(q_field_raw)
+
+    # Add timebase field
+    timebase_field = f"m{module+1:02d}_timebase"
+    df.add(
+        gd.entry(
+            gd.LINCOM_ENTRY,
+            timebase_field,
+            0,
+            ((ts_sbs_field, ts_ss_field), (1.0, 1 / 125e6), (0, 0)),
+        )
+    )
+
+    # Flush metadata so dirfile can be read immediately
+    df.metaflush()
 
 
 if __name__ == "__main__":

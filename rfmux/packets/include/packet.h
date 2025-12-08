@@ -10,7 +10,7 @@
 
 /* Packet magic numbers */
 #define READOUT_PACKET_MAGIC 0x5344494b
-#define PFB_PACKET_MAGIC 0x736e6162
+#define PFB_PACKET_MAGIC 0x736e6962
 
 /* Readout packet constants */
 #define STREAMER_PORT 9876

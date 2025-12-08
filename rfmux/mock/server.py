@@ -40,7 +40,7 @@ def yaml_hook(hwm):
     # Find all CRS objects in the database and patch up their hostnames to
     # something local.
     sockets = []
-    for d in hwm.query(BaseCRS):  # Query for BaseCRS, as MockCRS might not be in DB yet
+    for crs in hwm.query(BaseCRS):  # Query for BaseCRS, as MockCRS might not be in DB yet
 
         # Create a socket to be shared with the server process.
         s = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
@@ -48,12 +48,12 @@ def yaml_hook(hwm):
         (hostname, port) = s.getsockname()
 
         sockets.append(s)
-        d.hostname = f"{hostname}:{port}"
+        crs.hostname = f"{hostname}:{port}"
         # Store configuration for MockCRS instantiation in subprocess
         model_configs[port] = {
-            'serial': d.serial if d.serial else ("%05d" % port),
-            'slot': d.slot if d.crate else None,
-            'crate': d.crate.serial if d.crate else None,
+            'serial': crs.serial if crs.serial else ("%05d" % port),
+            'slot': crs.slot if crs.crate else None,
+            'crate': crs.crate.serial if crs.crate else None,
         }
 
     hwm.commit()

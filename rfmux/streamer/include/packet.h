@@ -13,6 +13,7 @@
 #define PFB_PACKET_MAGIC 0x736e6962
 
 /* Readout packet constants */
+#define MULTICAST_GROUP "239.192.0.2"
 #define STREAMER_PORT 9876
 #define PFB_STREAMER_PORT 9877
 
@@ -25,6 +26,8 @@
 #endif
 
 /* IRIG-B timestamp structure */
+#define SS_PER_SECOND 156250000
+
 struct irigb_timestamp {
 	uint32_t y;
 	uint32_t d;

@@ -52,8 +52,21 @@ namespace packets {
 			return static_cast<Source>((c >> 29) & 0x3);
 		}
 
+		void set_source(Source src) {
+			c = (c & ~(0x3 << 29)) | (static_cast<uint32_t>(src) << 29);
+		}
+
 		bool is_recent() const { return c & 0x80000000; }
+		void set_recent(bool recent) {
+			if (recent)
+				c |= 0x80000000;
+			else
+				c &= ~0x80000000;
+		}
+
 		uint32_t get_count() const { return c & 0x1fffffff; }
+
+		void renormalize();
 	};
 
 	/* Type-erased packet container. */
@@ -92,10 +105,16 @@ namespace packets {
 	public:
 		using Header = readout_packet_header;
 
+		ReadoutPacket() = default;
+
 		static ReadoutPacket from_bytes(const void* data, size_t len);
+		py::bytes to_bytes() const;
 
 		const auto& samples() const { return samples_; }
+		auto& samples() { return samples_; }
+
 		const Timestamp& timestamp() const { return timestamp_; }
+		Timestamp& timestamp() { return timestamp_; }
 
 		int get_num_channels() const {
 			return version == LONG_PACKET_VERSION
@@ -109,6 +128,14 @@ namespace packets {
 			return samples_[ch];
 		}
 
+		void set_channel(int ch, std::complex<double> value) {
+			if (ch < 0 || ch >= get_num_channels())
+				throw std::out_of_range("Channel index out of range");
+			if (ch >= (int)samples_.size())
+				samples_.resize(get_num_channels());
+			samples_[ch] = value;
+		}
+
 	private:
 		std::vector<std::complex<double>> samples_;
 		Timestamp timestamp_;
@@ -118,10 +145,16 @@ namespace packets {
 	public:
 		using Header = pfb_packet_header;
 
+		PFBPacket() = default;
+
 		static PFBPacket from_bytes(const void* data, size_t len);
+		py::bytes to_bytes() const;
 
 		const auto& samples() const { return samples_; }
+		auto& samples() { return samples_; }
+
 		const Timestamp& timestamp() const { return timestamp_; }
+		Timestamp& timestamp() { return timestamp_; }
 
 		int get_num_samples() const { return num_samples; }
 
@@ -129,6 +162,16 @@ namespace packets {
 			if (idx < 0 || idx >= get_num_samples())
 				throw std::out_of_range("Sample index out of range");
 			return samples_[idx];
+		}
+
+		void set_sample(int idx, std::complex<double> value) {
+			if (idx < 0 || idx >= PFBPACKET_NSAMP_MAX)
+				throw std::out_of_range("Sample index out of range");
+			if (idx >= (int)samples_.size())
+				samples_.resize(idx + 1);
+			samples_[idx] = value;
+			if (idx + 1 > num_samples)
+				num_samples = idx + 1;
 		}
 
 	private:

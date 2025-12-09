@@ -25,10 +25,10 @@ import time
 import numpy as np
 from contextlib import closing
 
-from rfmux.packets import (
+from rfmux.streamer import (
     ReadoutPacketReceiver,
     PFBPacketReceiver,
-    create_multicast_socket,
+    get_multicast_socket,
     STREAMER_PORT,
     PFB_STREAMER_PORT,
     MULTICAST_GROUP,
@@ -97,7 +97,7 @@ async def test_receive_readout_packets(crs):
     hostname = crs.tuber_hostname
 
     # Create socket and receiver (small reorder window for testing)
-    with closing(create_multicast_socket(hostname, STREAMER_PORT)) as sock:
+    with closing(get_multicast_socket(hostname, STREAMER_PORT)) as sock:
         receiver = ReadoutPacketReceiver(sock, reorder_window=128)
 
         # Get the CRS serial number
@@ -141,7 +141,7 @@ async def test_packet_sequence_ordering(crs):
     hostname = crs.tuber_hostname
     serial = int(crs.serial)
 
-    with closing(create_multicast_socket(hostname, STREAMER_PORT)) as sock:
+    with closing(get_multicast_socket(hostname, STREAMER_PORT)) as sock:
         receiver = ReadoutPacketReceiver(sock, reorder_window=128)
         queue = receiver.get_queue(serial=serial, module=1)
 
@@ -169,7 +169,7 @@ async def test_multiple_module_queues(crs):
     hostname = crs.tuber_hostname
     serial = int(crs.serial)
 
-    with closing(create_multicast_socket(hostname, STREAMER_PORT)) as sock:
+    with closing(get_multicast_socket(hostname, STREAMER_PORT)) as sock:
         receiver = ReadoutPacketReceiver(sock, reorder_window=128)
 
         total_received = 0
@@ -198,7 +198,7 @@ async def test_queue_overflow_handling(crs):
     hostname = crs.tuber_hostname
     serial = int(crs.serial)
 
-    with closing(create_multicast_socket(hostname, STREAMER_PORT)) as sock:
+    with closing(get_multicast_socket(hostname, STREAMER_PORT)) as sock:
         receiver = ReadoutPacketReceiver(sock, reorder_window=128)
         queue = receiver.get_queue(serial=serial, module=1)
 

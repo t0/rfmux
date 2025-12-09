@@ -59,7 +59,7 @@ class UDPReceiver(QtCore.QThread):
             if platform.system() == "Linux":
                 try:
                     data = self.sock.recv(streamer.LONG_PACKET_SIZE)
-                    pkt = streamer.ReadoutPacket.from_bytes(data)
+                    pkt = streamer.ReadoutPacket(data)
                     if pkt.module == self.module_id - 1:
                         if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
                             self.first_packet_received = pkt.seq
@@ -75,7 +75,7 @@ class UDPReceiver(QtCore.QThread):
             else:
                 try:
                     data = self.sock.recv(streamer.LONG_PACKET_SIZE)
-                    pkt = streamer.ReadoutPacket.from_bytes(data)
+                    pkt = streamer.ReadoutPacket(data)
                     if pkt.module == self.module_id - 1:
                         if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
                             self.first_packet_received = pkt.seq

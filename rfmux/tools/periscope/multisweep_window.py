@@ -1273,10 +1273,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 else:
                     data['pfb_enabled'] = False
                 
-                self.spectrum_noise_data['data'] = data
+                self.spectrum_noise_data['data'] = data  
                 
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", str(e))
+                raise
             finally:
                 progress.close()
 
@@ -1594,7 +1595,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "No Data", 
                                         "No multisweep data available. Please run a multisweep first.")
             return
-        
+            
         parent = self.parent()
         if not parent:
             QtWidgets.QMessageBox.warning(self, "Parent Not Available", 
@@ -1610,7 +1611,6 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "CRS Not Available", 
                                         "CRS object is None. Cannot bias detectors.")
             return
-        
         # Import the dialog
         from .bias_kids_dialog import BiasKidsDialog
         
@@ -1641,7 +1641,6 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Module Not Set", 
                                         "Target module is not set. Cannot bias detectors.")
             return
-        
         # Create and start the task with dialog parameters
         self.bias_kids_task = BiasKidsTask(
             parent.crs,
@@ -1657,7 +1656,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         
         # Start the task
         self.bias_kids_task.start()
-    
+
     def _bias_kids_progress(self, module, progress):
         """Handle progress updates from the bias_kids task."""
         # Could update a progress indicator if desired

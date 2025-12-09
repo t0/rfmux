@@ -146,7 +146,7 @@ class Timestamp:
 
 
 @dataclasses.dataclass
-class DfmuxPacket:
+class ReadoutPacket:
     magic: np.uint32
     version: np.uint16
     serial: np.uint16
@@ -165,7 +165,7 @@ class DfmuxPacket:
     @classmethod
     def from_bytes(cls, data):
         """
-        Parses the entire DfmuxPacket from raw bytes, which contain:
+        Parses the entire ReadoutPacket from raw bytes, which contain:
           - a header (<IHHBBBBI)
           - channel data (num_channels * 2 * sizeof(int))
           - a timestamp (8 * sizeof(uint32))
@@ -197,13 +197,13 @@ class DfmuxPacket:
         # Parse the timestamp from the remaining data
         ts = Timestamp.from_bytes(data[header.size + bodysize :])
 
-        # Return a DfmuxPacket instance with the parsed data
-        return DfmuxPacket(*header_args, s=body, ts=ts)
+        # Return a ReadoutPacket instance with the parsed data
+        return ReadoutPacket(*header_args, s=body, ts=ts)
 
 
     def to_bytes(self) -> bytes:
         """
-        Serialize a DfmuxPacket into bytes.
+        Serialize a ReadoutPacket into bytes.
         Layout:
           - 16-byte header (<IHHBBBBI)
           - channel data (NUM_CHANNELS*2 int32)

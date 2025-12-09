@@ -14,9 +14,9 @@ from datetime import datetime
 import numpy as np # For np.clip in generate_packet
 import platform
 
-# Import DfmuxPacket and related constants from streamer
+# Import ReadoutPacket and related constants from streamer
 from ..streamer import (
-    DfmuxPacket, Timestamp, TimestampPort,
+    ReadoutPacket, Timestamp, TimestampPort,
     STREAMER_MAGIC,
     SHORT_PACKET_VERSION, LONG_PACKET_VERSION,
     SHORT_PACKET_CHANNELS, LONG_PACKET_CHANNELS,
@@ -305,7 +305,7 @@ class MockCRSUDPStreamer(threading.Thread):
                 _active_streamers.remove(self)
     
     def generate_packet_for_module(self, module_num, seq):
-        """Generate a DfmuxPacket for a specific module with coupled channels."""
+        """Generate a ReadoutPacket for a specific module with coupled channels."""
         import time
         
         # Detailed timing
@@ -436,14 +436,14 @@ class MockCRSUDPStreamer(threading.Thread):
 
         timing_timestamp = time.perf_counter()
 
-        packet = DfmuxPacket(
+        packet = ReadoutPacket(
             magic=np.uint32(STREAMER_MAGIC),
             version=np.uint16(version),
             serial=np.uint16(int(self.mock_crs.serial) if self.mock_crs.serial and self.mock_crs.serial.isdigit() else 0),
             num_modules=np.uint8(1), # Packet is for one module's data
             block=np.uint8(0), # Block number, typically 0 for continuous streaming
             fir_stage=fir_stage,
-            module=np.uint8(module_num - 1),  # DfmuxPacket module is 0-indexed
+            module=np.uint8(module_num - 1),  # ReadoutPacket module is 0-indexed
             seq=np.uint32(seq),
             s=iq_data_arr, # This should be the array.array('i')
             ts=ts

@@ -33,6 +33,58 @@ namespace packets {
 		return type_->to_python(data(), size());
 	}
 
+	void Timestamp::renormalize() {
+		if (!is_recent())
+			return;
+
+		// Carry subseconds -> seconds
+		int32_t carry = ss / SS_PER_SECOND;
+		ss = ss % SS_PER_SECOND;
+		if (ss < 0) {
+			ss += SS_PER_SECOND;
+			carry--;
+		}
+		s += carry;
+
+		// Carry seconds -> minutes
+		carry = s / 60;
+		s = s % 60;
+		if (s < 0) {
+			s += 60;
+			carry--;
+		}
+		m += carry;
+
+		// Carry minutes -> hours
+		carry = m / 60;
+		m = m % 60;
+		if (m < 0) {
+			m += 60;
+			carry--;
+		}
+		h += carry;
+
+		// Carry hours -> days
+		carry = h / 24;
+		h = h % 24;
+		if (h < 0) {
+			h += 24;
+			carry--;
+		}
+		d += carry;
+
+		// Carry days -> years (ignoring leap years)
+		carry = (d - 1) / 365;
+		d = ((d - 1) % 365) + 1;
+		if (d < 1) {
+			d += 365;
+			carry--;
+		}
+		y = (y + carry) % 100;
+		if (y < 0)
+			y += 100;
+	}
+
 	ReadoutPacket ReadoutPacket::from_bytes(const void* data, size_t len) {
 		if (len != LONG_PACKET_SIZE && len != SHORT_PACKET_SIZE)
 			throw std::runtime_error("Invalid readout packet size");
@@ -73,6 +125,43 @@ namespace packets {
 		pkt.timestamp_ = Timestamp(*ts_ptr);
 
 		return pkt;
+	}
+
+	py::bytes ReadoutPacket::to_bytes() const {
+		int num_channels = get_num_channels();
+		size_t packet_size = (version == LONG_PACKET_VERSION) ? LONG_PACKET_SIZE : SHORT_PACKET_SIZE;
+
+		std::vector<char> buffer(packet_size);
+
+		// Write header
+		std::memcpy(buffer.data(), static_cast<const readout_packet_header*>(this), sizeof(readout_packet_header));
+
+		// Write samples (convert double back to int32)
+		auto* samples_ptr = reinterpret_cast<int32_t*>(buffer.data() + sizeof(readout_packet_header));
+		for (int i = 0; i < num_channels; i++) {
+			std::complex<double> sample = (i < (int)samples_.size()) ? samples_[i] : std::complex<double>(0, 0);
+			samples_ptr[2 * i] = static_cast<int32_t>(sample.real() * 256.);
+			samples_ptr[2 * i + 1] = static_cast<int32_t>(sample.imag() * 256.);
+		}
+
+		// Write timestamp
+		irigb_timestamp ts_out;
+		ts_out.y = timestamp_.y;
+		ts_out.d = timestamp_.d;
+		ts_out.h = timestamp_.h;
+		ts_out.m = timestamp_.m;
+		ts_out.s = timestamp_.s;
+		ts_out.ss = timestamp_.ss;
+		ts_out.c = timestamp_.c;
+		ts_out.sbs = timestamp_.sbs;
+
+		std::memcpy(
+			buffer.data() + sizeof(readout_packet_header) + num_channels * 2 * sizeof(int32_t),
+			&ts_out,
+			sizeof(irigb_timestamp)
+		);
+
+		return py::bytes(buffer.data(), buffer.size());
 	}
 
 	PFBPacket PFBPacket::from_bytes(const void* data, size_t len) {
@@ -116,6 +205,44 @@ namespace packets {
 		pkt.timestamp_ = Timestamp(*ts_ptr);
 
 		return pkt;
+	}
+
+	py::bytes PFBPacket::to_bytes() const {
+		size_t packet_size = sizeof(pfb_packet_header) +
+							 (num_samples * 2 * sizeof(int32_t)) +
+							 sizeof(irigb_timestamp);
+
+		std::vector<char> buffer(packet_size);
+
+		// Write header
+		std::memcpy(buffer.data(), static_cast<const pfb_packet_header*>(this), sizeof(pfb_packet_header));
+
+		// Write samples (convert double back to int32)
+		auto* samples_ptr = reinterpret_cast<int32_t*>(buffer.data() + sizeof(pfb_packet_header));
+		for (int i = 0; i < num_samples; i++) {
+			std::complex<double> sample = (i < (int)samples_.size()) ? samples_[i] : std::complex<double>(0, 0);
+			samples_ptr[2 * i] = static_cast<int32_t>(sample.real() * 256.);
+			samples_ptr[2 * i + 1] = static_cast<int32_t>(sample.imag() * 256.);
+		}
+
+		// Write timestamp
+		irigb_timestamp ts_out;
+		ts_out.y = timestamp_.y;
+		ts_out.d = timestamp_.d;
+		ts_out.h = timestamp_.h;
+		ts_out.m = timestamp_.m;
+		ts_out.s = timestamp_.s;
+		ts_out.ss = timestamp_.ss;
+		ts_out.c = timestamp_.c;
+		ts_out.sbs = timestamp_.sbs;
+
+		std::memcpy(
+			buffer.data() + sizeof(pfb_packet_header) + num_samples * 2 * sizeof(int32_t),
+			&ts_out,
+			sizeof(irigb_timestamp)
+		);
+
+		return py::bytes(buffer.data(), buffer.size());
 	}
 
 	std::optional<Packet> PacketQueue::pop(std::optional<int> timeout_ms) {

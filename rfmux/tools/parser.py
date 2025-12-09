@@ -23,10 +23,10 @@ import psutil
 import pygetdata as gd
 import numpy as np
 
-from rfmux.packets import (
+from rfmux.streamer import (
     ReadoutPacketReceiver,
     PFBPacketReceiver,
-    create_multicast_socket,
+    get_multicast_socket,
     STREAMER_PORT,
     PFB_STREAMER_PORT,
     PFBPACKET_NSAMP_MAX,
@@ -407,10 +407,10 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
     # Setup packet receiver with large buffer to reduce drops
     with (
         closing(
-            create_multicast_socket(
-                hostname=args.hostname,
-                interface=interface_ip,
+            get_multicast_socket(
+                crs_hostname=args.hostname,
                 port=STREAMER_PORT,
+                interface=interface_ip,
                 buffer_size=67108864,
             )
         ) as sock,
@@ -599,10 +599,10 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
     # Setup packet receiver with large buffer to reduce drops
     with (
         closing(
-            create_multicast_socket(
-                hostname=args.hostname,
-                interface=interface_ip,
+            get_multicast_socket(
+                crs_hostname=args.hostname,
                 port=PFB_STREAMER_PORT,
+                interface=interface_ip,
                 buffer_size=67108864,
             )
         ) as sock,

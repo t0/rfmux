@@ -191,7 +191,7 @@ async def py_get_samples(crs: CRS,
                 )
 
                 # Parse the received packet
-                p = streamer.DfmuxPacket.from_bytes(data)
+                p = streamer.ReadoutPacket(data)
 
                 if p.serial != int(crs.serial):
                     warnings.warn(

@@ -10,19 +10,43 @@ namespace py = pybind11;
 using namespace packets;
 using namespace py::literals;
 
-PYBIND11_MODULE(_packets, m) {
+PYBIND11_MODULE(_receiver, m) {
 	py::class_<Timestamp>(m, "Timestamp")
-		.def_readonly("y", &Timestamp::y, "Year (0-99)")
-		.def_readonly("d", &Timestamp::d, "Day of year (1-366)")
-		.def_readonly("h", &Timestamp::h, "Hour (0-23)")
-		.def_readonly("m", &Timestamp::m, "Minute (0-59)")
-		.def_readonly("s", &Timestamp::s, "Second (0-59)")
-		.def_readonly("ss", &Timestamp::ss, "Sub-seconds")
-		.def_readonly("c", &Timestamp::c, "Control field")
-		.def_readonly("sbs", &Timestamp::sbs, "Sub-block sequence")
+		.def(py::init<>())
+		.def(py::init([](int32_t y, int32_t d, int32_t h, int32_t m, int32_t s,
+		                 int32_t ss, uint32_t c, uint32_t sbs,
+		                 Timestamp::Source source, bool recent) {
+			Timestamp ts;
+			ts.y = y;
+			ts.d = d;
+			ts.h = h;
+			ts.m = m;
+			ts.s = s;
+			ts.ss = ss;
+			ts.c = c;
+			ts.sbs = sbs;
+			ts.set_source(source);
+			ts.set_recent(recent);
+			return ts;
+		}),
+		py::kw_only(),
+		"y"_a, "d"_a, "h"_a, "m"_a, "s"_a, "ss"_a, "c"_a, "sbs"_a,
+		"source"_a, "recent"_a,
+		"Create timestamp with specified fields")
+		.def_readwrite("y", &Timestamp::y, "Year (0-99)")
+		.def_readwrite("d", &Timestamp::d, "Day of year (1-366)")
+		.def_readwrite("h", &Timestamp::h, "Hour (0-23)")
+		.def_readwrite("m", &Timestamp::m, "Minute (0-59)")
+		.def_readwrite("s", &Timestamp::s, "Second (0-59)")
+		.def_readwrite("ss", &Timestamp::ss, "Sub-seconds")
+		.def_readwrite("c", &Timestamp::c, "Control field")
+		.def_readwrite("sbs", &Timestamp::sbs, "Sub-block sequence")
 		.def("get_source", &Timestamp::get_source, "Get timestamp source")
+		.def("set_source", &Timestamp::set_source, "Set timestamp source", "src"_a)
 		.def("is_recent", &Timestamp::is_recent, "Check if timestamp is recent")
+		.def("set_recent", &Timestamp::set_recent, "Set recent flag", "recent"_a)
 		.def("get_count", &Timestamp::get_count, "Get count field")
+		.def("renormalize", &Timestamp::renormalize, "Normalize timestamp fields (carry overflow)")
 		.def("__repr__", [](const Timestamp& ts) {
 			return fmt::format("Timestamp(y={} d={} {}:{}:{} ss={} c={} sbs={} recent={})",
 					ts.y, ts.d,
@@ -38,43 +62,93 @@ PYBIND11_MODULE(_packets, m) {
 		.value("GND", Timestamp::Source::GND);
 
 	py::class_<ReadoutPacket>(m, "ReadoutPacket")
-		.def_static("from_bytes", &ReadoutPacket::from_bytes, "data"_a, "len"_a)
-		.def_readonly("magic", &ReadoutPacket::magic)
-		.def_readonly("version", &ReadoutPacket::version)
-		.def_readonly("serial", &ReadoutPacket::serial)
-		.def_readonly("num_modules", &ReadoutPacket::num_modules)
-		.def_readonly("flags", &ReadoutPacket::flags)
-		.def_readonly("fir_stage", &ReadoutPacket::fir_stage)
-		.def_readonly("module", &ReadoutPacket::module)
-		.def_readonly("seq", &ReadoutPacket::seq)
+		.def(py::init<>())
+		.def(py::init([](py::bytes data) {
+			char* buffer;
+			Py_ssize_t length;
+			if (PYBIND11_BYTES_AS_STRING_AND_SIZE(data.ptr(), &buffer, &length)) {
+				throw std::runtime_error("Unable to extract bytes contents");
+			}
+			return ReadoutPacket::from_bytes(buffer, length);
+		}), "data"_a, "Deserialize packet from bytes")
+		.def(py::init([](uint32_t magic, uint16_t version, uint16_t serial,
+		                 uint8_t num_modules, uint8_t flags, int fir_stage,
+		                 uint8_t module, uint32_t seq) {
+			ReadoutPacket pkt;
+			pkt.magic = magic;
+			pkt.version = version;
+			pkt.serial = serial;
+			pkt.num_modules = num_modules;
+			pkt.flags = flags;
+			pkt.fir_stage = fir_stage;
+			pkt.module = module;
+			pkt.seq = seq;
+			return pkt;
+		}),
+		py::kw_only(),
+		"magic"_a, "version"_a, "serial"_a, "num_modules"_a, "flags"_a,
+		"fir_stage"_a, "module"_a, "seq"_a,
+		"Create readout packet with specified scalar fields")
+		.def("__bytes__", &ReadoutPacket::to_bytes, "Serialize packet to bytes")
+		.def_readwrite("magic", &ReadoutPacket::magic)
+		.def_readwrite("version", &ReadoutPacket::version)
+		.def_readwrite("serial", &ReadoutPacket::serial)
+		.def_readwrite("num_modules", &ReadoutPacket::num_modules)
+		.def_readwrite("flags", &ReadoutPacket::flags)
+		.def_readwrite("fir_stage", &ReadoutPacket::fir_stage)
+		.def_readwrite("module", &ReadoutPacket::module)
+		.def_readwrite("seq", &ReadoutPacket::seq)
 
-		.def_property_readonly("samples", &ReadoutPacket::samples)
-		.def_property_readonly("timestamp", &ReadoutPacket::timestamp)
+		.def_property("samples",
+			[](const ReadoutPacket& self) { return self.samples(); },
+			[](ReadoutPacket& self, py::object obj) {
+				self.samples() = py::cast<std::vector<std::complex<double>>>(obj);
+			})
+		.def_property("timestamp",
+			[](const ReadoutPacket& self) { return self.timestamp(); },
+			[](ReadoutPacket& self, const Timestamp& ts) { self.timestamp() = ts; })
 		.def("get_num_channels", &ReadoutPacket::get_num_channels)
 		.def("get_channel", &ReadoutPacket::get_channel, "ch"_a)
+		.def("set_channel", &ReadoutPacket::set_channel, "ch"_a, "value"_a)
 		.def("__repr__", [](const ReadoutPacket& pkt) {
 			return fmt::format("ReadoutPacket(serial={} module={} seq={})",
 					pkt.serial, pkt.module, pkt.seq);
 		});
 
 	py::class_<PFBPacket>(m, "PFBPacket")
-		.def_static("from_bytes", &PFBPacket::from_bytes, "data"_a, "len"_a)
-		.def_readonly("magic", &PFBPacket::magic)
-		.def_readonly("version", &PFBPacket::version)
-		.def_readonly("mode", &PFBPacket::mode)
-		.def_readonly("serial", &PFBPacket::serial)
-		.def_readonly("slot1", &PFBPacket::slot1)
-		.def_readonly("slot2", &PFBPacket::slot2)
-		.def_readonly("slot3", &PFBPacket::slot3)
-		.def_readonly("slot4", &PFBPacket::slot4)
-		.def_readonly("num_samples", &PFBPacket::num_samples)
-		.def_readonly("module", &PFBPacket::module)
-		.def_readonly("seq", &PFBPacket::seq)
-		// Other packet data
-		.def_property_readonly("samples", &PFBPacket::samples)
-		.def_property_readonly("timestamp", &PFBPacket::timestamp)
+		.def(py::init<>())
+		.def(py::init([](py::bytes data) {
+			char* buffer;
+			Py_ssize_t length;
+			if (PYBIND11_BYTES_AS_STRING_AND_SIZE(data.ptr(), &buffer, &length)) {
+				throw std::runtime_error("Unable to extract bytes contents");
+			}
+			return PFBPacket::from_bytes(buffer, length);
+		}), "data"_a, "Deserialize packet from bytes")
+		.def("__bytes__", &PFBPacket::to_bytes, "Serialize packet to bytes")
+		.def_readwrite("magic", &PFBPacket::magic)
+		.def_readwrite("version", &PFBPacket::version)
+		.def_readwrite("mode", &PFBPacket::mode)
+		.def_readwrite("serial", &PFBPacket::serial)
+		.def_readwrite("slot1", &PFBPacket::slot1)
+		.def_readwrite("slot2", &PFBPacket::slot2)
+		.def_readwrite("slot3", &PFBPacket::slot3)
+		.def_readwrite("slot4", &PFBPacket::slot4)
+		.def_readwrite("num_samples", &PFBPacket::num_samples)
+		.def_readwrite("module", &PFBPacket::module)
+		.def_readwrite("seq", &PFBPacket::seq)
+
+		.def_property("samples",
+			[](const PFBPacket& self) { return self.samples(); },
+			[](PFBPacket& self, py::object obj) {
+				self.samples() = py::cast<std::vector<std::complex<double>>>(obj);
+			})
+		.def_property("timestamp",
+			[](const PFBPacket& self) { return self.timestamp(); },
+			[](PFBPacket& self, const Timestamp& ts) { self.timestamp() = ts; })
 		.def("get_num_samples", &PFBPacket::get_num_samples)
 		.def("get_sample", &PFBPacket::get_sample, "idx"_a)
+		.def("set_sample", &PFBPacket::set_sample, "idx"_a, "value"_a)
 		.def("__repr__", [](const PFBPacket& pkt) {
 			return fmt::format("PFBPacket(serial={} module={} seq={} samples={})",
 					pkt.serial, pkt.module, pkt.seq, pkt.num_samples);
@@ -177,7 +251,7 @@ PYBIND11_MODULE(_packets, m) {
 			return IP_ADD_SOURCE_MEMBERSHIP; }
 		);
 
-	m.attr("MULTICAST_GROUP") = "239.192.0.2";
+	m.attr("MULTICAST_GROUP") = MULTICAST_GROUP;
 	m.attr("READOUT_PACKET_MAGIC") = READOUT_PACKET_MAGIC;
 	m.attr("PFB_PACKET_MAGIC") = PFB_PACKET_MAGIC;
 	m.attr("STREAMER_PORT") = STREAMER_PORT;
@@ -186,5 +260,8 @@ PYBIND11_MODULE(_packets, m) {
 	m.attr("SHORT_PACKET_SIZE") = SHORT_PACKET_SIZE;
 	m.attr("LONG_PACKET_CHANNELS") = LONG_PACKET_CHANNELS;
 	m.attr("SHORT_PACKET_CHANNELS") = SHORT_PACKET_CHANNELS;
+	m.attr("LONG_PACKET_VERSION") = LONG_PACKET_VERSION;
+	m.attr("SHORT_PACKET_VERSION") = SHORT_PACKET_VERSION;
 	m.attr("PFBPACKET_NSAMP_MAX") = PFBPACKET_NSAMP_MAX;
+	m.attr("SS_PER_SECOND") = SS_PER_SECOND;
 }

@@ -54,7 +54,7 @@ homepage = "https://github.com/t0/rfmux"
 repository = "https://github.com/t0/rfmux"
 
 [tool.scikit-build]
-cmake.source-dir = "rfmux/packets"
+cmake.source-dir = "rfmux/streamer"
 wheel.packages = ["rfmux"]
 
 [tool.setuptools]

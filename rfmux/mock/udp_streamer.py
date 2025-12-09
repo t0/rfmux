@@ -14,9 +14,9 @@ from datetime import datetime
 import numpy as np # For np.clip in generate_packet
 import platform
 
-# Import DfmuxPacket and related constants from streamer
+# Import ReadoutPacket and related constants from streamer
 from ..streamer import (
-    DfmuxPacket, Timestamp, TimestampPort,
+    ReadoutPacket, Timestamp, TimestampSource,
     STREAMER_MAGIC,
     SHORT_PACKET_VERSION, LONG_PACKET_VERSION,
     SHORT_PACKET_CHANNELS, LONG_PACKET_CHANNELS,
@@ -306,7 +306,7 @@ class MockCRSUDPStreamer(threading.Thread):
                 _active_streamers.remove(self)
     
     def generate_packet_for_module(self, module_num, seq, dec):
-        """Generate a DfmuxPacket for a specific module with coupled channels."""
+        """Generate a ReadoutPacket for a specific module with coupled channels."""
         import time
         
         # Detailed timing
@@ -420,34 +420,34 @@ class MockCRSUDPStreamer(threading.Thread):
         
         # Convert to timestamp fields
         ts = Timestamp(
-            y=np.int32(packet_datetime.year % 100),
-            d=np.int32(packet_datetime.timetuple().tm_yday),
-            h=np.int32(packet_datetime.hour), 
-            m=np.int32(packet_datetime.minute), 
-            s=np.int32(packet_datetime.second),
-            ss=np.int32(packet_datetime.microsecond * SS_PER_SECOND / 1e6), # Scaled sub-seconds
-            c=np.int32(0), # Carrier phase, typically 0 for mock
-            sbs=np.int32(0), # Sub-block sequence, typically 0 for mock
-            source=TimestampPort.TEST, # Mock data source
+            y=int(packet_datetime.year % 100),
+            d=int(packet_datetime.timetuple().tm_yday),
+            h=int(packet_datetime.hour),
+            m=int(packet_datetime.minute),
+            s=int(packet_datetime.second),
+            ss=int(packet_datetime.microsecond * SS_PER_SECOND / 1e6), # Scaled sub-seconds
+            c=0, # Carrier phase, typically 0 for mock
+            sbs=0, # Sub-block sequence, typically 0 for mock
+            source=TimestampSource.TEST, # Mock data source
             recent=True
         )
 
         timing_timestamp = time.perf_counter()
-        packet = DfmuxPacket(
-            magic=np.uint32(STREAMER_MAGIC),
-            version=np.uint16(version),
-            serial=np.uint16(int(self.mock_crs.serial) if self.mock_crs.serial and self.mock_crs.serial.isdigit() else 0),
-            num_modules=np.uint8(1), # Packet is for one module's data
-            block=np.uint8(0), # Block number, typically 0 for continuous streaming
+        packet = ReadoutPacket(
+            magic=STREAMER_MAGIC,
+            version=version,
+            serial=int(self.mock_crs.serial) if self.mock_crs.serial and self.mock_crs.serial.isdigit() else 0,
+            num_modules=1, # Packet is for one module's data
+            flags=0,
             fir_stage=dec,
-            module=np.uint8(module_num - 1),  # DfmuxPacket module is 0-indexed
-            seq=np.uint32(seq),
-            s=iq_data_arr, # This should be the array.array('i')
-            ts=ts
-        )
+            module=module_num-1,  # ReadoutPacket module is 0-indexed
+            seq=seq)
+        packet.samples = iq_data_arr
+        packet.timestamp = ts
+
         timing_packet_create = time.perf_counter()
-        
-        packet_bytes = packet.to_bytes()
+
+        packet_bytes = bytes(packet)
         self.mock_crs._last_timestamp = ts
         timing_serialize = time.perf_counter()
         

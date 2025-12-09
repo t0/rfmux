@@ -56,7 +56,7 @@ class UDPReceiver(QtCore.QThread):
 
     def _process_received_packet(self, data):
         """Process a received UDP packet if it matches our module."""
-        pkt = streamer.DfmuxPacket.from_bytes(data)
+        pkt = streamer.ReadoutPacket(data)
         if pkt.module == self.module_id - 1:
             if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
                 self.first_packet_received = pkt.seq

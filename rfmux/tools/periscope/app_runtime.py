@@ -570,8 +570,8 @@ class PeriscopeRuntime:
             float | None: Relative timestamp in seconds, or None if not recent.
         """
         # streamer from .utils
-        ts = pkt.ts
-        if ts.recent:
+        ts = pkt.timestamp
+        if ts.is_recent():
             # Apply a small offset to ensure timestamps are strictly increasing for plotting
             ts.ss += int(0.02 * streamer.SS_PER_SECOND); ts.renormalize()
             t_now = ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND
@@ -589,11 +589,12 @@ class PeriscopeRuntime:
         """
         # math from .utils
         for ch_val in self.all_chs: # Renamed ch
-            if len(pkt.s)/2 <= ch_val-1:
+            if len(pkt.samples) <= ch_val-1:
                 continue # don't plot channels that aren't streamed
 
-            Ival = pkt.s[2 * (ch_val - 1)] / 256.0  # Assuming 8-bit ADC data
-            Qval = pkt.s[2 * (ch_val - 1) + 1] / 256.0
+            sample = pkt.samples[ch_val - 1]
+            Ival = sample.real / 256.0  # Assuming 24-bit ADC data
+            Qval = sample.imag / 256.0
             self.buf[ch_val]["I"].add(Ival); self.buf[ch_val]["Q"].add(Qval)
             self.buf[ch_val]["M"].add(math.hypot(Ival, Qval)); self.tbuf[ch_val].add(t_rel)
 

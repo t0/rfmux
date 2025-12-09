@@ -25,27 +25,27 @@ set(SOURCES
     src/bindings.cpp
 )
 
-pybind11_add_module(_packets ${SOURCES})
+pybind11_add_module(_receiver ${SOURCES})
 
-target_include_directories(_packets PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(_packets PRIVATE fmt::fmt)
+target_include_directories(_receiver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(_receiver PRIVATE fmt::fmt)
 
 # Link Winsock on Windows
 if(WIN32)
-    target_link_libraries(_packets PRIVATE ws2_32)
+    target_link_libraries(_receiver PRIVATE ws2_32)
 endif()
 
 # Compiler warnings (cross-platform)
 if(MSVC)
-    target_compile_options(_packets PRIVATE /W4)
+    target_compile_options(_receiver PRIVATE /W4)
     # Workaround for MSVC 17.10+ constexpr mutex breaking change
     # See: https://github.com/microsoft/STL/issues/4730
     #      https://github.com/microsoft/STL/issues/4875
     # Without this, mutexes crash when Python uses older VC++ runtime
-    target_compile_definitions(_packets PRIVATE _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+    target_compile_definitions(_receiver PRIVATE _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 else()
-    target_compile_options(_packets PRIVATE -Wall -Wextra)
+    target_compile_options(_receiver PRIVATE -Wall -Wextra)
 endif()
 
-# Install to rfmux/packets subdirectory
-install(TARGETS _packets LIBRARY DESTINATION rfmux/packets)
+# Install to rfmux/streamer subdirectory
+install(TARGETS _receiver LIBRARY DESTINATION rfmux/streamer)

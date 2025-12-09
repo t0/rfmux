@@ -65,7 +65,7 @@ PYBIND11_MODULE(_receiver, m) {
 		.def(py::init<>())
 		.def(py::init([](py::bytes data) {
 			char* buffer;
-			ssize_t length;
+			Py_ssize_t length;
 			if (PYBIND11_BYTES_AS_STRING_AND_SIZE(data.ptr(), &buffer, &length)) {
 				throw std::runtime_error("Unable to extract bytes contents");
 			}
@@ -119,7 +119,7 @@ PYBIND11_MODULE(_receiver, m) {
 		.def(py::init<>())
 		.def(py::init([](py::bytes data) {
 			char* buffer;
-			ssize_t length;
+			Py_ssize_t length;
 			if (PYBIND11_BYTES_AS_STRING_AND_SIZE(data.ptr(), &buffer, &length)) {
 				throw std::runtime_error("Unable to extract bytes contents");
 			}

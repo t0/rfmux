@@ -1085,15 +1085,17 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     freq_i = np.log10(np.clip(np.concatenate((f_bin_i, pfb_f_bin_i if self.show_fast_tod else [])), 1e-12, None))
                     psd_i_vals = np.concatenate((psd_i_bin, pfb_psd_i_bin if self.show_fast_tod else []))
                     psd_q_vals = np.concatenate((psd_q_bin, pfb_psd_q_bin if self.show_fast_tod else []))
-                    psd_dual_vals = pfb_psd_mag_bin
-                    freq_l = pfb_f_bin_mag
+                    if self.show_fast_tod:
+                        psd_dual_vals = pfb_psd_mag_bin
+                        freq_l = pfb_f_bin_mag
                 else:
                     # Use the original data
                     freq_i = log_freqs
                     psd_i_vals = full_psd_i
                     psd_q_vals = full_psd_q
-                    psd_dual_vals = full_lin_comb
-                    freq_l = freq_lin_comb
+                    if self.show_fast_tod:
+                        psd_dual_vals = full_lin_comb
+                        freq_l = freq_lin_comb
 
 
                 if self.show_fast_tod:
@@ -1113,14 +1115,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                             f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
                             f"<span style='color:yellow'>Freq: {x:.3f}</span>"
                         )
-                        self.hover_label.setPos(log_x * 0.9, max(y_i, y_q, y_d)*0.9)
+                        self.hover_label.setPos(log_x * 0.95, max(y_i, y_q, y_d)*0.95)
                     else:
                         y_d = np.interp(log_x, freq_l, psd_dual_vals)
                         self.hover_label.setHtml(
                             f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
                             f"<span style='color:yellow'> Freq: {x:.3f}</span>"
                         )
-                        self.hover_label.setPos(log_x * 0.9, y_d * 0.9)
+                        self.hover_label.setPos(log_x * 0.95, y_d * 0.95)
                 else:
                     if log_x < max(freq_i):      
                         y_i = np.interp(log_x, freq_i, psd_i_vals)
@@ -1130,7 +1132,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                             f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
                             f"<span style='color:yellow'>Freq: {x:.3f}</span>"
                         )
-                        self.hover_label.setPos(log_x * 0.9, max(y_i, y_q)*0.9)
+                        self.hover_label.setPos(log_x * 0.95, max(y_i, y_q)*0.95)
                         
                 self.hover_label.show() 
             else:

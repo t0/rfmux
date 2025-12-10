@@ -15,6 +15,7 @@ import numpy as np
 from .crs import MockCRS
 # Import BaseCRS for type hinting or direct use if necessary
 from ..core.schema import CRS as BaseCRS
+import sys
 
 # DO NOT import algorithms on the server side
 # Algorithms should only run on the client side
@@ -31,14 +32,15 @@ def yaml_hook(hwm):
     model class.
     """
 
-    # These objects are hardware models of the dfmuxes, indexed by the port number
-    # used to connect with them over HTTP.
-    models = {}
+    # Store model configurations indexed by port number.
+    # We'll instantiate MockCRS instances in the subprocess to avoid
+    # pickling the unpicklable _config_lock (threading.RLock) on Windows.
+    model_configs = {}
 
     # Find all CRS objects in the database and patch up their hostnames to
     # something local.
     sockets = []
-    for d in hwm.query(BaseCRS):  # Query for BaseCRS, as MockCRS might not be in DB yet
+    for crs in hwm.query(BaseCRS):  # Query for BaseCRS, as MockCRS might not be in DB yet
 
         # Create a socket to be shared with the server process.
         s = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
@@ -46,19 +48,19 @@ def yaml_hook(hwm):
         (hostname, port) = s.getsockname()
 
         sockets.append(s)
-        d.hostname = f"{hostname}:{port}"
-        # Instantiate MockCRS
-        models[port] = MockCRS(
-            serial=d.serial if d.serial else ("%05d" % port),
-            slot=d.slot if d.crate else None,
-            crate=d.crate.serial if d.crate else None,
-        )
+        crs.hostname = f"{hostname}:{port}"
+        # Store configuration for MockCRS instantiation in subprocess
+        model_configs[port] = {
+            'serial': crs.serial if crs.serial else ("%05d" % port),
+            'slot': crs.slot if crs.crate else None,
+            'crate': crs.crate.serial if crs.crate else None,
+        }
 
     hwm.commit()
 
     l = mp_ctx.Semaphore(0)
 
-    p = ServerProcess(sockets=sockets, models=models, lock=l)
+    p = ServerProcess(sockets=sockets, model_configs=model_configs, lock=l)
     p.start()
     l.acquire()
 
@@ -97,15 +99,21 @@ def yaml_hook(hwm):
 class ServerProcess(mp_ctx.Process):
     daemon = True
 
-    def __init__(self, sockets, models, lock):
+    def __init__(self, sockets, model_configs, lock):
         self.sockets = sockets
-        self.models = models
+        self.model_configs = model_configs
         self.lock = lock
         super().__init__()
 
     def run(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+
+        # Instantiate MockCRS instances in the subprocess to avoid pickling
+        # the unpicklable _config_lock (threading.RLock) on Windows
+        self.models = {}
+        for port, config in self.model_configs.items():
+            self.models[port] = MockCRS(**config)
 
         # Set up signal handlers for graceful shutdown
         shutdown_event = asyncio.Event()

@@ -80,7 +80,7 @@ def main():
     
     s_mock = rfmux.load_session("""
     !HardwareMap
-    - !flavour "rfmux.core.mock"
+    - !flavour "rfmux.mock"
     - !CRS { serial: "0000", hostname: "127.0.0.1" }
     """)
     

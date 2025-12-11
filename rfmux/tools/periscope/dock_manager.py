@@ -126,6 +126,21 @@ class PeriscopeDockManager(QtCore.QObject):
             if id(tab_bar) not in self._monitored_tab_bars:
                 tab_bar.installEventFilter(self)
                 self._monitored_tab_bars.add(id(tab_bar))
+
+                tab_bar.setTabsClosable(True)
+                tab_bar.tabCloseRequested.connect(self._on_tab_close_requested)
+
+    def _on_tab_close_requested(self, index: int):
+        tab_bar = self.sender()
+        if not isinstance(tab_bar, QtWidgets.QTabBar):
+            return
+    
+        tab_title = tab_bar.tabText(index)
+        
+        for dock_id, dock in list(self.dock_widgets.items()):
+            if dock.windowTitle() == tab_title:
+                self.remove_dock(dock_id)
+      
     
     def _rename_tab_at_index(self, tab_bar: QtWidgets.QTabBar, index: int):
         """

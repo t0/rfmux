@@ -47,10 +47,10 @@ async def main(serial="MOCK"):
     # Network analysis parameters
     NETANAL_PARAMS = {
         'amp': 0.001,
-        'fmin': 100e6,      # 100 MHz
-        'fmax': 2450e6,     # 2450 MHz  
+        'fmin': 0.6e9,      # 500 MHz
+        'fmax': 1.0e9,     # 1000 MHz  
         'nsamps': 10,
-        'npoints': 100000,
+        'npoints': 50000,
         'max_chans': 1023,
         'max_span': 500e6,  # 500 MHz
         'module': MODULE
@@ -116,12 +116,13 @@ async def main(serial="MOCK"):
             crs = await create_mock_crs(
                 module=MODULE,
                 config={
-                    'num_resonances': 15,  # More resonances for testing
-                    'freq_start': 0.5e9,  # 500 MHz - within network analysis range
+                    'num_resonances': 10,  # More resonances for testing
+                    'freq_start': 0.6e9,  # 600 MHz - within network analysis range
                     'freq_end': 1.0e9,    # 1 GHz - within network analysis range
                     'enable_bifurcation': False,  # Disable for simpler testing
                     'q_min': 5e3,  # Lower Q for easier detection
-                    'q_max': 5e4
+                    'q_max': 5e4,
+                    'resonator_random_seed': 42 # making sure it is the same resonantor everytime
                 },
                 verbose=True
             )
@@ -166,7 +167,7 @@ async def main(serial="MOCK"):
 
 
 async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS, 
-                           MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS):
+                           MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS, full_run = True):
     """Run the complete algorithm flow with the given CRS instance."""
     
     # Step 2: Network Analysis
@@ -215,6 +216,9 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     
     resonance_frequencies = resonance_result['resonance_frequencies']
     resonance_details = resonance_result['resonances_details']
+
+    if full_run:
+        assert len(resonance_frequencies) == 10
     
     print(f"   ✓ Found {len(resonance_frequencies)} resonances:")
     for i, (freq, details) in enumerate(zip(resonance_frequencies, resonance_details)):

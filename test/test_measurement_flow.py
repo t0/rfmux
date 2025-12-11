@@ -78,7 +78,7 @@ class TestSimpleTuningFlow:
             }
             
             await run_algorithm_flow(
-                mock_crs, MODULE, NETANAL_PARAMS, {}, {}, {}, {}
+                mock_crs, MODULE, NETANAL_PARAMS, {}, {}, {}, {}, full_run = False
             )
         
         # Verify network analysis was called
@@ -121,7 +121,7 @@ class TestSimpleTuningFlow:
                 mock_crs, 1,
                 {'amp': 0.001, 'fmin': 100e6, 'fmax': 2450e6,
                  'nsamps': 10, 'npoints': 100, 'module': 1},
-                {}, {}, {}, {}
+                {}, {}, {}, {}, full_run = False
             )
         
         # Verify cable length was set
@@ -176,7 +176,7 @@ class TestSimpleTuningFlow:
                 {'span_hz': 500e3, 'npoints_per_sweep': 50, 'amp': 0.001,
                  'nsamps': 10, 'module': 1},
                 {'apply_skewed_fit': False, 'apply_nonlinear_fit': False},
-                {'num_samples': 1000, 'module': 1}
+                {'num_samples': 1000, 'module': 1}, full_run = False
             )
         
         print("Resonance finding completed")
@@ -274,7 +274,7 @@ class TestSimpleTuningFlow:
                 {'num_samples': 1000, 'return_spectrum': True,
                  'scaling': 'psd', 'reference': 'absolute',
                  'nsegments': 5, 'spectrum_cutoff': 0.9,
-                 'channel': None, 'module': 1}
+                 'channel': None, 'module': 1}, full_run = False
             )
         
         # Verify all major steps were called
@@ -317,7 +317,7 @@ class TestSimpleTuningFlow:
                 mock_crs, 1,
                 {'amp': 0.001, 'fmin': 100e6, 'fmax': 2450e6,
                  'nsamps': 10, 'npoints': 1000, 'module': 1},
-                {}, {}, {}, {}
+                {}, {}, {}, {}, full_run = False
             )
         
         # Should not call multisweep when no resonances

@@ -48,6 +48,7 @@ def yaml_hook(hwm):
         (hostname, port) = s.getsockname()
 
         sockets.append(s)
+
         crs.hostname = f"{hostname}:{port}"
         # Store configuration for MockCRS instantiation in subprocess
         model_configs[port] = {

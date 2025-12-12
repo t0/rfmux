@@ -78,10 +78,8 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
         action_buttons_widget = QtWidgets.QWidget()
         action_buttons_layout = QtWidgets.QHBoxLayout(action_buttons_widget)
         action_buttons_layout.setContentsMargins(0, 0, 0, 0)
-        action_buttons_layout.addStretch(1)
 
         # Add all the action buttons from parent
-        action_buttons_layout.addWidget(self.periscope.btn_interactive_session)
         action_buttons_layout.addWidget(self.periscope.btn_init_crs)
         action_buttons_layout.addWidget(self.periscope.btn_netanal)
         action_buttons_layout.addWidget(self.periscope.btn_load_multi)

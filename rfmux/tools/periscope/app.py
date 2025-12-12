@@ -223,7 +223,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._start_timer()
         
         # Set initial window size (wider and taller for better visibility)
-        self.resize(1400, 450)
+        self.resize(900, 450)
         
         # Show session startup dialog (unless already handled by launcher)
         self._skip_startup_dialog = skip_startup_dialog
@@ -290,7 +290,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.kernel_manager = None      # Manages the iPython kernel
         self.jupyter_widget = None      # The Qt widget for the console
         self.console_dock_widget = None # Dock widget to host the console
-        self.btn_interactive_session = None # Button to toggle the console
 
     def _create_ui_widgets(self, chan_str: str):
         """
@@ -301,12 +300,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         # Create toolbar widgets
         self.e_ch = QtWidgets.QLineEdit(chan_str)
+        self.e_ch.setMaximumWidth(40)
         self.e_ch.setToolTip("Enter comma-separated channels or use '&' to group in one row (e.g., 1&2,3,4&5&6).")
         self.e_ch.returnPressed.connect(self._update_channels)
 
         self.e_buf = QtWidgets.QLineEdit(str(self.N))
         self.e_buf.setValidator(QIntValidator(10, 1_000_000, self))
-        self.e_buf.setMaximumWidth(80)
+        self.e_buf.setMaximumWidth(120)
         self.e_buf.setToolTip("Size of the ring buffer for each channel (history/FFT depth).")
         self.e_buf.editingFinished.connect(self._change_buffer)
 
@@ -383,18 +383,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.btn_toggle_cfg = QtWidgets.QPushButton("Show Configuration")
         self.btn_toggle_cfg.setCheckable(True)
         self.btn_toggle_cfg.toggled.connect(self._toggle_config)
-
-
-        # Interactive session button
-        self.btn_interactive_session = QtWidgets.QPushButton("Interactive Session")
-        self.btn_interactive_session.setToolTip("Toggle an embedded iPython interactive session.")
-        self.btn_interactive_session.clicked.connect(self._toggle_interactive_session)
-        if not QTCONSOLE_AVAILABLE or self.crs is None:
-            self.btn_interactive_session.setEnabled(False)
-            if not QTCONSOLE_AVAILABLE:
-                self.btn_interactive_session.setToolTip("Interactive session disabled: qtconsole/ipykernel not installed.")
-            else:
-                self.btn_interactive_session.setToolTip("Interactive session disabled: CRS object not available.")
 
         # Mock mode specific buttons
         if self.is_mock_mode:
@@ -683,18 +671,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         action_buttons_layout = QtWidgets.QHBoxLayout(action_buttons_widget)
         action_buttons_layout.setContentsMargins(0,0,0,0) # No margins for this layout
         action_buttons_layout.addStretch(1) # Push buttons to the right
-
-        # Button to toggle embedded iPython session
-        self.btn_interactive_session = QtWidgets.QPushButton("Interactive Session")
-        self.btn_interactive_session.setToolTip("Toggle an embedded iPython interactive session.")
-        self.btn_interactive_session.clicked.connect(self._toggle_interactive_session)
-        if not QTCONSOLE_AVAILABLE or self.crs is None: # QTCONSOLE_AVAILABLE from .utils
-            self.btn_interactive_session.setEnabled(False)
-            if not QTCONSOLE_AVAILABLE:
-                self.btn_interactive_session.setToolTip("Interactive session disabled: qtconsole/ipykernel not installed.")
-            else:
-                self.btn_interactive_session.setToolTip("Interactive session disabled: CRS object not available.")
-        action_buttons_layout.addWidget(self.btn_interactive_session)
 
         action_buttons_layout.addWidget(self.btn_init_crs)
         action_buttons_layout.addWidget(self.btn_netanal)
@@ -2334,6 +2310,17 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.dark_mode_action.triggered.connect(self._update_console_style)
         view_menu.addAction(self.dark_mode_action)
 
+        self.interactive_session_action = QtGui.QAction("&Interactive Session", self)
+        self.interactive_session_action.setToolTip("Toggle an embedded iPython interactive session.")
+        self.interactive_session_action.triggered.connect(self._toggle_interactive_session)
+        if not QTCONSOLE_AVAILABLE or self.crs is None:
+            self.interactive_session_action.setEnabled(False)
+            if not QTCONSOLE_AVAILABLE:
+                self.interactive_session_action.setToolTip("Interactive session disabled: qtconsole/ipykernel not installed.")
+            else:
+                self.interactive_session_action.setToolTip("Interactive session disabled: CRS object not available.")
+        view_menu.addAction(self.interactive_session_action)
+
     def _create_window_menu(self):
         """
         Create the Window menu for managing dockable analysis panels.
@@ -2557,7 +2544,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             dock.setTitleBarWidget(None)
             dock.setWindowTitle("")
             dock.setWidget(dock._collapsed_widget)
-            dock.setFixedWidth(COLLAPSED_WIDTH)
+            dock.setMinimumWidth(COLLAPSED_WIDTH)
+            dock.setMaximumWidth(COLLAPSED_WIDTH)
             dock._collapsed = True
     
         def expand_dock():
@@ -2566,7 +2554,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             dock.setWindowTitle("Session Files")
             dock.setMinimumWidth(EXPANDED_MIN_WIDTH)
             dock.setMaximumWidth(EXPANDED_MAX_WIDTH)
-            dock.setFixedWidth(dock._expanded_width)
             dock._collapsed = False
     
         expand_btn.clicked.connect(expand_dock)

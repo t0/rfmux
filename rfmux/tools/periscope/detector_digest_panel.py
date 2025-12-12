@@ -255,11 +255,6 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.prev_button.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.prev_button)
         
-        # Screenshot button (left side)
-        self.screenshot_btn = QtWidgets.QPushButton("📷")
-        self.screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
-        self.screenshot_btn.clicked.connect(self._export_screenshot)
-        nav_layout.addWidget(self.screenshot_btn)
 
         # Title in the center
         title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
@@ -283,6 +278,12 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.refresh_noise_button.setToolTip("Captures 100 I,Q points for each detector and over-plots them on the I,Q plot in the detector digest windows. Used to conveniently re-assess detector state.")
         self.refresh_noise_button.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.refresh_noise_button)
+
+        # Screenshot button
+        self.screenshot_btn = QtWidgets.QPushButton("📷")
+        self.screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        self.screenshot_btn.clicked.connect(self._export_screenshot)
+        nav_layout.addWidget(self.screenshot_btn)
         
         # Add detector count label
         detector_count_text = ""
@@ -473,12 +474,6 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.prev_button_noise.clicked.connect(self._navigate_previous)
         self.prev_button_noise.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.prev_button_noise)
-        
-        # Screenshot button for noise tab (left side)
-        self.screenshot_btn_noise = QtWidgets.QPushButton("📷")
-        self.screenshot_btn_noise.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
-        self.screenshot_btn_noise.clicked.connect(self._export_screenshot)
-        nav_layout.addWidget(self.screenshot_btn_noise)
     
         title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
         self.title_label_noise = QtWidgets.QLabel(title_text)
@@ -493,6 +488,12 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.next_button_noise.clicked.connect(self._navigate_next)
         self.next_button_noise.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.next_button_noise)
+
+        # Screenshot button for noise tab
+        self.screenshot_btn_noise = QtWidgets.QPushButton("📷")
+        self.screenshot_btn_noise.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        self.screenshot_btn_noise.clicked.connect(self._export_screenshot)
+        nav_layout.addWidget(self.screenshot_btn_noise)
     
         detector_count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})" if self.detector_indices else ""
         self.detector_count_label_noise = QtWidgets.QLabel(detector_count_text)

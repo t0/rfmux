@@ -384,9 +384,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.btn_toggle_cfg.setCheckable(True)
         self.btn_toggle_cfg.toggled.connect(self._toggle_config)
 
-        self.btn_help = QtWidgets.QPushButton("Help")
-        self.btn_help.setToolTip("Show usage instructions, interaction details, and examples.")
-        self.btn_help.clicked.connect(self._show_help)
 
         # Interactive session button
         self.btn_interactive_session = QtWidgets.QPushButton("Interactive Session")
@@ -507,6 +504,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         # Add view menu (contains Dark Mode)
         self._create_view_menu()
+
+
+        # Add the help menu 
+        self._create_help_menu()
+
+        self.menuBar().setNativeMenuBar(False)
         
         # Note: Session browser dock will be added after Main dock is created
         
@@ -625,10 +628,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.btn_load_bias.setEnabled(False)
             self.btn_load_bias.setToolTip("CRS object not available - load Bias disabled.")
 
-        # Help button
-        self.btn_help = QtWidgets.QPushButton("Help")
-        self.btn_help.setToolTip("Show usage instructions, interaction details, and examples.")
-        self.btn_help.clicked.connect(self._show_help)
 
         # Add widgets to the toolbar layout
         toolbar_layout.addWidget(QtWidgets.QLabel("Channels:"))
@@ -702,7 +701,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         action_buttons_layout.addWidget(self.btn_load_multi)
         action_buttons_layout.addWidget(self.btn_load_bias)
         action_buttons_layout.addWidget(self.btn_toggle_cfg)
-        action_buttons_layout.addWidget(self.btn_help)  
         layout.addWidget(action_buttons_widget)
 
         # --- Collapsible Configuration Panel ---
@@ -2312,6 +2310,15 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             f"Failed to set pulse mode.\n\nError: {error_msg}"
         )
     
+    
+    def _create_help_menu(self):
+        help_menu = self.menuBar().addMenu("&Help")
+        help_action = QtGui.QAction("&Periscope Help", self)
+        help_action.setToolTip("Open Help Dialog")
+        help_action.triggered.connect(self._show_help)
+        help_menu.addAction(help_action)
+        
+
     def _create_view_menu(self):
         """
         Create the View menu for display settings like dark mode.
@@ -2486,51 +2493,145 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     
     def _add_session_browser_dock(self):
         """
-        Add the session browser panel as a dock on the left side.
-        
-        Creates a SessionBrowserPanel and wraps it in a collapsible dock widget
-        positioned on the left side of the main window.
+        Add the session browser panel as a collapsible dock on the left side.
+        Collapsing reduces the dock to a thin rail with a '+' button.
+        Expanding restores the previous width and full content.
         """
-        # Create the session browser panel
+    
+        # ---- Constants ----
+        COLLAPSED_WIDTH = 28
+        EXPANDED_MIN_WIDTH = 200
+        EXPANDED_MAX_WIDTH = 400
+        DEFAULT_EXPANDED_WIDTH = 280
+    
+        # ---- Create the session browser panel ----
         self.session_browser = SessionBrowserPanel(self.session_manager, self)
-        
-        # Apply current theme
         self.session_browser.apply_theme(self.dark_mode)
-        
-        # Connect the file load request signal
         self.session_browser.file_load_requested.connect(self._load_session_file)
-        
-        # Create dock widget
+    
+        # ---- Create dock widget ----
         dock = QtWidgets.QDockWidget("Session Files", self)
-        dock.setWidget(self.session_browser)
         dock.setObjectName("session_browser_dock")
-        
-        # Configure dock features - allow close, move, but not float by default
-        dock.setFeatures(
-            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable |
-            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+        dock.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable)
+    
+        # ---- Expanded widget ----
+        dock._expanded_widget = self.session_browser
+    
+        # ---- Collapsed placeholder widget (thin rail with '+') ----
+        collapsed_widget = QtWidgets.QWidget()
+        collapsed_layout = QtWidgets.QVBoxLayout(collapsed_widget)
+        collapsed_layout.setContentsMargins(0, 0, 0, 0)
+        collapsed_layout.setSpacing(0)
+    
+        expand_btn = QtWidgets.QToolButton()
+        expand_btn.setText("+")
+        expand_btn.setToolTip("Show Session Files")
+        expand_btn.setAutoRaise(True)
+        expand_btn.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding
         )
-        
-        # Add to left dock area
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
-        
-        # Split the Main dock to put session browser on the left side
-        # This ensures both docks are visible side-by-side instead of tabified
+        expand_btn.setStyleSheet("""
+            QToolButton {
+                font-size: 18px;
+                font-weight: bold;
+            }
+        """)
+    
+        collapsed_layout.addStretch(1)
+        collapsed_layout.addWidget(
+            expand_btn,
+            alignment=QtCore.Qt.AlignmentFlag.AlignCenter
+        )
+        collapsed_layout.addStretch(1)
+    
+        dock._collapsed_widget = collapsed_widget
+    
+        # ---- Internal state ----
+        dock._collapsed = False
+        dock._expanded_width = DEFAULT_EXPANDED_WIDTH
+    
+        # ---- Collapse / Expand logic ----
+        def collapse_dock():
+            dock._expanded_width = dock.width()
+            dock.setTitleBarWidget(None)
+            dock.setWindowTitle("")
+            dock.setWidget(dock._collapsed_widget)
+            dock.setFixedWidth(COLLAPSED_WIDTH)
+            dock._collapsed = True
+    
+        def expand_dock():
+            dock.setWidget(dock._expanded_widget)
+            dock.setTitleBarWidget(title_bar)
+            dock.setWindowTitle("Session Files")
+            dock.setMinimumWidth(EXPANDED_MIN_WIDTH)
+            dock.setMaximumWidth(EXPANDED_MAX_WIDTH)
+            dock.setFixedWidth(dock._expanded_width)
+            dock._collapsed = False
+    
+        expand_btn.clicked.connect(expand_dock)
+    
+        # ---- Custom title bar ----
+        title_bar = QtWidgets.QWidget()
+        title_layout = QtWidgets.QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(6, 2, 6, 2)
+    
+        title_label = QtWidgets.QLabel(dock.windowTitle())
+        title_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignVCenter |
+            QtCore.Qt.AlignmentFlag.AlignLeft
+        )
+    
+        toggle_btn = QtWidgets.QToolButton()
+        toggle_btn.setAutoRaise(True)
+    
+        toggle_btn.setIcon(
+            self.style().standardIcon(
+                QtWidgets.QStyle.StandardPixmap.SP_TitleBarMinButton
+            )
+        )
+        toggle_btn.setToolTip("Collapse Session Files")
+    
+        def toggle_collapse():
+            if dock._collapsed:
+                expand_dock()
+            else:
+                collapse_dock()
+    
+        toggle_btn.clicked.connect(toggle_collapse)
+    
+        title_layout.addWidget(title_label)
+        title_layout.addStretch(1)
+        title_layout.addWidget(toggle_btn)
+        dock.setTitleBarWidget(title_bar)
+    
+        # ---- Initial widget and size ----
+        dock.setWidget(dock._expanded_widget)
+        dock.setMinimumWidth(EXPANDED_MIN_WIDTH)
+        dock.setMaximumWidth(EXPANDED_MAX_WIDTH)
+        dock.resize(DEFAULT_EXPANDED_WIDTH, dock.height())
+        # update_toggle_button()
+    
+        # ---- Add to main window ----
+        self.addDockWidget(
+            QtCore.Qt.DockWidgetArea.LeftDockWidgetArea,
+            dock
+        )
+    
+        # ---- Split with main dock if present ----
         main_dock = self.dock_manager.get_dock("main_plots")
         if main_dock:
-            # splitDockWidget(first, second, orientation) - second goes on the right with Horizontal
-            # So put session browser first to make it appear on the left
-            self.splitDockWidget(dock, main_dock, QtCore.Qt.Orientation.Horizontal)
-        
-        # Set reasonable size constraints
-        dock.setMinimumWidth(200)
-        dock.setMaximumWidth(400)
-        
-        # Store reference
+            self.splitDockWidget(
+                dock,
+                main_dock,
+                QtCore.Qt.Orientation.Horizontal
+            )
+    
+        # ---- Store reference ----
         self.session_browser_dock = dock
-        
-        # Start collapsed (hidden) by default - user can show via Session menu or Window menu
-        dock.hide()
+    
+        # ---- Start collapsed ----
+        collapse_dock()
     
     def _start_new_session(self):
         """

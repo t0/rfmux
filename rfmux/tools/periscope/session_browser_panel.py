@@ -396,6 +396,9 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         )
         
         menu.addSeparator()
+
+        rename_action = menu.addAction("Rename File")
+        rename_action.triggered.connect(lambda: self._rename_file(file_path))
         
         # Delete action
         delete_action = menu.addAction("Delete File")
@@ -419,6 +422,49 @@ class SessionBrowserPanel(QtWidgets.QWidget):
                 subprocess.run(['xdg-open', folder], check=True)
         except Exception as e:
             print(f"[SessionBrowser] Error showing file in folder: {e}")
+    
+    
+    def _rename_file(self, file_path: str):
+        """Rename a file with user input and validation."""
+        path = Path(file_path)
+        old_name = path.name
+
+        new_name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Rename File",
+            "Enter new file name:",
+            QtWidgets.QLineEdit.EchoMode.Normal,
+            old_name
+        )
+
+        if not ok or not new_name.strip():
+            return
+
+        new_name = new_name.strip()
+        new_path = path.with_name(new_name)
+
+        if new_path == path:
+            return
+
+        if new_path.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Rename Error",
+                "A file with this name already exists."
+            )
+            return
+
+        try:
+            path.rename(new_path)
+            self.refresh()
+            print(f"[SessionBrowser] Renamed: {old_name} → {new_name}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Rename Error",
+                f"Could not rename file:\n{str(e)}"
+            )
+
     
     def _delete_file(self, file_path: str):
         """Delete a file with confirmation."""

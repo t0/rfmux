@@ -136,7 +136,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         toolbar_layout.setContentsMargins(5, 5, 5, 5)
 
         # Export Data Button
-        self.export_btn = QtWidgets.QPushButton("Export Data")
+        self.export_btn = QtWidgets.QPushButton("💾")
+        self.export_btn.setToolTip("Export data")
         self.export_btn.clicked.connect(self._export_data)
         toolbar_layout.addWidget(self.export_btn)
         

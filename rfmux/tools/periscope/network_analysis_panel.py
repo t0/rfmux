@@ -88,7 +88,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         toolbar_global_layout.setContentsMargins(5, 5, 5, 5)
 
         # Export button
-        export_btn = QtWidgets.QPushButton("Export Data")
+        export_btn = QtWidgets.QPushButton("💾")
+        export_btn.setToolTip("Export data")
         export_btn.clicked.connect(self._export_data)
         toolbar_global_layout.addWidget(export_btn)
         

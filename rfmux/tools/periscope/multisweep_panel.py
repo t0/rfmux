@@ -141,12 +141,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.export_btn.clicked.connect(self._export_data)
         toolbar_layout.addWidget(self.export_btn)
         
-        # Screenshot button
-        screenshot_btn = QtWidgets.QPushButton("📷")
-        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
-        screenshot_btn.clicked.connect(self._export_screenshot)
-        toolbar_layout.addWidget(screenshot_btn)
-
         # Re-run Multisweep Button
         self.rerun_btn = QtWidgets.QPushButton("Re-run Multisweep")
         self.rerun_btn.clicked.connect(self._rerun_multisweep)
@@ -184,7 +178,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self._setup_unit_controls(toolbar_layout)
         self._setup_zoom_box_control(toolbar_layout)
-        
+
+        # Screenshot button
+        screenshot_btn = QtWidgets.QPushButton("📷")
+        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        screenshot_btn.clicked.connect(self._export_screenshot)
+        toolbar_layout.addWidget(screenshot_btn)
+
         layout.addWidget(toolbar)
 
     def _setup_unit_controls(self, toolbar_layout):

@@ -92,12 +92,6 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         export_btn.setToolTip("Export data")
         export_btn.clicked.connect(self._export_data)
         toolbar_global_layout.addWidget(export_btn)
-        
-        # Screenshot button
-        screenshot_btn = QtWidgets.QPushButton("📷")
-        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
-        screenshot_btn.clicked.connect(self._export_screenshot)
-        toolbar_global_layout.addWidget(screenshot_btn)
 
         # Edit Other Parameters button (renamed to Re-run Analysis)
         edit_params_btn = QtWidgets.QPushButton("Re-run analysis")
@@ -129,11 +123,18 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.normalize_checkbox.toggled.connect(self._toggle_normalization)
         toolbar_global_layout.addWidget(self.normalize_checkbox)
 
+
         # Add unit controls
         self._setup_unit_controls(toolbar_global_layout)
 
         # Add zoom box mode checkbox
         self._setup_zoom_box_control(toolbar_global_layout)
+
+        # Screenshot button
+        screenshot_btn = QtWidgets.QPushButton("📷")
+        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        screenshot_btn.clicked.connect(self._export_screenshot)
+        toolbar_global_layout.addWidget(screenshot_btn)
         
         layout.addWidget(toolbar_global)
 

@@ -8,6 +8,7 @@ both connection mode (Hardware/Mock/Offline) and session management (New/Load/No
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 import datetime
+from . import settings
 
 
 class UnifiedStartupDialog(QtWidgets.QDialog):
@@ -283,6 +284,9 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             self.crs_serial = None
             self.module = None
         
+        # Get last session directory for file dialogs
+        last_session_dir = settings.get_last_session_directory()
+        
         # Determine session mode and open appropriate file dialogs
         if self.rb_new_session.isChecked():
             self.session_mode = self.SESS_NEW
@@ -298,10 +302,12 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             self.session_folder_name = self.folder_name_input.text().strip()
             
             # Open folder selection dialog for base path
+            # Start from last used directory if available
+            start_dir = last_session_dir if last_session_dir else ""
             base_path = QtWidgets.QFileDialog.getExistingDirectory(
                 self,
                 "Select Session Location",
-                "",
+                start_dir,
                 QtWidgets.QFileDialog.Option.ShowDirsOnly | 
                 QtWidgets.QFileDialog.Option.DontUseNativeDialog
             )
@@ -311,15 +317,19 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
                 return
             
             self.session_path = base_path
+            # Save this directory for next time
+            settings.set_last_session_directory(base_path)
             
         elif self.rb_load_session.isChecked():
             self.session_mode = self.SESS_LOAD
             
             # Open folder selection dialog for existing session
+            # Start from last used directory if available
+            start_dir = last_session_dir if last_session_dir else ""
             session_path = QtWidgets.QFileDialog.getExistingDirectory(
                 self,
                 "Select Session Folder",
-                "",
+                start_dir,
                 QtWidgets.QFileDialog.Option.ShowDirsOnly |
                 QtWidgets.QFileDialog.Option.DontUseNativeDialog
             )
@@ -330,38 +340,79 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             
             self.session_path = session_path
             self.session_folder_name = None
+            # Save the parent directory for next time (not the session folder itself)
+            import os
+            parent_dir = os.path.dirname(session_path)
+            if parent_dir:
+                settings.set_last_session_directory(parent_dir)
             
         elif self.rb_no_session.isChecked():
             self.session_mode = self.SESS_NONE
             self.session_path = None
             self.session_folder_name = None
         
+        # Save connection settings for next time
+        if self.connection_mode == self.CONN_HARDWARE:
+            settings.set_last_connection_mode("hardware")
+            if self.crs_serial:
+                settings.set_last_crs_serial(self.crs_serial)
+            if self.module:
+                settings.set_last_module(self.module)
+        elif self.connection_mode == self.CONN_MOCK:
+            settings.set_last_connection_mode("mock")
+            if self.module:
+                settings.set_last_module(self.module)
+        elif self.connection_mode == self.CONN_OFFLINE:
+            settings.set_last_connection_mode("offline")
+        
         # All validation passed
         self.accept()
     
     def _apply_prefill(self):
-        """Apply pre-fill values from CLI arguments to the UI."""
+        """
+        Apply pre-fill values from CLI arguments or saved settings to the UI.
+        
+        Priority: CLI prefill values > saved settings > defaults
+        """
+        # Load saved settings if no prefill provided
         if not self._prefill:
-            return
-        
-        # Apply connection mode
-        conn_mode = self._prefill.get('connection_mode')
-        if conn_mode == self.CONN_HARDWARE:
-            self.rb_hardware.setChecked(True)
-        elif conn_mode == self.CONN_MOCK:
-            self.rb_mock.setChecked(True)
-        elif conn_mode == self.CONN_OFFLINE:
-            self.rb_offline.setChecked(True)
-        
-        # Apply CRS serial
-        crs_serial = self._prefill.get('crs_serial')
-        if crs_serial:
-            self.serial_input.setText(str(crs_serial))
-        
-        # Apply module
-        module = self._prefill.get('module')
-        if module is not None:
-            self.module_input.setValue(int(module))
+            # Try to restore from saved settings
+            saved_mode = settings.get_last_connection_mode()
+            saved_serial = settings.get_last_crs_serial()
+            saved_module = settings.get_last_module()
+            
+            # Apply saved connection mode
+            if saved_mode == "hardware":
+                self.rb_hardware.setChecked(True)
+            elif saved_mode == "mock":
+                self.rb_mock.setChecked(True)
+            elif saved_mode == "offline":
+                self.rb_offline.setChecked(True)
+            
+            # Apply saved serial and module
+            if saved_serial:
+                self.serial_input.setText(saved_serial)
+            if saved_module:
+                self.module_input.setValue(saved_module)
+        else:
+            # Apply prefill values from CLI (takes precedence over saved settings)
+            conn_mode = self._prefill.get('connection_mode')
+            if conn_mode == self.CONN_HARDWARE:
+                self.rb_hardware.setChecked(True)
+            elif conn_mode == self.CONN_MOCK:
+                self.rb_mock.setChecked(True)
+            elif conn_mode == self.CONN_OFFLINE:
+                self.rb_offline.setChecked(True)
+            
+            # Apply CRS serial
+            crs_serial = self._prefill.get('crs_serial')
+            if crs_serial:
+                self.serial_input.setText(str(crs_serial))
+            
+            # Apply module
+            module = self._prefill.get('module')
+            if module is not None:
+                self.module_input.setValue(int(module))
         
         # Trigger UI updates
         self._on_connection_mode_changed()

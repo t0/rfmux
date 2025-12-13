@@ -108,6 +108,7 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         
         self.filter_combo = QtWidgets.QComboBox()
         self.filter_combo.addItem("All Files", "all")
+        self.filter_combo.addItem("Notebooks (.ipynb)", "ipynb")
         self.filter_combo.addItem("Network Analysis", "netanal")
         self.filter_combo.addItem("Multisweep", "multisweep")
         self.filter_combo.addItem("Bias KIDs", "bias")
@@ -128,12 +129,21 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         self.tree_view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.tree_view.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         
-        # Set up file system model (QFileSystemModel is in QtGui in this PyQt6 version)
+        # Set up file system model (QFileSystemModel is in QtGui)
         self.file_model = QtGui.QFileSystemModel()
-        self.file_model.setNameFilters(["*.pkl"])
+        self.file_model.setNameFilters(["*.pkl", "*.ipynb", ".png"])
         self.file_model.setNameFilterDisables(False)
         self.file_model.setFilter(
             QtCore.QDir.Filter.Files | QtCore.QDir.Filter.NoDotAndDotDot
+        )
+        
+        # IMPORTANT: Disable automatic file watching to prevent race conditions
+        # with Jupyter Lab's file watcher running inside QWebEngineView.
+        # Both watchers reacting to the same file system events can cause segfaults
+        # in Qt's accessibility system (QAccessible::registerAccessibleInterface).
+        # We use a gentle polling timer instead for automatic updates.
+        self.file_model.setOption(
+            QtGui.QFileSystemModel.Option.DontWatchForChanges, True
         )
         
         self.tree_view.setModel(self.file_model)
@@ -194,6 +204,16 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         self.open_folder_btn.setEnabled(False)
         
         layout.addWidget(self.placeholder_label)
+        
+        # ─────────────────────────────────────────────────────────────
+        # Polling timer for gentle automatic refresh
+        # ─────────────────────────────────────────────────────────────
+        # Since we disabled QFileSystemModel's file watcher (to prevent race
+        # conditions with Jupyter Lab), we use a gentle polling timer instead.
+        # This provides automatic updates without the segfault-inducing races.
+        self._poll_timer = QtCore.QTimer(self)
+        self._poll_timer.timeout.connect(self._poll_refresh)
+        self._poll_timer.setInterval(5000)  # 5 second interval - generous polling
     
     def _connect_signals(self):
         """Connect signals from the session manager."""
@@ -211,8 +231,12 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         if not self.session_manager.is_active:
             return
         
-        # Force the model to refresh
         root_path = str(self.session_manager.session_path)
+        
+        # With DontWatchForChanges enabled, QFileSystemModel caches directory contents.
+        # To force a true refresh, we need to reset the root path by setting it
+        # to an empty string first, then back to the actual path.
+        self.file_model.setRootPath("")
         self.file_model.setRootPath(root_path)
         self.tree_view.setRootIndex(self.file_model.index(root_path))
         
@@ -261,10 +285,16 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         self.open_folder_btn.setEnabled(True)
         
         self._update_file_count()
+        
+        # Start the polling timer for automatic refresh
+        self._poll_timer.start()
     
     @QtCore.pyqtSlot()
     def _on_session_ended(self):
         """Handle session end."""
+        # Stop the polling timer
+        self._poll_timer.stop()
+        
         self._update_session_display()
         
         # Clear the tree
@@ -289,6 +319,17 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         if index.isValid():
             self.tree_view.setCurrentIndex(index)
             self.tree_view.scrollTo(index)
+    
+    def _poll_refresh(self):
+        """
+        Gentle polling refresh - called periodically by the timer.
+        
+        Only refreshes when session is active and panel is visible.
+        This replaces QFileSystemModel's internal file watcher to avoid
+        race conditions with Jupyter Lab's file watcher.
+        """
+        if self.session_manager.is_active and self.isVisible():
+            self.refresh()
     
     def _update_session_display(self):
         """Update the session status labels."""
@@ -337,7 +378,9 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         filter_type = self.filter_combo.currentData()
         
         if filter_type == "all":
-            self.file_model.setNameFilters(["*.pkl"])
+            self.file_model.setNameFilters(["*.pkl", "*.ipynb", "*.png"])
+        elif filter_type == "ipynb":
+            self.file_model.setNameFilters(["*.ipynb"])
         else:
             # Filter by data type in filename (new format: type_identifier_HHMMSS.pkl)
             # Also support old format for backwards compatibility

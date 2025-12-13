@@ -5,6 +5,7 @@ from .tasks import *
 from .ui import *
 import asyncio
 from PyQt6 import sip
+from PyQt6.QtCore import QUrl
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
@@ -1004,6 +1005,12 @@ class PeriscopeRuntime:
             task.stop()  # Request interruption
             task.wait(2000)  # Wait up to 2 seconds for thread to finish
             self.multisweep_tasks.pop(task_key, None)
+        # Shutdown Jupyter notebook server if running
+        if hasattr(self, 'notebook_dock') and self.notebook_dock is not None:
+            if not sip.isdeleted(self.notebook_dock):
+                panel = self.notebook_dock.widget()
+                if panel and hasattr(panel, 'shutdown'):
+                    panel.shutdown()
         # Shutdown iPython kernel if active
         if self.kernel_manager and self.kernel_manager.has_kernel:
             try: self.kernel_manager.shutdown_kernel()
@@ -1037,6 +1044,7 @@ class PeriscopeRuntime:
                 self.kernel_manager = QtInProcessKernelManager()
                 self.kernel_manager.start_kernel()
                 kernel = self.kernel_manager.kernel
+                
                 # Push relevant objects into the kernel's namespace
                 kernel.shell.push({'crs': self.crs, 'rfmux': rfmux, 'periscope': self})
                 
@@ -1424,6 +1432,131 @@ class PeriscopeRuntime:
                 task.stop()  # Request interruption
                 task.wait(2000)  # Wait up to 2 seconds for thread to finish
             self.multisweep_windows.pop(window_id, None) # Remove window tracking
+
+    def _toggle_notebook_panel(self, notebook_dir: str | None = None, open_file: str | None = None):
+        """
+        Toggle the Jupyter notebook panel.
+        
+        Creates a new NotebookPanel on first use, or shows/hides the existing
+        dock widget on subsequent calls. The notebook directory is always set to the
+        active session folder. If no session is active, the user must start one first.
+        
+        The panel launches Jupyter Lab in the system browser (not embedded).
+        Uses a singleton server pattern - only one Jupyter server is ever running.
+        
+        Args:
+            notebook_dir: Optional directory for notebooks. If None, uses session
+                         folder (if active). Requires an active session.
+            open_file: Optional path to a notebook file to open after panel starts.
+        """
+        try:
+            from .notebook_panel import NotebookPanel, JupyterServerManager
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Import Error",
+                f"Failed to import notebook_panel:\n{e}"
+            )
+            return
+        
+        # Check if notebook dock already exists and is still valid
+        if hasattr(self, 'notebook_dock') and self.notebook_dock is not None:
+            # Check if the dock widget still exists in Qt
+            if not sip.isdeleted(self.notebook_dock):
+                # Panel already exists and is valid
+                panel = self.notebook_dock.widget()
+                
+                # If a specific file is requested, open it
+                if open_file and panel and hasattr(panel, 'open_notebook'):
+                    panel.open_notebook(open_file)
+                
+                # Show and raise the dock
+                self.notebook_dock.setVisible(True)
+                self.notebook_dock.raise_()
+                return
+            else:
+                # Dock was deleted - clear reference but keep server
+                self.notebook_dock = None
+                # Fall through to recreate the panel
+        
+        # Determine notebook directory - requires an active session
+        if notebook_dir is None:
+            if hasattr(self, 'session_manager') and self.session_manager.is_active:
+                notebook_dir = str(self.session_manager.session_path)
+            else:
+                # No active session - prompt user to start one
+                msg = QtWidgets.QMessageBox(self)
+                msg.setWindowTitle("Session Required")
+                msg.setText("No session is active.")
+                msg.setInformativeText(
+                    "Jupyter notebooks require an active session so that notebooks "
+                    "are saved alongside your analysis data.\n\n"
+                    "Please start or load a session first using:\n"
+                    "Session → New Session or Session → Load Session"
+                )
+                msg.setIcon(QtWidgets.QMessageBox.Icon.Information)
+                msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
+                msg.exec()
+                return
+        
+        # Initialize singleton server if it doesn't exist
+        if not hasattr(self, 'jupyter_server') or self.jupyter_server is None:
+            self.jupyter_server = JupyterServerManager(self)
+        
+        # Check if server is already running
+        server_running = (self.jupyter_server.process is not None and 
+                         self.jupyter_server.process.poll() is None)
+        
+        # Create panel with the session directory, using the singleton server
+        # Skip initial notebook creation if we're opening a specific file
+        panel = NotebookPanel(
+            notebook_dir=notebook_dir, 
+            parent=self, 
+            server=self.jupyter_server,
+            skip_initial_notebook=(open_file is not None)
+        )
+        
+        # Create dock
+        self.notebook_dock = self.dock_manager.create_dock(
+            panel, "Jupyter Notebook", "notebook_panel"
+        )
+        
+        # Mark this dock as protected (hide instead of close when X is clicked)
+        self.dock_manager.protect_dock("notebook_panel")
+        
+        # Make dock non-closeable via the standard close button (extra safety)
+        self.notebook_dock.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable |
+            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            # Note: No DockWidgetClosable flag - prevents closing via X button on title bar
+        )
+        
+        # Set up handler for opening specific files when requested
+        def handle_server_ready(url):
+            if open_file:
+                # If a specific file was requested, open it with a delay
+                QtCore.QTimer.singleShot(2000, lambda: panel.open_notebook(open_file))
+            # Note: Notebook panel automatically creates and opens an initial notebook
+            # via _create_and_open_initial_notebook() - no need to duplicate that here
+        
+        # Only connect signal and start server if not already running
+        if not server_running:
+            self.jupyter_server.server_ready.connect(handle_server_ready)
+            # Start the Jupyter server
+            panel.start()
+        else:
+            # Server already running - update UI and open file if requested
+            panel._on_server_ready(self.jupyter_server.url or "")
+            if open_file:
+                QtCore.QTimer.singleShot(500, lambda: panel.open_notebook(open_file))
+        
+        # Tabify with main dock by default
+        main_dock = self.dock_manager.get_dock("main_plots")
+        if main_dock:
+            self.tabifyDockWidget(main_dock, self.notebook_dock)
+        
+        # Show the dock and activate it
+        self.notebook_dock.show()
+        self.notebook_dock.raise_()
 
     def _update_console_style(self, dark_mode_enabled: bool):
         """

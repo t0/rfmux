@@ -1,0 +1,56 @@
+# Conda environment for rfmux
+# Usage:
+#   conda env create -f environment.yml
+#   conda activate rfmux
+#
+# To update after code changes:
+#   pip install -e .
+#
+# This follows the "conda owns binaries, pip owns your code" pattern:
+# - Conda manages Qt/GUI, scientific, and system-dependent packages
+# - pip installs the local rfmux package
+
+name: rfmux
+channels:
+  - conda-forge
+channel_priority: strict
+
+dependencies:
+  - python=3.12
+
+  # Qt/GUI stack (conda-owned to avoid binary conflicts)
+  - pyqt6
+  - pyqtgraph
+  - qt-main
+
+  # Scientific computing stack
+  - numpy
+  - scipy
+  - numba
+  - matplotlib
+  - tbb  # Intel Threading Building Blocks for numba parallel execution
+
+  # IPython/Jupyter stack
+  - ipython
+  - ipykernel<7  # Pin to 6.x for qtconsole in-process kernel compatibility
+  - qtconsole
+  - jupyterlab
+
+  # Web/Async
+  - aiohttp
+
+  # Utilities
+  - pyyaml
+  - simplejson
+  - sqlalchemy
+  - requests
+
+  # Testing
+  - pytest
+  - pytest-asyncio
+
+  # pip for installing local package and pip-only deps
+  - pip
+  - pip:
+      - requests_futures  # not available on conda-forge
+      - -e .  # install rfmux in editable mode

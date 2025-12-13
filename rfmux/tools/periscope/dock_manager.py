@@ -16,7 +16,7 @@ The DockManager enables:
 - Screenshot export of panel contents
 """
 
-from PyQt6 import QtCore, QtWidgets, QtGui
+from PyQt6 import QtCore, QtWidgets, QtGui, sip
 from PyQt6.QtCore import Qt
 from typing import Dict, List, Optional
 import datetime
@@ -80,6 +80,7 @@ class PeriscopeDockManager(QtCore.QObject):
         main_window: Reference to the main Periscope QMainWindow
         dock_widgets: Dictionary mapping unique dock IDs to QDockWidget instances
         dock_counter: Counter for generating unique dock IDs
+        protected_docks: Set of dock IDs that should be hidden (not closed) when user clicks X
     """
     
     def __init__(self, main_window: QtWidgets.QMainWindow):
@@ -94,6 +95,7 @@ class PeriscopeDockManager(QtCore.QObject):
         self.dock_widgets: Dict[str, QtWidgets.QDockWidget] = {}
         self.dock_counter = 0
         self._monitored_tab_bars: set = set()
+        self.protected_docks: set = set()  # Docks that should be hidden, not closed
         
         # Install event filter on main window to detect tab bar creation
         self.main_window.installEventFilter(self)
@@ -128,9 +130,24 @@ class PeriscopeDockManager(QtCore.QObject):
                 self._monitored_tab_bars.add(id(tab_bar))
 
                 tab_bar.setTabsClosable(True)
-                tab_bar.tabCloseRequested.connect(self._on_tab_close_requested)
+                # Use UniqueConnection to prevent duplicate signal connections
+                # Wrap in try-except to handle edge cases where connection already exists
+                try:
+                    tab_bar.tabCloseRequested.connect(
+                        self._on_tab_close_requested,
+                        Qt.ConnectionType.UniqueConnection
+                    )
+                except TypeError:
+                    # Connection already exists, silently continue
+                    pass
 
     def _on_tab_close_requested(self, index: int):
+        """
+        Handle tab close request from the tab bar.
+        
+        For protected docks (like Main and Jupyter), hides instead of closes.
+        For other docks, removes them completely.
+        """
         tab_bar = self.sender()
         if not isinstance(tab_bar, QtWidgets.QTabBar):
             return
@@ -138,8 +155,53 @@ class PeriscopeDockManager(QtCore.QObject):
         tab_title = tab_bar.tabText(index)
         
         for dock_id, dock in list(self.dock_widgets.items()):
+            # Check if the Qt C++ object has been deleted
+            if sip.isdeleted(dock):
+                # Clean up stale reference
+                self.dock_widgets.pop(dock_id, None)
+                continue
+            
             if dock.windowTitle() == tab_title:
-                self.remove_dock(dock_id)
+                if self.is_protected(dock_id):
+                    # Hide protected docks instead of removing them
+                    dock.hide()
+                    print(f"[DockManager] Protected dock '{tab_title}' hidden (use View menu to show again)")
+                else:
+                    self.remove_dock(dock_id)
+                break
+    
+    def protect_dock(self, dock_id: str) -> None:
+        """
+        Mark a dock as protected (will be hidden instead of closed).
+        
+        Protected docks are not removed when the user clicks the X button.
+        Instead, they are hidden and can be shown again via the View menu.
+        
+        Args:
+            dock_id: The unique identifier of the dock to protect
+        """
+        self.protected_docks.add(dock_id)
+    
+    def unprotect_dock(self, dock_id: str) -> None:
+        """
+        Remove protection from a dock.
+        
+        Args:
+            dock_id: The unique identifier of the dock to unprotect
+        """
+        self.protected_docks.discard(dock_id)
+    
+    def is_protected(self, dock_id: str) -> bool:
+        """
+        Check if a dock is protected.
+        
+        Args:
+            dock_id: The unique identifier of the dock
+            
+        Returns:
+            True if the dock is protected, False otherwise
+        """
+        return dock_id in self.protected_docks
       
     
     def _rename_tab_at_index(self, tab_bar: QtWidgets.QTabBar, index: int):

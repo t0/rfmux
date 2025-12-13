@@ -52,6 +52,7 @@ from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, Initial
                        # and window classes (NetworkAnalysisWindow, MultisweepWindow).
                        # (Assumes periscope_ui.py has been refactored into ui.py and exports these).
 from .app_runtime import PeriscopeRuntime
+from PyQt6 import sip  # For checking if Qt C++ objects have been deleted
 from .mock_configuration_dialog import MockConfigurationDialog
 from .dock_manager import PeriscopeDockManager
 from .main_plot_panel import MainPlotPanel
@@ -506,192 +507,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.session_manager.session_ended.connect(self._update_session_status)
         self.session_manager.file_exported.connect(self._on_file_exported_status)
 
-    def _add_toolbar(self, layout: QtWidgets.QVBoxLayout, chan_str: str):
-        """
-        Add the main toolbar to the UI.
-
-        The toolbar contains controls for channel selection, buffer size,
-        pausing, toggling real units, selecting plot types, and accessing
-        help, network analysis, and CRS initialization.
-
-        Args:
-            layout (QtWidgets.QVBoxLayout): The parent layout to add the toolbar to.
-            chan_str (str): The initial channel string for the channel input field.
-        """
-        # `QtWidgets`, `QIntValidator` are from .utils.
-        toolbar_widget = QtWidgets.QWidget() # Container widget for the toolbar
-        toolbar_layout = QtWidgets.QHBoxLayout(toolbar_widget) # Horizontal layout for toolbar items
-
-        # Button to show/hide the configuration panel
-        self.btn_toggle_cfg = QtWidgets.QPushButton("Show Configuration")
-        self.btn_toggle_cfg.setCheckable(True)
-        self.btn_toggle_cfg.toggled.connect(self._toggle_config)
-
-        # Input field for channel selection string
-        self.e_ch = QtWidgets.QLineEdit(chan_str)
-        self.e_ch.setToolTip("Enter comma-separated channels or use '&' to group in one row (e.g., 1&2,3,4&5&6).")
-        self.e_ch.returnPressed.connect(self._update_channels) # Update channels when Enter is pressed
-
-        # Input field for buffer size
-        self.e_buf = QtWidgets.QLineEdit(str(self.N))
-        self.e_buf.setValidator(QIntValidator(10, 1_000_000, self)) # Validate input as integer (10 to 1M)
-        self.e_buf.setMaximumWidth(80) # Limit width
-        self.e_buf.setToolTip("Size of the ring buffer for each channel (history/FFT depth).")
-        self.e_buf.editingFinished.connect(self._change_buffer) # Update buffer size when editing is done
-
-        # Pause/Resume button
-        self.b_pause = QtWidgets.QPushButton("Pause", clicked=self._toggle_pause)
-        self.b_pause.setToolTip("Pause or resume real-time data acquisition and display.")
-
-        # Radio buttons for unit selection
-        self.unit_group = QtWidgets.QButtonGroup()
-        self.rb_counts = QtWidgets.QRadioButton("Counts")
-        self.rb_real_units = QtWidgets.QRadioButton("Real Units")
-        self.rb_df_units = QtWidgets.QRadioButton("df Units")
-        
-        self.rb_counts.setToolTip("Display raw ADC counts")
-        self.rb_real_units.setToolTip("Display in voltage/power units (V, dBm/Hz)")
-        self.rb_df_units.setToolTip("Display frequency shift (Hz) and dissipation")
-        
-        # Add to button group for exclusive selection
-        self.unit_group.addButton(self.rb_counts, 0)
-        self.unit_group.addButton(self.rb_real_units, 1)
-        self.unit_group.addButton(self.rb_df_units, 2)
-        
-        # Set initial state based on real_units flag
-        if self.real_units:
-            self.rb_real_units.setChecked(True)
-        else:
-            self.rb_counts.setChecked(True)
-        
-        # Connect signal
-        self.unit_group.buttonClicked.connect(self._unit_mode_changed)
-
-        # Checkboxes to select which plot types are displayed
-        # For mock mode, default to TOD and FFT (not PSDs)
-        self.cb_time = QtWidgets.QCheckBox("TOD", checked=True) # Time-domain
-        self.cb_iq = QtWidgets.QCheckBox("IQ", checked=False)    # IQ plane
-        self.cb_fft = QtWidgets.QCheckBox("FFT", checked=self.is_mock_mode)   # Raw FFT - on by default in mock mode
-        self.cb_ssb = QtWidgets.QCheckBox("Single Sideband PSD", checked=not self.is_mock_mode) # SSB PSD - off in mock mode
-        self.cb_dsb = QtWidgets.QCheckBox("Dual Sideband PSD", checked=False)  # DSB PSD
-        
-        # Connect toggled signal of each plot type checkbox
-        # For PSD checkboxes in mock mode, show warning
-        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft):
-            cb_plot_type.toggled.connect(self._build_layout)
-        
-        # Special handling for PSD checkboxes in mock mode
-        self.cb_ssb.toggled.connect(self._handle_psd_toggle)
-        self.cb_dsb.toggled.connect(self._handle_psd_toggle)
-
-        # Button to open CRS (Control and Readout System) initialization dialog
-        self.btn_init_crs = QtWidgets.QPushButton("Initialize CRS Board")
-        self.btn_init_crs.setToolTip("Open a dialog to initialize the CRS board (e.g., set IRIG source).")
-        self.btn_init_crs.clicked.connect(self._show_initialize_crs_dialog)
-        if self.crs is None: # Disable if no CRS object is available
-            self.btn_init_crs.setEnabled(False)
-            self.btn_init_crs.setToolTip("CRS object not available - cannot initialize board.")
-
-        # Button to open Network Analyzer configuration dialog
-        self.btn_netanal = QtWidgets.QPushButton("Network Analyzer")
-        self.btn_netanal.setToolTip("Open the network analysis configuration window to perform sweeps.")
-        self.btn_netanal.clicked.connect(self._show_netanal_dialog)
-        if self.crs is None: # Disable if no CRS object is available
-            self.btn_netanal.setEnabled(False)
-            self.btn_netanal.setToolTip("CRS object not available - network analysis disabled.")
-
-        # Button to Load Multisweep Dialog
-        self.btn_load_multi = QtWidgets.QPushButton("Load Multisweep")
-        self.btn_load_multi.setToolTip("Load Multisweep directly from main window.")
-        self.btn_load_multi.clicked.connect(self._load_multisweep_dialog)
-        if self.crs is None: # Disable if no CRS object is available
-            self.btn_load_multi.setEnabled(False)
-            self.btn_load_multi.setToolTip("CRS object not available - load multisweep disabled.")
-
-        # Button to Load Bias KIDS Dialog
-        self.btn_load_bias = QtWidgets.QPushButton("Load Bias")
-        self.btn_load_bias.setToolTip("Bias KIDS directly from the main window.")
-        self.btn_load_bias.clicked.connect(self.handle_bias_from_file)
-        if self.crs is None: # Disable if no CRS object is available
-            self.btn_load_bias.setEnabled(False)
-            self.btn_load_bias.setToolTip("CRS object not available - load Bias disabled.")
-
-
-        # Add widgets to the toolbar layout
-        toolbar_layout.addWidget(QtWidgets.QLabel("Channels:"))
-        toolbar_layout.addWidget(self.e_ch)
-        toolbar_layout.addSpacing(20)
-        toolbar_layout.addWidget(QtWidgets.QLabel("Buffer:"))
-        toolbar_layout.addWidget(self.e_buf)
-        toolbar_layout.addWidget(self.b_pause)
-        toolbar_layout.addSpacing(30)
-        
-        # Add unit radio buttons
-        toolbar_layout.addWidget(QtWidgets.QLabel("Units:"))
-        toolbar_layout.addWidget(self.rb_counts)
-        toolbar_layout.addWidget(self.rb_real_units)
-        toolbar_layout.addWidget(self.rb_df_units)
-        toolbar_layout.addSpacing(30)
-        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
-            toolbar_layout.addWidget(cb_plot_type)
-        toolbar_layout.addStretch(1) # Add stretch to push items to the left
-        
-        # Add mock reconfigure button if in mock mode
-        if self.is_mock_mode:
-            self.btn_reconfigure_mock = QtWidgets.QPushButton("Reconfigure Simulated KIDs")
-            self.btn_reconfigure_mock.setToolTip("Reconfigure the simulated KID resonator parameters")
-            self.btn_reconfigure_mock.clicked.connect(self._show_mock_config_dialog)
-            toolbar_layout.addWidget(self.btn_reconfigure_mock)
-            
-            # Add quasiparticle pulse button
-            self.btn_qp_pulses = QtWidgets.QPushButton("QP Pulses: Off")
-            self.btn_qp_pulses.setToolTip("Toggle quasiparticle pulses in mock mode\nCycles through: Off → Periodic → Random → Off")
-            self.btn_qp_pulses.clicked.connect(self._toggle_qp_pulses)
-            self.qp_pulse_mode = 'none'  # Track current pulse mode
-            toolbar_layout.addWidget(self.btn_qp_pulses)
-        
-        layout.addWidget(toolbar_widget) # Add the toolbar widget to the main vertical layout
-
-    def _add_config_panel(self, layout: QtWidgets.QVBoxLayout):
-        """
-        Add the collapsible configuration panel and its associated action buttons.
-
-        The action buttons (Interactive Session, Initialize CRS, Network Analyzer,
-        Show/Hide Configuration, Help) are placed above the configuration panel itself.
-        The configuration panel contains groups for 'Show Curves', 'IQ Mode',
-        'PSD Mode', and 'General Display' settings.
-
-        Args:
-            layout (QtWidgets.QVBoxLayout): The parent layout to add the panel to.
-        """
-        # `QtWidgets`, `QTCONSOLE_AVAILABLE` are from .utils.
-
-        # --- Action Buttons Row (above the collapsible config panel) ---
-        action_buttons_widget = QtWidgets.QWidget()
-        action_buttons_layout = QtWidgets.QHBoxLayout(action_buttons_widget)
-        action_buttons_layout.setContentsMargins(0,0,0,0) # No margins for this layout
-        action_buttons_layout.addStretch(1) # Push buttons to the right
-
-        action_buttons_layout.addWidget(self.btn_init_crs)
-        action_buttons_layout.addWidget(self.btn_netanal)
-        action_buttons_layout.addWidget(self.btn_load_multi)
-        action_buttons_layout.addWidget(self.btn_load_bias)
-        action_buttons_layout.addWidget(self.btn_toggle_cfg)
-        layout.addWidget(action_buttons_widget)
-
-        # --- Collapsible Configuration Panel ---
-        # This panel contains more detailed settings and is initially hidden.
-        self.ctrl_panel = QtWidgets.QGroupBox("Configuration")
-        self.ctrl_panel.setVisible(False) # Initially hidden
-        config_panel_layout = QtWidgets.QHBoxLayout(self.ctrl_panel) # Horizontal layout for groups within the panel
-
-        # Add various settings groups to the configuration panel
-        config_panel_layout.addWidget(self._create_show_curves_group())
-        config_panel_layout.addWidget(self._create_iq_mode_group())
-        config_panel_layout.addWidget(self._create_psd_mode_group())
-        config_panel_layout.addWidget(self._create_display_group())
-        layout.addWidget(self.ctrl_panel) # Add the panel to the main vertical layout
-
     def _create_show_curves_group(self) -> QtWidgets.QGroupBox:
         """
         Create the 'Show Curves' group box for the configuration panel.
@@ -850,6 +665,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             "main_plots",
             area=QtCore.Qt.DockWidgetArea.LeftDockWidgetArea  # Main plots on left/center
         )
+        
+        # Mark main dock as protected (hide instead of close when X is clicked)
+        self.dock_manager.protect_dock("main_plots")
         
         # Show the main dock immediately, unless in offline mode (no data streaming)
         if self.host != "OFFLINE":
@@ -1052,7 +870,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         for rowPlots in self.plots:
             for mode, plot_widget in rowPlots.items():
                 viewbox = plot_widget.getViewBox()
-                if isinstance(viewbox, ClickableViewBox): # ClickableViewBox from .utils
+                # Check if viewbox is valid before accessing (may be deleted during layout rebuild)
+                if isinstance(viewbox, ClickableViewBox) and not sip.isdeleted(viewbox): # ClickableViewBox from .utils, sip from PyQt6
                     viewbox.enableZoomBoxMode(enable)
         for window_id, window_data in self.netanal_windows.items():
             window = window_data.get('window')
@@ -2283,7 +2102,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.dark_mode_action.triggered.connect(self._update_console_style)
         view_menu.addAction(self.dark_mode_action)
 
-        self.interactive_session_action = QtGui.QAction("&Interactive Session", self)
+        self.interactive_session_action = QtGui.QAction("Interactive iPython &Session", self)
         self.interactive_session_action.setToolTip("Toggle an embedded iPython interactive session.")
         self.interactive_session_action.triggered.connect(self._toggle_interactive_session)
         if not QTCONSOLE_AVAILABLE or self.crs is None:
@@ -2293,6 +2112,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             else:
                 self.interactive_session_action.setToolTip("Interactive session disabled: CRS object not available.")
         view_menu.addAction(self.interactive_session_action)
+        
+        # Jupyter Notebook panel
+        notebook_action = QtGui.QAction("📓 &Jupyter Notebook", self)
+        notebook_action.setShortcut("Ctrl+Shift+J")
+        notebook_action.setToolTip("Open an embedded Jupyter notebook for interactive analysis")
+        notebook_action.triggered.connect(lambda: self._toggle_notebook_panel())
+        view_menu.addAction(notebook_action)
 
     def _create_window_menu(self):
         """
@@ -2771,12 +2597,19 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     def _load_session_file(self, file_path: str):
         """
         Load a session file into a new analysis panel.
-        
+
         This is called when the user double-clicks a file in the session browser.
-        
+
         Args:
-            file_path: Path to the pickle file to load
+            file_path: Path to the file to load (.pkl or .ipynb)
         """
+        from pathlib import Path
+        
+        # Handle notebook files specially
+        if file_path.endswith('.ipynb'):
+            self._open_notebook_file(file_path)
+            return
+        
         # Identify file type from filename
         file_type = self.session_manager.identify_file_type(file_path)
         
@@ -2907,6 +2740,43 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         # Load as a multisweep file - this will create the panel with noise data
         self._load_multisweep_analysis(data)
+    
+    def _open_notebook_file(self, file_path: str):
+        """
+        Open a notebook file in the embedded Jupyter panel.
+        
+        If the notebook panel doesn't exist yet, creates it and starts the server.
+        Once the server is ready, navigates to the specified notebook.
+        
+        Args:
+            file_path: Full path to the .ipynb file
+        """
+        from pathlib import Path
+        
+        notebook_path = Path(file_path)
+        if not notebook_path.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"Notebook file not found:\n{file_path}"
+            )
+            return
+        
+        # Check if notebook panel already exists
+        notebook_dock = self.dock_manager.get_dock("notebook_panel")
+        
+        if notebook_dock is not None:
+            # Panel exists - just open the notebook
+            panel = notebook_dock.widget()
+            if panel and hasattr(panel, 'open_notebook'):
+                panel.open_notebook(file_path)
+                notebook_dock.show()
+                notebook_dock.raise_()
+        else:
+            # Need to create the panel first
+            # Use the notebook's parent directory as the notebook_dir
+            notebook_dir = str(notebook_path.parent)
+            self._toggle_notebook_panel(notebook_dir=notebook_dir, open_file=file_path)
     
     @QtCore.pyqtSlot()
     @QtCore.pyqtSlot(str)

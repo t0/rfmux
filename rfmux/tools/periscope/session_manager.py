@@ -491,26 +491,52 @@ class SessionManager(QtCore.QObject):
     
     def identify_file_type(self, file_path: str) -> Optional[str]:
         """
-        Identify the data type of a session file from its name.
+        Identify the data type of a session file by inspecting its content.
         
-        Filename format: <type>_<identifier>_HHMMSS.pkl
+        This method loads the pickle file and checks for identifying metadata
+        or data structures. This makes it robust against filename changes.
+        
+        Detection priority:
+        1. Check '_session_export' metadata (for files exported by session manager)
+        2. Inspect data structure (for older files or external files)
         
         Args:
-            file_path: Path to the file
+            file_path: Path to the pickle file
         
         Returns:
             Data type string (netanal, multisweep, bias, noise) or None if unknown
         """
-        filename = Path(file_path).name
+        # Try to load the file
+        data = self.load_file(file_path)
+        if data is None or not isinstance(data, dict):
+            return None
         
-        for data_type in self.DATA_TYPES:
-            # Check if filename starts with the data type
-            if filename.startswith(f'{data_type}_'):
-                return data_type
-            # Also check old format for backwards compatibility
-            if f'_{data_type}_' in filename:
-                return data_type
+        # 1. Check for session export metadata (most reliable)
+        if '_session_export' in data:
+            metadata = data['_session_export']
+            if isinstance(metadata, dict) and 'data_type' in metadata:
+                return metadata['data_type']
         
+        # 2. Fall back to structure-based detection for older files
+        # Priority order matters: bias and noise are subsets of multisweep
+        
+        # Bias files: have both bias_kids_output AND results_by_iteration
+        if 'bias_kids_output' in data and 'results_by_iteration' in data:
+            return 'bias'
+        
+        # Noise files: have noise_data AND results_by_iteration
+        if 'noise_data' in data and data['noise_data'] is not None and 'results_by_iteration' in data:
+            return 'noise'
+        
+        # Multisweep files: have results_by_iteration (but not bias or noise)
+        if 'results_by_iteration' in data:
+            return 'multisweep'
+        
+        # Network analysis files: have 'parameters' and 'modules' keys
+        if 'parameters' in data and 'modules' in data:
+            return 'netanal'
+        
+        # Unknown file type
         return None
     
     # ─────────────────────────────────────────────────────────────────

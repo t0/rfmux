@@ -1140,60 +1140,78 @@ class PeriscopeRuntime:
             QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
         
     
-    def _load_multisweep_analysis(self, load_params: dict):
+    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep") -> tuple:
         """
-        Start a new multisweep analysis.
-
-        Creates a `MultisweepWindow` and a `MultisweepTask`.
-        Connects signals for progress, data updates, and completion.
-
+        Create and display a MultisweepPanel from loaded data.
+        
+        This unified helper method is used by both _load_multisweep_analysis and 
+        _set_and_plot_bias to eliminate code duplication.
+        
         Args:
-            params (dict): Parameters for the multisweep analysis, typically
-                            from a configuration dialog.
+            load_params: Loaded data dictionary containing 'initial_parameters', 
+                        'results_by_iteration', 'dac_scales_used', etc.
+            source_type: "multisweep", "bias", or "noise" - affects naming and panel behavior
+            
+        Returns:
+            tuple: (panel, dock, window_id, target_module) or (None, None, None, None) on error
         """
-        # MultisweepWindow from .ui, MultisweepTask from .tasks, sys, traceback from .utils
         try:
             # Allow loading without CRS in offline mode
             if self.crs is None and self.host != "OFFLINE": 
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep. Make sure your board is correctly setup.")
-                return
-            window_id = f"multisweep_window_{self.multisweep_window_count}"; self.multisweep_window_count += 1
+                return None, None, None, None
+                
+            window_id = f"multisweep_window_{self.multisweep_window_count}"
+            self.multisweep_window_count += 1
+            
             params = load_params['initial_parameters']
             target_module = params.get('module')
-            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep. Please check your multisweep file."); return
+            if target_module is None: 
+                QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified. Please check your file.")
+                return None, None, None, None
             
-            # Restore DAC scales from loaded data (same pattern as netanal)
+            # Restore DAC scales from loaded data
             if 'dac_scales_used' in load_params:
                 self.dac_scales = load_params['dac_scales_used']
-                dac_scales_for_window = self.dac_scales
+                dac_scales_for_panel = self.dac_scales
             elif hasattr(self, 'dac_scales'):
-                dac_scales_for_window = self.dac_scales
+                dac_scales_for_panel = self.dac_scales
             else:
                 QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales from file or board.")
-                return
+                return None, None, None, None
 
             dac_scale_for_mod = load_params['dac_scales_used'][target_module]
-            dac_scale_for_board = dac_scales_for_window[target_module]
+            dac_scale_for_board = dac_scales_for_panel[target_module]
 
             if dac_scale_for_mod != dac_scale_for_board:
                 QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
             
             # Check if noise data exists in the loaded file
             has_noise_data = 'noise_data' in load_params and load_params['noise_data'] is not None
+            
+            # For bias source type, also check for bias_kids_output
+            has_bias_data = 'bias_kids_output' in load_params and load_params['bias_kids_output'] is not None
+            loaded_bias_flag = has_noise_data or (source_type == "bias" and has_bias_data)
                 
-            # Create panel instead of window
+            # Create panel
             panel = MultisweepPanel(parent=self, target_module=target_module, initial_params=params.copy(), 
-                                   dac_scales=dac_scales_for_window, dark_mode=self.dark_mode, 
-                                   loaded_bias=has_noise_data, is_loaded_data=True)
+                                   dac_scales=dac_scales_for_panel, dark_mode=self.dark_mode, 
+                                   loaded_bias=loaded_bias_flag, is_loaded_data=True)
             
             # Load noise spectrum data if it exists
             if has_noise_data:
                 panel.spectrum_noise_data = load_params['noise_data']
-                # Enable the noise spectrum button since we have data
                 panel.noise_spectrum_btn.setEnabled(True)
             
+            # Create dock title based on source type
+            if source_type == "bias":
+                dock_title = f"Bias #{self.multisweep_window_count} (Loaded)"
+            elif source_type == "noise":
+                dock_title = f"Noise #{self.multisweep_window_count} (Loaded)"
+            else:
+                dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
+            
             # Wrap in dock
-            dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
             
             self.multisweep_windows[window_id] = {'window': panel, 'dock': dock, 'params': params.copy()}
@@ -1207,20 +1225,22 @@ class PeriscopeRuntime:
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
 
             panel._hide_progress_bars()
-            iteration_params = load_params['results_by_iteration']
+            
+            # Set NCO frequency based on resonance frequencies
+            iteration_params = load_params.get('results_by_iteration', [])
+            reso_frequencies = params.get('resonance_frequencies', [])
+            
+            if reso_frequencies:
+                span_hz = params.get('span_hz', 0)
+                nco_freq = ((min(reso_frequencies) - span_hz/2) + (max(reso_frequencies) + span_hz/2)) / 2
 
-            span_hz = params['span_hz']
-            reso_frequencies = params['resonance_frequencies']
+                # Only set NCO frequency if CRS is available (skip in offline mode)
+                if self.crs is not None:
+                    asyncio.run(self.crs.set_nco_frequency(nco_freq, module=target_module))
+                else:
+                    print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
-            nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
-
-            # Only set NCO frequency if CRS is available (skip in offline mode)
-            if self.crs is not None:
-                crs = self.crs
-                asyncio.run(crs.set_nco_frequency(nco_freq, module=target_module)) #### Setting up the nco frequency ######
-            else:
-                print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
-
+            # Load iteration data into panel
             for i in range(len(iteration_params)):
                 amplitude = iteration_params[i]['amplitude']
                 direction = iteration_params[i]['direction']
@@ -1228,7 +1248,7 @@ class PeriscopeRuntime:
                 panel.update_data(target_module, i, amplitude, direction, data, None)
             
             # Extract and load df_calibrations if bias_kids_output exists
-            if 'bias_kids_output' in load_params and load_params['bias_kids_output']:
+            if has_bias_data:
                 bias_output = load_params['bias_kids_output']
                 df_calibrations = {}
                 for det_idx, det_data in bias_output.items():
@@ -1249,47 +1269,64 @@ class PeriscopeRuntime:
             dock.show()
             dock.raise_()
             
-            # Auto-launch detector digest panel by programmatically triggering the existing
-            # double-click handler which already has all the logic for creating digest panels
-            if iteration_params and len(iteration_params) > 0:
-                first_iteration_data = iteration_params[0].get('data', {})
-                if first_iteration_data:
-                    # Get any detector's frequency to simulate a click location
-                    first_detector_id = sorted(first_iteration_data.keys())[0]
-                    first_detector_data = first_iteration_data[first_detector_id]
-                    click_freq = first_detector_data.get('bias_frequency', 
-                                                        first_detector_data.get('original_center_frequency'))
-                    
-                    if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
-                        # Create a fake event at the detector's frequency
-                        # The handler will find the closest detector and create the digest panel
-                        class FakeEvent:
-                            def __init__(self, x, y):
-                                self._scene_pos = QtCore.QPointF(x, y)
-                            def scenePos(self):
-                                return self._scene_pos
-                            def accept(self):
-                                pass
-                        
-                        # Map the frequency to view coordinates (x position)
-                        view_box = panel.combined_mag_plot.getViewBox()
-                        if view_box:
-                            # The double-click handler expects scene coordinates
-                            # We'll use a point at the detector's frequency
-                            view_point = QtCore.QPointF(click_freq, 0)  # y doesn't matter for selection
-                            scene_point = view_box.mapViewToScene(view_point)
-                            fake_event = FakeEvent(scene_point.x(), scene_point.y())
-                            panel._handle_multisweep_plot_double_click(fake_event)
-                            
-                            # Re-raise the multisweep dock to keep focus on it (not the detector digest)
-                            multisweep_dock = self.dock_manager.find_dock_for_widget(panel)
-                            if multisweep_dock:
-                                multisweep_dock.raise_()
-                        
+            return panel, dock, window_id, target_module
+            
         except Exception as e:
-            error_msg = f"Error starting multisweep analysis: {type(e).__name__}: {str(e)}"
-            print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
-            QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
+            error_msg = f"Error creating multisweep panel: {type(e).__name__}: {str(e)}"
+            print(error_msg, file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            QtWidgets.QMessageBox.critical(self, "Error", error_msg)
+            return None, None, None, None
+
+    def _load_multisweep_analysis(self, load_params: dict):
+        """
+        Load multisweep analysis data from file and display in a docked panel.
+
+        Args:
+            load_params (dict): Loaded data dictionary from file.
+        """
+        # Use the unified helper method
+        panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
+            load_params, source_type="multisweep"
+        )
+        
+        if panel is None:
+            return  # Error already displayed by helper
+        
+        # Auto-launch detector digest panel by programmatically triggering the existing
+        # double-click handler which already has all the logic for creating digest panels
+        iteration_params = load_params.get('results_by_iteration', [])
+        if iteration_params and len(iteration_params) > 0:
+            first_iteration_data = iteration_params[0].get('data', {})
+            if first_iteration_data:
+                # Get any detector's frequency to simulate a click location
+                first_detector_id = sorted(first_iteration_data.keys())[0]
+                first_detector_data = first_iteration_data[first_detector_id]
+                click_freq = first_detector_data.get('bias_frequency', 
+                                                    first_detector_data.get('original_center_frequency'))
+                
+                if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
+                    # Create a fake event at the detector's frequency
+                    class FakeEvent:
+                        def __init__(self, x, y):
+                            self._scene_pos = QtCore.QPointF(x, y)
+                        def scenePos(self):
+                            return self._scene_pos
+                        def accept(self):
+                            pass
+                    
+                    # Map the frequency to view coordinates (x position)
+                    view_box = panel.combined_mag_plot.getViewBox()
+                    if view_box:
+                        view_point = QtCore.QPointF(click_freq, 0)
+                        scene_point = view_box.mapViewToScene(view_point)
+                        fake_event = FakeEvent(scene_point.x(), scene_point.y())
+                        panel._handle_multisweep_plot_double_click(fake_event)
+                        
+                        # Re-raise the multisweep dock to keep focus on it
+                        multisweep_dock = self.dock_manager.find_dock_for_widget(panel)
+                        if multisweep_dock:
+                            multisweep_dock.raise_()
 
     def _start_multisweep_analysis_for_window(self, window_instance: 'MultisweepWindow', params: dict):
         """

@@ -113,6 +113,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Bias KIDs output storage
         self.bias_kids_output = None  # Stores the output from bias_kids algorithm
+        self.nco_frequency_hz = None  # NCO frequency used when biasing (stored for export)
 
         self._setup_ui()
         self.resize(1200, 800) # Default window size
@@ -813,6 +814,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             'dac_scales_used': self.dac_scales,
             'results_by_iteration': self.results_by_iteration,
             'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
+            'nco_frequency_hz': self.nco_frequency_hz,  # NCO frequency used for biasing
             'noise_data': spectrum_data
         }
     
@@ -1735,10 +1737,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Could update a progress indicator if desired
         pass
     
-    def _bias_kids_completed(self, module, biased_results, df_calibrations):
+    def _bias_kids_completed(self, module, biased_results, df_calibrations, nco_frequency_hz):
         """Handle completion of the bias_kids task."""
         # Store the output
         self.bias_kids_output = biased_results
+        
+        # Store the NCO frequency used during biasing
+        self.nco_frequency_hz = nco_frequency_hz
         
         # Emit signal with df_calibration data
         if df_calibrations:

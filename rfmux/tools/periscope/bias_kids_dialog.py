@@ -60,12 +60,12 @@ def load_bias_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
 class BiasKidsDialog(QDialog):
     """Dialog for configuring Bias KIDs algorithm parameters."""
     
-    def __init__(self, parent=None, active_module : int | None = None, load_bias = False):
+    def __init__(self, parent=None, active_module : int | None = None, load_bias = False, loaded_data: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle("Bias KIDs Configuration")
         self.setModal(True)
         self.setMinimumWidth(400)
-        self._load_data = {}
+        self._load_data = loaded_data or {}  # Pre-populate if provided
         self.use_load_file = False
         self.current_module = active_module
 
@@ -268,8 +268,38 @@ class BiasKidsDialog(QDialog):
         self.cancel_btn.clicked.connect(self.reject)
 
         self.setMinimumWidth(500) # Ensure dialog is wide enough
-
         
+        # If data was pre-loaded (from double-click), populate fields immediately
+        if self._load_data:
+            self._populate_fields_from_data(self._load_data)
+            self.plot_bias_btn.setEnabled(True)
+            self.use_load_file = True  # Mark as using loaded file
+
+    def _populate_fields_from_data(self, payload: dict):
+        """Populate UI fields from loaded payload data."""
+        params = payload['initial_parameters']
+        bias_output = payload['bias_kids_output']
+    
+        bias_freqs = []
+        amplitudes = []
+        phases = []
+    
+        for det_idx, det_data in bias_output.items():
+            if not det_data.get("bias_successful", True):
+                print("Bias was successful")
+    
+            channel = int(det_data.get("bias_channel", det_idx))
+            bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
+            bias_freqs.append(bias_freq)
+    
+            amplitude = det_data.get("sweep_amplitude")
+            amplitudes.append(amplitude)
+    
+            phase = det_data.get("optimal_phase_degrees", 0)
+            phases.append(phase)
+    
+        self.tones_edit.setText(",".join([f"{f/1e6:.6f}" for f in bias_freqs]))
+        self.amp_edit.setText(",".join([f"{a:.3f}" for a in amplitudes]))
 
     def _on_set_and_plot_bias(self):
         """Set flag to use the loaded file and accept the dialog, 
@@ -311,35 +341,9 @@ class BiasKidsDialog(QDialog):
     
         self.plot_bias_btn.setEnabled(True)
         self._load_data = payload.copy()
-    
-        params = payload['initial_parameters']
-        bias_output = payload['bias_kids_output']
-    
-        bias_freqs = []
-        amplitudes = []
-        phases = []
-    
-        for det_idx, det_data in bias_output.items():
-            if not det_data.get("bias_successful", True):
-                print("Bias was successful")
-    
-            channel = int(det_data.get("bias_channel", det_idx))
-            bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
-            bias_freqs.append(bias_freq)
-    
-            amplitude = det_data.get("sweep_amplitude")
-            amplitudes.append(amplitude)
-    
-            phase = det_data.get("optimal_phase_degrees", 0)
-            phases.append(phase)
-    
-        self.tones_edit.setText(",".join([f"{f/1e6:.6f}" for f in bias_freqs]))
-    
-        # span_khz = params['span_hz'] / 1e3
-        # self.span_khz_edit.setText(str(span_khz))
-    
-        self.amp_edit.setText(",".join([f"{a:.3f}" for a in amplitudes]))
-        # self.phase_edit.setText(",".join([f"{p:.1f}" for p in phases]))
+        
+        # Use the helper method to populate fields
+        self._populate_fields_from_data(payload)
     
     
     @QtCore.pyqtSlot()

@@ -4,6 +4,7 @@ from .utils import *
 from .tasks import *
 from .ui import *
 import asyncio
+from PyQt6 import sip
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
@@ -608,16 +609,30 @@ class PeriscopeRuntime:
         # Update Time-Domain (TOD) plots
         if "T" in rowCurves and ch_val in rowCurves["T"]:
             cset = rowCurves["T"][ch_val]
-            if cset["I"].isVisible(): cset["I"].setData(tarr, I_data)
-            if cset["Q"].isVisible(): cset["Q"].setData(tarr, Q_data)
-            if "Mag" in cset and cset["Mag"].isVisible(): cset["Mag"].setData(tarr, M_data)
+            try:
+                if not sip.isdeleted(cset["I"]) and cset["I"].isVisible(): 
+                    cset["I"].setData(tarr, I_data)
+                if not sip.isdeleted(cset["Q"]) and cset["Q"].isVisible(): 
+                    cset["Q"].setData(tarr, Q_data)
+                if "Mag" in cset and not sip.isdeleted(cset["Mag"]) and cset["Mag"].isVisible(): 
+                    cset["Mag"].setData(tarr, M_data)
+            except RuntimeError:
+                # Qt object was deleted, skip this update
+                pass
         
         # Update FFT plots
         if "F" in rowCurves and ch_val in rowCurves["F"]:
             cset = rowCurves["F"][ch_val]
-            if cset["I"].isVisible(): cset["I"].setData(tarr, I_data, fftMode=True)
-            if cset["Q"].isVisible(): cset["Q"].setData(tarr, Q_data, fftMode=True)
-            if "Mag" in cset and cset["Mag"].isVisible(): cset["Mag"].setData(tarr, M_data, fftMode=True)
+            try:
+                if not sip.isdeleted(cset["I"]) and cset["I"].isVisible(): 
+                    cset["I"].setData(tarr, I_data, fftMode=True)
+                if not sip.isdeleted(cset["Q"]) and cset["Q"].isVisible(): 
+                    cset["Q"].setData(tarr, Q_data, fftMode=True)
+                if "Mag" in cset and not sip.isdeleted(cset["Mag"]) and cset["Mag"].isVisible(): 
+                    cset["Mag"].setData(tarr, M_data, fftMode=True)
+            except RuntimeError:
+                # Qt object was deleted, skip this update
+                pass
 
     def _dispatch_iq_task(self, row_i: int, group: list[int], rowCurves: dict):
         """

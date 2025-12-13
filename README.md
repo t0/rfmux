@@ -10,37 +10,79 @@ Distributed within `rfmux` is the binary files for the firmware itself (`/firmwa
 
 ## Installation
 
-Clone rfmux from github, and then install via pip (will also install the dependencies):
+rfmux requires Python 3.12 or later.
+
+### Method 1: uv (Recommended)
+
+[uv](https://github.com/astral-sh/uv) is a fast, modern Python package installer. Install it with:
 
 ```bash
+# Install uv (Linux/macOS)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Or on Windows
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Clone and install rfmux
+git clone https://github.com/t0/rfmux.git
 cd rfmux
-pip install -e .
+uv venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+uv pip install -e ".[gui]"
 ```
 
-For MacOS, you need to run the following to make sure threading works for the mock mode
+### Method 2: pip (Traditional)
+
+```bash
+git clone https://github.com/t0/rfmux.git
+cd rfmux
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install -e ".[gui]"
+```
+
+### Method 3: conda (Legacy)
+
+An `environment.yml` file is provided for conda users:
+
+```bash
+git clone https://github.com/t0/rfmux.git
+cd rfmux
+conda env create -f environment.yml
+conda activate rfmux
+```
+
+**Note:** The conda environment installs most dependencies via conda, then uses `pip install -e .` for the rfmux package itself.
+
+### Platform-Specific Requirements
+
+#### macOS
+For threading support in mock mode, install OpenMP:
 
 ```bash
 brew install libomp
-### Now in your .zshrc file add following 
+
+# Add to ~/.zshrc (or ~/.bash_profile):
 export NUMBA_THREADING_LAYER=omp
 export DYLD_LIBRARY_PATH="/opt/homebrew/opt/libomp/lib:$DYLD_LIBRARY_PATH"
-### if you have older Mac (Intel chip) your path might be - /usr/local/opt/libomp/lib/:$DYLD_LIBRARY_PATH
-### save and run 
+# For Intel Macs: /usr/local/opt/libomp/lib/:$DYLD_LIBRARY_PATH
+
+# Reload your shell config:
 source ~/.zshrc
 ```
 
-Note that rfmux requires Python 3.12 or later
+#### Linux
+For the Periscope GUI, install xcb-cursor:
+
+```bash
+sudo apt-get install libxcb-cursor0
+```
 
 ## Periscope
 
 https://github.com/user-attachments/assets/fa8eb68c-8593-43b1-af96-285720ed0d5f
 
-An additional system library that cannot be automatically installed with pip is xcb-cursor.
-This is required for the real-time GUI visualization tool `periscope`. It can be installed via:
-```bash
-$ sudo apt-get install libxcb-cursor0
-```
-The visualizer can be called directly from the commandline using the CRS serial number:
+Periscope is the real-time GUI visualization tool for rfmux. It can be called directly from the commandline using the CRS serial number:
 ```bash
 $ periscope 0022 --module 2 --channels "1,3&5"
 ```

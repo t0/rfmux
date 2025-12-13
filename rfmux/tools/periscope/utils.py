@@ -458,3 +458,115 @@ class ClickableViewBox(pg.ViewBox):
         #    pass to superclass for any other default ViewBox handling.
         if not event.isAccepted():
             super().mouseDoubleClickEvent(event)
+
+
+# ───────────────────────── Screenshot Mixin ─────────────────────────
+class ScreenshotMixin:
+    """
+    Mixin class that provides screenshot functionality for panel widgets.
+    
+    Any panel that inherits from this mixin will have access to screenshot
+    export methods that integrate with the Periscope dock manager and session manager.
+    
+    Usage:
+        class MyPanel(QtWidgets.QWidget, ScreenshotMixin):
+            def __init__(self):
+                ...
+                # Create screenshot button
+                self.screenshot_btn = QtWidgets.QPushButton("📷")
+                self.screenshot_btn.setToolTip("Export a screenshot of this panel")
+                self.screenshot_btn.clicked.connect(self._export_screenshot)
+    """
+    
+    def _get_periscope_parent(self) -> Optional[QtWidgets.QWidget]:
+        """
+        Get the Periscope parent instance by walking up the parent hierarchy.
+        
+        Returns:
+            The Periscope instance or None if not found
+        """
+        parent = self.parent() if hasattr(self, 'parent') else None
+        while parent and not hasattr(parent, 'crs'):
+            parent = parent.parent()
+        return parent
+    
+    def _export_screenshot(self):
+        """Export a screenshot of this panel to the session folder or user-chosen location."""
+        periscope = self._get_periscope_parent()
+        if not periscope:
+            # No parent - just save with dialog
+            self._export_screenshot_with_dialog()
+            return
+        
+        # Find this panel's dock
+        dock = periscope.dock_manager.find_dock_for_widget(self)
+        if not dock:
+            # No dock found - just save with dialog
+            self._export_screenshot_with_dialog()
+            return
+        
+        # Get dock ID
+        dock_id = dock.objectName()
+        
+        # Get session manager
+        session_manager = getattr(periscope, 'session_manager', None)
+        
+        # Use dock manager's export_screenshot method
+        filepath = periscope.dock_manager.export_screenshot(
+            dock_id,
+            session_manager=session_manager
+        )
+        
+        if filepath:
+            # Refresh session browser if available
+            if hasattr(periscope, 'session_browser') and periscope.session_browser:
+                periscope.session_browser.refresh()
+    
+    def _export_screenshot_with_dialog(self):
+        """Export screenshot with a non-blocking file dialog (fallback when no parent/dock).
+        
+        Uses DontUseNativeDialog option to prevent hanging on some Linux systems.
+        """
+        # Generate default filename
+        timestamp = datetime.datetime.now().strftime("%H%M%S")
+        panel_name = getattr(self, 'objectName', lambda: 'panel')()
+        if not panel_name:
+            panel_name = self.__class__.__name__
+        filename = f"screenshot_{panel_name}_{timestamp}.png"
+        
+        # Create a non-blocking file dialog (prevents hanging on Linux)
+        dlg = QtWidgets.QFileDialog(self, "Save Screenshot")
+        dlg.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
+        dlg.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
+        dlg.setNameFilters(["PNG Images (*.png)", "All Files (*)"])
+        dlg.setDefaultSuffix("png")
+        dlg.selectFile(filename)
+        
+        # Connect signal for handling file selection
+        dlg.fileSelected.connect(self._handle_screenshot_file_selected)
+        
+        # Show the dialog non-modally (returns immediately, doesn't block)
+        dlg.open()
+    
+    def _handle_screenshot_file_selected(self, filepath: str):
+        """Handle the file selection from the screenshot dialog.
+        
+        Args:
+            filepath: The path to the file selected by the user
+        """
+        if not filepath:
+            return
+        
+        # Use high-DPI rendering
+        scale = 2  # 2x resolution
+        size = self.size()
+        pixmap = QtGui.QPixmap(size.width() * scale, size.height() * scale)
+        pixmap.setDevicePixelRatio(scale)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+        
+        painter = QtGui.QPainter(pixmap)
+        self.render(painter)
+        painter.end()
+        
+        pixmap.save(filepath, "PNG")
+        print(f"[Screenshot] Saved: {filepath}")

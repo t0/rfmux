@@ -1010,7 +1010,7 @@ class MultisweepTask(QtCore.QThread):
 class BiasKidsSignals(QObject):
     """Signals for BiasKidsTask."""
     progress = pyqtSignal(int, float)  # module, progress_percentage
-    completed = pyqtSignal(int, dict, dict)  # module, biased_results, df_calibrations
+    completed = pyqtSignal(int, dict, dict, float)  # module, biased_results, df_calibrations, nco_frequency_hz
     error = pyqtSignal(str)  # error_message
 
 
@@ -1076,8 +1076,11 @@ class BiasKidsTask(QtCore.QThread):
                     if 'df_calibration' in det_data:
                         df_calibrations[det_idx] = det_data['df_calibration']
                 
-                # Emit completion with results
-                self.signals.completed.emit(self.module, result, df_calibrations)
+                # Read the NCO frequency that was used during biasing
+                nco_frequency_hz = loop.run_until_complete(self.crs.get_nco_frequency(module=self.module))
+                
+                # Emit completion with results and NCO frequency
+                self.signals.completed.emit(self.module, result, df_calibrations, float(nco_frequency_hz))
             else:
                 self.signals.error.emit("Bias KIDs operation returned no results.")
                 

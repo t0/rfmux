@@ -2614,12 +2614,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         file_type = self.session_manager.identify_file_type(file_path)
         
         if file_type is None:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Unknown File Type",
-                f"Cannot identify the type of file:\n{file_path}\n\n"
-                "Expected filename format: timestamp_type_identifier.pkl"
-            )
+            # Unknown file type - open with system default application
+            self._open_file_with_system_default(file_path)
             return
         
         # Load the data
@@ -2740,6 +2736,42 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         # Load as a multisweep file - this will create the panel with noise data
         self._load_multisweep_analysis(data)
+    
+    def _open_file_with_system_default(self, file_path: str):
+        """
+        Open a file with the system's default application.
+        
+        Args:
+            file_path: Path to the file to open
+        """
+        import subprocess
+        import sys
+        from pathlib import Path
+        
+        if not Path(file_path).exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"Cannot open file (not found):\n{file_path}"
+            )
+            return
+        
+        try:
+            if sys.platform == 'darwin':  # macOS
+                subprocess.run(['open', file_path], check=True)
+            elif sys.platform == 'win32':  # Windows
+                subprocess.run(['start', '', file_path], shell=True, check=True)
+            else:  # Linux
+                subprocess.run(['xdg-open', file_path], check=True)
+            
+            print(f"[SessionBrowser] Opened file with system default: {Path(file_path).name}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Open Error",
+                f"Failed to open file:\n{file_path}\n\nError: {str(e)}"
+            )
+            print(f"[SessionBrowser] Error opening file: {e}")
     
     def _open_notebook_file(self, file_path: str):
         """

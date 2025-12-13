@@ -557,8 +557,7 @@ class ScreenshotMixin:
         if not filepath:
             return
         
-        # Use high-DPI rendering
-        scale = 2  # 2x resolution
+        scale = 1  # 1x resolution
         size = self.size()
         pixmap = QtGui.QPixmap(size.width() * scale, size.height() * scale)
         pixmap.setDevicePixelRatio(scale)

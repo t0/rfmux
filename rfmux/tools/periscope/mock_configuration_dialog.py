@@ -24,6 +24,8 @@ import numpy as np
 from rfmux.mock import config as mc
 from rfmux.mr_resonator.mr_complex_resonator import MR_complex_resonator
 from rfmux.mr_resonator.mr_lekid import MR_LEKID
+from . import settings
+from .custom_material_dialog import CustomMaterialDialog, ManageCustomMaterialsDialog
 
 
 class ScientificDoubleValidator(QtGui.QDoubleValidator):
@@ -43,7 +45,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Mock Mode Configuration")
         self.setModal(True)
-        self.setMinimumWidth(800)
+        self.setMinimumWidth(1000)
 
         # Store current configuration or use defaults
         self.current_config = current_config or {}
@@ -57,16 +59,22 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         # Connect signals for interactions
         self._connect_signals()
 
-        # Trigger initial Q update
-        self._update_q_estimate()
+        # Trigger initial derived parameter update
+        self._update_all_derived()
 
     def _connect_signals(self):
-        """Connect signals for live Q update and other interactions."""
-        # Connect signals for live Q update
-        for widget in [self.T_edit, self.Popt_edit, self.Lg_edit, self.Cc_edit, 
-                       self.L_junk_edit, self.Vin_edit, self.input_atten_edit, self.ZLNA_edit]:
-            widget.textChanged.connect(self._update_q_estimate)
-        self.freq_start_spin.valueChanged.connect(self._update_q_estimate)
+        """Connect signals for live update of derived parameters."""
+        # Physics mode inputs
+        for widget in [self.T_edit, self.Popt_edit, self.width_edit, 
+                       self.thickness_edit, self.length_edit]:
+            widget.textChanged.connect(self._update_all_derived)
+        
+        # Circuit design
+        for widget in [self.Lg_edit, self.L_junk_edit, self.Cc_edit,
+                       self.Vin_edit, self.input_atten_edit, self.ZLNA_edit]:
+            widget.textChanged.connect(self._update_all_derived)
+            
+        self.freq_start_spin.valueChanged.connect(self._update_all_derived)
 
     def _create_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -175,118 +183,6 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.auto_bias_check.toggled.connect(self.bias_amplitude_spin.setEnabled)
         return group
 
-    def _create_performance_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Approximate Q values")
-        layout = QtWidgets.QVBoxLayout(group)
-        
-        self.q_table = QtWidgets.QTableWidget()
-        self.q_table.setColumnCount(2)
-        self.q_table.setHorizontalHeaderLabels(["Param", "Value"])
-        self.q_table.verticalHeader().setVisible(False)
-        self.q_table.horizontalHeader().setStretchLastSection(True)
-        self.q_table.setRowCount(3)
-        self.q_table.setItem(0, 0, QtWidgets.QTableWidgetItem("Qr (Total)"))
-        self.q_table.setItem(1, 0, QtWidgets.QTableWidgetItem("Qi (Internal)"))
-        self.q_table.setItem(2, 0, QtWidgets.QTableWidgetItem("Qc (Coupling)"))
-        
-        # Set initial values
-        for i in range(3):
-            item = QtWidgets.QTableWidgetItem("N/A")
-            # Make read-only
-            item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-            self.q_table.setItem(i, 1, item)
-            
-        # Adjust height to fit rows
-        self.q_table.setFixedHeight(110) 
-        
-        layout.addWidget(self.q_table)
-
-        # Add explanatory label
-        hint_label = QtWidgets.QLabel(
-            "<small>"
-            "<b>Key Dependencies:</b><br>"
-            "• <b>Lk</b> (Kinetic Inductance) increases with T and Popt.<br>"
-            "• <b>Qi</b> (Internal Q) depends on total inductance (L_k + L_g) and loss.<br>"
-            "&nbsp;&nbsp;• <b>Increases</b> with larger L_g (dilution effect).<br>"
-            "&nbsp;&nbsp;• <b>Decreases</b> with higher T or Popt (increased loss).<br>"
-            "• <b>Qc</b> (Coupling Q) increases as Cc decreases.<br>"
-            "• <b>Qr</b> (Total Q) is dominated by the lowest Q factor."
-            "</small>"
-        )
-        hint_label.setWordWrap(True)
-        layout.addWidget(hint_label)
-
-        return group
-
-    def _update_q_estimate(self):
-        """Calculate and update Q factor estimates based on current UI values."""
-        if not hasattr(self, 'q_table'): return
-
-        try:
-            # Read parameters (with defaults if parsing fails)
-            try: T = float(self.T_edit.text())
-            except ValueError: return
-            
-            try: Popt = float(self.Popt_edit.text())
-            except ValueError: return
-            
-            try: Lg = float(self.Lg_edit.text())
-            except ValueError: return
-            
-            try: Cc = float(self.Cc_edit.text())
-            except ValueError: return
-            
-            try: L_junk = float(self.L_junk_edit.text())
-            except ValueError: L_junk = 0.0
-            
-            try: Vin = float(self.Vin_edit.text())
-            except ValueError: Vin = 1e-5
-            
-            try: input_atten_dB = float(self.input_atten_edit.text())
-            except ValueError: input_atten_dB = 20.0
-            
-            try: ZLNA = float(self.ZLNA_edit.text())
-            except ValueError: ZLNA = 50.0
-
-            # Get start frequency as representative
-            freq = self.freq_start_spin.value() * 1e9
-            if freq <= 0: return
-
-            # Step 1: Get Lk and R from physics model (using reference params)
-            ref_params = {
-                'T': T, 'Popt': Popt, 'C': 1e-12, 'Cc': Cc, 'fix_Lg': Lg,
-                'L_junk': L_junk, 'Vin': Vin, 'input_atten_dB': input_atten_dB,
-                'base_readout_f': freq, 'verbose': False,
-                'ZLNA': complex(ZLNA, 0), 'GLNA': 1.0
-            }
-            ref_res = MR_complex_resonator(**ref_params)
-            Lk = ref_res.lekid.Lk
-            R = ref_res.lekid.R
-            
-            # Step 2: Calculate required C
-            L_total = Lk + Lg
-            C = 1.0 / ((2 * np.pi * freq)**2 * L_total)
-            
-            # Step 3: Calculate Q values
-            lekid = MR_LEKID(
-                C=C, Lk=Lk, Lg=Lg, R=R, Cc=Cc, 
-                L_junk=L_junk, Vin=Vin, 
-                system_termination=50.0, input_atten_dB=input_atten_dB,
-                ZLNA=complex(ZLNA, 0)
-            )
-            
-            Qr, Qi, Qc = lekid.compute_Q_values()
-            
-            # Update Table
-            self.q_table.item(0, 1).setText(f"{Qr:,.0f}")
-            self.q_table.item(1, 1).setText(f"{Qi:,.0f}")
-            self.q_table.item(2, 1).setText(f"{Qc:,.0f}")
-            
-        except Exception as e:
-            # If calculation fails, clear values or show error? Keep existing or N/A?
-            # print(f"Q Calc Error: {e}")
-            pass
-
     def _create_advanced_widget(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         vbox = QtWidgets.QVBoxLayout(widget)
@@ -306,17 +202,15 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
         # Left column
         left = QtWidgets.QVBoxLayout()
-        left.addWidget(self._create_physics_group())
-        left.addWidget(self._create_circuit_group())
-        left.addWidget(self._create_performance_group())
+        left.addWidget(self._create_mkids_group())
         left.addStretch()
 
         # Right column
         right = QtWidgets.QVBoxLayout()
         right.addWidget(self._create_readout_group())
-        right.addWidget(self._create_qp_pulses_group())
+        right.addWidget(self._create_pulse_injection_group())
         right.addWidget(self._create_noise_group())
-        right.addWidget(self._create_convergence_group())
+        right.addWidget(self._create_simulation_realism_group())
         right.addStretch()
 
         grid.addLayout(left)
@@ -329,62 +223,396 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.advanced_container.setVisible(not vis)
         self.advanced_toggle.setText("▼ Advanced Parameters" if not vis else "▶ Advanced Parameters")
 
-    def _create_physics_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Physics")
-        layout = QtWidgets.QGridLayout(group)
-        row = 0
-
-        layout.addWidget(QtWidgets.QLabel("Temperature T (K):"), row, 0)
-        self.T_edit = QtWidgets.QLineEdit()
-        self.T_edit.setValidator(ScientificDoubleValidator())
-        self.T_edit.setToolTip("Operating temperature in Kelvin used to derive Lk and R from quasiparticle physics.")
-        layout.addWidget(self.T_edit, row, 1)
-
-        layout.addWidget(QtWidgets.QLabel("Optical Power Popt (W):"), row, 2)
-        self.Popt_edit = QtWidgets.QLineEdit()
-        self.Popt_edit.setValidator(ScientificDoubleValidator())
-        self.Popt_edit.setToolTip("Optical loading power in Watts; affects quasiparticle density and dissipation.")
-        layout.addWidget(self.Popt_edit, row, 3)
-        return group
-
-    def _create_circuit_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Circuit")
-        layout = QtWidgets.QGridLayout(group)
-        row = 0
-
-        layout.addWidget(QtWidgets.QLabel("Lg (H):"), row, 0)
+    def _create_mkids_group(self) -> QtWidgets.QGroupBox:
+        """Create unified MKIDs section with physics-driven parameters."""
+        group = QtWidgets.QGroupBox("MKIDs (Microwave Kinetic Inductance Detectors)")
+        layout = QtWidgets.QVBoxLayout(group)
+        
+        # Physics-driven content
+        physics_page = self._create_physics_driven_page()
+        layout.addWidget(physics_page)
+        
+        # Circuit Design Parameters (shared between both modes, always visible)
+        circuit_group = QtWidgets.QGroupBox("Circuit Design Parameters")
+        circuit_layout = QtWidgets.QGridLayout(circuit_group)
+        
+        circuit_layout.addWidget(QtWidgets.QLabel("Lg (geometric, nH):"), 0, 0)
         self.Lg_edit = QtWidgets.QLineEdit()
         self.Lg_edit.setValidator(ScientificDoubleValidator())
-        self.Lg_edit.setToolTip("Geometric inductance (Henries).")
-        layout.addWidget(self.Lg_edit, row, 1)
-
-        layout.addWidget(QtWidgets.QLabel("Cc (F):"), row, 2)
-        self.Cc_edit = QtWidgets.QLineEdit()
-        self.Cc_edit.setValidator(ScientificDoubleValidator())
-        self.Cc_edit.setToolTip("Coupling capacitance (Farads) to the readout line.")
-        layout.addWidget(self.Cc_edit, row, 3)
-
-        row += 1
-        layout.addWidget(QtWidgets.QLabel("L_junk (H):"), row, 0)
+        self.Lg_edit.setToolTip("Geometric inductance in nanohenries. Fixed by fabrication geometry.")
+        circuit_layout.addWidget(self.Lg_edit, 0, 1)
+        
+        circuit_layout.addWidget(QtWidgets.QLabel("L_junk (nH):"), 0, 2)
         self.L_junk_edit = QtWidgets.QLineEdit()
         self.L_junk_edit.setValidator(ScientificDoubleValidator())
-        self.L_junk_edit.setToolTip("Parasitic inductance (Henries).")
-        layout.addWidget(self.L_junk_edit, row, 1)
-
-        layout.addWidget(QtWidgets.QLabel("C_variation (frac):"), row, 2)
+        self.L_junk_edit.setToolTip("Parasitic inductance in nH. Dilutes α_k = Lk/(Lk+Lg+L_junk).")
+        circuit_layout.addWidget(self.L_junk_edit, 0, 3)
+        
+        circuit_layout.addWidget(QtWidgets.QLabel("Cc (fF):"), 1, 0)
+        self.Cc_edit = QtWidgets.QLineEdit()
+        self.Cc_edit.setValidator(ScientificDoubleValidator())
+        self.Cc_edit.setToolTip("Coupling capacitor in femtofarads. Controls coupling strength.")
+        circuit_layout.addWidget(self.Cc_edit, 1, 1)
+        
+        circuit_layout.addWidget(QtWidgets.QLabel("C variation:"), 1, 2)
         self.C_variation_edit = QtWidgets.QLineEdit()
         self.C_variation_edit.setValidator(ScientificDoubleValidator())
-        self.C_variation_edit.setToolTip("Fractional σ of normal variation applied to capacitance C (e.g., 0.01 = 1%).")
-        layout.addWidget(self.C_variation_edit, row, 3)
-
-        row += 1
-        layout.addWidget(QtWidgets.QLabel("Cc_variation (frac):"), row, 0)
+        self.C_variation_edit.setToolTip("Fractional σ of capacitance variation (e.g., 0.01 = 1%).")
+        circuit_layout.addWidget(self.C_variation_edit, 1, 3)
+        
+        circuit_layout.addWidget(QtWidgets.QLabel("Cc variation:"), 2, 0)
         self.Cc_variation_edit = QtWidgets.QLineEdit()
         self.Cc_variation_edit.setValidator(ScientificDoubleValidator())
-        self.Cc_variation_edit.setToolTip("Fractional σ of variation applied to coupling capacitance Cc.")
-        layout.addWidget(self.Cc_variation_edit, row, 1)
-
+        self.Cc_variation_edit.setToolTip("Fractional σ of coupling capacitor variation.")
+        circuit_layout.addWidget(self.Cc_variation_edit, 2, 1)
+        
+        layout.addWidget(circuit_group)
+        
+        # Derived Properties - combined two-column layout
+        derived_group = QtWidgets.QGroupBox("Derived Properties (live-updated)")
+        derived_main_layout = QtWidgets.QHBoxLayout(derived_group)
+        
+        # Left column - physics derived values
+        left_form = QtWidgets.QFormLayout()
+        left_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        
+        self.nqp_label = QtWidgets.QLabel("—")
+        self.nqp_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
+        self.nqp_label.setToolTip("Quasiparticle density. Increases with T and Popt.")
+        left_form.addRow("nqp (µm⁻³):", self.nqp_label)
+        
+        self.sigma1_label = QtWidgets.QLabel("—")
+        self.sigma1_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
+        self.sigma1_label.setToolTip("Real part of complex conductivity (related to loss).")
+        left_form.addRow("σ₁ (S/m):", self.sigma1_label)
+        
+        self.sigma2_label = QtWidgets.QLabel("—")
+        self.sigma2_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
+        self.sigma2_label.setToolTip("Imaginary part of complex conductivity (related to kinetic inductance).")
+        left_form.addRow("σ₂ (S/m):", self.sigma2_label)
+        
+        self.lk_square_label = QtWidgets.QLabel("—")
+        self.lk_square_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
+        self.lk_square_label.setToolTip("Kinetic inductance per square. Material property at given T, Popt.")
+        left_form.addRow("Lk□ (pH/□):", self.lk_square_label)
+        
+        self.lk_label = QtWidgets.QLabel("—")
+        self.lk_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
+        self.lk_label.setToolTip("Total kinetic inductance = Lk□ × (length/width).")
+        left_form.addRow("Lk (nH):", self.lk_label)
+        
+        self.r_label = QtWidgets.QLabel("—")
+        self.r_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
+        self.r_label.setToolTip("Total series resistance scaled from surface resistance.")
+        left_form.addRow("R (mΩ):", self.r_label)
+        
+        # Right column - circuit derived values
+        right_form = QtWidgets.QFormLayout()
+        right_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        
+        self.ltotal_label = QtWidgets.QLabel("—")
+        self.ltotal_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
+        self.ltotal_label.setToolTip("Total inductance = Lk + Lg + L_junk. Determines resonance frequency.")
+        right_form.addRow("L_total (nH):", self.ltotal_label)
+        
+        self.alpha_k_label = QtWidgets.QLabel("—")
+        self.alpha_k_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
+        self.alpha_k_label.setToolTip("Kinetic inductance fraction = Lk / L_total. Determines responsivity.")
+        right_form.addRow("α_k:", self.alpha_k_label)
+        
+        self.qr_label = QtWidgets.QLabel("—")
+        self.qr_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
+        self.qr_label.setToolTip("Loaded quality factor. Limited by both internal loss and coupling.")
+        right_form.addRow("Q_r (loaded):", self.qr_label)
+        
+        self.qi_label = QtWidgets.QLabel("—")
+        self.qi_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
+        self.qi_label.setToolTip("Internal quality factor. Limited by loss only.")
+        right_form.addRow("Q_i (internal):", self.qi_label)
+        
+        self.qc_label = QtWidgets.QLabel("—")
+        self.qc_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
+        self.qc_label.setToolTip("Coupling quality factor. Higher Qc = weaker coupling.")
+        right_form.addRow("Q_c (coupling):", self.qc_label)
+        
+        # Add columns to main layout
+        derived_main_layout.addLayout(left_form)
+        derived_main_layout.addLayout(right_form)
+        
+        layout.addWidget(derived_group)
+        
         return group
+    
+    def _create_physics_driven_page(self) -> QtWidgets.QWidget:
+        """Create physics-driven mode page with geometry inputs and derived properties."""
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        
+        # Material & Operating Point subsection
+        mat_group = QtWidgets.QGroupBox("Material and Operating Point")
+        mat_layout = QtWidgets.QGridLayout(mat_group)
+        
+        # Material combo with manage button
+        mat_layout.addWidget(QtWidgets.QLabel("Material:"), 0, 0)
+        
+        material_h_layout = QtWidgets.QHBoxLayout()
+        self.material_combo = QtWidgets.QComboBox()
+        self.material_combo.setToolTip("Superconductor material. Determines Tc, N₀, τ₀, σN constants.")
+        self.material_combo.currentTextChanged.connect(self._on_material_changed)
+        material_h_layout.addWidget(self.material_combo, 1)
+        
+        # Manage materials button
+        self.manage_materials_btn = QtWidgets.QPushButton("⚙ Manage...")
+        self.manage_materials_btn.setToolTip("Add, edit, or delete custom materials")
+        self.manage_materials_btn.clicked.connect(self._manage_materials)
+        self.manage_materials_btn.setMaximumWidth(100)
+        material_h_layout.addWidget(self.manage_materials_btn)
+        
+        mat_layout.addLayout(material_h_layout, 0, 1, 1, 3)
+        
+        # Material constants label
+        self.mat_constants_label = QtWidgets.QLabel("Tc=1.2K, N₀=1.72×10¹⁰ µm⁻³eV⁻¹, τ₀=438ns")
+        self.mat_constants_label.setStyleSheet("color: gray; font-size: 9pt;")
+        self.mat_constants_label.setToolTip(
+            "<b>Material Constants:</b><br>"
+            "• <b>Tc</b> = Critical temperature<br>"
+            "• <b>N₀</b> = Density of states at Fermi level<br>"
+            "• <b>τ₀</b> = Quasiparticle recombination time at Tc"
+        )
+        mat_layout.addWidget(self.mat_constants_label, 1, 0, 1, 4)
+        
+        # T and Popt
+        mat_layout.addWidget(QtWidgets.QLabel("Temperature (K):"), 2, 0)
+        self.T_edit = QtWidgets.QLineEdit()
+        self.T_edit.setValidator(ScientificDoubleValidator())
+        self.T_edit.setToolTip("Operating temperature in Kelvin. Lower T → lower nqp → higher Lk → higher Q.")
+        mat_layout.addWidget(self.T_edit, 2, 1)
+        
+        mat_layout.addWidget(QtWidgets.QLabel("Optical Power (W):"), 2, 2)
+        self.Popt_edit = QtWidgets.QLineEdit()
+        self.Popt_edit.setValidator(ScientificDoubleValidator())
+        self.Popt_edit.setToolTip("Incident optical power in Watts. Higher Popt → higher nqp → lower Q.")
+        mat_layout.addWidget(self.Popt_edit, 2, 3)
+        
+        layout.addWidget(mat_group)
+        
+        # Load materials into combo box
+        self._refresh_material_list()
+        
+        # Geometry subsection
+        geom_group = QtWidgets.QGroupBox("Geometry")
+        geom_layout = QtWidgets.QGridLayout(geom_group)
+        
+        # Width, thickness, length inputs
+        geom_layout.addWidget(QtWidgets.QLabel("Width (µm):"), 0, 0)
+        self.width_edit = QtWidgets.QLineEdit("2.0")
+        self.width_edit.setValidator(ScientificDoubleValidator())
+        self.width_edit.setToolTip("Strip width in micrometers. Affects number of squares.")
+        geom_layout.addWidget(self.width_edit, 0, 1)
+        
+        geom_layout.addWidget(QtWidgets.QLabel("Thickness (nm):"), 0, 2)
+        self.thickness_edit = QtWidgets.QLineEdit("30")
+        self.thickness_edit.setValidator(ScientificDoubleValidator())
+        self.thickness_edit.setToolTip("Film thickness in nanometers. Thicker films reduce surface impedance.")
+        geom_layout.addWidget(self.thickness_edit, 0, 3)
+        
+        geom_layout.addWidget(QtWidgets.QLabel("Length (µm):"), 1, 0)
+        self.length_edit = QtWidgets.QLineEdit("9000")
+        self.length_edit.setValidator(ScientificDoubleValidator())
+        self.length_edit.setToolTip("Strip length in micrometers. Longer → higher Lk and R.")
+        geom_layout.addWidget(self.length_edit, 1, 1)
+        
+        # Volume display (calculated)
+        self.volume_label = QtWidgets.QLabel("Volume: 540 µm³")
+        self.volume_label.setStyleSheet("color: #1E90FF; font-weight: bold;")
+        geom_layout.addWidget(self.volume_label, 1, 2, 1, 2)
+        
+        layout.addWidget(geom_group)
+        
+        return page
+    
+    def _refresh_material_list(self):
+        """Populate material combo with built-in + custom materials."""
+        current = self.material_combo.currentText()
+        self.material_combo.blockSignals(True)  # Prevent triggering _on_material_changed during refresh
+        self.material_combo.clear()
+        
+        # Built-in materials
+        self.material_combo.addItem("Al (Aluminum)")
+        
+        # Custom materials
+        customs = settings.get_custom_materials()
+        for name in sorted(customs.keys()):
+            self.material_combo.addItem(name)
+        
+        # Restore selection or default to Al
+        idx = self.material_combo.findText(current)
+        if idx >= 0:
+            self.material_combo.setCurrentIndex(idx)
+        else:
+            self.material_combo.setCurrentIndex(0)
+        
+        self.material_combo.blockSignals(False)
+        # Trigger update for current selection
+        self._on_material_changed(self.material_combo.currentText())
+    
+    def _on_material_changed(self, material_text: str):
+        """Update material constants label when material changes."""
+        if not material_text:
+            return
+        
+        # Extract material name (remove description if present)
+        mat_name = material_text.split()[0] if material_text else "Al"
+        
+        try:
+            props = settings.get_material_properties(mat_name)
+            Tc = props['Tc']
+            N0 = props['N0']
+            tau0_ns = props['tau0'] * 1e9  # s to ns
+            
+            # Display Rs and thickness_ref if available
+            Rs = props.get('Rs', None)
+            thickness_ref = props.get('thickness_ref', None)
+            
+            if Rs is not None and thickness_ref is not None:
+                self.mat_constants_label.setText(
+                    f"Tc={Tc:.3g}K, N₀={N0:.3g} µm⁻³eV⁻¹, τ₀={tau0_ns:.3g}ns, "
+                    f"Rs={Rs:.3g}Ω/□ @{thickness_ref:.0f}nm"
+                )
+            else:
+                # Legacy materials without Rs
+                self.mat_constants_label.setText(
+                    f"Tc={Tc:.3g}K, N₀={N0:.3g} µm⁻³eV⁻¹, τ₀={tau0_ns:.3g}ns"
+                )
+        except ValueError:
+            self.mat_constants_label.setText("Material properties not found")
+        
+        # Trigger recalculation
+        self._update_all_derived()
+    
+    def _manage_materials(self):
+        """Open dialog to manage custom materials."""
+        dialog = ManageCustomMaterialsDialog(parent=self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            # Refresh material list after dialog closes
+            self._refresh_material_list()
+    
+    def _update_all_derived(self):
+        """Update all derived parameters based on physics-driven inputs."""
+        try:
+            # Physics mode: calculate from T, Popt, geometry
+            try:
+                T = float(self.T_edit.text())
+                Popt = float(self.Popt_edit.text())
+                width_um = float(self.width_edit.text())
+                thickness_nm = float(self.thickness_edit.text())
+                length_um = float(self.length_edit.text())
+            except ValueError:
+                return
+            
+            # Convert to SI
+            width = width_um * 1e-6
+            thickness = thickness_nm * 1e-9
+            length = length_um * 1e-6
+            
+            # Calculate volume
+            volume_um3 = width_um * (thickness_nm / 1000) * length_um
+            self.volume_label.setText(f"Volume: {volume_um3:.1f} µm³")
+            
+            # Get frequency
+            freq = self.freq_start_spin.value() * 1e9
+            if freq <= 0:
+                return
+            
+            try:
+                Lg = float(self.Lg_edit.text()) * 1e-9
+                L_junk = float(self.L_junk_edit.text()) * 1e-9
+                Cc = float(self.Cc_edit.text()) * 1e-15
+                Vin = float(self.Vin_edit.text())
+                input_atten_dB = float(self.input_atten_edit.text())
+                ZLNA = float(self.ZLNA_edit.text())
+            except ValueError:
+                return
+            
+            # Get material properties
+            mat_text = self.material_combo.currentText()
+            mat_name = mat_text.split()[0] if mat_text else "Al"
+            try:
+                mat_props = settings.get_material_properties(mat_name)
+            except ValueError:
+                # If material not found, use Al defaults
+                mat_props = settings.get_material_properties("Al")
+            
+            # Create reference resonator with geometry and custom material properties
+            # MR_complex_resonator now accepts explicit N0, tau0, Tc, sigmaN parameters
+            # N0 unit conversion: mat_props['N0'] is in µm⁻³eV⁻¹, internal uses µm⁻³J⁻¹
+            # Correct conversion: N0_J⁻¹ = N0_eV⁻¹ / (1.602e-19 J/eV)
+            ref_params = {
+                'T': T, 'Popt': Popt, 'C': 1e-12, 'Cc': Cc, 'fix_Lg': Lg,
+                'L_junk': L_junk, 'Vin': Vin, 'input_atten_dB': input_atten_dB,
+                'base_readout_f': freq, 'verbose': False,
+                'ZLNA': complex(ZLNA, 0), 'GLNA': 1.0,
+                'width': width, 'thickness': thickness, 'length': length,
+                # Material properties - pass directly (no post-hoc override needed)
+                'Tc': mat_props['Tc'],
+                'N0': mat_props['N0'] / 1.602e-19,  # Convert µm⁻³eV⁻¹ → µm⁻³J⁻¹
+                'tau0': mat_props['tau0'],
+                'sigmaN': mat_props['sigmaN']
+            }
+            ref_res = MR_complex_resonator(**ref_params)
+            
+            # Extract intermediate values
+            nqp = ref_res.calc_nqp()
+            sigma1 = ref_res.sigma1_dark
+            sigma2 = ref_res.sigma2_dark
+            Lk = ref_res.lekid.Lk
+            R = ref_res.lekid.R
+            
+            # Calculate Lk per square
+            Lk_square = Lk / (length / width) if (length / width) > 0 else 0
+            
+            # Update derived property labels
+            self.nqp_label.setText(f"{nqp:.3e}")
+            self.sigma1_label.setText(f"{sigma1:.3e}")
+            self.sigma2_label.setText(f"{sigma2:.3e}")
+            self.lk_square_label.setText(f"{Lk_square*1e12:.2f}")
+            self.lk_label.setText(f"{Lk*1e9:.3f}")
+            self.r_label.setText(f"{R*1e6:.3f}")
+            
+            # Calculate final derived properties using already-parsed Lg, L_junk, Cc, etc.
+            # (No second read needed - we already have these values from above)
+            L_total = Lk + Lg + L_junk
+            alpha_k = Lk / L_total if L_total > 0 else 0
+            
+            # Calculate Q values
+            freq = self.freq_start_spin.value() * 1e9
+            if freq > 0:
+                C = 1.0 / ((2 * np.pi * freq)**2 * L_total) if L_total > 0 else 1e-12
+                
+                lekid = MR_LEKID(
+                    C=C, Lk=Lk, Lg=Lg, R=R, Cc=Cc, 
+                    L_junk=L_junk, Vin=Vin, 
+                    system_termination=50.0, input_atten_dB=input_atten_dB,
+                    ZLNA=complex(ZLNA, 0)
+                )
+                
+                Qr, Qi, Qc = lekid.compute_Q_values()
+            else:
+                Qr = Qi = Qc = 0
+            
+            # Update final labels
+            self.ltotal_label.setText(f"{L_total*1e9:.2f}")
+            self.alpha_k_label.setText(f"{alpha_k:.4f}")
+            self.qr_label.setText(f"{Qr:,.0f}")
+            self.qi_label.setText(f"{Qi:,.0f}")
+            self.qc_label.setText(f"{Qc:,.0f}")
+            
+            # Debug: print to console to verify values are updating
+            # print(f"DEBUG _update_all_derived: Lg={Lg*1e9:.2f}nH, L_junk={L_junk*1e9:.2f}nH, Lk={Lk*1e9:.3f}nH -> L_total={L_total*1e9:.2f}nH, α_k={alpha_k:.4f}")
+            
+        except Exception as e:
+            # Log the exception for debugging (was silently swallowed)
+            print(f"DEBUG _update_all_derived exception: {type(e).__name__}: {e}")
 
     def _create_readout_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Readout")
@@ -451,8 +679,8 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
         return group
 
-    def _create_qp_pulses_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("QP Pulses")
+    def _create_pulse_injection_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("Pulse Injection")
         layout = QtWidgets.QGridLayout(group)
         row = 0
 
@@ -544,8 +772,8 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         for w in (self.random_amp_logmean_edit, self.random_amp_logsigma_edit):
             w.setEnabled(is_lognormal)
 
-    def _create_convergence_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Physics Realism")
+    def _create_simulation_realism_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("Simulation Realism")
         layout = QtWidgets.QGridLayout(group)
 
         # Convergence tolerance (solver accuracy)
@@ -574,13 +802,16 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         # Bias
         self.auto_bias_check.setChecked(bool(cfg["auto_bias_kids"]))
         self.bias_amplitude_spin.setValue(float(cfg["bias_amplitude"]))
-        # Physics
+        # Physics-driven mode
         self.T_edit.setText(str(cfg["T"]))
         self.Popt_edit.setText(str(cfg["Popt"]))
+        self.width_edit.setText(str(round(cfg.get("width", 2e-6) * 1e6, 6)))  # m to µm, round to 6 decimals
+        self.thickness_edit.setText(str(round(cfg.get("thickness", 30e-9) * 1e9, 6)))  # m to nm, round to 6 decimals
+        self.length_edit.setText(str(round(cfg.get("length", 9000e-6) * 1e6, 6)))  # m to µm, round to 6 decimals
         # Circuit
-        self.Lg_edit.setText(str(cfg["Lg"]))
-        self.Cc_edit.setText(str(cfg["Cc"]))
-        self.L_junk_edit.setText(str(cfg["L_junk"]))
+        self.Lg_edit.setText(str(cfg["Lg"] * 1e9))  # H to nH
+        self.Cc_edit.setText(str(cfg["Cc"] * 1e15))  # F to fF
+        self.L_junk_edit.setText(str(cfg["L_junk"] * 1e9))  # H to nH
         self.C_variation_edit.setText(str(cfg["C_variation"]))
         self.Cc_variation_edit.setText(str(cfg["Cc_variation"]))
         # Readout
@@ -624,8 +855,8 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.random_amp_logsigma_edit.setText(str(cfg.get("pulse_random_amp_logsigma")))
         self._on_random_amp_mode_changed(self.random_amp_mode_combo.currentText())
         
-        # Trigger Q update
-        self._update_q_estimate()
+        # Trigger derived parameter update
+        self._update_all_derived()
 
     def _load_current_values(self):
         if not self.current_config:
@@ -644,14 +875,31 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.auto_bias_check.setChecked(bool(cfg.get("auto_bias_kids")))
         self.bias_amplitude_spin.setValue(float(cfg.get("bias_amplitude")))
 
-        # Physics
+        # Physics-driven mode
         self.T_edit.setText(str(cfg.get("T")))
         self.Popt_edit.setText(str(cfg.get("Popt")))
+        self.width_edit.setText(str(round(cfg.get("width", 2e-6) * 1e6, 6)))  # m to µm, round to 6 decimals
+        self.thickness_edit.setText(str(round(cfg.get("thickness", 30e-9) * 1e9, 6)))  # m to nm, round to 6 decimals
+        self.length_edit.setText(str(round(cfg.get("length", 9000e-6) * 1e6, 6)))  # m to µm, round to 6 decimals
+        
+        # Material selection (if present in config)
+        if 'material' in cfg:
+            mat_name = cfg['material']
+            # Find material in combo (might be "Al (Aluminum)" or just "Al" or custom "Nb")
+            idx = -1
+            for i in range(self.material_combo.count()):
+                combo_text = self.material_combo.itemText(i)
+                combo_mat = combo_text.split()[0]
+                if combo_mat == mat_name:
+                    idx = i
+                    break
+            if idx >= 0:
+                self.material_combo.setCurrentIndex(idx)
 
         # Circuit
-        self.Lg_edit.setText(str(cfg.get("Lg")))
-        self.Cc_edit.setText(str(cfg.get("Cc")))
-        self.L_junk_edit.setText(str(cfg.get("L_junk")))
+        self.Lg_edit.setText(str(cfg.get("Lg") * 1e9))  # H to nH
+        self.Cc_edit.setText(str(cfg.get("Cc") * 1e15))  # F to fF
+        self.L_junk_edit.setText(str(cfg.get("L_junk") * 1e9))  # H to nH
         self.C_variation_edit.setText(str(cfg.get("C_variation")))
         self.Cc_variation_edit.setText(str(cfg.get("Cc_variation")))
 
@@ -706,8 +954,9 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
         # Validate numeric text fields that must parse
         try:
-            # Physics
+            # Physics-driven mode
             float(self.T_edit.text()); float(self.Popt_edit.text())
+            float(self.width_edit.text()); float(self.thickness_edit.text()); float(self.length_edit.text())
             # Circuit
             float(self.Lg_edit.text()); float(self.Cc_edit.text()); float(self.L_junk_edit.text())
             float(self.C_variation_edit.text()); float(self.Cc_variation_edit.text())
@@ -739,7 +988,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         seed_text = self.random_seed_edit.text().strip()
         seed_value = int(seed_text) if seed_text != "" else None
 
-        return {
+        config_dict = {
             # Basic
             "num_resonances": int(self.num_resonances_spin.value()),
             "freq_start": float(self.freq_start_spin.value()) * 1e9,  # GHz -> Hz
@@ -755,9 +1004,9 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             "Popt": float(self.Popt_edit.text()),
 
             # Circuit
-            "Lg": float(self.Lg_edit.text()),
-            "Cc": float(self.Cc_edit.text()),
-            "L_junk": float(self.L_junk_edit.text()),
+            "Lg": float(self.Lg_edit.text()) * 1e-9,  # nH -> H
+            "Cc": float(self.Cc_edit.text()) * 1e-15,  # fF -> F
+            "L_junk": float(self.L_junk_edit.text()) * 1e-9,  # nH -> H
             "C_variation": float(self.C_variation_edit.text()),
             "Cc_variation": float(self.Cc_variation_edit.text()),
 
@@ -794,3 +1043,27 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             "pulse_random_amp_logmean": float(self.random_amp_logmean_edit.text()),
             "pulse_random_amp_logsigma": float(self.random_amp_logsigma_edit.text()),
         }
+        
+        # Add geometry parameters
+        config_dict['width'] = float(self.width_edit.text()) * 1e-6  # µm -> m
+        config_dict['thickness'] = float(self.thickness_edit.text()) * 1e-9  # nm -> m
+        config_dict['length'] = float(self.length_edit.text()) * 1e-6  # µm -> m
+        
+        # Add material name
+        mat_text = self.material_combo.currentText()
+        mat_name = mat_text.split()[0] if mat_text else "Al"
+        config_dict['material'] = mat_name
+        
+        # If custom material, include properties for reproducibility
+        if mat_name != "Al":
+            try:
+                props = settings.get_material_properties(mat_name)
+                config_dict['material_Tc'] = props['Tc']
+                config_dict['material_N0'] = props['N0']
+                config_dict['material_tau0'] = props['tau0']
+                if 'sigmaN' in props:
+                    config_dict['material_sigmaN'] = props['sigmaN']
+            except ValueError:
+                pass
+        
+        return config_dict

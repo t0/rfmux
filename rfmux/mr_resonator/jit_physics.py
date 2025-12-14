@@ -298,8 +298,8 @@ def vectorized_update_params_from_nqp(
 @jit(nopython=True, parallel=True, cache=True, fastmath=True)
 def converged_lekid_parameters(
     frequency, amplitude, 
-    L_array, R_array, C_array, Cc_array, L_junk_array,
-    base_Lk, base_Lg,
+    L_array, R_array, C_array, Cc_array,
+    base_Lk, base_Lg, base_L_junk,
     input_atten_dB, ZLNA,
     Istar, tolerance, max_iterations, damp=0.1
 ):
@@ -315,10 +315,12 @@ def converged_lekid_parameters(
         Probe frequency in Hz
     amplitude : float
         Input voltage amplitude
-    L_array, R_array, C_array, Cc_array, L_junk_array : ndarray
-        Initial circuit parameters for all resonators
-    base_Lk, base_Lg : ndarray
-        Base inductance values (before current modification)
+    L_array, R_array, C_array, Cc_array : ndarray
+        Initial circuit parameters for all resonators.
+        L_array = Lk + Lg + L_junk (total resonator inductance)
+    base_Lk, base_Lg, base_L_junk : ndarray
+        Base inductance values (before current modification).
+        Only Lk changes with current; Lg and L_junk are fixed.
     input_atten_dB : float
         Input attenuation in dB
     ZLNA : complex
@@ -335,7 +337,7 @@ def converged_lekid_parameters(
     Returns
     -------
     L_converged : ndarray
-        Converged total inductance values
+        Converged total inductance values (Lk + Lg + L_junk)
     R_converged : ndarray
         Converged resistance values (unchanged)
     currents_converged : ndarray (complex)
@@ -367,6 +369,7 @@ def converged_lekid_parameters(
         
         for i in prange(n):
             # Parallel RLC impedance
+            # Note: L_work already includes L_junk (total resonator inductance)
             if C_array[i] > 0:
                 ZC = 1.0 / (1j * w * C_array[i])
                 ZL = 1j * w * L_work[i]
@@ -378,12 +381,8 @@ def converged_lekid_parameters(
             # Series coupling capacitor
             ZCc = 1.0 / (1j * w * Cc_array[i])
             
-            # Parasitic inductance if present
-            if L_junk_array[i] > 0:
-                ZLjunk = 1j * w * L_junk_array[i]
-                impedances[i] = Z_parallel + ZCc + ZLjunk
-            else:
-                impedances[i] = Z_parallel + ZCc
+            # L_junk is now included in L_work, not added separately
+            impedances[i] = Z_parallel + ZCc
         
         # Step 2: Calculate currents through resonators
         currents_new = np.zeros(n, dtype=np.complex128)
@@ -428,10 +427,10 @@ def converged_lekid_parameters(
         # Step 6: Update factors and inductances
         current_factors = new_factors
         
-        # Update L values: Lk changes with current, Lg doesn't
+        # Update L values: Lk changes with current; Lg and L_junk are fixed
         for i in prange(n):
             Lk_work = base_Lk[i] * current_factors[i]
-            L_work[i] = Lk_work + base_Lg[i]
+            L_work[i] = Lk_work + base_Lg[i] + base_L_junk[i]
     
     if actual_iterations == 0:
         actual_iterations = max_iterations
@@ -447,7 +446,7 @@ def converged_lekid_parameters(
 @jit(nopython=True, parallel=True, cache=True, fastmath=True)
 def compute_s21_vectorized(
     fc, Vin,
-    L_array, C_array, R_array, Cc_array, L_junk_array,
+    L_array, C_array, R_array, Cc_array,
     ZLNA, GLNA, input_atten_dB, system_termination
 ):
     """
@@ -463,15 +462,13 @@ def compute_s21_vectorized(
     Vin : float
         Input voltage amplitude
     L_array : ndarray
-        Total inductance for each resonator
+        Total inductance for each resonator (Lk + Lg + L_junk)
     C_array : ndarray
         Capacitance for each resonator
     R_array : ndarray
         Resistance for each resonator
     Cc_array : ndarray
         Coupling capacitance for each resonator
-    L_junk_array : ndarray
-        Parasitic inductance for each resonator
     ZLNA : complex
         LNA impedance
     GLNA : float
@@ -499,6 +496,7 @@ def compute_s21_vectorized(
     
     for i in prange(n):
         # Calculate impedance for this resonator
+        # L_array already includes L_junk (total resonator inductance)
         if C_array[i] > 0:
             ZC = 1.0 / (1j * w * C_array[i])
             ZL = 1j * w * L_array[i]
@@ -510,12 +508,8 @@ def compute_s21_vectorized(
         # Add coupling capacitor
         ZCc = 1.0 / (1j * w * Cc_array[i])
         
-        # Add parasitic inductance if present
-        if L_junk_array[i] > 0:
-            ZLjunk = 1j * w * L_junk_array[i]
-            Z_res = Z_parallel + ZCc + ZLjunk
-        else:
-            Z_res = Z_parallel + ZCc
+        # Total resonator impedance (L_junk already in L_array)
+        Z_res = Z_parallel + ZCc
         
         # System impedance calculation
         Zsys = 1.0 / (1.0/Z_res + 1.0/ZLNA)
@@ -549,7 +543,7 @@ def compute_s21_vectorized(
 @jit(nopython=True, cache=True, fastmath=True)
 def compute_s21_parallel(
     fc, Vin,
-    L_array, C_array, R_array, Cc_array, L_junk_array,
+    L_array, C_array, R_array, Cc_array,
     ZLNA, GLNA, input_atten_dB, system_termination
 ):
     """
@@ -565,15 +559,13 @@ def compute_s21_parallel(
     Vin : float
         Input voltage amplitude
     L_array : ndarray
-        Total inductance for each resonator
+        Total inductance for each resonator (Lk + Lg + L_junk)
     C_array : ndarray
         Capacitance for each resonator
     R_array : ndarray
         Resistance for each resonator
     Cc_array : ndarray
         Coupling capacitance for each resonator
-    L_junk_array : ndarray
-        Parasitic inductance for each resonator
     ZLNA : complex
         LNA impedance (load at end of transmission line)
     GLNA : float
@@ -598,7 +590,7 @@ def compute_s21_parallel(
     Z_resonators = np.zeros(n, dtype=np.complex128)
     
     for i in range(n):
-        # Parallel LC impedance
+        # Parallel LC impedance (L_array already includes L_junk)
         if C_array[i] > 0:
             ZC = 1.0 / (1j * w * C_array[i])
             ZL = 1j * w * L_array[i]
@@ -607,14 +599,9 @@ def compute_s21_parallel(
         else:
             Z_parallel = 1j * w * L_array[i] + R_array[i]
         
-        # Add series elements (coupling capacitor and parasitic inductance)
+        # Add coupling capacitor (L_junk already included in L_array)
         ZCc = 1.0 / (1j * w * Cc_array[i])
-        
-        if L_junk_array[i] > 0:
-            ZLjunk = 1j * w * L_junk_array[i]
-            Z_resonators[i] = Z_parallel + ZCc + ZLjunk
-        else:
-            Z_resonators[i] = Z_parallel + ZCc
+        Z_resonators[i] = Z_parallel + ZCc
     
     # Step 2: Combine all resonators in parallel
     # 1/Z_total = sum(1/Z_i) for parallel impedances

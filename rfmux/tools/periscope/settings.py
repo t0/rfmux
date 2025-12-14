@@ -31,6 +31,7 @@ KEY_CRS_SERIAL = "connection/last_crs_serial"
 KEY_MODULE = "connection/last_module"
 KEY_SESSION_DIRECTORY = "session/last_base_directory"
 KEY_USER_LIBRARY_PATH = "notebook/user_library_path"
+KEY_CUSTOM_MATERIALS = "materials/custom_materials"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
@@ -190,3 +191,147 @@ def get_settings_path() -> Optional[Path]:
     settings = _get_settings()
     filename = settings.fileName()
     return Path(filename) if filename else None
+
+
+# ─────────────────────────────────────────────────────────────────
+# Custom Materials Settings
+# ─────────────────────────────────────────────────────────────────
+
+def get_custom_materials() -> dict:
+    """
+    Get all user-defined custom materials.
+    
+    Returns:
+        dict: Material name -> properties dict
+              e.g., {'Nb': {'Tc': 9.2, 'N0': 3.5e10, 'tau0': 200e-9, 'sigmaN': 5e7}}
+    """
+    import json
+    settings = _get_settings()
+    json_str = settings.value(KEY_CUSTOM_MATERIALS, "{}")
+    try:
+        return json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def save_custom_material(name: str, tc: float, n0: float, tau0: float, Rs: Optional[float] = None, thickness_ref_nm: Optional[float] = None, sigmaN: Optional[float] = None) -> None:
+    """
+    Add or update a custom material.
+    
+    Args:
+        name: Material name/symbol (e.g., "Nb", "TiN")
+        tc: Critical temperature [K]
+        n0: Density of states at Fermi level [µm⁻³eV⁻¹]
+        tau0: Quasiparticle recombination time [s]
+        Rs: Sheet resistance [Ω/□] - preferred input method
+        thickness_ref_nm: Reference film thickness [nm] where Rs was measured
+        sigmaN: Normal state conductivity [S/m] - calculated from Rs if not provided
+        
+    Note:
+        Either (Rs AND thickness_ref_nm) OR sigmaN must be provided.
+        If Rs is provided, sigmaN is calculated as: σN = 1/(Rs × thickness)
+    """
+    import json
+    materials = get_custom_materials()
+    
+    # Calculate sigmaN from Rs if provided
+    if Rs is not None and thickness_ref_nm is not None:
+        thickness_m = thickness_ref_nm * 1e-9  # nm to m
+        sigmaN = 1.0 / (Rs * thickness_m)
+        
+        mat_data = {
+            'Tc': float(tc),
+            'N0': float(n0),
+            'tau0': float(tau0),
+            'Rs': float(Rs),
+            'thickness_ref': float(thickness_ref_nm),
+            'sigmaN': float(sigmaN)
+        }
+    elif sigmaN is not None:
+        # Legacy: direct sigmaN input (backward compatibility)
+        mat_data = {
+            'Tc': float(tc),
+            'N0': float(n0),
+            'tau0': float(tau0),
+            'sigmaN': float(sigmaN)
+        }
+    else:
+        # Default Rs and thickness for backward compatibility
+        Rs_default = 4.0
+        thickness_default = 20.0
+        sigmaN_default = 1.0 / (Rs_default * thickness_default * 1e-9)
+        mat_data = {
+            'Tc': float(tc),
+            'N0': float(n0),
+            'tau0': float(tau0),
+            'Rs': Rs_default,
+            'thickness_ref': thickness_default,
+            'sigmaN': sigmaN_default
+        }
+    
+    materials[name] = mat_data
+    
+    settings = _get_settings()
+    settings.setValue(KEY_CUSTOM_MATERIALS, json.dumps(materials))
+
+
+def delete_custom_material(name: str) -> None:
+    """
+    Remove a custom material.
+    
+    Args:
+        name: Material name to remove
+    """
+    import json
+    materials = get_custom_materials()
+    if name in materials:
+        del materials[name]
+        settings = _get_settings()
+        settings.setValue(KEY_CUSTOM_MATERIALS, json.dumps(materials))
+
+
+def get_material_properties(name: str) -> dict:
+    """
+    Get properties for a material (built-in or custom).
+    
+    Args:
+        name: Material name (e.g., "Al", "Nb")
+        
+    Returns:
+        dict: {
+            'Tc': float,      # Critical temperature [K]
+            'N0': float,      # Density of states [µm⁻³eV⁻¹] - NOTE: eV units, needs conversion!
+            'tau0': float,    # Quasiparticle recombination time [s]
+            'sigmaN': float   # Normal state conductivity [S/m]
+        }
+        
+    Note:
+        N0 is stored in µm⁻³eV⁻¹ for human readability. When passing to
+        MR_complex_resonator, convert to µm⁻³J⁻¹:
+        
+            N0_internal = N0_eV / 1.602e-19
+        
+    Raises:
+        ValueError: If material not found
+    """
+    # Built-in materials
+    if name == "Al":
+        return {
+            'Tc': 1.2,
+            'N0': 1.72e10,  # µm⁻³eV⁻¹
+            'tau0': 438e-9,  # s
+            'Rs': 4.0,  # Ω/□ (typical for thin Al)
+            'thickness_ref': 20.0,  # nm (reference thickness)
+            'sigmaN': 1./(4*20e-9)  # S/m (calculated from Rs)
+        }
+    
+    # Custom materials
+    materials = get_custom_materials()
+    if name in materials:
+        mat = materials[name].copy()
+        # Ensure sigmaN has default if not specified
+        if 'sigmaN' not in mat:
+            mat['sigmaN'] = 1./(4*20e-9)
+        return mat
+    
+    raise ValueError(f"Material '{name}' not found in built-in or custom materials")

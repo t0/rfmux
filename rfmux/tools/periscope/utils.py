@@ -300,6 +300,29 @@ def parse_channels_multich(txt: str) -> List[List[int]]:
         return [[1]]
     return out
 
+def find_parent_with_attr(widget: QtWidgets.QWidget, attr_name: str) -> Optional[QtWidgets.QWidget]:
+    """
+    Walk up the parent hierarchy to find a widget with the specified attribute.
+    
+    This is a common pattern for panels to find the Periscope main window instance,
+    which can be identified by various attributes like 'crs', 'dac_scales', 'netanal_windows', etc.
+    
+    Args:
+        widget: Starting widget (typically self)
+        attr_name: Name of the attribute to search for
+        
+    Returns:
+        The first parent widget that has the specified attribute, or None if not found
+        
+    Example:
+        periscope = find_parent_with_attr(self, 'crs')
+        periscope = find_parent_with_attr(self, 'dac_scales')
+    """
+    parent = widget.parent() if hasattr(widget, 'parent') else None
+    while parent and not hasattr(parent, attr_name):
+        parent = parent.parent()
+    return parent
+
 def mode_title(mode: str) -> str:
     """
     Provide a more user-friendly label for each plot mode.
@@ -485,10 +508,7 @@ class ScreenshotMixin:
         Returns:
             The Periscope instance or None if not found
         """
-        parent = self.parent() if hasattr(self, 'parent') else None
-        while parent and not hasattr(parent, 'crs'):
-            parent = parent.parent()
-        return parent
+        return find_parent_with_attr(self, 'crs')
     
     def _export_screenshot(self):
         """Export a screenshot of this panel to the session folder or user-chosen location."""

@@ -13,6 +13,7 @@ from pathlib import Path
 from datetime import datetime
 from PyQt6 import QtCore, QtWidgets, QtGui
 from . import settings
+from .utils import find_parent_with_attr
 
 
 class JupyterServerManager(QtCore.QObject):
@@ -430,9 +431,7 @@ class NotebookPanel(QtWidgets.QWidget):
                 - crs_serial: CRS serial number as string, or None
                 - is_mock: True if running in mock mode, False otherwise
         """
-        parent_app = self.parent()
-        while parent_app and not hasattr(parent_app, 'crs'):
-            parent_app = parent_app.parent()
+        parent_app = find_parent_with_attr(self, 'crs')
         
         crs_serial = None
         is_mock = False
@@ -597,9 +596,7 @@ class NotebookPanel(QtWidgets.QWidget):
             self.server.stop()
             
             # Find and close the dock widget
-            parent_app = self.parent()
-            while parent_app and not hasattr(parent_app, 'notebook_dock'):
-                parent_app = parent_app.parent()
+            parent_app = find_parent_with_attr(self, 'notebook_dock')
             
             if parent_app and hasattr(parent_app, 'notebook_dock'):
                 # Clear the reference

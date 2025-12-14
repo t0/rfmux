@@ -850,10 +850,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         Returns:
             The Periscope instance or None if not found
         """
-        parent = self.parent()
-        while parent and not hasattr(parent, 'netanal_windows'):
-            parent = parent.parent()
-        return parent
+        return find_parent_with_attr(self, 'netanal_windows')
     
     def _check_all_complete(self):
         """

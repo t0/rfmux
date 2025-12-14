@@ -912,6 +912,40 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             task = CRSInitializeTask(self.crs, self.module, irig_source, clear_channels, self.crs_init_signals)
             self.pool.start(task)
 
+    def _fetch_dac_scales_for_dialog(self, dialog) -> None:
+        """
+        Fetch DAC scales asynchronously and connect results to dialog update slots.
+        
+        This helper method encapsulates the common pattern of creating a DACScaleFetcher,
+        connecting its signals to update both the dialog and the Periscope instance's
+        dac_scales attribute.
+        
+        IMPORTANT: Stores the fetcher as an instance variable to prevent garbage collection
+        while the thread is still running.
+        
+        Args:
+            dialog: A dialog instance with dac_scales dict, _update_dac_scale_info(),
+                    and _update_dbm_from_normalized() methods.
+        """
+        if self.crs is None:
+            return
+        
+        # Store as instance variable to prevent garbage collection while thread runs
+        self._active_dac_fetcher = DACScaleFetcher(self.crs)
+        
+        # Clean up reference when thread completes
+        self._active_dac_fetcher.finished.connect(
+            lambda: setattr(self, '_active_dac_fetcher', None)
+        )
+        
+        # Connect signals to dialog updates
+        self._active_dac_fetcher.dac_scales_ready.connect(lambda scales: dialog.dac_scales.update(scales))
+        self._active_dac_fetcher.dac_scales_ready.connect(dialog._update_dac_scale_info)
+        self._active_dac_fetcher.dac_scales_ready.connect(dialog._update_dbm_from_normalized)
+        self._active_dac_fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
+        
+        self._active_dac_fetcher.start()
+
     def _show_netanal_dialog(self):
         """
         Display the Network Analysis configuration dialog.
@@ -931,17 +965,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
         dialog.module_entry.setText(str(self.module))
         
-        # Only fetch DAC scales if CRS is available
-        if self.crs is not None:
-            # DACScaleFetcher from .tasks
-            fetcher = DACScaleFetcher(self.crs)
-            fetcher.dac_scales_ready.connect(lambda scales: dialog.dac_scales.update(scales))
-            fetcher.dac_scales_ready.connect(dialog._update_dac_scale_info)
-            fetcher.dac_scales_ready.connect(dialog._update_dbm_from_normalized)
-            fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
-            fetcher.start()
-        else:
-            # Use defaults or empty dict if offline
+        # Fetch DAC scales if CRS is available
+        self._fetch_dac_scales_for_dialog(dialog)
+        if self.crs is None:
             self.dac_scales = default_dac_scales.copy()
             
         if dialog.exec():
@@ -1299,14 +1325,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
         netanal_dialog.module_entry.setText(str(self.module))
         
-        if self.crs is not None:
-            fetcher = DACScaleFetcher(self.crs)
-            fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
-            fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
-            fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
-            fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
-            fetcher.start()
-        else:
+        # Fetch DAC scales if CRS is available
+        self._fetch_dac_scales_for_dialog(netanal_dialog)
+        if self.crs is None:
             self.dac_scales = default_dac_scales.copy()
         
         active_module = self.module
@@ -1346,19 +1367,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             QtWidgets.QMessageBox.warning(self, "CRS Not Available", "Connect to a CRS before loading bias data.")
             return
 
-
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
         netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
         netanal_dialog.module_entry.setText(str(self.module))
         
-        if self.crs is not None:
-            fetcher = DACScaleFetcher(self.crs)
-            fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
-            fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
-            fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
-            fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
-            fetcher.start()
-        else:
+        # Fetch DAC scales if CRS is available
+        self._fetch_dac_scales_for_dialog(netanal_dialog)
+        if self.crs is None:
             self.dac_scales = default_dac_scales.copy()
         
         from .bias_kids_dialog import BiasKidsDialog

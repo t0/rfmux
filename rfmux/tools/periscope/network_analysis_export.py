@@ -732,9 +732,7 @@ class NetworkAnalysisExportMixin:
         
         # Walk up parent hierarchy to find Periscope instance
         # (panel may be wrapped in QDockWidget, so parent() might not be Periscope directly)
-        periscope_parent = self.parent()
-        while periscope_parent and not hasattr(periscope_parent, 'dac_scales'):
-            periscope_parent = periscope_parent.parent()
+        periscope_parent = find_parent_with_attr(self, 'dac_scales')
         
         # Get DAC scales from the Periscope instance
         dac_scales_for_dialog = {}
@@ -758,9 +756,7 @@ class NetworkAnalysisExportMixin:
                 return
                 
             # Find Periscope parent (walk up hierarchy if needed)
-            parent = self.parent()
-            while parent and not hasattr(parent, '_start_multisweep_analysis'):
-                parent = parent.parent()
+            parent = find_parent_with_attr(self, '_start_multisweep_analysis')
             
             if parent:
                 try:

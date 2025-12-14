@@ -1526,51 +1526,72 @@ class PeriscopeRuntime:
             self.jupyter_widget.update(); self.jupyter_widget.repaint() # Force repaint
 
     def _init_sim_speed_tracking(self):
-        """Initialize simulation speed tracking for mock mode."""
-        self.sim_time_history = []  # List of (real_time, sim_time) tuples
-        self.sim_speed_update_counter = 0
-        self.last_sim_speed_update_time = time.time()
+        """Initialize simulation speed tracking for mock mode.
+        
+        Uses a rolling window approach that samples at regular wall-clock intervals
+        (not based on packet processing) to avoid false readings when packets queue up.
+        """
+        self._sim_speed_history = []  # List of (wall_clock_time, sim_time) tuples
+        self._sim_speed_latest_sim_time = None  # Latest simulation time seen
+        self._sim_speed_last_sample_time = None  # Wall clock time of last sample
+        self._sim_speed_sample_interval = 1.0  # Sample every 1 second of wall clock time
+        self._sim_speed_window_size = 10  # Keep 10 samples (10 second rolling window)
         
     def _update_sim_time_tracking(self, sim_time: float):
         """
         Track simulation time for speed calculation.
         
+        Samples are taken at regular wall-clock intervals (not based on packet 
+        processing timing) to ensure accurate speed measurement even when the 
+        GUI is slow and packets queue up.
+        
         Args:
-            sim_time: Current simulation time in seconds
+            sim_time: Current simulation time in seconds (from packet timestamp)
         """
-        # Update every 10 packets
-        self.sim_speed_update_counter += 1
-        if self.sim_speed_update_counter >= 10:
-            real_time = time.time()
-            self.sim_time_history.append((real_time, sim_time))
+        # Always update the latest sim time
+        self._sim_speed_latest_sim_time = sim_time
+        
+        current_wall_clock = time.time()
+        
+        # Take a sample at regular wall-clock intervals
+        if self._sim_speed_last_sample_time is None:
+            # First sample
+            self._sim_speed_history.append((current_wall_clock, sim_time))
+            self._sim_speed_last_sample_time = current_wall_clock
+        elif (current_wall_clock - self._sim_speed_last_sample_time) >= self._sim_speed_sample_interval:
+            # Time for a new sample
+            self._sim_speed_history.append((current_wall_clock, sim_time))
+            self._sim_speed_last_sample_time = current_wall_clock
             
-            # Keep only last 10 samples for rolling average
-            if len(self.sim_time_history) > 10:
-                self.sim_time_history.pop(0)
-            
-            self.sim_speed_update_counter = 0
+            # Keep only the last N samples for rolling window
+            if len(self._sim_speed_history) > self._sim_speed_window_size:
+                self._sim_speed_history.pop(0)
     
     def _calculate_simulation_speed(self) -> float | None:
         """
-        Calculate the simulation speed relative to real-time.
+        Calculate the simulation speed relative to real-time using a rolling window.
+        
+        Compares simulation time elapsed vs wall clock time elapsed over the
+        sample window. This is immune to packet queuing effects because samples
+        are taken at wall-clock intervals, not packet processing intervals.
         
         Returns:
             float: Speed factor (1.0 = real-time, >1.0 = faster, <1.0 = slower)
             None: If not enough data to calculate
         """
-        if len(self.sim_time_history) < 2:
+        if len(self._sim_speed_history) < 2:
             return None
         
-        # Calculate speed from first to last sample
-        first_real, first_sim = self.sim_time_history[0]
-        last_real, last_sim = self.sim_time_history[-1]
+        # Calculate speed from oldest to newest sample in the window
+        first_wall_clock, first_sim = self._sim_speed_history[0]
+        last_wall_clock, last_sim = self._sim_speed_history[-1]
         
-        real_elapsed = last_real - first_real
+        wall_clock_elapsed = last_wall_clock - first_wall_clock
         sim_elapsed = last_sim - first_sim
         
         # Avoid division by zero
-        if real_elapsed <= 0 or sim_elapsed <= 0:
+        if wall_clock_elapsed <= 0 or sim_elapsed <= 0:
             return None
         
-        # sim_speed = delta_sim_time / delta_real_time
-        return sim_elapsed / real_elapsed
+        # sim_speed = delta_sim_time / delta_wall_clock_time
+        return sim_elapsed / wall_clock_elapsed

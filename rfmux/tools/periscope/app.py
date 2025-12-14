@@ -259,12 +259,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.psd_signals.done.connect(self._psd_done) # Connect completion signal to handler
 
         # Network Analysis (NetAnal) signals and tracking.
-        # NetworkAnalysisSignals (from .tasks) handles signals for NetAnal task progress, data updates, completion, and errors.
+        # NetworkAnalysisSignals (from .tasks) - signals are routed directly to panels via check_connection()
         self.netanal_signals = NetworkAnalysisSignals()
-        self.netanal_signals.progress.connect(self._netanal_progress)
-        self.netanal_signals.data_update.connect(self._netanal_data_update)
-        self.netanal_signals.data_update_with_amp.connect(self._netanal_data_update_with_amp)
-        self.netanal_signals.completed.connect(self._netanal_completed)
+        # Only keep the error signal connected globally as a fallback
         self.netanal_signals.error.connect(self._netanal_error)
         
         # Structures for managing multiple Network Analysis windows and tasks.
@@ -1576,22 +1573,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         return self.phase_shifts
             
     
-    def _netanal_progress(self, module_param: int, progress: float):
-        """Slot for network analysis progress signals. Currently a placeholder."""
-        pass # Renamed
-
-    def _netanal_data_update(self, module_param: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
-        """Slot for network analysis data update signals. Currently a placeholder."""
-        pass # Renamed
-
-    def _netanal_data_update_with_amp(self, module_param: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray, amplitude: float):
-        """Slot for network analysis data update signals that include amplitude. Currently a placeholder."""
-        pass # Renamed
-
-    def _netanal_completed(self, module_param: int):
-        """Slot for network analysis completion signals. Currently a placeholder."""
-        pass # Renamed
-
     def _netanal_error(self, error_msg: str):
         """Slot for network analysis error signals. Displays a critical message box."""
         QtWidgets.QMessageBox.critical(self, "Network Analysis Error", error_msg)

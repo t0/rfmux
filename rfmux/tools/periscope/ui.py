@@ -12,10 +12,7 @@ from .dialogs import ( # Assuming periscope_dialogs.py becomes dialogs.py
     FindResonancesDialog,
     MultisweepDialog,
 )
-# network_analysis_window.py and multisweep_window.py are sibling modules now
-from .network_analysis_window import NetworkAnalysisWindow
 from .network_analysis_panel import NetworkAnalysisPanel
-from .multisweep_window import MultisweepWindow
 from .multisweep_panel import MultisweepPanel
 from .detector_digest_panel import DetectorDigestPanel
 
@@ -28,10 +25,8 @@ __all__ = [
     "FindResonancesDialog",
     "MultisweepDialog",
     
-    # From window/panel files
-    "NetworkAnalysisWindow",
+    # From panel files
     "NetworkAnalysisPanel",
-    "MultisweepWindow",
     "MultisweepPanel",
     "DetectorDigestPanel",
 

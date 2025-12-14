@@ -9,19 +9,7 @@ from .utils import (
     UnitConverter, traceback
 )
 from .tasks import DACScaleFetcher
-
-"""Dialog classes for Periscope."""
-
-# Imports from within the 'periscope' subpackage
-from .utils import (
-    QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator,
-    QDoubleValidator, QIntValidator,
-    DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
-    DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
-    UnitConverter, traceback # Added traceback
-)
-from .tasks import DACScaleFetcher # For fetching DAC scales
-import numpy as np # For linspace
+import numpy as np  # For linspace
 
 class NetworkAnalysisDialogBase(QtWidgets.QDialog):
     """
@@ -277,20 +265,20 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         """Displays a warning message box with a list of warnings."""
         QtWidgets.QMessageBox.warning(self, title, "\n".join(warnings_list))
             
-    def _parse_amplitude_values(self, amp_text: str) -> list[float]:
+    def _parse_numeric_values(self, text: str) -> list[float]:
         """
-        Parses a comma-separated string of amplitude values.
+        Parses a comma-separated string of numeric values.
         Each part can be an expression evaluatable by `eval()`.
         Invalid parts are silently skipped.
 
         Args:
-            amp_text: The string containing amplitude values.
+            text: The string containing numeric values (amplitude or dBm).
 
         Returns:
             A list of parsed float values.
         """
         values = []
-        for part in amp_text.split(','):
+        for part in text.split(','):
             part = part.strip()
             if part:
                 try:
@@ -298,35 +286,18 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
                     # Caution: eval can execute arbitrary code if input is not controlled.
                     # In this GUI context, user inputs values for their own use.
                     values.append(float(eval(part)))
-                except (ValueError, SyntaxError, NameError, TypeError): # Added TypeError
+                except (ValueError, SyntaxError, NameError, TypeError):
                     # Silently skip parts that cannot be evaluated to a float
                     continue
         return values
+    
+    def _parse_amplitude_values(self, amp_text: str) -> list[float]:
+        """Parse comma-separated amplitude values (delegates to _parse_numeric_values)."""
+        return self._parse_numeric_values(amp_text)
         
     def _parse_dbm_values(self, dbm_text: str) -> list[float]:
-        """
-        Parses a comma-separated string of dBm values.
-        Each part can be an expression evaluatable by `eval()`.
-        Invalid parts are silently skipped.
-
-        Args:
-            dbm_text: The string containing dBm values.
-
-        Returns:
-            A list of parsed float values.
-        """
-        values = []
-        for part in dbm_text.split(','):
-            part = part.strip()
-            if part:
-                try:
-                    # Using eval allows for simple expressions.
-                    # Caution: eval can execute arbitrary code if input is not controlled.
-                    values.append(float(eval(part)))
-                except (ValueError, SyntaxError, NameError, TypeError): # Added TypeError
-                    # Silently skip parts that cannot be evaluated to a float
-                    continue
-        return values
+        """Parse comma-separated dBm values (delegates to _parse_numeric_values)."""
+        return self._parse_numeric_values(dbm_text)
 
     def _update_dac_scale_info(self):
         """

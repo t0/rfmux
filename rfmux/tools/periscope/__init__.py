@@ -21,9 +21,8 @@ from .__main__ import raise_periscope, main as cli_main
 # --- UI Components ---
 # Expose key UI components that might be used externally or by other tools
 # within the rfmux ecosystem or for custom integrations.
+# Note: Window classes removed (dead code). Panel versions are used internally via docking.
 from .ui import (
-    NetworkAnalysisWindow,
-    MultisweepWindow,
     NetworkAnalysisDialog,
     InitializeCRSDialog,
     FindResonancesDialog,
@@ -37,8 +36,6 @@ __all__ = [
     "Periscope",                # Main application class
     "raise_periscope",          # Function to launch Periscope GUI
     "cli_main",                 # Main function for CLI access
-    "NetworkAnalysisWindow",    # UI window for network analysis
-    "MultisweepWindow",         # UI window for multisweep operations
     "NetworkAnalysisDialog",    # Dialog for network analysis settings
     "InitializeCRSDialog",      # Dialog for CRS initialization
     "FindResonancesDialog",     # Dialog for finding resonances

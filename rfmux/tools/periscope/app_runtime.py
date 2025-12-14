@@ -1351,14 +1351,14 @@ class PeriscopeRuntime:
                         if multisweep_dock:
                             multisweep_dock.raise_()
 
-    def _start_multisweep_analysis_for_window(self, window_instance: 'MultisweepWindow', params: dict):
+    def _start_multisweep_analysis_for_window(self, window_instance: 'MultisweepPanel', params: dict):
         """
-        Re-run a multisweep analysis for an existing MultisweepWindow.
+        Re-run a multisweep analysis for an existing MultisweepPanel.
 
-        Stops any existing task for the window, updates parameters, and starts a new task.
+        Stops any existing task for the panel, updates parameters, and starts a new task.
 
         Args:
-            window_instance (MultisweepWindow): The window instance to re-run the analysis for.
+            window_instance (MultisweepPanel): The panel instance to re-run the analysis for.
             params (dict): The new parameters for the multisweep analysis.
         """
         # MultisweepWindow from .ui, MultisweepTask from .tasks
@@ -1412,14 +1412,14 @@ class PeriscopeRuntime:
         self.multisweep_tasks[old_task_key] = task
         task.start()  # Start the QThread directly
 
-    def stop_multisweep_task_for_window(self, window_instance: 'MultisweepWindow'):
+    def stop_multisweep_task_for_window(self, window_instance: 'MultisweepPanel'):
         """
-        Stop an active multisweep task associated with a specific window.
+        Stop an active multisweep task associated with a specific panel.
 
         Args:
-            window_instance (MultisweepWindow): The window whose task should be stopped.
+            window_instance (MultisweepPanel): The panel whose task should be stopped.
         """
-        # MultisweepWindow from .ui
+        # MultisweepPanel from .ui
         window_id = None; target_module = None
         for w_id, data in list(self.multisweep_windows.items()): # Iterate over a copy for safe removal
             if data['window'] == window_instance:

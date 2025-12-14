@@ -693,7 +693,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     def all_sweeps_completed(self):
         """
         Slot called when all amplitudes in the multisweep have been processed.
-        Updates UI elements to reflect completion.
+        Updates UI elements to reflect completion and auto-opens detector digest for first detector.
         """
         self._check_all_complete()
         self.current_amp_label.setText("All Amplitudes Processed")
@@ -703,6 +703,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             export_data = self._prepare_export_data()
             identifier = f"module{self.target_module}"
             self.data_ready.emit("multisweep", identifier, export_data)
+        
+        # Auto-open detector digest for the first detector (lowest frequency)
+        if self.results_by_iteration:
+            self._open_detector_digest_for_index(1)
         
     def _check_all_complete(self):
         """
@@ -1331,22 +1335,60 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _handle_multisweep_plot_double_click(self, ev):
         """
         Handles a double-click event on the multisweep magnitude plot.
-        Identifies the clicked resonance and prepares data for the DetectorDigestDialog.
+        Identifies the clicked resonance and opens detector digest for it.
         """
         if not self.results_by_iteration:
             return
 
         # Get click coordinates in view space from the event's scenePos
-        # The event 'ev' is a QGraphicsSceneMouseEvent from pyqtgraph
-        if not self.combined_mag_plot: return
+        if not self.combined_mag_plot:
+            return
         view_box = self.combined_mag_plot.getViewBox()
-        if not view_box: return
+        if not view_box:
+            return
 
         mouse_point = view_box.mapSceneToView(ev.scenePos())
         x_coord = mouse_point.x()
-        # y_coord = mouse_point.y() # y_coord is not used for selecting the CF
 
-        # Walk up parent hierarchy to find Periscope instance
+        # Find the resonance whose center/bias frequency is closest to the click
+        resonance_centers = {}  # {res_idx: center_freq}
+        
+        for iteration_data in self.results_by_iteration.values():
+            res_data = iteration_data.get("data", {})
+            for res_idx, data in res_data.items():
+                center_freq = data.get('bias_frequency', data.get('original_center_frequency'))
+                if center_freq is not None:
+                    resonance_centers[res_idx] = center_freq
+        
+        # Find the resonance with center frequency closest to the click
+        min_distance = np.inf
+        clicked_res_idx = None
+        
+        for res_idx, center_freq in resonance_centers.items():
+            distance = abs(center_freq - x_coord)
+            if distance < min_distance:
+                min_distance = distance
+                clicked_res_idx = res_idx
+
+        if clicked_res_idx is not None:
+            # Accept the event and open the detector digest
+            ev.accept()
+            self._open_detector_digest_for_index(clicked_res_idx)
+
+    def _open_detector_digest_for_index(self, detector_idx: int):
+        """
+        Open a detector digest panel for a specific detector index.
+        
+        This method extracts and reuses the panel creation logic from the double-click handler,
+        making it callable programmatically (e.g., for auto-opening on completion).
+        
+        Args:
+            detector_idx: Detector index (1-based) to open digest for
+        """
+        if not self.results_by_iteration:
+            return
+        
+        # Get debug data from Periscope parent
         periscope = self.parent()
         while periscope and not hasattr(periscope, 'get_test_noise'):
             periscope = periscope.parent()
@@ -1358,228 +1400,161 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.debug_noise_data = {}
             self.debug_phase_data = []
         
-        # --- Find the resonance whose center/bias frequency is closest to the click's X-coordinate ---
-        min_distance = np.inf
-        clicked_res_idx = None
-        clicked_actual_cf = None
-        noise_data = None
-
-        # Collect all unique resonances with their center frequencies
-        resonance_centers = {}  # {res_idx: center_freq}
+        # Get noise data if available
+        noise_data = self.noise_data if self.samples_taken else None
         
-        if self.results_by_iteration:
-            for iteration_data in self.results_by_iteration.values():
-                res_data = iteration_data.get("data", {})
-                for res_idx, data in res_data.items():
-                    # Get the bias/center frequency for this resonance
-                    center_freq = data.get('bias_frequency', data.get('original_center_frequency'))
-                    if center_freq is not None:
-                        resonance_centers[res_idx] = center_freq
+        # Get conceptual frequency for this detector
+        if detector_idx <= len(self.conceptual_resonance_frequencies) and detector_idx > 0:
+            conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[detector_idx - 1]
+        else:
+            print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
+            return
         
-        # Find the resonance with center frequency closest to the click
-        for res_idx, center_freq in resonance_centers.items():
-            distance = abs(center_freq - x_coord)
-            if distance < min_distance:
-                min_distance = distance
-                clicked_res_idx = res_idx
-                clicked_actual_cf = center_freq
-
-        if clicked_res_idx is not None and clicked_actual_cf is not None:
-
-            # --- Determine the conceptual resonance and its ID ---
-            # The clicked_res_idx IS the detector ID since results are keyed by index
-            detector_id = clicked_res_idx
-
-            if self.samples_taken:
-                noise_data = self.noise_data
-
+        # Gather data for this specific detector across all amplitudes and directions
+        resonance_data_for_digest = {}
+        
+        # Group iterations by amplitude and direction
+        amplitude_direction_to_iteration = {}
+        for iter_idx, iter_data in self.results_by_iteration.items():
+            amp_val = iter_data["amplitude"]
+            direction = iter_data["direction"]
+            key = (amp_val, direction)
             
-            # Get the conceptual frequency for this resonance index
-            # Note: clicked_res_idx is 1-based, but conceptual_resonance_frequencies is 0-based
-            if clicked_res_idx <= len(self.conceptual_resonance_frequencies) and clicked_res_idx > 0:
-                conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[clicked_res_idx - 1]
+            if key not in amplitude_direction_to_iteration or iter_idx > amplitude_direction_to_iteration[key]:
+                amplitude_direction_to_iteration[key] = iter_idx
+        
+        # Process data for the target detector
+        for (amp_val, direction), iter_idx in amplitude_direction_to_iteration.items():
+            iter_data = self.results_by_iteration[iter_idx]
+            res_data = iter_data["data"]
+            
+            if not res_data or detector_idx not in res_data:
+                continue
+            
+            resonance_sweep_data = res_data[detector_idx]
+            actual_cf_for_this_amp = resonance_sweep_data.get('bias_frequency', 
+                                                              resonance_sweep_data.get('original_center_frequency'))
+            
+            combo_key = f"{amp_val}:{direction}"
+            resonance_data_for_digest[combo_key] = {
+                'data': resonance_sweep_data,
+                'actual_cf_hz': actual_cf_for_this_amp,
+                'direction': direction,
+                'amplitude': amp_val
+            }
+        
+        if not resonance_data_for_digest:
+            print(f"Warning: No data for detector {detector_idx}")
+            return
+        
+        # Gather data for ALL detectors to enable navigation
+        all_detectors_data = {}
+        all_detector_indices = set()
+        for iter_data in self.results_by_iteration.values():
+            res_data = iter_data.get("data", {})
+            all_detector_indices.update(res_data.keys())
+        
+        for det_idx in sorted(all_detector_indices):
+            if det_idx <= len(self.conceptual_resonance_frequencies) and det_idx > 0:
+                conceptual_freq_hz = self.conceptual_resonance_frequencies[det_idx - 1]
             else:
-                print(f"Warning: Clicked resonance index {clicked_res_idx} exceeds conceptual frequencies list length.")
-                conceptual_resonance_base_freq_hz = clicked_actual_cf
-
-            # --- Gather all data for this conceptual resonance across all amplitudes and directions ---
-            # Create a structure that preserves both amplitude and direction information
-            resonance_data_for_digest = {}
+                conceptual_freq_hz = None
+                for iter_data in self.results_by_iteration.values():
+                    res_data = iter_data.get("data", {})
+                    if det_idx in res_data:
+                        det_data = res_data[det_idx]
+                        conceptual_freq_hz = det_data.get('bias_frequency', det_data.get('original_center_frequency'))
+                        if conceptual_freq_hz:
+                            break
             
-            # Group iterations by amplitude and direction
-            amplitude_direction_to_iteration = {}  # Maps (amplitude, direction) to iteration
+            if conceptual_freq_hz is None:
+                continue
+            
+            detector_resonance_data = {}
+            amplitude_direction_to_iteration_det = {}
             for iter_idx, iter_data in self.results_by_iteration.items():
                 amp_val = iter_data["amplitude"]
                 direction = iter_data["direction"]
                 key = (amp_val, direction)
                 
-                # Keep the latest iteration for each amplitude+direction combination
-                if key not in amplitude_direction_to_iteration or iter_idx > amplitude_direction_to_iteration[key]:
-                    amplitude_direction_to_iteration[key] = iter_idx
+                if key not in amplitude_direction_to_iteration_det or iter_idx > amplitude_direction_to_iteration_det[key]:
+                    amplitude_direction_to_iteration_det[key] = iter_idx
             
-            # Now process the appropriate iteration for each amplitude+direction combination
-            for (amp_val, direction), iter_idx in amplitude_direction_to_iteration.items():
+            for (amp_val, direction), iter_idx in amplitude_direction_to_iteration_det.items():
                 iter_data = self.results_by_iteration[iter_idx]
                 res_data = iter_data["data"]
                 
-                if not res_data or clicked_res_idx not in res_data:
-                    continue  # No data for this resonance index
+                if not res_data or det_idx not in res_data:
+                    continue
                 
-                # Get the data for the clicked resonance index
-                resonance_sweep_data = res_data[clicked_res_idx]
-                
-                # Get the actual bias frequency used for this sweep
+                resonance_sweep_data = res_data[det_idx]
                 actual_cf_for_this_amp = resonance_sweep_data.get('bias_frequency', 
                                                                   resonance_sweep_data.get('original_center_frequency'))
                 
-                # Create a unique key that combines amplitude and direction
-                # Format: "amp_val:direction" (e.g., "0.5:upward")
                 combo_key = f"{amp_val}:{direction}"
-                
-                # Store with combined key to preserve both directions per amplitude
-                resonance_data_for_digest[combo_key] = {
+                detector_resonance_data[combo_key] = {
                     'data': resonance_sweep_data,
-                    'actual_cf_hz': actual_cf_for_this_amp,  # Store the actual CF for this sweep
-                    'direction': direction,  # Include direction information
-                    'amplitude': amp_val  # Store the raw amplitude for reference
+                    'actual_cf_hz': actual_cf_for_this_amp,
+                    'direction': direction,
+                    'amplitude': amp_val
                 }
-
-            if not resonance_data_for_digest:
-                print(f"Warning: No data gathered for conceptual resonance near {conceptual_resonance_base_freq_hz / 1e9:.6f} GHz for digest.")
-                return
-
-            # At this point, we have:
-            # - clicked_cf_hz
-            # - detector_id
-            # - resonance_data_for_digest (dict of {amp_raw: sweep_data_dict})
-            # - self.dac_scales
-            # - self.zoom_box_mode
-
-            # Accept the event to prevent further processing (e.g., ClickableViewBox's own message box)
-            ev.accept()
-
-            # Gather data for ALL detectors to enable navigation
-            all_detectors_data = {}
             
-            # First, find all unique detector indices across all iterations
-            all_detector_indices = set()
-            for iter_data in self.results_by_iteration.values():
-                res_data = iter_data.get("data", {})
-                all_detector_indices.update(res_data.keys())
-            
-            # Now gather data for each detector
-            for det_idx in sorted(all_detector_indices):
-                # Get conceptual frequency for this detector
-                # Note: det_idx is 1-based, but conceptual_resonance_frequencies is 0-based
-                if det_idx <= len(self.conceptual_resonance_frequencies) and det_idx > 0:
-                    conceptual_freq_hz = self.conceptual_resonance_frequencies[det_idx - 1]
-                else:
-                    # Fallback - try to find any frequency data for this detector
-                    conceptual_freq_hz = None
-                    for iter_data in self.results_by_iteration.values():
-                        res_data = iter_data.get("data", {})
-                        if det_idx in res_data:
-                            det_data = res_data[det_idx]
-                            conceptual_freq_hz = det_data.get('bias_frequency', det_data.get('original_center_frequency'))
-                            if conceptual_freq_hz:
-                                break
-                
-                if conceptual_freq_hz is None:
-                    continue  # Skip this detector if we can't find any frequency info
-                
-                # Gather sweep data for this detector across all amplitudes/directions
-                detector_resonance_data = {}
-                
-                # Use the same logic as above to gather data for each amplitude/direction combination
-                amplitude_direction_to_iteration = {}
-                for iter_idx, iter_data in self.results_by_iteration.items():
-                    amp_val = iter_data["amplitude"]
-                    direction = iter_data["direction"]
-                    key = (amp_val, direction)
-                    
-                    if key not in amplitude_direction_to_iteration or iter_idx > amplitude_direction_to_iteration[key]:
-                        amplitude_direction_to_iteration[key] = iter_idx
-                
-                for (amp_val, direction), iter_idx in amplitude_direction_to_iteration.items():
-                    iter_data = self.results_by_iteration[iter_idx]
-                    res_data = iter_data["data"]
-                    
-                    if not res_data or det_idx not in res_data:
-                        continue
-                    
-                    resonance_sweep_data = res_data[det_idx]
-                    actual_cf_for_this_amp = resonance_sweep_data.get('bias_frequency', 
-                                                                      resonance_sweep_data.get('original_center_frequency'))
-                    
-                    combo_key = f"{amp_val}:{direction}"
-                    detector_resonance_data[combo_key] = {
-                        'data': resonance_sweep_data,
-                        'actual_cf_hz': actual_cf_for_this_amp,
-                        'direction': direction,
-                        'amplitude': amp_val
-                    }
-                
-                if detector_resonance_data:  # Only add if we have data
-                    all_detectors_data[det_idx] = {
-                        'resonance_data': detector_resonance_data,
-                        'conceptual_freq_hz': conceptual_freq_hz
-                    }
-            
-            if self.spectrum_noise_data:
-                spectrum_data = self.spectrum_noise_data['data']
-            else:
-                spectrum_data = None
-            
-            # Find Periscope parent to create docked panel
-            periscope = self._get_periscope_parent()
-            if not periscope:
-                print("ERROR: Could not find Periscope parent for detector digest panel")
-                return
-            
-            # Create panel
-            panel = DetectorDigestPanel(
-                parent=self,
-                resonance_data_for_digest=resonance_data_for_digest,
-                detector_id=detector_id,
-                resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
-                dac_scales=self.dac_scales,
-                zoom_box_mode=self.zoom_box_mode,
-                target_module=self.target_module,
-                normalize_plot3=self.normalize_traces,
-                dark_mode=self.dark_mode,
-                all_detectors_data=all_detectors_data,  
-                initial_detector_idx=detector_id,
-                noise_data=noise_data,
-                spectrum_data=spectrum_data,
-                debug_noise_data=self.debug_noise_data,
-                debug_phase_data=self.debug_phase_data,
-                debug=False            
-            )
-            
-            # Store direct reference to this MultisweepPanel for noise sampling
-            panel.multisweep_panel_ref = self
-            
-            # Increment counter and use for tab name (not detector ID, which can change with navigation)
-            self.digest_window_count += 1
-            loaded_suffix = " (Loaded)" if self.is_loaded_data else ""
-            dock_title = f"Detector Digest #{self.digest_window_count}{loaded_suffix}"
-            dock_id = f"digest_{self.digest_window_count}_{int(time.time())}"
-            dock = periscope.dock_manager.create_dock(panel, dock_title, dock_id)
-            
-            # Track panel reference to prevent garbage collection
-            self.detector_digest_windows.append(panel)
-            
-            # Tabify with this multisweep panel's dock
-            my_dock = periscope.dock_manager.find_dock_for_widget(self)
-            if my_dock:
-                periscope.tabifyDockWidget(my_dock, dock)
-            
-            # Show and activate the dock
-            dock.show()
-            dock.raise_()
-        else:
-            # No curve found near click, event not accepted, default ClickableViewBox behavior might occur
-            pass
+            if detector_resonance_data:
+                all_detectors_data[det_idx] = {
+                    'resonance_data': detector_resonance_data,
+                    'conceptual_freq_hz': conceptual_freq_hz
+                }
+        
+        # Get spectrum data if available
+        spectrum_data = self.spectrum_noise_data.get('data') if self.spectrum_noise_data else None
+        
+        # Find Periscope parent to create docked panel
+        periscope = self._get_periscope_parent()
+        if not periscope:
+            print("ERROR: Could not find Periscope parent for detector digest panel")
+            return
+        
+        # Create panel
+        panel = DetectorDigestPanel(
+            parent=self,
+            resonance_data_for_digest=resonance_data_for_digest,
+            detector_id=detector_idx,
+            resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
+            dac_scales=self.dac_scales,
+            zoom_box_mode=self.zoom_box_mode,
+            target_module=self.target_module,
+            normalize_plot3=self.normalize_traces,
+            dark_mode=self.dark_mode,
+            all_detectors_data=all_detectors_data,
+            initial_detector_idx=detector_idx,
+            noise_data=noise_data,
+            spectrum_data=spectrum_data,
+            debug_noise_data=self.debug_noise_data,
+            debug_phase_data=self.debug_phase_data,
+            debug=False
+        )
+        
+        # Store direct reference to this MultisweepPanel for noise sampling
+        panel.multisweep_panel_ref = self
+        
+        # Increment counter and use for tab name
+        self.digest_window_count += 1
+        loaded_suffix = " (Loaded)" if self.is_loaded_data else ""
+        dock_title = f"Detector Digest #{self.digest_window_count}{loaded_suffix}"
+        dock_id = f"digest_{self.digest_window_count}_{int(time.time())}"
+        dock = periscope.dock_manager.create_dock(panel, dock_title, dock_id)
+        
+        # Track panel reference to prevent garbage collection
+        self.detector_digest_windows.append(panel)
+        
+        # Tabify with this multisweep panel's dock
+        my_dock = periscope.dock_manager.find_dock_for_widget(self)
+        if my_dock:
+            periscope.tabifyDockWidget(my_dock, dock)
+        
+        # Show and activate the dock
+        dock.show()
+        dock.raise_()
 
     def _get_closest_remembered_cf(self, conceptual_idx: int, target_amp: float) -> float | None:
         """

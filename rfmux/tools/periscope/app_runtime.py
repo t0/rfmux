@@ -9,6 +9,44 @@ from PyQt6.QtCore import QUrl
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
+    
+    def _convert_iq_data(self, rawI: np.ndarray, rawQ: np.ndarray, ch_val: int) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Convert raw I/Q data based on current unit mode and calibration availability.
+        
+        This method consolidates the unit conversion logic that appears 5 times in the codebase.
+        It fixes a bug where 3 locations didn't fall back to real_units when df calibration
+        was missing (they returned raw counts instead).
+        
+        Behavior:
+        - df mode with calibration: apply df calibration to get freq shift/dissipation
+        - df mode without calibration: fall back to real_units check (BUG FIX)
+        - real_units mode: convert to volts
+        - counts mode: return raw counts
+        
+        Args:
+            rawI: Raw I component data
+            rawQ: Raw Q component data  
+            ch_val: Channel ID (for calibration lookup)
+            
+        Returns:
+            Tuple of (I_data, Q_data) converted according to unit_mode and calibration
+        """
+        if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
+            df_cal = self.df_calibrations[self.module].get(ch_val)
+            if df_cal is not None:
+                # Apply df calibration
+                iq_volts = convert_roc_to_volts(rawI) + 1j * convert_roc_to_volts(rawQ)
+                df_complex = iq_volts * df_cal
+                return df_complex.real, df_complex.imag  # Frequency shift (Hz), Dissipation (unitless)
+            else:
+                # No calibration - fall back to real_units check (matches PSD task behavior)
+                return (convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)) if self.real_units else (rawI, rawQ)
+        elif self.real_units:
+            return convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)
+        else:
+            return rawI, rawQ
+    
     def _init_buffers(self):
         """
         Initialize or re-initialize data buffers for all configured channels.
@@ -581,31 +619,22 @@ class PeriscopeRuntime:
         rawI = self.buf[ch_val]["I"].data(); rawQ = self.buf[ch_val]["Q"].data()
         rawM = self.buf[ch_val]["M"].data(); tarr = self.tbuf[ch_val].data()
         
-        # Apply appropriate unit conversion based on unit_mode
+        # Use extracted helper method for I/Q conversion
+        I_data, Q_data = self._convert_iq_data(rawI, rawQ, ch_val)
+        
+        # Handle magnitude separately (df calibration affects it differently)
         if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
-            # Check if calibration data exists for this channel
             df_cal = self.df_calibrations[self.module].get(ch_val)
             if df_cal is not None:
-                # Convert to volts first
-                I_volts = convert_roc_to_volts(rawI)
-                Q_volts = convert_roc_to_volts(rawQ)
-                # Apply df calibration: multiply complex IQ by calibration factor
-                iq_volts = I_volts + 1j * Q_volts
-                df_complex = iq_volts * df_cal
-                # Extract frequency shift (real) and dissipation (imaginary)
-                I_data = df_complex.real  # Frequency shift in Hz
-                Q_data = df_complex.imag  # Dissipation (unitless)
                 # Magnitude in df space
-                M_data = np.abs(df_complex)
+                M_data = np.abs((convert_roc_to_volts(rawI) + 1j * convert_roc_to_volts(rawQ)) * df_cal)
             else:
-                # No calibration for this channel, fall back to counts
-                I_data, Q_data, M_data = rawI, rawQ, rawM
+                # No calibration - use appropriate units
+                M_data = convert_roc_to_volts(rawM) if self.real_units else rawM
         elif self.real_units:
-            # Standard voltage conversion
-            I_data, Q_data, M_data = (convert_roc_to_volts(d) for d in (rawI, rawQ, rawM))
+            M_data = convert_roc_to_volts(rawM)
         else:
-            # Raw counts
-            I_data, Q_data, M_data = rawI, rawQ, rawM
+            M_data = rawM
         
         # Update Time-Domain (TOD) plots
         if "T" in rowCurves and ch_val in rowCurves["T"]:
@@ -651,29 +680,8 @@ class PeriscopeRuntime:
             rawI = self.buf[c_val]["I"].data()
             rawQ = self.buf[c_val]["Q"].data()
             
-            # Apply unit conversion (same logic as in _update_channel_plot_data)
-            if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
-                df_cal = self.df_calibrations[self.module].get(c_val)
-                if df_cal is not None:
-                    # Convert to volts first
-                    I_volts = convert_roc_to_volts(rawI)
-                    Q_volts = convert_roc_to_volts(rawQ)
-                    # Apply df calibration
-                    iq_volts = I_volts + 1j * Q_volts
-                    df_complex = iq_volts * df_cal
-                    # Extract frequency shift (real) and dissipation (imaginary)
-                    I_data = df_complex.real  # Frequency shift in Hz
-                    Q_data = df_complex.imag  # Dissipation (unitless)
-                else:
-                    # No calibration for this channel
-                    I_data, Q_data = rawI, rawQ
-            elif self.real_units:
-                # Standard voltage conversion
-                I_data = convert_roc_to_volts(rawI)
-                Q_data = convert_roc_to_volts(rawQ)
-            else:
-                # Raw counts
-                I_data, Q_data = rawI, rawQ
+            # Use extracted helper method (fixes bug where real_units wasn't checked as fallback)
+            I_data, Q_data = self._convert_iq_data(rawI, rawQ, c_val)
             
             self.iq_workers[row_i] = True
             task = IQTask(row_i, c_val, I_data, Q_data, self.dot_px, mode_key, self.iq_signals)
@@ -686,26 +694,8 @@ class PeriscopeRuntime:
                 rawI = self.buf[ch]["I"].data()
                 rawQ = self.buf[ch]["Q"].data()
                 
-                # Apply unit conversion for each channel
-                if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
-                    df_cal = self.df_calibrations[self.module].get(ch)
-                    if df_cal is not None:
-                        # Convert to volts first
-                        I_volts = convert_roc_to_volts(rawI)
-                        Q_volts = convert_roc_to_volts(rawQ)
-                        # Apply df calibration
-                        iq_volts = I_volts + 1j * Q_volts
-                        df_complex = iq_volts * df_cal
-                        # Extract frequency shift and dissipation
-                        I_data = df_complex.real
-                        Q_data = df_complex.imag
-                    else:
-                        I_data, Q_data = rawI, rawQ
-                elif self.real_units:
-                    I_data = convert_roc_to_volts(rawI)
-                    Q_data = convert_roc_to_volts(rawQ)
-                else:
-                    I_data, Q_data = rawI, rawQ
+                # Use extracted helper method (fixes bug where real_units wasn't checked as fallback)
+                I_data, Q_data = self._convert_iq_data(rawI, rawQ, ch)
                     
                 all_I_data.append(I_data)
                 all_Q_data.append(Q_data)
@@ -737,28 +727,8 @@ class PeriscopeRuntime:
                 if not self.psd_workers[row_i]["S"].get(ch_val, False): # Check if worker already active
                     rawI = self.buf[ch_val]["I"].data(); rawQ = self.buf[ch_val]["Q"].data()
                     
-                    # Apply unit conversion (same logic as in _update_channel_plot_data)
-                    if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
-                        df_cal = self.df_calibrations[self.module].get(ch_val)
-                        if df_cal is not None:
-                            # Convert to volts first
-                            I_volts = convert_roc_to_volts(rawI)
-                            Q_volts = convert_roc_to_volts(rawQ)
-                            # Apply df calibration
-                            iq_volts = I_volts + 1j * Q_volts
-                            df_complex = iq_volts * df_cal
-                            # Extract frequency shift (real) and dissipation (imaginary)
-                            I_data = df_complex.real  # Frequency shift in Hz
-                            Q_data = df_complex.imag  # Dissipation (unitless)
-                        else:
-                            # No calibration for this channel
-                            I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ)) if self.real_units else (rawI, rawQ)
-                    elif self.real_units:
-                        # Standard voltage conversion
-                        I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ))
-                    else:
-                        # Raw counts
-                        I_data, Q_data = rawI, rawQ
+                    # Use extracted helper method (consolidation - this already had correct logic)
+                    I_data, Q_data = self._convert_iq_data(rawI, rawQ, ch_val)
                     
                     self.psd_workers[row_i]["S"][ch_val] = True
                     task = PSDTask(row_i, ch_val, I_data, Q_data, "SSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
@@ -770,28 +740,8 @@ class PeriscopeRuntime:
                 if not self.psd_workers[row_i]["D"].get(ch_val, False): # Check if worker already active
                     rawI = self.buf[ch_val]["I"].data(); rawQ = self.buf[ch_val]["Q"].data()
                     
-                    # Apply unit conversion (same logic as in _update_channel_plot_data)
-                    if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
-                        df_cal = self.df_calibrations[self.module].get(ch_val)
-                        if df_cal is not None:
-                            # Convert to volts first
-                            I_volts = convert_roc_to_volts(rawI)
-                            Q_volts = convert_roc_to_volts(rawQ)
-                            # Apply df calibration
-                            iq_volts = I_volts + 1j * Q_volts
-                            df_complex = iq_volts * df_cal
-                            # Extract frequency shift (real) and dissipation (imaginary)
-                            I_data = df_complex.real  # Frequency shift in Hz
-                            Q_data = df_complex.imag  # Dissipation (unitless)
-                        else:
-                            # No calibration for this channel
-                            I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ)) if self.real_units else (rawI, rawQ)
-                    elif self.real_units:
-                        # Standard voltage conversion
-                        I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ))
-                    else:
-                        # Raw counts
-                        I_data, Q_data = rawI, rawQ
+                    # Use extracted helper method (consolidation - this already had correct logic)
+                    I_data, Q_data = self._convert_iq_data(rawI, rawQ, ch_val)
                     
                     self.psd_workers[row_i]["D"][ch_val] = True
                     task = PSDTask(row_i, ch_val, I_data, Q_data, "DSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())

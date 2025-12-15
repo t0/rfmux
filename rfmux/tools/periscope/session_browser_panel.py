@@ -113,6 +113,7 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         self.filter_combo.addItem("Multisweep", "multisweep")
         self.filter_combo.addItem("Bias KIDs", "bias")
         self.filter_combo.addItem("Noise Spectrum", "noise")
+        self.filter_combo.addItem("Screenshots", "screenshot")
         self.filter_combo.currentIndexChanged.connect(self._on_filter_changed)
         filter_layout.addWidget(self.filter_combo, 1)
         
@@ -237,6 +238,7 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         # To force a true refresh, we need to reset the root path by setting it
         # to an empty string first, then back to the actual path.
         self.file_model.setRootPath("")
+        QtCore.QCoreApplication.processEvents()
         self.file_model.setRootPath(root_path)
         self.tree_view.setRootIndex(self.file_model.index(root_path))
         
@@ -381,6 +383,8 @@ class SessionBrowserPanel(QtWidgets.QWidget):
             self.file_model.setNameFilters(["*.pkl", "*.ipynb", "*.png"])
         elif filter_type == "ipynb":
             self.file_model.setNameFilters(["*.ipynb"])
+        elif filter_type == "screenshot":
+            self.file_model.setNameFilters(["*.png"])
         else:
             # Filter by data type in filename (new format: type_identifier_HHMMSS.pkl)
             # Also support old format for backwards compatibility

@@ -14,6 +14,7 @@ from datetime import datetime
 from PyQt6 import QtCore, QtWidgets, QtGui
 from . import settings
 from .utils import find_parent_with_attr
+import sys
 
 
 class JupyterServerManager(QtCore.QObject):
@@ -76,16 +77,20 @@ class JupyterServerManager(QtCore.QObject):
             # Use CREATE_NO_WINDOW on Windows to hide console
             kwargs = {}
             if os.name == 'nt':
+                # Windows: Hide console window and redirect output to DEVNULL
+                # to prevent pipe buffer deadlock from verbose Jupyter startup output
                 kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-            
+                kwargs['stdout'] = subprocess.DEVNULL
+                kwargs['stderr'] = subprocess.DEVNULL
+            else:
+                # Unix: Capture output for error diagnosis
+                kwargs['stdout'] = subprocess.PIPE
+                kwargs['stderr'] = subprocess.STDOUT
             self.process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
                 text=True,
                 **kwargs
             )
-            
             # Build URL and start checking
             self.url = f"http://localhost:{actual_port}/lab?token=periscope"
             self._check_attempts = 0
@@ -115,30 +120,55 @@ class JupyterServerManager(QtCore.QObject):
         """Check if server is ready and emit signal."""
         import urllib.request
         import urllib.error
-        
+        import traceback
+    
         self._check_attempts += 1
-        
-        # Check if process died
+    
+        # If process exited, fail immediately
         if self.process and self.process.poll() is not None:
-            # Process exited - read error output
-            output = self.process.stdout.read() if self.process.stdout else ""
-            self.server_error.emit(f"Jupyter server exited unexpectedly:\n{output[:500]}")
+            # Process exited - read error output if available
+            if self.process.stdout:
+                output = self.process.stdout.read()
+                self.server_error.emit(f"Jupyter server exited unexpectedly:\n{output[:500]}")
+            else:
+                # On Windows, stdout is not captured - suggest running manually for diagnosis
+                self.server_error.emit(
+                    "Jupyter server exited unexpectedly.\n"
+                    "Run 'jupyter lab --no-browser' in a terminal for more details."
+                )
             return
-        
-        # Try to connect to server
+    
+        # Probe lightweight API endpoint
         try:
             if self.url:
                 urllib.request.urlopen(self.url, timeout=1)
                 self.server_ready.emit(self.url)
-        except (urllib.error.URLError, OSError):
-            # Not ready yet
+    
+        except Exception as e:
+            # Print full diagnostics
+            # print("[Notebook] Server not ready yet")
+            # print(f"  Attempt: {self._check_attempts}")
+            # print(f"  Exception type: {type(e)}")
+            # print(f"  Exception value: {e}")
+    
+            # if hasattr(e, "reason"):
+            #     print(f"  URLError.reason: {e.reason}")
+            #     print(f"  reason type: {type(e.reason)}")
+    
+            # # if isinstance(e, OSError):
+            #     print(f"  errno: {e.errno}")
+            #     print(f"  winerror: {getattr(e, 'winerror', None)}")
+            ### Keeping it here for debugging ####
+    
+            # Retry or fail
             if self._check_attempts < self._max_check_attempts:
                 QtCore.QTimer.singleShot(1000, self._check_ready)
             else:
                 self.server_error.emit(
-                    "Jupyter server did not start within 30 seconds.\n"
-                    "Check that JupyterLab is installed correctly."
+                    "Jupyter server did not become ready within 30 seconds.\n"
+                    "See console output for detailed startup errors."
                 )
+
     
     def get_notebook_url(self, notebook_path: str) -> str | None:
         """
@@ -487,6 +517,35 @@ class NotebookPanel(QtWidgets.QWidget):
             # Fallback to opening the home page
             self._open_in_browser()
     
+    
+    def create_dir_link(self, link_path: Path, target_path: Path):
+        """
+        Cross-platform directory linking:
+        - Windows: directory junction
+        - Unix: symlink
+        """
+        link_path = Path(link_path)
+        target_path = Path(target_path)
+        
+        if link_path.exists():
+            return
+        
+        if sys.platform == "win32":
+            print("[Notebook] Identified as windows platform for the symlink")
+            # Use mklink /J for directory junctions
+            cmd = [
+                "cmd",
+                "/c",
+                "mklink",
+                "/J",
+                str(link_path),
+                str(target_path)
+            ]
+            subprocess.check_call(cmd, shell=False)
+        else:
+            link_path.symlink_to(target_path, target_is_directory=True)   
+        
+        
     def _setup_notebook_resources(self):
         """
         Create symlinks to shared notebook resources.
@@ -519,7 +578,8 @@ class NotebookPanel(QtWidgets.QWidget):
                         # Create symlink if it doesn't exist
                         if not link_path.exists():
                             try:
-                                link_path.symlink_to(source, target_is_directory=True)
+                                # link_path.symlink_to(source, target_is_directory=True)
+                                self.create_dir_link(link_path, source)
                                 print(f"[Notebook] Linked: {link_name} -> {source}")
                             except OSError as e:
                                 print(f"[Notebook] Could not create symlink {link_name}: {e}")
@@ -547,6 +607,7 @@ class NotebookPanel(QtWidgets.QWidget):
     
     def _on_server_error(self, error: str):
         """Handle server error."""
+        
         self.status_label.setText("❌ Server error")
         self.status_label.setStyleSheet("font-weight: bold; font-size: 12px; color: red;")
         

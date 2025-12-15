@@ -454,6 +454,8 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         self.mean_subtract_checkbox = QtWidgets.QCheckBox("Mean Subtracted")
         self.mean_subtract_checkbox.setToolTip("If checked, TOD data will have its mean subtracted before plotting.")
+        self.mean_subtract_checkbox.setChecked(True)
+        self.mean_subtract_enabled = True
         self.mean_subtract_checkbox.stateChanged.connect(self._toggle_mean_subtraction)
 
         self.exp_binning_checkbox = QtWidgets.QCheckBox("Exponential Binning")

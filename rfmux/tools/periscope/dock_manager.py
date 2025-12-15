@@ -543,7 +543,7 @@ class PeriscopeDockManager(QtCore.QObject):
                 return None  # Return immediately, save happens in callback
         
         # Capture the widget as a high-DPI pixmap (synchronous path)
-        return self._save_screenshot(widget, filepath, scale)
+        return self._save_screenshot(widget, filepath, scale, session_manager)
     
     def _handle_screenshot_file_selected(self, filepath: str):
         """
@@ -565,7 +565,7 @@ class PeriscopeDockManager(QtCore.QObject):
         self._pending_screenshot_widget = None
         self._pending_screenshot_scale = 2
     
-    def _save_screenshot(self, widget: QtWidgets.QWidget, filepath: str, scale: int) -> Optional[str]:
+    def _save_screenshot(self, widget: QtWidgets.QWidget, filepath: str, scale: int, session_manager=None) -> Optional[str]:
         """
         Save a screenshot of a widget to a file.
         
@@ -590,6 +590,8 @@ class PeriscopeDockManager(QtCore.QObject):
             painter.end()
             
             pixmap.save(filepath, "PNG")
+            if session_manager is not None:
+                session_manager.register_screenshot(filepath)
             print(f"[Screenshot] Saved: {filepath} ({size.width() * scale}x{size.height() * scale} px)")
             return filepath
         except Exception as e:

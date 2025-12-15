@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PyQt6 import QtCore
+from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtCore import QUrl
 
 
 class SessionManager(QtCore.QObject):
@@ -61,7 +63,10 @@ class SessionManager(QtCore.QObject):
         'multisweep': 'Multisweep Analysis',
         'bias': 'Bias KIDs',
         'noise': 'Noise Spectrum',
+        'screenshot': 'Screenshot' ,
     }
+
+    ARTIFACT_TYPES = {'screenshot': 'Screenshots',}
     
     def __init__(self, parent: Optional[QtCore.QObject] = None):
         """
@@ -169,6 +174,7 @@ class SessionManager(QtCore.QObject):
             'folder_name': folder_name,
             'base_path': str(base),
             'exports': [],
+            'screenshots':[],
         }
         
         # Try to capture CRS info from parent
@@ -388,12 +394,13 @@ class SessionManager(QtCore.QObject):
         Get a list of pickle files in the current session folder.
         
         Returns:
-            List of Path objects for each .pkl file, sorted by name (newest first)
+            List of Path objects for each .pkl file and screenshot, sorted by name (newest first)
         """
         if not self.is_active or self._session_path is None:
             return []
         
         files = list(self._session_path.glob('*.pkl'))
+        files += list(self._session_path.glob('screenshot_*.png'))
         # Sort by name descending (newest timestamps first)
         files.sort(key=lambda p: p.name, reverse=True)
         return files
@@ -403,7 +410,7 @@ class SessionManager(QtCore.QObject):
         Get session files filtered by data type.
         
         Args:
-            data_type: Type to filter by (netanal, multisweep, bias, noise)
+            data_type: Type to filter by (netanal, multisweep, bias, noise, screenshot)
         
         Returns:
             List of Path objects matching the data type
@@ -411,8 +418,11 @@ class SessionManager(QtCore.QObject):
         if not self.is_active or self._session_path is None:
             return []
         
-        pattern = f'*_{data_type}_*.pkl'
-        files = list(self._session_path.glob(pattern))
+        if data_type == 'screenshot':
+            files = list(self._session_path.glob('screenshot_*.png'))
+        else:
+            pattern = f'*_{data_type}_*.pkl'
+            files = list(self._session_path.glob(pattern))
         files.sort(key=lambda p: p.name, reverse=True)
         return files
     
@@ -432,6 +442,8 @@ class SessionManager(QtCore.QObject):
         type_counts = {}
         for data_type in self.DATA_TYPES:
             type_counts[data_type] = len(self.get_files_by_type(data_type))
+
+        type_counts['screenshot'] = len(self.get_files_by_type('screenshot'))
         
         # Calculate session duration
         duration = None
@@ -538,6 +550,48 @@ class SessionManager(QtCore.QObject):
         
         # Unknown file type
         return None
+
+
+    def register_screenshot(self, filepath: str):
+        """
+        Register a screenshot file saved into the session folder.
+        """
+        if not self.is_active or self._session_path is None:
+            return
+    
+        path = Path(filepath)
+        if not path.exists():
+            return
+    
+        self._session_metadata.setdefault('screenshots', []).append({
+            'filename': path.name,
+            'timestamp': datetime.datetime.now().isoformat(),
+        })
+    
+        self._save_metadata()
+        self.session_updated.emit()
+
+
+    def get_screenshots(self) -> List[Path]:
+        """
+        Get all screenshot PNG files in the session folder.
+        """
+        if not self.is_active or self._session_path is None:
+            return []
+    
+        files = list(self._session_path.glob('screenshot_*.png'))
+        files.sort(key=lambda p: p.name, reverse=True)
+        return files
+
+    def open_screenshot(self, screenshot_path: Path):
+        """
+        Open a screenshot using the OS-native image viewer.
+        """
+        if not screenshot_path.exists():
+            return
+    
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(screenshot_path)))
+
     
     # ─────────────────────────────────────────────────────────────────
     # Private Methods

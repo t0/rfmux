@@ -1128,6 +1128,15 @@ class PeriscopeRuntime:
         Returns:
             tuple: (panel, dock, window_id, target_module) or (None, None, None, None) on error
         """
+        
+
+        dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
+        dialog.module_entry.setText(str(self.module))
+        
+        # Fetch DAC scales if CRS is available
+        self._fetch_dac_scales_for_dialog(dialog)
+        self.dac_scales = dialog.dac_scales.copy()
+        
         try:
             # Allow loading without CRS in offline mode
             if self.crs is None and self.host != "OFFLINE": 
@@ -1142,16 +1151,12 @@ class PeriscopeRuntime:
             if target_module is None: 
                 QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified. Please check your file.")
                 return None, None, None, None
-            
-            # Restore DAC scales from loaded data
-            if 'dac_scales_used' in load_params:
-                self.dac_scales = load_params['dac_scales_used']
-                dac_scales_for_panel = self.dac_scales
-            elif hasattr(self, 'dac_scales'):
+
+            if hasattr(self, 'dac_scales'): 
                 dac_scales_for_panel = self.dac_scales
             else:
-                QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales from file or board.")
-                return None, None, None, None
+                QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
+                return
 
             dac_scale_for_mod = load_params['dac_scales_used'][target_module]
             dac_scale_for_board = dac_scales_for_panel[target_module]

@@ -1111,7 +1111,25 @@ class PeriscopeRuntime:
             error_msg = f"Error starting multisweep analysis: {type(e).__name__}: {str(e)}"
             print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
             QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
-        
+    
+    def fetch_dac_scales_blocking(self) -> dict:
+        dac_scales = None
+    
+        fetcher = DACScaleFetcher(self.crs)
+        loop = QtCore.QEventLoop()
+    
+        def on_ready(scales):
+            nonlocal dac_scales
+            dac_scales = scales
+            loop.quit()
+    
+        fetcher.dac_scales_ready.connect(on_ready)
+        fetcher.finished.connect(fetcher.deleteLater)
+    
+        fetcher.start()
+        loop.exec_()   # waits until on_ready() calls loop.quit()
+    
+        return dac_scales    
     
     def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep") -> tuple:
         """
@@ -1129,14 +1147,6 @@ class PeriscopeRuntime:
             tuple: (panel, dock, window_id, target_module) or (None, None, None, None) on error
         """
         
-
-        dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
-        dialog.module_entry.setText(str(self.module))
-        
-        # Fetch DAC scales if CRS is available
-        self._fetch_dac_scales_for_dialog(dialog)
-        self.dac_scales = dialog.dac_scales.copy()
-        
         try:
             # Allow loading without CRS in offline mode
             if self.crs is None and self.host != "OFFLINE": 
@@ -1152,9 +1162,9 @@ class PeriscopeRuntime:
                 QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified. Please check your file.")
                 return None, None, None, None
 
-            if hasattr(self, 'dac_scales'): 
-                dac_scales_for_panel = self.dac_scales
-            else:
+            try: 
+                dac_scales_for_panel = self.fetch_dac_scales_blocking() #### Gets the dac scale directly from the board #####
+            except:
                 QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
                 return
 

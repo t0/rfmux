@@ -571,28 +571,6 @@ class SessionManager(QtCore.QObject):
         self._save_metadata()
         self.session_updated.emit()
 
-
-    def get_screenshots(self) -> List[Path]:
-        """
-        Get all screenshot PNG files in the session folder.
-        """
-        if not self.is_active or self._session_path is None:
-            return []
-    
-        files = list(self._session_path.glob('screenshot_*.png'))
-        files.sort(key=lambda p: p.name, reverse=True)
-        return files
-
-    def open_screenshot(self, screenshot_path: Path):
-        """
-        Open a screenshot using the OS-native image viewer.
-        """
-        if not screenshot_path.exists():
-            return
-    
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(screenshot_path)))
-
-    
     # ─────────────────────────────────────────────────────────────────
     # Private Methods
     # ─────────────────────────────────────────────────────────────────

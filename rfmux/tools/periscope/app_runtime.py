@@ -655,11 +655,11 @@ class PeriscopeRuntime:
             cset = rowCurves["F"][ch_val]
             try:
                 if not sip.isdeleted(cset["I"]) and cset["I"].isVisible(): 
-                    cset["I"].setData(tarr, I_data, fftMode=True)
+                    cset["I"].setData(tarr[1:], I_data[1:], fftMode=True)
                 if not sip.isdeleted(cset["Q"]) and cset["Q"].isVisible(): 
-                    cset["Q"].setData(tarr, Q_data, fftMode=True)
+                    cset["Q"].setData(tarr[1:], Q_data[1:], fftMode=True)
                 if "Mag" in cset and not sip.isdeleted(cset["Mag"]) and cset["Mag"].isVisible(): 
-                    cset["Mag"].setData(tarr, M_data, fftMode=True)
+                    cset["Mag"].setData(tarr[1:], M_data[1:], fftMode=True)
             except RuntimeError:
                 # Qt object was deleted, skip this update
                 pass

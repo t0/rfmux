@@ -28,6 +28,7 @@ from .ui import (
     FindResonancesDialog,
     MultisweepDialog
 )
+from .noise_spectrum_panel import NoiseSpectrumPanel
 
 # --- Public API Definition ---
 # Defines the public interface of the Periscope subpackage.
@@ -40,4 +41,5 @@ __all__ = [
     "InitializeCRSDialog",      # Dialog for CRS initialization
     "FindResonancesDialog",     # Dialog for finding resonances
     "MultisweepDialog",         # Dialog for multisweep settings
+    "NoiseSpectrumPanel",       # Panel for noise spectrum analysis
 ]

@@ -16,6 +16,7 @@ from .utils import (
     ScreenshotMixin
 )
 from .detector_digest_panel import DetectorDigestPanel
+from .noise_spectrum_panel import NoiseSpectrumPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
@@ -67,9 +68,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.debug_phase_data = []
 
         
-        # Track open detector digest windows to prevent garbage collection
+        # Track open detector digest and noise spectrum windows to prevent garbage collection
         self.detector_digest_windows = []
+        self.noise_spectrum_windows = []
         self.digest_window_count = 0  # Counter for naming digest tabs
+        self.noise_panel_count = 0    # Counter for naming noise tabs
         
         # Stores the initial/base CFs for detector ID and fallback. Order is important.
         self.conceptual_resonance_frequencies: list[float] = list(self.initial_params.get('resonance_frequencies', []))
@@ -1328,8 +1331,93 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", str(e))
+                traceback.print_exc()
             finally:
                 progress.close()
+                
+            # If we successfully got data, open the noise spectrum panel
+            if self.spectrum_noise_data.get('data'):
+                # Default to opening for the first detector
+                self._open_noise_spectrum_panel(1)
+
+    def _open_noise_spectrum_panel(self, detector_idx: int = 1):
+        """
+        Open a NoiseSpectrumPanel for a specific detector index.
+        
+        Args:
+            detector_idx: Detector index (1-based) to open panel for
+        """
+        # Get spectrum data
+        spectrum_data = self.spectrum_noise_data.get('data')
+        if not spectrum_data:
+            print("Warning: No noise spectrum data available")
+            return
+            
+        # Get conceptual frequency for this detector
+        if detector_idx <= len(self.conceptual_resonance_frequencies) and detector_idx > 0:
+            conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[detector_idx - 1]
+        else:
+            print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
+            return
+            
+        # Gather data for ALL detectors to enable navigation (similar logic to digest panel)
+        all_detectors_data = {}
+        # We need conceptual frequencies for navigation
+        for i, freq in enumerate(self.conceptual_resonance_frequencies):
+            det_id = i + 1
+            all_detectors_data[det_id] = {
+                'conceptual_freq_hz': freq
+            }
+            
+        # Find Periscope parent to create docked panel
+        periscope = self._get_periscope_parent()
+        if not periscope:
+            print("ERROR: Could not find Periscope parent for noise spectrum panel")
+            return
+            
+        # Create panel
+        panel = NoiseSpectrumPanel(
+            parent=self,
+            detector_id=detector_idx,
+            resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
+            dark_mode=self.dark_mode,
+            all_detectors_data=all_detectors_data,
+            initial_detector_idx=detector_idx,
+            spectrum_data=spectrum_data
+        )
+        
+        # Store direct reference to this MultisweepPanel (if needed)
+        panel.multisweep_panel_ref = self
+        
+        # Increment counter and use for tab name
+        self.noise_panel_count += 1
+        loaded_suffix = " (Loaded)" if self.is_loaded_data else ""
+        dock_title = f"Noise Spectrum #{self.noise_panel_count}{loaded_suffix}"
+        dock_id = f"noise_{self.noise_panel_count}_{int(time.time())}"
+        
+        # Create dock
+        dock = periscope.dock_manager.create_dock(panel, dock_title, dock_id)
+        
+        # Track panel reference
+        self.noise_spectrum_windows.append(panel)
+        
+        # Try to tabify with existing digest panel if available, else with multisweep panel
+        target_dock = None
+        if self.detector_digest_windows:
+            # Tabify with the most recently created digest window
+            last_digest = self.detector_digest_windows[-1]
+            target_dock = periscope.dock_manager.find_dock_for_widget(last_digest)
+        
+        if not target_dock:
+            # Fallback to multisweep panel
+            target_dock = periscope.dock_manager.find_dock_for_widget(self)
+            
+        if target_dock:
+            periscope.tabifyDockWidget(target_dock, dock)
+        
+        # Show and activate the dock
+        dock.show()
+        dock.raise_()
 
     @QtCore.pyqtSlot(object)
     def _handle_multisweep_plot_double_click(self, ev):
@@ -1505,9 +1593,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     'conceptual_freq_hz': conceptual_freq_hz
                 }
         
-        # Get spectrum data if available
-        spectrum_data = self.spectrum_noise_data.get('data') if self.spectrum_noise_data else None
-        
         # Find Periscope parent to create docked panel
         periscope = self._get_periscope_parent()
         if not periscope:
@@ -1528,7 +1613,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             all_detectors_data=all_detectors_data,
             initial_detector_idx=detector_idx,
             noise_data=noise_data,
-            spectrum_data=spectrum_data,
             debug_noise_data=self.debug_noise_data,
             debug_phase_data=self.debug_phase_data,
             debug=False
@@ -1636,6 +1720,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         for digest_window in self.detector_digest_windows:
             if hasattr(digest_window, 'apply_theme'):
                 digest_window.apply_theme(dark_mode)
+        
+        # Propagate to noise spectrum windows
+        for noise_window in self.noise_spectrum_windows:
+            if hasattr(noise_window, 'apply_theme'):
+                noise_window.apply_theme(dark_mode)
     
     def _bias_kids(self):
         """

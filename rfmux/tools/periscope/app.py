@@ -491,6 +491,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Add view menu (contains Dark Mode)
         self._create_view_menu()
 
+        # Contains jupyter notebook and 
+        self._create_jupyter_menu()
 
         # Add the help menu 
         self._create_help_menu()
@@ -2098,6 +2100,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.dark_mode_action.triggered.connect(self._update_console_style)
         view_menu.addAction(self.dark_mode_action)
 
+
+    def _create_jupyter_menu(self):
+        """
+        Create the Jupyter menu for display settings like jupyter notebook.
+        """
+
+        jupyter_menu = self.menuBar().addMenu("&Jupyter")
+
         self.interactive_session_action = QtGui.QAction("Interactive iPython &Session", self)
         self.interactive_session_action.setToolTip("Toggle an embedded iPython interactive session.")
         self.interactive_session_action.triggered.connect(self._toggle_interactive_session)
@@ -2107,14 +2117,15 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 self.interactive_session_action.setToolTip("Interactive session disabled: qtconsole/ipykernel not installed.")
             else:
                 self.interactive_session_action.setToolTip("Interactive session disabled: CRS object not available.")
-        view_menu.addAction(self.interactive_session_action)
+        jupyter_menu.addAction(self.interactive_session_action)
         
         # Jupyter Notebook panel
         notebook_action = QtGui.QAction("📓 &Jupyter Notebook", self)
         notebook_action.setShortcut("Ctrl+Shift+J")
         notebook_action.setToolTip("Open an embedded Jupyter notebook for interactive analysis")
         notebook_action.triggered.connect(lambda: self._toggle_notebook_panel())
-        view_menu.addAction(notebook_action)
+        jupyter_menu.addAction(notebook_action)
+        
 
     def _create_window_menu(self):
         """

@@ -460,6 +460,8 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self.exp_binning_checkbox = QtWidgets.QCheckBox("Exponential Binning")
         self.exp_binning_checkbox.setToolTip("If checked, noise spectrum will use exponential binning.")
+        self.exp_binning_checkbox.setChecked(True)
+        self.exp_binning_enabled = True
         self.exp_binning_checkbox.toggled.connect(self._toggle_exp_binning)
         
         checkbox_layout.addStretch()

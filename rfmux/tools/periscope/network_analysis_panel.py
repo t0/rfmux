@@ -1,4 +1,4 @@
-"""Window class for network analysis results."""
+"""Panel class for network analysis results (dockable)."""
 import datetime # Added for MultisweepWindow export
 import pickle   # Added for MultisweepWindow export
 import os 
@@ -13,13 +13,23 @@ from .tasks import SetCableLengthSignals # Added import
 from .dialogs import NetworkAnalysisParamsDialog, FindResonancesDialog, MultisweepDialog
 from .network_analysis_export import NetworkAnalysisExportMixin
 
-class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
+class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, ScreenshotMixin):
     """
-    Window for displaying network analysis results with real units support.
+    Dockable panel for displaying network analysis results with real units support.
+
+    This panel can be wrapped in a QDockWidget for tabbed/floating display within
+    the main Periscope window. All functionality from the original NetworkAnalysisWindow
+    is preserved.
+    
+    Signals:
+        data_ready: Emitted when analysis completes with full export data dict
     """
-    def __init__(self, parent=None, modules=None, dac_scales=None, dark_mode=False):
+    
+    # Signal for session auto-export
+    data_ready = QtCore.pyqtSignal(dict)  # Full export data dictionary
+    
+    def __init__(self, parent=None, modules=None, dac_scales=None, dark_mode=False, is_loaded_data=False):
         super().__init__(parent)
-        self.setWindowTitle("Network Analysis Results")
         self.modules = modules or []
         self.data = {}  # module -> amplitude data dictionary
         self.raw_data = {}  # Store the raw IQ data for unit conversion
@@ -39,6 +49,10 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
         self.faux_resonance_legend_items_mag = {} # For Req 3
         self.faux_resonance_legend_items_phase = {} # For Req 3
         self.dark_mode = dark_mode  # Store dark mode setting
+        self.is_loaded_data = is_loaded_data  # Track if this is from loaded data
+        
+        # Track last session export filename for overwriting
+        self._last_export_filename: Optional[str] = None
 
         # Initialize signals for SetCableLengthTask
         self.set_cable_length_signals = SetCableLengthSignals()
@@ -51,10 +65,10 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
         self.resize(1000, 800)
 
     def _setup_ui(self):
-        """Set up the user interface for the window."""
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
-        layout = QtWidgets.QVBoxLayout(central)
+        """Set up the user interface for the panel."""
+        # Create main layout for the panel (no central widget needed for QWidget)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)  # No margins for cleaner docking
         
         # Create toolbar
         self._setup_toolbar(layout)
@@ -68,28 +82,27 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
     def _setup_toolbar(self, layout):
         """Set up the toolbars with controls."""
         # Toolbar 1: Global Controls (Top Row)
-        toolbar_global = QtWidgets.QToolBar("Global Controls")
-        toolbar_global.setMovable(False)
-        self.addToolBar(toolbar_global)
+        # Use QWidget container instead of QToolBar for compatibility with QWidget base class
+        toolbar_global = QtWidgets.QWidget()
+        toolbar_global_layout = QtWidgets.QHBoxLayout(toolbar_global)
+        toolbar_global_layout.setContentsMargins(5, 5, 5, 5)
 
         # Export button
-        export_btn = QtWidgets.QPushButton("Export Data")
+        export_btn = QtWidgets.QPushButton("💾")
+        export_btn.setToolTip("Export data")
         export_btn.clicked.connect(self._export_data)
-        toolbar_global.addWidget(export_btn)
+        toolbar_global_layout.addWidget(export_btn)
 
         # Edit Other Parameters button (renamed to Re-run Analysis)
-        edit_params_btn = QtWidgets.QPushButton("Re-run analysis") # Renamed
-        edit_params_btn.clicked.connect(self._edit_parameters) # Kept self._edit_parameters as per user
-        toolbar_global.addWidget(edit_params_btn)
-
-        
-        toolbar_global.addSeparator()
+        edit_params_btn = QtWidgets.QPushButton("Re-run analysis")
+        edit_params_btn.clicked.connect(self._edit_parameters)
+        toolbar_global_layout.addWidget(edit_params_btn)
 
         # Show/Hide resonances checkbox
-        self.show_resonances_cb = QtWidgets.QCheckBox("Show Resonances") # Count removed as per req 3
+        self.show_resonances_cb = QtWidgets.QCheckBox("Show Resonances")
         self.show_resonances_cb.setChecked(True)
         self.show_resonances_cb.toggled.connect(self._toggle_resonances_visible)
-        toolbar_global.addWidget(self.show_resonances_cb)
+        toolbar_global_layout.addWidget(self.show_resonances_cb)
 
         # Add/Subtract mode
         self.edit_resonances_cb = QtWidgets.QCheckBox("Add/Subtract Resonances")
@@ -98,33 +111,37 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             "Shift + double-click removes the nearest resonance."
         )
         self.edit_resonances_cb.toggled.connect(self._toggle_resonance_edit_mode)
-        toolbar_global.addWidget(self.edit_resonances_cb)
-        
-        toolbar_global.addSeparator()
+        toolbar_global_layout.addWidget(self.edit_resonances_cb)
 
-        # Add spacer to push the unit controls to the far right of the global toolbar
-        spacer_global = QtWidgets.QWidget()
-        spacer_global.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
-        toolbar_global.addWidget(spacer_global)
+        # Add spacer to push the unit controls to the far right
+        toolbar_global_layout.addStretch(1)
 
         # Normalize Magnitudes checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Magnitudes")
         self.normalize_checkbox.setChecked(False)
         self.normalize_checkbox.setToolTip("Normalize all magnitude curves to their first data point")
         self.normalize_checkbox.toggled.connect(self._toggle_normalization)
-        toolbar_global.addWidget(self.normalize_checkbox)
+        toolbar_global_layout.addWidget(self.normalize_checkbox)
+
 
         # Add unit controls
-        self._setup_unit_controls(toolbar_global) # Pass the global toolbar
+        self._setup_unit_controls(toolbar_global_layout)
 
         # Add zoom box mode checkbox
-        self._setup_zoom_box_control(toolbar_global) # Pass the global toolbar
+        self._setup_zoom_box_control(toolbar_global_layout)
+
+        # Screenshot button
+        screenshot_btn = QtWidgets.QPushButton("📷")
+        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        screenshot_btn.clicked.connect(self._export_screenshot)
+        toolbar_global_layout.addWidget(screenshot_btn)
+        
+        layout.addWidget(toolbar_global)
 
         # Toolbar 2: Module-Specific Controls (Bottom Row)
-        toolbar_module = QtWidgets.QToolBar("Module Controls")
-        toolbar_module.setMovable(False)
-        self.addToolBarBreak(QtCore.Qt.ToolBarArea.TopToolBarArea) # Ensures this toolbar is on a new row
-        self.addToolBar(toolbar_module)
+        toolbar_module = QtWidgets.QWidget()
+        toolbar_module_layout = QtWidgets.QHBoxLayout(toolbar_module)
+        toolbar_module_layout.setContentsMargins(5, 5, 5, 5)
 
         # Cable length control
         self.cable_length_label = QtWidgets.QLabel("Cable Length (m):")
@@ -133,30 +150,34 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
         self.cable_length_spin.setValue(DEFAULT_CABLE_LENGTH)
         self.cable_length_spin.setSingleStep(0.05)
         self.cable_length_spin.valueChanged.connect(self._on_cable_length_changed)
-        toolbar_module.addWidget(self.cable_length_label)
-        toolbar_module.addWidget(self.cable_length_spin)
+        toolbar_module_layout.addWidget(self.cable_length_label)
+        toolbar_module_layout.addWidget(self.cable_length_spin)
 
         # Unwrap Cable Delay button
         unwrap_button = QtWidgets.QPushButton("Unwrap Cable Delay")
         unwrap_button.setToolTip("Fit phase slope, calculate cable length, and apply compensation for the active module.")
         unwrap_button.clicked.connect(self._unwrap_cable_delay_action)
-        toolbar_module.addWidget(unwrap_button)
+        toolbar_module_layout.addWidget(unwrap_button)
 
         # Find Resonances button
         find_res_btn = QtWidgets.QPushButton("Find Resonances")
         find_res_btn.setToolTip("Identify resonance frequencies from the current sweep data for the active module.")
         find_res_btn.clicked.connect(self._show_find_resonances_dialog)
-        toolbar_module.addWidget(find_res_btn)
+        toolbar_module_layout.addWidget(find_res_btn)
 
         # Take Multisweep button
         self.take_multisweep_btn = QtWidgets.QPushButton("Take Multisweep")
         self.take_multisweep_btn.setToolTip("Perform a multisweep using identified resonance frequencies for the active module.")
         self.take_multisweep_btn.clicked.connect(self._show_multisweep_dialog)
         self.take_multisweep_btn.setEnabled(False) # Initially disabled
-        toolbar_module.addWidget(self.take_multisweep_btn)
+        toolbar_module_layout.addWidget(self.take_multisweep_btn)
+        
+        toolbar_module_layout.addStretch(1)
+        
+        layout.addWidget(toolbar_module)
 
-    def _setup_unit_controls(self, toolbar):
-        """Set up the unit selection controls and add them to the specified toolbar."""
+    def _setup_unit_controls(self, toolbar_layout):
+        """Set up the unit selection controls and add them to the specified toolbar layout."""
         unit_group = QtWidgets.QWidget()
         unit_layout = QtWidgets.QHBoxLayout(unit_group)
         unit_layout.setContentsMargins(0, 0, 0, 0)
@@ -165,7 +186,7 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
         self.rb_counts = QtWidgets.QRadioButton("Counts")
         self.rb_dbm = QtWidgets.QRadioButton("dBm")
         self.rb_volts = QtWidgets.QRadioButton("Volts")
-        self.rb_dbm.setChecked(True)  # Changed from rb_counts to rb_dbm
+        self.rb_dbm.setChecked(True)
         
         unit_layout.addWidget(QtWidgets.QLabel("Units:"))
         unit_layout.addWidget(self.rb_counts)
@@ -181,21 +202,20 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
         unit_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, 
                                 QtWidgets.QSizePolicy.Policy.Preferred)
         
-        # Now add the unit controls at the far right
-        toolbar.addSeparator()
-        toolbar.addWidget(unit_group)
+        # Add the unit controls to the layout
+        toolbar_layout.addWidget(unit_group)
         
-    def _setup_zoom_box_control(self, toolbar):
+    def _setup_zoom_box_control(self, toolbar_layout):
         """Set up the zoom box mode control."""
         zoom_box_cb = QtWidgets.QCheckBox("Zoom Box Mode")
-        zoom_box_cb.setChecked(self.zoom_box_mode)  # Default to ON
+        zoom_box_cb.setChecked(self.zoom_box_mode)
         zoom_box_cb.setToolTip("When enabled, left-click drag creates a zoom box. When disabled, left-click drag pans.")
         zoom_box_cb.toggled.connect(self._toggle_zoom_box)
         
         # Store reference to the checkbox
         self.zoom_box_cb = zoom_box_cb
         
-        toolbar.addWidget(zoom_box_cb)
+        toolbar_layout.addWidget(zoom_box_cb)
 
     def _setup_progress_bars(self, layout):
         """Set up progress bars for each module."""
@@ -614,30 +634,6 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
                 amplitude = DEFAULT_AMPLITUDE
         return amplitude, freqs, amps, phases, iq_data
 
-    def closeEvent(self, event: pg.QtGui.QCloseEvent): # Corrected signature
-        """Handle window close event by cleaning up resources."""
-        parent_widget = self.parent()
-        
-        if parent_widget and hasattr(parent_widget, 'netanal_windows'):
-            window_id = None
-            for w_id, w_data in parent_widget.netanal_windows.items(): # type: ignore
-                if w_data['window'] == self:
-                    window_id = w_id
-                    break
-            
-            if window_id:
-                if hasattr(parent_widget, 'netanal_tasks'):
-                    # Assuming netanal_tasks is a dict
-                    for task_key in list(parent_widget.netanal_tasks.keys()): # type: ignore
-                        if task_key.startswith(f"{window_id}_"):
-                            task = parent_widget.netanal_tasks.pop(task_key) # type: ignore
-                            if hasattr(task, 'stop'): 
-                                task.stop() # type: ignore
-                
-                parent_widget.netanal_windows.pop(window_id, None) # type: ignore
-        
-        super().closeEvent(event)
-
     def _show_find_resonances_dialog(self):
         """Show the dialog to configure and run find_resonances."""
         current_tab_index = self.tabs.currentIndex()
@@ -760,6 +756,13 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             self._toggle_resonances_visible(self.show_resonances_cb.isChecked()) 
         self._update_multisweep_button_state(active_module)
         
+        # Emit data_ready signal for session auto-export after finding resonances
+        # Include filename override if this panel has exported before (to update existing file)
+        export_data = self.build_export_dict()  # Use inherited method from mixin
+        if self._last_export_filename:
+            export_data['_filename_override'] = self._last_export_filename
+        self.data_ready.emit(export_data)
+        
     def _use_loaded_resonances(self, active_module: int, load_resonance_freqs: list):
         if active_module in self.plots:
             plot_info = self.plots[active_module]
@@ -840,6 +843,15 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             self.faux_resonance_legend_items_phase[module_id] = legend_sample_item_phase
 
 
+    def _get_periscope_parent(self):
+        """
+        Get the Periscope parent instance by walking up the parent hierarchy.
+        
+        Returns:
+            The Periscope instance or None if not found
+        """
+        return find_parent_with_attr(self, 'netanal_windows')
+    
     def _check_all_complete(self):
         """
         Check if all progress bars are at 100% and hide the progress group 
@@ -847,15 +859,19 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
         """
         if not self.progress_group:
             return
-            
-        parent = self.parent()
-        window_id = None
         
-        if parent and hasattr(parent, 'netanal_windows'):
-            for w_id, w_data in parent.netanal_windows.items():
-                if w_data['window'] == self:
-                    window_id = w_id
-                    break
+        # Walk up parent hierarchy to find Periscope instance
+        # (panel may be wrapped in QDockWidget, so parent() might not be Periscope directly)
+        parent = self._get_periscope_parent()
+        
+        if not parent:
+            return
+            
+        window_id = None
+        for w_id, w_data in parent.netanal_windows.items():
+            if w_data['window'] == self:
+                window_id = w_id
+                break
         
         if not window_id:
             return
@@ -883,6 +899,19 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             updated_general_params = dialog.get_parameters() 
             
             if updated_general_params:
+                # Reset the loaded data flag since we're now generating fresh data
+                self.is_loaded_data = False
+                
+                # Update the dock title to remove "(Loaded)" suffix
+                periscope = self._get_periscope_parent()
+                if periscope:
+                    my_dock = periscope.dock_manager.find_dock_for_widget(self)
+                    if my_dock:
+                        # Get current title and remove " (Loaded)" if present
+                        current_title = my_dock.windowTitle()
+                        new_title = current_title.replace(" (Loaded)", "")
+                        my_dock.setWindowTitle(new_title)
+                
                 params_for_rerun = updated_general_params.copy()
                 params_for_rerun['module_cable_lengths'] = self.module_cable_lengths.copy()
                 params_for_rerun.pop('cable_length', None)
@@ -891,12 +920,13 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
                 if self.progress_group:
                     self.progress_group.setVisible(True)
                 
-                if self.parent() and hasattr(self.parent(), '_rerun_network_analysis'):
-                    self.parent()._rerun_network_analysis(self.current_params) # type: ignore
+                parent_widget = self._get_periscope_parent()
+                if parent_widget and hasattr(parent_widget, '_rerun_network_analysis'):
+                    parent_widget._rerun_network_analysis(self.current_params) # type: ignore
 
     def _rerun_analysis(self):
         """Re-run the analysis with potentially updated parameters."""
-        parent_widget = self.parent()
+        parent_widget = self._get_periscope_parent()
         if parent_widget and hasattr(parent_widget, '_rerun_network_analysis'):
             params = self.current_params.copy()
             params['module_cable_lengths'] = self.module_cable_lengths.copy()
@@ -1025,10 +1055,21 @@ class NetworkAnalysisWindow(QtWidgets.QMainWindow, NetworkAnalysisExportMixin):
             self.progress_bars[module].setValue(int(progress))
     
     def complete_analysis(self, module: int):
-        """Mark analysis as complete for a module."""
+        """Mark analysis as complete for a module and emit data_ready signal."""
         if module in self.progress_bars:
             self.progress_bars[module].setValue(100)
             self._check_all_complete()
+            
+        # Emit data_ready signal for session auto-export
+        if self._all_modules_complete():
+            export_data = self.build_export_dict()  # Use inherited method from mixin
+            self.data_ready.emit(export_data)
+    
+    def _all_modules_complete(self) -> bool:
+        """Check if all modules have completed analysis."""
+        if not self.progress_bars:
+            return False
+        return all(pbar.value() == 100 for pbar in self.progress_bars.values())
             
     def apply_theme(self, dark_mode: bool):
         """Apply the dark/light theme to all plots in this window."""

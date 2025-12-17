@@ -52,11 +52,28 @@ from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, Initial
                        # and window classes (NetworkAnalysisWindow, MultisweepWindow).
                        # (Assumes periscope_ui.py has been refactored into ui.py and exports these).
 from .app_runtime import PeriscopeRuntime
+from PyQt6 import sip  # For checking if Qt C++ objects have been deleted
 from .mock_configuration_dialog import MockConfigurationDialog
+from .dock_manager import PeriscopeDockManager
+from .main_plot_panel import MainPlotPanel
+from .session_manager import SessionManager
+from .session_browser_panel import SessionBrowserPanel
+from .session_startup_dialog import UnifiedStartupDialog
 from rfmux.core.transferfunctions import convert_roc_to_volts
 from rfmux.mock import config as mc
+import datetime
 
 
+
+class DummyReceiver:
+    """A dummy receiver for Offline mode that provides the expected interface."""
+    def __init__(self):
+        self.queue = queue.Queue()
+    def start(self): pass
+    def stop(self): pass
+    def wait(self): pass
+    def get_dropped_packets(self): return 0
+    def get_received_packets(self): return 0
 
 class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     """
@@ -104,6 +121,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         refresh_ms: int = DEFAULT_REFRESH_MS, # Constant from .utils
         dot_px: int = DENSITY_DOT_SIZE,       # Constant from .utils
         crs=None, # CRS object, type hint likely from .utils or a core module
+        skip_startup_dialog: bool = False,  # Skip dialog if already handled by launcher
     ):
         """
         Initializes the Periscope main window.
@@ -178,8 +196,23 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.pool = QThreadPool()
         self.pool.setMaxThreadCount(4)  # Example: Allow up to 4 concurrent network analyses.
 
+        # Initialize the DockManager for managing analysis windows as dockable panels
+        self.dock_manager = PeriscopeDockManager(self)
+
+        # Create UI widgets first (before MainPlotPanel needs them)
+        self._create_ui_widgets(chan_str)
+        
         # Construct the main user interface.
         self._build_ui(chan_str) # Pass chan_str for initial display in QLineEdit
+        
+        # Create the main plot panel in its dock
+        self._add_plot_container(None)  # Layout not needed, using dock
+        
+        # Add session browser dock (after Main dock exists so splitDockWidget works)
+        self._add_session_browser_dock()
+        
+        # Create the Window menu for dock management
+        self._create_window_menu()
 
         # Initialize data buffers for each channel (Circular buffer from .utils).
         self._init_buffers()
@@ -189,6 +222,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         # Start the timer for periodic GUI updates (QtCore from .utils).
         self._start_timer()
+        
+        # Set initial window size (wider and taller for better visibility)
+        self.resize(900, 450)
+        
+        # Show session startup dialog (unless already handled by launcher)
+        self._skip_startup_dialog = skip_startup_dialog
+        if not skip_startup_dialog:
+            QtCore.QTimer.singleShot(100, self._show_session_startup_dialog)
 
     def _init_workers(self):
         """
@@ -218,12 +259,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.psd_signals.done.connect(self._psd_done) # Connect completion signal to handler
 
         # Network Analysis (NetAnal) signals and tracking.
-        # NetworkAnalysisSignals (from .tasks) handles signals for NetAnal task progress, data updates, completion, and errors.
+        # NetworkAnalysisSignals (from .tasks) - signals are routed directly to panels via check_connection()
         self.netanal_signals = NetworkAnalysisSignals()
-        self.netanal_signals.progress.connect(self._netanal_progress)
-        self.netanal_signals.data_update.connect(self._netanal_data_update)
-        self.netanal_signals.data_update_with_amp.connect(self._netanal_data_update_with_amp)
-        self.netanal_signals.completed.connect(self._netanal_completed)
+        # Only keep the error signal connected globally as a fallback
         self.netanal_signals.error.connect(self._netanal_error)
         
         # Structures for managing multiple Network Analysis windows and tasks.
@@ -250,7 +288,120 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.kernel_manager = None      # Manages the iPython kernel
         self.jupyter_widget = None      # The Qt widget for the console
         self.console_dock_widget = None # Dock widget to host the console
-        self.btn_interactive_session = None # Button to toggle the console
+
+    def _create_ui_widgets(self, chan_str: str):
+        """
+        Create all UI widgets (but don't add them to layouts yet).
+        
+        These widgets will be added to layouts by MainPlotPanel.
+        This method must be called before creating MainPlotPanel.
+        """
+        # Create toolbar widgets
+        self.e_ch = QtWidgets.QLineEdit(chan_str)
+        self.e_ch.setMaximumWidth(40)
+        self.e_ch.setToolTip("Enter comma-separated channels or use '&' to group in one row (e.g., 1&2,3,4&5&6).")
+        self.e_ch.returnPressed.connect(self._update_channels)
+
+        self.e_buf = QtWidgets.QLineEdit(str(self.N))
+        self.e_buf.setValidator(QIntValidator(10, 1_000_000, self))
+        self.e_buf.setMaximumWidth(120)
+        self.e_buf.setToolTip("Size of the ring buffer for each channel (history/FFT depth).")
+        self.e_buf.editingFinished.connect(self._change_buffer)
+
+        self.b_pause = QtWidgets.QPushButton("Pause", clicked=self._toggle_pause)
+        self.b_pause.setToolTip("Pause or resume real-time data acquisition and display.")
+
+        # Unit radio buttons
+        self.unit_group = QtWidgets.QButtonGroup()
+        self.rb_counts = QtWidgets.QRadioButton("Counts")
+        self.rb_real_units = QtWidgets.QRadioButton("Real Units")
+        self.rb_df_units = QtWidgets.QRadioButton("df Units")
+        
+        self.rb_counts.setToolTip("Display raw ADC counts")
+        self.rb_real_units.setToolTip("Display in voltage/power units (V, dBm/Hz)")
+        self.rb_df_units.setToolTip("Display frequency shift (Hz) and dissipation")
+        
+        self.unit_group.addButton(self.rb_counts, 0)
+        self.unit_group.addButton(self.rb_real_units, 1)
+        self.unit_group.addButton(self.rb_df_units, 2)
+        
+        if self.real_units:
+            self.rb_real_units.setChecked(True)
+        else:
+            self.rb_counts.setChecked(True)
+        
+        self.unit_group.buttonClicked.connect(self._unit_mode_changed)
+
+        # Plot type checkboxes
+        self.cb_time = QtWidgets.QCheckBox("TOD", checked=True)
+        self.cb_iq = QtWidgets.QCheckBox("IQ", checked=False)
+        self.cb_fft = QtWidgets.QCheckBox("FFT", checked=self.is_mock_mode)
+        self.cb_ssb = QtWidgets.QCheckBox("Single Sideband PSD", checked=not self.is_mock_mode)
+        self.cb_dsb = QtWidgets.QCheckBox("Dual Sideband PSD", checked=False)
+        
+        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft):
+            cb_plot_type.toggled.connect(self._build_layout)
+        
+        self.cb_ssb.toggled.connect(self._handle_psd_toggle)
+        self.cb_dsb.toggled.connect(self._handle_psd_toggle)
+
+        # CRS control buttons
+        self.btn_init_crs = QtWidgets.QPushButton("Initialize CRS Board")
+        self.btn_init_crs.setToolTip("Open a dialog to initialize the CRS board (e.g., set IRIG source).")
+        self.btn_init_crs.clicked.connect(self._show_initialize_crs_dialog)
+        if self.crs is None: # Disable if no CRS object is available
+            self.btn_init_crs.setEnabled(False)
+            self.btn_init_crs.setToolTip("CRS object not available - cannot initialize board.")
+
+        self.btn_netanal = QtWidgets.QPushButton("Network Analyzer")
+        self.btn_netanal.setToolTip("Open the network analysis configuration window to perform sweeps.")
+        self.btn_netanal.clicked.connect(self._show_netanal_dialog)
+        if self.crs is None:
+            # In Offline Mode, allow opening dialog to load data
+            if self.host == "OFFLINE":
+                self.btn_netanal.setToolTip("Network Analyzer (Offline Mode - Loading Only)")
+            else:
+                self.btn_netanal.setEnabled(False)
+                self.btn_netanal.setToolTip("CRS object not available - network analysis disabled.")
+
+        self.btn_load_multi = QtWidgets.QPushButton("Load Multisweep")
+        self.btn_load_multi.setToolTip("Load Multisweep directly from main window.")
+        self.btn_load_multi.clicked.connect(self._load_multisweep_dialog)
+        if self.crs is None and self.host != "OFFLINE":
+            self.btn_load_multi.setEnabled(False)
+            self.btn_load_multi.setToolTip("CRS object not available - load multisweep disabled.")
+
+        self.btn_load_bias = QtWidgets.QPushButton("Load Bias")
+        self.btn_load_bias.setToolTip("Bias KIDS directly from the main window.")
+        self.btn_load_bias.clicked.connect(self.handle_bias_from_file)
+        if self.crs is None and self.host != "OFFLINE":
+            self.btn_load_bias.setEnabled(False)
+            self.btn_load_bias.setToolTip("CRS object not available - load Bias disabled.")
+
+        self.btn_toggle_cfg = QtWidgets.QPushButton("Show Configuration")
+        self.btn_toggle_cfg.setCheckable(True)
+        self.btn_toggle_cfg.toggled.connect(self._toggle_config)
+
+        # Mock mode specific buttons
+        if self.is_mock_mode:
+            self.btn_reconfigure_mock = QtWidgets.QPushButton("Reconfigure Simulated KIDs")
+            self.btn_reconfigure_mock.setToolTip("Reconfigure the simulated KID resonator parameters")
+            self.btn_reconfigure_mock.clicked.connect(self._show_mock_config_dialog)
+            
+            self.btn_qp_pulses = QtWidgets.QPushButton("QP Pulses: Off")
+            self.btn_qp_pulses.setToolTip("Toggle quasiparticle pulses in mock mode\nCycles through: Off → Periodic → Random → Off")
+            self.btn_qp_pulses.clicked.connect(self._toggle_qp_pulses)
+            self.qp_pulse_mode = 'none'
+
+        # Create configuration panel (will be added to MainPlotPanel's layout)
+        self.ctrl_panel = QtWidgets.QGroupBox("Configuration")
+        self.ctrl_panel.setVisible(False)
+        config_panel_layout = QtWidgets.QHBoxLayout(self.ctrl_panel)
+        
+        config_panel_layout.addWidget(self._create_show_curves_group())
+        config_panel_layout.addWidget(self._create_iq_mode_group())
+        config_panel_layout.addWidget(self._create_psd_mode_group())
+        config_panel_layout.addWidget(self._create_display_group())
 
     def _init_colormap(self):
         """
@@ -278,8 +429,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         The `UDPReceiver` class (from .tasks) handles receiving packets
         from the specified host and module in a separate thread.
         """
-        self.receiver = UDPReceiver(self.host, self.module) # Instantiate the receiver
-        self.receiver.start()  # Start the receiver thread
+        if self.host == "OFFLINE":
+            self.receiver = DummyReceiver()
+        else:
+            self.receiver = UDPReceiver(self.host, self.module) # Instantiate the receiver
+            self.receiver.start()  # Start the receiver thread
 
     def _start_timer(self):
         """
@@ -292,7 +446,20 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.timer = QtCore.QTimer(singleShot=False)  # Create a non-single-shot timer
         self.timer.timeout.connect(self._update_gui)   # Connect timeout signal to GUI update method
         self.timer.start(self.refresh_ms)             # Start the timer
-        self.setWindowTitle("Periscope")              # Set the main window title
+        # Set window title with CRS serial/module info
+        if self.host == "OFFLINE":
+            title = "Periscope - Offline Mode"
+        elif self.crs is not None and hasattr(self.crs, 'serial'):
+            serial = str(self.crs.serial)
+            if serial == "0000":
+                title = f"Periscope - Mock CRS, Module {self.module}"
+            else:
+                title = f"Periscope - CRS{serial}, Module {self.module}"
+        elif self.host in ["127.0.0.1", "localhost", "::1"]:
+            title = f"Periscope - Mock CRS, Module {self.module}"
+        else:
+            title = f"Periscope - {self.host}, Module {self.module}"
+        self.setWindowTitle(title)
 
     # ───────────────────────── UI Construction ─────────────────────────
     # The methods in this section are responsible for building the various
@@ -303,249 +470,41 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Create and configure all top-level widgets and the main layout.
 
         This method orchestrates the construction of the entire UI by calling
-        helper methods to add specific sections like the title, toolbar,
-        configuration panel, plot container, status bar, and interactive console.
+        helper methods to add specific sections like the status bar.
+        The toolbar, config panel, and plots are now in the MainPlotPanel dock.
 
         Args:
-            chan_str (str): The initial channel string, used to populate the
-                            channel input field in the toolbar.
+            chan_str (str): The initial channel string (passed to MainPlotPanel)
         """
-        # `QtWidgets` is imported from .utils.
-        central_widget = QtWidgets.QWidget() # Main content area for the QMainWindow
-        self.setCentralWidget(central_widget)
-        main_vbox_layout = QtWidgets.QVBoxLayout(central_widget) # Main vertical layout
-
-        # Add UI components sequentially
-        self._add_title(main_vbox_layout)
-        self._add_toolbar(main_vbox_layout, chan_str)
-        self._add_config_panel(main_vbox_layout)
-        self._add_plot_container(main_vbox_layout)
+        # Initialize session manager
+        self.session_manager = SessionManager(self)
+        
+        # Add status bar
         self._add_status_bar()
-        self._add_interactive_console_dock() # Adds dock for iPython console (if available)
-
-    def _add_title(self, layout: QtWidgets.QVBoxLayout):
-        """
-        Add the main application title label to the given layout.
-
-        Displays the connected CRS host and module number.
-        For mock mode, displays "EMULATED CRS BOARD" instead of the IP address.
-        """
-        # `QtWidgets` and `QtCore` are from .utils.
-        # Check if we're in mock mode (localhost/127.0.0.1)
-        if self.host in ["127.0.0.1", "localhost", "::1"]:
-            display_host = "EMULATED CRS BOARD"
-        else:
-            display_host = self.host
         
-        title_label = QtWidgets.QLabel(f"CRS: {display_host}    Module: {self.module}")
-        title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter) # Center the title
-        font_title = title_label.font() # Get current font to modify size
-        font_title.setPointSize(16)    # Set a larger font size for the title
-        title_label.setFont(font_title)
-        layout.addWidget(title_label) # Add the label to the provided layout
-
-    def _add_toolbar(self, layout: QtWidgets.QVBoxLayout, chan_str: str):
-        """
-        Add the main toolbar to the UI.
-
-        The toolbar contains controls for channel selection, buffer size,
-        pausing, toggling real units, selecting plot types, and accessing
-        help, network analysis, and CRS initialization.
-
-        Args:
-            layout (QtWidgets.QVBoxLayout): The parent layout to add the toolbar to.
-            chan_str (str): The initial channel string for the channel input field.
-        """
-        # `QtWidgets`, `QIntValidator` are from .utils.
-        toolbar_widget = QtWidgets.QWidget() # Container widget for the toolbar
-        toolbar_layout = QtWidgets.QHBoxLayout(toolbar_widget) # Horizontal layout for toolbar items
-
-        # Button to show/hide the configuration panel
-        self.btn_toggle_cfg = QtWidgets.QPushButton("Show Configuration")
-        self.btn_toggle_cfg.setCheckable(True)
-        self.btn_toggle_cfg.toggled.connect(self._toggle_config)
-
-        # Input field for channel selection string
-        self.e_ch = QtWidgets.QLineEdit(chan_str)
-        self.e_ch.setToolTip("Enter comma-separated channels or use '&' to group in one row (e.g., 1&2,3,4&5&6).")
-        self.e_ch.returnPressed.connect(self._update_channels) # Update channels when Enter is pressed
-
-        # Input field for buffer size
-        self.e_buf = QtWidgets.QLineEdit(str(self.N))
-        self.e_buf.setValidator(QIntValidator(10, 1_000_000, self)) # Validate input as integer (10 to 1M)
-        self.e_buf.setMaximumWidth(80) # Limit width
-        self.e_buf.setToolTip("Size of the ring buffer for each channel (history/FFT depth).")
-        self.e_buf.editingFinished.connect(self._change_buffer) # Update buffer size when editing is done
-
-        # Pause/Resume button
-        self.b_pause = QtWidgets.QPushButton("Pause", clicked=self._toggle_pause)
-        self.b_pause.setToolTip("Pause or resume real-time data acquisition and display.")
-
-        # Radio buttons for unit selection
-        self.unit_group = QtWidgets.QButtonGroup()
-        self.rb_counts = QtWidgets.QRadioButton("Counts")
-        self.rb_real_units = QtWidgets.QRadioButton("Real Units")
-        self.rb_df_units = QtWidgets.QRadioButton("df Units")
+        # Add interactive console dock
+        self._add_interactive_console_dock()
         
-        self.rb_counts.setToolTip("Display raw ADC counts")
-        self.rb_real_units.setToolTip("Display in voltage/power units (V, dBm/Hz)")
-        self.rb_df_units.setToolTip("Display frequency shift (Hz) and dissipation")
+        # Add session menu
+        self._create_session_menu()
         
-        # Add to button group for exclusive selection
-        self.unit_group.addButton(self.rb_counts, 0)
-        self.unit_group.addButton(self.rb_real_units, 1)
-        self.unit_group.addButton(self.rb_df_units, 2)
+        # Add view menu (contains Dark Mode)
+        self._create_view_menu()
+
+        # Contains jupyter notebook and 
+        self._create_jupyter_menu()
+
+        # Add the help menu 
+        self._create_help_menu()
+
+        self.menuBar().setNativeMenuBar(False)
         
-        # Set initial state based on real_units flag
-        if self.real_units:
-            self.rb_real_units.setChecked(True)
-        else:
-            self.rb_counts.setChecked(True)
+        # Note: Session browser dock will be added after Main dock is created
         
-        # Connect signal
-        self.unit_group.buttonClicked.connect(self._unit_mode_changed)
-
-        # Checkboxes to select which plot types are displayed
-        # For mock mode, default to TOD and FFT (not PSDs)
-        self.cb_time = QtWidgets.QCheckBox("TOD", checked=True) # Time-domain
-        self.cb_iq = QtWidgets.QCheckBox("IQ", checked=False)    # IQ plane
-        self.cb_fft = QtWidgets.QCheckBox("FFT", checked=self.is_mock_mode)   # Raw FFT - on by default in mock mode
-        self.cb_ssb = QtWidgets.QCheckBox("Single Sideband PSD", checked=not self.is_mock_mode) # SSB PSD - off in mock mode
-        self.cb_dsb = QtWidgets.QCheckBox("Dual Sideband PSD", checked=False)  # DSB PSD
-        
-        # Connect toggled signal of each plot type checkbox
-        # For PSD checkboxes in mock mode, show warning
-        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft):
-            cb_plot_type.toggled.connect(self._build_layout)
-        
-        # Special handling for PSD checkboxes in mock mode
-        self.cb_ssb.toggled.connect(self._handle_psd_toggle)
-        self.cb_dsb.toggled.connect(self._handle_psd_toggle)
-
-        # Button to open CRS (Control and Readout System) initialization dialog
-        self.btn_init_crs = QtWidgets.QPushButton("Initialize CRS Board")
-        self.btn_init_crs.setToolTip("Open a dialog to initialize the CRS board (e.g., set IRIG source).")
-        self.btn_init_crs.clicked.connect(self._show_initialize_crs_dialog)
-        if self.crs is None: # Disable if no CRS object is available
-            self.btn_init_crs.setEnabled(False)
-            self.btn_init_crs.setToolTip("CRS object not available - cannot initialize board.")
-
-        # Button to open Network Analyzer configuration dialog
-        self.btn_netanal = QtWidgets.QPushButton("Network Analyzer")
-        self.btn_netanal.setToolTip("Open the network analysis configuration window to perform sweeps.")
-        self.btn_netanal.clicked.connect(self._show_netanal_dialog)
-        if self.crs is None: # Disable if no CRS object is available
-            self.btn_netanal.setEnabled(False)
-            self.btn_netanal.setToolTip("CRS object not available - network analysis disabled.")
-
-        # Button to Load Multisweep Dialog
-        self.btn_load_multi = QtWidgets.QPushButton("Load Multisweep")
-        self.btn_load_multi.setToolTip("Load Multisweep directly from main window.")
-        self.btn_load_multi.clicked.connect(self._load_multisweep_dialog)
-        if self.crs is None: # Disable if no CRS object is available
-            self.btn_load_multi.setEnabled(False)
-            self.btn_load_multi.setToolTip("CRS object not available - load multisweep disabled.")
-
-        # Button to Load Bias KIDS Dialog
-        self.btn_load_bias = QtWidgets.QPushButton("Load Bias")
-        self.btn_load_bias.setToolTip("Bias KIDS directly from the main window.")
-        self.btn_load_bias.clicked.connect(self.handle_bias_from_file)
-        if self.crs is None: # Disable if no CRS object is available
-            self.btn_load_bias.setEnabled(False)
-            self.btn_load_bias.setToolTip("CRS object not available - load Bias disabled.")
-
-        # Help button
-        self.btn_help = QtWidgets.QPushButton("Help")
-        self.btn_help.setToolTip("Show usage instructions, interaction details, and examples.")
-        self.btn_help.clicked.connect(self._show_help)
-
-        # Add widgets to the toolbar layout
-        toolbar_layout.addWidget(QtWidgets.QLabel("Channels:"))
-        toolbar_layout.addWidget(self.e_ch)
-        toolbar_layout.addSpacing(20)
-        toolbar_layout.addWidget(QtWidgets.QLabel("Buffer:"))
-        toolbar_layout.addWidget(self.e_buf)
-        toolbar_layout.addWidget(self.b_pause)
-        toolbar_layout.addSpacing(30)
-        
-        # Add unit radio buttons
-        toolbar_layout.addWidget(QtWidgets.QLabel("Units:"))
-        toolbar_layout.addWidget(self.rb_counts)
-        toolbar_layout.addWidget(self.rb_real_units)
-        toolbar_layout.addWidget(self.rb_df_units)
-        toolbar_layout.addSpacing(30)
-        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_ssb, self.cb_dsb):
-            toolbar_layout.addWidget(cb_plot_type)
-        toolbar_layout.addStretch(1) # Add stretch to push items to the left
-        
-        # Add mock reconfigure button if in mock mode
-        if self.is_mock_mode:
-            self.btn_reconfigure_mock = QtWidgets.QPushButton("Reconfigure Simulated KIDs")
-            self.btn_reconfigure_mock.setToolTip("Reconfigure the simulated KID resonator parameters")
-            self.btn_reconfigure_mock.clicked.connect(self._show_mock_config_dialog)
-            toolbar_layout.addWidget(self.btn_reconfigure_mock)
-            
-            # Add quasiparticle pulse button
-            self.btn_qp_pulses = QtWidgets.QPushButton("QP Pulses: Off")
-            self.btn_qp_pulses.setToolTip("Toggle quasiparticle pulses in mock mode\nCycles through: Off → Periodic → Random → Off")
-            self.btn_qp_pulses.clicked.connect(self._toggle_qp_pulses)
-            self.qp_pulse_mode = 'none'  # Track current pulse mode
-            toolbar_layout.addWidget(self.btn_qp_pulses)
-        
-        layout.addWidget(toolbar_widget) # Add the toolbar widget to the main vertical layout
-
-    def _add_config_panel(self, layout: QtWidgets.QVBoxLayout):
-        """
-        Add the collapsible configuration panel and its associated action buttons.
-
-        The action buttons (Interactive Session, Initialize CRS, Network Analyzer,
-        Show/Hide Configuration, Help) are placed above the configuration panel itself.
-        The configuration panel contains groups for 'Show Curves', 'IQ Mode',
-        'PSD Mode', and 'General Display' settings.
-
-        Args:
-            layout (QtWidgets.QVBoxLayout): The parent layout to add the panel to.
-        """
-        # `QtWidgets`, `QTCONSOLE_AVAILABLE` are from .utils.
-
-        # --- Action Buttons Row (above the collapsible config panel) ---
-        action_buttons_widget = QtWidgets.QWidget()
-        action_buttons_layout = QtWidgets.QHBoxLayout(action_buttons_widget)
-        action_buttons_layout.setContentsMargins(0,0,0,0) # No margins for this layout
-        action_buttons_layout.addStretch(1) # Push buttons to the right
-
-        # Button to toggle embedded iPython session
-        self.btn_interactive_session = QtWidgets.QPushButton("Interactive Session")
-        self.btn_interactive_session.setToolTip("Toggle an embedded iPython interactive session.")
-        self.btn_interactive_session.clicked.connect(self._toggle_interactive_session)
-        if not QTCONSOLE_AVAILABLE or self.crs is None: # QTCONSOLE_AVAILABLE from .utils
-            self.btn_interactive_session.setEnabled(False)
-            if not QTCONSOLE_AVAILABLE:
-                self.btn_interactive_session.setToolTip("Interactive session disabled: qtconsole/ipykernel not installed.")
-            else:
-                self.btn_interactive_session.setToolTip("Interactive session disabled: CRS object not available.")
-        action_buttons_layout.addWidget(self.btn_interactive_session)
-
-        action_buttons_layout.addWidget(self.btn_init_crs)
-        action_buttons_layout.addWidget(self.btn_netanal)
-        action_buttons_layout.addWidget(self.btn_load_multi)
-        action_buttons_layout.addWidget(self.btn_load_bias)
-        action_buttons_layout.addWidget(self.btn_toggle_cfg)
-        action_buttons_layout.addWidget(self.btn_help)  
-        layout.addWidget(action_buttons_widget)
-
-        # --- Collapsible Configuration Panel ---
-        # This panel contains more detailed settings and is initially hidden.
-        self.ctrl_panel = QtWidgets.QGroupBox("Configuration")
-        self.ctrl_panel.setVisible(False) # Initially hidden
-        config_panel_layout = QtWidgets.QHBoxLayout(self.ctrl_panel) # Horizontal layout for groups within the panel
-
-        # Add various settings groups to the configuration panel
-        config_panel_layout.addWidget(self._create_show_curves_group())
-        config_panel_layout.addWidget(self._create_iq_mode_group())
-        config_panel_layout.addWidget(self._create_psd_mode_group())
-        config_panel_layout.addWidget(self._create_display_group())
-        layout.addWidget(self.ctrl_panel) # Add the panel to the main vertical layout
+        # Connect session manager to status bar
+        self.session_manager.session_started.connect(self._update_session_status)
+        self.session_manager.session_ended.connect(self._update_session_status)
+        self.session_manager.file_exported.connect(self._on_file_exported_status)
 
     def _create_show_curves_group(self) -> QtWidgets.QGroupBox:
         """
@@ -661,7 +620,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         Create the 'General Display' group box for the configuration panel.
 
-        Contains checkboxes for zoom box mode, dark mode, and auto-scaling plots.
+        Contains checkboxes for zoom box mode and auto-scaling plots.
+        Note: Dark mode is now in the View menu.
 
         Returns:
             QtWidgets.QGroupBox: The configured group box.
@@ -676,13 +636,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.cb_zoom_box.toggled.connect(self._toggle_zoom_box_mode)
         layout.addWidget(self.cb_zoom_box)
 
-        # Checkbox for dark mode theme
-        self.cb_dark = QtWidgets.QCheckBox("Dark Mode", checked=self.dark_mode)
-        self.cb_dark.setToolTip("Switch between dark and light UI themes.")
-        self.cb_dark.toggled.connect(self._toggle_dark_mode) # Rebuilds layout
-        self.cb_dark.toggled.connect(self._update_console_style) # Updates console style if active
-        layout.addWidget(self.cb_dark)
-
         # Checkbox for auto-scaling plots (excluding TOD)
         self.cb_auto_scale = QtWidgets.QCheckBox("Auto Scale", checked=self.auto_scale_plots)
         self.cb_auto_scale.setToolTip("Enable/disable auto-ranging for IQ, FFT, SSB, and DSB plots. Can improve display performance when disabled.")
@@ -692,14 +645,36 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
     def _add_plot_container(self, layout: QtWidgets.QVBoxLayout):
         """
-        Add the main container widget for plots to the given layout.
+        Add the main plot panel as a dockable widget.
 
-        This container will hold the grid layout where individual plots are placed.
+        Creates a MainPlotPanel, wraps it in a dock, and sets up references
+        so that PeriscopeRuntime can access self.grid and self.container.
         """
-        # `QtWidgets` is from .utils.
-        self.container = QtWidgets.QWidget() # The main widget that will contain the plot grid
-        layout.addWidget(self.container)    # Add it to the parent layout
-        self.grid = QtWidgets.QGridLayout(self.container) # Grid layout for arranging plots
+        # Create the MainPlotPanel
+        self.main_plot_panel = MainPlotPanel(self)
+        
+        # Set up references for backward compatibility with PeriscopeRuntime
+        self.container = self.main_plot_panel.container
+        self.grid = self.main_plot_panel.get_grid()
+        
+        # Wrap in a dock widget
+        main_dock = self.dock_manager.create_dock(
+            self.main_plot_panel,
+            "Main",
+            "main_plots",
+            area=QtCore.Qt.DockWidgetArea.LeftDockWidgetArea  # Main plots on left/center
+        )
+        
+        # Mark main dock as protected (hide instead of close when X is clicked)
+        self.dock_manager.protect_dock("main_plots")
+        
+        # Show the main dock immediately, unless in offline mode (no data streaming)
+        if self.host != "OFFLINE":
+            main_dock.show()
+            main_dock.raise_()
+        else:
+            # In offline mode, hide main dock since there's no data streaming
+            main_dock.hide()
 
     def _add_status_bar(self):
         """
@@ -894,7 +869,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         for rowPlots in self.plots:
             for mode, plot_widget in rowPlots.items():
                 viewbox = plot_widget.getViewBox()
-                if isinstance(viewbox, ClickableViewBox): # ClickableViewBox from .utils
+                # Check if viewbox is valid before accessing (may be deleted during layout rebuild)
+                if isinstance(viewbox, ClickableViewBox) and not sip.isdeleted(viewbox): # ClickableViewBox from .utils, sip from PyQt6
                     viewbox.enableZoomBoxMode(enable)
         for window_id, window_data in self.netanal_windows.items():
             window = window_data.get('window')
@@ -938,6 +914,40 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             task = CRSInitializeTask(self.crs, self.module, irig_source, clear_channels, self.crs_init_signals)
             self.pool.start(task)
 
+    def _fetch_dac_scales_for_dialog(self, dialog) -> None:
+        """
+        Fetch DAC scales asynchronously and connect results to dialog update slots.
+        
+        This helper method encapsulates the common pattern of creating a DACScaleFetcher,
+        connecting its signals to update both the dialog and the Periscope instance's
+        dac_scales attribute.
+        
+        IMPORTANT: Stores the fetcher as an instance variable to prevent garbage collection
+        while the thread is still running.
+        
+        Args:
+            dialog: A dialog instance with dac_scales dict, _update_dac_scale_info(),
+                    and _update_dbm_from_normalized() methods.
+        """
+        if self.crs is None:
+            return
+        
+        # Store as instance variable to prevent garbage collection while thread runs
+        self._active_dac_fetcher = DACScaleFetcher(self.crs)
+        
+        # Clean up reference when thread completes
+        self._active_dac_fetcher.finished.connect(
+            lambda: setattr(self, '_active_dac_fetcher', None)
+        )
+        
+        # Connect signals to dialog updates
+        self._active_dac_fetcher.dac_scales_ready.connect(lambda scales: dialog.dac_scales.update(scales))
+        self._active_dac_fetcher.dac_scales_ready.connect(dialog._update_dac_scale_info)
+        self._active_dac_fetcher.dac_scales_ready.connect(dialog._update_dbm_from_normalized)
+        self._active_dac_fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
+        
+        self._active_dac_fetcher.start()
+
     def _show_netanal_dialog(self):
         """
         Display the Network Analysis configuration dialog.
@@ -948,20 +958,20 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         estimations. If the user confirms the dialog with valid parameters,
         a new network analysis process is started via `_start_network_analysis`.
         """
-        if self.crs is None:
+        if self.crs is None and self.host != "OFFLINE":
             QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
             return
+            
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
         # NetworkAnalysisDialog from .ui (which imports from .dialogs)
         dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
         dialog.module_entry.setText(str(self.module))
-        # DACScaleFetcher from .tasks
-        fetcher = DACScaleFetcher(self.crs)
-        fetcher.dac_scales_ready.connect(lambda scales: dialog.dac_scales.update(scales))
-        fetcher.dac_scales_ready.connect(dialog._update_dac_scale_info)
-        fetcher.dac_scales_ready.connect(dialog._update_dbm_from_normalized)
-        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
-        fetcher.start()
+        
+        # Fetch DAC scales if CRS is available
+        self._fetch_dac_scales_for_dialog(dialog)
+        if self.crs is None:
+            self.dac_scales = default_dac_scales.copy()
+            
         if dialog.exec():
             self.dac_scales = dialog.dac_scales.copy()
             params = dialog.get_parameters()
@@ -969,13 +979,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 if "modules" in params.keys():
                     self._load_network_analysis(params)
                 else:
+                    if self.crs is None:
+                        QtWidgets.QMessageBox.warning(self, "Offline Mode", "Cannot start new network analysis without CRS hardware. Loading data only.")
+                        return
                     self._start_network_analysis(params)
 
     def _start_network_analysis(self, params: dict):
         """
         Initialize and start a new network analysis process.
 
-        This method creates a new `NetworkAnalysisWindow` to display the results
+        This method creates a new `NetworkAnalysisPanel` wrapped in a QDockWidget 
         and a `NetworkAnalysisTask` to perform the sweep in a background thread.
         It handles single or multiple module sweeps and iterates through specified
         amplitudes if provided.
@@ -991,7 +1004,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             if self.crs is None:
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
-            selected_module_param = params.get('module') # Renamed to avoid conflict
+            selected_module_param = params.get('module')
             if selected_module_param is None:
                 modules_to_run = list(range(1, 9))
             elif isinstance(selected_module_param, list):
@@ -1002,90 +1015,117 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 QtWidgets.QMessageBox.critical(self, "Error", 
                     "DAC scales are not available. Please run the network analysis configuration again.")
                 return
-            window_id = f"window_{self.netanal_window_count}"
+            
+            # Create unique ID for this analysis
+            window_id = f"netanal_{self.netanal_window_count}"
             self.netanal_window_count += 1
-            window_signals = NetworkAnalysisSignals() # From .tasks
-            dac_scales_local = self.dac_scales.copy() # Renamed
-            # NetworkAnalysisWindow from .ui
-            window_instance = NetworkAnalysisWindow(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode) # Renamed
-            window_instance.set_params(params)
-            window_instance.window_id = window_id
+            
+            # Create panel
+            window_signals = NetworkAnalysisSignals()
+            dac_scales_local = self.dac_scales.copy()
+            panel = NetworkAnalysisPanel(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode)
+            panel.set_params(params)
+            
+            # Wrap panel in dock
+            dock_title = f"Network Analysis #{self.netanal_window_count}"
+            dock = self.dock_manager.create_dock(panel, dock_title, window_id)
+            
+            # Store panel reference
             self.netanal_windows[window_id] = {
-                'window': window_instance,
+                'window': panel,  # Keep 'window' key for compatibility
+                'dock': dock,
                 'signals': window_signals,
                 'amplitude_queues': {},
                 'current_amp_index': {}
             }
+            
+            # Connect signals (same as before)
             window_signals.progress.connect(
-                lambda mod, prog: window_instance.update_progress(mod, prog), # mod, prog to avoid conflict
+                lambda mod, prog: panel.update_progress(mod, prog),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update.connect(
-                lambda mod, freqs, amps, phases: window_instance.update_data(mod, freqs, amps, phases),
+                lambda mod, freqs, amps, phases: panel.update_data(mod, freqs, amps, phases),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update_with_amp.connect(
-                lambda mod, freqs, amps, phases, amp_val:  # amp_val to avoid conflict
-                window_instance.update_data_with_amp(mod, freqs, amps, phases, amp_val),
+                lambda mod, freqs, amps, phases, amp_val: panel.update_data_with_amp(mod, freqs, amps, phases, amp_val),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.completed.connect(
                 lambda mod: self._handle_analysis_completed(mod, window_id),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.error.connect(
-                lambda error_msg: QtWidgets.QMessageBox.critical(window_instance, "Network Analysis Error", error_msg),
+                lambda error_msg: QtWidgets.QMessageBox.critical(panel, "Network Analysis Error", error_msg),
                 QtCore.Qt.ConnectionType.QueuedConnection)
-            amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)]) # DEFAULT_AMPLITUDE from .utils
+            
+            # Connect data_ready signal for session auto-export
+            # Use default arg to capture panel reference for filename storage
+            panel.data_ready.connect(
+                lambda data, p=panel: self._handle_netanal_data_ready(modules_to_run, data, panel=p)
+            )
+            
+            amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)])
             window_data = self.netanal_windows[window_id]
             window_data['amplitude_queues'] = {mod: list(amplitudes) for mod in modules_to_run}
             window_data['current_amp_index'] = {mod: 0 for mod in modules_to_run}
-            for mod_iter in modules_to_run: # Renamed
-                window_instance.update_amplitude_progress(mod_iter, 1, len(amplitudes), amplitudes[0])
+            for mod_iter in modules_to_run:
+                panel.update_amplitude_progress(mod_iter, 1, len(amplitudes), amplitudes[0])
                 self._start_next_amplitude_task(mod_iter, params, window_id)
-            window_instance.show()
+            
+            # Tabify with Main dock by default
+            main_dock = self.dock_manager.get_dock("main_plots")
+            if main_dock:
+                self.tabifyDockWidget(main_dock, dock)
+            
+            # Show the dock and activate it
+            dock.show()
+            dock.raise_()
         except Exception as e:
             print(f"Error in _start_network_analysis: {e}")
-            traceback.print_exc() # traceback from .utils
+            traceback.print_exc()
 
 
     def _load_network_analysis(self, params: dict):
         """
-        Initialize and start a new network analysis process.
-
-        This method creates a new `NetworkAnalysisWindow` to display the results
-        and a `NetworkAnalysisTask` to perform the sweep in a background thread.
-        It handles single or multiple module sweeps and iterates through specified
-        amplitudes if provided.
+        Load network analysis data from file and display in a docked panel.
 
         Args:
-            params (dict): A dictionary of parameters for the network analysis,
-                           typically obtained from `NetworkAnalysisDialog`.
-                           Expected keys include 'module' (int or list of ints),
-                           'amps' (list of floats), 'amp' (float, fallback if 'amps'
-                           is not present), and other sweep-specific settings.
+            params (dict): Loaded network analysis data with 'parameters' and 'modules' keys
         """
         try:
-            if self.crs is None:
+            # Allow loading without CRS in offline mode
+            if self.crs is None and self.host != "OFFLINE":
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
-            selected_module_param = params['parameters'].get('module') # Renamed to avoid conflict
+                
+            selected_module_param = params['parameters'].get('module')
             if selected_module_param is None:
                 modules_to_run = list(range(1, 9))
             elif isinstance(selected_module_param, list):
                 modules_to_run = selected_module_param
             else:
                 modules_to_run = [selected_module_param]
-            if not hasattr(self, 'dac_scales'):
-                QtWidgets.QMessageBox.critical(self, "Error", 
-                    "DAC scales are not available. Please run the network analysis configuration again.")
-                return
-            window_id = f"window_{self.netanal_window_count}"
+            
+            # Restore DAC scales from loaded data (using existing 'dac_scales_used' key)
+            self.dac_scales = params['dac_scales_used']
+            
+            # Create unique ID for this analysis
+            window_id = f"netanal_{self.netanal_window_count}"
             self.netanal_window_count += 1
-            dac_scales_local = self.dac_scales.copy() # Renamed
+            
+            # Create panel
+            dac_scales_local = self.dac_scales.copy()
             window_signals = NetworkAnalysisSignals()
-            # NetworkAnalysisWindow from .ui
-            window_instance = NetworkAnalysisWindow(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode) # Renamed
-            window_instance._hide_progress_bars() #### Remove the progress bar when loading the data
-            window_instance.set_params(params['parameters'])
-            window_instance.window_id = window_id
-            self.netanal_windows[window_id] = {'window': window_instance, 'signals': window_signals}
+            panel = NetworkAnalysisPanel(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode, is_loaded_data=True)
+            panel._hide_progress_bars()
+            panel.set_params(params['parameters'])
+            
+            # Wrap panel in dock
+            dock_title = f"Network Analysis #{self.netanal_window_count} (Loaded)"
+            dock = self.dock_manager.create_dock(panel, dock_title, window_id)
+            
+            # Store panel reference
+            self.netanal_windows[window_id] = {'window': panel, 'dock': dock, 'signals': window_signals}
+            
+            # Load data into panel
             amplitudes = params['parameters'].get('amps')
             for mod in modules_to_run:
                 for i in range(len(amplitudes)):
@@ -1093,18 +1133,23 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     amps = np.array(params['modules'][mod][i]['magnitude']['counts']['raw'])
                     phases = np.array(params['modules'][mod][i]['phase']['values'])
                     
-                    window_instance.update_data(mod, freqs, amps, phases)
-                    window_instance.update_data_with_amp(mod, freqs, amps, phases, amplitudes[i])
-
-                window_data = self.netanal_windows[window_id]
+                    panel.update_data(mod, freqs, amps, phases)
+                    panel.update_data_with_amp(mod, freqs, amps, phases, amplitudes[i])
                 
                 r_freq = params['modules'][mod]['resonances_hz']
-                window_instance._use_loaded_resonances(mod, r_freq)
-                    
-            window_instance.show()
+                panel._use_loaded_resonances(mod, r_freq)
+            
+            # Tabify with Main dock by default
+            main_dock = self.dock_manager.get_dock("main_plots")
+            if main_dock:
+                self.tabifyDockWidget(main_dock, dock)
+            
+            # Show the dock and activate it
+            dock.show()
+            dock.raise_()
         except Exception as e:
-            print(f"Error in _start_network_analysis: {e}")
-            traceback.print_exc() # traceback from .utils
+            print(f"Error in _load_network_analysis: {e}")
+            traceback.print_exc()
 
     def _handle_analysis_completed(self, module_param: int, window_id: str): # Renamed module
         """
@@ -1216,31 +1261,38 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             print(f"Error in _start_next_amplitude_task: {e}")
             traceback.print_exc()
 
-    def _rerun_network_analysis(self, params: dict):
+    def _rerun_network_analysis(self, params: dict, source_panel=None):
         """
-        Re-run a network analysis for an existing NetworkAnalysisWindow.
+        Re-run a network analysis for an existing NetworkAnalysisPanel.
 
-        This method is typically triggered by a signal from a
-        `NetworkAnalysisWindow` instance (e.g., when the user clicks a "Re-run"
-        button within that window). It stops any ongoing tasks for that window,
-        clears its data and plots, updates its parameters, and then restarts
-        the analysis sequence.
+        This method is called from a NetworkAnalysisPanel's _edit_parameters method.
+        It stops any ongoing tasks for that window, clears its data and plots, 
+        updates its parameters, and then restarts the analysis sequence.
 
         Args:
             params (dict): The new or updated parameters for the network analysis.
+            source_panel: The NetworkAnalysisPanel requesting the re-run (optional, auto-detected if None)
         """
         try:
             if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available"); return
-            sender_widget = self.sender() # Renamed
-            source_window = None
+            
+            # Find the panel that's calling this
+            if source_panel is None:
+                # Try to find it from params (fallback)
+                for w_id, w_data in self.netanal_windows.items():
+                    if w_data['window'].current_params == params:
+                        source_panel = w_data['window']
+                        break
+            
+            # Find window_id for this panel
             window_id = None
-            if sender_widget and hasattr(sender_widget, 'window'): 
-                source_window = sender_widget.window()
             for w_id, w_data in self.netanal_windows.items():
-                if w_data['window'] == source_window: 
-                    window_id = w_id; break
+                if w_data['window'] == source_panel: 
+                    window_id = w_id
+                    break
+            
             if not window_id: 
-                print("No window_id found")
+                print("No window_id found for panel")
                 return
             window_data = self.netanal_windows[window_id]
             window = window_data['window']
@@ -1274,12 +1326,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
         netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
         netanal_dialog.module_entry.setText(str(self.module))
-        fetcher = DACScaleFetcher(self.crs)
-        fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
-        fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
-        fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
-        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
-        fetcher.start()
+        
+        # Fetch DAC scales if CRS is available
+        self._fetch_dac_scales_for_dialog(netanal_dialog)
+        if self.crs is None:
+            self.dac_scales = default_dac_scales.copy()
         
         active_module = self.module
 
@@ -1306,25 +1357,26 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 if "results_by_iteration" in params.keys():
                     self._load_multisweep_analysis(params)
                 else:
+                    if self.crs is None:
+                        QtWidgets.QMessageBox.warning(self, "Offline Mode", "Cannot start new multisweep analysis without CRS hardware. Loading data only.")
+                        return
                     self._start_multisweep_analysis(params)
     
     
     def handle_bias_from_file(self) -> None:
         """Slot for the 'Load Bias…' button in the main application window."""
-        if self.crs is None:
+        if self.crs is None and self.host != "OFFLINE":
             QtWidgets.QMessageBox.warning(self, "CRS Not Available", "Connect to a CRS before loading bias data.")
             return
-
 
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
         netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
         netanal_dialog.module_entry.setText(str(self.module))
-        fetcher = DACScaleFetcher(self.crs)
-        fetcher.dac_scales_ready.connect(lambda scales: netanal_dialog.dac_scales.update(scales))
-        fetcher.dac_scales_ready.connect(netanal_dialog._update_dac_scale_info)
-        fetcher.dac_scales_ready.connect(netanal_dialog._update_dbm_from_normalized)
-        fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
-        fetcher.start()
+        
+        # Fetch DAC scales if CRS is available
+        self._fetch_dac_scales_for_dialog(netanal_dialog)
+        if self.crs is None:
+            self.dac_scales = default_dac_scales.copy()
         
         from .bias_kids_dialog import BiasKidsDialog
         dialog = BiasKidsDialog(self, self.module, True)
@@ -1351,13 +1403,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             QtWidgets.QMessageBox.critical(self, "Missing Module", "The file does not specify which module was biased.")
             return
 
-        if bias_freqs:
+        if bias_freqs and self.crs is not None:
             # nco_freq = ((min(bias_freqs) - span_hz / 2 + (max(bias_freqs) + span_hz / 2)) / 2
             nco_freq = (min(bias_freqs)  + max(bias_freqs)) / 2
             crs = self.crs
             asyncio.run(crs.set_nco_frequency(nco_freq, module=module)) #### Setting up the nco frequency ######
     
-        asyncio.run(self.apply_bias_output(self.crs, module, amplitudes, bias_freqs, channels, phases))
+        if self.crs is not None:
+            asyncio.run(self.apply_bias_output(self.crs, module, amplitudes, bias_freqs, channels, phases))
+        else:
+            print("[Offline] Skipping hardware bias application")
         
     async def apply_bias_output(self, crs, module: int, amplitudes: list, bias_freqs : list,
                                 channels : list, phases : list) -> None:
@@ -1383,58 +1438,39 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
 
     def _set_and_plot_bias(self, load_params):
-
-        #### Making sure the dac scales are set in case unit change is needed somewhere#####
+        """
+        Load bias data from file, apply bias to hardware, and display in a docked panel.
         
+        Uses the unified _create_multisweep_panel_from_loaded_data helper for panel creation.
+        """
         active_module = self.module 
 
         try:
-            #### Will visualize in the multisweep window ######
-            if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep."); return
-            window_id = f"multisweep_window_{self.multisweep_window_count}"; self.multisweep_window_count += 1
+            # Check if module in file matches active module
             params = load_params['initial_parameters']
             target_module = params.get('module')
 
             if active_module != target_module:
-                QtWidgets.QMessageBox.warning(self, "Error", "The module in file doesn't match the active module, the value will be changed.")
+                QtWidgets.QMessageBox.warning(self, "Module Mismatch", 
+                    "The module in file doesn't match the active module. The value will be changed.")
+                # Update the module in params to use the active module
+                load_params['initial_parameters']['module'] = active_module
                 target_module = active_module
 
-            dac_scale_for_mod = load_params['dac_scales_used'][target_module] 
-            dac_scale_for_board = self.dac_scales[target_module]
+            if target_module is None: 
+                QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for Bias.")
+                return
 
-            if dac_scale_for_mod != dac_scale_for_board:
-                QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
-            
-            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for Bias."); return
-            
-            dac_scales_for_window = self.dac_scales if hasattr(self, 'dac_scales') else {}
-            window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), 
-                                     dac_scales=dac_scales_for_window, dark_mode=self.dark_mode, loaded_bias=True)
-            self.multisweep_windows[window_id] = {'window': window, 'params': params.copy()}
-            
-            # Connect df_calibration_ready signal if the method exists
-            if hasattr(window, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
-                window.df_calibration_ready.connect(self._handle_df_calibration_ready)
-
-            window._hide_progress_bars()
-
-            # span_hz = params['span_hz']
-            reso_frequencies = params['resonance_frequencies']
-
-            # nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
-            nco_freq = (min(reso_frequencies)  + max(reso_frequencies)) / 2
-            crs = self.crs
-            asyncio.run(crs.set_nco_frequency(nco_freq, module=target_module)) #### Setting up the nco frequency ######
-
-            ###### Setting up the bias #######
-
-            bias_output =load_params['bias_kids_output']
+            # Extract bias data for hardware application BEFORE creating panel
+            bias_output = load_params.get('bias_kids_output')
+            if not bias_output:
+                QtWidgets.QMessageBox.critical(self, "Error", "No bias_kids_output in loaded file.")
+                return
             
             bias_freqs = []
             amplitudes = []
             phases = []
             channels = []
-            data_full = {}
             data_rod = {}
             
             for det_idx, det_data in bias_output.items():
@@ -1446,49 +1482,45 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 amplitudes.append(amplitude)
                 phase = det_data.get("optimal_phase_degrees", 0)
                 phases.append(phase)
-                new_data = {}
-                for k, v in bias_output[det_idx].items():
-                    new_data[k] = v
-                    if k == "rotation_tod":
-                        data_rod[channel] = v
-                    if k == "nonlinear_model_iq":
-                        break
-                data_full[det_idx] = new_data
+                if "rotation_tod" in det_data:
+                    data_rod[channel] = det_data["rotation_tod"]
 
-
-            asyncio.run(self.apply_bias_output(self.crs, target_module, amplitudes, bias_freqs, channels, phases))
+            # Apply bias to hardware if CRS is available
+            if self.crs is not None:
+                # Set NCO frequency to center of bias frequency range before applying bias
+                if bias_freqs:
+                    nco_freq = (min(bias_freqs) + max(bias_freqs)) / 2
+                    asyncio.run(self.crs.set_nco_frequency(nco_freq, module=target_module))
                 
-            asyncio.run(self.adjust_phase(target_module, channels, data_rod))
+                asyncio.run(self.apply_bias_output(self.crs, target_module, amplitudes, bias_freqs, channels, phases))
+                    
+                if data_rod:
+                    asyncio.run(self.adjust_phase(target_module, channels, data_rod))
+                    #print(f"[Bias] Refining the rotation")
+                    self.noise_count = self.noise_count + 1
+                    asyncio.run(self.adjust_phase(target_module, channels, data_rod, True))
+            else:
+                print("[Offline] Skipping hardware bias application and phase adjustment")
 
-
-            print(f"[Bias] Refining the rotation")
-            self.noise_count = self.noise_count + 1
-            asyncio.run(self.adjust_phase(target_module, channels, data_rod, True))
+            # Use the unified helper method to create the panel and dock
+            panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
+                load_params, source_type="bias"
+            )
             
-            ##### Plotting the bias #######
+            if panel is None:
+                return  # Error already displayed by helper
 
-            direction = load_params['results_by_iteration'][0]['direction'] ### Assuming sweep direction will be same for all 
-            
-            for i in range(len(bias_output)):
-                amplitude = amplitudes[i]
-                direction = direction
-                data = data_full
-                window.update_data(target_module, i, amplitude, direction, data, None)
-
-            #### Using noise data from the file to generate noise plots ####
-
+            # Load noise data if present
             if load_params.get('noise_data') is not None:
                 noise_data = load_params['noise_data']
-                window._get_spectrum(noise_data, use_loaded_noise=True)
+                panel._get_spectrum(noise_data, use_loaded_noise=True)
             else:
                 print("[Bias] There is no noise data in the file")
             
-            window.show()
-
-            
         except Exception as e:
             error_msg = f"Error displaying results: {type(e).__name__}: {str(e)}"
-            print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
+            print(error_msg, file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             QtWidgets.QMessageBox.critical(self, "Bias Error", error_msg)
 
 
@@ -1558,25 +1590,42 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         return self.phase_shifts
             
     
-    def _netanal_progress(self, module_param: int, progress: float):
-        """Slot for network analysis progress signals. Currently a placeholder."""
-        pass # Renamed
-
-    def _netanal_data_update(self, module_param: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
-        """Slot for network analysis data update signals. Currently a placeholder."""
-        pass # Renamed
-
-    def _netanal_data_update_with_amp(self, module_param: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray, amplitude: float):
-        """Slot for network analysis data update signals that include amplitude. Currently a placeholder."""
-        pass # Renamed
-
-    def _netanal_completed(self, module_param: int):
-        """Slot for network analysis completion signals. Currently a placeholder."""
-        pass # Renamed
-
     def _netanal_error(self, error_msg: str):
         """Slot for network analysis error signals. Displays a critical message box."""
         QtWidgets.QMessageBox.critical(self, "Network Analysis Error", error_msg)
+    
+    def _handle_netanal_data_ready(self, modules: list, data: dict, panel=None):
+        """
+        Handle data_ready signal from NetworkAnalysisPanel for session auto-export.
+
+        Args:
+            modules: List of module IDs that were analyzed
+            data: Full export data dictionary (may contain '_filename_override' key)
+            panel: Optional reference to the NetworkAnalysisPanel for storing export filename
+        """
+        if not self.session_manager.is_active or not self.session_manager.auto_export_enabled:
+            return
+
+        # Create identifier from module list
+        if len(modules) == 1:
+            identifier = f"module{modules[0]}"
+        else:
+            identifier = f"modules_{'_'.join(map(str, modules))}"
+
+        # Extract filename override if present (for overwriting previous export)
+        filename_override = data.pop('_filename_override', None)
+
+        # Export via session manager
+        exported_path = self.session_manager.export_data(
+            'netanal', identifier, data, filename_override=filename_override
+        )
+        
+        # Store the exported filename on the panel for future overwrites
+        if exported_path and panel and hasattr(panel, '_last_export_filename'):
+            panel._last_export_filename = exported_path.name
+        
+        action = "updated" if filename_override else "exported"
+        print(f"[Session] Auto-{action} network analysis: {identifier}")
 
     def _crs_init_success(self, message: str):
         """Slot for CRS initialization success signals. Displays an information message box."""
@@ -1780,7 +1829,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
                     # If QP pulses are currently active, re-apply the same mode with updated parameters
                     try:
-                        if hasattr(self.crs, "set_pulse_mode") and getattr(self, "qp_pulse_mode", "none") in ("periodic", "random"):
+                        if self.crs is not None and hasattr(self.crs, "set_pulse_mode") and getattr(self, "qp_pulse_mode", "none") in ("periodic", "random"):
                             try:
                                 cfg = mc.apply_overrides(self.mock_config) if self.mock_config else mc.defaults()
                             except Exception:
@@ -1856,6 +1905,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             return
         
+        # Capture reference to avoid closure issues
+        crs = self.crs
+        
         # Run the async pulse mode setting in a separate thread
         import asyncio
         import threading
@@ -1878,7 +1930,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     self.qp_pulse_mode = 'periodic'
                     
                     # Configure periodic pulses using unified config
-                    loop.run_until_complete(self.crs.set_pulse_mode(
+                    loop.run_until_complete(crs.set_pulse_mode(
                         'periodic',
                         period=cfg.get('pulse_period', 10.0),
                         tau_rise=cfg.get('pulse_tau_rise', 1e-6),
@@ -1900,7 +1952,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     self.qp_pulse_mode = 'random'
                     
                     # Configure random pulses using unified config
-                    loop.run_until_complete(self.crs.set_pulse_mode(
+                    loop.run_until_complete(crs.set_pulse_mode(
                         'random',
                         probability=cfg.get('pulse_probability', 0.001),
                         tau_rise=cfg.get('pulse_tau_rise', 1e-6),
@@ -1928,7 +1980,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     self.qp_pulse_mode = 'none'
                     
                     # Disable pulses
-                    loop.run_until_complete(self.crs.set_pulse_mode('none'))
+                    loop.run_until_complete(crs.set_pulse_mode('none'))
                     try:
                         if self.mock_config is None:
                             self.mock_config = mc.defaults()
@@ -2023,3 +2075,824 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             "Pulse Control Error",
             f"Failed to set pulse mode.\n\nError: {error_msg}"
         )
+    
+    
+    def _create_help_menu(self):
+        help_menu = self.menuBar().addMenu("&Help")
+        help_action = QtGui.QAction("&Periscope Help", self)
+        help_action.setToolTip("Open Help Dialog")
+        help_action.triggered.connect(self._show_help)
+        help_menu.addAction(help_action)
+        
+
+    def _create_view_menu(self):
+        """
+        Create the View menu for display settings like dark mode.
+        """
+        view_menu = self.menuBar().addMenu("&View")
+        
+        # Dark Mode toggle action
+        self.dark_mode_action = QtGui.QAction("&Dark Mode", self)
+        self.dark_mode_action.setCheckable(True)
+        self.dark_mode_action.setChecked(self.dark_mode)
+        self.dark_mode_action.setToolTip("Switch between dark and light UI themes")
+        self.dark_mode_action.triggered.connect(self._toggle_dark_mode)
+        self.dark_mode_action.triggered.connect(self._update_console_style)
+        view_menu.addAction(self.dark_mode_action)
+
+
+    def _create_jupyter_menu(self):
+        """
+        Create the Jupyter menu for display settings like jupyter notebook.
+        """
+
+        jupyter_menu = self.menuBar().addMenu("&Jupyter")
+
+        self.interactive_session_action = QtGui.QAction("Interactive iPython &Session", self)
+        self.interactive_session_action.setToolTip("Toggle an embedded iPython interactive session.")
+        self.interactive_session_action.triggered.connect(self._toggle_interactive_session)
+        if not QTCONSOLE_AVAILABLE or self.crs is None:
+            self.interactive_session_action.setEnabled(False)
+            if not QTCONSOLE_AVAILABLE:
+                self.interactive_session_action.setToolTip("Interactive session disabled: qtconsole/ipykernel not installed.")
+            else:
+                self.interactive_session_action.setToolTip("Interactive session disabled: CRS object not available.")
+        jupyter_menu.addAction(self.interactive_session_action)
+        
+        # Jupyter Notebook panel
+        notebook_action = QtGui.QAction("📓 &Jupyter Notebook", self)
+        notebook_action.setShortcut("Ctrl+Shift+J")
+        notebook_action.setToolTip("Open an embedded Jupyter notebook for interactive analysis")
+        notebook_action.triggered.connect(lambda: self._toggle_notebook_panel())
+        jupyter_menu.addAction(notebook_action)
+        
+
+    def _create_window_menu(self):
+        """
+        Create the Window menu for managing dockable analysis panels.
+        
+        Provides options to organize, tile, and manage all open dock widgets.
+        """
+        # Create Window menu
+        window_menu = self.menuBar().addMenu("&Window")
+        
+        # Tile Horizontally action (QAction is in QtGui in PyQt6)
+        tile_h_action = QtGui.QAction("Tile &Horizontally", self)
+        tile_h_action.setToolTip("Arrange all dock widgets side by side")
+        tile_h_action.triggered.connect(self._tile_docks_horizontally)
+        window_menu.addAction(tile_h_action)
+        
+        # Tile Vertically action
+        tile_v_action = QtGui.QAction("Tile &Vertically", self)
+        tile_v_action.setToolTip("Arrange all dock widgets stacked vertically")
+        tile_v_action.triggered.connect(self._tile_docks_vertically)
+        window_menu.addAction(tile_v_action)
+        
+        window_menu.addSeparator()
+        
+        # Tabify All action
+        tabify_action = QtGui.QAction("&Tabify All Panels", self)
+        tabify_action.setToolTip("Group all dock widgets together as tabs")
+        tabify_action.triggered.connect(self._tabify_all_docks)
+        window_menu.addAction(tabify_action)
+        
+        # Float All action
+        float_action = QtGui.QAction("&Float All Panels", self)
+        float_action.setToolTip("Undock all panels into separate windows")
+        float_action.triggered.connect(self._float_all_docks)
+        window_menu.addAction(float_action)
+        
+        # Dock All action
+        dock_action = QtGui.QAction("&Dock All Panels", self)
+        dock_action.setToolTip("Dock all floating panels back into the main window")
+        dock_action.triggered.connect(self._dock_all_docks)
+        window_menu.addAction(dock_action)
+        
+        window_menu.addSeparator()
+        
+        # Close All Analysis Windows action
+        close_all_action = QtGui.QAction("&Close All Analysis Panels", self)
+        close_all_action.setToolTip("Close all network analysis, multisweep, and detector digest panels")
+        close_all_action.triggered.connect(self._close_all_analysis_panels)
+        window_menu.addAction(close_all_action)
+        
+        window_menu.addSeparator()
+        
+        # List Panels action (dynamic submenu)
+        self.list_panels_menu = window_menu.addMenu("&Show/Hide Panels")
+        self.list_panels_menu.aboutToShow.connect(self._update_panels_list_menu)
+    
+    def _tile_docks_horizontally(self):
+        """Tile all dock widgets horizontally."""
+        dock_ids = self.dock_manager.get_all_dock_ids()
+        if len(dock_ids) >= 2:
+            self.dock_manager.tile_docks_horizontally(dock_ids)
+    
+    def _tile_docks_vertically(self):
+        """Tile all dock widgets vertically."""
+        dock_ids = self.dock_manager.get_all_dock_ids()
+        if len(dock_ids) >= 2:
+            self.dock_manager.tile_docks_vertically(dock_ids)
+    
+    def _tabify_all_docks(self):
+        """Tabify all dock widgets together."""
+        dock_ids = self.dock_manager.get_all_dock_ids()
+        if len(dock_ids) >= 2:
+            self.dock_manager.tabify_docks(dock_ids)
+    
+    def _float_all_docks(self):
+        """Float all dock widgets."""
+        self.dock_manager.float_all_docks()
+    
+    def _dock_all_docks(self):
+        """Dock all floating widgets."""
+        self.dock_manager.dock_all_docks()
+    
+    def _close_all_analysis_panels(self):
+        """Close all analysis-related dock panels."""
+        self.dock_manager.close_all_docks()
+    
+    def _update_panels_list_menu(self):
+        """Update the Show/Hide Panels submenu with current dock widgets."""
+        self.list_panels_menu.clear()
+        
+        dock_ids = self.dock_manager.get_all_dock_ids()
+        
+        if not dock_ids:
+            no_panels_action = QtGui.QAction("(No panels open)", self)
+            no_panels_action.setEnabled(False)
+            self.list_panels_menu.addAction(no_panels_action)
+            return
+        
+        # Add an action for each dock widget
+        for dock_id in dock_ids:
+            dock = self.dock_manager.get_dock(dock_id)
+            if dock:
+                action = QtGui.QAction(dock.windowTitle(), self)
+                action.setCheckable(True)
+                action.setChecked(dock.isVisible())
+                
+                # Connect to toggle visibility
+                action.triggered.connect(
+                    lambda checked, d=dock: d.setVisible(checked)
+                )
+                
+                self.list_panels_menu.addAction(action)
+
+    # ─────────────────────────────────────────────────────────────────
+    # Session Management Methods
+    # ─────────────────────────────────────────────────────────────────
+    
+    def _create_session_menu(self):
+        """
+        Create the Session menu in the menu bar.
+        
+        Provides options to start/load sessions, toggle auto-export,
+        manually export data, and end sessions.
+        """
+        session_menu = self.menuBar().addMenu("&Session")
+        
+        # Start New Session
+        start_action = QtGui.QAction("&Start New Session...", self)
+        start_action.setShortcut("Ctrl+Shift+N")
+        start_action.setToolTip("Start a new session to auto-export analysis data")
+        start_action.triggered.connect(self._start_new_session)
+        session_menu.addAction(start_action)
+        
+        # Load Session
+        load_action = QtGui.QAction("&Load Session...", self)
+        load_action.setShortcut("Ctrl+Shift+O")
+        load_action.setToolTip("Load an existing session folder")
+        load_action.triggered.connect(self._load_session)
+        session_menu.addAction(load_action)
+        
+        session_menu.addSeparator()
+        
+        # Auto-Export Toggle
+        self.auto_export_action = QtGui.QAction("&Auto-Export Enabled", self)
+        self.auto_export_action.setCheckable(True)
+        self.auto_export_action.setChecked(True)
+        self.auto_export_action.setToolTip("Toggle automatic export of analysis data when session is active")
+        self.auto_export_action.triggered.connect(self._toggle_auto_export)
+        session_menu.addAction(self.auto_export_action)
+        
+        session_menu.addSeparator()
+        
+        # End Session
+        end_action = QtGui.QAction("&End Session", self)
+        end_action.setToolTip("End the current session")
+        end_action.triggered.connect(self._end_session)
+        session_menu.addAction(end_action)
+    
+    def _add_session_browser_dock(self):
+        """
+        Add the session browser panel as a collapsible dock on the left side.
+        Collapsing reduces the dock to a thin rail with a '+' button.
+        Expanding restores the previous width and full content.
+        """
+    
+        # ---- Constants ----
+        COLLAPSED_WIDTH = 28
+        EXPANDED_MIN_WIDTH = 200
+        EXPANDED_MAX_WIDTH = 400
+        DEFAULT_EXPANDED_WIDTH = 280
+    
+        # ---- Create the session browser panel ----
+        self.session_browser = SessionBrowserPanel(self.session_manager, self)
+        self.session_browser.apply_theme(self.dark_mode)
+        self.session_browser.file_load_requested.connect(self._load_session_file)
+    
+        # ---- Create dock widget ----
+        dock = QtWidgets.QDockWidget("Session Files", self)
+        dock.setObjectName("session_browser_dock")
+        dock.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable)
+    
+        # ---- Expanded widget ----
+        dock._expanded_widget = self.session_browser
+    
+        # ---- Collapsed placeholder widget (thin rail with '+') ----
+        collapsed_widget = QtWidgets.QWidget()
+        collapsed_layout = QtWidgets.QVBoxLayout(collapsed_widget)
+        collapsed_layout.setContentsMargins(0, 0, 0, 0)
+        collapsed_layout.setSpacing(0)
+    
+        expand_btn = QtWidgets.QToolButton()
+        expand_btn.setText("+")
+        expand_btn.setToolTip("Show Session Files")
+        expand_btn.setAutoRaise(True)
+        expand_btn.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding
+        )
+        expand_btn.setStyleSheet("""
+            QToolButton {
+                font-size: 18px;
+                font-weight: bold;
+            }
+        """)
+    
+        collapsed_layout.addStretch(1)
+        collapsed_layout.addWidget(
+            expand_btn,
+            alignment=QtCore.Qt.AlignmentFlag.AlignCenter
+        )
+        collapsed_layout.addStretch(1)
+    
+        dock._collapsed_widget = collapsed_widget
+    
+        # ---- Internal state ----
+        dock._collapsed = False
+        dock._expanded_width = DEFAULT_EXPANDED_WIDTH
+    
+        # ---- Collapse / Expand logic ----
+        def collapse_dock():
+            dock._expanded_width = dock.width()
+            dock.setTitleBarWidget(None)
+            dock.setWindowTitle("")
+            dock.setWidget(dock._collapsed_widget)
+            dock.setMinimumWidth(COLLAPSED_WIDTH)
+            dock.setMaximumWidth(COLLAPSED_WIDTH)
+            dock._collapsed = True
+    
+        def expand_dock():
+            dock.setWidget(dock._expanded_widget)
+            dock.setTitleBarWidget(title_bar)
+            dock.setWindowTitle("Session Files")
+            dock.setMinimumWidth(EXPANDED_MIN_WIDTH)
+            dock.setMaximumWidth(EXPANDED_MAX_WIDTH)
+            dock._collapsed = False
+    
+        expand_btn.clicked.connect(expand_dock)
+    
+        # ---- Custom title bar ----
+        title_bar = QtWidgets.QWidget()
+        title_layout = QtWidgets.QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(6, 2, 6, 2)
+    
+        title_label = QtWidgets.QLabel(dock.windowTitle())
+        title_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignVCenter |
+            QtCore.Qt.AlignmentFlag.AlignLeft
+        )
+    
+        toggle_btn = QtWidgets.QToolButton()
+        toggle_btn.setAutoRaise(True)
+    
+        toggle_btn.setIcon(
+            self.style().standardIcon(
+                QtWidgets.QStyle.StandardPixmap.SP_TitleBarMinButton
+            )
+        )
+        toggle_btn.setToolTip("Collapse Session Files")
+    
+        def toggle_collapse():
+            if dock._collapsed:
+                expand_dock()
+            else:
+                collapse_dock()
+    
+        toggle_btn.clicked.connect(toggle_collapse)
+    
+        title_layout.addWidget(title_label)
+        title_layout.addStretch(1)
+        title_layout.addWidget(toggle_btn)
+        dock.setTitleBarWidget(title_bar)
+    
+        # ---- Initial widget and size ----
+        dock.setWidget(dock._expanded_widget)
+        dock.setMinimumWidth(EXPANDED_MIN_WIDTH)
+        dock.setMaximumWidth(EXPANDED_MAX_WIDTH)
+        dock.resize(DEFAULT_EXPANDED_WIDTH, dock.height())
+        # update_toggle_button()
+    
+        # ---- Add to main window ----
+        self.addDockWidget(
+            QtCore.Qt.DockWidgetArea.LeftDockWidgetArea,
+            dock
+        )
+    
+        # ---- Split with main dock if present ----
+        main_dock = self.dock_manager.get_dock("main_plots")
+        if main_dock:
+            self.splitDockWidget(
+                dock,
+                main_dock,
+                QtCore.Qt.Orientation.Horizontal
+            )
+    
+        # ---- Store reference ----
+        self.session_browser_dock = dock
+    
+        # ---- Start expanded (not collapsed) ----
+        # Session browser is visible by default to help users see their session files
+    
+    def _start_new_session(self):
+        """
+        Start a new session with folder selection dialog.
+        
+        Shows a folder selection dialog, then lets the user customize
+        the session folder name before creating it.
+        """
+        # Show folder selection dialog
+        # Use Qt dialog (not native) to prevent hanging on some systems
+        base_path = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select Session Location",
+            "",  # Start in current directory
+            QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
+        )
+        
+        if not base_path:
+            return
+        
+        # Generate default folder name with timestamp
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"session_{timestamp}"
+        
+        # Let user rename
+        folder_name, ok = QtWidgets.QInputDialog.getText(
+            self, 
+            "Session Name",
+            "Enter session folder name:",
+            QtWidgets.QLineEdit.EchoMode.Normal,
+            default_name
+        )
+        
+        if ok and folder_name:
+            try:
+                self.session_manager.start_session(base_path, folder_name)
+                
+                # Show the session browser dock
+                if hasattr(self, 'session_browser_dock'):
+                    self.session_browser_dock.show()
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Session Error",
+                    f"Failed to start session:\n{str(e)}"
+                )
+    
+    def _load_session(self):
+        """
+        Load an existing session folder.
+        
+        Shows a folder selection dialog to choose an existing session folder.
+        """
+        # Use Qt dialog (not native) to prevent hanging on some systems
+        session_path = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select Session Folder",
+            "",
+            QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
+        )
+        
+        if session_path:
+            success = self.session_manager.load_session(session_path)
+            
+            if success:
+                # Show the session browser dock
+                if hasattr(self, 'session_browser_dock'):
+                    self.session_browser_dock.show()
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Load Session Failed",
+                    f"Could not load session from:\n{session_path}"
+                )
+    
+    def _show_session_startup_dialog(self):
+        """
+        Show the unified startup dialog to configure connection and session.
+        
+        This is shown automatically when Periscope launches, unless a session
+        has already been configured (e.g., from command-line launch).
+        """
+        # Skip dialog if session is already active or configured
+        # (e.g., when launched via command-line with startup dialog)
+        if self.session_manager.is_active:
+            return
+        
+        dialog = UnifiedStartupDialog(self)
+        if dialog.exec():
+            config = dialog.get_configuration()
+            
+            # Handle connection mode
+            connection_mode = config['connection_mode']
+            session_mode = config['session_mode']
+            
+            # For now, just handle session management
+            # TODO: In the future, implement offline mode and use the IP/module from config
+            
+            if session_mode == UnifiedStartupDialog.SESS_NEW:
+                # Start new session with provided path and folder name
+                try:
+                    self.session_manager.start_session(
+                        config['session_path'], 
+                        config['session_folder_name']
+                    )
+                    # Show the session browser dock
+                    if hasattr(self, 'session_browser_dock'):
+                        self.session_browser_dock.show()
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "Session Error",
+                        f"Failed to start session:\n{str(e)}"
+                    )
+            elif session_mode == UnifiedStartupDialog.SESS_LOAD:
+                # Load existing session
+                success = self.session_manager.load_session(config['session_path'])
+                if success:
+                    # Show the session browser dock
+                    if hasattr(self, 'session_browser_dock'):
+                        self.session_browser_dock.show()
+                else:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Load Session Failed",
+                        f"Could not load session from:\n{config['session_path']}"
+                    )
+            elif session_mode == UnifiedStartupDialog.SESS_NONE:
+                # Continue without session - disable auto-export
+                self.session_manager.auto_export_enabled = False
+                self.auto_export_action.setChecked(False)
+                print("[Session] Continuing without session (auto-export disabled)")
+            
+            # TODO: Handle connection mode (CONN_OFFLINE, etc.)
+            if connection_mode == UnifiedStartupDialog.CONN_OFFLINE:
+                print("[Connection] Offline mode selected - feature not yet implemented")
+                # Future: Initialize in offline mode, disable CRS-dependent features
+    
+    def _toggle_auto_export(self, checked: bool):
+        """
+        Toggle auto-export on/off.
+        
+        Args:
+            checked: True to enable auto-export, False to disable
+        """
+        self.session_manager.auto_export_enabled = checked
+        
+        status = "enabled" if checked else "disabled"
+        print(f"[Session] Auto-export {status}")
+    
+    def _end_session(self):
+        """
+        End the current session with confirmation.
+        """
+        if not self.session_manager.is_active:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No Active Session",
+                "There is no active session to end."
+            )
+            return
+        
+        # Confirm with user
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "End Session",
+            f"End the current session?\n\n"
+            f"Session: {self.session_manager.session_name}\n"
+            f"Files exported: {self.session_manager.export_count}",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No
+        )
+        
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.session_manager.end_session()
+    
+    def _load_session_file(self, file_path: str):
+        """
+        Load a session file into a new analysis panel.
+
+        This is called when the user double-clicks a file in the session browser.
+
+        Args:
+            file_path: Path to the file to load (.pkl or .ipynb)
+        """
+        from pathlib import Path
+        
+        # Handle notebook files specially
+        if file_path.endswith('.ipynb'):
+            self._open_notebook_file(file_path)
+            return
+        
+        # Identify file type from filename
+        file_type = self.session_manager.identify_file_type(file_path)
+        
+        if file_type is None:
+            # Unknown file type - open with system default application
+            self._open_file_with_system_default(file_path)
+            return
+        
+        # Load the data
+        data = self.session_manager.load_file(file_path)
+        
+        if data is None:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Load Error",
+                f"Failed to load file:\n{file_path}"
+            )
+            return
+        
+        # Create appropriate panel based on file type
+        try:
+            if file_type == 'netanal':
+                self._load_netanal_from_session(data, file_path)
+            elif file_type == 'multisweep':
+                self._load_multisweep_from_session(data, file_path)
+            elif file_type == 'bias':
+                self._load_bias_from_session(data, file_path)
+            elif file_type == 'noise':
+                self._load_noise_from_session(data, file_path)
+            else:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "File Loaded",
+                    f"Loaded {file_type} data from session.\n"
+                    f"(Panel creation for this type not yet implemented)"
+                )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Load Error",
+                f"Error creating panel for {file_type} data:\n{str(e)}"
+            )
+            traceback.print_exc()
+    
+    def _load_netanal_from_session(self, data: dict, file_path: str):
+        """Load network analysis data from session file into a new panel."""
+        # Check if data has the expected structure
+        if 'parameters' not in data and 'modules' not in data:
+            # Try to wrap it in expected format
+            QtWidgets.QMessageBox.information(
+                self,
+                "Network Analysis Loaded",
+                f"Loaded network analysis data.\n"
+                f"File: {file_path}\n\n"
+                "(Direct panel display not yet implemented for this format)"
+            )
+            return
+        
+        # Use existing load mechanism
+        self._load_network_analysis(data)
+    
+    def _load_multisweep_from_session(self, data: dict, file_path: str):
+        """Load multisweep data from session file into a new panel."""
+        if 'results_by_iteration' not in data:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Multisweep Loaded",
+                f"Loaded multisweep data.\n"
+                f"File: {file_path}\n\n"
+                "(Direct panel display not yet implemented for this format)"
+            )
+            return
+        
+        # Use existing load mechanism
+        self._load_multisweep_analysis(data)
+    
+    def _load_bias_from_session(self, data: dict, file_path: str):
+        """
+        Load bias data from session file - show dialog with options.
+        
+        When double-clicking a bias file, the user gets to choose whether to:
+        - Set bias (apply to hardware only)
+        - Set + Plot bias (apply to hardware and create visualization panel)
+        """
+        if 'results_by_iteration' not in data:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid Bias File",
+                f"File does not contain multisweep data:\n{file_path}\n\n"
+                "Cannot load this bias file."
+            )
+            return
+        
+        # Show the same dialog that the "Load Bias" button shows
+        from .bias_kids_dialog import BiasKidsDialog
+        dialog = BiasKidsDialog(self, self.module, load_bias=True, loaded_data=data)
+        
+        if dialog.exec():
+            params = dialog.get_load_param()
+            if params:
+                if "bias_kids_output" in params:
+                    # User chose "Set + Plot Bias"
+                    self._set_and_plot_bias(params)
+                else:
+                    # User chose "Set Bias" (hardware only)
+                    self._set_bias(params)
+    
+    def _load_noise_from_session(self, data: dict, file_path: str):
+        """
+        Load noise spectrum data from session file.
+        
+        Noise files contain complete multisweep data plus noise spectrum data.
+        Creates a MultisweepPanel, opens the DetectorDigestPanel (fit), and 
+        opens a separate NoiseSpectrumPanel for the noise visualization.
+        """
+        if 'results_by_iteration' not in data:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid Noise File",
+                f"File does not contain multisweep data:\n{file_path}\n\n"
+                "Cannot load this noise file."
+            )
+            return
+        
+        # Use the unified helper to create the multisweep panel
+        panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
+            data, source_type="noise"
+        )
+        
+        if panel is None:
+            return  # Error already displayed by helper
+        
+        # Auto-launch detector digest panel (fit panel) by simulating a double-click
+        # This is the same logic used in _load_multisweep_analysis
+        iteration_params = data.get('results_by_iteration', [])
+        if iteration_params and len(iteration_params) > 0:
+            first_iteration_data = iteration_params[0].get('data', {})
+            if first_iteration_data:
+                # Get any detector's frequency to simulate a click location
+                first_detector_id = sorted(first_iteration_data.keys())[0]
+                first_detector_data = first_iteration_data[first_detector_id]
+                click_freq = first_detector_data.get('bias_frequency', 
+                                                    first_detector_data.get('original_center_frequency'))
+                
+                if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
+                    # Create a fake event at the detector's frequency
+                    class FakeEvent:
+                        def __init__(self, x, y):
+                            self._scene_pos = QtCore.QPointF(x, y)
+                        def scenePos(self):
+                            return self._scene_pos
+                        def accept(self):
+                            pass
+                    
+                    # Map the frequency to view coordinates (x position)
+                    view_box = panel.combined_mag_plot.getViewBox()
+                    if view_box:
+                        view_point = QtCore.QPointF(click_freq, 0)
+                        scene_point = view_box.mapViewToScene(view_point)
+                        fake_event = FakeEvent(scene_point.x(), scene_point.y())
+                        panel._handle_multisweep_plot_double_click(fake_event)
+        
+        # Load noise data if present and open the NoiseSpectrumPanel
+        if data.get('noise_data') is not None:
+            noise_data = data['noise_data']
+            panel._get_spectrum(noise_data, use_loaded_noise=True)
+        else:
+            print("[Noise] File loaded but no noise_data found - only fit panel shown")
+        
+        # Re-raise the multisweep dock to keep focus on it
+        if dock:
+            dock.raise_()
+    
+    def _open_file_with_system_default(self, file_path: str):
+        """
+        Open a file with the system's default application.
+        
+        Args:
+            file_path: Path to the file to open
+        """
+        import subprocess
+        import sys
+        from pathlib import Path
+        
+        if not Path(file_path).exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"Cannot open file (not found):\n{file_path}"
+            )
+            return
+        
+        try:
+            if sys.platform == 'darwin':  # macOS
+                subprocess.run(['open', file_path], check=True)
+            elif sys.platform == 'win32':  # Windows
+                subprocess.run(['start', '', file_path], shell=True, check=True)
+            else:  # Linux
+                subprocess.run(['xdg-open', file_path], check=True)
+            
+            print(f"[SessionBrowser] Opened file with system default: {Path(file_path).name}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Open Error",
+                f"Failed to open file:\n{file_path}\n\nError: {str(e)}"
+            )
+            print(f"[SessionBrowser] Error opening file: {e}")
+    
+    def _open_notebook_file(self, file_path: str):
+        """
+        Open a notebook file in the embedded Jupyter panel.
+        
+        If the notebook panel doesn't exist yet, creates it and starts the server.
+        Once the server is ready, navigates to the specified notebook.
+        
+        Args:
+            file_path: Full path to the .ipynb file
+        """
+        from pathlib import Path
+        
+        notebook_path = Path(file_path)
+        if not notebook_path.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"Notebook file not found:\n{file_path}"
+            )
+            return
+        
+        # Check if notebook panel already exists
+        notebook_dock = self.dock_manager.get_dock("notebook_panel")
+        
+        if notebook_dock is not None:
+            # Panel exists - just open the notebook
+            panel = notebook_dock.widget()
+            if panel and hasattr(panel, 'open_notebook'):
+                panel.open_notebook(file_path)
+                notebook_dock.show()
+                notebook_dock.raise_()
+        else:
+            # Need to create the panel first
+            # Use the notebook's parent directory as the notebook_dir
+            notebook_dir = str(notebook_path.parent)
+            self._toggle_notebook_panel(notebook_dir=notebook_dir, open_file=file_path)
+    
+    @QtCore.pyqtSlot()
+    @QtCore.pyqtSlot(str)
+    def _update_session_status(self, session_path: str | None = None):
+        """
+        Update the status bar with session information.
+        
+        Args:
+            session_path: Path to session (provided on session start)
+        """
+        if self.session_manager.is_active:
+            name = self.session_manager.session_name or "Active"
+            count = self.session_manager.export_count
+            self.info_text.setText(f"📁 Session: {name} | {count} files")
+            self.info_text.setToolTip(f"Session path: {self.session_manager.session_path}")
+        else:
+            self.info_text.setText("")
+            self.info_text.setToolTip("")
+    
+    @QtCore.pyqtSlot(str, str)
+    def _on_file_exported_status(self, file_path: str, data_type: str):
+        """
+        Update status bar when a file is exported.
+        
+        Args:
+            file_path: Path to the exported file
+            data_type: Type of data exported
+        """
+        self._update_session_status()
+        
+        # Brief flash message in status bar
+        from pathlib import Path
+        filename = Path(file_path).name
+        self.statusBar().showMessage(f"Exported: {filename}", 3000)  # Show for 3 seconds

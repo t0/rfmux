@@ -1,4 +1,4 @@
-"""Window for displaying a detailed digest of a single detector resonance."""
+"""Dockable panel for displaying a detailed digest of a single detector resonance."""
 
 import numpy as np
 import pyqtgraph as pg
@@ -7,15 +7,16 @@ from PyQt6 import QtCore, QtWidgets, QtGui
 from .utils import (
     ClickableViewBox, UnitConverter, LINE_WIDTH,
     IQ_COLORS, SCATTER_COLORS, DISTINCT_PLOT_COLORS, COLORMAP_CHOICES,
-    UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE, FITTING_COLORS
+    UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE, FITTING_COLORS,
+    ScreenshotMixin
 )
-from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm, exp_bin_noise_data, PFB_SAMPLING_FREQ
+from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm
 
-class DetectorDigestWindow(QtWidgets.QMainWindow):
+class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
     """
-    A window that displays a detailed "digest" of a single detector resonance,
+    A dockable panel that displays a detailed "digest" of a single detector resonance,
     including three plots: Sweep (vs freq.), Sweep (IQ plane), Bias amplitude optimization,
-    and a panel for fitting results.
+    and a panel for fitting results. Can be docked, floated, or tabbed within the main Periscope window.
     """
     def __init__(self, parent: QtWidgets.QWidget = None,
                  resonance_data_for_digest: dict = None, # {amp_raw_direction_key: {'data': sweep_data_dict, 'actual_cf_hz': float, 'direction': str, 'amplitude': float}}
@@ -29,7 +30,6 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                  all_detectors_data: dict = None,  
                  initial_detector_idx: int = None,
                  noise_data = None,
-                 spectrum_data = None,
                  debug_noise_data = None,
                  debug_phase_data = None,
                  debug = False): 
@@ -46,11 +46,6 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
         self.current_detector = self.detector_id
 
-        self.noise_tab_avail = False
-        
-        # Set default reference mode (will be updated if spectrum_data exists)
-        self.reference = "absolute"
-        
         # Navigation support
         self.all_detectors_data = all_detectors_data or {}
         self.detector_indices = sorted(self.all_detectors_data.keys()) if self.all_detectors_data else []
@@ -72,44 +67,6 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.noise_i_data = None
         self.noise_q_data = None
 
-        #### Noise spectrum Tab #####
-        self.tabs = None
-        self.digest_page = None
-        self.mean_subtract_enabled = False
-        self.exp_binning_enabled = False
-
-        self.spectrum_data = spectrum_data
-        self.fast_freq = PFB_SAMPLING_FREQ/2 #### 2.44 MSS = 1.22 MHz nyquist frequency
-        self.slow_freq = 0
-
-        self.show_fast_tod = False
-
-
-
-        ### Data products for plotting ####
-        if self.spectrum_data:
-            self.noise_tab_avail = True
-            self.single_psd_i = self.spectrum_data['single_psd_i'][self.detector_id - 1]
-            self.single_psd_q = self.spectrum_data['single_psd_q'][self.detector_id - 1]
-            self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
-            self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
-            self.reference = self.spectrum_data['reference']
-            self.tone_amp = self.spectrum_data['amplitudes_dbm'][self.detector_id - 1]
-            self.slow_freq = self.spectrum_data['slow_freq_hz']
-            if self.spectrum_data['pfb_enabled']:
-                self.show_fast_tod = True
-            
-            if self.show_fast_tod:
-                self.pfb_psd_i = self.spectrum_data['pfb_psd_i'][self.detector_id - 1]
-                self.pfb_psd_q = self.spectrum_data['pfb_psd_q'][self.detector_id - 1]
-                self.pfb_tod_i = self.spectrum_data['pfb_I'][self.detector_id - 1]
-                self.pfb_tod_q = self.spectrum_data['pfb_Q'][self.detector_id - 1]
-                self.pfb_freq_iq = self.spectrum_data['pfb_freq_iq'][self.detector_id - 1]
-                self.pfb_freq_dsb = self.spectrum_data['pfb_freq_dsb'][self.detector_id - 1]
-                self.pfb_dual_psd = self.spectrum_data['pfb_dual_psd'][self.detector_id - 1]
-        else:
-            self.noise_tab_avail = False ### You can't access noise tab if no noise data was collected
-        
         #### Extra debugging step ####
         self.debug = debug
 
@@ -159,88 +116,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
 
     
     def _setup_ui(self):
-        """Sets up the UI layout with plots, fitting, and noise information panel."""
-        # Root central widget
-        central_widget = QtWidgets.QWidget()
-        self.setCentralWidget(central_widget)
-    
-        outer_layout = QtWidgets.QVBoxLayout(central_widget)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-    
-        # Tabs
-        self.tabs = QtWidgets.QTabWidget()
-        outer_layout.addWidget(self.tabs)
-    
-        # ---- Tab 1: existing Digest/Fit UI ----
-        self.digest_page = self._build_digest_tab()
-        self.tabs.addTab(self.digest_page, "Fit")
-    
-        # ---- Tab 2: Noise UI ----
-        self.noise_tab = self._build_noise_tab()
-        self.tabs.addTab(self.noise_tab, "Noise")
-        # Noise tab is always enabled now, with placeholder if no data
-    
-        # --- Optional: connect tab change ---
-        self.tabs.currentChanged.connect(self._on_tab_changed if hasattr(self, "_on_tab_changed") else lambda _: None)
-    
-        # --- Apply theme + finish ---
-        self.apply_theme(self.dark_mode)
-        self._update_plots()
-    
-        # Window configuration
-        self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
-        self.setWindowFlags(QtCore.Qt.WindowType.Window)
-        self.resize(1200, 800)
-
-
-    def _on_tab_changed(self, index: int):
-        """Handle switching between tabs (Fit and Noise)."""
-        if not hasattr(self, "tabs"):
-            return
-    
-        current_tab_name = self.tabs.tabText(index)
-    
-        # --- When switched to the Fit (Digest) tab ---
-        if current_tab_name == "Fit":
-            return
-    
-        # --- When switched to the Noise tab ---
-        if current_tab_name == "Noise":
-            # Update title and count to match the current detector
-            if hasattr(self, "title_label_noise"):
-                title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
-                self.title_label_noise.setText(title_text)
-    
-            if hasattr(self, "detector_count_label_noise") and self.detector_indices:
-                count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
-                self.detector_count_label_noise.setText(count_text)
-
-
-            multiple_detectors = len(self.detector_indices) > 1
-            if hasattr(self, "prev_button_noise"):
-                self.prev_button_noise.setEnabled(multiple_detectors)
-            if hasattr(self, "next_button_noise"):
-                self.next_button_noise.setEnabled(multiple_detectors)
-    
-            # If you later add noise plotting logic, you can enable this:
-            if hasattr(self, "_update_noise_plots"):
-                self._update_noise_plots()
-    
-            # For now, do nothing else — this is just a layout switch.
-            return
-
-    
-    def _build_digest_tab(self):
         """Sets up the UI layout with plots and fitting information panel."""
-        page = QtWidgets.QWidget()
-        
         # Main vertical layout for the entire window content
-        outer_layout = QtWidgets.QVBoxLayout(page)
+        outer_layout = QtWidgets.QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins for cleaner look
         
         # Set the background color of the dialog based on dark mode
         bg_color_hex = "#1C1C1C" if self.dark_mode else "#FFFFFF" # Hex for stylesheet
-        page.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}") # Apply to QWidget base
+        self.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}") # Apply to QWidget base
         
         # Create main splitter for resizable panes
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
@@ -263,6 +146,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.prev_button.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.prev_button)
         
+
         # Title in the center
         title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
         self.title_label = QtWidgets.QLabel(title_text)
@@ -285,6 +169,12 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.refresh_noise_button.setToolTip("Captures 100 I,Q points for each detector and over-plots them on the I,Q plot in the detector digest windows. Used to conveniently re-assess detector state.")
         self.refresh_noise_button.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.refresh_noise_button)
+
+        # Screenshot button
+        self.screenshot_btn = QtWidgets.QPushButton("📷")
+        self.screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        self.screenshot_btn.clicked.connect(self._export_screenshot)
+        nav_layout.addWidget(self.screenshot_btn)
         
         # Add detector count label
         detector_count_text = ""
@@ -299,7 +189,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.trace_hint_label = QtWidgets.QLabel(trace_hint_text)
         self.trace_hint_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; font-size: 10pt; }}")
         nav_layout.addWidget(self.trace_hint_label)
-        
+
         top_layout.addWidget(nav_widget)
         
         plots_layout = QtWidgets.QHBoxLayout()
@@ -426,157 +316,28 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         outer_layout.addWidget(self.main_splitter)
 
         self._apply_zoom_box_mode_to_all()
+        # Note: apply_theme() is called at the end of _setup_ui()
+    
+        # --- Apply theme ---
         self.apply_theme(self.dark_mode)
-
-        return page
-
-
-    def _build_noise_tab(self):
-        """Builds the Noise tab."""
-        page = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(page)
-        layout.setContentsMargins(5, 5, 5, 5)
-
-        bg_color_hex = "#1C1C1C" if self.dark_mode else "#FFFFFF" # Hex for stylesheet
-        page.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}") # Apply to QWidget base
-    
-        title_color_str = "white" if self.dark_mode else "black"
-        plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-    
-        # --- Navigation Bar (same as Digest tab) ---
-        nav_widget = QtWidgets.QWidget()
-        nav_layout = QtWidgets.QHBoxLayout(nav_widget)
-        nav_layout.setContentsMargins(0, 0, 0, 0)
-
-        #### Mean enabled ######
-        checkbox_widget = QtWidgets.QWidget()
-        checkbox_layout = QtWidgets.QHBoxLayout(checkbox_widget)
-        checkbox_layout.setContentsMargins(5, 0, 5, 0)
-        
-        self.mean_subtract_checkbox = QtWidgets.QCheckBox("Mean Subtracted")
-        self.mean_subtract_checkbox.setToolTip("If checked, TOD data will have its mean subtracted before plotting.")
-        self.mean_subtract_checkbox.stateChanged.connect(self._toggle_mean_subtraction)
-
-        self.exp_binning_checkbox = QtWidgets.QCheckBox("Exponential Binning")
-        self.exp_binning_checkbox.setToolTip("If checked, noise spectrum will use exponential binning.")
-        self.exp_binning_checkbox.toggled.connect(self._toggle_exp_binning)
-        
-        checkbox_layout.addStretch()
-        checkbox_layout.addWidget(self.mean_subtract_checkbox)
-        checkbox_layout.addSpacing(20)
-        checkbox_layout.addWidget(self.exp_binning_checkbox)
-        checkbox_layout.addStretch()
-        
-        layout.addWidget(checkbox_widget)
-
-        ##### Buttons #####
-    
-        self.prev_button_noise = QtWidgets.QPushButton("◀ Previous")
-        self.prev_button_noise.clicked.connect(self._navigate_previous)
-        self.prev_button_noise.setEnabled(len(self.detector_indices) > 1)
-        nav_layout.addWidget(self.prev_button_noise)
-    
-        title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
-        self.title_label_noise = QtWidgets.QLabel(title_text)
-        self.title_label_noise.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        font = self.title_label_noise.font()
-        font.setPointSize(font.pointSize() + 2)
-        self.title_label_noise.setFont(font)
-        self.title_label_noise.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
-        nav_layout.addWidget(self.title_label_noise, 1)
-    
-        self.next_button_noise = QtWidgets.QPushButton("Next ▶")
-        self.next_button_noise.clicked.connect(self._navigate_next)
-        self.next_button_noise.setEnabled(len(self.detector_indices) > 1)
-        nav_layout.addWidget(self.next_button_noise)
-    
-        detector_count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})" if self.detector_indices else ""
-        self.detector_count_label_noise = QtWidgets.QLabel(detector_count_text)
-        self.detector_count_label_noise.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
-        nav_layout.addWidget(self.detector_count_label_noise)
-    
-        layout.addWidget(nav_widget)
-    
-        # --- Splitter with Conditional Fast TOD Plot ---
-        splitter_main = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        
-        # --- Top Splitter (Horizontal) ---
-        splitter_top = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        
-        # Plot colors
-        plot_bg_color, plot_pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-        
-        # --- Top Left Plot (Time vs Magnitude) ---
-        vb_time = ClickableViewBox(); vb_time.parent_window = self
-        self.plot_time_vs_mag = pg.PlotWidget(viewBox=vb_time, name="TimeVsAmplitude")
-        self.plot_time_vs_mag.setBackground(plot_bg_color)
-        self.plot_time_vs_mag.setLabel('left', "Amplitude", units="V")
-        self.plot_time_vs_mag.setLabel('bottom', "Time", units="s")
-        self.plot_time_vs_mag.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_time_vs_mag.setTitle("TOD", color=plot_pen_color)
-        self.plot_time_vs_mag.addLegend(offset=(30, 10), labelTextColor=plot_pen_color)
-        splitter_top.addWidget(self.plot_time_vs_mag)
-
-        
-        # --- Conditionally Add Fast TOD Plot ---
-        if self.show_fast_tod:  # your condition flag
-            vb_fast_tod = ClickableViewBox(); vb_fast_tod.parent_window = self
-            self.plot_fast_tod = pg.PlotWidget(viewBox=vb_fast_tod, name="FastTOD")
-            self.plot_fast_tod.setBackground(plot_bg_color)
-            self.plot_fast_tod.setLabel('left', "Amplitude", units="V")
-            self.plot_fast_tod.setLabel('bottom', "Time", units="s")
-            self.plot_fast_tod.showGrid(x=True, y=True, alpha=0.2)
-            self.plot_fast_tod.setTitle("Fast TOD", color=plot_pen_color)
-            self.plot_fast_tod.addLegend(offset=(30, 10), labelTextColor=plot_pen_color)
-            splitter_top.addWidget(self.plot_fast_tod)
-        
-        # --- Bottom Plot (Noise Spectrum) ---
-        vb_spec = ClickableViewBox(); vb_spec.parent_window = self
-        self.plot_noise_spectrum = pg.PlotWidget(viewBox=vb_spec, name="NoiseSpectrum")
-        self.plot_noise_spectrum.setBackground(plot_bg_color)
-        if self.reference == "relative":
-            self.plot_noise_spectrum.setLabel('left', "Amplitude", units="dBc/Hz")
-        else:
-            self.plot_noise_spectrum.setLabel('left', "Amplitude", units="dBm/Hz")
-        self.plot_noise_spectrum.setLabel('bottom', "Frequency", units="Hz")
-        self.plot_noise_spectrum.showGrid(x=True, y=True, alpha=0.2)
-        self.plot_noise_spectrum.setTitle("Noise Spectrum", color=plot_pen_color)
-        self.plot_noise_spectrum.setYRange(-180, 0)
-        self.plot_noise_spectrum.addLegend(offset=(30, 10), labelTextColor=plot_pen_color)
-        
-        # --- Combine Splitters ---
-        splitter_main.addWidget(splitter_top)
-        splitter_main.addWidget(self.plot_noise_spectrum)
-        splitter_main.setSizes([400, 400])
-        
-        # Placeholder label for when no data is available
-        self.noise_placeholder_label = QtWidgets.QLabel("This data is populated once 'Get Noise Spectrum' is run from the multisweep panel")
-        self.noise_placeholder_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.noise_placeholder_label.setStyleSheet("font-size: 14pt; color: gray;")
-        self.noise_placeholder_label.hide() # Hidden by default
-        
-        layout.addWidget(splitter_main)
-        layout.addWidget(self.noise_placeholder_label)
-        
-        # Keep reference to splitter to hide/show it
-        self.noise_splitter = splitter_main
-        
-        self.apply_theme(self.dark_mode)
-
-    
-        return page
 
     def _refresh_noise_samps(self):
         self.current_detector = self.detector_id
         self.refresh_noise_button.setEnabled(False)
-        self.noise_data = self.parent()._take_noise_samps()
-        self.noise_i_data = self.noise_data.i[self.current_detector - 1]
-        self.noise_q_data = self.noise_data.q[self.current_detector - 1]
+        
+        # Use stored reference to MultisweepPanel (avoids fragile parent traversal)
+        if hasattr(self, 'multisweep_panel_ref') and self.multisweep_panel_ref:
+            self.noise_data = self.multisweep_panel_ref._take_noise_samps()
+            if self.noise_data:
+                self.noise_i_data = self.noise_data.i[self.current_detector - 1]
+                self.noise_q_data = self.noise_data.q[self.current_detector - 1]
+        else:
+            print("Warning: No MultisweepPanel reference available for noise sampling")
+        
         self.refresh_noise_button.setEnabled(True)
         # Don't auto-range when refreshing noise - preserve user zoom
         self._update_plots(auto_range=False)
-    
-    
+
     def _init_skewed_table_rows(self):
         """Initialize the rows for the skewed fit table."""
         params = [
@@ -634,16 +395,6 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self._navigate_next_trace()
         else:
             super().keyPressEvent(event)
-            
-    def _toggle_mean_subtraction(self, state):
-        """Toggles mean subtraction for TOD data and updates plots."""
-        self.mean_subtract_enabled = (state == QtCore.Qt.CheckState.Checked.value)
-        self._update_noise_plots()
-
-    def _toggle_exp_binning(self, checked: bool):
-        """Handles checkbox toggle to enable/disable exponential binning."""
-        self.exp_binning_enabled = checked
-        self._update_noise_plots()
     
     def _navigate_previous(self):
         """Navigate to the previous detector."""
@@ -751,29 +502,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
         self.current_plot_offset_hz = None
         self.noise_i_data = None
         self.noise_q_data = None
-        self.fast_freq = 1.22e6
 
-
-        if self.spectrum_data:
-            self.noise_tab_avail = True
-            self.single_psd_i = self.spectrum_data['single_psd_i'][self.detector_id - 1] 
-            self.single_psd_q = self.spectrum_data['single_psd_q'][self.detector_id - 1]
-            self.tod_i = self.spectrum_data['I'][self.detector_id - 1]
-            self.tod_q = self.spectrum_data['Q'][self.detector_id - 1]
-            self.reference = self.spectrum_data['reference']
-            self.tone_amp = self.spectrum_data['amplitudes_dbm'][self.detector_id - 1]
-            self.slow_freq = self.spectrum_data['slow_freq_hz']
-            if self.spectrum_data['pfb_enabled']:
-                self.show_fast_tod = True
-            
-            if self.show_fast_tod:
-                self.pfb_psd_i = self.spectrum_data['pfb_psd_i'][self.detector_id - 1]
-                self.pfb_psd_q = self.spectrum_data['pfb_psd_q'][self.detector_id - 1]
-                self.pfb_tod_i = self.spectrum_data['pfb_I'][self.detector_id - 1]
-                self.pfb_tod_q = self.spectrum_data['pfb_Q'][self.detector_id - 1]
-                self.pfb_freq_iq = self.spectrum_data['pfb_freq_iq'][self.detector_id - 1]
-                self.pfb_freq_dsb = self.spectrum_data['pfb_freq_dsb'][self.detector_id - 1]
-                self.pfb_dual_psd = self.spectrum_data['pfb_dual_psd'][self.detector_id - 1]
         if self.debug:
             self.debug_noise = self.full_debug[self.detector_id]
         # print("For detector", self.detector_id, "the noise is", self.debug_noise)
@@ -819,19 +548,9 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             detector_count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
             self.detector_count_label.setText(detector_count_text)
         
-        if hasattr(self, "title_label_noise"):
-            title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
-            self.title_label_noise.setText(title_text)
-
-        if hasattr(self, "detector_count_label_noise") and self.detector_indices:
-            count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
-            self.detector_count_label_noise.setText(count_text)
-        
         # Redraw plots with new data
         
         self._update_plots()
-        if self.spectrum_data:
-            self._update_noise_plots()
 
     def _apply_zoom_box_mode_to_all(self):
         """Applies the current zoom_box_mode state to all plot viewboxes."""
@@ -860,290 +579,6 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 if self.nl_table.item(row, 1):
                     self.nl_table.item(row, 1).setText("N/A")
 
-
-    def _get_relative_timestamps(self, ts, num_samples):
-        SS_PER_SECOND = 156250000
-        first = ts[0].h * 3600 + ts[0].m * 60 + ts[0].s + ts[0].ss/SS_PER_SECOND
-        last = ts[-1].h * 3600 + ts[-1].m * 60 + ts[-1].s + ts[-1].ss/SS_PER_SECOND
-        total_time = last - first
-        timeseries = list(np.linspace(0, total_time, num_samples))
-        return timeseries
-    
-    
-    def _update_noise_plots(self):
-        self.apply_theme(self.dark_mode)
-    
-        if not self.spectrum_data:
-            if hasattr(self, 'noise_splitter'): self.noise_splitter.hide()
-            if hasattr(self, 'noise_placeholder_label'): self.noise_placeholder_label.show()
-            self.plot_time_vs_mag.clear()
-            self.plot_noise_spectrum.clear()
-            return
-            
-        if hasattr(self, 'noise_splitter'): self.noise_splitter.show()
-        if hasattr(self, 'noise_placeholder_label'): self.noise_placeholder_label.hide()
-    
-        # try:
-        exp_bins = 100
-        self.plot_time_vs_mag.clear()
-        self.plot_noise_spectrum.clear()
-        if self.show_fast_tod:
-            self.plot_fast_tod.clear()
-
-        ###### First plot ######
-        ts = self._get_relative_timestamps(self.spectrum_data['ts'], len(self.tod_i))
-        if self.reference == "relative":
-            tod_i_volts = convert_roc_to_volts(np.array(self.tod_i))
-            tod_q_volts = convert_roc_to_volts(np.array(self.tod_q))
-        else:
-            tod_i_volts = np.array(self.tod_i)
-            tod_q_volts = np.array(self.tod_q) ##### it is already converted to volts in spectrum_from_slow_tod_function for "absolute"
-
-        if self.mean_subtract_enabled:
-            tod_i_volts = tod_i_volts - np.mean(tod_i_volts)
-            tod_q_volts = tod_q_volts - np.mean(tod_q_volts)
-
-        complex_volts = tod_i_volts + 1j * tod_q_volts
-        mag_volts = np.abs(complex_volts)
-
-        self.plot_time_vs_mag.plot(ts, tod_i_volts, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
-        self.plot_time_vs_mag.plot(ts, tod_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
-        self.plot_time_vs_mag.autoRange()
-
-        if self.show_fast_tod:
-            pfb_ts = self.spectrum_data['pfb_ts']
-
-            tod_pfb_i_volts = convert_roc_to_volts(np.array(self.pfb_tod_i))
-            tod_pfb_q_volts = convert_roc_to_volts(np.array(self.pfb_tod_q))
-
-            if self.mean_subtract_enabled:
-                tod_pfb_i_volts = tod_pfb_i_volts - np.mean(tod_pfb_i_volts)
-                tod_pfb_q_volts = tod_pfb_q_volts - np.mean(tod_pfb_q_volts)
-
-
-            self.plot_fast_tod.plot(pfb_ts, tod_pfb_i_volts, pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="PFB I")
-            self.plot_fast_tod.plot(pfb_ts, tod_pfb_q_volts, pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="PFB Q")
-            self.plot_fast_tod.autoRange()
-
-        ###### Second plot ########
-        frequencies = self.spectrum_data['freq_iq']
-        psd_i = self.single_psd_i[3:] #### Remove DC bin
-        psd_q = self.single_psd_q[3:]
-        freq = frequencies[3:]
-
-
-
-        #### pfb_data ####
-
-        if self.show_fast_tod:
-            overlap = self.spectrum_data['overlap'] #### Overlapping points with the slow spectrum, just for plotting
-            if overlap < 2: ### Incase the calculation doesn't pick up any overlapping samples and also to remove the dc bin
-                overlap = 2
-            pfb_psd_i = self.pfb_psd_i[overlap:]
-            pfb_psd_q = self.pfb_psd_q[overlap:]
-            pfb_freq = self.pfb_freq_iq[overlap:]
-
-            ##### For the magnitude part ####
-            freq_dsb = np.array(self.pfb_freq_dsb)
-            psd_dsb = np.array(self.pfb_dual_psd)
-            min_f_abs = abs(np.min(freq_dsb))
-            max_f_abs = abs(np.max(freq_dsb))
-            
-            if max_f_abs >= min_f_abs:
-                # Keep positive side
-                mask = freq_dsb >= 0
-                freq_sel = freq_dsb[mask]
-                psd_sel  = psd_dsb[mask]
-                h_label = "(I-Q)/2"
-            else:
-                # Keep negative side, convert to positive
-                mask = freq_dsb <= 0
-                freq_sel = np.abs(freq_dsb[mask])
-                psd_sel  = psd_dsb[mask]
-                h_label = "(I+Q)/2"
-            
-            # Sort ascending
-            sort_idx = np.argsort(freq_sel)
-            freq_sel = freq_sel[sort_idx]
-            psd_sel  = psd_sel[sort_idx]
-
-            freq_sel = freq_sel[2:] ### Removing DC bin info
-            psd_sel = psd_sel[2:]
-
-            
-        else:
-            pfb_freq = []
-            pfb_psd_i = []
-            pfb_psd_q = []
-            psd_sel = []
-            freq_sel = []
-
-
-        full_freq = list(freq) + list(pfb_freq)
-        full_psd_i = list(psd_i) + list(pfb_psd_i)
-        full_psd_q = list(psd_q) + list(pfb_psd_q)
-        full_lin_comb = list(psd_sel)
-        freq_lin_comb = list(freq_sel)
-
-        
-        log_freqs = np.log10(np.clip(full_freq, 1e-12, None))
-        
-        amplitude = self.tone_amp #### already in dbm
-        slow_freq = self.slow_freq
-        fast_freq = self.fast_freq/1e6
-        
-        # Create a text box to show the values
-        summary_text = (
-            f"<span style='font-size:12pt; color:grey;'>"
-            f"Tone Amp: {amplitude:.1f} dBm <br>"
-            f"Slow Bandwidth: {slow_freq:.0f} Hz <br>"
-            f"Fast Bandwidth: {fast_freq:.2f} MHz </span>"
-        )
-        
-        self.summary_label = pg.TextItem(html=summary_text, anchor=(0, 0), border='w', fill=(0, 0, 0, 150))
-        self.plot_noise_spectrum.addItem(self.summary_label)
-        self.summary_label.setPos(np.max(log_freqs) * 0.8, np.max(psd_i) * 0.9)
-        
-        if self.exp_binning_enabled:
-
-            f_bin_i, psd_i_bin = exp_bin_noise_data(freq, psd_i, exp_bins) #### fixing bins to 50
-            f_bin_q, psd_q_bin = exp_bin_noise_data(freq, psd_q, exp_bins)
-
-            
-            curve_i = self.plot_noise_spectrum.plot(f_bin_i, psd_i_bin,
-                                                    pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
-            curve_q = self.plot_noise_spectrum.plot(f_bin_q, psd_q_bin,
-                                                    pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
-    
-            if self.show_fast_tod:
-                # --- New PFB curves ---
-                pfb_f_bin_i, pfb_psd_i_bin = exp_bin_noise_data(pfb_freq, pfb_psd_i, exp_bins) #### fixing bins to 100
-                pfb_f_bin_q, pfb_psd_q_bin = exp_bin_noise_data(pfb_freq, pfb_psd_q, exp_bins)
-                pfb_f_bin_mag, pfb_psd_mag_bin = exp_bin_noise_data(freq_sel, psd_sel, exp_bins)
-
-                
-                curve_pfb_i = self.plot_noise_spectrum.plot(pfb_f_bin_i, pfb_psd_i_bin,
-                                                            pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH, style=QtCore.Qt.DashLine),
-                                                            name="PFB I")
-                curve_pfb_q = self.plot_noise_spectrum.plot(pfb_f_bin_q, pfb_psd_q_bin,
-                                                            pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH, style=QtCore.Qt.DashLine),
-                                                            name="PFB Q")
-                curve_pfb_mag = self.plot_noise_spectrum.plot(pfb_f_bin_mag, pfb_psd_mag_bin,
-                                                              pen=pg.mkPen(color = (255, 0, 0, 100), width=LINE_WIDTH, style=QtCore.Qt.DashLine),
-                                                              name="wideband linear combination (I,Q)")
-            
-            self.plot_noise_spectrum.setLogMode(x=True, y=False)
-            self.plot_noise_spectrum.autoRange()
-
-        else:
-            curve_i = self.plot_noise_spectrum.plot(freq, psd_i,
-                                                    pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH), name="I")
-            curve_q = self.plot_noise_spectrum.plot(freq, psd_q,
-                                                    pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
-
-    
-            if self.show_fast_tod:
-                # --- New PFB curves ---
-                curve_pfb_i = self.plot_noise_spectrum.plot(pfb_freq, pfb_psd_i,
-                                                            pen=pg.mkPen(IQ_COLORS["I"], width=LINE_WIDTH, style=QtCore.Qt.DashLine),
-                                                            name="PFB I")
-                curve_pfb_q = self.plot_noise_spectrum.plot(pfb_freq, pfb_psd_q,
-                                                            pen=pg.mkPen(IQ_COLORS["Q"], width=LINE_WIDTH, style=QtCore.Qt.DashLine),
-                                                            name="PFB Q")
-
-                curve_pfb_mag = self.plot_noise_spectrum.plot(freq_sel, psd_sel,
-                                                              pen=pg.mkPen(color = (255, 0, 0, 100), width=LINE_WIDTH, style=QtCore.Qt.DashLine),
-                                                              name="wideband linear combination (I,Q)")
-            
-            self.plot_noise_spectrum.setLogMode(x=True, y=False)
-            self.plot_noise_spectrum.autoRange()
-
-        # --- Hover label setup ---
-        vb = self.plot_noise_spectrum.getViewBox()
-        self.hover_label = pg.TextItem("", anchor=(0, 1), color='w')
-        self.plot_noise_spectrum.addItem(self.hover_label)
-        self.hover_label.hide()
-
-
-        # --- Mouse move handler ---
-        def on_mouse_move(evt):
-            pos = evt[0]  # current mouse position in scene coordinates
-            if self.plot_noise_spectrum.sceneBoundingRect().contains(pos):
-                mouse_point = vb.mapSceneToView(pos)
-                
-                log_x = mouse_point.x()
-                x = 10 ** log_x
-
-                summary_rect = self.summary_label.boundingRect()
-                summary_rect = self.summary_label.mapRectToScene(summary_rect)
-                if summary_rect.contains(pos):
-                    # Mouse is over text box — disable hover update
-                    return
-                
-                if self.exp_binning_enabled:
-                    # Use the binned frequency and PSD data
-                    freq_i = np.log10(np.clip(np.concatenate((f_bin_i, pfb_f_bin_i if self.show_fast_tod else [])), 1e-12, None))
-                    psd_i_vals = np.concatenate((psd_i_bin, pfb_psd_i_bin if self.show_fast_tod else []))
-                    psd_q_vals = np.concatenate((psd_q_bin, pfb_psd_q_bin if self.show_fast_tod else []))
-                    if self.show_fast_tod:
-                        psd_dual_vals = pfb_psd_mag_bin
-                        freq_l = pfb_f_bin_mag
-                else:
-                    # Use the original data
-                    freq_i = log_freqs
-                    psd_i_vals = full_psd_i
-                    psd_q_vals = full_psd_q
-                    if self.show_fast_tod:
-                        psd_dual_vals = full_lin_comb
-                        freq_l = freq_lin_comb
-
-
-                if self.show_fast_tod:
-                    if x > max(freq_l):
-                        self.hover_label.hide()
-                        return
-
-                        
-                if self.show_fast_tod:
-                    if log_x < max(freq_i):
-                        y_i = np.interp(log_x, freq_i, psd_i_vals)
-                        y_q = np.interp(log_x, freq_i, psd_q_vals)
-                        y_d = np.interp(log_x, freq_l, psd_dual_vals)
-                        self.hover_label.setHtml(
-                            f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
-                            f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
-                            f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
-                            f"<span style='color:yellow'>Freq: {x:.3f}</span>"
-                        )
-                        self.hover_label.setPos(log_x * 0.95, max(y_i, y_q, y_d)*0.95)
-                    else:
-                        y_d = np.interp(log_x, freq_l, psd_dual_vals)
-                        self.hover_label.setHtml(
-                            f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
-                            f"<span style='color:yellow'> Freq: {x:.3f}</span>"
-                        )
-                        self.hover_label.setPos(log_x * 0.95, y_d * 0.95)
-                else:
-                    if log_x < max(freq_i):      
-                        y_i = np.interp(log_x, freq_i, psd_i_vals)
-                        y_q = np.interp(log_x, freq_i, psd_q_vals)
-                        self.hover_label.setHtml(
-                            f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
-                            f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
-                            f"<span style='color:yellow'>Freq: {x:.3f}</span>"
-                        )
-                        self.hover_label.setPos(log_x * 0.95, max(y_i, y_q)*0.95)
-                        
-                self.hover_label.show() 
-            else:
-                self.hover_label.hide()
-
-        self.proxy = pg.SignalProxy(self.plot_noise_spectrum.scene().sigMouseMoved,
-                                    rateLimit=60, slot=on_mouse_move)
-        
-        # except Exception as e:
-        #     print("Error updating noise plots:", e)      
-        
     def _update_plots(self, auto_range=True):
         """
         Populates all three plots with data and updates fitting information panel.
@@ -1449,30 +884,14 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 self.nl_table.item(NL_QC_ROW, 1).setText(f"{nl_params_dict.get('Qc_nl', nl_params_dict.get('Qc',0)):,.1f}")
                 self.nl_table.item(NL_QI_ROW, 1).setText(f"{nl_params_dict.get('Qi_nl', nl_params_dict.get('Qi',0)):,.1f}")
                 
-                # Nonlinearity parameter 'a' with special formatting and color
+                # Nonlinearity parameter 'a'
                 a_value = nl_params_dict.get('a', 0)
-                a_item = self.nl_table.item(NL_A_ROW, 1)
-                a_item.setText(f"{a_value:.3e}")
+                self.nl_table.item(NL_A_ROW, 1).setText(f"{a_value:.3e}")
                 
                 # Bifurcation threshold is 4*sqrt(3)/9 ≈ 0.77
                 bifurcation_threshold = 4 * np.sqrt(3) / 9
-                
-                # Reset styling to ensure "milder" colors are used without complex highlighting
-                # This avoids rendering issues on some OS/themes
-                default_bg_brush = QtGui.QBrush(QtGui.QColor("transparent")) 
-                default_text_color = QtGui.QColor("white" if self.dark_mode else "black")
-                
-                # Reset 'a' parameter styling
-                a_item.setBackground(default_bg_brush)
-                a_item.setForeground(QtGui.QBrush(default_text_color))
-                
-                # Set bifurcation status text
                 is_bifurcated = a_value > bifurcation_threshold
                 self.nl_table.item(NL_BIFURCATION_ROW, 1).setText("Yes" if is_bifurcated else "No")
-                
-                # Reset bifurcation row styling
-                self.nl_table.item(NL_BIFURCATION_ROW, 1).setBackground(default_bg_brush)
-                self.nl_table.item(NL_BIFURCATION_ROW, 1).setForeground(QtGui.QBrush(default_text_color))
                 
                 self.nl_table.item(NL_PHI_ROW, 1).setText(f"{np.degrees(nl_params_dict.get('phi', 0)):.2f}")
                 self.nl_table.item(NL_I0_ROW, 1).setText(f"{nl_params_dict.get('i0', 0):.3e}")
@@ -1535,13 +954,12 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             ev.accept()
             
     def apply_theme(self, dark_mode: bool):
-        """Apply the dark/light theme to all plots and UI elements in this window."""
+        """Apply the dark/light theme to all plots and UI elements in this panel."""
         self.dark_mode = dark_mode
-        central_widget = self.centralWidget()
-        if central_widget:
-            bg_color_hex = "#1C1C1C" if dark_mode else "#FFFFFF"
-            # Apply to central widget and ensure children inherit or are styled explicitly
-            central_widget.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}")
+        
+        # Apply background color directly to self (QWidget base)
+        bg_color_hex = "#1C1C1C" if dark_mode else "#FFFFFF"
+        self.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}")
         
         title_color_str = "white" if dark_mode else "black"
         plot_bg_color, plot_pen_color = ("k", "w") if dark_mode else ("w", "k")
@@ -1551,12 +969,7 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
             self.title_label.setStyleSheet(
                 f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}"
             )
-        if hasattr(self, 'title_label_noise'):
-            self.title_label_noise.setStyleSheet(
-                f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}"
-            )
-    
-        # ----- Plots (Digest tab) -----
+        # ----- Plots -----
         plot_widgets_legends = [
             (self.plot1_sweep_vs_freq, self.plot1_legend, "Sweep"),
             (self.plot2_iq_plane, self.plot2_legend, "IQ"),
@@ -1584,24 +997,6 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                         legend_widget.setLabelTextColor(plot_pen_color)
                     except Exception as e:
                         print(f"Error updating legend color for {default_title_text}: {e}")
-    
-        # ----- Plots (Noise tab) -----
-        if hasattr(self, 'plot_time_vs_mag'):
-            self.plot_time_vs_mag.setBackground(plot_bg_color)
-            plot_item = self.plot_time_vs_mag.getPlotItem()
-            plot_item.setTitle("TOD", color=plot_pen_color)
-            for ax in ("left", "bottom"):
-                axis = plot_item.getAxis(ax)
-                axis.setPen(plot_pen_color)
-                axis.setTextPen(plot_pen_color)
-        if hasattr(self, 'plot_noise_spectrum'):
-            self.plot_noise_spectrum.setBackground(plot_bg_color)
-            plot_item = self.plot_noise_spectrum.getPlotItem()
-            plot_item.setTitle("Noise Spectrum", color=plot_pen_color)
-            for ax in ("left", "bottom"):
-                axis = plot_item.getAxis(ax)
-                axis.setPen(plot_pen_color)
-                axis.setTextPen(plot_pen_color)
     
         # ----- Fitting info panel -----
         if hasattr(self, 'fitting_info_group'):
@@ -1681,10 +1076,22 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 }
             """
     
-        # Style for QTableWidget using Palette (better for item-specific coloring)
+        # Style for QTableWidget - use full stylesheet approach for better control
         if dark_mode:
-            # Header style only (stylesheets often needed for headers)
-            header_style = """
+            table_style = """
+                QTableWidget {
+                    background-color: #2C2C2C;
+                    alternate-background-color: #353535;
+                    color: #E0E0E0;
+                    gridline-color: #555555;
+                }
+                QTableWidget::item {
+                    color: #E0E0E0;
+                    background-color: #2C2C2C;
+                }
+                QTableWidget::item:alternate {
+                    background-color: #353535;
+                }
                 QHeaderView::section {
                     background-color: #3C3C3C;
                     color: #E0E0E0;
@@ -1696,16 +1103,21 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     border: 1px solid #555555;
                 }
             """
-            # Palette for the table content
-            p = QtGui.QPalette()
-            p.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor("#2C2C2C"))
-            p.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor("#353535"))
-            p.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor("#E0E0E0"))
-            p.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor("#4C4C4C"))
-            p.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor("white"))
         else:
-            # Header style only
-            header_style = """
+            table_style = """
+                QTableWidget {
+                    background-color: #FFFFFF;
+                    alternate-background-color: #F9F9F9;
+                    color: #000000;
+                    gridline-color: #CCCCCC;
+                }
+                QTableWidget::item {
+                    color: #000000;
+                    background-color: #FFFFFF;
+                }
+                QTableWidget::item:alternate {
+                    background-color: #F9F9F9;
+                }
                 QHeaderView::section {
                     background-color: #F0F0F0;
                     color: #000000;
@@ -1717,111 +1129,20 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                     border: 1px solid #CCCCCC;
                 }
             """
-            # Palette for the table content
-            p = QtGui.QPalette()
-            p.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor("#FFFFFF"))
-            p.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor("#F9F9F9"))
-            p.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor("#000000"))
-            p.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor("#E0F0FF"))
-            p.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor("black"))
 
         if hasattr(self, 'skewed_table'):
-            self.skewed_table.setStyleSheet(header_style)
-            self.skewed_table.setPalette(p)
+            self.skewed_table.setStyleSheet(table_style)
 
         if hasattr(self, 'nl_table'):
-            self.nl_table.setStyleSheet(header_style)
-            self.nl_table.setPalette(p)
+            self.nl_table.setStyleSheet(table_style)
 
-        # Digest tab buttons
+        # Buttons
         if hasattr(self, 'prev_button'):
             self.prev_button.setStyleSheet(button_style)
         if hasattr(self, 'next_button'):
             self.next_button.setStyleSheet(button_style)
-    
-        # Noise tab buttons ✅
-        if hasattr(self, 'prev_button_noise'):
-            self.prev_button_noise.setStyleSheet(button_style)
-        if hasattr(self, 'next_button_noise'):
-            self.next_button_noise.setStyleSheet(button_style)
         if hasattr(self, 'refresh_noise_button'):
             self.refresh_noise_button.setStyleSheet(button_style)
-
-        if hasattr(self, 'mean_subtract_checkbox'):
-            if self.dark_mode:
-                self.mean_subtract_checkbox.setStyleSheet("""
-                    QCheckBox {
-                        color: white;
-                    }
-                    QCheckBox::indicator {
-                        width: 16px;
-                        height: 16px;
-                    }
-                    QCheckBox::indicator:unchecked {
-                        border: 1px solid white;
-                        background-color: transparent;
-                    }
-                    QCheckBox::indicator:checked {
-                        border: 1px solid white;
-                        background-color: white;
-                    }
-                """)
-            else:
-                self.mean_subtract_checkbox.setStyleSheet("""
-                    QCheckBox {
-                        color: black;
-                    }
-                    QCheckBox::indicator {
-                        width: 16px;
-                        height: 16px;
-                    }
-                    QCheckBox::indicator:unchecked {
-                        border: 1px solid black;
-                        background-color: transparent;
-                    }
-                    QCheckBox::indicator:checked {
-                        border: 1px solid black;
-                        background-color: black;
-                    }
-                """)
-
-        if hasattr(self, 'exp_binning_checkbox'):
-            if self.dark_mode:
-                self.exp_binning_checkbox.setStyleSheet("""
-                    QCheckBox {
-                        color: white;
-                    }
-                    QCheckBox::indicator {
-                        width: 16px;
-                        height: 16px;
-                    }
-                    QCheckBox::indicator:unchecked {
-                        border: 1px solid white;
-                        background-color: transparent;
-                    }
-                    QCheckBox::indicator:checked {
-                        border: 1px solid white;
-                        background-color: white;
-                    }
-                """)
-            else:
-                self.exp_binning_checkbox.setStyleSheet("""
-                    QCheckBox {
-                        color: black;
-                    }
-                    QCheckBox::indicator {
-                        width: 16px;
-                        height: 16px;
-                    }
-                    QCheckBox::indicator:unchecked {
-                        border: 1px solid black;
-                        background-color: transparent;
-                    }
-                    QCheckBox::indicator:checked {
-                        border: 1px solid black;
-                        background-color: black;
-                    }
-                """)
     
         # ----- Splitter -----
         if hasattr(self, 'main_splitter'):
@@ -1845,59 +1166,5 @@ class DetectorDigestWindow(QtWidgets.QMainWindow):
                 f"QLabel {{ color: {title_color_str}; background-color: transparent; font-size: 10pt; }}"
             )
     
-        # Noise tab labels ✅
-        if hasattr(self, 'detector_count_label_noise'):
-            self.detector_count_label_noise.setStyleSheet(
-                f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
-            )
-    
-        if hasattr(self, 'tabs') and isinstance(self.tabs, QtWidgets.QTabWidget):
-            if dark_mode:
-                self.tabs.setStyleSheet("""
-                    QTabWidget::pane {
-                        border: 1px solid #555555;
-                        background: #1C1C1C;
-                    }
-                    QTabBar::tab {
-                        background: #2C2C2C;
-                        color: white;
-                        padding: 8px 16px;
-                        border: 1px solid #444444;
-                        border-top-left-radius: 4px;
-                        border-top-right-radius: 4px;
-                    }
-                    QTabBar::tab:selected {
-                        background: #3C3C3C;
-                        color: white;
-                        border: 1px solid #777777;
-                    }
-                    QTabBar::tab:hover {
-                        background: #4C4C4C;
-                    }
-                """)
-            else:
-                self.tabs.setStyleSheet("""
-                    QTabWidget::pane {
-                        border: 1px solid #CCCCCC;
-                        background: #FFFFFF;
-                    }
-                    QTabBar::tab {
-                        background: #F0F0F0;
-                        color: black;
-                        padding: 8px 16px;
-                        border: 1px solid #CCCCCC;
-                        border-top-left-radius: 4px;
-                        border-top-right-radius: 4px;
-                    }
-                    QTabBar::tab:selected {
-                        background: #FFFFFF;
-                        color: black;
-                        border: 1px solid #888888;
-                    }
-                    QTabBar::tab:hover {
-                        background: #E8E8E8;
-                    }
-                """)
-        
         # ----- Update plots to reflect new theme -----
         self._update_plots()

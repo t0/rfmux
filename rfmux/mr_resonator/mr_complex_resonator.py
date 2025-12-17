@@ -18,9 +18,9 @@ from .jit_physics import bessel_k0 as bessel_k0_approx, bessel_i0 as bessel_i0_a
 from .mr_lekid import MR_LEKID as MR_LEKID
 
 
-h = 6.626e-34
-kb = 1.38e-23
-mu0 = 8.85e-12 # F / m
+h = 6.626e-34      # Planck's constant [J·s]
+kb = 1.38e-23      # Boltzmann constant [J/K]
+mu0 = 4e-7 * 3.14159265359  # Permeability of free space [H/m] ≈ 1.257e-6
 
 
 class MR_complex_resonator(): 
@@ -50,21 +50,54 @@ class MR_complex_resonator():
       S21 calculations and convergence.
     """
     
-    def __init__(self, T=0.12, base_readout_f=1e9, material='Al', VL=540e-18, width=2e-6, thickness=30e-9, 
-                 length=None, C=0.5e-12, Cc=0.005e-12, alpha_k=0.5, fix_Lg=None, R_spoiler=0, L_junk=0, Tc=None, 
-                 Popt=1e-18, opt_eff=0.5, pb_eff=0.7, nu_opt=150e9, big_sigma_factor=1e-4, nstar=0, sigmaN=1./(4*20e-9),
+    # Material constants for Aluminum (internal units: µm⁻³ J⁻¹ for N0, seconds for tau0)
+    # N0 conversion: 1.72e10 µm⁻³ eV⁻¹ / (1.602e-19 J/eV) = 1.074e29 µm⁻³ J⁻¹
+    AL_N0 = 1.72e10 / 1.602e-19     # Density of states [µm⁻³ J⁻¹]
+    AL_TAU0 = 438e-9                # Electron-phonon time [s] (de Visser thesis)
+    AL_TC = 1.2                     # Critical temperature [K]
+    
+    def __init__(self, T=0.12, base_readout_f=1e9, VL=540e-18, width=2e-6, thickness=30e-9, 
+                 length=None, C=0.5e-12, Cc=0.005e-12, alpha_k=0.5, fix_Lg=None, R_spoiler=0, L_junk=0,
+                 # Material parameters - Al defaults (can be overridden for custom materials)
+                 Tc=None, N0=None, tau0=None, sigmaN=1./(4*20e-9),
+                 # Operating point
+                 Popt=1e-18, opt_eff=0.5, pb_eff=0.7, nu_opt=150e9, big_sigma_factor=1e-4, nstar=0,
+                 # Readout chain
                  Vin=0.15e-3, input_atten_dB=20, ZLNA=50., GLNA=1,
+                 # Deprecated parameter (kept for backward compatibility)
+                 material=None,
                  verbose=False):
+        """
+        High-level KID physics model.
+        
+        Material Parameters
+        -------------------
+        Tc : float, optional
+            Critical temperature [K]. Default: 1.2 K (Aluminum)
+        N0 : float, optional
+            Density of states at Fermi level [µm⁻³ J⁻¹]. 
+            Default: 1.074e29 (Aluminum: 1.72e10 µm⁻³ eV⁻¹ converted to SI)
+        tau0 : float, optional
+            Characteristic electron-phonon time [s]. Default: 438 ns (Aluminum)
+        sigmaN : float, optional
+            Normal state conductivity [S/m]. Default: 1/(4*20nm) for thin Al
+        """
         self.T = T
         self.readout_f = base_readout_f
         self.Popt = Popt
         self.opt_eff = opt_eff
         self.pb_eff = pb_eff
-        self.nu_opt = nu_opt ###
-        self.big_sigma_factor = big_sigma_factor #
-        if material != 'Al':
-            raise ValueError('You must choose Al for aluminum. More options may be added in future.')
-        self.material = material
+        self.nu_opt = nu_opt
+        self.big_sigma_factor = big_sigma_factor
+        
+        # Handle deprecated material parameter
+        if material is not None and material != 'Al':
+            import warnings
+            warnings.warn(
+                f"material='{material}' is deprecated. Use explicit Tc, N0, tau0 parameters instead. "
+                "Ignoring material name and using provided or default values.",
+                DeprecationWarning
+            )
 
         self.R_spoiler = R_spoiler
         self.L_junk = L_junk
@@ -79,18 +112,15 @@ class MR_complex_resonator():
         self.VL = VL
         self.VL_um3 = VL*1e18 # in um^3; this is conventionally the units for nqp etc
         
-        
         self.sigmaN = sigmaN
     
-        if Tc is None:
-            self.Tc = 1.2 # for Al
-        else:
-            self.Tc = Tc
+        # Material properties - use explicit values or Al defaults
+        self.Tc = Tc if Tc is not None else self.AL_TC
+        self.N0 = N0 if N0 is not None else self.AL_N0
+        self.tau0 = tau0 if tau0 is not None else self.AL_TAU0
+        
         if self.T >= self.Tc:
-            raise ValueError('Error: cannot set operational temperature equal to transition temperature.')
-        if material == 'Al': # this is your only choice 
-            self.N0 = 1.72e10 * 1.602e19 # for Al, um^-3 eV^-1 --> um^-3 J^-1
-            self.tau0 = 438e-9 # s; from de Visser thesis for aluminum (characteristic electron-phonon interaction time)
+            raise ValueError('Error: cannot set operational temperature equal to or above transition temperature.')
         self.nstar = nstar
 
 
@@ -103,7 +133,7 @@ class MR_complex_resonator():
         self.sigma_initial = self.sigma1_initial - 1.j*self.sigma2_initial
         self.Zs_initial = self.calc_Zs(f=self.readout_f, sigma=self.sigma_initial)
         self.R_initial, self.Lk_initial = self.calc_R_L(f=self.readout_f, Zs=self.Zs_initial)
-        self.R_initial += R_spoiler
+        # R_spoiler already included in calc_R_L(), no need to add again
         
         # generate dark resonator
         self.input_atten_dB = input_atten_dB
@@ -140,7 +170,7 @@ class MR_complex_resonator():
         self.sigma_dark = self.sigma1_dark - 1.j*self.sigma2_dark
         self.Zs_dark = self.calc_Zs(f=self.readout_f, sigma=self.sigma_dark)
         self.R_dark, self.Lk_dark = self.calc_R_L(f=self.readout_f, Zs=self.Zs_dark)
-        self.R_dark += R_spoiler
+        # R_spoiler already included in calc_R_L(), no need to add again
         
         # generate dark resonator
         self.C = C

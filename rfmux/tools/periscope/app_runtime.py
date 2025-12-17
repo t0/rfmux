@@ -4,9 +4,49 @@ from .utils import *
 from .tasks import *
 from .ui import *
 import asyncio
+from PyQt6 import sip
+from PyQt6.QtCore import QUrl
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
+    
+    def _convert_iq_data(self, rawI: np.ndarray, rawQ: np.ndarray, ch_val: int) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Convert raw I/Q data based on current unit mode and calibration availability.
+        
+        This method consolidates the unit conversion logic that appears 5 times in the codebase.
+        It fixes a bug where 3 locations didn't fall back to real_units when df calibration
+        was missing (they returned raw counts instead).
+        
+        Behavior:
+        - df mode with calibration: apply df calibration to get freq shift/dissipation
+        - df mode without calibration: fall back to real_units check (BUG FIX)
+        - real_units mode: convert to volts
+        - counts mode: return raw counts
+        
+        Args:
+            rawI: Raw I component data
+            rawQ: Raw Q component data  
+            ch_val: Channel ID (for calibration lookup)
+            
+        Returns:
+            Tuple of (I_data, Q_data) converted according to unit_mode and calibration
+        """
+        if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
+            df_cal = self.df_calibrations[self.module].get(ch_val)
+            if df_cal is not None:
+                # Apply df calibration
+                iq_volts = convert_roc_to_volts(rawI) + 1j * convert_roc_to_volts(rawQ)
+                df_complex = iq_volts * df_cal
+                return df_complex.real, df_complex.imag  # Frequency shift (Hz), Dissipation (unitless)
+            else:
+                # No calibration - fall back to real_units check (matches PSD task behavior)
+                return (convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)) if self.real_units else (rawI, rawQ)
+        elif self.real_units:
+            return convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)
+        else:
+            return rawI, rawQ
+    
     def _init_buffers(self):
         """
         Initialize or re-initialize data buffers for all configured channels.
@@ -421,18 +461,20 @@ class PeriscopeRuntime:
         self._update_dark_mode_in_child_windows()
         
     def _update_dark_mode_in_child_windows(self):
-        """Propagate dark mode setting to all open child windows."""
-        # Update NetworkAnalysis windows
+        """Propagate dark mode setting to all open child windows and panels."""
+        # Update NetworkAnalysis panels (in docks)
         if hasattr(self, 'netanal_windows'):
             for window_data in self.netanal_windows.values():
-                if 'window' in window_data and hasattr(window_data['window'], 'apply_theme'):
-                    window_data['window'].apply_theme(self.dark_mode)
+                panel = window_data.get('window')  # 'window' key contains panel instance
+                if panel and hasattr(panel, 'apply_theme'):
+                    panel.apply_theme(self.dark_mode)
         
-        # Update Multisweep windows
+        # Update Multisweep panels (in docks)
         if hasattr(self, 'multisweep_windows'):
             for window_data in self.multisweep_windows.values():
-                if 'window' in window_data and hasattr(window_data['window'], 'apply_theme'):
-                    window_data['window'].apply_theme(self.dark_mode)
+                panel = window_data.get('window')  # 'window' key contains panel instance
+                if panel and hasattr(panel, 'apply_theme'):
+                    panel.apply_theme(self.dark_mode)
 
     def _toggle_real_units(self, checked: bool):
         """
@@ -577,45 +619,50 @@ class PeriscopeRuntime:
         rawI = self.buf[ch_val]["I"].data(); rawQ = self.buf[ch_val]["Q"].data()
         rawM = self.buf[ch_val]["M"].data(); tarr = self.tbuf[ch_val].data()
         
-        # Apply appropriate unit conversion based on unit_mode
+        # Use extracted helper method for I/Q conversion
+        I_data, Q_data = self._convert_iq_data(rawI, rawQ, ch_val)
+        
+        # Handle magnitude separately (df calibration affects it differently)
         if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
-            # Check if calibration data exists for this channel
             df_cal = self.df_calibrations[self.module].get(ch_val)
             if df_cal is not None:
-                # Convert to volts first
-                I_volts = convert_roc_to_volts(rawI)
-                Q_volts = convert_roc_to_volts(rawQ)
-                # Apply df calibration: multiply complex IQ by calibration factor
-                iq_volts = I_volts + 1j * Q_volts
-                df_complex = iq_volts * df_cal
-                # Extract frequency shift (real) and dissipation (imaginary)
-                I_data = df_complex.real  # Frequency shift in Hz
-                Q_data = df_complex.imag  # Dissipation (unitless)
                 # Magnitude in df space
-                M_data = np.abs(df_complex)
+                M_data = np.abs((convert_roc_to_volts(rawI) + 1j * convert_roc_to_volts(rawQ)) * df_cal)
             else:
-                # No calibration for this channel, fall back to counts
-                I_data, Q_data, M_data = rawI, rawQ, rawM
+                # No calibration - use appropriate units
+                M_data = convert_roc_to_volts(rawM) if self.real_units else rawM
         elif self.real_units:
-            # Standard voltage conversion
-            I_data, Q_data, M_data = (convert_roc_to_volts(d) for d in (rawI, rawQ, rawM))
+            M_data = convert_roc_to_volts(rawM)
         else:
-            # Raw counts
-            I_data, Q_data, M_data = rawI, rawQ, rawM
+            M_data = rawM
         
         # Update Time-Domain (TOD) plots
         if "T" in rowCurves and ch_val in rowCurves["T"]:
             cset = rowCurves["T"][ch_val]
-            if cset["I"].isVisible(): cset["I"].setData(tarr, I_data)
-            if cset["Q"].isVisible(): cset["Q"].setData(tarr, Q_data)
-            if "Mag" in cset and cset["Mag"].isVisible(): cset["Mag"].setData(tarr, M_data)
+            try:
+                if not sip.isdeleted(cset["I"]) and cset["I"].isVisible(): 
+                    cset["I"].setData(tarr, I_data)
+                if not sip.isdeleted(cset["Q"]) and cset["Q"].isVisible(): 
+                    cset["Q"].setData(tarr, Q_data)
+                if "Mag" in cset and not sip.isdeleted(cset["Mag"]) and cset["Mag"].isVisible(): 
+                    cset["Mag"].setData(tarr, M_data)
+            except RuntimeError:
+                # Qt object was deleted, skip this update
+                pass
         
         # Update FFT plots
         if "F" in rowCurves and ch_val in rowCurves["F"]:
             cset = rowCurves["F"][ch_val]
-            if cset["I"].isVisible(): cset["I"].setData(tarr, I_data, fftMode=True)
-            if cset["Q"].isVisible(): cset["Q"].setData(tarr, Q_data, fftMode=True)
-            if "Mag" in cset and cset["Mag"].isVisible(): cset["Mag"].setData(tarr, M_data, fftMode=True)
+            try:
+                if not sip.isdeleted(cset["I"]) and cset["I"].isVisible(): 
+                    cset["I"].setData(tarr[1:], I_data[1:], fftMode=True)
+                if not sip.isdeleted(cset["Q"]) and cset["Q"].isVisible(): 
+                    cset["Q"].setData(tarr[1:], Q_data[1:], fftMode=True)
+                if "Mag" in cset and not sip.isdeleted(cset["Mag"]) and cset["Mag"].isVisible(): 
+                    cset["Mag"].setData(tarr[1:], M_data[1:], fftMode=True)
+            except RuntimeError:
+                # Qt object was deleted, skip this update
+                pass
 
     def _dispatch_iq_task(self, row_i: int, group: list[int], rowCurves: dict):
         """
@@ -633,29 +680,8 @@ class PeriscopeRuntime:
             rawI = self.buf[c_val]["I"].data()
             rawQ = self.buf[c_val]["Q"].data()
             
-            # Apply unit conversion (same logic as in _update_channel_plot_data)
-            if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
-                df_cal = self.df_calibrations[self.module].get(c_val)
-                if df_cal is not None:
-                    # Convert to volts first
-                    I_volts = convert_roc_to_volts(rawI)
-                    Q_volts = convert_roc_to_volts(rawQ)
-                    # Apply df calibration
-                    iq_volts = I_volts + 1j * Q_volts
-                    df_complex = iq_volts * df_cal
-                    # Extract frequency shift (real) and dissipation (imaginary)
-                    I_data = df_complex.real  # Frequency shift in Hz
-                    Q_data = df_complex.imag  # Dissipation (unitless)
-                else:
-                    # No calibration for this channel
-                    I_data, Q_data = rawI, rawQ
-            elif self.real_units:
-                # Standard voltage conversion
-                I_data = convert_roc_to_volts(rawI)
-                Q_data = convert_roc_to_volts(rawQ)
-            else:
-                # Raw counts
-                I_data, Q_data = rawI, rawQ
+            # Use extracted helper method (fixes bug where real_units wasn't checked as fallback)
+            I_data, Q_data = self._convert_iq_data(rawI, rawQ, c_val)
             
             self.iq_workers[row_i] = True
             task = IQTask(row_i, c_val, I_data, Q_data, self.dot_px, mode_key, self.iq_signals)
@@ -668,26 +694,8 @@ class PeriscopeRuntime:
                 rawI = self.buf[ch]["I"].data()
                 rawQ = self.buf[ch]["Q"].data()
                 
-                # Apply unit conversion for each channel
-                if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
-                    df_cal = self.df_calibrations[self.module].get(ch)
-                    if df_cal is not None:
-                        # Convert to volts first
-                        I_volts = convert_roc_to_volts(rawI)
-                        Q_volts = convert_roc_to_volts(rawQ)
-                        # Apply df calibration
-                        iq_volts = I_volts + 1j * Q_volts
-                        df_complex = iq_volts * df_cal
-                        # Extract frequency shift and dissipation
-                        I_data = df_complex.real
-                        Q_data = df_complex.imag
-                    else:
-                        I_data, Q_data = rawI, rawQ
-                elif self.real_units:
-                    I_data = convert_roc_to_volts(rawI)
-                    Q_data = convert_roc_to_volts(rawQ)
-                else:
-                    I_data, Q_data = rawI, rawQ
+                # Use extracted helper method (fixes bug where real_units wasn't checked as fallback)
+                I_data, Q_data = self._convert_iq_data(rawI, rawQ, ch)
                     
                 all_I_data.append(I_data)
                 all_Q_data.append(Q_data)
@@ -719,28 +727,8 @@ class PeriscopeRuntime:
                 if not self.psd_workers[row_i]["S"].get(ch_val, False): # Check if worker already active
                     rawI = self.buf[ch_val]["I"].data(); rawQ = self.buf[ch_val]["Q"].data()
                     
-                    # Apply unit conversion (same logic as in _update_channel_plot_data)
-                    if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
-                        df_cal = self.df_calibrations[self.module].get(ch_val)
-                        if df_cal is not None:
-                            # Convert to volts first
-                            I_volts = convert_roc_to_volts(rawI)
-                            Q_volts = convert_roc_to_volts(rawQ)
-                            # Apply df calibration
-                            iq_volts = I_volts + 1j * Q_volts
-                            df_complex = iq_volts * df_cal
-                            # Extract frequency shift (real) and dissipation (imaginary)
-                            I_data = df_complex.real  # Frequency shift in Hz
-                            Q_data = df_complex.imag  # Dissipation (unitless)
-                        else:
-                            # No calibration for this channel
-                            I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ)) if self.real_units else (rawI, rawQ)
-                    elif self.real_units:
-                        # Standard voltage conversion
-                        I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ))
-                    else:
-                        # Raw counts
-                        I_data, Q_data = rawI, rawQ
+                    # Use extracted helper method (consolidation - this already had correct logic)
+                    I_data, Q_data = self._convert_iq_data(rawI, rawQ, ch_val)
                     
                     self.psd_workers[row_i]["S"][ch_val] = True
                     task = PSDTask(row_i, ch_val, I_data, Q_data, "SSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
@@ -752,28 +740,8 @@ class PeriscopeRuntime:
                 if not self.psd_workers[row_i]["D"].get(ch_val, False): # Check if worker already active
                     rawI = self.buf[ch_val]["I"].data(); rawQ = self.buf[ch_val]["Q"].data()
                     
-                    # Apply unit conversion (same logic as in _update_channel_plot_data)
-                    if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
-                        df_cal = self.df_calibrations[self.module].get(ch_val)
-                        if df_cal is not None:
-                            # Convert to volts first
-                            I_volts = convert_roc_to_volts(rawI)
-                            Q_volts = convert_roc_to_volts(rawQ)
-                            # Apply df calibration
-                            iq_volts = I_volts + 1j * Q_volts
-                            df_complex = iq_volts * df_cal
-                            # Extract frequency shift (real) and dissipation (imaginary)
-                            I_data = df_complex.real  # Frequency shift in Hz
-                            Q_data = df_complex.imag  # Dissipation (unitless)
-                        else:
-                            # No calibration for this channel
-                            I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ)) if self.real_units else (rawI, rawQ)
-                    elif self.real_units:
-                        # Standard voltage conversion
-                        I_data, Q_data = (convert_roc_to_volts(d) for d in (rawI, rawQ))
-                    else:
-                        # Raw counts
-                        I_data, Q_data = rawI, rawQ
+                    # Use extracted helper method (consolidation - this already had correct logic)
+                    I_data, Q_data = self._convert_iq_data(rawI, rawQ, ch_val)
                     
                     self.psd_workers[row_i]["D"][ch_val] = True
                     task = PSDTask(row_i, ch_val, I_data, Q_data, "DSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
@@ -987,6 +955,12 @@ class PeriscopeRuntime:
             task.stop()  # Request interruption
             task.wait(2000)  # Wait up to 2 seconds for thread to finish
             self.multisweep_tasks.pop(task_key, None)
+        # Shutdown Jupyter notebook server if running
+        if hasattr(self, 'notebook_dock') and self.notebook_dock is not None:
+            if not sip.isdeleted(self.notebook_dock):
+                panel = self.notebook_dock.widget()
+                if panel and hasattr(panel, 'shutdown'):
+                    panel.shutdown()
         # Shutdown iPython kernel if active
         if self.kernel_manager and self.kernel_manager.has_kernel:
             try: self.kernel_manager.shutdown_kernel()
@@ -1020,6 +994,7 @@ class PeriscopeRuntime:
                 self.kernel_manager = QtInProcessKernelManager()
                 self.kernel_manager.start_kernel()
                 kernel = self.kernel_manager.kernel
+                
                 # Push relevant objects into the kernel's namespace
                 kernel.shell.push({'crs': self.crs, 'rfmux': rfmux, 'periscope': self})
                 
@@ -1057,28 +1032,39 @@ class PeriscopeRuntime:
         """
         Start a new multisweep analysis.
 
-        Creates a `MultisweepWindow` and a `MultisweepTask`.
+        Creates a `MultisweepPanel` wrapped in a QDockWidget and a `MultisweepTask`.
         Connects signals for progress, data updates, and completion.
 
         Args:
             params (dict): Parameters for the multisweep analysis, typically
                             from a configuration dialog.
         """
-        # MultisweepWindow from .ui, MultisweepTask from .tasks, sys, traceback from .utils
+        # MultisweepPanel from .ui, MultisweepTask from .tasks, sys, traceback from .utils
         try:
             if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep."); return
-            window_id = f"multisweep_window_{self.multisweep_window_count}"; self.multisweep_window_count += 1
+            window_id = f"multisweep_{self.multisweep_window_count}"; self.multisweep_window_count += 1
             target_module = params.get('module')
             if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep."); return
             
-            dac_scales_for_window = self.dac_scales if hasattr(self, 'dac_scales') else {}
-            window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), 
-                                     dac_scales=dac_scales_for_window, dark_mode=self.dark_mode)
-            self.multisweep_windows[window_id] = {'window': window, 'params': params.copy()}
+            # Create panel
+            dac_scales_for_panel = self.dac_scales if hasattr(self, 'dac_scales') else {}
+            panel = MultisweepPanel(parent=self, target_module=target_module, initial_params=params.copy(), 
+                                   dac_scales=dac_scales_for_panel, dark_mode=self.dark_mode)
+            
+            # Wrap in dock
+            dock_title = f"Multisweep #{self.multisweep_window_count}"
+            dock = self.dock_manager.create_dock(panel, dock_title, window_id)
+            
+            # Store panel reference
+            self.multisweep_windows[window_id] = {'window': panel, 'dock': dock, 'params': params.copy()}
             
             # Connect df_calibration_ready signal if the method exists
-            if hasattr(window, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
-                window.df_calibration_ready.connect(self._handle_df_calibration_ready)
+            if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
+                panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
+            
+            # Connect data_ready signal for session auto-export
+            if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
+                panel.data_ready.connect(self.session_manager.handle_data_ready)
             
             # Disconnect any previous signal connections to avoid multiple calls
             try:
@@ -1090,104 +1076,250 @@ class PeriscopeRuntime:
             except TypeError: 
                 pass # Raised if signals were not previously connected
 
-            # Connect signals from the MultisweepTask to the new window's slots
-            self.multisweep_signals.progress.connect(window.update_progress,
+            # Connect signals from the MultisweepTask to the new panel's slots
+            self.multisweep_signals.progress.connect(panel.update_progress,
                                                    QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.starting_iteration.connect(window.handle_starting_iteration,
+            self.multisweep_signals.starting_iteration.connect(panel.handle_starting_iteration,
                                                              QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.data_update.connect(window.update_data,
+            self.multisweep_signals.data_update.connect(panel.update_data,
                                                       QtCore.Qt.ConnectionType.QueuedConnection)
             self.multisweep_signals.completed_iteration.connect(
-                lambda module, iteration, amplitude, direction: window.completed_amplitude_sweep(module, amplitude),
+                lambda module, iteration, amplitude, direction: panel.completed_amplitude_sweep(module, amplitude),
                 QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.all_completed.connect(window.all_sweeps_completed,
+            self.multisweep_signals.all_completed.connect(panel.all_sweeps_completed,
                                                         QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.error.connect(window.handle_error,
+            self.multisweep_signals.error.connect(panel.handle_error,
                                                 QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.fitting_progress.connect(window.handle_fitting_progress,
+            self.multisweep_signals.fitting_progress.connect(panel.handle_fitting_progress,
                                                             QtCore.Qt.ConnectionType.QueuedConnection)
             
-            # Pass the window instance to the task (now starts automatically since it's a QThread)
-            task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window)
+            # Create and start the task
+            task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=panel)
             task_key = f"{window_id}_module_{target_module}"
             self.multisweep_tasks[task_key] = task
             task.start()  # Start the QThread directly
-            window.show()
+            
+            # Tabify with Main dock by default
+            main_dock = self.dock_manager.get_dock("main_plots")
+            if main_dock:
+                self.tabifyDockWidget(main_dock, dock)
+            
+            # Show the dock and activate it
+            dock.show()
+            dock.raise_()
         except Exception as e:
             error_msg = f"Error starting multisweep analysis: {type(e).__name__}: {str(e)}"
             print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
             QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
-        
     
-    def _load_multisweep_analysis(self, load_params: dict):
+    def fetch_dac_scales_blocking(self) -> dict:
+        dac_scales = None
+    
+        fetcher = DACScaleFetcher(self.crs)
+        loop = QtCore.QEventLoop()
+    
+        def on_ready(scales):
+            nonlocal dac_scales
+            dac_scales = scales
+            loop.quit()
+    
+        fetcher.dac_scales_ready.connect(on_ready)
+        fetcher.finished.connect(fetcher.deleteLater)
+    
+        fetcher.start()
+        loop.exec_()   # waits until on_ready() calls loop.quit()
+    
+        return dac_scales    
+    
+    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep") -> tuple:
         """
-        Start a new multisweep analysis.
-
-        Creates a `MultisweepWindow` and a `MultisweepTask`.
-        Connects signals for progress, data updates, and completion.
-
+        Create and display a MultisweepPanel from loaded data.
+        
+        This unified helper method is used by both _load_multisweep_analysis and 
+        _set_and_plot_bias to eliminate code duplication.
+        
         Args:
-            params (dict): Parameters for the multisweep analysis, typically
-                            from a configuration dialog.
+            load_params: Loaded data dictionary containing 'initial_parameters', 
+                        'results_by_iteration', 'dac_scales_used', etc.
+            source_type: "multisweep", "bias", or "noise" - affects naming and panel behavior
+            
+        Returns:
+            tuple: (panel, dock, window_id, target_module) or (None, None, None, None) on error
         """
-        # MultisweepWindow from .ui, MultisweepTask from .tasks, sys, traceback from .utils
+        
         try:
-            if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep. Make sure your board is correctly setup."); return
-            window_id = f"multisweep_window_{self.multisweep_window_count}"; self.multisweep_window_count += 1
+            # Allow loading without CRS in offline mode
+            if self.crs is None and self.host != "OFFLINE": 
+                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep. Make sure your board is correctly setup.")
+                return None, None, None, None
+                
+            window_id = f"multisweep_window_{self.multisweep_window_count}"
+            self.multisweep_window_count += 1
+            
             params = load_params['initial_parameters']
             target_module = params.get('module')
-            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep. Please check your multisweep file."); return
-            
-            if hasattr(self, 'dac_scales'): 
-                dac_scales_for_window = self.dac_scales
-            else:
+            if target_module is None: 
+                QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified. Please check your file.")
+                return None, None, None, None
+
+            try: 
+                dac_scales_for_panel = self.fetch_dac_scales_blocking() #### Gets the dac scale directly from the board #####
+            except:
                 QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
                 return
 
             dac_scale_for_mod = load_params['dac_scales_used'][target_module]
-            dac_scale_for_board = dac_scales_for_window[target_module]
+            dac_scale_for_board = dac_scales_for_panel[target_module]
 
             if dac_scale_for_mod != dac_scale_for_board:
                 QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
+            
+            # Check if noise data exists in the loaded file
+            has_noise_data = 'noise_data' in load_params and load_params['noise_data'] is not None
+            
+            # For bias source type, also check for bias_kids_output
+            has_bias_data = 'bias_kids_output' in load_params and load_params['bias_kids_output'] is not None
+            loaded_bias_flag = has_noise_data or (source_type == "bias" and has_bias_data)
                 
-            window = MultisweepWindow(parent=self, target_module=target_module, initial_params=params.copy(), 
-                                     dac_scales=dac_scales_for_window, dark_mode=self.dark_mode)
-            self.multisweep_windows[window_id] = {'window': window, 'params': params.copy()}
+            # Create panel
+            panel = MultisweepPanel(parent=self, target_module=target_module, initial_params=params.copy(), 
+                                   dac_scales=dac_scales_for_panel, dark_mode=self.dark_mode, 
+                                   loaded_bias=loaded_bias_flag, is_loaded_data=True)
+            
+            # Load noise spectrum data if it exists
+            if has_noise_data:
+                panel.spectrum_noise_data = load_params['noise_data']
+                panel.noise_spectrum_btn.setEnabled(True)
+            
+            # MultisweepPanel dock is always named "Multisweep" regardless of source type
+            # The source_type affects panel behavior, not the dock title
+            dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
+            
+            # Wrap in dock
+            dock = self.dock_manager.create_dock(panel, dock_title, window_id)
+            
+            self.multisweep_windows[window_id] = {'window': panel, 'dock': dock, 'params': params.copy()}
             
             # Connect df_calibration_ready signal if the method exists
-            if hasattr(window, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
-                window.df_calibration_ready.connect(self._handle_df_calibration_ready)
+            if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
+                panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
+            
+            # Connect data_ready signal for session auto-export
+            if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
+                panel.data_ready.connect(self.session_manager.handle_data_ready)
 
-            window._hide_progress_bars()
-            iteration_params = load_params['results_by_iteration']
+            panel._hide_progress_bars()
+            
+            # Set NCO frequency based on resonance frequencies
+            iteration_params = load_params.get('results_by_iteration', [])
+            reso_frequencies = params.get('resonance_frequencies', [])
+            
+            if reso_frequencies:
+                span_hz = params.get('span_hz', 0)
+                nco_freq = ((min(reso_frequencies) - span_hz/2) + (max(reso_frequencies) + span_hz/2)) / 2
 
-            span_hz = params['span_hz']
-            reso_frequencies = params['resonance_frequencies']
+                # Only set NCO frequency if CRS is available (skip in offline mode)
+                if self.crs is not None:
+                    asyncio.run(self.crs.set_nco_frequency(nco_freq, module=target_module))
+                else:
+                    print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
-            nco_freq = ((min(reso_frequencies)-span_hz/2) + (max(reso_frequencies)+span_hz/2))/2
-
-            crs = self.crs
-            asyncio.run(crs.set_nco_frequency(nco_freq, module=target_module)) #### Setting up the nco frequency ######
-
+            # Load iteration data into panel
             for i in range(len(iteration_params)):
                 amplitude = iteration_params[i]['amplitude']
                 direction = iteration_params[i]['direction']
                 data = iteration_params[i]['data']
-                window.update_data(target_module, i, amplitude, direction, data, None)
-            window.show()
+                panel.update_data(target_module, i, amplitude, direction, data, None)
+            
+            # Extract and load df_calibrations if bias_kids_output exists
+            if has_bias_data:
+                bias_output = load_params['bias_kids_output']
+                df_calibrations = {}
+                for det_idx, det_data in bias_output.items():
+                    if 'df_calibration' in det_data:
+                        df_calibrations[det_idx] = det_data['df_calibration']
+                
+                # Load calibrations into main window
+                if df_calibrations and hasattr(self, '_handle_df_calibration_ready'):
+                    self._handle_df_calibration_ready(target_module, df_calibrations)
+                    print(f"[Session] Loaded df calibrations for {len(df_calibrations)} detectors from session file")
+            
+            # Tabify with Main dock by default
+            main_dock = self.dock_manager.get_dock("main_plots")
+            if main_dock:
+                self.tabifyDockWidget(main_dock, dock)
+            
+            # Show the dock and activate it
+            dock.show()
+            dock.raise_()
+            
+            return panel, dock, window_id, target_module
+            
         except Exception as e:
-            error_msg = f"Error starting multisweep analysis: {type(e).__name__}: {str(e)}"
-            print(error_msg, file=sys.stderr); traceback.print_exc(file=sys.stderr)
-            QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
+            error_msg = f"Error creating multisweep panel: {type(e).__name__}: {str(e)}"
+            print(error_msg, file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            QtWidgets.QMessageBox.critical(self, "Error", error_msg)
+            return None, None, None, None
 
-    def _start_multisweep_analysis_for_window(self, window_instance: 'MultisweepWindow', params: dict):
+    def _load_multisweep_analysis(self, load_params: dict):
         """
-        Re-run a multisweep analysis for an existing MultisweepWindow.
-
-        Stops any existing task for the window, updates parameters, and starts a new task.
+        Load multisweep analysis data from file and display in a docked panel.
 
         Args:
-            window_instance (MultisweepWindow): The window instance to re-run the analysis for.
+            load_params (dict): Loaded data dictionary from file.
+        """
+        # Use the unified helper method
+        panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
+            load_params, source_type="multisweep"
+        )
+        
+        if panel is None:
+            return  # Error already displayed by helper
+        
+        # Auto-launch detector digest panel by programmatically triggering the existing
+        # double-click handler which already has all the logic for creating digest panels
+        iteration_params = load_params.get('results_by_iteration', [])
+        if iteration_params and len(iteration_params) > 0:
+            first_iteration_data = iteration_params[0].get('data', {})
+            if first_iteration_data:
+                # Get any detector's frequency to simulate a click location
+                first_detector_id = sorted(first_iteration_data.keys())[0]
+                first_detector_data = first_iteration_data[first_detector_id]
+                click_freq = first_detector_data.get('bias_frequency', 
+                                                    first_detector_data.get('original_center_frequency'))
+                
+                if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
+                    # Create a fake event at the detector's frequency
+                    class FakeEvent:
+                        def __init__(self, x, y):
+                            self._scene_pos = QtCore.QPointF(x, y)
+                        def scenePos(self):
+                            return self._scene_pos
+                        def accept(self):
+                            pass
+                    
+                    # Map the frequency to view coordinates (x position)
+                    view_box = panel.combined_mag_plot.getViewBox()
+                    if view_box:
+                        view_point = QtCore.QPointF(click_freq, 0)
+                        scene_point = view_box.mapViewToScene(view_point)
+                        fake_event = FakeEvent(scene_point.x(), scene_point.y())
+                        panel._handle_multisweep_plot_double_click(fake_event)
+                        
+                        # Re-raise the multisweep dock to keep focus on it
+                        multisweep_dock = self.dock_manager.find_dock_for_widget(panel)
+                        if multisweep_dock:
+                            multisweep_dock.raise_()
+
+    def _start_multisweep_analysis_for_window(self, window_instance: 'MultisweepPanel', params: dict):
+        """
+        Re-run a multisweep analysis for an existing MultisweepPanel.
+
+        Stops any existing task for the panel, updates parameters, and starts a new task.
+
+        Args:
+            window_instance (MultisweepPanel): The panel instance to re-run the analysis for.
             params (dict): The new parameters for the multisweep analysis.
         """
         # MultisweepWindow from .ui, MultisweepTask from .tasks
@@ -1233,19 +1365,22 @@ class PeriscopeRuntime:
         self.multisweep_signals.fitting_progress.connect(window_instance.handle_fitting_progress,
                                                         QtCore.Qt.ConnectionType.QueuedConnection)
 
+        # Connect data_ready signal for session auto-export
+        if hasattr(window_instance, 'data_ready') and hasattr(self, 'session_manager'):
+            window_instance.data_ready.connect(self.session_manager.handle_data_ready)
         
         task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window_instance)
         self.multisweep_tasks[old_task_key] = task
         task.start()  # Start the QThread directly
 
-    def stop_multisweep_task_for_window(self, window_instance: 'MultisweepWindow'):
+    def stop_multisweep_task_for_window(self, window_instance: 'MultisweepPanel'):
         """
-        Stop an active multisweep task associated with a specific window.
+        Stop an active multisweep task associated with a specific panel.
 
         Args:
-            window_instance (MultisweepWindow): The window whose task should be stopped.
+            window_instance (MultisweepPanel): The panel whose task should be stopped.
         """
-        # MultisweepWindow from .ui
+        # MultisweepPanel from .ui
         window_id = None; target_module = None
         for w_id, data in list(self.multisweep_windows.items()): # Iterate over a copy for safe removal
             if data['window'] == window_instance:
@@ -1258,6 +1393,131 @@ class PeriscopeRuntime:
                 task.stop()  # Request interruption
                 task.wait(2000)  # Wait up to 2 seconds for thread to finish
             self.multisweep_windows.pop(window_id, None) # Remove window tracking
+
+    def _toggle_notebook_panel(self, notebook_dir: str | None = None, open_file: str | None = None):
+        """
+        Toggle the Jupyter notebook panel.
+        
+        Creates a new NotebookPanel on first use, or shows/hides the existing
+        dock widget on subsequent calls. The notebook directory is always set to the
+        active session folder. If no session is active, the user must start one first.
+        
+        The panel launches Jupyter Lab in the system browser (not embedded).
+        Uses a singleton server pattern - only one Jupyter server is ever running.
+        
+        Args:
+            notebook_dir: Optional directory for notebooks. If None, uses session
+                         folder (if active). Requires an active session.
+            open_file: Optional path to a notebook file to open after panel starts.
+        """
+        try:
+            from .notebook_panel import NotebookPanel, JupyterServerManager
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Import Error",
+                f"Failed to import notebook_panel:\n{e}"
+            )
+            return
+        
+        # Check if notebook dock already exists and is still valid
+        if hasattr(self, 'notebook_dock') and self.notebook_dock is not None:
+            # Check if the dock widget still exists in Qt
+            if not sip.isdeleted(self.notebook_dock):
+                # Panel already exists and is valid
+                panel = self.notebook_dock.widget()
+                
+                # If a specific file is requested, open it
+                if open_file and panel and hasattr(panel, 'open_notebook'):
+                    panel.open_notebook(open_file)
+                
+                # Show and raise the dock
+                self.notebook_dock.setVisible(True)
+                self.notebook_dock.raise_()
+                return
+            else:
+                # Dock was deleted - clear reference but keep server
+                self.notebook_dock = None
+                # Fall through to recreate the panel
+        
+        # Determine notebook directory - requires an active session
+        if notebook_dir is None:
+            if hasattr(self, 'session_manager') and self.session_manager.is_active:
+                notebook_dir = str(self.session_manager.session_path)
+            else:
+                # No active session - prompt user to start one
+                msg = QtWidgets.QMessageBox(self)
+                msg.setWindowTitle("Session Required")
+                msg.setText("No session is active.")
+                msg.setInformativeText(
+                    "Jupyter notebooks require an active session so that notebooks "
+                    "are saved alongside your analysis data.\n\n"
+                    "Please start or load a session first using:\n"
+                    "Session → New Session or Session → Load Session"
+                )
+                msg.setIcon(QtWidgets.QMessageBox.Icon.Information)
+                msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
+                msg.exec()
+                return
+        
+        # Initialize singleton server if it doesn't exist
+        if not hasattr(self, 'jupyter_server') or self.jupyter_server is None:
+            self.jupyter_server = JupyterServerManager(self)
+        
+        # Check if server is already running
+        server_running = (self.jupyter_server.process is not None and 
+                         self.jupyter_server.process.poll() is None)
+        
+        # Create panel with the session directory, using the singleton server
+        # Skip initial notebook creation if we're opening a specific file
+        panel = NotebookPanel(
+            notebook_dir=notebook_dir, 
+            parent=self, 
+            server=self.jupyter_server,
+            skip_initial_notebook=(open_file is not None)
+        )
+        
+        # Create dock
+        self.notebook_dock = self.dock_manager.create_dock(
+            panel, "Jupyter Notebook", "notebook_panel"
+        )
+        
+        # Mark this dock as protected (hide instead of close when X is clicked)
+        self.dock_manager.protect_dock("notebook_panel")
+        
+        # Make dock non-closeable via the standard close button (extra safety)
+        self.notebook_dock.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable |
+            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            # Note: No DockWidgetClosable flag - prevents closing via X button on title bar
+        )
+        
+        # Set up handler for opening specific files when requested
+        def handle_server_ready(url):
+            if open_file:
+                # If a specific file was requested, open it with a delay
+                QtCore.QTimer.singleShot(2000, lambda: panel.open_notebook(open_file))
+            # Note: Notebook panel automatically creates and opens an initial notebook
+            # via _create_and_open_initial_notebook() - no need to duplicate that here
+        
+        # Only connect signal and start server if not already running
+        if not server_running:
+            self.jupyter_server.server_ready.connect(handle_server_ready)
+            # Start the Jupyter server
+            panel.start()
+        else:
+            # Server already running - update UI and open file if requested
+            panel._on_server_ready(self.jupyter_server.url or "")
+            if open_file:
+                QtCore.QTimer.singleShot(500, lambda: panel.open_notebook(open_file))
+        
+        # Tabify with main dock by default
+        main_dock = self.dock_manager.get_dock("main_plots")
+        if main_dock:
+            self.tabifyDockWidget(main_dock, self.notebook_dock)
+        
+        # Show the dock and activate it
+        self.notebook_dock.show()
+        self.notebook_dock.raise_()
 
     def _update_console_style(self, dark_mode_enabled: bool):
         """
@@ -1277,51 +1537,72 @@ class PeriscopeRuntime:
             self.jupyter_widget.update(); self.jupyter_widget.repaint() # Force repaint
 
     def _init_sim_speed_tracking(self):
-        """Initialize simulation speed tracking for mock mode."""
-        self.sim_time_history = []  # List of (real_time, sim_time) tuples
-        self.sim_speed_update_counter = 0
-        self.last_sim_speed_update_time = time.time()
+        """Initialize simulation speed tracking for mock mode.
+        
+        Uses a rolling window approach that samples at regular wall-clock intervals
+        (not based on packet processing) to avoid false readings when packets queue up.
+        """
+        self._sim_speed_history = []  # List of (wall_clock_time, sim_time) tuples
+        self._sim_speed_latest_sim_time = None  # Latest simulation time seen
+        self._sim_speed_last_sample_time = None  # Wall clock time of last sample
+        self._sim_speed_sample_interval = 1.0  # Sample every 1 second of wall clock time
+        self._sim_speed_window_size = 10  # Keep 10 samples (10 second rolling window)
         
     def _update_sim_time_tracking(self, sim_time: float):
         """
         Track simulation time for speed calculation.
         
+        Samples are taken at regular wall-clock intervals (not based on packet 
+        processing timing) to ensure accurate speed measurement even when the 
+        GUI is slow and packets queue up.
+        
         Args:
-            sim_time: Current simulation time in seconds
+            sim_time: Current simulation time in seconds (from packet timestamp)
         """
-        # Update every 10 packets
-        self.sim_speed_update_counter += 1
-        if self.sim_speed_update_counter >= 10:
-            real_time = time.time()
-            self.sim_time_history.append((real_time, sim_time))
+        # Always update the latest sim time
+        self._sim_speed_latest_sim_time = sim_time
+        
+        current_wall_clock = time.time()
+        
+        # Take a sample at regular wall-clock intervals
+        if self._sim_speed_last_sample_time is None:
+            # First sample
+            self._sim_speed_history.append((current_wall_clock, sim_time))
+            self._sim_speed_last_sample_time = current_wall_clock
+        elif (current_wall_clock - self._sim_speed_last_sample_time) >= self._sim_speed_sample_interval:
+            # Time for a new sample
+            self._sim_speed_history.append((current_wall_clock, sim_time))
+            self._sim_speed_last_sample_time = current_wall_clock
             
-            # Keep only last 10 samples for rolling average
-            if len(self.sim_time_history) > 10:
-                self.sim_time_history.pop(0)
-            
-            self.sim_speed_update_counter = 0
+            # Keep only the last N samples for rolling window
+            if len(self._sim_speed_history) > self._sim_speed_window_size:
+                self._sim_speed_history.pop(0)
     
     def _calculate_simulation_speed(self) -> float | None:
         """
-        Calculate the simulation speed relative to real-time.
+        Calculate the simulation speed relative to real-time using a rolling window.
+        
+        Compares simulation time elapsed vs wall clock time elapsed over the
+        sample window. This is immune to packet queuing effects because samples
+        are taken at wall-clock intervals, not packet processing intervals.
         
         Returns:
             float: Speed factor (1.0 = real-time, >1.0 = faster, <1.0 = slower)
             None: If not enough data to calculate
         """
-        if len(self.sim_time_history) < 2:
+        if len(self._sim_speed_history) < 2:
             return None
         
-        # Calculate speed from first to last sample
-        first_real, first_sim = self.sim_time_history[0]
-        last_real, last_sim = self.sim_time_history[-1]
+        # Calculate speed from oldest to newest sample in the window
+        first_wall_clock, first_sim = self._sim_speed_history[0]
+        last_wall_clock, last_sim = self._sim_speed_history[-1]
         
-        real_elapsed = last_real - first_real
+        wall_clock_elapsed = last_wall_clock - first_wall_clock
         sim_elapsed = last_sim - first_sim
         
         # Avoid division by zero
-        if real_elapsed <= 0 or sim_elapsed <= 0:
+        if wall_clock_elapsed <= 0 or sim_elapsed <= 0:
             return None
         
-        # sim_speed = delta_sim_time / delta_real_time
-        return sim_elapsed / real_elapsed
+        # sim_speed = delta_sim_time / delta_wall_clock_time
+        return sim_elapsed / wall_clock_elapsed

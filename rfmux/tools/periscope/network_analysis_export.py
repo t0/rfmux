@@ -141,19 +141,21 @@ class NetworkAnalysisExportMixin:
                 f"Error exporting data: {str(e)}"
             )
     
-    def _export_to_pickle(self, filename: str) -> None:
+    def build_export_dict(self) -> dict:
         """
-        Export data to a pickle file with comprehensive metadata.
+        Build the export data dictionary with comprehensive metadata.
         
         This method creates a hierarchical dictionary structure containing all measurement
-        data, parameters, and module information, then serializes it to a pickle file.
+        data, parameters, and module information. Can be used for both file export and
+        session auto-export.
         
-        Args:
-            filename: The path to the pickle file to create
+        Returns:
+            Dictionary containing all export data
         """
         export_data = {
             'timestamp': datetime.datetime.now().isoformat(),
             'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
+            'dac_scales_used': self.dac_scales.copy() if hasattr(self, 'dac_scales') else {},
             'modules': {}
         }
         
@@ -201,6 +203,19 @@ class NetworkAnalysisExportMixin:
             
             # Include resonance frequencies for the module
             export_data['modules'][module]['resonances_hz'] = self.resonance_freqs.get(module, [])
+        
+        return export_data
+    
+    def _export_to_pickle(self, filename: str) -> None:
+        """
+        Export data to a pickle file with comprehensive metadata.
+        
+        Uses build_export_dict() to create the data structure, then saves to file.
+        
+        Args:
+            filename: The path to the pickle file to create
+        """
+        export_data = self.build_export_dict()
         
         # Write the data to file
         with open(filename, 'wb') as f:
@@ -714,11 +729,15 @@ class NetworkAnalysisExportMixin:
                 f"No resonances for Module {active_module}. Run 'Find Resonances'."
             )
             return
-            
-        # Get DAC scales
+        
+        # Walk up parent hierarchy to find Periscope instance
+        # (panel may be wrapped in QDockWidget, so parent() might not be Periscope directly)
+        periscope_parent = find_parent_with_attr(self, 'dac_scales')
+        
+        # Get DAC scales from the Periscope instance
         dac_scales_for_dialog = {}
-        if hasattr(self.parent(), 'dac_scales'):
-            dac_scales_for_dialog = self.parent().dac_scales
+        if periscope_parent and hasattr(periscope_parent, 'dac_scales'):
+            dac_scales_for_dialog = periscope_parent.dac_scales
         elif hasattr(self, 'dac_scales'):
             dac_scales_for_dialog = self.dac_scales
         
@@ -733,11 +752,22 @@ class NetworkAnalysisExportMixin:
         # Process dialog result
         if dialog.exec():
             params = dialog.get_parameters()
-            if params and hasattr(self.parent(), '_start_multisweep_analysis'):
-                self.parent()._start_multisweep_analysis(params)
-            elif not hasattr(self.parent(), '_start_multisweep_analysis'):
-                QtWidgets.QMessageBox.critical(
-                    self, 
-                    "Error", 
-                    "Cannot start multisweep: Parent integration missing."
-                )
+            if not params:
+                return
+                
+            # Find Periscope parent (walk up hierarchy if needed)
+            parent = find_parent_with_attr(self, '_start_multisweep_analysis')
+            
+            if parent:
+                try:
+                    parent._start_multisweep_analysis(params)
+                except Exception as e:
+                    error_msg = f"Error starting multisweep: {type(e).__name__}: {str(e)}"
+                    print(error_msg, file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
+                    QtWidgets.QMessageBox.critical(self, "Multisweep Error", error_msg)
+            else:
+                error_msg = "Cannot start multisweep: Parent integration missing (could not find Periscope parent)"
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+                traceback.print_stack(file=sys.stderr)
+                QtWidgets.QMessageBox.critical(self, "Error", error_msg)

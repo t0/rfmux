@@ -39,6 +39,14 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "Popt": 1e-15,         # Optical power [W]
 
     # -------------------------------------------------------------------------
+    # Material & Geometry (optional - uses hardcoded defaults if not specified)
+    # -------------------------------------------------------------------------
+    "material": "Al",      # Superconductor material
+    "width": 2e-6,         # Strip width [m] (2 µm)
+    "thickness": 30e-9,    # Film thickness [m] (30 nm)
+    "length": 9000e-6,     # Strip length [m] (9000 µm = 9 mm)
+    
+    # -------------------------------------------------------------------------
     # Circuit parameters (base values for MR_LEKID)
     # -------------------------------------------------------------------------
     "Lg": 10e-9,           # Geometric inductance [H]
@@ -153,6 +161,7 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
     # Ensure numeric fields that might come in as strings are parsed
     for k in (
         "freq_start", "freq_end", "T", "Popt", "Lg", "Cc", "L_junk",
+        "width", "thickness", "length",  # Geometry
         "C_variation", "Cc_variation", "Vin", "input_atten_dB",
         "system_termination", "ZLNA", "GLNA", "nqp_noise_std_factor",
         "convergence_tolerance", "bias_amplitude", "udp_noise_level",

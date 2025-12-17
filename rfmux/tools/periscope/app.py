@@ -2728,9 +2728,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         Load noise spectrum data from session file.
         
-        Noise files contain complete multisweep data plus noise spectrum data,
-        so we load them as multisweep files. The noise data will be available
-        in detector digest panels.
+        Noise files contain complete multisweep data plus noise spectrum data.
+        Creates a MultisweepPanel, opens the DetectorDigestPanel (fit), and 
+        opens a separate NoiseSpectrumPanel for the noise visualization.
         """
         if 'results_by_iteration' not in data:
             QtWidgets.QMessageBox.warning(
@@ -2741,8 +2741,54 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             return
         
-        # Load as a multisweep file - this will create the panel with noise data
-        self._load_multisweep_analysis(data)
+        # Use the unified helper to create the multisweep panel
+        panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
+            data, source_type="noise"
+        )
+        
+        if panel is None:
+            return  # Error already displayed by helper
+        
+        # Auto-launch detector digest panel (fit panel) by simulating a double-click
+        # This is the same logic used in _load_multisweep_analysis
+        iteration_params = data.get('results_by_iteration', [])
+        if iteration_params and len(iteration_params) > 0:
+            first_iteration_data = iteration_params[0].get('data', {})
+            if first_iteration_data:
+                # Get any detector's frequency to simulate a click location
+                first_detector_id = sorted(first_iteration_data.keys())[0]
+                first_detector_data = first_iteration_data[first_detector_id]
+                click_freq = first_detector_data.get('bias_frequency', 
+                                                    first_detector_data.get('original_center_frequency'))
+                
+                if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
+                    # Create a fake event at the detector's frequency
+                    class FakeEvent:
+                        def __init__(self, x, y):
+                            self._scene_pos = QtCore.QPointF(x, y)
+                        def scenePos(self):
+                            return self._scene_pos
+                        def accept(self):
+                            pass
+                    
+                    # Map the frequency to view coordinates (x position)
+                    view_box = panel.combined_mag_plot.getViewBox()
+                    if view_box:
+                        view_point = QtCore.QPointF(click_freq, 0)
+                        scene_point = view_box.mapViewToScene(view_point)
+                        fake_event = FakeEvent(scene_point.x(), scene_point.y())
+                        panel._handle_multisweep_plot_double_click(fake_event)
+        
+        # Load noise data if present and open the NoiseSpectrumPanel
+        if data.get('noise_data') is not None:
+            noise_data = data['noise_data']
+            panel._get_spectrum(noise_data, use_loaded_noise=True)
+        else:
+            print("[Noise] File loaded but no noise_data found - only fit panel shown")
+        
+        # Re-raise the multisweep dock to keep focus on it
+        if dock:
+            dock.raise_()
     
     def _open_file_with_system_default(self, file_path: str):
         """

@@ -1175,6 +1175,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             print(f"[Bias] Plotting noise data taken at decimation {params['noise_parameters']['decimation']}")
             self.spectrum_noise_data['noise_parameters'] = params['noise_parameters']
             self.spectrum_noise_data['data'] = params['data']
+            # Open the noise spectrum panel for loaded noise data
+            self._open_noise_spectrum_panel(1)
         else:
             periscope = self._get_periscope_parent()
             if not periscope or periscope.crs is None: 

@@ -1191,13 +1191,9 @@ class PeriscopeRuntime:
                 panel.spectrum_noise_data = load_params['noise_data']
                 panel.noise_spectrum_btn.setEnabled(True)
             
-            # Create dock title based on source type
-            if source_type == "bias":
-                dock_title = f"Bias #{self.multisweep_window_count} (Loaded)"
-            elif source_type == "noise":
-                dock_title = f"Noise #{self.multisweep_window_count} (Loaded)"
-            else:
-                dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
+            # MultisweepPanel dock is always named "Multisweep" regardless of source type
+            # The source_type affects panel behavior, not the dock title
+            dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
             
             # Wrap in dock
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)

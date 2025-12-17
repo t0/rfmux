@@ -11,19 +11,19 @@ authors = [
   {name="Joshua Montgomery", email="joshua@t0.technology"},
 ]
 dependencies = [
-  "PyQt6",
+  # Core dependencies (non-GUI)
+  # When using conda (environment.yml), these are handled by conda
+  # When using pip-only, these are installed directly
   "aiohttp",
   "ipython",
-  "ipykernel",
+  "ipykernel<7",  # Pin to 6.x for qtconsole in-process kernel compatibility (ipykernel 7.x has a bug)
   "matplotlib",
   "numba",  # Required for high-performance physics calculations in MockCRS
   "numpy",
 #  "pygetdata", # This is not yet in PyPI. Should be added back when available.
-  "pyqtgraph",
   "pytest",
   "pytest-asyncio",
   "pyyaml",
-  "qtconsole",
   "requests_futures",
   "scipy",
   "simplejson",
@@ -31,8 +31,20 @@ dependencies = [
   "tbb; sys_platform != 'darwin'",  # Intel Threading Building Blocks for numba parallel execution
   ## brew install libomp if you are on mac since tbb won't work. 
 ]
+
 # for py_get_samples: 3.12.0 introduced socket.IP_ADD_SOURCE_MEMBERSHIP
 requires-python = ">=3.12"
+
+[project.optional-dependencies]
+# GUI dependencies - use with: pip install -e ".[gui]"
+# When using conda (environment.yml), conda handles Qt packages directly
+# so you don't need this extra. Only use for pip-only installs.
+gui = [
+  "PyQt6",
+  "pyqtgraph",
+  "qtconsole",
+  "jupyterlab"
+]
 
 [project.gui-scripts]
 periscope = "rfmux.tools.periscope.__main__:main"

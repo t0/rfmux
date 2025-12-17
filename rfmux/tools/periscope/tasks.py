@@ -54,41 +54,28 @@ class UDPReceiver(QtCore.QThread):
     def get_received_packets(self):
         return self.packets_received
 
+    def _process_received_packet(self, data):
+        """Process a received UDP packet if it matches our module."""
+        pkt = streamer.DfmuxPacket.from_bytes(data)
+        if pkt.module == self.module_id - 1:
+            if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
+                self.first_packet_received = pkt.seq
+                self.prev_seq = pkt.seq
+            self.receive_counter()
+            self.calc_dropped_packets(self.prev_seq, pkt.seq)
+            self.prev_seq = pkt.seq
+            self.queue.put((pkt.seq, pkt))
+
     def run(self):
         while not self.isInterruptionRequested():
-            if platform.system() == "Linux":
-                try:
-                    data = self.sock.recv(streamer.LONG_PACKET_SIZE)
-                    pkt = streamer.DfmuxPacket.from_bytes(data)
-                    if pkt.module == self.module_id - 1:
-                        if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
-                            self.first_packet_received = pkt.seq
-                            self.prev_seq = pkt.seq
-                        self.receive_counter()
-                        self.calc_dropped_packets(self.prev_seq, pkt.seq)
-                        self.prev_seq = pkt.seq
-                        self.queue.put((pkt.seq, pkt))
-                except socket.timeout:
-                    continue
-                except OSError:
-                    break
-            else:
-                try:
-                    data = self.sock.recv(streamer.LONG_PACKET_SIZE)
-                    pkt = streamer.DfmuxPacket.from_bytes(data)
-                    if pkt.module == self.module_id - 1:
-                        if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
-                            self.first_packet_received = pkt.seq
-                            self.prev_seq = pkt.seq  
-                        self.receive_counter()
-                        self.calc_dropped_packets(self.prev_seq, pkt.seq)
-                        self.prev_seq = pkt.seq
-                        self.queue.put((pkt.seq, pkt))
-                except BlockingIOError:
-                    # No data available right now — just loop
-                    pass
-                except OSError:
-                    break
+            try:
+                data = self.sock.recv(streamer.LONG_PACKET_SIZE)
+                self._process_received_packet(data)
+            except (socket.timeout, BlockingIOError):
+                # No data available right now — just loop
+                continue
+            except OSError:
+                break
 
 
     def stop(self):
@@ -510,170 +497,6 @@ class MultisweepTask(QtCore.QThread):
     def _progress_callback_wrapper(self, module_idx, progress_percentage):
         if self._running: self.signals.progress.emit(module_idx, progress_percentage)
 
-    def _apply_fitting_analysis(self, raw_results_from_crs):
-        if not raw_results_from_crs:
-            return raw_results_from_crs
-        
-        # Initialize enhanced_results as a copy to preserve raw data if fitting is skipped or fails
-        enhanced_results = {k: v.copy() for k, v in raw_results_from_crs.items()}
-
-        apply_skewed = self.params.get('apply_skewed_fit', False)
-        apply_nonlinear = self.params.get('apply_nonlinear_fit', False)
-
-        if not apply_skewed and not apply_nonlinear:
-            # If no fitting is requested, add flags indicating this
-            for res_idx in enhanced_results:
-                enhanced_results[res_idx]['skewed_fit_applied'] = False
-                enhanced_results[res_idx]['skewed_fit_success'] = False
-                enhanced_results[res_idx]['nonlinear_fit_applied'] = False
-                enhanced_results[res_idx]['nonlinear_fit_success'] = False
-            return enhanced_results
-
-    #print(f"Applying fitting analysis to {len(raw_results_from_crs)} resonances...")
-        
-        # Temporary dictionary to hold results from skewed fit if it's applied
-        skewed_fit_results_temp = enhanced_results 
-
-        if apply_skewed:
-            # Signal start of skewed fitting
-            module_idx = self.params.get('module')
-            if module_idx is not None and self._running:
-                self.signals.fitting_progress.emit(module_idx, "Fitting in progress: Applying skewed fits")
-            try:
-                skewed_fit_results_temp = fitting_module_direct.fit_skewed_multisweep(
-                    enhanced_results, # Start with a copy of raw or previously enhanced data
-                    approx_Q_for_fit=1e4,
-                    fit_resonances=True,
-                    center_iq_circle=True,
-                    normalize_fit=True
-                )
-                #print(f"Skewed fitting completed.")
-                # Mark skewed fit as applied and check success for each resonance
-                for res_idx in enhanced_results: # Iterate original keys to update
-                    if res_idx in skewed_fit_results_temp:
-                        enhanced_results[res_idx].update(skewed_fit_results_temp[res_idx])
-                        enhanced_results[res_idx]['skewed_fit_applied'] = True
-                        fit_p = enhanced_results[res_idx].get('fit_params', {})
-                        enhanced_results[res_idx]['skewed_fit_success'] = fit_p.get('fr') is not None and fit_p.get('fr') != 'nan'
-                        
-                        # Generate skewed model magnitude if fit was successful
-                        if enhanced_results[res_idx]['skewed_fit_success'] and fit_p:
-                            frequencies = enhanced_results[res_idx].get('frequencies')
-                            if frequencies is not None:
-                                try:
-                                    # Generate magnitude model using fitted parameters
-                                    skewed_model_mag = fitting_module_direct.s21_skewed(
-                                        frequencies, 
-                                        fit_p['fr'], 
-                                        fit_p['Qr'], 
-                                        fit_p['Qcre'], 
-                                        fit_p['Qcim'], 
-                                        fit_p['A']
-                                    )
-                                    enhanced_results[res_idx]['skewed_model_mag'] = skewed_model_mag
-                                except Exception as e:
-                                    print(f"Warning: Failed to generate skewed model for resonance {res_idx}: {e}", file=sys.stderr)
-                    else: # Should not happen if fit_skewed_multisweep returns all keys
-                        enhanced_results[res_idx]['skewed_fit_applied'] = True
-                        enhanced_results[res_idx]['skewed_fit_success'] = False
-            except Exception as e:
-                print(f"Warning: Skewed fitting failed: {e}", file=sys.stderr)
-                for res_idx in enhanced_results:
-                    enhanced_results[res_idx]['skewed_fit_applied'] = True
-                    enhanced_results[res_idx]['skewed_fit_success'] = False
-        else: # Skewed fit not applied
-            for res_idx in enhanced_results:
-                enhanced_results[res_idx]['skewed_fit_applied'] = False
-                enhanced_results[res_idx]['skewed_fit_success'] = False
-        
-        # Now, `enhanced_results` contains results from skewed fitting (if applied) or is still a copy of raw.
-        # `skewed_fit_results_temp` is not needed beyond this point if we update `enhanced_results` in place.
-
-        if apply_nonlinear:
-            # Signal start of nonlinear fitting
-            module_idx = self.params.get('module')
-            if module_idx is not None and self._running:
-                self.signals.fitting_progress.emit(module_idx, "Fitting in progress: Applying non-linear fits")
-            try:
-                # Pass the current state of enhanced_results (which may include skewed fit data)
-                nonlinear_fit_output = fitting_nonlinear.fit_nonlinear_iq_multisweep(
-                    enhanced_results.copy(), # Pass a copy to avoid modifying during iteration if fit_nonlinear_iq_multisweep does
-                    fit_nonlinearity=True,
-                    n_extrema_points=5,
-                    verbose=False
-                )
-                #print(f"Nonlinear fitting completed.")
-                # Update enhanced_results with nonlinear fit data
-                for res_idx in enhanced_results:
-                    if res_idx in nonlinear_fit_output:
-                        enhanced_results[res_idx].update(nonlinear_fit_output[res_idx])
-                        enhanced_results[res_idx]['nonlinear_fit_applied'] = True
-                        # 'nonlinear_fit_success' should be set by fit_nonlinear_iq_multisweep
-                        if 'nonlinear_fit_success' not in enhanced_results[res_idx]:
-                             enhanced_results[res_idx]['nonlinear_fit_success'] = False # Default if not set
-                        
-                        # Generate nonlinear model IQ if fit was successful
-                        if enhanced_results[res_idx].get('nonlinear_fit_success', False):
-                            nl_params = enhanced_results[res_idx].get('nonlinear_fit_params', {})
-                            frequencies = enhanced_results[res_idx].get('frequencies')
-                            if nl_params and frequencies is not None:
-                                try:
-                                    # Generate complex IQ model using fitted parameters
-                                    nonlinear_model_iq = fitting_nonlinear.nonlinear_iq(
-                                        frequencies,
-                                        nl_params['fr'],
-                                        nl_params['Qr'],
-                                        nl_params['amp'],
-                                        nl_params['phi'],
-                                        nl_params['a'],
-                                        nl_params['i0'],
-                                        nl_params['q0']
-                                    )
-                                    enhanced_results[res_idx]['nonlinear_model_iq'] = nonlinear_model_iq
-                                except Exception as e:
-                                    print(f"Warning: Failed to generate nonlinear model for resonance {res_idx}: {e}", file=sys.stderr)
-                    else: # Should not happen
-                        enhanced_results[res_idx]['nonlinear_fit_applied'] = True
-                        enhanced_results[res_idx]['nonlinear_fit_success'] = False
-            except Exception as e:
-                print(f"Warning: Nonlinear fitting failed: {e}", file=sys.stderr)
-                for res_idx in enhanced_results:
-                    enhanced_results[res_idx]['nonlinear_fit_applied'] = True
-                    enhanced_results[res_idx]['nonlinear_fit_success'] = False
-        else: # Nonlinear fit not applied
-             for res_idx in enhanced_results:
-                enhanced_results[res_idx]['nonlinear_fit_applied'] = False
-                enhanced_results[res_idx]['nonlinear_fit_success'] = False
-        
-        # Final summary
-        skewed_applied_count = sum(1 for r in enhanced_results.values() if r.get('skewed_fit_applied'))
-        skewed_success_count = sum(1 for r in enhanced_results.values() if r.get('skewed_fit_success'))
-        nonlinear_applied_count = sum(1 for r in enhanced_results.values() if r.get('nonlinear_fit_applied'))
-        nonlinear_success_count = sum(1 for r in enhanced_results.values() if r.get('nonlinear_fit_success'))
-
-        # print(f"Fitting summary: Skewed: {skewed_success_count}/{skewed_applied_count if apply_skewed else len(enhanced_results)} successful. "
-        #       f"Nonlinear: {nonlinear_success_count}/{nonlinear_applied_count if apply_nonlinear else len(enhanced_results)} successful.")
-        
-        # Signal completion of fitting
-        module_idx = self.params.get('module')
-        if module_idx is not None and self._running:
-            self.signals.fitting_progress.emit(module_idx, "Fitting Completed")
-            
-        return enhanced_results
-            
-        # except Exception as e: # This outer try-except might be redundant now
-        #     print(f"Error in _apply_fitting_analysis: {e}", file=sys.stderr)
-        #     traceback.print_exc(file=sys.stderr)
-        #     # Ensure flags are set even on major error
-        #     for res_idx in raw_results_from_crs: # Iterate original keys
-        #         if res_idx not in enhanced_results: # If it wasn't even copied
-        #             enhanced_results[res_idx] = raw_results_from_crs[res_idx].copy()
-        #         enhanced_results[res_idx]['skewed_fit_applied'] = apply_skewed
-        #         enhanced_results[res_idx]['skewed_fit_success'] = False
-        #         enhanced_results[res_idx]['nonlinear_fit_applied'] = apply_nonlinear
-        #         enhanced_results[res_idx]['nonlinear_fit_success'] = False
-        #     return enhanced_results
-
 
     def run(self):
         """QThread entry point - runs in a separate thread."""
@@ -873,10 +696,14 @@ class MultisweepTask(QtCore.QThread):
     def _process_chunk_thread_safe(self, chunk, apply_skewed, apply_nonlinear, module_idx, chunk_idx, total_chunks):
         """Process a chunk of resonances in a thread."""
         # Process this chunk using the existing logic
-        return self._apply_fitting_analysis_thread_safe(chunk, apply_skewed, apply_nonlinear, module_idx)
+        return self._apply_fitting_analysis(chunk, apply_skewed, apply_nonlinear, module_idx)
     
-    def _apply_fitting_analysis_thread_safe(self, raw_results, apply_skewed, apply_nonlinear, module_idx):
-        """Thread-safe version of fitting analysis that emits progress signals."""
+    def _apply_fitting_analysis(self, raw_results, apply_skewed, apply_nonlinear, module_idx):
+        """Apply fitting analysis (skewed and/or nonlinear) to multisweep results.
+        
+        This method runs in a worker thread for parallel processing.
+        Emits progress signals for GUI updates (thread-safe via Qt's queued connections).
+        """
         # This runs in a separate thread, so we need to be careful about Qt signals
         
         # Initialize enhanced_results as a copy to preserve raw data if fitting is skipped or fails
@@ -1010,7 +837,7 @@ class MultisweepTask(QtCore.QThread):
 class BiasKidsSignals(QObject):
     """Signals for BiasKidsTask."""
     progress = pyqtSignal(int, float)  # module, progress_percentage
-    completed = pyqtSignal(int, dict, dict)  # module, biased_results, df_calibrations
+    completed = pyqtSignal(int, dict, dict, float)  # module, biased_results, df_calibrations, nco_frequency_hz
     error = pyqtSignal(str)  # error_message
 
 
@@ -1076,8 +903,11 @@ class BiasKidsTask(QtCore.QThread):
                     if 'df_calibration' in det_data:
                         df_calibrations[det_idx] = det_data['df_calibration']
                 
-                # Emit completion with results
-                self.signals.completed.emit(self.module, result, df_calibrations)
+                # Read the NCO frequency that was used during biasing
+                nco_frequency_hz = loop.run_until_complete(self.crs.get_nco_frequency(module=self.module))
+                
+                # Emit completion with results and NCO frequency
+                self.signals.completed.emit(self.module, result, df_calibrations, float(nco_frequency_hz))
             else:
                 self.signals.error.emit("Bias KIDs operation returned no results.")
                 

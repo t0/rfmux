@@ -177,8 +177,11 @@ class MockResonatorModel:
         print('Using config:', {k: v for k, v in config.items() if k in ['num_resonances', 'freq_start', 'freq_end', 'T', 'Popt']})
         
         # Set random seed for reproducible resonator generation
+        # Use separate RandomState for C/Cc variations to avoid pollution from
+        # varying iteration counts in the binary search convergence loop
         seed = config.get('resonator_random_seed', 42)
-        np.random.seed(seed)
+        np.random.seed(seed)  # Global seed for any internal MR_complex_resonator randomness
+        variation_rng = np.random.RandomState(seed)  # Dedicated RNG for circuit variations
         
         # Extract parameters
         freq_start = config.get('freq_start', 1e9)
@@ -187,6 +190,24 @@ class MockResonatorModel:
         # Physics parameters (determine Lk and R via quasiparticle density)
         T = config.get('T', 0.12)
         Popt = config.get('Popt', 1e-18)
+        
+        # Material & Geometry (use config if provided, otherwise MR_complex_resonator defaults)
+        material = config.get('material', 'Al')
+        width = config.get('width', 2e-6)  # Default from MR_complex_resonator
+        thickness = config.get('thickness', 30e-9)  # Default from MR_complex_resonator
+        length = config.get('length', 9000e-6)  # Default derived: VL/(width*thickness) where VL=540e-18
+        
+        # Custom material properties (from dialog or config)
+        # N0 in config is stored in µm⁻³eV⁻¹, must convert to µm⁻³J⁻¹ for MR_complex_resonator
+        # Tc, tau0, sigmaN are used directly (no conversion needed)
+        custom_Tc = config.get('material_Tc', None)
+        custom_N0_eV = config.get('material_N0', None)  # µm⁻³eV⁻¹
+        custom_N0 = custom_N0_eV / 1.602e-19 if custom_N0_eV is not None else None  # Convert to µm⁻³J⁻¹
+        custom_tau0 = config.get('material_tau0', None)
+        custom_sigmaN = config.get('material_sigmaN', None)
+        
+        if custom_Tc is not None:
+            print(f"Using custom material: Tc={custom_Tc}K, N0={custom_N0_eV}µm⁻³eV⁻¹, tau0={custom_tau0}s")
         
         # Base circuit parameters
         Lg_base = config.get('Lg', 10e-9)
@@ -279,12 +300,17 @@ class MockResonatorModel:
         print(f"Computing Lk and R from T={T} K and Popt={Popt} W")
         
         # Create reference resonator with dummy C value to get physics-computed Lk and R
+        # NOTE: Include L_junk so the reference Lk is calculated in the same circuit context
         reference_params = {
             'T': T,
             'Popt': Popt,
+            'width': width,
+            'thickness': thickness,
+            'length': length,
             'C': 1e-12,  # Dummy value, just to create the object
             'Cc': Cc_base,
             'fix_Lg': Lg_base,  # Fix Lg to our desired value
+            'L_junk': L_junk,   # Include L_junk for consistent circuit context
             'Vin': Vin,
             'input_atten_dB': input_atten_dB,
             'base_readout_f': (freq_start + freq_end) / 2,  # Middle frequency as initial guess
@@ -292,6 +318,15 @@ class MockResonatorModel:
             'ZLNA': complex(ZLNA, 0),
             'GLNA': GLNA
         }
+        # Add custom material properties if provided (N0 already converted to J⁻¹ units)
+        if custom_Tc is not None:
+            reference_params['Tc'] = custom_Tc
+        if custom_N0 is not None:
+            reference_params['N0'] = custom_N0
+        if custom_tau0 is not None:
+            reference_params['tau0'] = custom_tau0
+        if custom_sigmaN is not None:
+            reference_params['sigmaN'] = custom_sigmaN
         
         # Create reference resonator to get physics-computed Lk and R
         ref_resonator = MR_complex_resonator(**reference_params)
@@ -300,12 +335,18 @@ class MockResonatorModel:
         
         print(f"Physics-computed values: Lk={computed_Lk*1e9:.2f} nH, R={computed_R*1e6:.2f} µΩ")
         
-        # Step 2: Generate resonators with computed Lk and R, solving for C to get target frequencies
+        # Step 2: Generate resonators with iterative C-finding algorithm
+        # The key challenge is that Lk depends on frequency, so we need to iterate
+        # until the actual resonance frequency matches the target.
         print(f"Generating {num_resonances} resonators from {freq_start/1e9:.2f} GHz to {freq_end/1e9:.2f} GHz")
         
         # Determine bounds for frequency correction
         f_min_bound = min(freq_start, freq_end)
         f_max_bound = max(freq_start, freq_end)
+        
+        # Tolerance for frequency convergence (0.1% of target)
+        freq_tolerance_fraction = 0.001
+        max_c_iterations = 20  # Maximum iterations for C-finding
         
         for x in range(num_resonances):
             try:
@@ -315,80 +356,116 @@ class MockResonatorModel:
                 else:
                     target_freq = freq_start + (freq_end - freq_start) * x / (num_resonances - 1)
                 
-                # Calculate C required for target frequency using computed Lk
-                # fr = 1/(2π√(LC)) where L = Lk + Lg
-                L_total = computed_Lk + Lg_base
-                C_required = 1 / (4 * np.pi**2 * target_freq**2 * L_total)
-                
-                # Apply variations using normal distribution
-                C_actual = C_required * (1 + np.random.normal(0, C_variation))
-                Cc_actual = Cc_base * (1 + np.random.normal(0, Cc_variation))
-                
-                # Ensure positive values
-                C_actual = max(C_actual, C_required * 0.1)  # At least 10% of required value
+                # Apply Cc variation using dedicated RNG (doesn't change during iteration)
+                Cc_actual = Cc_base * (1 + variation_rng.normal(0, Cc_variation))
                 Cc_actual = max(Cc_actual, Cc_base * 0.1)
                 
-                print(f"Resonator {x}: target_freq={target_freq/1e9:.3f} GHz, C={C_actual*1e12:.2f} pF")
+                # --- Iterative C-finding algorithm ---
+                # Use binary search to find C that gives the target frequency
+                # Since Lk depends on frequency (through Mattis-Bardeen), we need to iterate
                 
-                # Create MR_complex_resonator with T, Popt, and calculated C
+                # Initial guess for C using the reference Lk
+                L_total_guess = computed_Lk + Lg_base + L_junk
+                C_initial = 1 / (4 * np.pi**2 * target_freq**2 * L_total_guess)
+                
+                # Set up binary search bounds
+                # Start with very wide bounds (factor of 100 in each direction)
+                C_low = C_initial / 100
+                C_high = C_initial * 100
+                C_current = C_initial
+                
+                print(f"Resonator {x}: target_freq={target_freq/1e9:.3f} GHz")
+                
+                # Base resonator params (C will be updated during iteration)
                 complex_res_params = {
                     'T': T,
                     'Popt': Popt,
-                    'C': C_actual,
+                    'C': C_current,
                     'Cc': Cc_actual,
-                    'fix_Lg': Lg_base,  # Fix Lg to our desired value
+                    'fix_Lg': Lg_base,
                     'L_junk': L_junk,
                     'Vin': Vin,
                     'input_atten_dB': input_atten_dB,
-                    'base_readout_f': target_freq,  # Initial guess for readout frequency
-                    'verbose': False,  # Suppress individual resonator output
-                    'ZLNA': complex(ZLNA, 0),  # Convert real ZLNA to complex for MR_complex_resonator
-                    'GLNA': GLNA
+                    'base_readout_f': target_freq,
+                    'verbose': False,
+                    'ZLNA': complex(ZLNA, 0),
+                    'GLNA': GLNA,
+                    'width': width,
+                    'thickness': thickness,
+                    'length': length,
                 }
+                # Add custom material properties if provided (N0 already converted to J⁻¹ units)
+                if custom_Tc is not None:
+                    complex_res_params['Tc'] = custom_Tc
+                if custom_N0 is not None:
+                    complex_res_params['N0'] = custom_N0
+                if custom_tau0 is not None:
+                    complex_res_params['tau0'] = custom_tau0
+                if custom_sigmaN is not None:
+                    complex_res_params['sigmaN'] = custom_sigmaN
                 
-                # Create the full MR_complex_resonator (includes physics modeling)
-                complex_res = MR_complex_resonator(**complex_res_params)
+                best_freq = None
+                best_C = C_current
+                best_error = float('inf')
                 
-                # Extract the LEKID from the complex resonator
-                lekid = complex_res.lekid
-                
-                # Calculate and store actual resonance frequency
-                actual_freq = lekid.compute_fr()
-                
-                # Feedback loop to ensure frequency stays within bounds
-                # This handles shifts due to loading (Cc), random scatter, or other physics effects
-                for _ in range(3):  # Max 3 attempts to correct
-                    needs_correction = False
-                    target_correction = 0.0
+                for iteration in range(max_c_iterations):
+                    # Create resonator with current C guess
+                    complex_res_params['C'] = C_current
+                    complex_res = MR_complex_resonator(**complex_res_params)
+                    lekid = complex_res.lekid
                     
-                    if actual_freq < f_min_bound:
-                        # Frequency too low -> Decrease C to increase f
-                        # Target slightly inside the boundary (0.1%) to be safe
-                        target_correction = f_min_bound * 1.001
-                        needs_correction = True
-                    elif actual_freq > f_max_bound:
-                        # Frequency too high -> Increase C to decrease f
-                        target_correction = f_max_bound * 0.999
-                        needs_correction = True
+                    # Get actual resonance frequency
+                    actual_freq = lekid.compute_fr()
                     
-                    if needs_correction:
-                        print(f"  Correction needed: {actual_freq/1e9:.4f} GHz out of bounds [{f_min_bound/1e9:.3f}, {f_max_bound/1e9:.3f}]")
-                        # Calculate required C scaling: f ~ 1/sqrt(C) => C_new = C_old * (f_old / f_new)^2
-                        correction_factor = (actual_freq / target_correction)**2
-                        
-                        # Update C in params
-                        complex_res_params['C'] = complex_res_params['C'] * correction_factor
-                        
-                        # Re-create resonator with corrected C
-                        complex_res = MR_complex_resonator(**complex_res_params)
-                        lekid = complex_res.lekid
-                        actual_freq = lekid.compute_fr()
-                        print(f"  Corrected to: {actual_freq/1e9:.4f} GHz")
-                    else:
+                    # Calculate error
+                    freq_error = abs(actual_freq - target_freq) / target_freq
+                    
+                    # Track best result
+                    if freq_error < best_error:
+                        best_error = freq_error
+                        best_freq = actual_freq
+                        best_C = C_current
+                    
+                    # Check convergence
+                    if freq_error < freq_tolerance_fraction:
+                        if iteration > 0:
+                            print(f"  Converged in {iteration+1} iterations: f={actual_freq/1e9:.4f} GHz (error={freq_error*100:.2f}%)")
                         break
+                    
+                    # Update bounds based on whether we're above or below target
+                    if actual_freq > target_freq:
+                        # Frequency too high -> need larger C to lower frequency
+                        C_low = C_current
+                    else:
+                        # Frequency too low -> need smaller C to raise frequency
+                        C_high = C_current
+                    
+                    # Binary search: take geometric mean of bounds
+                    C_current = np.sqrt(C_low * C_high)
+                    
+                    # Safety: if bounds have collapsed, break
+                    if C_high / C_low < 1.001:
+                        print(f"  Bounds collapsed after {iteration+1} iterations: f={actual_freq/1e9:.4f} GHz")
+                        break
+                else:
+                    print(f"  Max iterations reached: f={best_freq/1e9:.4f} GHz (error={best_error*100:.2f}%)")
+                
+                # Use the best result we found
+                complex_res_params['C'] = best_C
+                
+                # Apply C variation using dedicated RNG now that we have the target C
+                C_with_variation = best_C * (1 + variation_rng.normal(0, C_variation))
+                C_with_variation = max(C_with_variation, best_C * 0.5)  # At least 50% of target
+                complex_res_params['C'] = C_with_variation
+                
+                # Final resonator creation with variation applied
+                complex_res = MR_complex_resonator(**complex_res_params)
+                lekid = complex_res.lekid
+                actual_freq = lekid.compute_fr()
 
-                print(f"  Actual frequency: {actual_freq/1e9:.3f} GHz")
-                print(f"  Actual Lk: {lekid.Lk*1e9:.2f} nH, R: {lekid.R*1e6:.2f} µΩ")
+                print(f"  Actual frequency: {actual_freq/1e9:.4f} GHz")
+                print(f"  Circuit: C={lekid.C*1e12:.3f} pF, Cc={lekid.Cc*1e15:.2f} fF, Lg={lekid.Lg*1e9:.2f} nH, Lk={lekid.Lk*1e9:.2f} nH")
+                print(f"  Derived: L_total={lekid.L*1e9:.2f} nH, R={lekid.R*1e6:.2f} µΩ, α_k={lekid.alpha_k:.4f}")
                 
                 # Compute all derived values BEFORE appending to lists to ensure atomicity
                 # This prevents partial updates if a calculation fails
@@ -662,20 +739,19 @@ class MockResonatorModel:
             self._convergence_stats['skipped'] += 1
         
         # Extract parameters for ALL resonators
+        # Note: L now includes L_junk (L = Lk + Lg + L_junk)
         n_relevant = len(self.mr_lekids)
         L_subset = np.zeros(n_relevant)
         C_subset = np.zeros(n_relevant)
         R_subset = np.zeros(n_relevant)
         Cc_subset = np.zeros(n_relevant)
-        L_junk_subset = np.zeros(n_relevant)
         
         for i in range(n_relevant):
             lekid = self.mr_lekids[i]
-            L_subset[i] = lekid.L
+            L_subset[i] = lekid.L  # Total inductance (includes L_junk)
             C_subset[i] = lekid.C
             R_subset[i] = lekid.R
             Cc_subset[i] = lekid.Cc
-            L_junk_subset[i] = lekid.L_junk
         
         # Get common parameters from first LEKID (they should all be the same)
         lekid0 = self.mr_lekids[0]
@@ -689,7 +765,6 @@ class MockResonatorModel:
             C_array=C_subset,
             R_array=R_subset,
             Cc_array=Cc_subset,
-            L_junk_array=L_junk_subset,
             ZLNA=complex(lekid0.ZLNA),
             GLNA=lekid0.GLNA,
             input_atten_dB=lekid0.input_atten_dB,
@@ -739,23 +814,25 @@ class MockResonatorModel:
         R_work = self.R_array
         C_work = self.C_array
         Cc_work = self.Cc_array
-        L_junk_work = self.L_junk_array
         base_Lk = np.array([self.base_lekid_params[i]['Lk'] for i in range(n)])
         base_Lg = np.array([self.base_lekid_params[i]['Lg'] for i in range(n)])
+        base_L_junk = self.L_junk_array  # L_junk is fixed per resonator
         
         # Call JIT-compiled convergence loop
+        # Note: L_work = Lk + Lg + L_junk (total resonator inductance)
+        # base_L_junk is fixed; only Lk changes with current
         L_converged, R_converged, currents_converged, actual_iterations = \
             jit_physics.converged_lekid_parameters(
                 frequency, amplitude,
-                L_work, R_work, C_work,
-                Cc_work, L_junk_work,
-                base_Lk, base_Lg,
+                L_work, R_work, C_work, Cc_work,
+                base_Lk, base_Lg, base_L_junk,
                 lekid0.input_atten_dB, complex(lekid0.ZLNA),
                 self.Istar, tolerance, max_iterations, damp=0.1
             )
         
         # Extract current factors from converged inductances
-        Lk_converged = L_converged - base_Lg
+        # L_converged = Lk_converged + Lg + L_junk, so Lk_converged = L_converged - Lg - L_junk
+        Lk_converged = L_converged - base_Lg - base_L_junk
         current_factors = Lk_converged / base_Lk
         
         # Update LEKID objects with converged values (guard against concurrent reconfigure)

@@ -1,4 +1,4 @@
-"""Window for displaying multisweep analysis results."""
+"""Panel for displaying multisweep analysis results (dockable)."""
 import datetime
 import pickle
 import numpy as np
@@ -12,26 +12,32 @@ import time
 # Imports from within the 'periscope' subpackage
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
-    TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE
+    TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
+    ScreenshotMixin
 )
-from .detector_digest_dialog import DetectorDigestWindow
+from .detector_digest_panel import DetectorDigestPanel
+from .noise_spectrum_panel import NoiseSpectrumPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
 
 
-class MultisweepWindow(QtWidgets.QMainWindow):
+class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     """
-    A QMainWindow subclass for displaying and interacting with multisweep analysis results.
+    A dockable panel for displaying and interacting with multisweep analysis results.
 
-    This window visualizes S21 magnitude and phase data for multiple resonances
+    This panel visualizes S21 magnitude and phase data for multiple resonances
     across various probe amplitudes. It provides controls for data export,
     re-running sweeps, unit conversion, normalization, and plot interaction.
+    Can be docked, floated, or tabbed within the main Periscope window.
     """
     
     # Signal emitted when bias_kids algorithm completes with df_calibration data
     df_calibration_ready = pyqtSignal(int, dict)  # module, {detector_idx: df_calibration}
-    def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None, dark_mode=False, loaded_bias=False):
+    
+    # Signal for session auto-export
+    data_ready = pyqtSignal(str, str, dict)  # type, identifier, data
+    def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None, dark_mode=False, loaded_bias=False, is_loaded_data=False):
         """
         Initializes the MultisweepWindow.
 
@@ -44,6 +50,8 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                                          Defaults to an empty dict.
             dark_mode (bool, optional): Whether to use dark mode for plots.
                                          Defaults to False.
+            loaded_bias (bool, optional): Whether bias/noise data is available from loaded file.
+            is_loaded_data (bool, optional): Whether this panel is from loaded data (for naming).
         """
         super().__init__(parent)
         self.target_module = target_module
@@ -51,6 +59,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.dac_scales = dac_scales or {}          # DAC scales for unit conversions
         self.dark_mode = dark_mode                 # Store dark mode setting
         self.bias_data_avail = loaded_bias
+        self.is_loaded_data = is_loaded_data       # Track if this is from loaded data
         self.samples_taken = False
         self.noise_data = {}
         self.spectrum_noise_data = {}
@@ -59,8 +68,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.debug_phase_data = []
 
         
-        # Track open detector digest windows to prevent garbage collection
+        # Track open detector digest and noise spectrum windows to prevent garbage collection
         self.detector_digest_windows = []
+        self.noise_spectrum_windows = []
+        self.digest_window_count = 0  # Counter for naming digest tabs
+        self.noise_panel_count = 0    # Counter for naming noise tabs
         
         # Stores the initial/base CFs for detector ID and fallback. Order is important.
         self.conceptual_resonance_frequencies: list[float] = list(self.initial_params.get('resonance_frequencies', []))
@@ -104,48 +116,45 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         
         # Bias KIDs output storage
         self.bias_kids_output = None  # Stores the output from bias_kids algorithm
+        self.nco_frequency_hz = None  # NCO frequency used when biasing (stored for export)
 
         self._setup_ui()
         self.resize(1200, 800) # Default window size
 
     def _setup_ui(self):
         """Sets up the main UI layout, toolbar, and plot area."""
-        central_widget = QtWidgets.QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QtWidgets.QVBoxLayout(central_widget)
+        # Main layout for the panel (no central widget for QWidget)
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
-        self._setup_toolbar(main_layout) # main_layout is not used by _setup_toolbar
+        self._setup_toolbar(main_layout)
         self._setup_progress_bar(main_layout)
         self._setup_plot_area(main_layout)
 
 
-    def _setup_toolbar(self, layout): # layout parameter is not used
-        """Creates and configures the main toolbar with controls."""
-        toolbar = QtWidgets.QToolBar("Multisweep Controls")
-        toolbar.setMovable(False) # Prevent toolbar from being moved by the user
-        self.addToolBar(toolbar)
+    def _setup_toolbar(self, layout):
+        """Creates and configures the toolbar with controls (using QWidget instead of QToolBar)."""
+        # Use QWidget container instead of QToolBar for QWidget compatibility
+        toolbar = QtWidgets.QWidget()
+        toolbar_layout = QtWidgets.QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(5, 5, 5, 5)
 
         # Export Data Button
-        self.export_btn = QtWidgets.QPushButton("Export Data")
+        self.export_btn = QtWidgets.QPushButton("💾")
+        self.export_btn.setToolTip("Export data")
         self.export_btn.clicked.connect(self._export_data)
-        toolbar.addWidget(self.export_btn)
-
+        toolbar_layout.addWidget(self.export_btn)
+        
         # Re-run Multisweep Button
         self.rerun_btn = QtWidgets.QPushButton("Re-run Multisweep")
         self.rerun_btn.clicked.connect(self._rerun_multisweep)
-        toolbar.addWidget(self.rerun_btn)
+        toolbar_layout.addWidget(self.rerun_btn)
         
         # Bias KIDs Button
         self.bias_kids_btn = QtWidgets.QPushButton("Bias KIDs")
         self.bias_kids_btn.clicked.connect(self._bias_kids)
         self.bias_kids_btn.setToolTip("Bias detectors at optimal operating points based on multisweep results")
-        toolbar.addWidget(self.bias_kids_btn)
-
-        # self.take_samp_btn = QtWidgets.QPushButton("Take Noise Samples")
-        # self.take_samp_btn.setVisible(self.bias_data_avail)
-        # self.take_samp_btn.clicked.connect(self._take_noise_samps)        
-        # self.take_samp_btn.setToolTip("Get Noise data to see if detectors were biased correctly.")
-        # toolbar.addWidget(self.take_samp_btn)
+        toolbar_layout.addWidget(self.bias_kids_btn)
 
         self.noise_spectrum_btn = QtWidgets.QPushButton("Get Noise Spectrum")
         if self.bias_data_avail:
@@ -154,31 +163,35 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             self.noise_spectrum_btn.setEnabled(False)
         self.noise_spectrum_btn.setToolTip("Open a dialog to configure and get the noise spectrum, will only work if KIDS is biased.")
         self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
-        toolbar.addWidget(self.noise_spectrum_btn)
+        toolbar_layout.addWidget(self.noise_spectrum_btn)
         
-        toolbar.addSeparator()
-
         # Spacer to push subsequent items to the right
-        spacer = QtWidgets.QWidget()
-        spacer.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
-        toolbar.addWidget(spacer)
+        toolbar_layout.addStretch(1)
 
         # Normalization Checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
         self.normalize_checkbox.setChecked(self.normalize_traces)
         self.normalize_checkbox.toggled.connect(self._toggle_trace_normalization)
-        toolbar.addWidget(self.normalize_checkbox)
+        toolbar_layout.addWidget(self.normalize_checkbox)
 
         # Show Center Frequencies Checkbox
         self.show_cf_lines_cb = QtWidgets.QCheckBox("Show Center Frequencies")
         self.show_cf_lines_cb.setChecked(False) # Default to off
         self.show_cf_lines_cb.toggled.connect(self._toggle_cf_lines_visibility)
-        toolbar.addWidget(self.show_cf_lines_cb)
+        toolbar_layout.addWidget(self.show_cf_lines_cb)
 
-        self._setup_unit_controls(toolbar)
-        self._setup_zoom_box_control(toolbar)
+        self._setup_unit_controls(toolbar_layout)
+        self._setup_zoom_box_control(toolbar_layout)
 
-    def _setup_unit_controls(self, toolbar):
+        # Screenshot button
+        screenshot_btn = QtWidgets.QPushButton("📷")
+        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        screenshot_btn.clicked.connect(self._export_screenshot)
+        toolbar_layout.addWidget(screenshot_btn)
+
+        layout.addWidget(toolbar)
+
+    def _setup_unit_controls(self, toolbar_layout):
         """Sets up radio buttons for selecting magnitude units."""
         unit_group = QtWidgets.QWidget() # Group for unit radio buttons
         unit_layout = QtWidgets.QHBoxLayout(unit_group)
@@ -201,15 +214,14 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         self.rb_volts.toggled.connect(lambda: self._update_unit_mode("volts"))
         
         unit_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Preferred)
-        toolbar.addSeparator()
-        toolbar.addWidget(unit_group)
+        toolbar_layout.addWidget(unit_group)
 
-    def _setup_zoom_box_control(self, toolbar):
+    def _setup_zoom_box_control(self, toolbar_layout):
         """Sets up the checkbox to toggle zoom box mode for plots."""
         self.zoom_box_cb = QtWidgets.QCheckBox("Zoom Box Mode")
         self.zoom_box_cb.setChecked(self.zoom_box_mode)
         self.zoom_box_cb.toggled.connect(self._toggle_zoom_box_mode)
-        toolbar.addWidget(self.zoom_box_cb)
+        toolbar_layout.addWidget(self.zoom_box_cb)
 
     def _setup_plot_area(self, layout):
         """Sets up the magnitude and phase plot widgets."""
@@ -684,10 +696,20 @@ class MultisweepWindow(QtWidgets.QMainWindow):
     def all_sweeps_completed(self):
         """
         Slot called when all amplitudes in the multisweep have been processed.
-        Updates UI elements to reflect completion.
+        Updates UI elements to reflect completion and auto-opens detector digest for first detector.
         """
         self._check_all_complete()
         self.current_amp_label.setText("All Amplitudes Processed")
+        
+        # Emit data_ready signal for session auto-export
+        if self.results_by_iteration:
+            export_data = self._prepare_export_data()
+            identifier = f"module{self.target_module}"
+            self.data_ready.emit("multisweep", identifier, export_data)
+        
+        # Auto-open detector digest for the first detector (lowest frequency)
+        if self.results_by_iteration:
+            self._open_detector_digest_for_index(1)
         
     def _check_all_complete(self):
         """
@@ -779,29 +801,37 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         if hasattr(self, 'combined_phase_plot') and self.combined_phase_plot:
             self.combined_phase_plot.setUpdatesEnabled(True)
     
+    def _prepare_export_data(self) -> dict:
+        """
+        Prepare data dictionary for export.
+        
+        Returns:
+            Dictionary containing all multisweep data for export
+        """
+        # Handle lack of noise data more gracefully
+        if self.spectrum_noise_data:
+            spectrum_data = self.spectrum_noise_data
+        else:
+            spectrum_data = None 
+            
+        return {
+            'timestamp': datetime.datetime.now().isoformat(),
+            'target_module': self.target_module,
+            'initial_parameters': self.initial_params,
+            'dac_scales_used': self.dac_scales,
+            'results_by_iteration': self.results_by_iteration,
+            'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
+            'nco_frequency_hz': self.nco_frequency_hz,  # NCO frequency used for biasing
+            'noise_data': spectrum_data
+        }
+    
     def _handle_export_file_selected(self, filename):
         """Handle the file selection from the non-blocking dialog."""
         if not filename:
             return
             
         try:
-            # Prepare data for export
-
-            #### Adding this to handle lack of noise data more gracefully ####
-            if self.spectrum_noise_data:
-                spectrum_data = self.spectrum_noise_data
-            else:
-                spectrum_data = None 
-                
-            export_content = {
-                'timestamp': datetime.datetime.now().isoformat(),
-                'target_module': self.target_module,
-                'initial_parameters': self.initial_params,
-                'dac_scales_used': self.dac_scales,
-                'results_by_iteration': self.results_by_iteration,
-                'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
-                'noise_data': spectrum_data
-            }
+            export_content = self._prepare_export_data()
             with open(filename, 'wb') as f: # Write in binary mode for pickle
                 pickle.dump(export_content, f)
             QtWidgets.QMessageBox.information(self, "Export Complete", f"Data exported to {filename}")
@@ -871,6 +901,19 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         )
 
         if dialog.exec(): # True if user clicked OK
+            # Reset the loaded data flag since we're now generating fresh data
+            self.is_loaded_data = False
+            
+            # Update the dock title to remove "(Loaded)" suffix
+            periscope = self._get_periscope_parent()
+            if periscope:
+                my_dock = periscope.dock_manager.find_dock_for_widget(self)
+                if my_dock:
+                    # Get current title and remove " (Loaded)" if present
+                    current_title = my_dock.windowTitle()
+                    new_title = current_title.replace(" (Loaded)", "")
+                    my_dock.setWindowTitle(new_title)
+            
             self.noise_spectrum_btn.setEnabled(False)
             new_params_from_dialog = dialog.get_parameters()
             if not new_params_from_dialog:
@@ -944,8 +987,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 else:
                     self.current_amp_label.setText("No sweeps defined. (Waiting...)")
             
-            parent_widget = self.parent()
-            parent_widget = self.parent()
+            parent_widget = self._get_periscope_parent()
             if parent_widget and hasattr(parent_widget, '_start_multisweep_analysis_for_window'):
                 # Pass self.initial_params which now contains the correctly determined baseline CFs
                 parent_widget._start_multisweep_analysis_for_window(self, self.initial_params) # type: ignore
@@ -1079,6 +1121,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         total = 100
         # self.take_samp_btn.setEnabled(False)
 
+        periscope = self._get_periscope_parent()
+        if not periscope or periscope.crs is None:
+            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
+            return None
+
         try:
             loop = asyncio.get_event_loop()
             if loop.is_closed():
@@ -1089,7 +1136,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             asyncio.set_event_loop(loop)
 
         # Launch async sampler
-        samples = loop.run_until_complete(self.parent().crs.get_samples(total, average=False, channel=None, module=self.target_module))
+        samples = loop.run_until_complete(periscope.crs.get_samples(total, average=False, channel=None, module=self.target_module))
         self.noise_data = samples
         loop.close()
         # self.take_samp_btn.setEnabled(True)
@@ -1100,12 +1147,13 @@ class MultisweepWindow(QtWidgets.QMainWindow):
 
     def _open_noise_spectrum_dialog(self):
         num_res = len(self.conceptual_resonance_frequencies)
-        if self.parent().crs is None: 
+        periscope = self._get_periscope_parent()
+        
+        if not periscope or periscope.crs is None: 
             QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available") 
             return
-        else:
-            crs = self.parent().crs
-            
+        
+        crs = periscope.crs
         noise_dialog = NoiseSpectrumDialog(self, num_res, crs)
         if noise_dialog.exec():
             params = noise_dialog.get_parameters()
@@ -1127,12 +1175,15 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             print(f"[Bias] Plotting noise data taken at decimation {params['noise_parameters']['decimation']}")
             self.spectrum_noise_data['noise_parameters'] = params['noise_parameters']
             self.spectrum_noise_data['data'] = params['data']
+            # Open the noise spectrum panel for loaded noise data
+            self._open_noise_spectrum_panel(1)
         else:
-            if self.parent().crs is None: 
+            periscope = self._get_periscope_parent()
+            if not periscope or periscope.crs is None: 
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available") 
                 return
-            else:
-                crs = self.parent().crs
+            
+            crs = periscope.crs
     
             time_taken = params['time_taken']
             pfb_enabled = params['pfb_enabled']
@@ -1275,234 +1326,322 @@ class MultisweepWindow(QtWidgets.QMainWindow):
                 
                 self.spectrum_noise_data['data'] = data  
                 
+                # Emit data_ready signal for session auto-export
+                export_data = self._prepare_export_data()
+                identifier = f"module{module}_noise"
+                self.data_ready.emit("noise", identifier, export_data)
+                
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", str(e))
                 raise
+                traceback.print_exc()
             finally:
                 progress.close()
+                
+            # If we successfully got data, open the noise spectrum panel
+            if self.spectrum_noise_data.get('data'):
+                # Default to opening for the first detector
+                self._open_noise_spectrum_panel(1)
+
+    def _open_noise_spectrum_panel(self, detector_idx: int = 1):
+        """
+        Open a NoiseSpectrumPanel for a specific detector index.
+        
+        Args:
+            detector_idx: Detector index (1-based) to open panel for
+        """
+        # Get spectrum data
+        spectrum_data = self.spectrum_noise_data.get('data')
+        if not spectrum_data:
+            print("Warning: No noise spectrum data available")
+            return
+            
+        # Get conceptual frequency for this detector
+        if detector_idx <= len(self.conceptual_resonance_frequencies) and detector_idx > 0:
+            conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[detector_idx - 1]
+        else:
+            print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
+            return
+            
+        # Gather data for ALL detectors to enable navigation (similar logic to digest panel)
+        all_detectors_data = {}
+        # We need conceptual frequencies for navigation
+        for i, freq in enumerate(self.conceptual_resonance_frequencies):
+            det_id = i + 1
+            all_detectors_data[det_id] = {
+                'conceptual_freq_hz': freq
+            }
+            
+        # Find Periscope parent to create docked panel
+        periscope = self._get_periscope_parent()
+        if not periscope:
+            print("ERROR: Could not find Periscope parent for noise spectrum panel")
+            return
+            
+        # Create panel
+        panel = NoiseSpectrumPanel(
+            parent=self,
+            detector_id=detector_idx,
+            resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
+            dark_mode=self.dark_mode,
+            all_detectors_data=all_detectors_data,
+            initial_detector_idx=detector_idx,
+            spectrum_data=spectrum_data
+        )
+        
+        # Store direct reference to this MultisweepPanel (if needed)
+        panel.multisweep_panel_ref = self
+        
+        # Increment counter and use for tab name
+        self.noise_panel_count += 1
+        loaded_suffix = " (Loaded)" if self.is_loaded_data else ""
+        dock_title = f"Noise Spectrum #{self.noise_panel_count}{loaded_suffix}"
+        dock_id = f"noise_{self.noise_panel_count}_{int(time.time())}"
+        
+        # Create dock
+        dock = periscope.dock_manager.create_dock(panel, dock_title, dock_id)
+        
+        # Track panel reference
+        self.noise_spectrum_windows.append(panel)
+        
+        # Try to tabify with existing digest panel if available, else with multisweep panel
+        target_dock = None
+        if self.detector_digest_windows:
+            # Tabify with the most recently created digest window
+            last_digest = self.detector_digest_windows[-1]
+            target_dock = periscope.dock_manager.find_dock_for_widget(last_digest)
+        
+        if not target_dock:
+            # Fallback to multisweep panel
+            target_dock = periscope.dock_manager.find_dock_for_widget(self)
+            
+        if target_dock:
+            periscope.tabifyDockWidget(target_dock, dock)
+        
+        # Show and activate the dock
+        dock.show()
+        dock.raise_()
 
     @QtCore.pyqtSlot(object)
     def _handle_multisweep_plot_double_click(self, ev):
         """
         Handles a double-click event on the multisweep magnitude plot.
-        Identifies the clicked resonance and prepares data for the DetectorDigestDialog.
+        Identifies the clicked resonance and opens detector digest for it.
         """
         if not self.results_by_iteration:
             return
 
         # Get click coordinates in view space from the event's scenePos
-        # The event 'ev' is a QGraphicsSceneMouseEvent from pyqtgraph
-        if not self.combined_mag_plot: return
+        if not self.combined_mag_plot:
+            return
         view_box = self.combined_mag_plot.getViewBox()
-        if not view_box: return
+        if not view_box:
+            return
 
         mouse_point = view_box.mapSceneToView(ev.scenePos())
         x_coord = mouse_point.x()
-        # y_coord = mouse_point.y() # y_coord is not used for selecting the CF
 
-        self.debug_noise_data = self.parent().get_test_noise()
-        self.debug_phase_data = self.parent().get_phase_shift()
-        
-        # --- Find the resonance whose center/bias frequency is closest to the click's X-coordinate ---
-        min_distance = np.inf
-        clicked_res_idx = None
-        clicked_actual_cf = None
-        noise_data = None
-
-        # Collect all unique resonances with their center frequencies
+        # Find the resonance whose center/bias frequency is closest to the click
         resonance_centers = {}  # {res_idx: center_freq}
         
-        if self.results_by_iteration:
-            for iteration_data in self.results_by_iteration.values():
-                res_data = iteration_data.get("data", {})
-                for res_idx, data in res_data.items():
-                    # Get the bias/center frequency for this resonance
-                    center_freq = data.get('bias_frequency', data.get('original_center_frequency'))
-                    if center_freq is not None:
-                        resonance_centers[res_idx] = center_freq
+        for iteration_data in self.results_by_iteration.values():
+            res_data = iteration_data.get("data", {})
+            for res_idx, data in res_data.items():
+                center_freq = data.get('bias_frequency', data.get('original_center_frequency'))
+                if center_freq is not None:
+                    resonance_centers[res_idx] = center_freq
         
         # Find the resonance with center frequency closest to the click
+        min_distance = np.inf
+        clicked_res_idx = None
+        
         for res_idx, center_freq in resonance_centers.items():
             distance = abs(center_freq - x_coord)
             if distance < min_distance:
                 min_distance = distance
                 clicked_res_idx = res_idx
-                clicked_actual_cf = center_freq
 
-        if clicked_res_idx is not None and clicked_actual_cf is not None:
+        if clicked_res_idx is not None:
+            # Accept the event and open the detector digest
+            ev.accept()
+            self._open_detector_digest_for_index(clicked_res_idx)
 
-            # --- Determine the conceptual resonance and its ID ---
-            # The clicked_res_idx IS the detector ID since results are keyed by index
-            detector_id = clicked_res_idx
-
-            if self.samples_taken:
-                noise_data = self.noise_data
-
+    def _open_detector_digest_for_index(self, detector_idx: int):
+        """
+        Open a detector digest panel for a specific detector index.
+        
+        This method extracts and reuses the panel creation logic from the double-click handler,
+        making it callable programmatically (e.g., for auto-opening on completion).
+        
+        Args:
+            detector_idx: Detector index (1-based) to open digest for
+        """
+        if not self.results_by_iteration:
+            return
+        
+        # Get debug data from Periscope parent
+        periscope = self.parent()
+        while periscope and not hasattr(periscope, 'get_test_noise'):
+            periscope = periscope.parent()
+        
+        if periscope:
+            self.debug_noise_data = periscope.get_test_noise()
+            self.debug_phase_data = periscope.get_phase_shift()
+        else:
+            self.debug_noise_data = {}
+            self.debug_phase_data = []
+        
+        # Get noise data if available
+        noise_data = self.noise_data if self.samples_taken else None
+        
+        # Get conceptual frequency for this detector
+        if detector_idx <= len(self.conceptual_resonance_frequencies) and detector_idx > 0:
+            conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[detector_idx - 1]
+        else:
+            print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
+            return
+        
+        # Gather data for this specific detector across all amplitudes and directions
+        resonance_data_for_digest = {}
+        
+        # Group iterations by amplitude and direction
+        amplitude_direction_to_iteration = {}
+        for iter_idx, iter_data in self.results_by_iteration.items():
+            amp_val = iter_data["amplitude"]
+            direction = iter_data["direction"]
+            key = (amp_val, direction)
             
-            # Get the conceptual frequency for this resonance index
-            # Note: clicked_res_idx is 1-based, but conceptual_resonance_frequencies is 0-based
-            if clicked_res_idx <= len(self.conceptual_resonance_frequencies) and clicked_res_idx > 0:
-                conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[clicked_res_idx - 1]
+            if key not in amplitude_direction_to_iteration or iter_idx > amplitude_direction_to_iteration[key]:
+                amplitude_direction_to_iteration[key] = iter_idx
+        
+        # Process data for the target detector
+        for (amp_val, direction), iter_idx in amplitude_direction_to_iteration.items():
+            iter_data = self.results_by_iteration[iter_idx]
+            res_data = iter_data["data"]
+            
+            if not res_data or detector_idx not in res_data:
+                continue
+            
+            resonance_sweep_data = res_data[detector_idx]
+            actual_cf_for_this_amp = resonance_sweep_data.get('bias_frequency', 
+                                                              resonance_sweep_data.get('original_center_frequency'))
+            
+            combo_key = f"{amp_val}:{direction}"
+            resonance_data_for_digest[combo_key] = {
+                'data': resonance_sweep_data,
+                'actual_cf_hz': actual_cf_for_this_amp,
+                'direction': direction,
+                'amplitude': amp_val
+            }
+        
+        if not resonance_data_for_digest:
+            print(f"Warning: No data for detector {detector_idx}")
+            return
+        
+        # Gather data for ALL detectors to enable navigation
+        all_detectors_data = {}
+        all_detector_indices = set()
+        for iter_data in self.results_by_iteration.values():
+            res_data = iter_data.get("data", {})
+            all_detector_indices.update(res_data.keys())
+        
+        for det_idx in sorted(all_detector_indices):
+            if det_idx <= len(self.conceptual_resonance_frequencies) and det_idx > 0:
+                conceptual_freq_hz = self.conceptual_resonance_frequencies[det_idx - 1]
             else:
-                print(f"Warning: Clicked resonance index {clicked_res_idx} exceeds conceptual frequencies list length.")
-                conceptual_resonance_base_freq_hz = clicked_actual_cf
-
-            # --- Gather all data for this conceptual resonance across all amplitudes and directions ---
-            # Create a structure that preserves both amplitude and direction information
-            resonance_data_for_digest = {}
+                conceptual_freq_hz = None
+                for iter_data in self.results_by_iteration.values():
+                    res_data = iter_data.get("data", {})
+                    if det_idx in res_data:
+                        det_data = res_data[det_idx]
+                        conceptual_freq_hz = det_data.get('bias_frequency', det_data.get('original_center_frequency'))
+                        if conceptual_freq_hz:
+                            break
             
-            # Group iterations by amplitude and direction
-            amplitude_direction_to_iteration = {}  # Maps (amplitude, direction) to iteration
+            if conceptual_freq_hz is None:
+                continue
+            
+            detector_resonance_data = {}
+            amplitude_direction_to_iteration_det = {}
             for iter_idx, iter_data in self.results_by_iteration.items():
                 amp_val = iter_data["amplitude"]
                 direction = iter_data["direction"]
                 key = (amp_val, direction)
                 
-                # Keep the latest iteration for each amplitude+direction combination
-                if key not in amplitude_direction_to_iteration or iter_idx > amplitude_direction_to_iteration[key]:
-                    amplitude_direction_to_iteration[key] = iter_idx
+                if key not in amplitude_direction_to_iteration_det or iter_idx > amplitude_direction_to_iteration_det[key]:
+                    amplitude_direction_to_iteration_det[key] = iter_idx
             
-            # Now process the appropriate iteration for each amplitude+direction combination
-            for (amp_val, direction), iter_idx in amplitude_direction_to_iteration.items():
+            for (amp_val, direction), iter_idx in amplitude_direction_to_iteration_det.items():
                 iter_data = self.results_by_iteration[iter_idx]
                 res_data = iter_data["data"]
                 
-                if not res_data or clicked_res_idx not in res_data:
-                    continue  # No data for this resonance index
+                if not res_data or det_idx not in res_data:
+                    continue
                 
-                # Get the data for the clicked resonance index
-                resonance_sweep_data = res_data[clicked_res_idx]
-                
-                # Get the actual bias frequency used for this sweep
+                resonance_sweep_data = res_data[det_idx]
                 actual_cf_for_this_amp = resonance_sweep_data.get('bias_frequency', 
                                                                   resonance_sweep_data.get('original_center_frequency'))
                 
-                # Create a unique key that combines amplitude and direction
-                # Format: "amp_val:direction" (e.g., "0.5:upward")
                 combo_key = f"{amp_val}:{direction}"
-                
-                # Store with combined key to preserve both directions per amplitude
-                resonance_data_for_digest[combo_key] = {
+                detector_resonance_data[combo_key] = {
                     'data': resonance_sweep_data,
-                    'actual_cf_hz': actual_cf_for_this_amp,  # Store the actual CF for this sweep
-                    'direction': direction,  # Include direction information
-                    'amplitude': amp_val  # Store the raw amplitude for reference
+                    'actual_cf_hz': actual_cf_for_this_amp,
+                    'direction': direction,
+                    'amplitude': amp_val
                 }
-
-            if not resonance_data_for_digest:
-                print(f"Warning: No data gathered for conceptual resonance near {conceptual_resonance_base_freq_hz / 1e9:.6f} GHz for digest.")
-                return
-
-            # At this point, we have:
-            # - clicked_cf_hz
-            # - detector_id
-            # - resonance_data_for_digest (dict of {amp_raw: sweep_data_dict})
-            # - self.dac_scales
-            # - self.zoom_box_mode
-
-            # Accept the event to prevent further processing (e.g., ClickableViewBox's own message box)
-            ev.accept()
-
-            # Gather data for ALL detectors to enable navigation
-            all_detectors_data = {}
             
-            # First, find all unique detector indices across all iterations
-            all_detector_indices = set()
-            for iter_data in self.results_by_iteration.values():
-                res_data = iter_data.get("data", {})
-                all_detector_indices.update(res_data.keys())
-            
-            # Now gather data for each detector
-            for det_idx in sorted(all_detector_indices):
-                # Get conceptual frequency for this detector
-                # Note: det_idx is 1-based, but conceptual_resonance_frequencies is 0-based
-                if det_idx <= len(self.conceptual_resonance_frequencies) and det_idx > 0:
-                    conceptual_freq_hz = self.conceptual_resonance_frequencies[det_idx - 1]
-                else:
-                    # Fallback - try to find any frequency data for this detector
-                    conceptual_freq_hz = None
-                    for iter_data in self.results_by_iteration.values():
-                        res_data = iter_data.get("data", {})
-                        if det_idx in res_data:
-                            det_data = res_data[det_idx]
-                            conceptual_freq_hz = det_data.get('bias_frequency', det_data.get('original_center_frequency'))
-                            if conceptual_freq_hz:
-                                break
-                
-                if conceptual_freq_hz is None:
-                    continue  # Skip this detector if we can't find any frequency info
-                
-                # Gather sweep data for this detector across all amplitudes/directions
-                detector_resonance_data = {}
-                
-                # Use the same logic as above to gather data for each amplitude/direction combination
-                amplitude_direction_to_iteration = {}
-                for iter_idx, iter_data in self.results_by_iteration.items():
-                    amp_val = iter_data["amplitude"]
-                    direction = iter_data["direction"]
-                    key = (amp_val, direction)
-                    
-                    if key not in amplitude_direction_to_iteration or iter_idx > amplitude_direction_to_iteration[key]:
-                        amplitude_direction_to_iteration[key] = iter_idx
-                
-                for (amp_val, direction), iter_idx in amplitude_direction_to_iteration.items():
-                    iter_data = self.results_by_iteration[iter_idx]
-                    res_data = iter_data["data"]
-                    
-                    if not res_data or det_idx not in res_data:
-                        continue
-                    
-                    resonance_sweep_data = res_data[det_idx]
-                    actual_cf_for_this_amp = resonance_sweep_data.get('bias_frequency', 
-                                                                      resonance_sweep_data.get('original_center_frequency'))
-                    
-                    combo_key = f"{amp_val}:{direction}"
-                    detector_resonance_data[combo_key] = {
-                        'data': resonance_sweep_data,
-                        'actual_cf_hz': actual_cf_for_this_amp,
-                        'direction': direction,
-                        'amplitude': amp_val
-                    }
-                
-                if detector_resonance_data:  # Only add if we have data
-                    all_detectors_data[det_idx] = {
-                        'resonance_data': detector_resonance_data,
-                        'conceptual_freq_hz': conceptual_freq_hz
-                    }
-            
-            if self.spectrum_noise_data:
-                spectrum_data = self.spectrum_noise_data['data']
-            else:
-                spectrum_data = None
-            
-            # Create a non-modal window for the detector digest with ALL detector data
-            digest_window = DetectorDigestWindow(
-                parent=self, # type: ignore # parent is QWidget, DetectorDigestWindow expects QWidget
-                resonance_data_for_digest=resonance_data_for_digest,  # Keep for backward compatibility
-                detector_id=detector_id,
-                resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
-                dac_scales=self.dac_scales,
-                zoom_box_mode=self.zoom_box_mode,
-                target_module=self.target_module, # type: ignore # target_module is int | None, DetectorDigestWindow expects int
-                normalize_plot3=self.normalize_traces,
-                dark_mode=self.dark_mode,
-                all_detectors_data=all_detectors_data,  
-                initial_detector_idx=detector_id,
-                noise_data = noise_data,
-                spectrum_data = spectrum_data,
-                debug_noise_data = self.debug_noise_data,
-                debug_phase_data = self.debug_phase_data,
-                debug = False            
-            )
-            
-            # Add to tracking list to prevent garbage collection
-            self.detector_digest_windows.append(digest_window)
-            
-            # Show the window
-            digest_window.show()
-        else:
-            # No curve found near click, event not accepted, default ClickableViewBox behavior might occur
-            pass
+            if detector_resonance_data:
+                all_detectors_data[det_idx] = {
+                    'resonance_data': detector_resonance_data,
+                    'conceptual_freq_hz': conceptual_freq_hz
+                }
+        
+        # Find Periscope parent to create docked panel
+        periscope = self._get_periscope_parent()
+        if not periscope:
+            print("ERROR: Could not find Periscope parent for detector digest panel")
+            return
+        
+        # Create panel
+        panel = DetectorDigestPanel(
+            parent=self,
+            resonance_data_for_digest=resonance_data_for_digest,
+            detector_id=detector_idx,
+            resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
+            dac_scales=self.dac_scales,
+            zoom_box_mode=self.zoom_box_mode,
+            target_module=self.target_module,
+            normalize_plot3=self.normalize_traces,
+            dark_mode=self.dark_mode,
+            all_detectors_data=all_detectors_data,
+            initial_detector_idx=detector_idx,
+            noise_data=noise_data,
+            debug_noise_data=self.debug_noise_data,
+            debug_phase_data=self.debug_phase_data,
+            debug=False
+        )
+        
+        # Store direct reference to this MultisweepPanel for noise sampling
+        panel.multisweep_panel_ref = self
+        
+        # Increment counter and use for tab name
+        self.digest_window_count += 1
+        loaded_suffix = " (Loaded)" if self.is_loaded_data else ""
+        dock_title = f"Detector Digest #{self.digest_window_count}{loaded_suffix}"
+        dock_id = f"digest_{self.digest_window_count}_{int(time.time())}"
+        dock = periscope.dock_manager.create_dock(panel, dock_title, dock_id)
+        
+        # Track panel reference to prevent garbage collection
+        self.detector_digest_windows.append(panel)
+        
+        # Tabify with this multisweep panel's dock
+        my_dock = periscope.dock_manager.find_dock_for_widget(self)
+        if my_dock:
+            periscope.tabifyDockWidget(my_dock, dock)
+        
+        # Show and activate the dock
+        dock.show()
+        dock.raise_()
 
     def _get_closest_remembered_cf(self, conceptual_idx: int, target_amp: float) -> float | None:
         """
@@ -1584,6 +1723,11 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         for digest_window in self.detector_digest_windows:
             if hasattr(digest_window, 'apply_theme'):
                 digest_window.apply_theme(dark_mode)
+        
+        # Propagate to noise spectrum windows
+        for noise_window in self.noise_spectrum_windows:
+            if hasattr(noise_window, 'apply_theme'):
+                noise_window.apply_theme(dark_mode)
     
     def _bias_kids(self):
         """
@@ -1595,19 +1739,15 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "No Data", 
                                         "No multisweep data available. Please run a multisweep first.")
             return
-            
-        parent = self.parent()
-        if not parent:
+        
+        # Get Periscope parent
+        periscope = self._get_periscope_parent()
+        if not periscope:
             QtWidgets.QMessageBox.warning(self, "Parent Not Available", 
                                         "Parent window not available. Cannot access CRS object.")
             return
             
-        if not hasattr(parent, 'crs'):
-            QtWidgets.QMessageBox.warning(self, "CRS Not Found", 
-                                        "Parent window does not have CRS object.")
-            return
-            
-        if parent.crs is None:
+        if periscope.crs is None:
             QtWidgets.QMessageBox.warning(self, "CRS Not Available", 
                                         "CRS object is None. Cannot bias detectors.")
             return
@@ -1643,7 +1783,7 @@ class MultisweepWindow(QtWidgets.QMainWindow):
             return
         # Create and start the task with dialog parameters
         self.bias_kids_task = BiasKidsTask(
-            parent.crs,
+            periscope.crs,
             self.target_module,
             gui_format_results,
             self.bias_kids_signals,
@@ -1662,14 +1802,23 @@ class MultisweepWindow(QtWidgets.QMainWindow):
         # Could update a progress indicator if desired
         pass
     
-    def _bias_kids_completed(self, module, biased_results, df_calibrations):
+    def _bias_kids_completed(self, module, biased_results, df_calibrations, nco_frequency_hz):
         """Handle completion of the bias_kids task."""
         # Store the output
         self.bias_kids_output = biased_results
         
+        # Store the NCO frequency used during biasing
+        self.nco_frequency_hz = nco_frequency_hz
+        
         # Emit signal with df_calibration data
         if df_calibrations:
             self.df_calibration_ready.emit(module, df_calibrations)
+        
+        # Emit data_ready signal for session auto-export
+        if biased_results:
+            export_data = self._prepare_export_data()
+            identifier = f"module{module}"
+            self.data_ready.emit("bias", identifier, export_data)
         
         # Show success dialog
         num_biased = len(biased_results)

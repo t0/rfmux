@@ -57,13 +57,18 @@ class MR_LEKID():
             
         self.Lk = Lk
         if Lg is None:
-            self.alpha_k = alpha_k
-            self.Lg = (self.Lk - self.alpha_k*self.Lk) / self.alpha_k
+            # If Lg not provided, derive it from alpha_k parameter
+            # alpha_k = Lk / (Lk + Lg) => Lg = Lk * (1 - alpha_k) / alpha_k
+            self.Lg = (self.Lk - alpha_k*self.Lk) / alpha_k
         else:
             self.Lg = Lg
-            self.alpha_k = self.Lk / (self.Lk + self.Lg)
-        self.L = self.Lk + self.Lg
+        
         self.L_junk = L_junk
+        # L is the total inductance affecting resonance frequency and kinetic inductance fraction
+        # L_total = Lk + Lg + L_junk (all inductances in the resonator circuit)
+        self.L = self.Lk + self.Lg + self.L_junk
+        # Effective kinetic inductance fraction (diluted by geometric and junk inductance)
+        self.alpha_k = self.Lk / self.L if self.L > 0 else 0.0
 
         self.C = C
         self.R = R
@@ -131,35 +136,32 @@ class MR_LEKID():
 
         return 1./(1./ZC + 1./(ZL + R))
     
-    def total_impedance(self, fc, C=None, L=None, R=None, Cc=None, L_junk=None):
+    def total_impedance(self, fc, C=None, L=None, R=None, Cc=None):
         """
         Total device impedance at fc including series elements.
 
         Composition
         -----------
-        Z_total = Z_parallel_RLC + Z_Cc (+ jω L_junk)
+        Z_total = Z_parallel_RLC + Z_Cc
+        
+        Note: L_junk is included in self.L (self.L = Lk + Lg + L_junk) for the
+        parallel RLC calculation, so it affects the resonance frequency and
+        dilutes the kinetic inductance fraction (alpha_k).
 
         Parameters
         ----------
         fc : float
             Probe frequency [Hz]
         C, L, R : float, optional
-            RLC parameters [F, H, Ω]
+            RLC parameters [F, H, Ω] (L already includes L_junk)
         Cc : float, optional
             Coupling capacitor [F]
-        L_junk : float, optional
-            Series parasitic inductance [H]
 
         Returns
         -------
         complex
             Total device impedance [Ω]
         """
-        # where fc is the carrier frequency
-        # Compute total device impedance at fc,
-        # including the coupling capacitor in series with
-        # the parallel RLC resonance
-
         if C is None:
             C = self.C
         if L is None:
@@ -168,14 +170,11 @@ class MR_LEKID():
             R = self.R
         if Cc is None:
             Cc = self.Cc
-        if L_junk is None:
-            L_junk = self.L_junk
         
         Zres = self.parallel_RLC(fc, L=L, C=C, R=R)
         ZCc = 1./(1j*2*np.pi*fc*Cc)
-        ZLjunk = 1j*2*np.pi*L_junk*fc
 
-        return Zres + ZCc + ZLjunk
+        return Zres + ZCc
     
     
     

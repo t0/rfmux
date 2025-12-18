@@ -1811,12 +1811,22 @@ class PeriscopeRuntime:
         fake_fetcher.start = MagicMock()
         fake_fetcher.dac_scales_ready = fetcher_signal
 
-        ### We can't mock Netanal and Multisweep windows as they are used to call other dialogs #####
-        from rfmux.tools.periscope.network_analysis_window import NetworkAnalysisWindow
-        MockNAWindow = NetworkAnalysisWindow
+        # Dock and panel scaffolding
+        def _mock_create_dock(_self, widget, title, dock_id=None):
+            dock = MagicMock()
+            dock.widget.return_value = widget
+            dock.windowTitle.return_value = title
+            return dock
 
-        from rfmux.tools.periscope.multisweep_window import MultisweepWindow
-        MockMultiWindow = MultisweepWindow
+        MockDockCreate = MagicMock(side_effect=_mock_create_dock)
+        MockDockGet = MagicMock(return_value=None)
+
+        ### Use panel classes for mocked flows ###
+        from rfmux.tools.periscope.network_analysis_panel import NetworkAnalysisPanel
+        MockNAWindow = NetworkAnalysisPanel
+
+        from rfmux.tools.periscope.multisweep_panel import MultisweepPanel
+        MockMultiWindow = MultisweepPanel
         
         MockInitCRS = MagicMock(return_value=fake_init_dialog)
         MockNetAnal = MagicMock(return_value=fake_netanal_dialog)
@@ -1849,6 +1859,8 @@ class PeriscopeRuntime:
             patch.object(utils_mod.QtWidgets.QMessageBox, "warning", MagicMock(), create=True),
             patch.object(utils_mod.QtWidgets.QMessageBox, "critical", MagicMock(), create=True),
             patch.object(utils_mod.QtWidgets.QMessageBox, "question", MagicMock(), create=True),
+            patch.object(utils_mod.QtWidgets.QMainWindow, "tabifyDockWidget", MagicMock(), create=True),
+            patch.object(utils_mod.QtWidgets.QMainWindow, "addDockWidget", MagicMock(), create=True),
         ]
 
         module_patchers = [
@@ -1898,6 +1910,16 @@ class PeriscopeRuntime:
             patch("rfmux.tools.periscope.tasks.MultisweepTask", MockMultiTask, create=True),
             patch("rfmux.tools.periscope.tasks.BiasKidsTask", MockBiasTask, create=True),
             patch("rfmux.tools.periscope.tasks.BiasKidsSignals", MockBiasSignals, create=True),
+            patch(
+                "rfmux.tools.periscope.dock_manager.PeriscopeDockManager.create_dock",
+                MockDockCreate,
+                create=True,
+            ),
+            patch(
+                "rfmux.tools.periscope.dock_manager.PeriscopeDockManager.get_dock",
+                MockDockGet,
+                create=True,
+            ),
         ]
 
 
@@ -1917,22 +1939,32 @@ class PeriscopeRuntime:
             patch.object(periscope_app, "MultisweepTask", MockMultiTask, create=True),
             patch.object(periscope_app, "BiasKidsTask", MockBiasTask, create=True),
             patch.object(periscope_app, "BiasKidsSignals", MockBiasSignals, create=True),
+            patch.object(periscope_app, "NetworkAnalysisPanel", MockNAWindow, create=True),
+            patch.object(periscope_app, "MultisweepPanel", MockMultiWindow, create=True),
+            patch.object(periscope_app, "PeriscopeDockManager", MagicMock(), create=True),
         ]
 
-        from rfmux.tools.periscope.detector_digest_dialog import DetectorDigestWindow
-
+        from rfmux.tools.periscope.detector_digest_panel import DetectorDigestPanel
+        
         patchers_for_digest = [
-            patch.object(DetectorDigestWindow, "_build_digest_tab", MagicMock(return_value=QtWidgets.QWidget())),
-            patch.object(DetectorDigestWindow, "_build_noise_tab", MagicMock(return_value=QtWidgets.QWidget())),
-            patch.object(DetectorDigestWindow, "apply_theme", MagicMock()),
-            patch.object(DetectorDigestWindow, "_update_plots", MagicMock()),
-            patch.object(DetectorDigestWindow, "resize", MagicMock()),
-            patch.object(DetectorDigestWindow, "show", MagicMock()),
-            patch.object(DetectorDigestWindow, "_update_noise_plots", MagicMock()),
-            patch.object(DetectorDigestWindow, "_on_tab_changed", MagicMock()),  
+            patch.object(DetectorDigestPanel, "_setup_ui", MagicMock()),
+            patch.object(DetectorDigestPanel, "_update_plots", MagicMock()),
+            patch.object(DetectorDigestPanel, "apply_theme", MagicMock()),
+            patch.object(DetectorDigestPanel, "resize", MagicMock()),
+            patch.object(DetectorDigestPanel, "show", MagicMock()),
         ]
 
-        patchers = qt_suppression_patchers + module_patchers  + patchers_for_digest + app_patchers
+        from rfmux.tools.periscope.noise_spectrum_panel import NoiseSpectrumPanel
+
+        patchers_for_noise_spectrum = [
+            patch.object(NoiseSpectrumPanel, "_setup_ui", MagicMock()),
+            patch.object(NoiseSpectrumPanel, "_update_noise_plots", MagicMock()),
+            patch.object(NoiseSpectrumPanel, "apply_theme", MagicMock()),
+            patch.object(NoiseSpectrumPanel, "resize", MagicMock()),
+            patch.object(NoiseSpectrumPanel, "show", MagicMock()),
+        ]
+
+        patchers = qt_suppression_patchers + module_patchers  + app_patchers  + patchers_for_digest + patchers_for_noise_spectrum
         try:
             for patcher in patchers:
                 patcher.start()
@@ -1962,6 +1994,8 @@ class PeriscopeRuntime:
         self.pool = getattr(self, "pool", None) or MagicMock()
         if not hasattr(self.pool, "start"):
             self.pool.start = MagicMock()
+
+            
         self.module = getattr(self, "module", 1)
         self.netanal_window_count = getattr(self, "netanal_window_count", 0)
         self.netanal_windows = getattr(self, "netanal_windows", {})
@@ -2076,21 +2110,33 @@ class PeriscopeRuntime:
                 self.phase_shifts = [0]
     
                 multisweep_window._handle_multisweep_plot_double_click(fake_event)
-    
-                # Access the instance created
-                digest_window = multisweep_window.detector_digest_windows[-1]
-    
-                assert digest_window.tabs.count() == 2
-                assert digest_window.tabs.tabText(0) == "Fit"
-                assert digest_window.tabs.tabText(1) == "Noise"
 
-                print(">>> Testing Detector Digest Window (Fit tab)")
+                print(">>> Testing Detector Digest Panel")
+    
+                before = len(multisweep_window.detector_digest_windows)
                 
-                digest_window.tabs.setCurrentIndex(0)
-                assert digest_window.tabs.currentIndex() == 0
-
-                print(">>> Testing Detector Digest Window (Noise tab)")
-                digest_window.tabs.setCurrentIndex(1)
-                assert digest_window.tabs.currentIndex() == 1
+                multisweep_window._open_detector_digest_for_index(1)
+                
+                after = len(multisweep_window.detector_digest_windows)
+                assert after == before + 1
+                
+                digest_panel = multisweep_window.detector_digest_windows[-1]
+                assert isinstance(digest_panel, rfmux.tools.periscope.detector_digest_panel.DetectorDigestPanel)
+                assert digest_panel.detector_id == 1
+                
+                print(">>> Testing Noise Spectrum Panel")
+                
+                # --- Noise Spectrum Panel ---
+                multisweep_window.spectrum_noise_data = MagicMock()
+                before = len(multisweep_window.noise_spectrum_windows)
+                
+                multisweep_window._open_noise_spectrum_panel(1)
+                
+                after = len(multisweep_window.noise_spectrum_windows)
+                assert after == before + 1
+                
+                noise_panel = multisweep_window.noise_spectrum_windows[-1]
+                assert isinstance(noise_panel, rfmux.tools.periscope.noise_spectrum_panel.NoiseSpectrumPanel)
+                assert noise_panel.detector_id == 1
 
         print("\n✓ ALL dialog / window functions executed successfully (mocked)\n")

@@ -47,8 +47,8 @@ async def main(serial="MOCK"):
     # Network analysis parameters
     NETANAL_PARAMS = {
         'amp': 0.001,
-        'fmin': 0.6e9,      # 500 MHz
-        'fmax': 1.0e9,     # 1000 MHz  
+        'fmin': 0.6e9,      # 600 MHz
+        'fmax': 1.1e9,     # 1100 MHz  
         'nsamps': 10,
         'npoints': 50000,
         'max_chans': 1023,

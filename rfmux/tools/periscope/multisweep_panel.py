@@ -1324,7 +1324,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 else:
                     data['pfb_enabled'] = False
                 
-                self.spectrum_noise_data['data'] = data
+                self.spectrum_noise_data['data'] = data  
                 
                 # Emit data_ready signal for session auto-export
                 export_data = self._prepare_export_data()
@@ -1333,6 +1333,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", str(e))
+                raise
                 traceback.print_exc()
             finally:
                 progress.close()
@@ -1750,7 +1751,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             QtWidgets.QMessageBox.warning(self, "CRS Not Available", 
                                         "CRS object is None. Cannot bias detectors.")
             return
-        
         # Import the dialog
         from .bias_kids_dialog import BiasKidsDialog
         
@@ -1781,7 +1781,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             QtWidgets.QMessageBox.warning(self, "Module Not Set", 
                                         "Target module is not set. Cannot bias detectors.")
             return
-        
         # Create and start the task with dialog parameters
         self.bias_kids_task = BiasKidsTask(
             periscope.crs,
@@ -1797,7 +1796,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Start the task
         self.bias_kids_task.start()
-    
+
     def _bias_kids_progress(self, module, progress):
         """Handle progress updates from the bias_kids task."""
         # Could update a progress indicator if desired

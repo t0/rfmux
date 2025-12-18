@@ -47,6 +47,11 @@ def mock_periscope(qt_app):
     periscope.raw_data = {1: [1, 2, 3]}
     periscope.resonance_freqs = {1: [90e6, 91e6]}
 
+    periscope.timer = MagicMock()
+    periscope.receiver = MagicMock()
+    periscope.receiver.stop = MagicMock()
+    periscope.receiver.wait = MagicMock()
+
     # UI bookkeeping
     periscope.netanal_window_count = 0
     periscope.netanal_windows = {}
@@ -64,6 +69,24 @@ def mock_periscope(qt_app):
     # Signals required by smoke test
     periscope.netanal_signals = MagicMock()
     periscope.multisweep_signals = MagicMock()
+
+    dock_manager = MagicMock()
+
+    def _make_dock(widget, title=None, dock_id=None):
+        dock = MagicMock()
+        dock.widget.return_value = widget
+        dock.windowTitle.return_value = title or ""
+        return dock
+
+    dock_manager.create_dock.side_effect = _make_dock
+    dock_manager.get_dock.return_value = None
+    dock_manager.protect_dock = MagicMock()
+    dock_manager.remove_dock = MagicMock()
+    periscope.dock_manager = dock_manager
+
+    periscope.setDockNestingEnabled = MagicMock()
+    periscope.tabifyDockWidget = MagicMock()
+    
     for sig_name in (
         "progress",
         "starting_iteration",
@@ -86,6 +109,7 @@ def test_periscope_ui_smoke(mock_periscope):
 
     # The core smoke-test entry point
     mock_periscope.run_ui_mock_smoke_test()
+
 
     # Passing = no exceptions
     assert True

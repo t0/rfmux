@@ -45,7 +45,7 @@ jobs:
 
       - name: Build package
         run: |
-          pip install -e . -v
+          pip install -e ".[gui]" -v
 
       - name: Install libomp (macOS only)
         if: runner.os == 'macOS'

@@ -33,56 +33,59 @@ namespace packets {
 		return type_->to_python(data(), size());
 	}
 
-	void Timestamp::renormalize() {
-		if (!is_recent())
-			return;
+	Timestamp Timestamp::normalized() const {
+		Timestamp result = *this;
+		if (!result.is_recent())
+			return result;
 
 		// Carry subseconds -> seconds
-		int32_t carry = ss / SS_PER_SECOND;
-		ss = ss % SS_PER_SECOND;
-		if (ss < 0) {
-			ss += SS_PER_SECOND;
+		int32_t carry = result.ss / SS_PER_SECOND;
+		result.ss = result.ss % SS_PER_SECOND;
+		if (result.ss < 0) {
+			result.ss += SS_PER_SECOND;
 			carry--;
 		}
-		s += carry;
+		result.s += carry;
 
 		// Carry seconds -> minutes
-		carry = s / 60;
-		s = s % 60;
-		if (s < 0) {
-			s += 60;
+		carry = result.s / 60;
+		result.s = result.s % 60;
+		if (result.s < 0) {
+			result.s += 60;
 			carry--;
 		}
-		m += carry;
+		result.m += carry;
 
 		// Carry minutes -> hours
-		carry = m / 60;
-		m = m % 60;
-		if (m < 0) {
-			m += 60;
+		carry = result.m / 60;
+		result.m = result.m % 60;
+		if (result.m < 0) {
+			result.m += 60;
 			carry--;
 		}
-		h += carry;
+		result.h += carry;
 
 		// Carry hours -> days
-		carry = h / 24;
-		h = h % 24;
-		if (h < 0) {
-			h += 24;
+		carry = result.h / 24;
+		result.h = result.h % 24;
+		if (result.h < 0) {
+			result.h += 24;
 			carry--;
 		}
-		d += carry;
+		result.d += carry;
 
 		// Carry days -> years (ignoring leap years)
-		carry = (d - 1) / 365;
-		d = ((d - 1) % 365) + 1;
-		if (d < 1) {
-			d += 365;
+		carry = (result.d - 1) / 365;
+		result.d = ((result.d - 1) % 365) + 1;
+		if (result.d < 1) {
+			result.d += 365;
 			carry--;
 		}
-		y = (y + carry) % 100;
-		if (y < 0)
-			y += 100;
+		result.y = (result.y + carry) % 100;
+		if (result.y < 0)
+			result.y += 100;
+
+		return result;
 	}
 
 	ReadoutPacket ReadoutPacket::from_bytes(const void* data, size_t len) {

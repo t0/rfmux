@@ -64,7 +64,8 @@ namespace packets {
 				c &= ~0x80000000;
 		}
 
-		void renormalize();
+		Timestamp normalized() const;
+		void renormalize() { *this = normalized(); }
 	};
 
 	/* Type-erased packet container. */

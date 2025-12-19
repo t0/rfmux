@@ -64,8 +64,6 @@ namespace packets {
 				c &= ~0x80000000;
 		}
 
-		uint32_t get_count() const { return c & 0x1fffffff; }
-
 		void renormalize();
 	};
 

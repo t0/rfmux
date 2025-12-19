@@ -39,14 +39,36 @@ PYBIND11_MODULE(_receiver, m) {
 		.def_readwrite("m", &Timestamp::m, "Minute (0-59)")
 		.def_readwrite("s", &Timestamp::s, "Second (0-59)")
 		.def_readwrite("ss", &Timestamp::ss, "Sub-seconds")
-		.def_readwrite("c", &Timestamp::c, "Control field")
+		.def_property("c",
+			[](const Timestamp& ts) { return ts.c & 0xfff; },
+			[](Timestamp& ts, uint32_t control) {
+				ts.c = (ts.c & 0xfffff000) | (control & 0xfff);
+			},
+			"Control field (12-bit, preserves source and recent bits)")
 		.def_readwrite("sbs", &Timestamp::sbs, "Sub-block sequence")
 		.def("get_source", &Timestamp::get_source, "Get timestamp source")
 		.def("set_source", &Timestamp::set_source, "Set timestamp source", "src"_a)
-		.def("is_recent", &Timestamp::is_recent, "Check if timestamp is recent")
-		.def("set_recent", &Timestamp::set_recent, "Set recent flag", "recent"_a)
-		.def("get_count", &Timestamp::get_count, "Get count field")
+		.def_property("recent", &Timestamp::is_recent, &Timestamp::set_recent, "Recent flag (read/write)")
 		.def("renormalize", &Timestamp::renormalize, "Normalize timestamp fields (carry overflow)")
+		.def("keys", [](const Timestamp&) {
+			return py::make_tuple("y", "d", "h", "m", "s", "ss", "c", "sbs", "recent");
+		}, "Return dictionary keys")
+		.def("__getitem__", [](const Timestamp& ts, const std::string& key) {
+			if (key == "y") return py::cast(ts.y);
+			if (key == "d") return py::cast(ts.d);
+			if (key == "h") return py::cast(ts.h);
+			if (key == "m") return py::cast(ts.m);
+			if (key == "s") return py::cast(ts.s);
+			if (key == "ss") return py::cast(ts.ss);
+			if (key == "c") return py::cast(ts.c & 0xfff);
+			if (key == "sbs") return py::cast(ts.sbs);
+			if (key == "recent") return py::cast(ts.is_recent());
+			throw py::key_error(key);
+		}, "key"_a, "Get field value by name")
+		.def("__iter__", [](const Timestamp&) {
+			return py::iter(py::make_tuple("y", "d", "h", "m", "s", "ss", "c", "sbs", "recent"));
+		}, "Iterate over field names")
+		.def("__len__", [](const Timestamp&) { return 9; }, "Return number of fields")
 		.def("__repr__", [](const Timestamp& ts) {
 			return fmt::format("Timestamp(y={} d={} {}:{}:{} ss={} c={} sbs={} recent={})",
 					ts.y, ts.d,

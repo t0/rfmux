@@ -21,7 +21,7 @@ from .udp_streamer import MockUDPManager
 
 # Import enhanced scaling constants
 from ..tuber.codecs import TuberResult
-from ..streamer import LONG_PACKET_CHANNELS, SHORT_PACKET_CHANNELS
+from ..streamer import LONG_PACKET_CHANNELS, SHORT_PACKET_CHANNELS, Timestamp, TimestampSource
 
 # Module-level cleanup registry for MockCRS instances
 _mock_crs_instances = weakref.WeakSet()
@@ -257,7 +257,10 @@ class MockCRS(BaseCRS):
         self.clock_priority = []
         self.timestamp_port = None
         self.timestamp = {"y": 2024, "d": 1, "h": 0, "m": 0, "s": 0, "c": 0}
-        self._last_timestamp = None
+        self._last_timestamp = Timestamp(
+            y=2024, d=1, h=0, m=0, s=0, ss=0, c=0, sbs=0,
+            source=TimestampSource.TEST, recent=True
+        )
         self.max_samples_per_channel = 100000
         self.max_samples_per_module = 30000
 
@@ -536,11 +539,7 @@ class MockCRS(BaseCRS):
         pass
 
     def get_timestamp(self):
-        ts = self._last_timestamp
-        ts_obj = dataclasses.replace(ts)
-        ts_dict = dataclasses.asdict(ts_obj)
-        ts_tube = TuberResult(ts_dict)
-        return ts_tube
+        return dict(self._last_timestamp)
 
     async def get_pfb_samples(self, num_samples, units=Units.NORMALIZED, channel=None, module=1):
         assert isinstance(num_samples, int) and num_samples > 0

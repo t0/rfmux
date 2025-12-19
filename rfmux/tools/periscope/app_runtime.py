@@ -571,7 +571,7 @@ class PeriscopeRuntime:
         """
         # streamer from .utils
         ts = pkt.timestamp
-        if ts.is_recent():
+        if ts.recent:
             # Apply a small offset to ensure timestamps are strictly increasing for plotting
             ts.ss += int(0.02 * streamer.SS_PER_SECOND); ts.renormalize()
             t_now = ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND

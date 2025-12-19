@@ -1,3 +1,5 @@
+#include "tuber_support.hpp"
+
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/operators.h>
@@ -46,12 +48,35 @@ PYBIND11_MODULE(_receiver, m) {
 			},
 			"Control field (12-bit, preserves source and recent bits)")
 		.def_readwrite("sbs", &Timestamp::sbs, "Sub-block sequence")
-		.def("get_source", &Timestamp::get_source, "Get timestamp source")
-		.def("set_source", &Timestamp::set_source, "Set timestamp source", "src"_a)
+		.def_property("source", &Timestamp::get_source, &Timestamp::set_source, "Timestamp source (read/write)")
 		.def_property("recent", &Timestamp::is_recent, &Timestamp::set_recent, "Recent flag (read/write)")
 		.def("renormalize", &Timestamp::renormalize, "Normalize timestamp fields (carry overflow)")
+		.def("__lt__", [](const Timestamp& a, const Timestamp& b) {
+			auto an = a.normalized(), bn = b.normalized();
+			return std::tie(an.y, an.d, an.h, an.m, an.s, an.ss, an.c) < std::tie(bn.y, bn.d, bn.h, bn.m, bn.s, bn.ss, bn.c);
+		})
+		.def("__le__", [](const Timestamp& a, const Timestamp& b) {
+			auto an = a.normalized(), bn = b.normalized();
+			return std::tie(an.y, an.d, an.h, an.m, an.s, an.ss, an.c) <= std::tie(bn.y, bn.d, bn.h, bn.m, bn.s, bn.ss, bn.c);
+		})
+		.def("__gt__", [](const Timestamp& a, const Timestamp& b) {
+			auto an = a.normalized(), bn = b.normalized();
+			return std::tie(an.y, an.d, an.h, an.m, an.s, an.ss, an.c) > std::tie(bn.y, bn.d, bn.h, bn.m, bn.s, bn.ss, bn.c);
+		})
+		.def("__ge__", [](const Timestamp& a, const Timestamp& b) {
+			auto an = a.normalized(), bn = b.normalized();
+			return std::tie(an.y, an.d, an.h, an.m, an.s, an.ss, an.c) >= std::tie(bn.y, bn.d, bn.h, bn.m, bn.s, bn.ss, bn.c);
+		})
+		.def("__eq__", [](const Timestamp& a, const Timestamp& b) {
+			auto an = a.normalized(), bn = b.normalized();
+			return std::tie(an.y, an.d, an.h, an.m, an.s, an.ss, an.c) == std::tie(bn.y, bn.d, bn.h, bn.m, bn.s, bn.ss, bn.c);
+		})
+		.def("__ne__", [](const Timestamp& a, const Timestamp& b) {
+			auto an = a.normalized(), bn = b.normalized();
+			return std::tie(an.y, an.d, an.h, an.m, an.s, an.ss, an.c) != std::tie(bn.y, bn.d, bn.h, bn.m, bn.s, bn.ss, bn.c);
+		})
 		.def("keys", [](const Timestamp&) {
-			return py::make_tuple("y", "d", "h", "m", "s", "ss", "c", "sbs", "recent");
+			return py::make_tuple("y", "d", "h", "m", "s", "ss", "c", "sbs", "source", "recent");
 		}, "Return dictionary keys")
 		.def("__getitem__", [](const Timestamp& ts, const std::string& key) {
 			if (key == "y") return py::cast(ts.y);
@@ -62,13 +87,14 @@ PYBIND11_MODULE(_receiver, m) {
 			if (key == "ss") return py::cast(ts.ss);
 			if (key == "c") return py::cast(ts.c & 0xfff);
 			if (key == "sbs") return py::cast(ts.sbs);
+			if (key == "source") return py::cast(ts.get_source());
 			if (key == "recent") return py::cast(ts.is_recent());
 			throw py::key_error(key);
 		}, "key"_a, "Get field value by name")
 		.def("__iter__", [](const Timestamp&) {
-			return py::iter(py::make_tuple("y", "d", "h", "m", "s", "ss", "c", "sbs", "recent"));
+			return py::iter(py::make_tuple("y", "d", "h", "m", "s", "ss", "c", "sbs", "source", "recent"));
 		}, "Iterate over field names")
-		.def("__len__", [](const Timestamp&) { return 9; }, "Return number of fields")
+		.def("__len__", [](const Timestamp&) { return 10; }, "Return number of fields")
 		.def("__repr__", [](const Timestamp& ts) {
 			return fmt::format("Timestamp(y={} d={} {}:{}:{} ss={} c={} sbs={} recent={})",
 					ts.y, ts.d,
@@ -77,7 +103,7 @@ PYBIND11_MODULE(_receiver, m) {
 					ts.is_recent() ? "Y" : "N");
 		});
 
-	py::enum_<Timestamp::Source>(m, "TimestampSource")
+	pybind11::str_enum<Timestamp::Source>(m, "TimestampSource")
 		.value("BACKPLANE", Timestamp::Source::BACKPLANE)
 		.value("TEST", Timestamp::Source::TEST)
 		.value("SMA", Timestamp::Source::SMA)

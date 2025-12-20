@@ -606,8 +606,8 @@ class NetworkAnalysisExportMixin:
             active_module: The module identifier
             new_length: The new cable length in meters
         """
-        # Ensure the main application (parent) has the crs object and thread pool
-        main_app = self.parent()
+        # Ensure the main application has the crs object and thread pool
+        main_app = self.window()
         if hasattr(main_app, 'crs') and main_app.crs is not None and \
            hasattr(main_app, 'pool') and main_app.pool is not None:
             

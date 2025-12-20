@@ -570,7 +570,7 @@ class PeriscopeRuntime:
             float | None: Relative timestamp in seconds, or None if not recent.
         """
         # streamer from .utils
-        ts = pkt.timestamp
+        ts = pkt.ts
         if ts.recent:
             # Apply a small offset to ensure timestamps are strictly increasing for plotting
             ts.ss += int(0.02 * streamer.SS_PER_SECOND); ts.renormalize()

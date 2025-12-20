@@ -152,7 +152,7 @@ PYBIND11_MODULE(_receiver, m) {
 			[](ReadoutPacket& self, py::object obj) {
 				self.samples() = py::cast<std::vector<std::complex<double>>>(obj);
 			})
-		.def_property("timestamp",
+		.def_property("ts",
 			[](const ReadoutPacket& self) { return self.timestamp(); },
 			[](ReadoutPacket& self, const Timestamp& ts) { self.timestamp() = ts; })
 		.def("get_num_channels", &ReadoutPacket::get_num_channels)
@@ -191,7 +191,7 @@ PYBIND11_MODULE(_receiver, m) {
 			[](PFBPacket& self, py::object obj) {
 				self.samples() = py::cast<std::vector<std::complex<double>>>(obj);
 			})
-		.def_property("timestamp",
+		.def_property("ts",
 			[](const PFBPacket& self) { return self.timestamp(); },
 			[](PFBPacket& self, const Timestamp& ts) { self.timestamp() = ts; })
 		.def("get_num_samples", &PFBPacket::get_num_samples)
@@ -206,7 +206,7 @@ PYBIND11_MODULE(_receiver, m) {
 		.def("serial", &Packet::serial)
 		.def("module", &Packet::module)
 		.def("seq", &Packet::seq)
-		.def("timestamp", &Packet::timestamp)
+		.def("ts", &Packet::timestamp)
 		.def("to_python", &Packet::to_python,
 			 "Convert to typed Python object (ReadoutPacket or PFBPacket)")
 		.def("size", &Packet::size)

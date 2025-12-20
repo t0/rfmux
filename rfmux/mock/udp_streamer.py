@@ -443,7 +443,7 @@ class MockCRSUDPStreamer(threading.Thread):
             module=module_num-1,  # ReadoutPacket module is 0-indexed
             seq=seq)
         packet.samples = iq_data_arr
-        packet.timestamp = ts
+        packet.ts = ts
 
         timing_packet_create = time.perf_counter()
 

@@ -160,11 +160,11 @@ class MockCRSUDPStreamer(threading.Thread):
         configured_modules = set()
         
         # Check frequencies, amplitudes, and phases dictionaries
-        for (module, channel) in self.mock_crs.frequencies.keys():
+        for (module, channel) in self.mock_crs._frequencies.keys():
             configured_modules.add(module)
-        for (module, channel) in self.mock_crs.amplitudes.keys():
+        for (module, channel) in self.mock_crs._amplitudes.keys():
             configured_modules.add(module)
-        for (module, channel) in self.mock_crs.phases.keys():
+        for (module, channel) in self.mock_crs._phases.keys():
             configured_modules.add(module)
         
         # Convert to sorted list and ensure it's within valid range (1-4)
@@ -209,7 +209,7 @@ class MockCRSUDPStreamer(threading.Thread):
                     start_time_loop = time.perf_counter()
                     
                     # Get current decimation (dynamically check each iteration)
-                    dec = self.mock_crs.fir_stage
+                    dec = self.mock_crs._fir_stage
                     if dec is None:
                         dec = 6  # Default only if None, not if 0
                     sample_rate = 625e6 / (256 * 64 * (2**dec))
@@ -314,7 +314,7 @@ class MockCRSUDPStreamer(threading.Thread):
         
         # Create channel data array (NUM_CHANNELS = 1024, so 2048 int32s for I & Q)
         # This array should store int32 values.
-        if self.mock_crs.short_packets:
+        if self.mock_crs._short_packets:
             num_channels = SHORT_PACKET_CHANNELS
             version = SHORT_PACKET_VERSION
         else:
@@ -340,7 +340,7 @@ class MockCRSUDPStreamer(threading.Thread):
         timing_noise = time.perf_counter()
         
         # NEW: Use module-wide coupled calculation if available
-        if hasattr(self.mock_crs.resonator_model, 'calculate_module_response_coupled'):
+        if hasattr(self.mock_crs._resonator_model, 'calculate_module_response_coupled'):
             # Get sample rate for time-varying signals
             dec = dec
             if dec is None:
@@ -352,18 +352,18 @@ class MockCRSUDPStreamer(threading.Thread):
             t = seq / sample_rate
             
             # Update QP densities based on current time (for pulse events)
-            if hasattr(self.mock_crs.resonator_model, 'update_qp_densities_for_time'):
-                self.mock_crs.resonator_model.update_qp_densities_for_time(t)
+            if hasattr(self.mock_crs._resonator_model, 'update_qp_densities_for_time'):
+                self.mock_crs._resonator_model.update_qp_densities_for_time(t)
             
             # Count configured channels for debugging
             num_configured = 0
-            for (mod, ch) in self.mock_crs.frequencies.keys():
+            for (mod, ch) in self.mock_crs._frequencies.keys():
                 if mod == module_num:
                     num_configured += 1
             
             # Get all channel responses at once (includes coupling effects and time-varying beats)
             # Now using the unified method with start_time parameter
-            channel_responses = self.mock_crs.resonator_model.calculate_module_response_coupled(
+            channel_responses = self.mock_crs._resonator_model.calculate_module_response_coupled(
                 module_num, 
                 num_samples=1,  # Single sample per packet
                 sample_rate=sample_rate,
@@ -436,7 +436,7 @@ class MockCRSUDPStreamer(threading.Thread):
         packet = ReadoutPacket(
             magic=STREAMER_MAGIC,
             version=version,
-            serial=int(self.mock_crs.serial) if self.mock_crs.serial and self.mock_crs.serial.isdigit() else 0,
+            serial=int(self.mock_crs._serial) if self.mock_crs._serial and self.mock_crs._serial.isdigit() else 0,
             num_modules=1, # Packet is for one module's data
             flags=0,
             fir_stage=dec,

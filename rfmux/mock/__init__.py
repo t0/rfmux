@@ -46,8 +46,8 @@ See Also:
 # Import the yaml_hook from the server module
 from .server import yaml_hook
 
-# Import base CRS from schema - client should use base class, not MockCRS
-from ..core.schema import CRS
+# Import ClientMockCRS as CRS for the ORM
+from .crs import CRS
 
 # Import schema elements that were part of the original mock.py's __all__
 from ..core.schema import (

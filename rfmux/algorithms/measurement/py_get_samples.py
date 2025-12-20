@@ -166,7 +166,7 @@ async def py_get_samples(crs: CRS,
 
     # Ingest timestamp into Pythonic representation and nudge to compensate for
     # FIR delay.
-    ts = streamer.Timestamp.from_TuberResult(ts)
+    ts = streamer.Timestamp(**vars(ts))
     ts.ss += np.uint32(.02 * streamer.SS_PER_SECOND) # 20ms, per experiments at FIR6
     ts.renormalize()
 
@@ -249,10 +249,10 @@ async def py_get_samples(crs: CRS,
         std_q = np.zeros(num_channels)
 
         for c in range(num_channels):
-            mean_i[c] = np.mean([p.s[2*c]/256 for p in packets])
-            mean_q[c] = np.mean([p.s[2*c+1]/256 for p in packets])
-            std_i[c] = np.std([p.s[2*c]/256 for p in packets])
-            std_q[c] = np.std([p.s[2*c+1]/256 for p in packets])
+            mean_i[c] = np.mean([p.samples[c].real for p in packets])
+            mean_q[c] = np.mean([p.samples[c].imag for p in packets])
+            std_i[c] = np.std([p.samples[c].real for p in packets])
+            std_q[c] = np.std([p.samples[c].imag for p in packets])
 
         # If reference='absolute', convert to volts
         if reference == 'absolute':
@@ -275,7 +275,7 @@ async def py_get_samples(crs: CRS,
         return TuberResult(results)
 
     # Otherwise build the normal time-domain results
-    results = dict(ts=[TuberResult(dataclasses.asdict(p.ts)) for p in packets])
+    results = dict(ts=[TuberResult(dict(p.ts)) for p in packets])
 
     if _extra_metadata:
         results["seq"] = [p.seq for p in packets]
@@ -285,16 +285,16 @@ async def py_get_samples(crs: CRS,
         results["i"] = []
         results["q"] = []
         for c in range(num_channels):
-            i_channel = np.array([p.s[2*c]/256 for p in packets])
-            q_channel = np.array([p.s[2*c+1]/256 for p in packets])
+            i_channel = np.array([p.samples[c].real for p in packets])
+            q_channel = np.array([p.samples[c].imag for p in packets])
             if reference == 'absolute':
                 i_channel=i_channel*VOLTS_PER_ROC
                 q_channel=q_channel*VOLTS_PER_ROC
             results["i"].append(i_channel.tolist())
             results["q"].append(q_channel.tolist())
     else:
-        i_channel = np.array([p.s[2*(channel-1)]/256 for p in packets])
-        q_channel = np.array([p.s[2*(channel-1)+1]/256 for p in packets])
+        i_channel = np.array([p.samples[channel-1].real for p in packets])
+        q_channel = np.array([p.samples[channel-1].imag for p in packets])
         if reference=='absolute':
             i_channel=i_channel*VOLTS_PER_ROC
             q_channel=q_channel*VOLTS_PER_ROC

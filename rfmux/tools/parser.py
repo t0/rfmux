@@ -479,7 +479,7 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                             f"module={pkt.module} seq={pkt.seq})"
                         )
 
-                        ts = pkt.timestamp
+                        ts = pkt.ts
                         print(
                             f"  Timestamp(source={ts.get_source()} y={ts.y} d={ts.d} "
                             f"h:m:s={ts.h}:{ts.m}:{ts.s} ss={ts.ss} "
@@ -518,7 +518,7 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                         frame = mstats.dirfile_frame
 
                         # Write timestamp
-                        ts = pkt.timestamp
+                        ts = pkt.ts
                         df.putdata(
                             fields["ts_sbs"],
                             np.array([ts.sbs], dtype=np.int32),
@@ -670,7 +670,7 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                             f"slot3={pkt.slot3} slot4={pkt.slot4}"
                         )
 
-                        ts = pkt.timestamp
+                        ts = pkt.ts
                         print(
                             f"  Timestamp(source={ts.get_source()} y={ts.y} d={ts.d} "
                             f"h:m:s={ts.h}:{ts.m}:{ts.s} ss={ts.ss} "
@@ -717,7 +717,7 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                         frame = mstats.dirfile_frame
 
                         # Write timestamp
-                        ts = pkt.timestamp
+                        ts = pkt.ts
                         df.putdata(
                             fields["ts_sbs"],
                             np.array([ts.sbs], dtype=np.int32),

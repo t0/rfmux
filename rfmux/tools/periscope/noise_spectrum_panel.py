@@ -588,7 +588,7 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
 
 
                 if self.show_fast_tod:
-                    if log_x < max(freq_i):
+                    if len(freq_i) > 0 and log_x < max(freq_i):
                         y_i = np.interp(log_x, freq_i, psd_i_vals)
                         y_q = np.interp(log_x, freq_i, psd_q_vals)
                         y_d = np.interp(log_x, np.log10(np.clip(freq_l, 1e-12, None)), psd_dual_vals) if len(freq_l) > 0 else 0
@@ -607,7 +607,7 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
                         )
                         self.hover_label.setPos(mouse_point.x(), mouse_point.y())
                 else:
-                    if log_x < max(freq_i):
+                    if len(freq_i) > 0 and log_x < max(freq_i):
                         y_i = np.interp(log_x, freq_i, psd_i_vals)
                         y_q = np.interp(log_x, freq_i, psd_q_vals)
                         self.hover_label.setHtml(

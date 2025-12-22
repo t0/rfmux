@@ -58,27 +58,6 @@ from .core.crs import (
     Wafer,
 )
 
-# Workaround for older Python versions that don't have IP_ADD_SOURCE_MEMBERSHIP
-# (support was added in Python 3.12.0)
-import socket
-
-if not hasattr(socket, "IP_ADD_SOURCE_MEMBERSHIP"):
-    match sys.platform.lower():
-        case "win32":
-            # https://github.com/tpn/winsdk-10/blob/master/Include/10.0.16299.0/shared/ws2ipdef.h
-            setattr(socket, "IP_ADD_SOURCE_MEMBERSHIP", 15)
-        case "darwin":
-            # https://github.com/apple/darwin-xnu/blob/main/bsd/netinet/in.h
-            setattr(socket, "IP_ADD_SOURCE_MEMBERSHIP", 70)
-        case "linux":
-            # /usr/include/linux/in.h
-            setattr(socket, "IP_ADD_SOURCE_MEMBERSHIP", 39)
-        case _:
-            raise NotImplementedError(
-                f"Source-specific multicast support for {sys.platform} is incomplete."
-            )
-
-
 from .core.hardware_map import macro, algorithm, HardwareMap
 from .core.dirfile import load_dirfile
 from .core.session import load_session, get_session, set_session, load_from_database

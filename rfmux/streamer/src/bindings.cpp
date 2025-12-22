@@ -4,6 +4,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/operators.h>
 #include <pybind11/complex.h>
+#include <pybind11/numpy.h>
 #include <fmt/format.h>
 
 #include "packets.hpp"
@@ -148,9 +149,23 @@ PYBIND11_MODULE(_receiver, m) {
 		.def_readwrite("seq", &ReadoutPacket::seq)
 
 		.def_property("samples",
-			[](const ReadoutPacket& self) { return self.samples(); },
+			[](ReadoutPacket& self) {
+				auto& vec = self.samples();
+				return py::array_t<std::complex<double>>(
+					{vec.size()},
+					{sizeof(std::complex<double>)},
+					vec.data(),
+					py::cast(self)  // Keep packet alive while array exists
+				);
+			},
 			[](ReadoutPacket& self, py::object obj) {
-				self.samples() = py::cast<std::vector<std::complex<double>>>(obj);
+				if (py::isinstance<py::array_t<std::complex<double>>>(obj)) {
+					auto arr = obj.cast<py::array_t<std::complex<double>>>();
+					auto buf = arr.request();
+					auto* ptr = static_cast<std::complex<double>*>(buf.ptr);
+					self.samples() = std::vector<std::complex<double>>(ptr, ptr + buf.size);
+				} else
+					self.samples() = py::cast<std::vector<std::complex<double>>>(obj);
 			})
 		.def_property("ts",
 			[](const ReadoutPacket& self) { return self.timestamp(); },
@@ -187,9 +202,23 @@ PYBIND11_MODULE(_receiver, m) {
 		.def_readwrite("seq", &PFBPacket::seq)
 
 		.def_property("samples",
-			[](const PFBPacket& self) { return self.samples(); },
+			[](PFBPacket& self) {
+				auto& vec = self.samples();
+				return py::array_t<std::complex<double>>(
+					{vec.size()},
+					{sizeof(std::complex<double>)},
+					vec.data(),
+					py::cast(self)  // Keep packet alive while array exists
+				);
+			},
 			[](PFBPacket& self, py::object obj) {
-				self.samples() = py::cast<std::vector<std::complex<double>>>(obj);
+				if (py::isinstance<py::array_t<std::complex<double>>>(obj)) {
+					auto arr = obj.cast<py::array_t<std::complex<double>>>();
+					auto buf = arr.request();
+					auto* ptr = static_cast<std::complex<double>*>(buf.ptr);
+					self.samples() = std::vector<std::complex<double>>(ptr, ptr + buf.size);
+				} else
+					self.samples() = py::cast<std::vector<std::complex<double>>>(obj);
 			})
 		.def_property("ts",
 			[](const PFBPacket& self) { return self.timestamp(); },

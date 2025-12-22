@@ -246,18 +246,15 @@ async def py_get_samples(crs: CRS,
         # Stack all samples into a (num_samples, num_channels) array
         samples = np.stack([p.samples for p in packets])
 
+        # If reference='absolute', convert to volts
+        if reference == 'absolute':
+            samples *= VOLTS_PER_ROC
+
         # Compute statistics across time axis (axis=0)
         mean_i = np.mean(samples.real, axis=0)
         mean_q = np.mean(samples.imag, axis=0)
         std_i = np.std(samples.real, axis=0)
         std_q = np.std(samples.imag, axis=0)
-
-        # If reference='absolute', convert to volts
-        if reference == 'absolute':
-            mean_i *= VOLTS_PER_ROC
-            mean_q *= VOLTS_PER_ROC
-            std_i *= VOLTS_PER_ROC
-            std_q *= VOLTS_PER_ROC
 
         if channel is None:
             results = {
@@ -280,9 +277,6 @@ async def py_get_samples(crs: CRS,
 
     if channel is None:
         # Return data for all channels
-        results["i"] = []
-        results["q"] = []
-
         # Stack all samples into a 2D array: (num_samples, num_channels)
         samples = np.stack([p.samples for p in packets])
         if reference == 'absolute':

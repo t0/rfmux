@@ -55,9 +55,12 @@ repository = "https://github.com/t0/rfmux"
 [tool.scikit-build]
 cmake.source-dir = "rfmux/streamer"
 wheel.packages = ["rfmux"]
+metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
+sdist.include = ["rfmux/_version.py"]
 
 [tool.setuptools]
 packages = ["rfmux"]
 
 [tool.setuptools_scm]
 version_file = "rfmux/_version.py"
+fallback_version = "0.0.0"

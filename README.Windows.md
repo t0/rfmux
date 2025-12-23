@@ -9,18 +9,20 @@ Native (non-WSL)
 ----------------
 
 The following is what worked for me (Feb. 2025).  You may prefer another method
-of installing Python (e.g. conda) or may already have Python and/or Git
-installed. Feel free to skip these steps as needed.
+of installing Python or may already have Python and/or Git installed. Feel free
+to skip these steps as needed.
 
 First, a few pre-requisites:
 
 1. Install git (https://git-scm.com/downloads/win)
 2. Install uv (https://docs.astral.sh/uv/getting-started/installation/)
+3. Install Visual Studio Community edition (if building from source)
 
 Now, you should be able to open up a DOS box (cmd.exe), and run:
 
 ```
 > cd \path\to\rfmux
+rfmux> uv pip install -e .
 rfmux> uv run ipython
 ```
 
@@ -62,19 +64,3 @@ To set parameters like `DefaultReceiveWindow`, `MaximumBufferSize` and `MaximumD
 - Double-click it, set Base to Decimal, then set Value data to 67108864 (64 MB).
 - Repeat for `MaximumBufferSize` (and `MaximumDynamicBufferSize`).
 - Close Registry Editor and reboot for changes to take effect.
-
-## Periscope using Condas ##
-
-Once you have git installed using the link provided above. 
-
-You can install condas using - https://docs.conda.io/projects/conda/en/stable/user-guide/install/windows.html
-
-You can now link up condas inside your git bash
-Locate your `condo.sh` file and run the following 
-- `echo ". '/c/Users/<YOUR_USERNAME>/anaconda3/etc/profile.d/conda.sh'" >> ~/.bashrc` if you have miniconda replace anaconda3 with miniconda3
-- `source ~/.bashrc`
-- `conda activate base`
-
-You can now clone the rfmux repo and install it using the steps README.md
-
-To test everything works run `periscope mock`

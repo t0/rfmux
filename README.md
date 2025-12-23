@@ -28,7 +28,7 @@ git clone https://github.com/t0/rfmux.git
 cd rfmux
 uv venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-uv pip install -e ".[gui]"
+uv pip install -e .
 ```
 
 ### Method 2: pip (Traditional)
@@ -38,21 +38,8 @@ git clone https://github.com/t0/rfmux.git
 cd rfmux
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install -e ".[gui]"
+pip install -e .
 ```
-
-### Method 3: conda (Legacy)
-
-An `environment.yml` file is provided for conda users:
-
-```bash
-git clone https://github.com/t0/rfmux.git
-cd rfmux
-conda env create -f environment.yml
-conda activate rfmux
-```
-
-**Note:** The conda environment installs most dependencies via conda, then uses `pip install -e .` for the rfmux package itself.
 
 ### Platform-Specific Requirements
 

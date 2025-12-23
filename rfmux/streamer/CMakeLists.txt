@@ -3,7 +3,11 @@ project(packets LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_BUILD_TYPE Debug)
+
+# Use Release build with optimizations by default
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
 
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
@@ -36,16 +40,26 @@ if(WIN32)
     target_link_libraries(_receiver PRIVATE ws2_32)
 endif()
 
-# Compiler warnings (cross-platform)
+# Compiler warnings and optimizations (cross-platform)
 if(MSVC)
-    target_compile_options(_receiver PRIVATE /W4)
+    target_compile_options(_receiver PRIVATE
+        /W4                  # Warning level 4
+        /O2                  # Optimize for speed
+        /fp:fast            # Fast floating-point math
+        /arch:AVX2          # Use AVX2 instructions if available
+    )
     # Workaround for MSVC 17.10+ constexpr mutex breaking change
     # See: https://github.com/microsoft/STL/issues/4730
     #      https://github.com/microsoft/STL/issues/4875
     # Without this, mutexes crash when Python uses older VC++ runtime
     target_compile_definitions(_receiver PRIVATE _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 else()
-    target_compile_options(_receiver PRIVATE -Wall -Wextra)
+    target_compile_options(_receiver PRIVATE
+        -Wall -Wextra       # Warnings
+        -O3                 # Aggressive optimization with auto-vectorization
+        -march=native       # Use all available CPU instructions
+        -ffast-math         # Fast floating-point (convert divisions to multiplications)
+    )
 endif()
 
 # Install to rfmux/streamer subdirectory

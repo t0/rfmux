@@ -166,7 +166,7 @@ async def py_get_samples(crs: CRS,
 
     # Ingest timestamp into Pythonic representation and nudge to compensate for
     # FIR delay.
-    ts = streamer.Timestamp.from_TuberResult(ts)
+    ts = streamer.Timestamp(**vars(ts))
     ts.ss += np.uint32(.02 * streamer.SS_PER_SECOND) # 20ms, per experiments at FIR6
     ts.renormalize()
 
@@ -191,7 +191,7 @@ async def py_get_samples(crs: CRS,
                 )
 
                 # Parse the received packet
-                p = streamer.DfmuxPacket.from_bytes(data)
+                p = streamer.ReadoutPacket(data)
 
                 if p.serial != int(crs.serial):
                     warnings.warn(
@@ -243,23 +243,18 @@ async def py_get_samples(crs: CRS,
 
     # If average => just return time-domain averages
     if average:
-        mean_i = np.zeros(num_channels)
-        mean_q = np.zeros(num_channels)
-        std_i = np.zeros(num_channels)
-        std_q = np.zeros(num_channels)
-
-        for c in range(num_channels):
-            mean_i[c] = np.mean([p.s[2*c]/256 for p in packets])
-            mean_q[c] = np.mean([p.s[2*c+1]/256 for p in packets])
-            std_i[c] = np.std([p.s[2*c]/256 for p in packets])
-            std_q[c] = np.std([p.s[2*c+1]/256 for p in packets])
+        # Stack all samples into a (num_samples, num_channels) array
+        samples = np.stack([p.samples for p in packets])
 
         # If reference='absolute', convert to volts
         if reference == 'absolute':
-            mean_i *= VOLTS_PER_ROC
-            mean_q *= VOLTS_PER_ROC
-            std_i *= VOLTS_PER_ROC
-            std_q *= VOLTS_PER_ROC
+            samples *= VOLTS_PER_ROC
+
+        # Compute statistics across time axis (axis=0)
+        mean_i = np.mean(samples.real, axis=0)
+        mean_q = np.mean(samples.imag, axis=0)
+        std_i = np.std(samples.real, axis=0)
+        std_q = np.std(samples.imag, axis=0)
 
         if channel is None:
             results = {
@@ -275,31 +270,28 @@ async def py_get_samples(crs: CRS,
         return TuberResult(results)
 
     # Otherwise build the normal time-domain results
-    results = dict(ts=[TuberResult(dataclasses.asdict(p.ts)) for p in packets])
+    results = dict(ts=[TuberResult(dict(p.ts)) for p in packets])
 
     if _extra_metadata:
         results["seq"] = [p.seq for p in packets]
 
     if channel is None:
         # Return data for all channels
-        results["i"] = []
-        results["q"] = []
-        for c in range(num_channels):
-            i_channel = np.array([p.s[2*c]/256 for p in packets])
-            q_channel = np.array([p.s[2*c+1]/256 for p in packets])
-            if reference == 'absolute':
-                i_channel=i_channel*VOLTS_PER_ROC
-                q_channel=q_channel*VOLTS_PER_ROC
-            results["i"].append(i_channel.tolist())
-            results["q"].append(q_channel.tolist())
+        # Stack all samples into a 2D array: (num_samples, num_channels)
+        samples = np.stack([p.samples for p in packets])
+        if reference == 'absolute':
+            samples *= VOLTS_PER_ROC
+
+        # Transposition produces to (num_channels, num_samples)
+        results["i"] = samples.real.T.tolist()
+        results["q"] = samples.imag.T.tolist()
     else:
-        i_channel = np.array([p.s[2*(channel-1)]/256 for p in packets])
-        q_channel = np.array([p.s[2*(channel-1)+1]/256 for p in packets])
+        samples = np.array([p.samples[channel-1] for p in packets])
         if reference=='absolute':
-            i_channel=i_channel*VOLTS_PER_ROC
-            q_channel=q_channel*VOLTS_PER_ROC
-        results["i"] = i_channel.tolist()
-        results["q"] = q_channel.tolist()
+            samples *= VOLTS_PER_ROC
+
+        results["i"] = samples.real.tolist()
+        results["q"] = samples.imag.tolist()
 
     # Optionally compute the spectrum
     if return_spectrum:

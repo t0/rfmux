@@ -12,7 +12,7 @@ import signal
 import numpy as np
 
 # Import MockCRS from the crs module within this package
-from .crs import MockCRS
+from .crs import ServerMockCRS
 # Import BaseCRS for type hinting or direct use if necessary
 from ..core.schema import CRS as BaseCRS
 import sys
@@ -113,7 +113,7 @@ class ServerProcess(mp_ctx.Process):
         # the unpicklable _config_lock (threading.RLock) on Windows
         self.models = {}
         for port, config in self.model_configs.items():
-            self.models[port] = MockCRS(**config)
+            self.models[port] = ServerMockCRS(**config)
 
         # Set up signal handlers for graceful shutdown
         shutdown_event = asyncio.Event()
@@ -181,7 +181,7 @@ class ServerProcess(mp_ctx.Process):
 
     async def post_handler(self, request):
         port = request.url.port
-        model = self.models[port]  # This is an instance of MockCRS
+        model = self.models[port]  # This is an instance of ServerMockCRS
 
         body = await request.text()
 
@@ -261,6 +261,11 @@ class ServerProcess(mp_ctx.Process):
 
         elif "property" in request:
             prop_name = request["property"]
+
+            # Block access to private attributes (server-side implementation details)
+            if prop_name.startswith('_'):
+                return {"error": {"message": f"Property '{prop_name}' is private and not accessible via RPC"}}
+
             if hasattr(model, prop_name):
                 prop = getattr(model, prop_name)
                 if callable(prop):
@@ -307,7 +312,9 @@ class ServerProcess(mp_ctx.Process):
             # Normal object metadata request
             # We need to provide some metadata to TuberObject so it can populate
             # properties and methods on the client-side object.
-            illegal_prefixes = ("__", "_MockCRS__", "_thread_lock_", "_resolve", "_sa_")
+            # Block all private attributes (single underscore) from RPC access
+            # These are server-side implementation details
+            illegal_prefixes = ("_",)
             # Also exclude Tuber-specific methods and SQLAlchemy properties that shouldn't be exposed
             exclude_methods = {
                 "tuber_resolve", "tuber_context", "object_factory",

@@ -33,4 +33,4 @@ async def crs(live_session):
 
     # teardown: restore politeness
     await crs.set_analog_bank(high=False)
-    await crs.set_decimation(stage=6, short=False, modules=[1,2,3,4])
+    await crs.set_decimation(stage=6, short=False, module=[1,2,3,4])

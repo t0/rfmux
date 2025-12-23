@@ -7,16 +7,15 @@ import socket
 import struct
 import time
 import threading
-import array
 import signal
 import atexit
 from datetime import datetime
-import numpy as np # For np.clip in generate_packet
+import numpy as np
 import platform
 
-# Import DfmuxPacket and related constants from streamer
+# Import ReadoutPacket and related constants from streamer
 from ..streamer import (
-    DfmuxPacket, Timestamp, TimestampPort,
+    ReadoutPacket, Timestamp, TimestampSource,
     STREAMER_MAGIC,
     SHORT_PACKET_VERSION, LONG_PACKET_VERSION,
     SHORT_PACKET_CHANNELS, LONG_PACKET_CHANNELS,
@@ -160,11 +159,11 @@ class MockCRSUDPStreamer(threading.Thread):
         configured_modules = set()
         
         # Check frequencies, amplitudes, and phases dictionaries
-        for (module, channel) in self.mock_crs.frequencies.keys():
+        for (module, channel) in self.mock_crs._frequencies.keys():
             configured_modules.add(module)
-        for (module, channel) in self.mock_crs.amplitudes.keys():
+        for (module, channel) in self.mock_crs._amplitudes.keys():
             configured_modules.add(module)
-        for (module, channel) in self.mock_crs.phases.keys():
+        for (module, channel) in self.mock_crs._phases.keys():
             configured_modules.add(module)
         
         # Convert to sorted list and ensure it's within valid range (1-4)
@@ -209,7 +208,7 @@ class MockCRSUDPStreamer(threading.Thread):
                     start_time_loop = time.perf_counter()
                     
                     # Get current decimation (dynamically check each iteration)
-                    dec = self.mock_crs.fir_stage
+                    dec = self.mock_crs._fir_stage
                     if dec is None:
                         dec = 6  # Default only if None, not if 0
                     sample_rate = 625e6 / (256 * 64 * (2**dec))
@@ -306,41 +305,35 @@ class MockCRSUDPStreamer(threading.Thread):
                 _active_streamers.remove(self)
     
     def generate_packet_for_module(self, module_num, seq, dec):
-        """Generate a DfmuxPacket for a specific module with coupled channels."""
-        import time
-        
+        """Generate a ReadoutPacket for a specific module with coupled channels."""
+
         # Detailed timing
         timing_start = time.perf_counter()
         
-        # Create channel data array (NUM_CHANNELS = 1024, so 2048 int32s for I & Q)
-        # This array should store int32 values.
-        if self.mock_crs.short_packets:
+        if self.mock_crs._short_packets:
             num_channels = SHORT_PACKET_CHANNELS
             version = SHORT_PACKET_VERSION
         else:
             num_channels = LONG_PACKET_CHANNELS
             version = LONG_PACKET_VERSION
 
-        iq_data_arr = array.array("i", [0] * (num_channels * 2))
         timing_array_create = time.perf_counter()
-        
+
         # Pre-calculate constants from unified configuration (SoT)
         cfg = getattr(self.mock_crs, "physics_config", {}) or {}
         scale_factor = cfg.get("scale_factor", 2**21)
-        full_scale_counts = scale_factor * 2**8  # 32 bit number instead of 24 bit
-        noise_level = cfg.get("udp_noise_level", 10.0)  # Base noise level (in ADC counts)
-        
-        # OPTIMIZED: Generate and clip noise using numpy, then convert to array.array
-        # This is MUCH faster than looping
-        noise_array = np.random.normal(0, noise_level, num_channels * 2)
-        # Vectorized clipping to int32 range
-        noise_array = np.clip(noise_array, -2147483648, 2147483647).astype(np.int32)
-        # Direct conversion to array.array
-        iq_data_arr = array.array("i", noise_array)
+        full_scale = scale_factor  # Full scale in normalized units
+        noise_level = cfg.get("udp_noise_level", 10.0)  # Base noise level
+
+        # Noise is in normalized units
+        noise_i = np.random.normal(0, noise_level, num_channels)
+        noise_q = np.random.normal(0, noise_level, num_channels)
+        channel_samples = noise_i + 1j * noise_q
+
         timing_noise = time.perf_counter()
-        
-        # NEW: Use module-wide coupled calculation if available
-        if hasattr(self.mock_crs.resonator_model, 'calculate_module_response_coupled'):
+
+        # Use module-wide coupled calculation if available
+        if hasattr(self.mock_crs._resonator_model, 'calculate_module_response_coupled'):
             # Get sample rate for time-varying signals
             dec = dec
             if dec is None:
@@ -352,18 +345,18 @@ class MockCRSUDPStreamer(threading.Thread):
             t = seq / sample_rate
             
             # Update QP densities based on current time (for pulse events)
-            if hasattr(self.mock_crs.resonator_model, 'update_qp_densities_for_time'):
-                self.mock_crs.resonator_model.update_qp_densities_for_time(t)
+            if hasattr(self.mock_crs._resonator_model, 'update_qp_densities_for_time'):
+                self.mock_crs._resonator_model.update_qp_densities_for_time(t)
             
             # Count configured channels for debugging
             num_configured = 0
-            for (mod, ch) in self.mock_crs.frequencies.keys():
+            for (mod, ch) in self.mock_crs._frequencies.keys():
                 if mod == module_num:
                     num_configured += 1
             
             # Get all channel responses at once (includes coupling effects and time-varying beats)
             # Now using the unified method with start_time parameter
-            channel_responses = self.mock_crs.resonator_model.calculate_module_response_coupled(
+            channel_responses = self.mock_crs._resonator_model.calculate_module_response_coupled(
                 module_num, 
                 num_samples=1,  # Single sample per packet
                 sample_rate=sample_rate,
@@ -372,20 +365,13 @@ class MockCRSUDPStreamer(threading.Thread):
             timing_physics = time.perf_counter()
             
             # Process each channel's response
-            for ch_num_1 in channel_responses:
+            for ch_num_1, signal in channel_responses.items():
                 ch_idx_0 = ch_num_1 - 1  # Convert to 0-based index
                 
-                # Get the complex signal for this channel
-                signal = channel_responses[ch_num_1]
+                # Scale signal from normalized units to ADC counts and add to noise
+                # signal is in normalized units, full_scale converts to ADC counts
+                channel_samples[ch_idx_0] += signal * full_scale
                 
-                # Scale and add to existing noise
-                i_val = signal.real * full_scale_counts + iq_data_arr[ch_idx_0 * 2]
-                q_val = signal.imag * full_scale_counts + iq_data_arr[ch_idx_0 * 2 + 1]
-                
-                # Clip and store
-                iq_data_arr[ch_idx_0 * 2] = int(np.clip(i_val, -2147483648, 2147483647))
-                iq_data_arr[ch_idx_0 * 2 + 1] = int(np.clip(q_val, -2147483648, 2147483647))
-            
             timing_fill_array = time.perf_counter()
             non_zero_channels_count = len(channel_responses)
         else:
@@ -420,34 +406,37 @@ class MockCRSUDPStreamer(threading.Thread):
         
         # Convert to timestamp fields
         ts = Timestamp(
-            y=np.int32(packet_datetime.year % 100),
-            d=np.int32(packet_datetime.timetuple().tm_yday),
-            h=np.int32(packet_datetime.hour), 
-            m=np.int32(packet_datetime.minute), 
-            s=np.int32(packet_datetime.second),
-            ss=np.int32(packet_datetime.microsecond * SS_PER_SECOND / 1e6), # Scaled sub-seconds
-            c=np.int32(0), # Carrier phase, typically 0 for mock
-            sbs=np.int32(0), # Sub-block sequence, typically 0 for mock
-            source=TimestampPort.TEST, # Mock data source
+            y=int(packet_datetime.year % 100),
+            d=int(packet_datetime.timetuple().tm_yday),
+            h=int(packet_datetime.hour),
+            m=int(packet_datetime.minute),
+            s=int(packet_datetime.second),
+            ss=int(packet_datetime.microsecond * SS_PER_SECOND / 1e6), # Scaled sub-seconds
+            c=0, # Carrier phase, typically 0 for mock
+            sbs=0, # Sub-block sequence, typically 0 for mock
+            source=TimestampSource.TEST, # Mock data source
             recent=True
         )
 
         timing_timestamp = time.perf_counter()
-        packet = DfmuxPacket(
-            magic=np.uint32(STREAMER_MAGIC),
-            version=np.uint16(version),
-            serial=np.uint16(int(self.mock_crs.serial) if self.mock_crs.serial and self.mock_crs.serial.isdigit() else 0),
-            num_modules=np.uint8(1), # Packet is for one module's data
-            block=np.uint8(0), # Block number, typically 0 for continuous streaming
+        packet = ReadoutPacket(
+            magic=STREAMER_MAGIC,
+            version=version,
+            serial=int(self.mock_crs._serial) if self.mock_crs._serial and self.mock_crs._serial.isdigit() else 0,
+            num_modules=1, # Packet is for one module's data
+            flags=0,
             fir_stage=dec,
-            module=np.uint8(module_num - 1),  # DfmuxPacket module is 0-indexed
-            seq=np.uint32(seq),
-            s=iq_data_arr, # This should be the array.array('i')
-            ts=ts
-        )
+            module=module_num-1,  # ReadoutPacket module is 0-indexed
+            seq=seq)
+
+        # Clip and assign complex samples to packet
+        packet.samples = (np.clip(channel_samples.real, -8388608, 8388607) +
+                1j*np.clip(channel_samples.imag, -8388608, 8388607)).tolist()
+        packet.ts = ts
+
         timing_packet_create = time.perf_counter()
-        
-        packet_bytes = packet.to_bytes()
+
+        packet_bytes = bytes(packet)
         self.mock_crs._last_timestamp = ts
         timing_serialize = time.perf_counter()
         

@@ -168,8 +168,8 @@ class MockResonatorModel:
         # Get configuration
         if config is None:
             # Use physics_config from MockCRS if available, otherwise use unified defaults
-            if hasattr(self.mock_crs, 'physics_config') and self.mock_crs.physics_config:
-                config = self.mock_crs.physics_config
+            if hasattr(self.mock_crs, 'physics_config') and self.mock_crs._physics_config:
+                config = self.mock_crs._physics_config
             else:
                 from .config import defaults
                 config = defaults()
@@ -795,7 +795,7 @@ class MockResonatorModel:
         - 1e-3: Ultra fast (for many channels)
         """
         max_iterations = 500
-        tolerance = self.mock_crs.physics_config.get('convergence_tolerance', 1e-9)
+        tolerance = self.mock_crs._physics_config.get('convergence_tolerance', 1e-9)
         
         # Get LEKID config from first resonator
         lekid0 = self.mr_lekids[0]
@@ -1233,10 +1233,10 @@ class MockResonatorModel:
         t_state_update = time.perf_counter()
         
         # Get NCO frequency for this module using the proper getter
-        nco_freq = self.mock_crs.get_nco_frequency(module=module)
+        nco_freq = self.mock_crs._nco_frequencies.get(module)
         
         # Get decimation stage for bandwidth calculation
-        dec_stage = self.mock_crs.fir_stage  # Note: still called fir_stage in MockCRS for compatibility
+        dec_stage = self.mock_crs._fir_stage  # Note: still called fir_stage in MockCRS for compatibility
         bandwidth = self.cic_bandwidths.get(dec_stage, 298)  # Hz
         
         # Determine sample rate if not provided
@@ -1256,10 +1256,10 @@ class MockResonatorModel:
             
             # Find all configured channels in this module
             configured_channels = set()
-            for (mod, ch) in self.mock_crs.frequencies.keys():
+            for (mod, ch) in self.mock_crs._frequencies.keys():
                 if (mod == module) and (ch <= max_channels):
                     configured_channels.add(ch)
-            for (mod, ch) in self.mock_crs.amplitudes.keys():
+            for (mod, ch) in self.mock_crs._amplitudes.keys():
                 if (mod == module) and (ch <= max_channels):
                     configured_channels.add(ch)
             
@@ -1268,9 +1268,9 @@ class MockResonatorModel:
             raw_channel_configs = []
             
             for ch in configured_channels:
-                freq = self.mock_crs.get_frequency(channel=ch, module=module)
-                amp = self.mock_crs.get_amplitude(channel=ch, module=module)
-                phase_deg = self.mock_crs.phases.get((module, ch), 0)
+                freq = self.mock_crs._frequencies.get((module, ch))
+                amp = self.mock_crs._amplitudes.get((module, ch))
+                phase_deg = self.mock_crs._phases.get((module, ch), 0)
                 
                 if freq is not None and amp is not None and amp != 0:
                     raw_channel_configs.append((ch, freq, amp, phase_deg))
@@ -1440,9 +1440,9 @@ class MockResonatorModel:
         
         # Check if there are other active channels in this module
         other_active_channels = False
-        for (mod, ch) in self.mock_crs.frequencies.keys():
+        for (mod, ch) in self.mock_crs._frequencies.keys():
             if mod == module and ch != channel:
-                amp = self.mock_crs.amplitudes.get((mod, ch), 0)
+                amp = self.mock_crs._amplitudes.get((mod, ch), 0)
                 if amp != 0:
                     other_active_channels = True
                     break
@@ -1450,10 +1450,10 @@ class MockResonatorModel:
         if other_active_channels:
             # Use coupled calculation when multiple channels are active
             # Store this channel's settings temporarily
-            nco_freq = self.mock_crs.nco_frequencies.get(module, 0)
-            self.mock_crs.frequencies[(module, channel)] = frequency - nco_freq
-            self.mock_crs.amplitudes[(module, channel)] = amplitude
-            self.mock_crs.phases[(module, channel)] = phase_degrees
+            nco_freq = self.mock_crs._nco_frequencies.get(module, 0)
+            self.mock_crs._frequencies[(module, channel)] = frequency - nco_freq
+            self.mock_crs._amplitudes[(module, channel)] = amplitude
+            self.mock_crs._phases[(module, channel)] = phase_degrees
             
             # Calculate module-wide response
             module_responses = self.calculate_module_response_coupled(module)

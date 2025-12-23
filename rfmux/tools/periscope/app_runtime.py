@@ -6,6 +6,7 @@ from .ui import *
 import asyncio
 from PyQt6 import sip
 from PyQt6.QtCore import QUrl
+import numpy as np
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
@@ -587,16 +588,19 @@ class PeriscopeRuntime:
             pkt: The incoming packet object.
             t_rel (float | None): The relative timestamp for this packet.
         """
-        # math from .utils
+        # Convert 24-bit datapath to 16-bit ADC scale
+        samples = pkt.samples / 256
+
         for ch_val in self.all_chs: # Renamed ch
-            if len(pkt.samples) <= ch_val-1:
+            if len(samples) <= ch_val-1:
                 continue # don't plot channels that aren't streamed
 
-            sample = pkt.samples[ch_val - 1]
-            Ival = sample.real / 256.0  # Assuming 24-bit ADC data
-            Qval = sample.imag / 256.0
-            self.buf[ch_val]["I"].add(Ival); self.buf[ch_val]["Q"].add(Qval)
-            self.buf[ch_val]["M"].add(math.hypot(Ival, Qval)); self.tbuf[ch_val].add(t_rel)
+            sample = samples[ch_val-1]
+
+            self.buf[ch_val]["I"].add(sample.real)
+            self.buf[ch_val]["Q"].add(sample.imag)
+            self.buf[ch_val]["M"].add(np.abs(sample))
+            self.tbuf[ch_val].add(t_rel)
 
     def _update_plot_data(self):
         """Update all active plots with new data from buffers and dispatch worker tasks."""

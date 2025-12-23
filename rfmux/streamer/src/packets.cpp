@@ -113,12 +113,11 @@ namespace packets {
 			static_cast<const char*>(data) + sizeof(readout_packet_header)
 		);
 
-		pkt.samples_.reserve(num_channels);
-		for (int i = 0; i < num_channels; i++) {
-			double i_val = samples_ptr[2 * i] / 256.;
-			double q_val = samples_ptr[2 * i + 1] / 256.;
-			pkt.samples_.emplace_back(i_val, q_val);
-		}
+		pkt.samples_.resize(num_channels);
+		for (int i = 0; i < num_channels; i++)
+			pkt.samples_[i] = std::complex<double>(
+					samples_ptr[2*i],
+					samples_ptr[2*i+1]) / 256.;
 
 		// Parse timestamp
 		const auto* ts_ptr = reinterpret_cast<const irigb_timestamp*>(

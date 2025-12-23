@@ -1,10 +1,10 @@
 [build-system]
-requires = ["scikit-build-core>=0.3.3", "pybind11"]
+requires = ["scikit-build-core>=0.3.3", "pybind11", "setuptools-scm>=8.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "rfmux"
-version = "1.0"
+dynamic = ["version"]
 description = "Python library for t0.technology CRS board running rfmux firmware"
 authors = [
   {name="Graeme Smecher", email="gsmecher@t0.technology"},
@@ -58,3 +58,6 @@ wheel.packages = ["rfmux"]
 
 [tool.setuptools]
 packages = ["rfmux"]
+
+[tool.setuptools_scm]
+version_file = "rfmux/_version.py"

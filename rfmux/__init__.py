@@ -18,6 +18,12 @@ __all__ = [
     "TuberRemoteError",
 ]
 
+# Version from setuptools-scm
+try:
+    from ._version import __version__
+except ImportError:
+    __version__ = "unknown"
+
 # Check version numbers
 import sys
 

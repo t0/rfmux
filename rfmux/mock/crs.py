@@ -19,11 +19,9 @@ from ..core.schema import CRS as BaseCRS
 from .resonator_model import MockResonatorModel
 from .udp_streamer import MockUDPManager
 
-# Import enhanced scaling constants
 from ..tuber.codecs import TuberResult
 from ..streamer import LONG_PACKET_CHANNELS, SHORT_PACKET_CHANNELS, Timestamp, TimestampSource
 
-# Module-level cleanup registry for MockCRS instances
 _mock_crs_instances = weakref.WeakSet()
 _cleanup_registered = False
 
@@ -275,6 +273,19 @@ class ServerMockCRS:
             for key in [k for k in store.keys() if k[1] > max_channels]:
                 store.pop(key, None)
 
+    def channels_per_module(self):
+        if self._short_packets:
+            return SHORT_PACKET_CHANNELS
+        else:
+            return LONG_PACKET_CHANNELS
+
+
+    def _prune_channels_over_limit(self):
+        max_channels = self.channels_per_module()
+        for store in (self._frequencies, self._amplitudes, self._phases):
+            for key in [k for k in store.keys() if k[1] > max_channel]:
+                store.pop(key, None)
+    
     async def generate_resonators(self, config=None):
         """Generate/regenerate resonators with current or provided parameters."""
         try:
@@ -336,6 +347,53 @@ class ServerMockCRS:
             print(f"[MockCRS] Error in auto-bias KIDs: {e}")
             import traceback
             traceback.print_exc()
+
+    async def _auto_bias_kids(self, config, resonance_frequencies, amplitude=None):
+        """Automatically configure channels at resonator frequencies (bias KIDs).
+        
+        Parameters
+        ----------
+        config : dict
+            Configuration dictionary containing bias parameters
+        resonance_frequencies : list
+            List of resonator frequencies in Hz
+        """
+        try:
+            # Get configuration parameters
+            if amplitude is None:
+                amplitude = config.get('bias_amplitude', 0.01)  # Normalized units
+            module = 1  # Always use module 1 for mock
+            
+            print(f"[MockCRS] Auto-biasing {len(resonance_frequencies)} KIDs with amplitude {amplitude}")
+            
+            # Set NCO to the mean of resonance frequencies
+            nco_freq = np.mean(resonance_frequencies)
+            print(f"[MockCRS] Setting NCO frequency to {nco_freq:.3e} Hz")
+            await self.set_nco_frequency(nco_freq, module=module)
+            
+            # Configure channels for each resonator (up to 256 channels per module)
+            chan_limit = min(self.channels_per_module(), 256)
+            configured_count = 0
+            for i, freq_Hz in enumerate(resonance_frequencies[:chan_limit]):
+                channel = i + 1  # Channels are 1-indexed
+                
+                # Set frequency relative to NCO
+                relative_freq = freq_Hz - nco_freq
+                
+                # Configure the channel (these are synchronous methods)
+                self.set_frequency(relative_freq, channel=channel, module=module)
+                self.set_amplitude(amplitude, channel=channel, module=module)
+                self.set_phase(0, channel=channel, module=module)
+                
+                configured_count += 1
+                
+            print(f"[MockCRS] Configured {configured_count} channels with automatic KID biasing")
+            
+        except Exception as e:
+            print(f"[MockCRS] Error in auto-bias KIDs: {e}")
+            import traceback
+            traceback.print_exc()
+            # Don't re-raise - this is a convenience feature, not critical
 
     def validate_enum_member(self, value, enum_class, name):
         if isinstance(value, str):
@@ -652,6 +710,7 @@ class ServerMockCRS:
 
         if channel is not None:
             if channel in module_responses:
+                # Get the S21 response with QP noise for this channel
                 response = module_responses[channel]
                 if isinstance(response, np.ndarray):
                     i_list = (response.real * scale_factor).tolist()

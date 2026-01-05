@@ -9,6 +9,8 @@ This script executes the complete measurement sequence:
 5. Take multisweep
 6. Do fitting
 7. Bias the kids
+8. Get slow samples
+9. Get PFB samples (only for real boards)
 
 Usage:
     python simplified_tuning_flow.py MOCK         # Run with mock CRS
@@ -45,10 +47,10 @@ async def main(serial="MOCK"):
     # Network analysis parameters
     NETANAL_PARAMS = {
         'amp': 0.001,
-        'fmin': 100e6,      # 100 MHz
-        'fmax': 2450e6,     # 2450 MHz  
+        'fmin': 0.6e9,      # 600 MHz
+        'fmax': 1.1e9,     # 1100 MHz  
         'nsamps': 10,
-        'npoints': 100000,
+        'npoints': 50000,
         'max_chans': 1023,
         'max_span': 500e6,  # 500 MHz
         'module': MODULE
@@ -84,6 +86,17 @@ async def main(serial="MOCK"):
         'center_iq_circle': True,
         'normalize_fit': True
     }
+
+    SAMPLE_PARAMS = {
+        'num_samples': 1000,
+        'return_spectrum': True,
+        'scaling': 'psd',
+        'reference': 'absolute',
+        'nsegments': 5,
+        'spectrum_cutoff': 0.9,
+        'channel': None,
+        'module': MODULE
+    }
     
     is_mock = serial.upper() == "MOCK"
     
@@ -103,12 +116,13 @@ async def main(serial="MOCK"):
             crs = await create_mock_crs(
                 module=MODULE,
                 config={
-                    'num_resonances': 15,  # More resonances for testing
-                    'freq_start': 0.5e9,  # 500 MHz - within network analysis range
+                    'num_resonances': 10,  # More resonances for testing
+                    'freq_start': 0.6e9,  # 600 MHz - within network analysis range
                     'freq_end': 1.0e9,    # 1 GHz - within network analysis range
                     'enable_bifurcation': False,  # Disable for simpler testing
                     'q_min': 5e3,  # Lower Q for easier detection
-                    'q_max': 5e4
+                    'q_max': 5e4,
+                    'resonator_random_seed': 42 # making sure it is the same resonantor everytime
                 },
                 verbose=True
             )
@@ -119,7 +133,7 @@ async def main(serial="MOCK"):
             
             # Run the algorithm flow with mock CRS
             await run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
-                                   MULTISWEEP_PARAMS, FIT_PARAMS)
+                                   MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS)
             
         else:
             # Use real hardware - load session with serial number
@@ -141,7 +155,7 @@ async def main(serial="MOCK"):
             
             # Run the algorithm flow
             await run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
-                                   MULTISWEEP_PARAMS, FIT_PARAMS)
+                                   MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS)
             
     except Exception as e:
         print(f"\n❌ Error occurred: {type(e).__name__}: {str(e)}")
@@ -153,7 +167,7 @@ async def main(serial="MOCK"):
 
 
 async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS, 
-                           MULTISWEEP_PARAMS, FIT_PARAMS):
+                           MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS, full_run = True):
     """Run the complete algorithm flow with the given CRS instance."""
     
     # Step 2: Network Analysis
@@ -202,6 +216,9 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     
     resonance_frequencies = resonance_result['resonance_frequencies']
     resonance_details = resonance_result['resonances_details']
+
+    if full_run:
+        assert len(resonance_frequencies) == 10
     
     print(f"   ✓ Found {len(resonance_frequencies)} resonances:")
     for i, (freq, details) in enumerate(zip(resonance_frequencies, resonance_details)):
@@ -296,6 +313,63 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
             print(f"     Detector {det_idx}: bias_freq={det_data['bias_frequency']/1e6:.3f} MHz")
             if 'df_calibration' in det_data:
                 print(f"                      df_cal={det_data['df_calibration']:.3e} Hz/rad")
+    
+    
+    ### Step 8. Slow Noise spectrum 
+    print("\n8. Collecting 1000 slow noise samples...")
+
+    slow_data = await crs.py_get_samples(**SAMPLE_PARAMS)
+
+    num_res = len(bias_results)
+
+    print(f"\nSlow Noise data collected for the {num_res} biased channels")
+
+    print("\n  Noise results summary:")
+
+    for i in range(num_res):
+        psd_i = slow_data.spectrum.psd_i[i]
+        psd_q = slow_data.spectrum.psd_q[i]
+        freq_iq = slow_data.spectrum.freq_iq
+        freq_dsb = slow_data.spectrum.freq_dsb
+
+        mean_psd_i = np.mean(psd_i[2:]) ### removing DC
+        mean_psd_q = np.mean(psd_q[2:])
+
+        print(f"   Channel {i+1}: Frequency Bandwidth = {max(freq_iq):.3f} Hz, Min dsb frequency = {min(freq_dsb):.3f} Hz, Max dsb frequency = {max(freq_dsb):.3f} Hz")
+        print(f"                  Mean I spectrum power = {mean_psd_i:.3f} dBm/Hz, Mean Q spectrum power = {mean_psd_q:.3f} dBm/Hz\n")
+
+    #### Step 9. PFB noise spectrum 
+    if crs.serial == "0000":
+        print("\nSkipping PFB noise samples for the mock mode")
+    else:
+        print("\n9. Collecting 100000 PFB noise samples....")
+
+        for i in range(num_res):
+            pfb_data = await crs.py_get_pfb_samples(100_000,
+                                                    channel = i + 1,
+                                                    module = 1,
+                                                    binlim = 1e6,
+                                                    trim = False,
+                                                    nsegments = 5,
+                                                    reference = "absolute",
+                                                    reset_NCO = False)
+            
+            # print(f"Pfb data collected for channel {i+1}")
+            
+            pfb_psd_i = pfb_data.spectrum.psd_i
+            pfb_psd_q = pfb_data.spectrum.psd_q
+            pfb_freq_iq = pfb_data.spectrum.freq_iq
+            pfb_freq_dsb = pfb_data.spectrum.freq_dsb
+
+            mean_pfb_psd_i = np.mean(pfb_psd_i[2:]) ### Removing dc bin
+            mean_pfb_psd_q = np.mean(pfb_psd_q[2:])
+
+            print(f"   Channel {i+1}: Frequency Bandwidth = {max(pfb_freq_iq):.3f} Hz, Min dsb frequency = {min(pfb_freq_dsb):.3f} Hz, Max dsb frequency = {max(pfb_freq_dsb):.3f} Hz")
+            print(f"                  Mean I spectrum power = {mean_pfb_psd_i:.3f} dBm/Hz, Mean Q spectrum power = {mean_pfb_psd_q:.3f} dBm/Hz\n")
+            
+
+        
+
     
     print("\n" + "="*60)
     print("Algorithm flow complete!")

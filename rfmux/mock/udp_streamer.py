@@ -248,11 +248,18 @@ class MockCRSUDPStreamer(threading.Thread):
                         try:
                             # Generate and send packet
                             s_time = time.perf_counter()
+
                             packet_bytes = self.generate_packet_for_module(module_num, self.seq_counters[module_num], dec)
                             
                             if self.use_multicast:
                                 if self.socket:
-                                    bytes_sent = self.socket.sendto(packet_bytes, (self.multicast_group, self.multicast_port))
+                                    try:
+                                        bytes_sent = self.socket.sendto(packet_bytes, (self.multicast_group, self.multicast_port))
+                                    except OSError as e:
+                                        if e.errno == 10051: ## unreachable network on Windows, corner case on first start and for tests
+                                            continue
+                                        else:
+                                            raise
                                 else:
                                     raise RuntimeError("Socket not initialized")
                             else:
@@ -304,6 +311,7 @@ class MockCRSUDPStreamer(threading.Thread):
             if self in _active_streamers:
                 _active_streamers.remove(self)
     
+
     def generate_packet_for_module(self, module_num, seq, dec):
         """Generate a ReadoutPacket for a specific module with coupled channels."""
 
@@ -335,6 +343,7 @@ class MockCRSUDPStreamer(threading.Thread):
         # Use module-wide coupled calculation if available
         if hasattr(self.mock_crs._resonator_model, 'calculate_module_response_coupled'):
             # Get sample rate for time-varying signals
+
             dec = dec
             if dec is None:
                 dec = 6  # Default only if None, not if 0
@@ -381,6 +390,7 @@ class MockCRSUDPStreamer(threading.Thread):
         
         # Calculate deterministic timestamp based on sequence number and sampling rate
         # Get the decimation stage and calculate sample rate
+
         dec = dec
         if dec is None:
             dec = 6  # Default only if None, not if 0

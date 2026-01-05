@@ -324,12 +324,3 @@ def make_nqp_timestream_from_Nqp_spectrum(res, frequencies, Nqp_spectrum, rbw, b
     timestream_N = np.fft.ifft(amplitude_spectrum_N).real * len(SN)
     
     return timestream_N / res.VL_um3
-
-
-
-
-
-
-
-
-

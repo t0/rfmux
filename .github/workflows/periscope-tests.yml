@@ -1,0 +1,82 @@
+name: Periscope tests
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+     - '**/*.md'
+     - 'docs/**'
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+     - '**/*.md'
+     - 'docs/**'
+  workflow_dispatch:
+
+jobs:
+  run-tests:
+    name: Run tests on ${{ matrix.os }} with Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.12"]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install scikit-build-core pybind11
+
+      - name: Build package
+        run: |
+          pip install -e .
+
+      - name: Install libomp (macOS only)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libomp
+
+      - name: Configure macOS environment
+        if: runner.os == 'macOS'
+        run: |
+          echo "NUMBA_THREADING_LAYER=omp" >> $GITHUB_ENV
+          echo "DYLD_LIBRARY_PATH=/opt/homebrew/opt/libomp/lib:/usr/local/opt/libomp/lib:$DYLD_LIBRARY_PATH" >> $GITHUB_ENV
+          
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libegl1 \
+            libopengl0 \
+            libxcb-cursor0 \
+            libxkbcommon-x11-0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-render-util0 \
+            libxcb-xinerama0
+
+      - name: Run test_measurement_flow.py
+        run: |
+          pytest -v -s test/test_measurement_flow.py
+
+      - name: Run test_periscope_flow.py
+        run: |
+          pytest -v -s test/test_periscope_flow.py

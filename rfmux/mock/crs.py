@@ -325,9 +325,9 @@ class ServerMockCRS:
             for i, freq_Hz in enumerate(resonance_frequencies[:chan_limit]):
                 channel = i + 1
                 relative_freq = freq_Hz - nco_freq
-                self.set_frequency(relative_freq, channel=channel, module=module)
-                self.set_amplitude(amplitude, channel=channel, module=module)
-                self.set_phase(0, channel=channel, module=module)
+                await self.set_frequency(relative_freq, channel=channel, module=module)
+                await self.set_amplitude(amplitude, channel=channel, module=module)
+                await self.set_phase(0, channel=channel, module=module)
                 configured_count += 1
 
             print(f"[MockCRS] Configured {configured_count} channels with automatic KID biasing")

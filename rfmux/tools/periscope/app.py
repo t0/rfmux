@@ -1080,7 +1080,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             dock.raise_()
         except Exception as e:
             print(f"Error in _start_network_analysis: {e}")
-            traceback.print_exc()
+            traceback.print_exc() # traceback from .utils
+            raise
 
 
     def _load_network_analysis(self, params: dict):

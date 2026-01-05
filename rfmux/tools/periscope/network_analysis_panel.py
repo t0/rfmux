@@ -640,14 +640,13 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         if current_tab_index < 0:
             QtWidgets.QMessageBox.warning(self, "No Module Selected", "Please select a module tab to analyze.")
             return
-        
         active_module_text = self.tabs.tabText(current_tab_index)
         try:
             active_module = int(active_module_text.split(" ")[1])
         except (IndexError, ValueError):
             QtWidgets.QMessageBox.critical(self, "Error", f"Could not determine active module from tab: {active_module_text}")
+            raise
             return
-
         if not self.raw_data or active_module not in self.raw_data or not self.raw_data[active_module]:
             QtWidgets.QMessageBox.information(self, "No Data", f"No sweep data available for Module {active_module} to find resonances.")
             return

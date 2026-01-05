@@ -1,4 +1,4 @@
-name: Python tests
+name: Periscope tests
 
 on:
   push:

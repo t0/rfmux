@@ -1,0 +1,23 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - integrated_streamer_testing_merge #main
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Release Please targeting integrated_streamer_testing_merge
+        uses: googleapis/release-please-action@v4
+        with:
+          release-type: python
+          package-name: rfmux
+          target-branch: integrated_streamer_testing_merge #main
+          tag-prefix: itest-v

@@ -367,15 +367,10 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
             print(f"   Channel {i+1}: Frequency Bandwidth = {max(pfb_freq_iq):.3f} Hz, Min dsb frequency = {min(pfb_freq_dsb):.3f} Hz, Max dsb frequency = {max(pfb_freq_dsb):.3f} Hz")
             print(f"                  Mean I spectrum power = {mean_pfb_psd_i:.3f} dBm/Hz, Mean Q spectrum power = {mean_pfb_psd_q:.3f} dBm/Hz\n")
             
-
-        
-
-    
     print("\n" + "="*60)
     print("Algorithm flow complete!")
     print(f"Finished at: {datetime.now()}")
     print("="*60)
-
 
 if __name__ == "__main__":
     # Get serial number from command line or default to MOCK

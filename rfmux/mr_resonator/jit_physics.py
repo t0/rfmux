@@ -32,7 +32,6 @@ MU0 = 8.85e-12  # Permeability (note: this appears to be using permittivity valu
 # Bessel Function Approximations
 # ============================================================================
 
-
 if platform.system() == "Darwin":
     numba.get_num_threads()
     layer = numba.config.THREADING_LAYER

@@ -116,7 +116,6 @@ def exp_bin_noise_data(f, psd, nbins=100):
     
     return fbinned, cavg
 
-
 def rotate_iq_plane(iqdata, n_thetas=50, enforce_positive_i=True, use_mean_value=False, make_plots=False, plot_save_dir=None):
 
     '''

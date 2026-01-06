@@ -310,7 +310,6 @@ class MockCRSUDPStreamer(threading.Thread):
             if self in _active_streamers:
                 _active_streamers.remove(self)
     
-
     def generate_packet_for_module(self, module_num, seq, dec):
         """Generate a ReadoutPacket for a specific module with coupled channels."""
 
@@ -342,7 +341,6 @@ class MockCRSUDPStreamer(threading.Thread):
         # Use module-wide coupled calculation if available
         if hasattr(self.mock_crs._resonator_model, 'calculate_module_response_coupled'):
             # Get sample rate for time-varying signals
-
             dec = dec
             if dec is None:
                 dec = 6  # Default only if None, not if 0
@@ -389,7 +387,6 @@ class MockCRSUDPStreamer(threading.Thread):
         
         # Calculate deterministic timestamp based on sequence number and sampling rate
         # Get the decimation stage and calculate sample rate
-
         dec = dec
         if dec is None:
             dec = 6  # Default only if None, not if 0

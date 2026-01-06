@@ -1333,8 +1333,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", str(e))
-                raise
                 traceback.print_exc()
+                raise
             finally:
                 progress.close()
                 

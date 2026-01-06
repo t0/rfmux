@@ -1,5 +1,3 @@
-# empty or noop
-
 import pytest
 import rfmux
 import os

@@ -41,11 +41,11 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install scikit-build-core pybind11 pytest pytest-asyncio
+          pip install scikit-build-core pybind11
 
       - name: Build package
         run: |
-          pip install -e ".[gui]" -v
+          pip install -e .
 
       - name: Install libomp (macOS only)
         if: runner.os == 'macOS'

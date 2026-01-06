@@ -248,7 +248,6 @@ class MockCRSUDPStreamer(threading.Thread):
                         try:
                             # Generate and send packet
                             s_time = time.perf_counter()
-
                             packet_bytes = self.generate_packet_for_module(module_num, self.seq_counters[module_num], dec)
                             
                             if self.use_multicast:

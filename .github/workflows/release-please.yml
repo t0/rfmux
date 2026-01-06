@@ -1,14 +1,17 @@
 name: Release Please
 
 on:
+  push:
+    branches:
+      - integrated_streamer_testing_merge # safety branch (no direct pushes to main)
   workflow_dispatch:
     inputs:
       target_branch:
-        description: "Branch to analyze commit history from and open the release PR against"
+        description: "Branch whose commit history Release Please should analyze and against which it should open the release PR"
         required: true
         default: "main"
       tag_prefix:
-        description: "Tag prefix to use for releases"
+        description: "Tag prefix to use for releases (e.g., v, itest-v)"
         required: true
         default: "itest-v"
 
@@ -20,11 +23,12 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
-      - name: Run Release Please
+      - name: Run Release Please (manual can target main without pushing to main)
         uses: googleapis/release-please-action@v4
         with:
           release-type: python
           package-name: rfmux
-          target-branch: ${{ inputs.target_branch }}
-          tag-prefix: ${{ inputs.tag_prefix }}
-
+          # When manually dispatched, use the provided target branch; otherwise fall back to your safety branch
+          target-branch: ${{ github.event_name == 'workflow_dispatch' && inputs.target_branch || 'integrated_streamer_testing_merge' }}
+          # When manually dispatched, use the provided tag prefix; otherwise keep your integration-testing tag prefix
+          tag-prefix: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_prefix || 'itest-v' }}

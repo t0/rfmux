@@ -1,9 +1,9 @@
 name: Release Please
 
 on:
-  push:
-    branches:
-      - integrated_streamer_testing_merge # safety branch (no direct pushes to main)
+  #push:
+    #branches:
+      #- integrated_streamer_testing_merge # safety branch (no direct pushes to main)
   workflow_dispatch:
     inputs:
       target_branch:
@@ -13,7 +13,7 @@ on:
       tag_prefix:
         description: "Tag prefix to use for releases (e.g., v, itest-v)"
         required: true
-        default: "itest-v"
+        default: "v"
 
 permissions:
   contents: write
@@ -29,6 +29,6 @@ jobs:
           release-type: python
           package-name: rfmux
           # When manually dispatched, use the provided target branch; otherwise fall back to your safety branch
-          target-branch: ${{ github.event_name == 'workflow_dispatch' && inputs.target_branch || 'integrated_streamer_testing_merge' }}
+          target-branch: ${{ inputs.target_branch }}
           # When manually dispatched, use the provided tag prefix; otherwise keep your integration-testing tag prefix
-          tag-prefix: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_prefix || 'itest-v' }}
+          tag-prefix: ${{ inputs.tag_prefix }}

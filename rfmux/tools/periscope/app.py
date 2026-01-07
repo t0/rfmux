@@ -224,7 +224,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._start_timer()
         
         # Set initial window size (wider and taller for better visibility)
-        self.resize(900, 450)
+        self.resize(1000, 700)
         
         # Show session startup dialog (unless already handled by launcher)
         self._skip_startup_dialog = skip_startup_dialog

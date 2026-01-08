@@ -319,36 +319,6 @@ class ServerMockCRS:
             raise
 
     async def _auto_bias_kids(self, config, resonance_frequencies, amplitude=None):
-        """Automatically configure channels at resonator frequencies."""
-        try:
-            if amplitude is None:
-                amplitude = config.get('bias_amplitude', 0.01)
-            module = 1
-
-            print(f"[MockCRS] Auto-biasing {len(resonance_frequencies)} KIDs with amplitude {amplitude}")
-
-            nco_freq = np.mean(resonance_frequencies)
-            print(f"[MockCRS] Setting NCO frequency to {nco_freq:.3e} Hz")
-            await self.set_nco_frequency(nco_freq, module=module)
-
-            chan_limit = min(self.channels_per_module(), 256)
-            configured_count = 0
-            for i, freq_Hz in enumerate(resonance_frequencies[:chan_limit]):
-                channel = i + 1
-                relative_freq = freq_Hz - nco_freq
-                await self.set_frequency(relative_freq, channel=channel, module=module)
-                await self.set_amplitude(amplitude, channel=channel, module=module)
-                await self.set_phase(0, channel=channel, module=module)
-                configured_count += 1
-
-            print(f"[MockCRS] Configured {configured_count} channels with automatic KID biasing")
-
-        except Exception as e:
-            print(f"[MockCRS] Error in auto-bias KIDs: {e}")
-            import traceback
-            traceback.print_exc()
-
-    async def _auto_bias_kids(self, config, resonance_frequencies, amplitude=None):
         """Automatically configure channels at resonator frequencies (bias KIDs).
         
         Parameters

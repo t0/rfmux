@@ -205,6 +205,7 @@ namespace packets {
 		std::optional<Packet> pop(std::optional<int> timeout_ms = std::nullopt);
 		std::optional<Packet> try_pop();
 		void push(Packet&& packet);
+		void clear();
 
 		bool empty() const;
 		size_t size() const;
@@ -230,7 +231,7 @@ namespace packets {
 
 	class PacketReceiver {
 	public:
-		PacketReceiver(std::shared_ptr<PacketType> type, py::object socket, size_t reorder_window = 256);
+		PacketReceiver(std::shared_ptr<PacketType> type, py::object socket, size_t reorder_window = 256, size_t queue_max_size = 4096, size_t flush_threshold = 256);
 		~PacketReceiver();
 
 		PacketReceiver(const PacketReceiver&) = delete;
@@ -263,6 +264,8 @@ namespace packets {
 		std::shared_ptr<PacketType> type_;
 		int sockfd_;
 		size_t reorder_window_;
+		size_t queue_max_size_;
+		size_t flush_threshold_;
 
 		using QueueKey = std::tuple<uint16_t, uint8_t>;
 
@@ -283,10 +286,10 @@ namespace packets {
 	};
 
 	struct ReadoutPacketReceiver : PacketReceiver {
-		ReadoutPacketReceiver(py::object socket, size_t reorder_window = 256);
+		ReadoutPacketReceiver(py::object socket, size_t reorder_window = 256, size_t queue_max_size = 4096, size_t flush_threshold = 256);
 	};
 
 	struct PFBPacketReceiver : PacketReceiver {
-		PFBPacketReceiver(py::object socket, size_t reorder_window = 256);
+		PFBPacketReceiver(py::object socket, size_t reorder_window = 256, size_t queue_max_size = 4096, size_t flush_threshold = 256);
 	};
 }

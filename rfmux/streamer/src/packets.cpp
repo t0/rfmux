@@ -308,6 +308,11 @@ namespace packets {
 		return queue_.size();
 	}
 
+	void PacketQueue::clear() {
+		std::lock_guard<std::mutex> lock(mutex_);
+		queue_.clear();
+	}
+
 	PacketQueue::Stats PacketQueue::get_stats() const {
 		std::lock_guard<std::mutex> lock(mutex_);
 		return stats_;
@@ -318,8 +323,8 @@ namespace packets {
 		stats_ = Stats{};
 	}
 
-	PacketReceiver::PacketReceiver(std::shared_ptr<PacketType> type, py::object socket, size_t reorder_window)
-			: type_(type), reorder_window_(reorder_window), socket_(socket) {
+	PacketReceiver::PacketReceiver(std::shared_ptr<PacketType> type, py::object socket, size_t reorder_window, size_t queue_max_size, size_t flush_threshold)
+			: type_(type), reorder_window_(reorder_window), queue_max_size_(queue_max_size), flush_threshold_(flush_threshold), socket_(socket) {
 		// Extract file descriptor from Python socket
 		sockfd_ = socket.attr("fileno")().cast<int>();
 	}
@@ -451,6 +456,18 @@ namespace packets {
 			process_packet(std::move(data));
 		}
 #endif
+
+		// Flush all reorder buffers that have accumulated enough packets
+		{
+			std::lock_guard<std::mutex> lock(queues_mutex_);
+			for (auto& [key, reorder_buf] : reorder_buffers_) {
+				if (reorder_buf.size() >= reorder_window_ + flush_threshold_) {
+					auto [serial, module] = key;
+					flush_reorder_buffer(serial, module);
+				}
+			}
+		}
+
 		return packets_received;
 	}
 
@@ -459,7 +476,7 @@ namespace packets {
 		std::lock_guard<std::mutex> lock(queues_mutex_);
 
 		if (queues_.find(key) == queues_.end())
-			queues_[key] = std::make_shared<PacketQueue>();
+			queues_[key] = std::make_shared<PacketQueue>(queue_max_size_);
 
 		return queues_[key];
 	}
@@ -497,22 +514,22 @@ namespace packets {
 		std::lock_guard<std::mutex> lock(queues_mutex_);
 
 		reorder_buffers_[key].push(std::move(packet));
-
-		if (reorder_buffers_[key].size() >= reorder_window_)
-			flush_reorder_buffer(serial, module);
 	}
 
 	void PacketReceiver::flush_reorder_buffer(uint16_t serial, uint8_t module) {
 		auto key = std::make_tuple(serial, module);
 
 		if (queues_.find(key) == queues_.end())
-			queues_[key] = std::make_shared<PacketQueue>();
+			queues_[key] = std::make_shared<PacketQueue>(queue_max_size_);
 
 		auto& reorder_buf = reorder_buffers_[key];
 		auto& out_queue = *queues_[key];
 
-		size_t to_pop = reorder_window_ / 2;
-		while (to_pop > 0 && !reorder_buf.empty()) {
+		// Flush excess packets while maintaining reorder_window_ for reordering
+		size_t current_size = reorder_buf.size();
+		size_t to_pop = (current_size > reorder_window_) ? (current_size - reorder_window_) : 0;
+
+		while (to_pop && !reorder_buf.empty()) {
 			// Can't move from priority_queue::top() because it's const
 			// Must copy, then pop
 			Packet pkt = reorder_buf.top();
@@ -669,10 +686,10 @@ namespace packets {
 		}
 	};
 
-	ReadoutPacketReceiver::ReadoutPacketReceiver(py::object socket, size_t reorder_window)
+	ReadoutPacketReceiver::ReadoutPacketReceiver(py::object socket, size_t reorder_window, size_t queue_max_size, size_t flush_threshold)
 		: PacketReceiver(std::make_shared<ReadoutPacketTypeImpl>(),
-				socket, reorder_window) {}
+				socket, reorder_window, queue_max_size, flush_threshold) {}
 
-	PFBPacketReceiver::PFBPacketReceiver(py::object socket, size_t reorder_window)
-		: PacketReceiver(std::make_shared<PFBPacketTypeImpl>(), socket, reorder_window) {}
+	PFBPacketReceiver::PFBPacketReceiver(py::object socket, size_t reorder_window, size_t queue_max_size, size_t flush_threshold)
+		: PacketReceiver(std::make_shared<PFBPacketTypeImpl>(), socket, reorder_window, queue_max_size, flush_threshold) {}
 }

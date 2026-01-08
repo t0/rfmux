@@ -23,64 +23,72 @@ import platform
 
 class UDPReceiver(QtCore.QThread):
     """
-    Receives multicast packets in a dedicated QThread and pushes them
-    into a thread-safe queue.
+    Receives multicast packets in a dedicated QThread using the C++ ReadoutPacketReceiver.
+    The C++ receiver handles packet reordering.
     """
     def __init__(self, host: str, module: int) -> None:
         super().__init__()
-        self.module_id = module
-        self.queue = queue.PriorityQueue()
-        self.sock = streamer.get_multicast_socket(host) # streamer from .utils
-        if platform.system() == "Linux":
-            self.sock.settimeout(0.2)
-        else:
-            self.sock.setblocking(False)
+        self.module_id = module  # 1-indexed module ID (for Periscope)
+        self.module_idx = module - 1  # 0-indexed (for packet filtering)
+
+        # Create socket and C++ receiver
+        # reorder_window=256: Maintain good packet reordering capability
+        # queue_max_size=50000: Handle high data rates at FIR stage 0 (~38kHz)
+        # flush_threshold=32: Flush every 32 packets for smooth updates (~54ms at FIR stage 6)
+        self.sock = streamer.get_multicast_socket(host)
+        self.receiver = streamer.ReadoutPacketReceiver(self.sock,
+                                                       reorder_window=256,
+                                                       queue_max_size=50000,
+                                                       flush_threshold=16)
+
+        # Queue reference will be set when we first see packets for our module
+        self.queue = None
+        self.serial = None
+
+        # Statistics
         self.packets_received = 0
         self.packets_dropped = 0
-        self.first_packet_received = 0
-        self.prev_seq = 0
-
-    def calc_dropped_packets(self, prev_seq, seq):
-        diff = seq - prev_seq
-        if diff > 1:
-            self.packets_dropped = self.packets_dropped + (diff - 1)
-            
-    def receive_counter(self):
-        self.packets_received += 1
 
     def get_dropped_packets(self):
+        """Get cumulative dropped packet count from C++ queue statistics."""
+        if self.queue is not None:
+            stats = self.queue.get_stats()
+            return stats.sequence_gaps + stats.packets_dropped
         return self.packets_dropped
 
     def get_received_packets(self):
+        """Get cumulative received packet count from C++ queue statistics."""
+        if self.queue is not None:
+            stats = self.queue.get_stats()
+            return stats.packets_received
         return self.packets_received
 
-    def _process_received_packet(self, data):
-        """Process a received UDP packet if it matches our module."""
-        pkt = streamer.ReadoutPacket(data)
-        if pkt.module == self.module_id - 1:
-            if (self.first_packet_received == 0) or (self.first_packet_received > pkt.seq):
-                self.first_packet_received = pkt.seq
-                self.prev_seq = pkt.seq
-            self.receive_counter()
-            self.calc_dropped_packets(self.prev_seq, pkt.seq)
-            self.prev_seq = pkt.seq
-            self.queue.put((pkt.seq, pkt))
-
     def run(self):
+        """Main reception loop - calls C++ receiver and retrieves packets."""
         while not self.isInterruptionRequested():
             try:
-                data = self.sock.recv(streamer.LONG_PACKET_SIZE)
-                self._process_received_packet(data)
-            except (socket.timeout, BlockingIOError):
-                # No data available right now — just loop
-                continue
-            except OSError:
-                break
+                # Call C++ receiver to read and process packets
+                self.receiver.receive_batch(batch_size=16, timeout_ms=50)
 
+                # Find our module's queue
+                if self.queue is None:
+                    # Look for a queue matching our module
+                    for serial, module, q in self.receiver.get_all_queues():
+                        if module == self.module_idx:
+                            self.queue = q
+                            self.serial = serial
+                            print(f"[UDP] Found queue for serial={serial}, module={self.module_id}")
+                            break
+
+            except Exception as e:
+                if self.isInterruptionRequested():
+                    break
+                print(f"[UDP] Error in receive loop: {e}")
+                continue
 
     def stop(self):
-        print(f"[UDP] UDP receiving thread stopped. Total packets received: {self.packets_received}")
-        print(f"[UDP] UDP receiving thread stopped. Total packets dropped: {self.packets_dropped}")
+        print(f"[UDP] UDP receiving thread stopped. Total packets received: {self.get_received_packets()}")
+        print(f"[UDP] UDP receiving thread stopped. Total packets dropped: {self.get_dropped_packets()}")
         self.requestInterruption()
         try:
             self.sock.close()

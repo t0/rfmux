@@ -542,26 +542,33 @@ class PeriscopeRuntime:
 
     def _discard_packets(self):
         """Discard all packets currently in the receiver queue (when paused)."""
-        while not self.receiver.queue.empty(): self.receiver.queue.get()
-
+        if self.receiver.queue is None:
+            return
+        self.receiver.queue.clear()
 
     def _process_incoming_packets(self):
         """Process all packets currently in the receiver queue."""
+        if self.receiver.queue is None:
+            return
+
         while not self.receiver.queue.empty():
-            try:
-                seq, pkt = self.receiver.queue.get(block=False)
-                self.pkt_cnt += 1
-                if hasattr(pkt, 'fir_stage'):
-                    self.actual_dec_stage = pkt.fir_stage
-                t_rel = self._calculate_relative_timestamp(pkt)
-                self._update_buffers(pkt, t_rel)
-                
-                # Track simulation time for speed calculation (mock mode only)
-                if self.is_mock_mode and t_rel is not None:
-                    self._update_sim_time_tracking(t_rel)
-            except:
-                self.receiver.queue.get_nowait()  # pop the bad element
-                continue
+            # Get packet from C++ queue (returns type-erased Packet)
+            packet = self.receiver.queue.try_pop()
+            if packet is None:
+                break
+
+            # Convert to ReadoutPacket
+            pkt = packet.to_python()
+
+            self.pkt_cnt += 1
+            if hasattr(pkt, 'fir_stage'):
+                self.actual_dec_stage = pkt.fir_stage
+            t_rel = self._calculate_relative_timestamp(pkt)
+            self._update_buffers(pkt, t_rel)
+
+            # Track simulation time for speed calculation (mock mode only)
+            if self.is_mock_mode and t_rel is not None:
+                self._update_sim_time_tracking(t_rel)
 
     def _calculate_relative_timestamp(self, pkt) -> float | None:
         """

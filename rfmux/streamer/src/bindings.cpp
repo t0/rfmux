@@ -259,6 +259,7 @@ PYBIND11_MODULE(_receiver, m) {
 		.def("try_pop", &PacketQueue::try_pop, "Try to pop packet (non-blocking)")
 		.def("empty", &PacketQueue::empty)
 		.def("size", &PacketQueue::size)
+		.def("clear", &PacketQueue::clear, "Clear all packets from queue")
 		.def("max_size", &PacketQueue::max_size)
 		.def("get_stats", &PacketQueue::get_stats)
 		.def("reset_stats", &PacketQueue::reset_stats);
@@ -290,17 +291,21 @@ PYBIND11_MODULE(_receiver, m) {
 
 	py::class_<ReadoutPacketReceiver, PacketReceiver>(m, "ReadoutPacketReceiver",
 		"Packet receiver for readout packets.")
-		.def(py::init<py::object, size_t>(),
+		.def(py::init<py::object, size_t, size_t, size_t>(),
 			 "socket"_a,
 			 "reorder_window"_a = 256,
-			 "Create readout packet receiver");
+			 "queue_max_size"_a = 4096,
+			 "flush_threshold"_a = 128,
+			 "Create readout packet receiver with reorder_window (min buffer) and flush_threshold (flush every N additional packets)");
 
 	py::class_<PFBPacketReceiver, PacketReceiver>(m, "PFBPacketReceiver",
 		"Packet receiver for PFB packets.")
-		.def(py::init<py::object, size_t>(),
+		.def(py::init<py::object, size_t, size_t, size_t>(),
 			 "socket"_a,
 			 "reorder_window"_a = 256,
-			 "Create PFB packet receiver");
+			 "queue_max_size"_a = 4096,
+			 "flush_threshold"_a = 128,
+			 "Create PFB packet receiver with reorder_window (min buffer) and flush_threshold (flush every N additional packets)");
 
 	/* Cross-platform wrapper for IP_ADD_SOURCE_MEMBERSHIP structure.
 	 * Linux/macOS/Windows all have struct ip_mreq_source with the same fields

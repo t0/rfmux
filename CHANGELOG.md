@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.1](https://github.com/t0/rfmux/compare/v1.2.0...v1.2.1) (2026-01-08)
+
+
+### Bug Fixes
+
+* _auto_bias_kids: mock CRS calls are now asynchronous and need to be awaited ([cdfc5a5](https://github.com/t0/rfmux/commit/cdfc5a5119b67fc34ef0f4ccb57edcdaafcf3b11))
+* mock UDP streamer: don't reset sequence numbers when decimation changes ([5007e83](https://github.com/t0/rfmux/commit/5007e8331cfa7ec92f94e5ad91d0071c2eafd012))
+* remove duplicate (identical) MockCRS._auto_bias_kids ([36cb46d](https://github.com/t0/rfmux/commit/36cb46d3ea44440a81e00c6a6413b150d3cde637))
+
 ## 1.2.0 (2026-01-06)
 
 

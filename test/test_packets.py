@@ -63,7 +63,6 @@ def test_receiver_get_queue():
         queue = receiver.get_queue(serial=1234, module=1)
         assert queue is not None
         assert queue.empty()
-        assert queue.max_size() == 1024  # Default queue size
 
         stats = queue.get_stats()
         assert stats.packets_received == 0

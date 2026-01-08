@@ -227,10 +227,6 @@ class MockCRSUDPStreamer(threading.Thread):
                         last_decimation = dec
                         self.last_decimation = dec
                         
-                        # Reset sequence counters on decimation change (but keep total_elapsed_time)
-                        for m in self.seq_counters:
-                            self.seq_counters[m] = 0
-                    
                     # Determine which modules to stream
                     if self.modules_to_stream:
                         # Use explicitly specified modules

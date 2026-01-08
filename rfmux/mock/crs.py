@@ -380,10 +380,10 @@ class ServerMockCRS:
                 # Set frequency relative to NCO
                 relative_freq = freq_Hz - nco_freq
                 
-                # Configure the channel (these are synchronous methods)
-                self.set_frequency(relative_freq, channel=channel, module=module)
-                self.set_amplitude(amplitude, channel=channel, module=module)
-                self.set_phase(0, channel=channel, module=module)
+                # Configure the channel
+                await self.set_frequency(relative_freq, channel=channel, module=module)
+                await self.set_amplitude(amplitude, channel=channel, module=module)
+                await self.set_phase(0, channel=channel, module=module)
                 
                 configured_count += 1
                 

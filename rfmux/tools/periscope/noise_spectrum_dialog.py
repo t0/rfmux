@@ -16,7 +16,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
     Dialog for configuring noise spectrum parameters with live dependency updates.
     """
 
-    def __init__(self, parent=None, num_resonances = 0, crs = None): #### Remmove the decimation function
+    def __init__(self, parent=None, num_resonances = 0, crs = None, channel = False): #### Remmove the decimation function
         """
         Args:
             parent: Parent QWidget.
@@ -31,6 +31,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         self._updating = False  # Prevent feedback loops during recalculations
         
         self.nres = num_resonances
+        self.channel_noise = channel
 
         if crs is not None:
             self.crs = crs
@@ -52,9 +53,14 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
     def _setup_ui(self):
         layout = QtWidgets.QFormLayout(self)
 
-        self.number_res = QtWidgets.QLabel(str(self.nres))
-        self.number_res.setToolTip("Number of resonances")
-        layout.addRow("Number of resonances:", self.number_res)
+        if self.channel_noise:
+            self.channel_edit = QtWidgets.QLineEdit("1")
+            self.channel_edit.setToolTip("Take noise spectrum for these channels (comma separated)")
+            layout.addRow("Channels:", self.channel_edit)
+        else:
+            self.number_res = QtWidgets.QLabel(str(self.nres))
+            self.number_res.setToolTip("Number of resonances")
+            layout.addRow("Number of resonances:", self.number_res)
 
         # Number of Samples
         self.samples_edit = QtWidgets.QLineEdit("10000")
@@ -126,7 +132,10 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         
         # PFB Calculations
         pfb_samples = 210_000 ### Change time_pfb as well if you change the number of samples
-        time_pfb = 0.4 * self.nres  # Example computation, was timed in a notebook takes around 0.28 seconds for 100000 samples
+        if self.channel_noise:
+            time_pfb = 0.4
+        else:
+            time_pfb = 0.4 * self.nres  # Example computation, was timed in a notebook takes around 0.28 seconds for 100000 samples
         
         self.pfb_time_taken_label = QtWidgets.QLabel(f"{time_pfb:.3f} s")
         self.pfb_time_taken_label.setToolTip("Displays estimated capture time (in seconds) for PFB, provided no failures.")
@@ -167,7 +176,9 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         self.spectrum_limit_input.valueChanged.connect(self._update_dependent_values)
         self.segments_edit.textChanged.connect(self._update_dependent_values)
         self.decimation_input.valueChanged.connect(self._update_dependent_values)
-
+        if self.channel_noise:
+            self.channel_edit.textChanged.connect(self._update_dependent_values)
+        
     def _toggle_pfb_section(self, checked: bool):
         """Show or hide the PFB configuration section."""
         self.pfb_group.setVisible(checked)
@@ -214,20 +225,32 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         self.freq_resolution_label.setText(f"{freq_resolution:.4f} Hz")
         self.overlap_sample.setText(f"{int(overlap)}")
 
-        if decimation <= 1:
-            self.status_label.setText(
-                "Decimation ≤ 1: You will drop packets in Mac and Windows, increase UDP buffer in Linux (see Help).\nOnly 128 channels available."
-            )
-            self.status_label.setStyleSheet("background-color: #f8d7da; color: #721c24; padding: 5px; border-radius: 6px;")
-        elif 1 < decimation <=3:
-            self.status_label.setText("Decimation = 2 or 3: 128 channels but only for the current module.")
-            self.status_label.setStyleSheet("background-color: #fff3cd; color: #856404; padding: 5px; border-radius: 6px;")
-        elif decimation == 4:
-            self.status_label.setText("Decimation = 4: 1024 channels but only for the current module.")
-            self.status_label.setStyleSheet("background-color: #fff3cd; color: #856404; padding: 5px; border-radius: 6px;")
+        if self.channel_noise:
+            chan = max(self._safe_channel(self.channel_edit.text(), 1))
+            if (decimation < 4) and (chan > 128):
+                self.status_label.setText(
+                    "Decimation < 4: Only channel 1-128 allowed, please check!!"
+                )
+                self.status_label.setStyleSheet("background-color: #fff3cd; color: #856404; padding: 5px; border-radius: 6px;")
+            else:
+                self.status_label.setText("")
+                self.status_label.setStyleSheet("")
+        
         else:
-            self.status_label.setText("")
-            self.status_label.setStyleSheet("")
+            if decimation <= 1:
+                self.status_label.setText(
+                    "Decimation ≤ 1: You will drop packets in Mac and Windows, increase UDP buffer in Linux (see Help).\nOnly 128 channels available."
+                )
+                self.status_label.setStyleSheet("background-color: #f8d7da; color: #721c24; padding: 5px; border-radius: 6px;")
+            elif 1 < decimation <=3:
+                self.status_label.setText("Decimation = 2 or 3: 128 channels but only for the current module.")
+                self.status_label.setStyleSheet("background-color: #fff3cd; color: #856404; padding: 5px; border-radius: 6px;")
+            elif decimation == 4:
+                self.status_label.setText("Decimation = 4: 1024 channels but only for the current module.")
+                self.status_label.setStyleSheet("background-color: #fff3cd; color: #856404; padding: 5px; border-radius: 6px;")
+            else:
+                self.status_label.setText("")
+                self.status_label.setStyleSheet("")
 
         self._updating = False
 
@@ -254,6 +277,15 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         except ValueError:
             return default
 
+    def _safe_channel(self, text, default=1):
+        try:
+            chan = text.split(',')
+            channels = []
+            for c in chan:
+                channels.append(int(c))
+            return channels
+        except ValueError:
+            return [default]
 
     # ------------------------------------------------------
     # Get User Parameters
@@ -284,6 +316,14 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
             "time_taken": float(time_taken),
             "freq_resolution" : float(freq_res)
         }
+
+        if self.channel_noise:
+            channels = self._safe_channel(self.channel_edit.text(), 1)
+            params["channel_noise"] = channels
+            pfb_time = float(pfb_time) * len(channels) ### increasing it depending on how many channels were provided
+        else:
+            params["channel_noise"] = None
+        
         if self.pfb_checkbox.isChecked():
             params["pfb_enabled"] = True
             params["pfb_samples"] = self._safe_int(pfb_samps, 1000000)

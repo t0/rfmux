@@ -63,6 +63,7 @@ class SessionManager(QtCore.QObject):
         'multisweep': 'Multisweep Analysis',
         'bias': 'Bias KIDs',
         'noise': 'Noise Spectrum',
+        'channel_noise':'Channel Noise',
         'screenshot': 'Screenshot' ,
     }
 
@@ -547,6 +548,9 @@ class SessionManager(QtCore.QObject):
         # Network analysis files: have 'parameters' and 'modules' keys
         if 'parameters' in data and 'modules' in data:
             return 'netanal'
+
+        if 'channel_noise_data' in data and data['channel_noise_data'] is not None:
+            return 'channel_noise'
         
         # Unknown file type
         return None

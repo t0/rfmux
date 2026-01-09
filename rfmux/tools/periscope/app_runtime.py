@@ -1995,6 +1995,7 @@ class PeriscopeRuntime:
     
         self.noise_params = {
             "num_samples": 10000,
+            "channel_noise": 1,
             "spectrum_limit": 0.9,
             "num_segments": 10,
             "decimation": 6,

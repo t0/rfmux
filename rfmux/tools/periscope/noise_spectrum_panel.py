@@ -438,15 +438,26 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
         log_freqs = np.log10(np.clip(full_freq, 1e-12, None))
 
         # Summary box
-        amplitude = float(self.tone_amp)
-        slow_freq = float(self.slow_freq)
-        fast_freq_mhz = (self.fast_freq / 1e6) if self.fast_freq else 0.0
-        summary_text = (
-            f"<span style='font-size:12pt; color:grey;'>"
-            f"Tone Amp: {amplitude:.1f} dBm <br>"
-            f"Slow Bandwidth: {slow_freq:.0f} Hz <br>"
-            f"Fast Bandwidth: {fast_freq_mhz:.2f} MHz </span>"
-        )
+        if self.tone_amp > 0:
+            amplitude = float(self.tone_amp)
+            slow_freq = float(self.slow_freq)
+            fast_freq_mhz = (self.fast_freq / 1e6) if self.fast_freq else 0.0
+            summary_text = (
+                f"<span style='font-size:12pt; color:grey;'>"
+                f"Tone Amp: {amplitude:.1f} dBm <br>"
+                f"Slow Bandwidth: {slow_freq:.0f} Hz <br>"
+                f"Fast Bandwidth: {fast_freq_mhz:.2f} MHz </span>"
+            )
+        else:
+            amplitude = "Listener"
+            slow_freq = float(self.slow_freq)
+            fast_freq_mhz = (self.fast_freq / 1e6) if self.fast_freq else 0.0
+            summary_text = (
+                f"<span style='font-size:12pt; color:grey;'>"
+                f"Tone Amp: {amplitude} <br>"
+                f"Slow Bandwidth: {slow_freq:.0f} Hz <br>"
+                f"Fast Bandwidth: {fast_freq_mhz:.2f} MHz </span>"
+            )
 
         self.summary_label = pg.TextItem(html=summary_text, anchor=(0, 0), border="w", fill=(0, 0, 0, 150))
         self.plot_noise_spectrum.addItem(self.summary_label)

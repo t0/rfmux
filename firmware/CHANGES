@@ -1,5 +1,51 @@
 # Changelog
 
+# r1.6.0rc1 - 2026-01-09
+
+## Decimation and Streaming
+
+- There is now a "fast" streamer that allows a subset of up to 4 channels (on a
+  single module) to be streamed over the 1GbE connection. This streaming mode
+  is controlled by the `set_pfb_streamer` command, and is mutually exclusive with
+  `get_pfb_samples` when active (because they use the same packetizer.) Because
+  this streamer competes with the "slow" streamer for 1GbE bandwidth, it may be
+  necessary to jointly configure these two streamers to manage bandwidth. We are
+  experimenting with this mode in the hopes it can be ergonomic.
+
+- `get_pfb_samples` now returns a timestamp structure
+
+## Feedback
+
+- The feedback controller now has a global (per-module) maximum amplitude limit,
+  which defaults to full-scale (as before) but allows feedback excursions to be
+  limited so a feedback failure in a single channel does not cascade to others.
+  This can be controlled via `set_amplitude_limit`.
+
+- Negative feedback amplitudes are now disallowed (similarly, negative amplitude
+  in a KIDs feedback loop results in loss of feedback and should not be allowed
+  to accumulate further.) This limit is not configurable.
+
+## Housekeeping
+
+- A `dump_housekeeping()` call now exists.
+
+- Thermometry associated with buck converters now includes a second sensor.
+  The nominal sensor name (TEMPERATURE_SENSOR.MB_R5V0) corresponds to the board-level
+  thermometer, and the new sensor name (TEMPERATURE_SENSOR.MB_R5V0_DIE) is an
+  on-die sensor within the regulator itself.
+
+- DNS-SD service registration has been added to assist with automatic
+  collection of telemetry in a Prometheus / Grafana install.
+
+## Churn
+
+- The C++ codebase has been refactored to be more maintainable. This has been a
+  long time coming, and other than DocString changes, should be invisible to users.
+  Please report regressions or suspicious behaviour.
+
+- Inert or unimplemented API calls (`get_backplane_temperature`, `get_arm_mac`,
+  `clear_fpga_bitstream`, `load_fpga_bitstream`) have been removed.
+
 # r1.5.6 - 2025-05-22
 
 ## On-board Python environment

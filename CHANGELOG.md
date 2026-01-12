@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/t0/rfmux/compare/v1.3.0...v1.3.1) (2026-01-12)
+
+
+### Bug Fixes
+
+* **updated-build-logic:** updated the logic to trigger build once release please PR is merged ([#68](https://github.com/t0/rfmux/issues/68)) ([992a1d5](https://github.com/t0/rfmux/commit/992a1d591583a813fe78135235aac2064554fff5))
+
 ## [1.3.0](https://github.com/t0/rfmux/compare/v1.2.1...v1.3.0) (2026-01-12)
 
 

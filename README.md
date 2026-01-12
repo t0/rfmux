@@ -19,6 +19,11 @@ The CRS + MKIDs firmware is described in
 $ curl -LsSf https://astral.sh/uv/install.sh | sh  # Linux/macOS or WSL
 # Or: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"  # Windows
 
+# Create virtual environment 
+uv venv ### or uv venv my-env-name
+source .venv/bin/activate # On Windows: .venv/Scripts/activate
+# or source my-env-name/bin/activate
+
 # Install rfmux
 $ uv pip install rfmux
 ```
@@ -33,7 +38,7 @@ compiler. See [Installation Guide](docs/installation.md) for details.
 To launch the Periscope GUI, run:
 
 ```bash
-$ uv run periscope
+$ uv run periscope # or periscope
 ```
 
 https://github.com/user-attachments/assets/fa8eb68c-8593-43b1-af96-285720ed0d5f

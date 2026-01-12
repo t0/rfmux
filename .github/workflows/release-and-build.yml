@@ -12,15 +12,9 @@ on:
         required: true
         default: "v"
 
-  # This is the key to avoid having to run Release Please twice manually.
-  # When the Release Please PR is merged, that merge produces a push to main,
-  # and Release Please can then cut the tag/release.
   push:
     branches:
       - main
-
-  # Build/publish happens only after a tag is created (post-merge).
-  push:
     tags:
       - "v*"
 
@@ -30,7 +24,6 @@ permissions:
 jobs:
   release-please:
     name: Release Please (PR + post-merge release)
-    # Run on manual dispatch OR push to main.
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -42,8 +35,6 @@ jobs:
         with:
           release-type: python
           package-name: rfmux
-          # For manual runs, use the selected target branch (default main).
-          # For push-to-main runs, analyze main.
           target-branch: ${{ github.event_name == 'workflow_dispatch' && inputs.target_branch || 'main' }}
           tag-prefix: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_prefix || 'v' }}
 
@@ -54,13 +45,14 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -74,7 +66,7 @@ jobs:
           CIBW_SKIP: "*-musllinux_*"
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-${{ matrix.os }}
           path: ./wheelhouse/*.whl
@@ -83,13 +75,14 @@ jobs:
     name: Build source distribution
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -99,7 +92,7 @@ jobs:
       - name: Build sdist
         run: python -m build --sdist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -115,9 +108,10 @@ jobs:
     permissions:
       id-token: write
       contents: read
+
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           path: dist
           pattern: "*"

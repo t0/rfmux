@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.3.0](https://github.com/t0/rfmux/compare/v1.2.1...v1.3.0) (2026-01-12)
+
+
+### Features
+
+* release firmware r1.6.0rc1 ([6f34104](https://github.com/t0/rfmux/commit/6f3410464254fe2eb91065f00e3e05f3dc2363a8))
+
+
+### Bug Fixes
+
+* **including-build-in-realease-file:** Release and build ([#64](https://github.com/t0/rfmux/issues/64)) ([4993369](https://github.com/t0/rfmux/commit/4993369ce24dadea2279d00b563cf2e56e9c1ef7))
+
+
+### Documentation
+
+* consolidate and reorganize documentation ([5940f86](https://github.com/t0/rfmux/commit/5940f866b3388c991a1fa9a5bdc0bb3a91522a32))
+* when writing flash, note that it must be unmounted first (Mint, Ubuntu) ([12a258b](https://github.com/t0/rfmux/commit/12a258b50b94b66f53853cc86a3a3bb4a25e2c11))
+
 ## [1.2.1](https://github.com/t0/rfmux/compare/v1.2.0...v1.2.1) (2026-01-08)
 
 

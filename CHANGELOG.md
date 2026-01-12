@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.2](https://github.com/t0/rfmux/compare/v1.3.1...v1.3.2) (2026-01-12)
+
+
+### Bug Fixes
+
+* **virtual-enviornment:** Addding the command to create a virtual environment before installation ([#70](https://github.com/t0/rfmux/issues/70)) ([225fb06](https://github.com/t0/rfmux/commit/225fb0623cc19d24ea834cbc44bcb23d8e8a6d8c))
+
 ## [1.3.1](https://github.com/t0/rfmux/compare/v1.3.0...v1.3.1) (2026-01-12)
 
 

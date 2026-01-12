@@ -112,6 +112,13 @@ sudo dmesg | tail -20
 lsblk
 ```
 
+#### Unmounting Device Partitions
+
+Some distributions (Mint, Ubuntu, but not Debian) will mount filesystems by default when you insert a flash card.
+You must unmount these filesystems before proceeding, otherwise Linux's filesystem layer thinks it "owns" the devices and writes to the underlying image may be corrupted.
+The `lsblk` command (see above) lists mounted partitions under the "MOUNTPOINTS" column.
+You can unmount them using e.g. `sudo umount /dev/sdb1` (if your flash device is `/dev/sdb` and its partition `/dev/sdb1` is shown as a MOUNTPOINT).
+
 #### Writing your Device
 
 In the following commands, replace `DEVICE` with your SD card device (e.g., `sdb`). Use the device file (e.g., `/dev/sdb`), NOT partition files (e.g., `/dev/sdb1`).

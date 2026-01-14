@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.3](https://github.com/t0/rfmux/compare/v1.3.2...v1.3.3) (2026-01-14)
+
+
+### Bug Fixes
+
+* **parser:** correct timestamp message generation (c++ churn) ([4004220](https://github.com/t0/rfmux/commit/4004220eb180aed54c7f35e29709c85ea619c31f))
+* **parser:** don't require pygetdata as a top-level dependency ([c2a94dd](https://github.com/t0/rfmux/commit/c2a94dd3c03e8ef12486f153a80c4ee0022559da))
+
 ## [1.3.2](https://github.com/t0/rfmux/compare/v1.3.1...v1.3.2) (2026-01-12)
 
 

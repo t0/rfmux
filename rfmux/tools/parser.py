@@ -9,6 +9,9 @@ Receives and processes packets from CRS boards, with options to:
 - Collect drop statistics
 """
 
+# make type annotations lazy in case pygetdata is not present
+from __future__ import annotations
+
 import argparse
 import signal
 import socket
@@ -20,7 +23,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import psutil
-import pygetdata as gd
 import numpy as np
 
 from rfmux.streamer import (
@@ -128,6 +130,8 @@ def setup_dirfile_for_board(
     channels: list[range],
 ):
     """Create a subdirfile for a specific CRS board"""
+    import pygetdata as gd
+
     board_ns = f"serial_{serial:04d}"
     board_path = f"{main_dirfile.name}/{board_ns}"
 
@@ -155,6 +159,8 @@ def setup_dirfile_for_module(
     channels: list[range],
 ):
     """Create dirfile fields for a specific module"""
+    import pygetdata as gd
+
     df = board_stats.dirfile
     num_channels = sum(len(r) for r in channels)
 
@@ -772,6 +778,8 @@ def setup_pfb_dirfile_for_board(
     channels: list[range],
 ):
     """Create a subdirfile for a specific CRS board (PFB mode)"""
+    import pygetdata as gd
+
     board_ns = f"serial_{serial:04d}"
     board_path = f"{main_dirfile.name}/{board_ns}"
 
@@ -791,6 +799,8 @@ def setup_pfb_dirfile_for_module(
     channels: list[range],
 ):
     """Create dirfile fields for a specific module (PFB mode)"""
+    import pygetdata as gd
+
     df = board_stats.dirfile
 
     # Field names

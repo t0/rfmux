@@ -481,10 +481,10 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
 
                         ts = pkt.ts
                         print(
-                            f"  Timestamp(source={ts.get_source()} y={ts.y} d={ts.d} "
+                            f"  Timestamp(source={ts.source} y={ts.y} d={ts.d} "
                             f"h:m:s={ts.h}:{ts.m}:{ts.s} ss={ts.ss} "
                             f"sbs={ts.sbs} c={ts.c & 0x1fffffff} "
-                            f"recent={'Y' if ts.is_recent() else 'N'})"
+                            f"recent={'Y' if ts.recent else 'N'})"
                         )
 
                         # Sample channels
@@ -672,10 +672,10 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
 
                         ts = pkt.ts
                         print(
-                            f"  Timestamp(source={ts.get_source()} y={ts.y} d={ts.d} "
+                            f"  Timestamp(source={ts.source} y={ts.y} d={ts.d} "
                             f"h:m:s={ts.h}:{ts.m}:{ts.s} ss={ts.ss} "
                             f"sbs={ts.sbs} c={ts.c & 0x1fffffff} "
-                            f"recent={'Y' if ts.is_recent() else 'N'})"
+                            f"recent={'Y' if ts.recent else 'N'})"
                         )
 
                         # Determine number of active slots based on mode

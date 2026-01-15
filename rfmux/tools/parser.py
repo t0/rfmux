@@ -672,8 +672,8 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                             f"seq={pkt.seq} num_samples={pkt.num_samples})"
                         )
                         print(
-                            f"  Slots: slot1={pkt.slot1} slot2={pkt.slot2} "
-                            f"slot3={pkt.slot3} slot4={pkt.slot4}"
+                            f"  Slots: slot1=ch{pkt.slot1+1} slot2=ch{pkt.slot2+1} "
+                            f"slot3=ch{pkt.slot3+1} slot4=ch{pkt.slot4+1}"
                         )
 
                         ts = pkt.ts

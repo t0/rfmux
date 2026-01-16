@@ -12,6 +12,7 @@ for i in range(len(channel)):
     plt.show()
 '''
 
+from typing import Union, List
 import asyncio, inspect
 import enum
 import numpy as np

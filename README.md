@@ -41,7 +41,7 @@ To launch the Periscope GUI, run:
 $ uv run periscope # or periscope
 ```
 
-https://github.com/user-attachments/assets/fa8eb68c-8593-43b1-af96-285720ed0d5f
+https://github.com/user-attachments/assets/581d4ff8-5ea2-493a-9c9c-c93d6ca847e2
 
 ### Scripting with Mock Mode
 

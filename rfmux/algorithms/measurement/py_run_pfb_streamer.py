@@ -19,6 +19,7 @@ import numpy as np
 import socket
 import time
 import traceback
+import warnings
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
@@ -37,7 +38,7 @@ async def py_run_pfb_streamer(crs : CRS,
                               module : int = 1,
                               *, 
                               _bandwidth_derating: float = 0.5,
-                              time_run : float = 10.0,
+                              time_run : float = 4.0,
                               binlim: float = 1e6,
                               trim: bool = True,
                               nsegments: int = 100,
@@ -135,11 +136,12 @@ async def py_run_pfb_streamer(crs : CRS,
             loop = asyncio.get_running_loop()
             sock.setblocking(False)
             packets = []
+
+            slices = [slice(k, None, n_groups) for k in range(n_groups)]
     
             async def receive_attempt():
-                
+
                 slot_lists = [[] for _ in range(n_groups)]
-                slices = [slice(k, None, n_groups) for k in range(n_groups)]
                 
                 start = time.monotonic()
                 # Start receiving packets

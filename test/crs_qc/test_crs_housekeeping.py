@@ -45,20 +45,29 @@ async def test_housekeeping_temperature(d, request, shelf, check):
         )
     ]
 
-    NOM = 50.0
-    MIN = 0.0
-    MAX = 70.0
+    NOM = 50
+    MIN = 0
+    MAX = 70
+    MAX_DIE = 80
 
     sensors = (
         SensorReading(d.TEMPERATURE_SENSOR.MB_R5V0, nom=NOM, min=MIN, max=MAX),
+        SensorReading(d.TEMPERATURE_SENSOR.MB_R5V0_DIE, nom=NOM, min=MIN, max=MAX_DIE),
         SensorReading(d.TEMPERATURE_SENSOR.MB_R3V3A, nom=NOM, min=MIN, max=MAX),
+        SensorReading(d.TEMPERATURE_SENSOR.MB_R3V3A_DIE, nom=NOM, min=MIN, max=MAX_DIE),
         SensorReading(d.TEMPERATURE_SENSOR.MB_R2V5, nom=NOM, min=MIN, max=MAX),
+        SensorReading(d.TEMPERATURE_SENSOR.MB_R2V5_DIE, nom=NOM, min=MIN, max=MAX_DIE),
         SensorReading(d.TEMPERATURE_SENSOR.MB_R1V8, nom=NOM, min=MIN, max=MAX),
+        SensorReading(d.TEMPERATURE_SENSOR.MB_R1V8_DIE, nom=NOM, min=MIN, max=MAX_DIE),
         SensorReading(d.TEMPERATURE_SENSOR.MB_R1V2A, nom=NOM, min=MIN, max=MAX),
+        SensorReading(d.TEMPERATURE_SENSOR.MB_R1V2A_DIE, nom=NOM, min=MIN, max=MAX_DIE),
         SensorReading(d.TEMPERATURE_SENSOR.MB_R1V4, nom=NOM, min=MIN, max=MAX),
+        SensorReading(d.TEMPERATURE_SENSOR.MB_R1V4_DIE, nom=NOM, min=MIN, max=MAX_DIE),
         SensorReading(d.TEMPERATURE_SENSOR.MB_R1V2B, nom=NOM, min=MIN, max=MAX),
-        SensorReading(d.TEMPERATURE_SENSOR.MB_R0V85A, nom=NOM, min=MIN, max=MAX),
-        SensorReading(d.TEMPERATURE_SENSOR.MB_R0V85B, nom=NOM, min=MIN, max=MAX),
+        SensorReading(d.TEMPERATURE_SENSOR.MB_R1V2B_DIE, nom=NOM, min=MIN, max=MAX_DIE),
+        SensorReading(d.TEMPERATURE_SENSOR.MB_R0V85, nom=NOM, min=MIN, max=MAX),
+        SensorReading(d.TEMPERATURE_SENSOR.MB_R0V85A_DIE, nom=NOM, min=MIN, max=MAX_DIE),
+        SensorReading(d.TEMPERATURE_SENSOR.MB_R0V85B_DIE, nom=NOM, min=MIN, max=MAX_DIE),
         SensorReading(d.TEMPERATURE_SENSOR.RFSOC_PL, nom=NOM, min=MIN, max=MAX),
         SensorReading(d.TEMPERATURE_SENSOR.RFSOC_PS, nom=NOM, min=MIN, max=MAX),
     )
@@ -173,7 +182,7 @@ async def test_housekeeping_voltages(d, request, shelf, check):
         SensorReading.relative(d.VOLTAGE_SENSOR.RFSOC_VCCPSIO2, nom=3.3, rel=0.05),
         SensorReading.relative(d.VOLTAGE_SENSOR.RFSOC_VCCPSIO3, nom=3.3, rel=0.05),
         SensorReading(d.VOLTAGE_SENSOR.RFSOC_VCCVREFN, nom=0.0, min=-0.1, max=0.1),
-        SensorReading.relative(d.VOLTAGE_SENSOR.RFSOC_VCCVREFP, nom=1.85, rel=0.05),
+        SensorReading.relative(d.VOLTAGE_SENSOR.RFSOC_VCCVREFP, nom=1.25, rel=0.05),
         SensorReading(d.VOLTAGE_SENSOR.RFSOC_VCC_PSBATT, nom=0.0, min=-0.1, max=0.1),
         SensorReading(
             d.VOLTAGE_SENSOR.RFSOC_VCC_PSDDRPLL, nom=1.8, min=1.710, max=1.890

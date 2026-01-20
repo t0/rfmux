@@ -83,7 +83,7 @@ async def test_housekeeping_temperature(d, request, shelf, check):
         )
     )
     for s, v in zip(sensors, temps):
-        if check(s.min <= v <= s.max):
+        if check.between(v, s.min, s.max):
             rt.pass_(s.name, v, s.nom, s.min, s.max)
         else:
             rt.fail(s.name, v, s.nom, s.min, s.max)
@@ -201,7 +201,7 @@ async def test_housekeeping_voltages(d, request, shelf, check):
         rt := ResultTable("Sensor", "Reading", "Nominal", "Minimum", "Maximum")
     )
     for s, v in zip(sensors, voltages):
-        if check(s.min < v < s.max):
+        if check.between(v, s.min, s.max):
             rt.pass_(s.name, v, s.nom, s.min, s.max)
         else:
             rt.fail(s.name, v, s.nom, s.min, s.max)

@@ -181,6 +181,18 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Structure: {module: {detector_idx: complex_calibration_factor}}
         self.df_calibrations: Dict[int, Dict[int, complex]] = {}
 
+
+        ## Histogram stuff ###
+        self.hist_nbins = 128
+        # Persistent histogram state:
+        # key: (ch_val, "I") or (ch_val, "Q")
+        # value: {"edges": np.ndarray, "counts": np.ndarray, "last_seq": int}
+        self._hist_state: dict[tuple[int, str], dict] = {}
+        
+        # Thread safety (packet thread writes, GUI thread reads)
+        self._hist_mutex = QtCore.QMutex()
+        self.hist_x0 = 1e-3
+
         # --- Initialization Steps ---
         # Initialize structures for tracking background worker threads.
         self._init_workers()
@@ -338,8 +350,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.cb_fft = QtWidgets.QCheckBox("FFT", checked=self.is_mock_mode)
         self.cb_ssb = QtWidgets.QCheckBox("Single Sideband PSD", checked=not self.is_mock_mode)
         self.cb_dsb = QtWidgets.QCheckBox("Dual Sideband PSD", checked=False)
+        self.cb_hist = QtWidgets.QCheckBox("Amplitude Histogram", checked=False)
         
-        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft):
+        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_hist):
             cb_plot_type.toggled.connect(self._build_layout)
         
         self.cb_ssb.toggled.connect(self._handle_psd_toggle)

@@ -41,8 +41,8 @@ async def test_communications(d, request, shelf, check):
         address = socket.gethostbyname(hostname)
         rt.pass_("Name resolution", "Pass")
     except Exception as e:
-        rt.fail("Name resolution", e.message)
-        check.fail(e.message)
+        rt.fail("Name resolution", str(e))
+        check.fail(str(e))
 
     # 2. Can we make a bare HTTP request to it?
     try:
@@ -55,8 +55,8 @@ async def test_communications(d, request, shelf, check):
         ).text
         rt.pass_("HTTP POST", "Pass")
     except Exception as e:
-        rt.fail("HTTP POST", e.message)
-        check.fail(e.message)
+        rt.fail("HTTP POST", str(e))
+        check.fail(str(e))
 
     # 3. Can we receive multicast packets directly?
     try:

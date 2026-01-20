@@ -66,7 +66,7 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Add plot type checkboxes
         for cb in (self.periscope.cb_time, self.periscope.cb_iq, self.periscope.cb_fft, 
-                   self.periscope.cb_ssb, self.periscope.cb_dsb):
+                   self.periscope.cb_ssb, self.periscope.cb_dsb, self.periscope.cb_hist):
             toolbar_layout.addWidget(cb)
         toolbar_layout.addStretch(1)
         

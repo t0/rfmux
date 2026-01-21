@@ -232,7 +232,7 @@ class PeriscopeRuntime:
                 pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
         elif mode_key == "H":
             pw.setLabel("bottom", "Amplitude", units="V" if self.real_units else "Counts")
-            pw.setLabel("left", "Bin Count")
+            pw.setLabel("left", "Bin Count (log)")
         elif mode_key == "S":
             pw.setLogMode(x=True, y=not self.real_units)
             pw.setLabel("bottom", "Freq", units="Hz")
@@ -415,6 +415,19 @@ class PeriscopeRuntime:
                 else:
                     cM = pw.plot(pen=pg.mkPen(colM, width=LINE_WIDTH), name=f"ch{ch_val}-Mag"); cM.setFftMode(True)
                     mode_dict[ch_val] = {"I": cI, "Q": cQ, "Mag": cM}
+            elif mode_key == "H":
+                # 1D histograms for I/Q
+                hI = pg.BarGraphItem(x=[], height=[], width=1.0,
+                                     brush=pg.mkBrush(colI))
+                hQ = pg.BarGraphItem(x=[], height=[], width=1.0,
+                                     brush=pg.mkBrush(colQ))
+                pw.addItem(hI)
+                pw.addItem(hQ)
+    
+                legend.addItem(hI, f"ch{ch_val}{i_suffix}")
+                legend.addItem(hQ, f"ch{ch_val}{q_suffix}")
+    
+                mode_dict[ch_val] = {"I": hI, "Q": hQ}
             elif mode_key == "S":
                 cI = pw.plot(pen=pg.mkPen(colI, width=LINE_WIDTH), name=f"ch{ch_val}{i_suffix}")
                 cQ = pw.plot(pen=pg.mkPen(colQ, width=LINE_WIDTH), name=f"ch{ch_val}{q_suffix}")
@@ -620,8 +633,6 @@ class PeriscopeRuntime:
         """
         # Convert 24-bit datapath to 16-bit ADC scale
         samples = pkt.samples / 256
-        seq = pkt.seq
-        nbins = getattr(self, "hist_nbins", 128)
 
         for ch_val in self.all_chs: # Renamed ch
             if len(samples) <= ch_val-1:
@@ -634,131 +645,6 @@ class PeriscopeRuntime:
             self.buf[ch_val]["M"].add(np.abs(sample))
             self.tbuf[ch_val].add(t_rel)
 
-            # Accumulate histogram persistently (thread-safe)
-            locker = QtCore.QMutexLocker(self._hist_mutex)
-            self._hist_accumulate_from_packet(ch_val, "I", seq, float(sample.real), nbins=nbins)
-            self._hist_accumulate_from_packet(ch_val, "Q", seq, float(sample.imag), nbins=nbins)
-
-    
-    def _rebin_counts_overlap(self, old_edges: np.ndarray, old_counts: np.ndarray,
-                          new_edges: np.ndarray) -> np.ndarray:
-        """
-        Rebin counts from old_edges to new_edges by distributing each old bin's
-        count proportional to overlap with new bins (uniform-within-bin assumption).
-        """
-        new_counts = np.zeros(len(new_edges) - 1, dtype=np.float64)
-    
-        for i, c in enumerate(old_counts):
-            if c == 0:
-                continue
-    
-            a = float(old_edges[i])
-            b = float(old_edges[i + 1])
-            if b <= a:
-                continue
-    
-            # Find overlapping new bin index range
-            j0 = int(np.searchsorted(new_edges, a, side="right") - 1)
-            j1 = int(np.searchsorted(new_edges, b, side="left"))
-    
-            j0 = max(j0, 0)
-            j1 = min(j1, len(new_counts))
-            if j1 <= j0:
-                continue
-    
-            width = b - a
-            for j in range(j0, j1):
-                na = float(new_edges[j])
-                nb = float(new_edges[j + 1])
-                overlap = min(b, nb) - max(a, na)
-                if overlap > 0:
-                    new_counts[j] += c * (overlap / width)
-    
-        return new_counts
-    
-    def _ensure_hist_range(self, st: dict, x: float, nbins: int,
-                       pad_frac: float = 0.05, grow_factor: float = 1.5) -> None:
-        """
-        Ensure x lies within st["edges"]. If not, expand the range and rebin existing counts.
-        Keeps nbins constant.
-        """
-        edges = st["edges"]
-        lo = float(edges[0])
-        hi = float(edges[-1])
-    
-        if lo <= x <= hi:
-            return
-    
-        # Expand symmetrically around current mid until x fits
-        mid = 0.5 * (lo + hi)
-        span = max(hi - lo, 1e-12)
-    
-        new_lo, new_hi = lo, hi
-        while not (new_lo <= x <= new_hi):
-            span *= grow_factor
-            new_lo = mid - 0.5 * span
-            new_hi = mid + 0.5 * span
-    
-        # Pad a bit so x isn't right on the boundary
-        pad = span * pad_frac
-        new_lo -= pad
-        new_hi += pad
-    
-        new_edges = np.linspace(new_lo, new_hi, nbins + 1)
-    
-        # Rebin counts
-        old_edges = st["edges"]
-        old_counts = st["counts"]
-        st["edges"] = new_edges
-        st["counts"] = self._rebin_counts_overlap(old_edges, old_counts, new_edges)
-    
-    
-    def _hist_accumulate_from_packet(self, ch_val: int, which: str,
-                                     seq: int, x: float, nbins: int) -> None:
-        """
-        Persistently accumulate histogram counts using pkt.seq gating.
-    
-        - Each (ch_val, which) stream uses seq to avoid double-counting.
-        - Auto-expands and rebins when x is outside current edges.
-        - Uses a signed log-like transform to accommodate very large dynamic range
-          (e.g., milli to kilo) while supporting negative values.
-        """
-        key = (ch_val, which)
-        st = self._hist_state.get(key)
-    
-        # Signed log-like transform (works for negative I/Q and huge dynamic range)
-        # x0 controls the linear region near zero; set self.hist_x0 in __init__.
-        x0 = getattr(self, "hist_x0", 1e-3)
-        x_t = float(np.sign(x) * np.log10(1.0 + (abs(x) / x0)))
-    
-        # Initialize on first use (edges are in transformed space)
-        if st is None:
-            mid = x_t
-            # Start with a fixed span in transformed units (~1 decade-ish coverage)
-            span = 1.0
-            lo, hi = mid - span, mid + span
-            if hi <= lo:
-                lo, hi = mid - 1.0, mid + 1.0
-    
-            edges = np.linspace(lo, hi, nbins + 1)
-            counts = np.zeros(nbins, dtype=np.float64)
-            st = {"edges": edges, "counts": counts, "last_seq": seq - 1}
-            self._hist_state[key] = st
-    
-        # Seq gate: skip duplicates / old packets
-        if seq <= st["last_seq"]:
-            return
-        st["last_seq"] = seq
-    
-        # Expand + rebin if needed (in transformed space)
-        self._ensure_hist_range(st, x_t, nbins=nbins, pad_frac=0.05, grow_factor=1.5)
-    
-        edges = st["edges"]
-        counts = st["counts"]
-    
-        idx = int(np.searchsorted(edges, x_t, side="right") - 1)
-        if 0 <= idx < counts.size:
-            counts[idx] += 1.0
 
     def reset_histogram_channel(self, ch_val: int) -> None:
         """Clear persistent histogram state for one channel (I and Q)."""
@@ -835,138 +721,112 @@ class PeriscopeRuntime:
                 # Qt object was deleted, skip this update
                 pass
 
-        ##### For persistent update of Histogram ####
         if "H" in rowCurves and ch_val in rowCurves["H"]:
             cset = rowCurves["H"][ch_val]
             try:
-                locker = QtCore.QMutexLocker(self._hist_mutex)
+                nbins = getattr(self, "hist_nbins", 128)
         
-                for which in ("I", "Q"):
-                    if which not in cset:
-                        continue
-                    item = cset[which]
-                    if sip.isdeleted(item) or not item.isVisible():
-                        continue
+                if "I" in cset and not sip.isdeleted(cset["I"]) and cset["I"].isVisible():
+                    self._set_hist_bargraph_dynamic(
+                        ch_val, "I", cset["I"], I_data, nbins=nbins
+                    )
         
-                    st = self._hist_state.get((ch_val, which))
-                    if st is None:
-                        continue
-        
-                    edges = st["edges"]
-                    counts = st["counts"]
-                    centers = 0.5 * (edges[:-1] + edges[1:])
-                    width = edges[1] - edges[0]
-        
-                    item.setOpts(x=centers, height=counts, width=width)
+                if "Q" in cset and not sip.isdeleted(cset["Q"]) and cset["Q"].isVisible():
+                    self._set_hist_bargraph_dynamic(
+                        ch_val, "Q", cset["Q"], Q_data, nbins=nbins
+                    )
         
             except RuntimeError:
                 pass
 
-        # if "H" in rowCurves and ch_val in rowCurves["H"]:
-        #     cset = rowCurves["H"][ch_val]
-        #     try:
-        #         nbins = getattr(self, "hist_nbins", 128)
-        
-        #         if "I" in cset and not sip.isdeleted(cset["I"]) and cset["I"].isVisible():
-        #             self._set_hist_bargraph_dynamic(
-        #                 ch_val, "I", cset["I"], I_data, nbins=nbins
-        #             )
-        
-        #         if "Q" in cset and not sip.isdeleted(cset["Q"]) and cset["Q"].isVisible():
-        #             self._set_hist_bargraph_dynamic(
-        #                 ch_val, "Q", cset["Q"], Q_data, nbins=nbins
-        #             )
-        
-        #     except RuntimeError:
-        #         pass
-
-    # def _true_minmax(self, x: np.ndarray):
-    #     """
-    #     Compute the true amplitude range of a data array.
+    def _true_minmax(self, x: np.ndarray):
+        """
+        Compute the true amplitude range of a data array.
     
-    #     Filters non-finite values and guarantees a non-degenerate (min, max)
-    #     range suitable for histogram binning and axis scaling.
-    #     """
-    #     x = np.asarray(x)
-    #     x = x[np.isfinite(x)]
-    #     if x.size == 0:
-    #         return None, None
+        Filters non-finite values and guarantees a non-degenerate (min, max)
+        range suitable for histogram binning and axis scaling.
+        """
+        x = np.asarray(x)
+        x = x[np.isfinite(x)]
+        if x.size == 0:
+            return None, None
     
-    #     lo = float(np.min(x))
-    #     hi = float(np.max(x))
+        lo = float(np.min(x))
+        hi = float(np.max(x))
     
-    #     # Prevent degenerate range (all samples identical)
-    #     if hi <= lo:
-    #         mid = lo
-    #         eps = 1e-6 if mid == 0.0 else abs(mid) * 1e-6
-    #         return mid - eps, mid + eps
+        # Prevent degenerate range (all samples identical)
+        if hi <= lo:
+            mid = lo
+            eps = 1e-6 if mid == 0.0 else abs(mid) * 1e-6
+            return mid - eps, mid + eps
     
-    #     return lo, hi
+        return lo, hi
 
 
-    # def _smooth_range(self, key, lo, hi, alpha=0.2, pad_frac=0.05):
-    #     """
-    #     Smooth and stabilize histogram amplitude ranges over time.
+    def _smooth_range(self, key, lo, hi, alpha=0.2, pad_frac=0.05):
+        """
+        Smooth and stabilize histogram amplitude ranges over time.
     
-    #     Applies padding and exponential smoothing to successive (min, max)
-    #     values to prevent axis jitter in real-time histogram displays.
+        Applies padding and exponential smoothing to successive (min, max)
+        values to prevent axis jitter in real-time histogram displays.
     
-    #     Args:
-    #         key (hashable): Identifier for the histogram (e.g., channel and I/Q).
-    #         lo (float): Current lower bound of the data range.
-    #         hi (float): Current upper bound of the data range.
-    #         alpha (float): Smoothing factor for range updates.
-    #         pad_frac (float): Fractional padding applied to the range.
-    #     """
-    #     if not hasattr(self, "_hist_ranges"):
-    #         self._hist_ranges = {}
+        Args:
+            key (hashable): Identifier for the histogram (e.g., channel and I/Q).
+            lo (float): Current lower bound of the data range.
+            hi (float): Current upper bound of the data range.
+            alpha (float): Smoothing factor for range updates.
+            pad_frac (float): Fractional padding applied to the range.
+        """
+        if not hasattr(self, "_hist_ranges"):
+            self._hist_ranges = {}
     
-    #     span = hi - lo
-    #     pad = span * pad_frac
-    #     lo2, hi2 = lo - pad, hi + pad
+        span = hi - lo
+        pad = span * pad_frac
+        lo2, hi2 = lo - pad, hi + pad
     
-    #     prev = self._hist_ranges.get(key)
-    #     if prev is None:
-    #         self._hist_ranges[key] = (lo2, hi2)
-    #         return lo2, hi2
+        prev = self._hist_ranges.get(key)
+        if prev is None:
+            self._hist_ranges[key] = (lo2, hi2)
+            return lo2, hi2
     
-    #     plo, phi = prev
-    #     slo = (1 - alpha) * plo + alpha * lo2
-    #     shi = (1 - alpha) * phi + alpha * hi2
+        plo, phi = prev
+        slo = (1 - alpha) * plo + alpha * lo2
+        shi = (1 - alpha) * phi + alpha * hi2
     
-    #     if shi <= slo:
-    #         mid = 0.5 * (slo + shi)
-    #         eps = 1e-6 if mid == 0.0 else abs(mid) * 1e-6
-    #         slo, shi = mid - eps, mid + eps
+        if shi <= slo:
+            mid = 0.5 * (slo + shi)
+            eps = 1e-6 if mid == 0.0 else abs(mid) * 1e-6
+            slo, shi = mid - eps, mid + eps
     
-    #     self._hist_ranges[key] = (slo, shi)
-    #     return slo, shi
+        self._hist_ranges[key] = (slo, shi)
+        return slo, shi
 
-    # def _set_hist_bargraph_dynamic(self, ch_val, which, item, data, nbins=128):
-    #     """
-    #     Update a 1D histogram plot with dynamically computed amplitude ranges.
+    def _set_hist_bargraph_dynamic(self, ch_val, which, item, data, nbins=128):
+        """
+        Update a 1D histogram plot with dynamically computed amplitude ranges.
     
-    #     Computes the true data range, applies temporal smoothing, and updates
-    #     the associated BarGraphItem for real-time visualization.
+        Computes the true data range, applies temporal smoothing, and updates
+        the associated BarGraphItem for real-time visualization.
     
-    #     Args:
-    #         ch_val (int): Channel ID associated with the histogram.
-    #         which (str): Data selector (e.g., "I" or "Q").
-    #         item (pg.BarGraphItem): Histogram plot item to update.
-    #         data (np.ndarray): Input data used to build the histogram.
-    #         nbins (int): Number of histogram bins.
-    #     """
-    #     lo, hi = self._true_minmax(data)
-    #     if lo is None:
-    #         return
+        Args:
+            ch_val (int): Channel ID associated with the histogram.
+            which (str): Data selector (e.g., "I" or "Q").
+            item (pg.BarGraphItem): Histogram plot item to update.
+            data (np.ndarray): Input data used to build the histogram.
+            nbins (int): Number of histogram bins.
+        """
+        lo, hi = self._true_minmax(data)
+        if lo is None:
+            return
     
-    #     lo, hi = self._smooth_range((ch_val, which), lo, hi, alpha=0.2, pad_frac=0.05)
+        lo, hi = self._smooth_range((ch_val, which), lo, hi, alpha=0.2, pad_frac=0.05)
     
-    #     counts, edges = np.histogram(data, bins=nbins, range=(lo, hi))
-    #     centers = 0.5 * (edges[:-1] + edges[1:])
-    #     width = edges[1] - edges[0]
+        counts, edges = np.histogram(data, bins=nbins, range=(lo, hi))
+        counts_display = np.log10(counts + 1.0)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        width = edges[1] - edges[0]
 
-    #     item.setOpts(x=centers, height=counts, width=width)
+        item.setOpts(x=centers, height=counts_display, width=width)
     
         
     def _dispatch_iq_task(self, row_i: int, group: list[int], rowCurves: dict):

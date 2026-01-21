@@ -171,7 +171,7 @@ async def py_run_pfb_streamer(crs : CRS,
                 break
             else:
                 raise RuntimeError(
-                    f"Failed to retrieve contiguous, consistent packet capture in {NUM_ATTEMPTS} attempts! Do either or all. 1.Check network config\n 2.Reduce the number of channels\n 3. Reduce the acquistion time.")
+                    f"Failed to retrieve contiguous, consistent packet capture in {NUM_ATTEMPTS} attempts! Do either or all. 1.Check network config\n 2.Reduce the number of channels\n 3. Reduce the acquisition time.")
         
         ###### Spectrum and TOD ######
         

@@ -27,9 +27,6 @@ from ...tuber.codecs import TuberResult
 from ...core.transferfunctions import VOLTS_PER_ROC
 from ... import streamer
 
-from scipy.signal.windows import chebwin
-from scipy.interpolate import interp1d
-
 from .py_get_pfb_samples import separate_iq_fft_to_i_and_q_linear, apply_pfb_correction
 
 @macro(CRS, register=True)
@@ -37,7 +34,6 @@ async def py_run_pfb_streamer(crs : CRS,
                               channel : Union[None, int, List[int]] = None,
                               module : int = 1,
                               *, 
-                              _bandwidth_derating: float = 0.5,
                               time_run : float = 4.0,
                               binlim: float = 1e6,
                               trim: bool = True,
@@ -73,10 +69,6 @@ async def py_run_pfb_streamer(crs : CRS,
     module : int, default 1
         CRS module index (must be in the range 1–8).
 
-    _bandwidth_derating : float, keyword-only
-        Bandwidth derating factor passed to the PFB streamer configuration.
-        Controls streaming bandwidth share between fast and slow. 
-
     time_run : float, keyword-only
         Duration (in seconds) to capture PFB packets.
 
@@ -105,7 +97,7 @@ async def py_run_pfb_streamer(crs : CRS,
           - "q": time-domain Q samples (per channel)
           - "spectrum": a nested TuberResult with frequency axes and
             single- and dual-sideband PSDs for each channel.
-    """
+    """   
     
     if channel is None:
         print(f"[Pfb streaming]: No channels specified. No Pfb streaming.")
@@ -114,7 +106,7 @@ async def py_run_pfb_streamer(crs : CRS,
     
     try:
         #### Activate streaming ####
-        await crs.set_pfb_streamer(channel = channel, module = module, _bandwidth_derating = _bandwidth_derating)
+        await crs.set_pfb_streamer(channel = channel, module = module)
     
         #### rechecking if its active ####
         pfb_state = await crs.get_pfb_streamer(module = module)
@@ -166,7 +158,7 @@ async def py_run_pfb_streamer(crs : CRS,
                 return sorted(packets, key=lambda p: p.seq), pfb_samps
                 
             # Allow up to 10 packet-loss retries
-            for attempt in range(NUM_ATTEMPTS := 10):
+            for attempt in range(NUM_ATTEMPTS := 3):
                 packets, samples = await receive_attempt()
     
                 sequence_steps = np.diff([p.seq for p in packets])
@@ -179,8 +171,7 @@ async def py_run_pfb_streamer(crs : CRS,
                 break
             else:
                 raise RuntimeError(
-                    f"Failed to retrieve contiguous, consistent packet capture in {NUM_ATTEMPTS} attempts!"
-                )
+                    f"Failed to retrieve contiguous, consistent packet capture in {NUM_ATTEMPTS} attempts! Do either or all. 1.Check network config\n 2.Reduce the number of channels\n 3. Reduce the acquistion time.")
         
         ###### Spectrum and TOD ######
         
@@ -256,11 +247,20 @@ async def py_run_pfb_streamer(crs : CRS,
         }
     
         return TuberResult(results)
-        
-    except Exception:
-        print("[Pfb streaming]: Exception occurred:")
-        traceback.print_exc()   # prints full traceback
-        raise
+
+    except Exception as e:
+        if e.__class__.__name__ == "TuberRemoteError":
+            raise RuntimeError(
+                "[Pfb streaming] Remote call failed: bandwidth limit exceeded.\n"
+                "Mitigations:\n"
+                "  1) Reduce the number of channels requested\n"
+                "  2) Increase decimation (e.g., 6)\n"
+            )
+    
+        else:
+            print("[Pfb streaming]: Exception occurred:")
+            traceback.print_exc()
+            raise
     
     finally:
         print(f"[Pfb streaming] Shutting off the streaming")

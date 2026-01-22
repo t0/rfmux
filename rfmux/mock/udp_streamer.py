@@ -324,7 +324,7 @@ class MockCRSUDPStreamer(threading.Thread):
         # Pre-calculate constants from unified configuration (SoT)
         cfg = getattr(self.mock_crs, "physics_config", {}) or {}
         scale_factor = cfg.get("scale_factor", 2**21)
-        full_scale = scale_factor  # Full scale in normalized units
+        full_scale = scale_factor * 256. # Full scale in normalized units, scaled up by 256 to account for 24-bit scalar packing into 32-bit packets
         noise_level = cfg.get("udp_noise_level", 10.0)  # Base noise level
 
         # Noise is in normalized units

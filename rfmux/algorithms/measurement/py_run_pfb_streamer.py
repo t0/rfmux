@@ -2,7 +2,7 @@
 Example run for 4 random channels 
 
 channel = [13, 23, 37, 47]
-result = await crs.py_run_pfb_streamer(channel = channel, module = 1, _bandwidth_derating = 0.8, time_run = 0.5) 
+result = await crs.py_run_pfb_streamer(channel = channel, module = 1, time_run = 0.5) 
 
 #### Plotting spectrum for each channel #####
 

@@ -1510,6 +1510,7 @@ class PeriscopeRuntime:
         data = self.channel_noise_data
         spectrum_data = self.channel_noise_data.get('data')
         noise_params = self.channel_noise_data.get('noise_parameters')
+        channels = noise_params['channel_noise']
         
         if not spectrum_data:
             print("Warning: No noise spectrum data available")
@@ -1535,13 +1536,14 @@ class PeriscopeRuntime:
             dark_mode=self.dark_mode,
             all_detectors_data=all_detectors_data,
             initial_detector_idx=detector_idx,
-            spectrum_data=spectrum_data
+            spectrum_data=spectrum_data,
+            channels = channels
         )
         
         # Increment counter and use for tab name
         self.channel_noise_panel_count += 1
         loaded_suffix = " (Loaded)" if self.loaded_channel_noise else ""
-        dock_title = f"Noise Spectrum #{self.channel_noise_panel_count}{loaded_suffix}"
+        dock_title = f"Channel Noise Spectrum #{self.channel_noise_panel_count}{loaded_suffix}"
         dock_id = f"noise_{self.channel_noise_panel_count}_{int(time.time())}"
         
         # Create dock

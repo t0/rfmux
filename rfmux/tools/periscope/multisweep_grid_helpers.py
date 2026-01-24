@@ -1,9 +1,8 @@
 """
 Helper functions for rendering per-detector grid plots in multisweep panels.
 
-This module provides reusable plotting functions that can be used by both
-MultisweepPanel and MultisweepAggregateTabbedPanel to create grids of
-per-detector sweep plots.
+This module provides reusable plotting functions used by MultisweepPanel
+to create grids of per-detector sweep plots.
 """
 
 import numpy as np

@@ -74,6 +74,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.digest_window_count = 0  # Counter for naming digest tabs
         self.noise_panel_count = 0    # Counter for naming noise tabs
         
+        # Track auto-generated aggregate panel
+        self.auto_aggregate_panel = None
+        
         # Stores the initial/base CFs for detector ID and fallback. Order is important.
         self.conceptual_resonance_frequencies: list[float] = list(self.initial_params.get('resonance_frequencies', []))
         # Stores {amp: {conceptual_idx: output_cf}}
@@ -164,6 +167,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_spectrum_btn.setToolTip("Open a dialog to configure and get the noise spectrum, will only work if KIDS is biased.")
         self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
         toolbar_layout.addWidget(self.noise_spectrum_btn)
+        
+        # Aggregate Plots Button
+        self.aggregate_plots_btn = QtWidgets.QPushButton("Aggregate Plots")
+        self.aggregate_plots_btn.setToolTip("View aggregate sweep plots or parameter histograms")
+        self.aggregate_plots_btn.clicked.connect(self._show_aggregate_plots)
+        toolbar_layout.addWidget(self.aggregate_plots_btn)
         
         # Spacer to push subsequent items to the right
         toolbar_layout.addStretch(1)
@@ -502,6 +511,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {}).update(results_for_history)
 
         self._redraw_plots() # Refresh plots with the new data
+        
+        # Auto-generate or update aggregate panel
+        self._update_or_create_auto_aggregate_panel()
         
         # Note: We now update the status in handle_starting_iteration() instead of here
 
@@ -965,6 +977,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
             # Reset window state for the new sweep
             self.results_by_iteration.clear()
+            
+            # Close auto-aggregate panel if it exists
+            if self.auto_aggregate_panel is not None:
+                try:
+                    self.auto_aggregate_panel.close()
+                except RuntimeError:
+                    pass
+                self.auto_aggregate_panel = None
+            
             self._redraw_plots() # Clear plots
             if self.progress_bar: self.progress_bar.setValue(0)
             if self.progress_group: self.progress_group.setVisible(True)
@@ -1673,6 +1694,76 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     pass
         
         return best_cf_found
+    
+    def _get_periscope_parent(self):
+        """Find and return the Periscope parent window."""
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'dock_manager'):
+                return parent
+            parent = parent.parent()
+        return None
+    
+    def _update_or_create_auto_aggregate_panel(self):
+        """
+        Create or update the auto-generated aggregate panel.
+        Called after each amplitude sweep completes.
+        """
+        # Only auto-generate if not loaded data
+        if self.is_loaded_data:
+            # For loaded data, generate all at once when button is clicked
+            return
+            
+        # Check if we have data
+        if not self.results_by_iteration:
+            return
+            
+        # Find Periscope parent
+        periscope = self._get_periscope_parent()
+        if not periscope:
+            return
+            
+        # Check if auto-aggregate panel exists and is still valid
+        if self.auto_aggregate_panel is not None:
+            # Check if the panel widget still exists
+            try:
+                if self.auto_aggregate_panel.isVisible():
+                    # Panel exists, update it
+                    self.auto_aggregate_panel.update_with_new_data()
+                    return
+                else:
+                    # Panel was closed, create a new one
+                    self.auto_aggregate_panel = None
+            except RuntimeError:
+                # Panel was deleted, create a new one
+                self.auto_aggregate_panel = None
+        
+        # Create new auto-aggregate panel
+        from .multisweep_aggregate_tabbed_panel import MultisweepAggregateTabbedPanel
+        
+        panel = MultisweepAggregateTabbedPanel(
+            parent=self,
+            multisweep_panel=self,
+            dark_mode=self.dark_mode,
+            is_auto=True
+        )
+        
+        # Store reference
+        self.auto_aggregate_panel = panel
+        
+        # Create dock with (Auto) suffix
+        dock_title = f"Aggregate Plots (Auto) - Module {self.target_module}"
+        dock_id = f"aggregate_auto_{self.target_module}_{int(time.time())}"
+        dock = periscope.dock_manager.create_dock(panel, dock_title, dock_id)
+        
+        # Tabify with this multisweep panel's dock
+        my_dock = periscope.dock_manager.find_dock_for_widget(self)
+        if my_dock:
+            periscope.tabifyDockWidget(my_dock, dock)
+        
+        # Show and activate the dock
+        dock.show()
+        dock.raise_()
         
     def apply_theme(self, dark_mode: bool):
         """Apply the dark/light theme to all plots in this window."""
@@ -1728,6 +1819,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         for noise_window in self.noise_spectrum_windows:
             if hasattr(noise_window, 'apply_theme'):
                 noise_window.apply_theme(dark_mode)
+        
+        # Propagate to auto-aggregate panel
+        if self.auto_aggregate_panel is not None:
+            try:
+                if hasattr(self.auto_aggregate_panel, 'apply_theme'):
+                    self.auto_aggregate_panel.apply_theme(dark_mode)
+            except RuntimeError:
+                # Panel was deleted
+                self.auto_aggregate_panel = None
     
     def _bias_kids(self):
         """
@@ -1853,3 +1953,54 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Clean up the task
         self.bias_kids_task = None
+    
+    def _show_aggregate_plots(self):
+        """
+        Manually create a new aggregate plots panel with tabs.
+        No dialog - directly creates the unified tabbed panel.
+        """
+        # Check if we have data
+        if not self.results_by_iteration:
+            QtWidgets.QMessageBox.warning(
+                self, "No Data",
+                "No multisweep data available. Please run a multisweep first."
+            )
+            return
+        
+        # Find Periscope parent to create docked panel
+        periscope = self._get_periscope_parent()
+        if not periscope:
+            QtWidgets.QMessageBox.warning(
+                self, "Parent Not Available",
+                "Cannot create aggregate panel without parent window."
+            )
+            return
+        
+        # Import the tabbed panel
+        from .multisweep_aggregate_tabbed_panel import MultisweepAggregateTabbedPanel
+        
+        # Create manual (non-auto) tabbed aggregate panel
+        panel = MultisweepAggregateTabbedPanel(
+            parent=self,
+            multisweep_panel=self,
+            dark_mode=self.dark_mode,
+            is_auto=False
+        )
+        
+        # Create dock - use counter for manual panels
+        if not hasattr(self, 'manual_aggregate_count'):
+            self.manual_aggregate_count = 0
+        self.manual_aggregate_count += 1
+        
+        dock_title = f"Aggregate Plots #{self.manual_aggregate_count} - Module {self.target_module}"
+        dock_id = f"aggregate_manual_{self.target_module}_{int(time.time())}"
+        dock = periscope.dock_manager.create_dock(panel, dock_title, dock_id)
+        
+        # Tabify with this multisweep panel's dock
+        my_dock = periscope.dock_manager.find_dock_for_widget(self)
+        if my_dock:
+            periscope.tabifyDockWidget(my_dock, dock)
+        
+        # Show and activate the dock
+        dock.show()
+        dock.raise_()

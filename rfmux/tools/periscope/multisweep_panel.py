@@ -127,7 +127,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.iq_sweep_plots = {}   # {detector_id: plot_widget}
 
         self._setup_ui()
-        self.resize(1200, 800) # Default window size
+        
+        # Set reasonable minimum size but allow flexible sizing
+        self.setMinimumSize(600, 400)
+        # Preferred size policy - adapt to dock size without forcing window resize
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Preferred
+        )
 
     def _setup_ui(self):
         """Sets up the main UI layout, toolbar, and plot area."""

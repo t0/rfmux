@@ -74,9 +74,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.digest_window_count = 0  # Counter for naming digest tabs
         self.noise_panel_count = 0    # Counter for naming noise tabs
         
-        # Track auto-generated aggregate panel
-        self.auto_aggregate_panel = None
-        
         # Stores the initial/base CFs for detector ID and fallback. Order is important.
         self.conceptual_resonance_frequencies: list[float] = list(self.initial_params.get('resonance_frequencies', []))
         # Stores {amp: {conceptual_idx: output_cf}}
@@ -120,6 +117,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Bias KIDs output storage
         self.bias_kids_output = None  # Stores the output from bias_kids algorithm
         self.nco_frequency_hz = None  # NCO frequency used when biasing (stored for export)
+
+        # Initialize batch tracking for sweep tabs (before _setup_ui)
+        self.current_batch = 0
+        self.batch_size = 50
+        
+        # Storage for sweep grid plots
+        self.mag_sweep_plots = {}  # {detector_id: plot_widget}
+        self.iq_sweep_plots = {}   # {detector_id: plot_widget}
 
         self._setup_ui()
         self.resize(1200, 800) # Default window size
@@ -168,14 +173,36 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
         toolbar_layout.addWidget(self.noise_spectrum_btn)
         
-        # Aggregate Plots Button
-        self.aggregate_plots_btn = QtWidgets.QPushButton("Aggregate Plots")
-        self.aggregate_plots_btn.setToolTip("View aggregate sweep plots or parameter histograms")
-        self.aggregate_plots_btn.clicked.connect(self._show_aggregate_plots)
-        toolbar_layout.addWidget(self.aggregate_plots_btn)
-        
         # Spacer to push subsequent items to the right
         toolbar_layout.addStretch(1)
+        
+        # Batch navigation controls (for sweep tabs)
+        self.batch_label = QtWidgets.QLabel("Batch:")
+        toolbar_layout.addWidget(self.batch_label)
+        
+        self.prev_batch_btn = QtWidgets.QPushButton("◀")
+        self.prev_batch_btn.setToolTip("Previous batch")
+        self.prev_batch_btn.clicked.connect(self._prev_batch)
+        toolbar_layout.addWidget(self.prev_batch_btn)
+        
+        self.batch_info_label = QtWidgets.QLabel("1 of 1")
+        self.batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.batch_info_label.setMinimumWidth(60)
+        toolbar_layout.addWidget(self.batch_info_label)
+        
+        self.next_batch_btn = QtWidgets.QPushButton("▶")
+        self.next_batch_btn.setToolTip("Next batch")
+        self.next_batch_btn.clicked.connect(self._next_batch)
+        toolbar_layout.addWidget(self.next_batch_btn)
+        
+        self.batch_size_spin = QtWidgets.QSpinBox()
+        self.batch_size_spin.setRange(10, 200)
+        self.batch_size_spin.setValue(self.batch_size)
+        self.batch_size_spin.setSingleStep(10)
+        self.batch_size_spin.setToolTip("Detectors per batch")
+        self.batch_size_spin.setPrefix("Size: ")
+        self.batch_size_spin.valueChanged.connect(self._batch_size_changed)
+        toolbar_layout.addWidget(self.batch_size_spin)
 
         # Normalization Checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
@@ -233,22 +260,66 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         toolbar_layout.addWidget(self.zoom_box_cb)
 
     def _setup_plot_area(self, layout):
-        """Sets up the magnitude and phase plot widgets."""
-        plot_container = QtWidgets.QWidget()
-        plot_layout = QtWidgets.QVBoxLayout(plot_container)
+        """Sets up the tabbed plot area with aggregate and combined views."""
+        # Create tab widget
+        self.plot_tabs = QtWidgets.QTabWidget()
+        self.plot_tabs.currentChanged.connect(self._on_plot_tab_changed)
+        
+        # Tab 0: Magnitude Sweeps (per-detector grid)
+        self.mag_sweeps_tab, self.mag_sweeps_grid = self._create_sweep_tab()
+        self.plot_tabs.addTab(self.mag_sweeps_tab, "Magnitude Sweeps")
+        
+        # Tab 1: IQ Circles (per-detector grid)
+        self.iq_sweeps_tab, self.iq_sweeps_grid = self._create_sweep_tab()
+        self.plot_tabs.addTab(self.iq_sweeps_tab, "IQ Circles")
+        
+        # Tab 2: Combined Plots (original combined view)
+        self.combined_tab = self._create_combined_tab()
+        self.plot_tabs.addTab(self.combined_tab, "Combined Plots")
+        
+        # Set default tab to Magnitude Sweeps
+        self.plot_tabs.setCurrentIndex(0)
+        
+        layout.addWidget(self.plot_tabs)
+        
+    def _create_sweep_tab(self):
+        """Create a tab for sweep plots (magnitude or IQ). Returns (tab, grid_layout)."""
+        tab = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Scroll area for plots
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        
+        # Container for grid
+        container = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(container)
+        grid.setSpacing(10)
+        
+        scroll.setWidget(container)
+        tab_layout.addWidget(scroll)
+        
+        return tab, grid
+        
+    def _create_combined_tab(self):
+        """Create the combined plots tab (original magnitude + phase plots)."""
+        tab = QtWidgets.QWidget()
+        plot_layout = QtWidgets.QVBoxLayout(tab)
+        plot_layout.setContentsMargins(5, 5, 5, 5)
 
         # Magnitude Plot
-        vb_mag = ClickableViewBox() # Custom viewbox for potential extra click interactions
-        vb_mag.parent_window = self # Link back to this window if needed by viewbox
+        vb_mag = ClickableViewBox()
+        vb_mag.parent_window = self
         self.combined_mag_plot = pg.PlotWidget(viewBox=vb_mag)
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
         plot_item_mag = self.combined_mag_plot.getPlotItem()
-        if plot_item_mag: # Add check for None
+        if plot_item_mag:
             plot_item_mag.setTitle("Combined S21 Magnitude (All Resonances)", color=pen_color)
             plot_item_mag.setLabel('bottom', 'Frequency', units='Hz')
             plot_item_mag.showGrid(x=True, y=True, alpha=0.3)
             self.mag_legend = plot_item_mag.addLegend(offset=(10,-50),labelTextColor=pen_color)
-        self._update_mag_plot_label() # Set initial Y-axis label based on unit mode
+        self._update_mag_plot_label()
         plot_layout.addWidget(self.combined_mag_plot)
 
         # Phase Plot
@@ -256,7 +327,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         vb_phase.parent_window = self
         self.combined_phase_plot = pg.PlotWidget(viewBox=vb_phase)
         plot_item_phase = self.combined_phase_plot.getPlotItem()
-        if plot_item_phase: # Add check for None
+        if plot_item_phase:
             plot_item_phase.setTitle("Combined S21 Phase (All Resonances)", color=pen_color)
             plot_item_phase.setLabel('bottom', 'Frequency', units='Hz')
             plot_item_phase.setLabel('left', 'Phase', units='deg')
@@ -264,20 +335,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.phase_legend = plot_item_phase.addLegend(offset=(10,-50),labelTextColor=pen_color)
         plot_layout.addWidget(self.combined_phase_plot)
         
-        layout.addWidget(plot_container)
-        
-        # Link X-axes of magnitude and phase plots for synchronized zooming/panning
-        if self.combined_phase_plot and self.combined_mag_plot: # Add check for None
+        # Link X-axes for synchronized zooming/panning
+        if self.combined_phase_plot and self.combined_mag_plot:
             self.combined_phase_plot.setXLink(self.combined_mag_plot)
-        self._apply_zoom_box_mode() # Apply initial zoom box mode state
+        self._apply_zoom_box_mode()
         
-        # Apply initial theme based on dark_mode setting
-        # bg_color, pen_color are already defined
-        
+        # Apply theme
         if self.combined_mag_plot:
             self.combined_mag_plot.setBackground(bg_color)
             plot_item_mag_for_axes = self.combined_mag_plot.getPlotItem()
-            if plot_item_mag_for_axes: # Add check for None
+            if plot_item_mag_for_axes:
                 for axis_name in ("left", "bottom", "right", "top"):
                     ax = plot_item_mag_for_axes.getAxis(axis_name)
                     if ax:
@@ -287,25 +354,75 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.combined_phase_plot:
             self.combined_phase_plot.setBackground(bg_color)
             plot_item_phase_for_axes = self.combined_phase_plot.getPlotItem()
-            if plot_item_phase_for_axes: # Add check for None
+            if plot_item_phase_for_axes:
                 for axis_name in ("left", "bottom", "right", "top"):
                     ax = plot_item_phase_for_axes.getAxis(axis_name)
                     if ax:
                         ax.setPen(pen_color)
                         ax.setTextPen(pen_color)
 
-        # Connect double click signal to both magnitude and phase plot viewboxes
-        if self.combined_mag_plot: # Add check for None
+        # Connect double click handlers
+        if self.combined_mag_plot:
             view_box_mag = self.combined_mag_plot.getViewBox()
             if isinstance(view_box_mag, ClickableViewBox):
                 view_box_mag.doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
                 
-        # Also connect the phase plot's viewbox to the same handler
-        if self.combined_phase_plot: # Add check for None
+        if self.combined_phase_plot:
             view_box_phase = self.combined_phase_plot.getViewBox()
             if isinstance(view_box_phase, ClickableViewBox):
                 view_box_phase.doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
+        
+        return tab
 
+
+    def _on_plot_tab_changed(self, index):
+        """Handle plot tab changes - show/hide batch controls appropriately."""
+        # Batch controls visible for sweep tabs (0, 1), hidden for combined tab (2)
+        is_sweep_tab = index in (0, 1)
+        
+        self.batch_label.setVisible(is_sweep_tab)
+        self.prev_batch_btn.setVisible(is_sweep_tab)
+        self.batch_info_label.setVisible(is_sweep_tab)
+        self.next_batch_btn.setVisible(is_sweep_tab)
+        self.batch_size_spin.setVisible(is_sweep_tab)
+        
+        # Redraw the active tab's plots if we have data
+        if self.results_by_iteration:
+            self._redraw_plots()
+    
+    def _batch_size_changed(self, value):
+        """Handle batch size change."""
+        self.batch_size = value
+        self.current_batch = 0
+        self._redraw_plots()
+    
+    def _prev_batch(self):
+        """Show previous batch."""
+        if self.current_batch > 0:
+            self.current_batch -= 1
+            self._redraw_plots()
+    
+    def _next_batch(self):
+        """Show next batch."""
+        # Get current tab to determine which data to use
+        current_tab_idx = self.plot_tabs.currentIndex()
+        if current_tab_idx not in (0, 1):  # Only sweep tabs have batches
+            return
+            
+        if not self.results_by_iteration:
+            return
+        
+        # Count detectors
+        detector_ids = set()
+        for iteration_data in self.results_by_iteration.values():
+            detector_ids.update(iteration_data["data"].keys())
+        
+        num_detectors = len(detector_ids)
+        total_batches = max(1, (num_detectors + self.batch_size - 1) // self.batch_size)
+        
+        if self.current_batch < total_batches - 1:
+            self.current_batch += 1
+            self._redraw_plots()
 
     def _toggle_trace_normalization(self, checked):
         """
@@ -512,16 +629,79 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self._redraw_plots() # Refresh plots with the new data
         
-        # Auto-generate or update aggregate panel
-        self._update_or_create_auto_aggregate_panel()
-        
         # Note: We now update the status in handle_starting_iteration() instead of here
 
     def _redraw_plots(self):
         """
-        Clears and redraws all plot items (magnitude and phase curves, legends, CF lines)
-        based on the current `results_by_amplitude` and UI settings (unit, normalization).
+        Redraws plots based on the currently active tab.
+        For sweep tabs (0, 1), uses grid plotting. For combined tab (2), uses original logic.
         """
+        # Early return if no data
+        num_iterations = len(self.results_by_iteration)
+        if num_iterations == 0:
+            # Clear any existing plots
+            if hasattr(self, 'combined_mag_plot') and self.combined_mag_plot:
+                self.combined_mag_plot.clear()
+            if hasattr(self, 'combined_phase_plot') and self.combined_phase_plot:
+                self.combined_phase_plot.clear()
+            return
+        
+        # Get current tab
+        current_tab_idx = self.plot_tabs.currentIndex()
+        
+        # Tabs 0 and 1: Grid sweep plots (magnitude and IQ)
+        if current_tab_idx in (0, 1):
+            self._redraw_sweep_grid(current_tab_idx)
+        # Tab 2: Combined plots (original view)
+        elif current_tab_idx == 2:
+            self._redraw_combined_plots()
+    
+    def _redraw_sweep_grid(self, tab_idx):
+        """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
+        from .multisweep_grid_helpers import (
+            prepare_detector_data_from_iterations,
+            create_amplitude_color_map,
+            update_sweep_grid
+        )
+        
+        # Prepare detector-based data from iterations
+        detector_data = prepare_detector_data_from_iterations(self.results_by_iteration)
+        
+        if not detector_data:
+            return
+        
+        # Get all amplitudes for color mapping
+        all_amps = set()
+        for det_data in detector_data.values():
+            all_amps.update(det_data.keys())
+        
+        # Create amplitude color mapping (matches combined plot colors)
+        amplitude_to_color = create_amplitude_color_map(all_amps, self.dark_mode)
+        
+        # Determine plot type and grid
+        if tab_idx == 0:
+            plot_type = 'magnitude'
+            grid_layout = self.mag_sweeps_grid
+        else:  # tab_idx == 1
+            plot_type = 'iq'
+            grid_layout = self.iq_sweeps_grid
+        
+        # Update the grid
+        update_sweep_grid(
+            grid_layout=grid_layout,
+            data_by_detector=detector_data,
+            plot_type=plot_type,
+            current_batch=self.current_batch,
+            batch_size=self.batch_size,
+            amplitude_to_color=amplitude_to_color,
+            dark_mode=self.dark_mode,
+            prev_btn=self.prev_batch_btn,
+            next_btn=self.next_batch_btn,
+            batch_label=self.batch_info_label
+        )
+    
+    def _redraw_combined_plots(self):
+        """Redraw the combined magnitude and phase plots (original view)."""
         if not self.combined_mag_plot or not self.combined_phase_plot:
             # Plots haven't been initialized yet
             return
@@ -977,14 +1157,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
             # Reset window state for the new sweep
             self.results_by_iteration.clear()
-            
-            # Close auto-aggregate panel if it exists
-            if self.auto_aggregate_panel is not None:
-                try:
-                    self.auto_aggregate_panel.close()
-                except RuntimeError:
-                    pass
-                self.auto_aggregate_panel = None
             
             self._redraw_plots() # Clear plots
             if self.progress_bar: self.progress_bar.setValue(0)
@@ -1704,67 +1876,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             parent = parent.parent()
         return None
     
-    def _update_or_create_auto_aggregate_panel(self):
-        """
-        Create or update the auto-generated aggregate panel.
-        Called after each amplitude sweep completes.
-        """
-        # Only auto-generate if not loaded data
-        if self.is_loaded_data:
-            # For loaded data, generate all at once when button is clicked
-            return
-            
-        # Check if we have data
-        if not self.results_by_iteration:
-            return
-            
-        # Find Periscope parent
-        periscope = self._get_periscope_parent()
-        if not periscope:
-            return
-            
-        # Check if auto-aggregate panel exists and is still valid
-        if self.auto_aggregate_panel is not None:
-            # Check if the panel widget still exists
-            try:
-                if self.auto_aggregate_panel.isVisible():
-                    # Panel exists, update it
-                    self.auto_aggregate_panel.update_with_new_data()
-                    return
-                else:
-                    # Panel was closed, create a new one
-                    self.auto_aggregate_panel = None
-            except RuntimeError:
-                # Panel was deleted, create a new one
-                self.auto_aggregate_panel = None
-        
-        # Create new auto-aggregate panel
-        from .multisweep_aggregate_tabbed_panel import MultisweepAggregateTabbedPanel
-        
-        panel = MultisweepAggregateTabbedPanel(
-            parent=self,
-            multisweep_panel=self,
-            dark_mode=self.dark_mode,
-            is_auto=True
-        )
-        
-        # Store reference
-        self.auto_aggregate_panel = panel
-        
-        # Create dock with (Auto) suffix
-        dock_title = f"Aggregate Plots (Auto) - Module {self.target_module}"
-        dock_id = f"aggregate_auto_{self.target_module}_{int(time.time())}"
-        dock = periscope.dock_manager.create_dock(panel, dock_title, dock_id)
-        
-        # Tabify with this multisweep panel's dock
-        my_dock = periscope.dock_manager.find_dock_for_widget(self)
-        if my_dock:
-            periscope.tabifyDockWidget(my_dock, dock)
-        
-        # Show and activate the dock
-        dock.show()
-        dock.raise_()
-        
     def apply_theme(self, dark_mode: bool):
         """Apply the dark/light theme to all plots in this window."""
         self.dark_mode = dark_mode
@@ -1819,15 +1930,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         for noise_window in self.noise_spectrum_windows:
             if hasattr(noise_window, 'apply_theme'):
                 noise_window.apply_theme(dark_mode)
-        
-        # Propagate to auto-aggregate panel
-        if self.auto_aggregate_panel is not None:
-            try:
-                if hasattr(self.auto_aggregate_panel, 'apply_theme'):
-                    self.auto_aggregate_panel.apply_theme(dark_mode)
-            except RuntimeError:
-                # Panel was deleted
-                self.auto_aggregate_panel = None
     
     def _bias_kids(self):
         """
@@ -1953,54 +2055,3 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Clean up the task
         self.bias_kids_task = None
-    
-    def _show_aggregate_plots(self):
-        """
-        Manually create a new aggregate plots panel with tabs.
-        No dialog - directly creates the unified tabbed panel.
-        """
-        # Check if we have data
-        if not self.results_by_iteration:
-            QtWidgets.QMessageBox.warning(
-                self, "No Data",
-                "No multisweep data available. Please run a multisweep first."
-            )
-            return
-        
-        # Find Periscope parent to create docked panel
-        periscope = self._get_periscope_parent()
-        if not periscope:
-            QtWidgets.QMessageBox.warning(
-                self, "Parent Not Available",
-                "Cannot create aggregate panel without parent window."
-            )
-            return
-        
-        # Import the tabbed panel
-        from .multisweep_aggregate_tabbed_panel import MultisweepAggregateTabbedPanel
-        
-        # Create manual (non-auto) tabbed aggregate panel
-        panel = MultisweepAggregateTabbedPanel(
-            parent=self,
-            multisweep_panel=self,
-            dark_mode=self.dark_mode,
-            is_auto=False
-        )
-        
-        # Create dock - use counter for manual panels
-        if not hasattr(self, 'manual_aggregate_count'):
-            self.manual_aggregate_count = 0
-        self.manual_aggregate_count += 1
-        
-        dock_title = f"Aggregate Plots #{self.manual_aggregate_count} - Module {self.target_module}"
-        dock_id = f"aggregate_manual_{self.target_module}_{int(time.time())}"
-        dock = periscope.dock_manager.create_dock(panel, dock_title, dock_id)
-        
-        # Tabify with this multisweep panel's dock
-        my_dock = periscope.dock_manager.find_dock_for_widget(self)
-        if my_dock:
-            periscope.tabifyDockWidget(my_dock, dock)
-        
-        # Show and activate the dock
-        dock.show()
-        dock.raise_()

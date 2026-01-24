@@ -76,7 +76,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_panel_count = 0    # Counter for naming noise tabs
         
         # Stores the initial/base CFs for detector ID and fallback. Order is important.
-        self.conceptual_resonance_frequencies: list[float] = list(self.initial_params.get('resonance_frequencies', []))
+        self.conceptual_section_frequencies: list[float] = list(self.initial_params.get('resonance_frequencies', []))
         # Stores {amp: {conceptual_idx: output_cf}}
         self.last_output_cfs_by_amp_and_conceptual_idx: dict[float, dict[int, float]] = {}
         # Amps used for the last configured/completed run, to compare if settings changed.
@@ -1116,13 +1116,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Ensure MultisweepDialog is available (local import to avoid circular dependencies if any)
         from .dialogs import MultisweepDialog
 
-        if not self.conceptual_resonance_frequencies: # Check conceptual frequencies
+        if not self.conceptual_section_frequencies: # Check conceptual frequencies
             QtWidgets.QMessageBox.warning(self, "Cannot Re-run",
                                           "No center frequencies are known to periscope to run on.")
             return
 
         # --- Determine frequencies to seed the dialog ---
-        dialog_seed_frequencies = list(self.conceptual_resonance_frequencies) # Start with conceptual
+        dialog_seed_frequencies = list(self.conceptual_section_frequencies) # Start with conceptual
 
         ##### Getting the fit values for updating in re-run ######
 
@@ -1133,7 +1133,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # Use a representative amplitude from the current/last run to seed the dialog
             # For simplicity, let's use the first amplitude from the current_run_amps.
             representative_amp_for_seeding = self.current_run_amps[0]
-            for idx, conceptual_cf in enumerate(self.conceptual_resonance_frequencies):
+            for idx, conceptual_cf in enumerate(self.conceptual_section_frequencies):
                 remembered_cf = self._get_closest_remembered_cf(idx, representative_amp_for_seeding)
                 if remembered_cf is not None:
                     dialog_seed_frequencies[idx] = remembered_cf
@@ -1148,7 +1148,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         dialog = MultisweepDialog(
             parent=self,
-            resonance_frequencies=dialog_seed_frequencies, # Seed with potentially updated CFs
+            section_center_frequencies=dialog_seed_frequencies, # Seed with potentially updated CFs
             dac_scales=self.dac_scales,
             current_module=self.target_module,
             initial_params=dialog_initial_params, # Pass other existing params
@@ -1176,39 +1176,39 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 return # Dialog returned None, likely due to validation error
 
             new_amps_for_this_run = list(new_params_from_dialog.get('amps', []))
-            # resonance_frequencies_from_dialog are the ones dialog was seeded with, as it doesn't change them.
-            resonance_frequencies_from_dialog = list(new_params_from_dialog.get('resonance_frequencies', []))
+            # section_frequencies_from_dialog are the ones dialog was seeded with, as it doesn't change them.
+            section_frequencies_from_dialog = list(new_params_from_dialog.get('resonance_frequencies', []))
 
             # --- Determine the final input CFs for the new sweep task ---
             # This list will be passed to the MultisweepTask as its baseline.
             # The task itself will then refine this per amplitude.
-            final_baseline_cfs_for_new_task = list(self.conceptual_resonance_frequencies)
+            final_baseline_cfs_for_new_task = list(self.conceptual_section_frequencies)
 
             if not new_amps_for_this_run: # No amplitudes specified, fall back or warn
                  QtWidgets.QMessageBox.warning(self, "Configuration Error", "No amplitudes specified for the new sweep.")
-                 # Default to conceptual, or could use resonance_frequencies_from_dialog
-                 final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog if resonance_frequencies_from_dialog else list(self.conceptual_resonance_frequencies)
+                 # Default to conceptual, or could use section_frequencies_from_dialog
+                 final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
             elif new_amps_for_this_run == self.current_run_amps:
                 # Amplitudes haven't changed from the last run configuration.
                 # Use the frequencies that were in the dialog (which were seeded from history).
-                final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog if resonance_frequencies_from_dialog else list(self.conceptual_resonance_frequencies)
+                final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
             else:
-                # Amplitudes have changed. For each conceptual resonance,
+                # Amplitudes have changed. For each conceptual section,
                 # find the best historical CF based on the *new* representative amplitude.
                 # If no history, use what was in the dialog (which was seeded based on old rep. amp or conceptual).
                 if new_amps_for_this_run: # Ensure there's at least one new amp
                     representative_new_amp = new_amps_for_this_run[0]
-                    for idx, conceptual_cf in enumerate(self.conceptual_resonance_frequencies):
+                    for idx, conceptual_cf in enumerate(self.conceptual_section_frequencies):
                         remembered_cf = self._get_closest_remembered_cf(idx, representative_new_amp)
                         if remembered_cf is not None:
                             final_baseline_cfs_for_new_task[idx] = remembered_cf
                         else:
                             # Fallback to what was in the dialog for this index if no better history for new amp
-                            if idx < len(resonance_frequencies_from_dialog):
-                                 final_baseline_cfs_for_new_task[idx] = resonance_frequencies_from_dialog[idx]
+                            if idx < len(section_frequencies_from_dialog):
+                                 final_baseline_cfs_for_new_task[idx] = section_frequencies_from_dialog[idx]
                             # Else it remains the conceptual_cf (already initialized)
                 else: # Should be caught by the "No amplitudes specified" case, but as a safeguard
-                    final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog if resonance_frequencies_from_dialog else list(self.conceptual_resonance_frequencies)
+                    final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
 
 
             # Update the 'resonance_frequencies' in new_params_from_dialog to be this chosen baseline
@@ -1403,7 +1403,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
 
     def _open_noise_spectrum_dialog(self):
-        num_res = len(self.conceptual_resonance_frequencies)
+        num_res = len(self.conceptual_section_frequencies)
         periscope = self._get_periscope_parent()
         
         if not periscope or periscope.crs is None: 
@@ -1488,7 +1488,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     
     
                 self.spectrum_noise_data['noise_parameters'] = params
-                num_res = len(self.conceptual_resonance_frequencies)
+                num_res = len(self.conceptual_section_frequencies)
     
                 amplitudes = []
                 dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
@@ -1614,8 +1614,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             return
             
         # Get conceptual frequency for this detector
-        if detector_idx <= len(self.conceptual_resonance_frequencies) and detector_idx > 0:
-            conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[detector_idx - 1]
+        if detector_idx <= len(self.conceptual_section_frequencies) and detector_idx > 0:
+            conceptual_resonance_base_freq_hz = self.conceptual_section_frequencies[detector_idx - 1]
         else:
             print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
             return
@@ -1623,7 +1623,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Gather data for ALL detectors to enable navigation (similar logic to digest panel)
         all_detectors_data = {}
         # We need conceptual frequencies for navigation
-        for i, freq in enumerate(self.conceptual_resonance_frequencies):
+        for i, freq in enumerate(self.conceptual_section_frequencies):
             det_id = i + 1
             all_detectors_data[det_id] = {
                 'conceptual_freq_hz': freq
@@ -1752,14 +1752,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         noise_data = self.noise_data if self.samples_taken else None
         
         # Get conceptual frequency for this detector
-        if detector_idx <= len(self.conceptual_resonance_frequencies) and detector_idx > 0:
-            conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[detector_idx - 1]
+        if detector_idx <= len(self.conceptual_section_frequencies) and detector_idx > 0:
+            conceptual_resonance_base_freq_hz = self.conceptual_section_frequencies[detector_idx - 1]
         else:
             print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
             return
         
         # Gather data for this specific detector across all amplitudes and directions
-        resonance_data_for_digest = {}
+        section_data_for_digest = {}
         
         # Group iterations by amplitude and direction
         amplitude_direction_to_iteration = {}
@@ -1784,14 +1784,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                                                               resonance_sweep_data.get('original_center_frequency'))
             
             combo_key = f"{amp_val}:{direction}"
-            resonance_data_for_digest[combo_key] = {
+            section_data_for_digest[combo_key] = {
                 'data': resonance_sweep_data,
                 'actual_cf_hz': actual_cf_for_this_amp,
                 'direction': direction,
                 'amplitude': amp_val
             }
         
-        if not resonance_data_for_digest:
+        if not section_data_for_digest:
             print(f"Warning: No data for detector {detector_idx}")
             return
         
@@ -1803,8 +1803,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             all_detector_indices.update(res_data.keys())
         
         for det_idx in sorted(all_detector_indices):
-            if det_idx <= len(self.conceptual_resonance_frequencies) and det_idx > 0:
-                conceptual_freq_hz = self.conceptual_resonance_frequencies[det_idx - 1]
+            if det_idx <= len(self.conceptual_section_frequencies) and det_idx > 0:
+                conceptual_freq_hz = self.conceptual_section_frequencies[det_idx - 1]
             else:
                 conceptual_freq_hz = None
                 for iter_data in self.results_by_iteration.values():
@@ -1862,7 +1862,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Create panel
         panel = DetectorDigestPanel(
             parent=self,
-            resonance_data_for_digest=resonance_data_for_digest,
+            resonance_data_for_digest=section_data_for_digest,
             detector_id=detector_idx,
             resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
             dac_scales=self.dac_scales,
@@ -1901,11 +1901,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _get_closest_remembered_cf(self, conceptual_idx: int, target_amp: float) -> float | None:
         """
-        Finds the remembered output CF for a given conceptual resonance index,
+        Finds the remembered output CF for a given conceptual section index,
         for the amplitude in history closest to target_amp.
 
         Args:
-            conceptual_idx: Index in self.conceptual_resonance_frequencies.
+            conceptual_idx: Index in self.conceptual_section_frequencies.
             target_amp: The amplitude we are trying to find a historical match for.
 
         Returns:
@@ -2091,7 +2091,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Show success dialog
         num_biased = len(biased_results)
-        total_detectors = len(self.conceptual_resonance_frequencies)
+        total_detectors = len(self.conceptual_section_frequencies)
         
         msg = f"Successfully biased {num_biased} out of {total_detectors} detectors.\n\n"
         

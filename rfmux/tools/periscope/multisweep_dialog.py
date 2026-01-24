@@ -69,7 +69,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     Allows specifying parameters for sweeping multiple pre-identified resonances.
     """
     def __init__(self, parent: QtWidgets.QWidget = None, 
-                 resonance_frequencies: list[float] | None = None, 
+                 section_center_frequencies: list[float] | None = None, 
                  dac_scales: dict[int, float] = None, 
                  current_module: int | None = None, 
                  initial_params: dict | None = None, load_multisweep = False, fit_frequencies: list[float] = None):
@@ -78,20 +78,20 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         Args:
             parent: The parent widget.
-            resonance_frequencies: List of resonance frequencies (in Hz) to target.
+            section_center_frequencies: List of center frequencies (in Hz) for each sweep section.
             dac_scales: Pre-fetched DAC scales.
             current_module: The module ID on which the multisweep will be performed.
             initial_params: Dictionary of initial parameters to populate fields.
         """
         super().__init__(parent, params=initial_params, dac_scales=dac_scales)
-        self.resonance_frequencies = resonance_frequencies or []
+        self.section_center_frequencies = section_center_frequencies or []
         self.current_module = current_module # Store the current module for DAC scale and params
         self.load_multisweep = load_multisweep
         self.fit_frequencies = fit_frequencies
 
         self.use_data_from_file = False
         self._load_data = {}
-        self.reso_count = 0
+        self.section_count = 0
 
         self.setWindowTitle("Multisweep Configuration")
         self.setModal(True)
@@ -156,19 +156,19 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         return [self.current_module] if self.current_module is not None else []
 
 
-    def _update_resonance_count(self, text):
-        """Update label with resonance count based on QLineEdit content."""
+    def _update_section_count(self, text):
+        """Update label with section count based on QLineEdit content."""
         text = text.strip()
         if not text:
-            self.resonances_info_label.setText("No data. Enter manually if desired.")
+            self.sections_info_label.setText("No data. Enter manually if desired.")
             self.start_btn.setEnabled(False)
             self.load_btn.setEnabled(False)
             return
         self.start_btn.setEnabled(True)
         # Split on commas, ignore empty pieces
         parts = [p.strip() for p in text.split(",") if p.strip()]
-        self.reso_count = len(parts)
-        self.resonances_info_label.setText(f"Loaded {self.reso_count} resonance(s).")    
+        self.section_count = len(parts)
+        self.sections_info_label.setText(f"Loaded {self.section_count} section(s).")
     
     def _setup_ui(self):
         """Sets up the user interface elements for the Multisweep dialog."""
@@ -180,96 +180,96 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.import_button.clicked.connect(self._import_file)
             layout.addWidget(self.import_button)
     
-            # --- Resonances Section ---
-            res_info_group = QtWidgets.QGroupBox("Target Resonances")
-            res_info_layout = QtWidgets.QVBoxLayout(res_info_group)
+            # --- Sweep Sections ---
+            section_info_group = QtWidgets.QGroupBox("Sweep sections")
+            section_info_layout = QtWidgets.QVBoxLayout(section_info_group)
             
-            res_label_layout = QtWidgets.QHBoxLayout()
-            self.resonances_info_label = QtWidgets.QLabel("No file loaded. Enter manually if desired.")
-            self.resonances_info_label.setWordWrap(True)
-            res_label_layout.addWidget(self.resonances_info_label, stretch=1)
+            section_label_layout = QtWidgets.QHBoxLayout()
+            self.sections_info_label = QtWidgets.QLabel("No file loaded. Enter manually if desired.")
+            self.sections_info_label.setWordWrap(True)
+            section_label_layout.addWidget(self.sections_info_label, stretch=1)
             
-            self.res_freq_combo = QtWidgets.QComboBox()
-            self.res_freq_combo.setEnabled(False)
-            self.res_freq_combo.addItems(["Use multisweep central frequency", "Use resonance fit frequency"])
-            self.res_freq_combo.setToolTip("Select which resonance frequency type to use.")
-            self.res_freq_combo.currentIndexChanged.connect(self._scroll_resonance)
-            res_label_layout.addWidget(self.res_freq_combo)
+            self.section_freq_combo = QtWidgets.QComboBox()
+            self.section_freq_combo.setEnabled(False)
+            self.section_freq_combo.addItems(["Use multisweep central frequency", "Use resonance fit frequency"])
+            self.section_freq_combo.setToolTip("Select which frequency type to use.")
+            self.section_freq_combo.currentIndexChanged.connect(self._scroll_section)
+            section_label_layout.addWidget(self.section_freq_combo)
             
-            res_info_layout.addLayout(res_label_layout)
+            section_info_layout.addLayout(section_label_layout)
     
-            # Manual input fallback (comma-separated resonances in MHz)
-            self.resonances_edit = QtWidgets.QLineEdit()
-            self.resonances_edit.setPlaceholderText("Enter resonance frequencies (MHz, comma separated)")
-            self.resonances_edit.textChanged.connect(self._update_resonance_count)
-            res_info_layout.addWidget(self.resonances_edit)
-            layout.addWidget(res_info_group)
+            # Manual input fallback (comma-separated sweep central frequencies in MHz)
+            self.sections_edit = QtWidgets.QLineEdit()
+            self.sections_edit.setPlaceholderText("Enter sweep central frequencies (MHz, comma separated)")
+            self.sections_edit.textChanged.connect(self._update_section_count)
+            section_info_layout.addWidget(self.sections_edit)
+            layout.addWidget(section_info_group)
 
         elif self.fit_frequencies is not None:
-            res_info_group = QtWidgets.QGroupBox("Target Resonances")
-            res_info_layout = QtWidgets.QVBoxLayout(res_info_group)
+            section_info_group = QtWidgets.QGroupBox("Sweep sections")
+            section_info_layout = QtWidgets.QVBoxLayout(section_info_group)
             
-            res_label_layout = QtWidgets.QHBoxLayout()
-            self.resonances_info_label = QtWidgets.QLabel("Resonance Frequencies for re-run")
-            self.resonances_info_label.setWordWrap(True)
-            res_label_layout.addWidget(self.resonances_info_label, stretch=1)
+            section_label_layout = QtWidgets.QHBoxLayout()
+            self.sections_info_label = QtWidgets.QLabel("Central frequencies for re-run")
+            self.sections_info_label.setWordWrap(True)
+            section_label_layout.addWidget(self.sections_info_label, stretch=1)
             
-            self.res_freq_combo = QtWidgets.QComboBox()
-            self.res_freq_combo.addItems(["Use multisweep central frequency", "Use resonance fit frequency"])
-            self.res_freq_combo.setToolTip("Select which resonance frequency type to use.")
-            self.res_freq_combo.currentIndexChanged.connect(self._scroll_rerun_resonance)
-            self.res_freq_combo.setCurrentIndex(0)
-            res_label_layout.addWidget(self.res_freq_combo)
+            self.section_freq_combo = QtWidgets.QComboBox()
+            self.section_freq_combo.addItems(["Use previous multisweep central frequencies", "Use resonant frequencies from fit"])
+            self.section_freq_combo.setToolTip("Select what to use as the central frequency of this sweep")
+            self.section_freq_combo.currentIndexChanged.connect(self._scroll_rerun_section)
+            self.section_freq_combo.setCurrentIndex(0)
+            section_label_layout.addWidget(self.section_freq_combo)
             
-            res_info_layout.addLayout(res_label_layout)
+            section_info_layout.addLayout(section_label_layout)
     
-            # Default input fallback (comma-separated resonances in MHz)
-            self.resonances_edit = QtWidgets.QLineEdit()
-            res_freq_rerun = ", ".join([f"{f / 1e6:.9f}" for f in self.resonance_frequencies])
-            self.resonances_edit.setText(res_freq_rerun)
-            self.resonances_edit.textChanged.connect(self._update_resonance_count)
-            res_info_layout.addWidget(self.resonances_edit)
-            layout.addWidget(res_info_group)
+            # Default input fallback (comma-separated sweep central frequencies in MHz)
+            self.sections_edit = QtWidgets.QLineEdit()
+            section_freq_rerun = ", ".join([f"{f / 1e6:.9f}" for f in self.section_center_frequencies])
+            self.sections_edit.setText(section_freq_rerun)
+            self.sections_edit.textChanged.connect(self._update_section_count)
+            section_info_layout.addWidget(self.sections_edit)
+            layout.addWidget(section_info_group)
             
         else:
-            res_info_group = QtWidgets.QGroupBox("Target Resonances")
-            res_info_layout = QtWidgets.QVBoxLayout(res_info_group)
-            num_resonances = len(self.resonance_frequencies)
-            res_label_text = f"Number of resonances to sweep: {num_resonances}"
-            if num_resonances > 0:
-                # Show first few resonance frequencies for quick reference
-                res_freq_mhz_str = ", ".join([f"{f / 1e6:.3f}" for f in self.resonance_frequencies[:5]])
-                if num_resonances > 5:
-                    res_freq_mhz_str += ", ..."  # Indicate more frequencies exist
-                res_label_text += f"\nFrequencies (MHz): {res_freq_mhz_str}"
+            section_info_group = QtWidgets.QGroupBox("Sweep sections")
+            section_info_layout = QtWidgets.QVBoxLayout(section_info_group)
+            num_sections = len(self.section_center_frequencies)
+            section_label_text = f"Number of sections to sweep: {num_sections}"
+            if num_sections > 0:
+                # Show first few sweep central frequencies for quick reference
+                section_freq_mhz_str = ", ".join([f"{f / 1e6:.3f}" for f in self.section_center_frequencies[:5]])
+                if num_sections > 5:
+                    section_freq_mhz_str += ", ..."  # Indicate more frequencies exist
+                section_label_text += f"\nFrequencies (MHz): {section_freq_mhz_str}"
     
             
-            self.resonances_info_label = QtWidgets.QLabel(res_label_text)
-            self.resonances_info_label.setWordWrap(True)
-            res_info_layout.addWidget(self.resonances_info_label)
-            layout.addWidget(res_info_group)
+            self.sections_info_label = QtWidgets.QLabel(section_label_text)
+            self.sections_info_label.setWordWrap(True)
+            section_info_layout.addWidget(self.sections_info_label)
+            layout.addWidget(section_info_group)
 
         # Sweep parameters group
         param_group = QtWidgets.QGroupBox("Sweep Parameters")
         param_form_layout = QtWidgets.QFormLayout(param_group)
 
-        # Span per resonance (kHz)
+        # Span per section (kHz)
         default_span_khz = self.params.get('span_hz', MULTISWEEP_DEFAULT_SPAN_HZ) / 1e3
         self.span_khz_edit = QtWidgets.QLineEdit(str(default_span_khz))
         self.span_khz_edit.setValidator(QDoubleValidator(0.1, 10000.0, 2, self)) # Min 0.1 kHz, Max 10 MHz
-        param_form_layout.addRow("Span per Resonance (kHz):", self.span_khz_edit)
+        param_form_layout.addRow("Span per section (kHz):", self.span_khz_edit)
 
         # Number of points per sweep
         default_npoints = self.params.get('npoints_per_sweep', MULTISWEEP_DEFAULT_NPOINTS)
         self.npoints_edit = QtWidgets.QLineEdit(str(default_npoints))
         self.npoints_edit.setValidator(QIntValidator(2, 10000, self)) # Min 2 points
-        param_form_layout.addRow("Number of Points per Sweep:", self.npoints_edit)
+        param_form_layout.addRow("Number of points per sweep:", self.npoints_edit)
 
         # Samples to average (nsamps)
         default_nsamps = self.params.get('nsamps', MULTISWEEP_DEFAULT_NSAMPLES)
         self.nsamps_edit = QtWidgets.QLineEdit(str(default_nsamps))
         self.nsamps_edit.setValidator(QIntValidator(1, 10000, self)) # Min 1 sample
-        param_form_layout.addRow("Samples to Average (nsamps):", self.nsamps_edit)
+        param_form_layout.addRow("Samples to average per point (nsamps):", self.nsamps_edit)
 
         
         self.setup_amplitude_group(param_form_layout) # Shared amplitude settings
@@ -399,10 +399,10 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.use_data_from_file = True
         self.accept()
 
-    def _scroll_resonance(self):
-        """Handle resonance selection changes and update displayed frequencies accordingly. Choice between fit or sweep frequencies"""
-        selected = self.res_freq_combo.currentText().lower()
-        self.resonances_edit.clear()
+    def _scroll_section(self):
+        """Handle section selection changes and update displayed frequencies accordingly. Choice between fit or sweep frequencies"""
+        selected = self.section_freq_combo.currentText().lower()
+        self.sections_edit.clear()
 
         if "fit" in selected:
             self.load_btn.setEnabled(False)
@@ -413,21 +413,21 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.load_btn.setEnabled(True)
             freqs = self._get_frequencies(self._load_data, self.use_raw_frequencies)
 
-        self.resonances_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
-        self.resonances_info_label.setText(f"Loaded {len(freqs)} resonances from file.")
+        self.sections_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
+        self.sections_info_label.setText(f"Loaded {len(freqs)} sections from file.")
 
-    def _scroll_rerun_resonance(self):
-        """Refresh resonance display when rerunning choice between fit or sweep frequencies."""
-        selected = self.res_freq_combo.currentText().lower()
-        self.resonances_edit.clear()
+    def _scroll_rerun_section(self):
+        """Refresh section display when rerunning choice between fit or sweep frequencies."""
+        selected = self.section_freq_combo.currentText().lower()
+        self.sections_edit.clear()
 
         if "fit" in selected:
             freqs = self.fit_frequencies
         else:
-            freqs = self.resonance_frequencies
+            freqs = self.section_center_frequencies
 
-        self.resonances_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
-        self.resonances_info_label.setText(f"Loaded {len(freqs)} resonances from file.")
+        self.sections_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
+        self.sections_info_label.setText(f"Loaded {len(freqs)} sections from file.")
         
     
     def _import_file(self):
@@ -466,17 +466,17 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.load_btn.setEnabled(True)
         self.start_btn.setEnabled(True)
         self._load_data = payload.copy()
-        self.res_freq_combo.setEnabled(True)
+        self.section_freq_combo.setEnabled(True)
         
         try:
             params = payload['initial_parameters']
     
             freqs = self._get_frequencies(payload, self.use_raw_frequencies)
             
-            self.resonances_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
-            self.resonances_info_label.setText(f"Loaded {len(freqs)} resonances from file.")
+            self.sections_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
+            self.sections_info_label.setText(f"Loaded {len(freqs)} sections from file.")
         
-            # Span per Resonance (Hz -> kHz)
+            # Span per section (Hz -> kHz)
             span_khz = params['span_hz'] / 1e3
             self.span_khz_edit.setText(str(span_khz))
         
@@ -513,13 +513,13 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             QtWidgets.QMessageBox.warning(self, "Missing Key", msg)
     
     
-    def _get_frequencies(self, payload, raw_resonance = True):
-        """Extract resonance frequencies from payload, optionally using fitted or sweep data."""
+    def _get_frequencies(self, payload, raw_section_centers = True):
+        """Extract section center frequencies from payload, optionally using fitted or sweep data."""
         
         params = payload['initial_parameters']
-        freqs = params['resonance_frequencies']
+        freqs = params['resonance_frequencies']  # Legacy key name for backward compatibility
         
-        if raw_resonance:
+        if raw_section_centers:
             return freqs
 
         else:
@@ -621,12 +621,12 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                     
                 # Include the essential context for the multisweep
                 if self.load_multisweep:
-                    params_dict['resonance_frequencies'] = []
-                    freqs = self.resonances_edit.text().split(',')
+                    params_dict['resonance_frequencies'] = []  # Using legacy key for backward compatibility
+                    freqs = self.sections_edit.text().split(',')
                     for f in freqs:
                         params_dict['resonance_frequencies'].append(np.float64(f) * 1e6)
                 else:
-                    params_dict['resonance_frequencies'] = self.resonance_frequencies
+                    params_dict['resonance_frequencies'] = self.section_center_frequencies
                 params_dict['module'] = self.current_module
                 
                 # Get fitting parameters
@@ -644,7 +644,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                     QtWidgets.QMessageBox.warning(self, "Validation Error", "Samples to average must be at least 1.")
                     return None
                 if len(params_dict['resonance_frequencies']) < 1:
-                     QtWidgets.QMessageBox.warning(self, "Configuration Error", "No target resonances specified for multisweep.")
+                     QtWidgets.QMessageBox.warning(self, "Configuration Error", "No target sweep sections specified for multisweep.")
                      return None
     
     

@@ -1358,7 +1358,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         # --- Launch dialog even if no resonances yet ---
         dialog = MultisweepDialog( parent=netanal_dialog, 
-                                   resonance_frequencies=resonances,   # may be []
+                                   section_center_frequencies=resonances,   # may be []
                                    dac_scales=netanal_dialog.dac_scales,   # may be {}
                                    current_module=active_module,       # may be None
                                    initial_params=None ,                # nothing prefilled

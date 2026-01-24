@@ -324,8 +324,10 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             self.session_mode = self.SESS_LOAD
             
             # Open folder selection dialog for existing session
-            # Start from last used directory if available
-            start_dir = last_session_dir if last_session_dir else ""
+            # Try to start from last loaded session path, fall back to last session directory
+            last_session_path = settings.get_last_session_path()
+            start_dir = last_session_path if last_session_path else (last_session_dir if last_session_dir else "")
+            
             session_path = QtWidgets.QFileDialog.getExistingDirectory(
                 self,
                 "Select Session Folder",
@@ -340,7 +342,11 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             
             self.session_path = session_path
             self.session_folder_name = None
-            # Save the parent directory for next time (not the session folder itself)
+            
+            # Save the loaded session path for quick reload next time
+            settings.set_last_session_path(session_path)
+            
+            # Also save the parent directory for new session creation
             import os
             parent_dir = os.path.dirname(session_path)
             if parent_dir:
@@ -365,6 +371,14 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         elif self.connection_mode == self.CONN_OFFLINE:
             settings.set_last_connection_mode("offline")
         
+        # Save session mode for next time
+        if self.session_mode == self.SESS_NEW:
+            settings.set_last_session_mode("new")
+        elif self.session_mode == self.SESS_LOAD:
+            settings.set_last_session_mode("load")
+        elif self.session_mode == self.SESS_NONE:
+            settings.set_last_session_mode("none")
+        
         # All validation passed
         self.accept()
     
@@ -380,6 +394,7 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             saved_mode = settings.get_last_connection_mode()
             saved_serial = settings.get_last_crs_serial()
             saved_module = settings.get_last_module()
+            saved_session_mode = settings.get_last_session_mode()
             
             # Apply saved connection mode
             if saved_mode == "hardware":
@@ -394,6 +409,14 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
                 self.serial_input.setText(saved_serial)
             if saved_module:
                 self.module_input.setValue(saved_module)
+            
+            # Apply saved session mode
+            if saved_session_mode == "new":
+                self.rb_new_session.setChecked(True)
+            elif saved_session_mode == "load":
+                self.rb_load_session.setChecked(True)
+            elif saved_session_mode == "none":
+                self.rb_no_session.setChecked(True)
         else:
             # Apply prefill values from CLI (takes precedence over saved settings)
             conn_mode = self._prefill.get('connection_mode')
@@ -416,6 +439,7 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         
         # Trigger UI updates
         self._on_connection_mode_changed()
+        self._on_session_mode_changed()
     
     def get_configuration(self) -> dict:
         """

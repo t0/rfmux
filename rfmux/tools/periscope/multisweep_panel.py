@@ -91,7 +91,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed
         self.current_iteration_being_processed = None # Tracks the current iteration
         self.unit_mode = "dbm"  # Current unit for magnitude display ("counts", "dbm", "volts")
-        self.normalize_traces = False  # Flag to normalize trace plots (magnitude and phase)
+        self.normalize_traces = True  # Flag to normalize trace plots (magnitude and phase)
         self.zoom_box_mode = True  # Flag for enabling/disabling pyqtgraph's zoom box
         
         # Intermediate update data storage
@@ -757,6 +757,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             batch_size=self.batch_size,
             amplitude_to_color=amplitude_to_color,
             dark_mode=self.dark_mode,
+            unit_mode=self.unit_mode,
+            normalize=self.normalize_traces,
             prev_btn=self.prev_batch_btn,
             next_btn=self.next_batch_btn,
             batch_label=self.batch_info_label

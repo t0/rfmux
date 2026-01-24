@@ -9,12 +9,12 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtWidgets
 
-from .utils import LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, square_axes
+from .utils import LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, square_axes, UnitConverter
 
 
 def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, batch_size,
-                      amplitude_to_color, dark_mode, prev_btn=None, next_btn=None, 
-                      batch_label=None):
+                      amplitude_to_color, dark_mode, unit_mode='dbm', normalize=False, 
+                      prev_btn=None, next_btn=None, batch_label=None):
     """
     Update a grid layout with per-detector sweep plots.
     
@@ -26,6 +26,8 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
         batch_size: Number of detectors per batch
         amplitude_to_color: Dict mapping amplitude values to colors
         dark_mode: Boolean for theme
+        unit_mode: Unit mode for magnitude display ('counts', 'dbm', 'volts')
+        normalize: Whether to normalize traces
         prev_btn: Optional previous batch button to enable/disable
         next_btn: Optional next batch button to enable/disable
         batch_label: Optional label to update with batch info
@@ -55,8 +57,18 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
     
     # Calculate grid dimensions
     num_plots = len(batch_detectors)
-    ncols = int(np.ceil(np.sqrt(num_plots)))
-    nrows = int(np.ceil(num_plots / ncols))
+    
+    # Set minimum columns to 4 for better aspect ratios with small numbers of plots
+    MIN_COLS = 4
+    
+    if num_plots <= MIN_COLS:
+        # For few plots, use all columns in a single row with empty space
+        ncols = MIN_COLS
+        nrows = 1
+    else:
+        # For many plots, use the square root approach with minimum of 4 columns
+        ncols = max(MIN_COLS, int(np.ceil(np.sqrt(num_plots))))
+        nrows = int(np.ceil(num_plots / ncols))
     
     # Theme colors
     bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
@@ -85,8 +97,22 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
             detector_data = data_by_detector.get(detector_id, {})
             
             if plot_type == 'magnitude':
-                plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_color)
-                plot_item.setLabel('left', 'S21 Magnitude', units='dB')
+                plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_color, unit_mode, normalize)
+                
+                # Set Y-axis label based on unit_mode and normalize
+                if normalize:
+                    if unit_mode == "dbm":
+                        plot_item.setLabel('left', 'Normalized Magnitude', units='dB')
+                    else:
+                        plot_item.setLabel('left', 'Normalized Magnitude', units='')
+                else:
+                    if unit_mode == "counts":
+                        plot_item.setLabel('left', 'Magnitude', units='Counts')
+                    elif unit_mode == "dbm":
+                        plot_item.setLabel('left', 'Power', units='dBm')
+                    elif unit_mode == "volts":
+                        plot_item.setLabel('left', 'Magnitude', units='V')
+                
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             else:  # IQ
                 plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color)
@@ -110,7 +136,7 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
         batch_label.setText(f"{current_batch + 1} of {total_batches}")
 
 
-def plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_color):
+def plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_color, unit_mode='dbm', normalize=False):
     """
     Plot S21 magnitude sweeps for a single detector across multiple amplitudes.
     
@@ -119,6 +145,8 @@ def plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_co
         detector_data: Dict {amplitude: {'freq': [...], 'iq': [...]}}
         amplitude_to_color: Dict mapping amplitude values to colors
         pen_color: Fallback pen color for single amplitude
+        unit_mode: Unit mode for magnitude display ('counts', 'dbm', 'volts')
+        normalize: Whether to normalize traces
     """
     amplitudes = sorted(detector_data.keys())
     
@@ -131,9 +159,9 @@ def plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_co
         if freqs is None or iq is None or len(freqs) == 0:
             continue
         
-        # Calculate magnitude in dB
+        # Calculate magnitude using UnitConverter (matches combined plot logic)
         mag = np.abs(iq)
-        mag_db = 20 * np.log10(mag + 1e-12)
+        mag_converted = UnitConverter.convert_amplitude(mag, iq, unit_mode, normalize=normalize)
         
         # Get color for this amplitude
         if len(amplitudes) == 1:
@@ -145,7 +173,7 @@ def plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_co
         # Plot relative to mean frequency (in kHz)
         freqs_rel_khz = 1e-3 * (freqs - np.mean(freqs))
         
-        plot_item.plot(freqs_rel_khz, mag_db, pen=pen)
+        plot_item.plot(freqs_rel_khz, mag_converted, pen=pen)
 
 
 def plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color):

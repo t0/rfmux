@@ -1246,9 +1246,21 @@ class PeriscopeRuntime:
 
             # Load iteration data into panel
             for i in range(len(iteration_params)):
-                amplitude = iteration_params[i]['amplitude']
                 direction = iteration_params[i]['direction']
                 data = iteration_params[i]['data']
+                
+                # Extract amplitude from first detector's data (amplitude is stored per-detector, not per-iteration)
+                amplitude = None
+                for det_data in data.values():
+                    amplitude = det_data.get('sweep_amplitude')
+                    if amplitude is not None:
+                        break
+                
+                if amplitude is None:
+                    # Fallback value if no amplitude found in detector data
+                    print(f"Warning: No amplitude found for iteration {i}, using 0.0 as fallback")
+                    amplitude = 0.0
+                
                 panel.update_data(target_module, i, amplitude, direction, data, None)
             
             # Extract and load df_calibrations if bias_kids_output exists

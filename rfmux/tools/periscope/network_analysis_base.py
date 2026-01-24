@@ -52,13 +52,13 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         amp_group = QtWidgets.QGroupBox("Amplitude Settings") # Group box title
         amp_layout = QtWidgets.QFormLayout(amp_group)
         
-        # Determine initial amplitude: use 'amps' list if available, else 'amp', else default.
-        amps_list = self.params.get('amps', [self.params.get('amp', DEFAULT_AMPLITUDE)])
-        amp_str = ','.join(map(str, amps_list)) if amps_list else str(DEFAULT_AMPLITUDE)
+        # Determine initial amplitude: use 'amps' list if available, else 'amp', else default to 0.005
+        amps_list = self.params.get('amps', [self.params.get('amp', 0.005)])
+        amp_str = ','.join(map(str, amps_list)) if amps_list else '0.005'
         
         self.amp_edit = QtWidgets.QLineEdit(amp_str)
         self.amp_edit.setToolTip("Enter a single value or comma-separated list of normalized amplitudes (e.g., 0.001,0.01,0.1). Expressions like '1/1000' are allowed.")
-        amp_layout.addRow("Normalized Amplitude:", self.amp_edit)
+        amp_layout.addRow("Global amplitude:", self.amp_edit)
         
         self.dbm_edit = QtWidgets.QLineEdit()
         self.dbm_edit.setToolTip("Enter a single value or comma-separated list of power in dBm (e.g., -30,-20,-10). Expressions are allowed.")
@@ -78,17 +78,19 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         linspace_group = QtWidgets.QGroupBox("Generate Amplitude List")
         linspace_layout = QtWidgets.QFormLayout(linspace_group)
 
-        self.start_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_START}")
+        self.start_amp_edit = QtWidgets.QLineEdit("")  # Empty by default
         self.start_amp_edit.setValidator(QDoubleValidator(self))
-        self.start_amp_edit.setToolTip("Start value for linspace generation.")
+        self.start_amp_edit.setPlaceholderText("e.g., 0.001")
+        self.start_amp_edit.setToolTip("Start value for linspace generation. Leave empty if not using linspace mode.")
         linspace_layout.addRow("Start:", self.start_amp_edit)
 
-        self.stop_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_STOP}")
+        self.stop_amp_edit = QtWidgets.QLineEdit("")  # Empty by default
         self.stop_amp_edit.setValidator(QDoubleValidator(self))
-        self.stop_amp_edit.setToolTip("Stop value for linspace generation.")
+        self.stop_amp_edit.setPlaceholderText("e.g., 0.01")
+        self.stop_amp_edit.setToolTip("Stop value for linspace generation. Leave empty if not using linspace mode.")
         linspace_layout.addRow("Stop:", self.stop_amp_edit)
 
-        self.iterations_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_ITERATIONS}")
+        self.iterations_amp_edit = QtWidgets.QLineEdit("2")  # Keep default of 2 (minimum for linspace)
         self.iterations_amp_edit.setValidator(QIntValidator(2, 1000, self)) # Min 2 points for linspace
         self.iterations_amp_edit.setToolTip("Number of points for linspace generation (min 2).")
         linspace_layout.addRow("Iterations:", self.iterations_amp_edit)

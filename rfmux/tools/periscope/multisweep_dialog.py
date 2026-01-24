@@ -285,6 +285,43 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.section_amps_edit.setPlaceholderText("e.g., 0.1, 0.15, 0.2 (comma-separated, optional)")
         param_form_layout.addRow(section_amps_label, self.section_amps_edit)
 
+        # Add amplitude scaling factors
+        section_amp_scaling_group = QtWidgets.QGroupBox("Per-Section Amplitude Scaling (Optional)")
+        section_amp_scaling_layout = QtWidgets.QFormLayout(section_amp_scaling_group)
+        
+        self.amp_array_startfactor_edit = QtWidgets.QLineEdit("")  # Empty by default
+        self.amp_array_startfactor_edit.setValidator(QDoubleValidator(0.001, 100.0, 3, self))
+        self.amp_array_startfactor_edit.setPlaceholderText("e.g., 0.5")
+        self.amp_array_startfactor_edit.setToolTip(
+            "Multiplicative factor for the first iteration.\n"
+            "Works with both single amplitudes and per-section amplitude arrays.\n"
+            "Example: If base amplitude is 0.1 and start factor is 0.5, first iteration uses 0.05.\n"
+            "Leave empty if not using scaling mode."
+        )
+        section_amp_scaling_layout.addRow("Start Factor:", self.amp_array_startfactor_edit)
+        
+        self.amp_array_stopfactor_edit = QtWidgets.QLineEdit("")  # Empty by default
+        self.amp_array_stopfactor_edit.setValidator(QDoubleValidator(0.001, 100.0, 3, self))
+        self.amp_array_stopfactor_edit.setPlaceholderText("e.g., 2.0")
+        self.amp_array_stopfactor_edit.setToolTip(
+            "Multiplicative factor for the last iteration.\n"
+            "Intermediate iterations are linearly interpolated between start and stop factors.\n"
+            "Example: With start=0.5, stop=2.0, iterations=3, factors are [0.5, 1.25, 2.0]\n"
+            "Leave empty if not using scaling mode."
+        )
+        section_amp_scaling_layout.addRow("Stop Factor:", self.amp_array_stopfactor_edit)
+        
+        # Note about using the iterations field from base class
+        section_amp_scaling_note = QtWidgets.QLabel(
+            "Note: Number of iterations is taken from the 'Iterations' field in "
+            "the 'Generate Amplitude List' section above. When both factors are 1.0, "
+            "the linspace Start/Stop values are used instead to generate iterations."
+        )
+        section_amp_scaling_note.setWordWrap(True)
+        section_amp_scaling_note.setStyleSheet("font-style: italic; color: #666;")
+        section_amp_scaling_layout.addRow(section_amp_scaling_note)
+        
+        param_form_layout.addRow(section_amp_scaling_group)
         
         # Option to recalculate center frequencies
         self.recalc_cf_combo = QtWidgets.QComboBox()
@@ -670,32 +707,142 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 params_dict['apply_skewed_fit'] = self.apply_skewed_fit_checkbox.isChecked()
                 params_dict['apply_nonlinear_fit'] = self.apply_nonlinear_fit_checkbox.isChecked()
                 
-                # Parse per-section amplitudes
-                section_amps_text = self.section_amps_edit.text().strip()
-                if section_amps_text:
-                    # User specified per-section amplitudes
+                # Parse scaling factors to determine amplitude mode
+                start_factor_text = self.amp_array_startfactor_edit.text().strip()
+                stop_factor_text = self.amp_array_stopfactor_edit.text().strip()
+                iterations_text = self.iterations_amp_edit.text().strip()
+                
+                # Parse start and stop factors (empty = 1.0, no scaling)
+                try:
+                    start_factor = float(start_factor_text) if start_factor_text else 1.0
+                except ValueError:
+                    start_factor = 1.0
+                
+                try:
+                    stop_factor = float(stop_factor_text) if stop_factor_text else 1.0
+                except ValueError:
+                    stop_factor = 1.0
+                
+                try:
+                    num_iterations = int(iterations_text) if iterations_text else 1
+                except ValueError:
+                    num_iterations = 1
+                
+                # Determine mode
+                use_scaling_mode = (start_factor != 1.0 or stop_factor != 1.0)
+                use_linspace_mode = (not use_scaling_mode) and (num_iterations > 1)
+                
+                num_sections = len(params_dict['resonance_frequencies'])
+                
+                if use_scaling_mode:
+                    # MODE 1: SCALING MODE
+                    # Determine base amplitude
+                    section_amps_text = self.section_amps_edit.text().strip()
+                    if section_amps_text:
+                        # Base is per-section array
+                        base_amps = [float(x.strip()) for x in section_amps_text.split(',')]
+                        if len(base_amps) != num_sections:
+                            QtWidgets.QMessageBox.warning(
+                                self, 
+                                "Validation Error", 
+                                f"Number of per-section amplitudes ({len(base_amps)}) must match "
+                                f"number of sweep sections ({num_sections})."
+                            )
+                            return None
+                    else:
+                        # Base is from amp_edit - take first value
+                        if not amps_list:
+                            base_amps = [DEFAULT_AMPLITUDE]
+                        else:
+                            base_amps = [amps_list[0]]
+                    
+                    # Generate scale factors
+                    if num_iterations > 1:
+                        scale_factors = np.linspace(start_factor, stop_factor, num_iterations)
+                    else:
+                        scale_factors = [start_factor]
+                    
+                    # Generate amp_arrays for each iteration
+                    amp_arrays = []
+                    
+                    if len(base_amps) == 1:
+                        # Scalar base - broadcast to all sections
+                        for factor in scale_factors:
+                            amp_arrays.append([base_amps[0] * factor] * num_sections)
+                    else:
+                        # Array base - scale each element
+                        for factor in scale_factors:
+                            amp_arrays.append([amp * factor for amp in base_amps])
+                    
+                    params_dict['amp_arrays'] = amp_arrays
+                    params_dict['section_amplitudes'] = None
+                
+                elif use_linspace_mode:
+                    # MODE 2: LINSPACE MODE (existing functionality)
                     try:
+                        start_amp = float(self.start_amp_edit.text())
+                        stop_amp = float(self.stop_amp_edit.text())
+                    except ValueError:
+                        QtWidgets.QMessageBox.warning(
+                            self, 
+                            "Input Error", 
+                            "Invalid Start/Stop values for linspace generation."
+                        )
+                        return None
+                    
+                    # Check if per-section base is specified
+                    section_amps_text = self.section_amps_edit.text().strip()
+                    if section_amps_text:
+                        # Per-section linspace: scale each section's base amplitude
+                        base_amps = [float(x.strip()) for x in section_amps_text.split(',')]
+                        if len(base_amps) != num_sections:
+                            QtWidgets.QMessageBox.warning(
+                                self, 
+                                "Validation Error", 
+                                f"Number of per-section amplitudes ({len(base_amps)}) must match "
+                                f"number of sweep sections ({num_sections})."
+                            )
+                            return None
+                        
+                        # Generate scale factors from start/stop
+                        scale_factors = np.linspace(start_amp, stop_amp, num_iterations)
+                        
+                        # Scale each section's base
+                        amp_arrays = []
+                        for factor in scale_factors:
+                            amp_arrays.append([amp * factor for amp in base_amps])
+                        
+                        params_dict['amp_arrays'] = amp_arrays
+                        params_dict['section_amplitudes'] = None
+                    else:
+                        # Global linspace: uniform amplitudes for all sections
+                        uniform_amps = np.linspace(start_amp, stop_amp, num_iterations)
+                        
+                        amp_arrays = []
+                        for amp_val in uniform_amps:
+                            amp_arrays.append([amp_val] * num_sections)
+                        
+                        params_dict['amp_arrays'] = amp_arrays
+                        params_dict['section_amplitudes'] = None
+                
+                else:
+                    # MODE 3: MANUAL MODE
+                    section_amps_text = self.section_amps_edit.text().strip()
+                    if section_amps_text:
+                        # Per-section amplitudes (single iteration)
                         section_amps = [float(x.strip()) for x in section_amps_text.split(',')]
-                        # Validate length matches number of sections
-                        if len(section_amps) != len(params_dict['resonance_frequencies']):
+                        if len(section_amps) != num_sections:
                             QtWidgets.QMessageBox.warning(
                                 self, 
                                 "Validation Error", 
                                 f"Number of per-section amplitudes ({len(section_amps)}) must match "
-                                f"number of sweep sections ({len(params_dict['resonance_frequencies'])})."
+                                f"number of sweep sections ({num_sections})."
                             )
                             return None
                         params_dict['section_amplitudes'] = section_amps
-                    except ValueError as e:
-                        QtWidgets.QMessageBox.warning(
-                            self, 
-                            "Input Error", 
-                            f"Invalid per-section amplitude format: {str(e)}"
-                        )
-                        return None
-                else:
-                    # No per-section amplitudes specified, will be broadcast from amp_array in algorithm
-                    params_dict['section_amplitudes'] = None
+                    else:
+                        # Global amplitude list from amp_edit (already in params_dict['amps'])
+                        params_dict['section_amplitudes'] = None
     
                 # Basic validation
                 if params_dict['span_hz'] <= 0:

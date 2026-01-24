@@ -18,6 +18,7 @@ from .utils import (
 from .detector_digest_panel import DetectorDigestPanel
 from .noise_spectrum_panel import NoiseSpectrumPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
+from .parameter_histograms_panel import ParameterHistogramsPanel
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
 
@@ -125,6 +126,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Storage for sweep grid plots
         self.mag_sweep_plots = {}  # {detector_id: plot_widget}
         self.iq_sweep_plots = {}   # {detector_id: plot_widget}
+        
+        # Histogram panel (created lazily in _setup_plot_area)
+        self.histogram_panel = None
 
         self._setup_ui()
         
@@ -284,6 +288,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.combined_tab = self._create_combined_tab()
         self.plot_tabs.addTab(self.combined_tab, "Combined Plots")
         
+        # Tab 3: Histograms (parameter distributions)
+        self.histogram_tab = self._create_histogram_tab()
+        self.plot_tabs.addTab(self.histogram_tab, "Histograms")
+        
         # Set default tab to Magnitude Sweeps
         self.plot_tabs.setCurrentIndex(0)
         
@@ -380,6 +388,48 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 view_box_phase.doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
         
         return tab
+    
+    def _create_histogram_tab(self):
+        """Create the histograms tab containing the ParameterHistogramsPanel."""
+        tab = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Create a placeholder - we'll create the actual panel when data is available
+        placeholder = QtWidgets.QLabel("Histogram plots will appear here when multisweep data is available.")
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder.setStyleSheet("color: gray; font-style: italic;")
+        tab_layout.addWidget(placeholder)
+        
+        return tab
+    
+    def _ensure_histogram_panel(self):
+        """Lazily create the histogram panel when first needed with data."""
+        if self.histogram_panel is not None:
+            # Panel already exists, just reload data
+            if hasattr(self.histogram_panel, '_load_and_plot_data'):
+                self.histogram_panel._load_and_plot_data()
+            return
+        
+        # Find the histogram tab widget and create the panel
+        if hasattr(self, 'histogram_tab') and self.histogram_tab:
+            # Clear placeholder
+            layout = self.histogram_tab.layout()
+            if layout:
+                while layout.count():
+                    item = layout.takeAt(0)
+                    if item.widget():
+                        item.widget().deleteLater()
+                
+                # Create the actual histogram panel now that we have data
+                self.histogram_panel = ParameterHistogramsPanel(
+                    parent=self.histogram_tab,
+                    multisweep_panel=self,
+                    amplitude_idx=None,  # Will use last/highest amplitude by default
+                    nbins=30,
+                    dark_mode=self.dark_mode
+                )
+                layout.addWidget(self.histogram_panel)
 
 
     def _on_plot_tab_changed(self, index):
@@ -642,6 +692,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         """
         Redraws plots based on the currently active tab.
         For sweep tabs (0, 1), uses grid plotting. For combined tab (2), uses original logic.
+        For histogram tab (3), updates histogram panel.
         """
         # Early return if no data
         num_iterations = len(self.results_by_iteration)
@@ -662,6 +713,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Tab 2: Combined plots (original view)
         elif current_tab_idx == 2:
             self._redraw_combined_plots()
+        # Tab 3: Histograms (parameter distributions)
+        elif current_tab_idx == 3:
+            # Ensure histogram panel is created and loaded with data
+            self._ensure_histogram_panel()
     
     def _redraw_sweep_grid(self, tab_idx):
         """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
@@ -1926,6 +1981,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Redraw plots which will now use the updated legend text colors
         self._redraw_plots()
+            
+        # Propagate to histogram panel
+        if self.histogram_panel and hasattr(self.histogram_panel, 'apply_theme'):
+            self.histogram_panel.apply_theme(dark_mode)
             
         # Also propagate dark mode to any open detector digest windows
         for digest_window in self.detector_digest_windows:

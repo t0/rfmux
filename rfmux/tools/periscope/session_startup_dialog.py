@@ -324,22 +324,40 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             self.session_mode = self.SESS_LOAD
             
             # Open folder selection dialog for existing session
-            # Try to start from last loaded session path, fall back to last session directory
+            # Try to start from parent of last loaded session path, with session pre-selected
+            import os
             last_session_path = settings.get_last_session_path()
-            start_dir = last_session_path if last_session_path else (last_session_dir if last_session_dir else "")
             
-            session_path = QtWidgets.QFileDialog.getExistingDirectory(
-                self,
-                "Select Session Folder",
-                start_dir,
-                QtWidgets.QFileDialog.Option.ShowDirsOnly |
-                QtWidgets.QFileDialog.Option.DontUseNativeDialog
-            )
+            # Determine starting directory and file to pre-select
+            if last_session_path and os.path.exists(last_session_path):
+                # Start in parent directory of last session
+                start_dir = os.path.dirname(last_session_path)
+                preselect_path = last_session_path
+            else:
+                # Fall back to last session directory
+                start_dir = last_session_dir if last_session_dir else ""
+                preselect_path = None
             
-            # If user cancelled, stay in dialog
-            if not session_path:
+            # Use non-static QFileDialog for more control (allows pre-selection)
+            dialog = QtWidgets.QFileDialog(self, "Select Session Folder", start_dir)
+            dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+            dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly)
+            dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog)
+            
+            # Pre-select the last session folder if available
+            if preselect_path:
+                dialog.selectFile(preselect_path)
+            
+            # Show dialog and get result
+            if not dialog.exec():
+                # User cancelled, stay in dialog
                 return
             
+            selected_files = dialog.selectedFiles()
+            if not selected_files:
+                return
+            
+            session_path = selected_files[0]
             self.session_path = session_path
             self.session_folder_name = None
             
@@ -347,7 +365,6 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             settings.set_last_session_path(session_path)
             
             # Also save the parent directory for new session creation
-            import os
             parent_dir = os.path.dirname(session_path)
             if parent_dir:
                 settings.set_last_session_directory(parent_dir)

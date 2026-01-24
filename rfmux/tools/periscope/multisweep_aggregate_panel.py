@@ -8,7 +8,7 @@ import pyqtgraph as pg
 
 # Imports from within the 'periscope' subpackage
 from .utils import (
-    ScreenshotMixin, find_parent_with_attr, TABLEAU10_COLORS, LINE_WIDTH
+    ScreenshotMixin, find_parent_with_attr, TABLEAU10_COLORS, LINE_WIDTH, square_axes, SquarePlotWidget
 )
 from .aggregate_data_adapter import (
     extract_multisweep_data, calculate_grid_size
@@ -197,8 +197,11 @@ class MultisweepAggregatePanel(QtWidgets.QWidget, ScreenshotMixin):
             row = idx // ncols
             col = idx % ncols
             
-            # Create plot widget
-            plot_widget = pg.PlotWidget()
+            # Create plot widget - use SquarePlotWidget for IQ plots to maintain aspect ratio
+            if self.plot_type == "iq":
+                plot_widget = SquarePlotWidget()
+            else:
+                plot_widget = pg.PlotWidget()
             plot_widget.setBackground(bg_color)
             plot_item = plot_widget.getPlotItem()
             
@@ -308,6 +311,9 @@ class MultisweepAggregatePanel(QtWidgets.QWidget, ScreenshotMixin):
                 pen = pg.mkPen(color=color_rgb, width=LINE_WIDTH)
             
             plot_item.plot(i_vals, q_vals, pen=pen)
+        
+        # Make the plot square with equal scaling (important for IQ circles)
+        square_axes(plot_item)
             
     def _get_all_amplitudes(self):
         """Get list of all amplitudes in the data."""

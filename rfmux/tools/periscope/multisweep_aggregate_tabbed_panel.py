@@ -5,7 +5,7 @@ from PyQt6.QtCore import Qt
 import pyqtgraph as pg
 
 # Imports from within the 'periscope' subpackage
-from .utils import ScreenshotMixin
+from .utils import ScreenshotMixin, square_axes, SquarePlotWidget, SquareGridLayout
 from .aggregate_data_adapter import extract_multisweep_data
 
 
@@ -78,8 +78,8 @@ class MultisweepAggregateTabbedPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
         
         # Create tabs and store grid references
-        self.mag_tab, self.mag_grid = self._create_sweep_tab()
-        self.iq_tab, self.iq_grid = self._create_sweep_tab()
+        self.mag_tab, self.mag_grid = self._create_sweep_tab(use_square_layout=False)
+        self.iq_tab, self.iq_grid = self._create_sweep_tab(use_square_layout=True)
         self.hist_tab = self._create_histogram_tab()
         
         print(f"[DEBUG] After creating tabs:")
@@ -149,7 +149,7 @@ class MultisweepAggregateTabbedPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         layout.addWidget(toolbar)
         
-    def _create_sweep_tab(self):
+    def _create_sweep_tab(self, use_square_layout=False):
         """Create a tab for sweep plots (magnitude or IQ). Returns (tab, grid_layout)."""
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
@@ -157,13 +157,23 @@ class MultisweepAggregateTabbedPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Scroll area for plots
         scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
+        
+        # For square layout (IQ plots), don't use setWidgetResizable
+        # This allows our custom layout to control the size
+        if not use_square_layout:
+            scroll.setWidgetResizable(True)
         
         # Container for grid
         container = QtWidgets.QWidget()
-        grid = QtWidgets.QGridLayout(container)
-        grid.setSpacing(10)
         
+        # Use custom square grid layout for IQ plots, regular grid for others
+        if use_square_layout:
+            grid = SquareGridLayout(container, spacing=10)
+        else:
+            grid = QtWidgets.QGridLayout(container)
+            grid.setSpacing(10)
+        
+        container.setLayout(grid)
         scroll.setWidget(container)
         layout.addWidget(scroll)
         
@@ -422,7 +432,11 @@ class MultisweepAggregateTabbedPanel(QtWidgets.QWidget, ScreenshotMixin):
             row = idx // ncols
             col = idx % ncols
             
-            plot_widget = pg.PlotWidget()
+            # Create plot widget - use SquarePlotWidget for IQ plots to maintain aspect ratio
+            if plot_type == 'iq':
+                plot_widget = SquarePlotWidget()
+            else:
+                plot_widget = pg.PlotWidget()
             plot_widget.setBackground(bg_color)
             plot_item = plot_widget.getPlotItem()
             
@@ -523,6 +537,9 @@ class MultisweepAggregateTabbedPanel(QtWidgets.QWidget, ScreenshotMixin):
                 pen = pg.mkPen(color=color_rgb, width=LINE_WIDTH)
             
             plot_item.plot(i_vals, q_vals, pen=pen)
+        
+        # Make the plot square with equal scaling (important for IQ circles)
+        square_axes(plot_item)
             
     def _update_histogram_tab(self):
         """Update histogram tab with current amplitude selection."""

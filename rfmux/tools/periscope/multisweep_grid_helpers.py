@@ -272,7 +272,7 @@ def prepare_detector_data_from_iterations(results_by_iteration):
             
             # Store just what we need for plotting
             freqs = sweep_data.get('frequencies', np.array([]))
-            iq_complex = sweep_data.get('iq_complex', np.array([]))
+            iq_complex = sweep_data.get('iq_complex_volts', np.array([]))
             
             if len(freqs) > 0 and len(iq_complex) > 0:
                 detector_data[detector_id][amp_val] = {

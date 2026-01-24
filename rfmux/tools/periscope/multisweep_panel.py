@@ -1832,9 +1832,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if my_dock:
             periscope.tabifyDockWidget(my_dock, dock)
         
-        # Show and activate the dock
+        # Show the dock (but don't bring to front)
         dock.show()
-        dock.raise_()
 
     def _get_closest_remembered_cf(self, conceptual_idx: int, target_amp: float) -> float | None:
         """

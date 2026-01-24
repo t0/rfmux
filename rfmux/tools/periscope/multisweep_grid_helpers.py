@@ -9,7 +9,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtWidgets
 
-from .utils import LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD
+from .utils import LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, square_axes
 
 
 def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, batch_size,
@@ -92,6 +92,8 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
                 plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color)
                 plot_item.setLabel('left', 'Q (Imaginary)')
                 plot_item.setLabel('bottom', 'I (Real)')
+                # Lock aspect ratio to 1:1 to keep circles circular
+                square_axes(plot_item)
             
             plot_item.showGrid(x=True, y=True, alpha=0.3)
         

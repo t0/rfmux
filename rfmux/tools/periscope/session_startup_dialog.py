@@ -74,6 +74,70 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         # Apply pre-fill values after UI is set up
         self._apply_prefill()
         
+        # Install event filter on radio buttons to prevent them from handling Enter
+        self._disable_enter_on_radio_buttons()
+        
+        # Create keyboard shortcut for Enter/Return keys
+        # This works regardless of which widget has focus
+        self.enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Return), self)
+        self.enter_shortcut.activated.connect(self._validate_and_accept)
+        
+        # Also handle numpad Enter
+        self.numpad_enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Enter), self)
+        self.numpad_enter_shortcut.activated.connect(self._validate_and_accept)
+    
+    def _disable_enter_on_radio_buttons(self):
+        """Install event filters on all radio buttons to prevent Enter key handling."""
+        radio_buttons = [
+            self.rb_hardware,
+            self.rb_mock,
+            self.rb_offline,
+            self.rb_new_session,
+            self.rb_load_session,
+            self.rb_no_session
+        ]
+        
+        class RadioButtonEnterFilter(QtCore.QObject):
+            """Event filter that blocks Enter key on radio buttons."""
+            def eventFilter(self, obj, event):
+                if event.type() == QtCore.QEvent.Type.KeyPress:
+                    if event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                        # Block Enter key - don't let radio button handle it
+                        return True
+                return False
+        
+        # Create single filter instance and apply to all radio buttons
+        self._radio_filter = RadioButtonEnterFilter()
+        for rb in radio_buttons:
+            rb.installEventFilter(self._radio_filter)
+    
+    def _install_enter_key_filter(self, dialog: QtWidgets.QFileDialog):
+        """
+        Install an event filter on a QFileDialog to make Enter key accept the dialog.
+        
+        Args:
+            dialog: The QFileDialog instance to enhance
+        """
+        class EnterKeyFilter(QtCore.QObject):
+            """Event filter that makes Enter key accept the dialog."""
+            def __init__(self, dialog):
+                super().__init__()
+                self.dialog = dialog
+            
+            def eventFilter(self, obj, event):
+                if event.type() == QtCore.QEvent.Type.KeyPress:
+                    if event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                        # Accept the dialog (equivalent to clicking Choose/Open)
+                        self.dialog.accept()
+                        return True  # Event handled
+                return False  # Pass through other events
+        
+        # Create and install the filter
+        key_filter = EnterKeyFilter(dialog)
+        dialog.installEventFilter(key_filter)
+        # Store reference to prevent garbage collection
+        dialog._enter_key_filter = key_filter
+    
     def _setup_ui(self):
         """Create the dialog UI."""
         layout = QtWidgets.QVBoxLayout(self)
@@ -304,18 +368,26 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             # Open folder selection dialog for base path
             # Start from last used directory if available
             start_dir = last_session_dir if last_session_dir else ""
-            base_path = QtWidgets.QFileDialog.getExistingDirectory(
-                self,
-                "Select Session Location",
-                start_dir,
-                QtWidgets.QFileDialog.Option.ShowDirsOnly | 
-                QtWidgets.QFileDialog.Option.DontUseNativeDialog
-            )
             
-            # If user cancelled, stay in dialog
-            if not base_path:
+            # Create non-static dialog to allow Enter key handling
+            dialog = QtWidgets.QFileDialog(self, "Select Session Location", start_dir)
+            dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+            dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly)
+            dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog)
+            
+            # Install Enter key filter
+            self._install_enter_key_filter(dialog)
+            
+            # Show dialog and get result
+            if not dialog.exec():
+                # User cancelled, stay in dialog
                 return
             
+            selected_files = dialog.selectedFiles()
+            if not selected_files:
+                return
+            
+            base_path = selected_files[0]
             self.session_path = base_path
             # Save this directory for next time
             settings.set_last_session_directory(base_path)
@@ -347,6 +419,9 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             # Pre-select the last session folder if available
             if preselect_path:
                 dialog.selectFile(preselect_path)
+            
+            # Install Enter key filter
+            self._install_enter_key_filter(dialog)
             
             # Show dialog and get result
             if not dialog.exec():

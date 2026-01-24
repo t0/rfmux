@@ -1,7 +1,7 @@
 """Dialog for multisweep settings."""
 
 from .utils import (
-    QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator,
+    QtWidgets, QtCore, QtGui, QRegularExpression, QRegularExpressionValidator,
     QDoubleValidator, QIntValidator,
     DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
     DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
@@ -348,6 +348,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         if self.load_multisweep:
             btn_layout = QtWidgets.QHBoxLayout()
             self.start_btn = QtWidgets.QPushButton("Start Multisweep")
+            self.start_btn.setDefault(True)  # Make this the default button (highlighted, triggered by Enter)
             self.start_btn.setEnabled(False)
             self.load_btn = QtWidgets.QPushButton("Load Multisweep")
             self.load_btn.setEnabled(False) ### Will enable once file is available.
@@ -366,6 +367,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         else:
             btn_layout = QtWidgets.QHBoxLayout()
             self.start_btn = QtWidgets.QPushButton("Start Multisweep")
+            self.start_btn.setDefault(True)  # Make this the default button (highlighted, triggered by Enter)
             self.load_btn = QtWidgets.QPushButton("Load Multisweep")
             self.load_btn.hide()
             self.cancel_btn = QtWidgets.QPushButton("Cancel")
@@ -376,6 +378,14 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.start_btn.clicked.connect(self.accept) # Connect to QDialog's accept slot            
             self.cancel_btn.clicked.connect(self.reject) # Connect to QDialog's reject slot
             
+        # Create keyboard shortcuts for Enter/Return keys to trigger "Start Multisweep"
+        # This works regardless of which widget has focus
+        self.enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Return), self)
+        self.enter_shortcut.activated.connect(self.accept)
+        
+        # Also handle numpad Enter
+        self.numpad_enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Enter), self)
+        self.numpad_enter_shortcut.activated.connect(self.accept)
 
         # Initial update of dBm field if DAC scales are already known
         if self.dac_scales: # Check if dac_scales were passed or fetched synchronously before UI setup

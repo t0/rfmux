@@ -273,6 +273,17 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         
         self.setup_amplitude_group(param_form_layout) # Shared amplitude settings
+        
+        # Per-section amplitudes input
+        section_amps_label = QtWidgets.QLabel("Per-section amplitudes (optional):")
+        section_amps_label.setToolTip(
+            "Enter comma-separated amplitudes, one per sweep section.\n"
+            "Leave empty to use the global amplitude above for all sections.\n"
+            "If specified, must match the number of sweep sections."
+        )
+        self.section_amps_edit = QtWidgets.QLineEdit()
+        self.section_amps_edit.setPlaceholderText("e.g., 0.1, 0.15, 0.2 (comma-separated, optional)")
+        param_form_layout.addRow(section_amps_label, self.section_amps_edit)
 
         
         # Option to recalculate center frequencies
@@ -497,6 +508,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.apply_skewed_fit_checkbox.setChecked(params['apply_skewed_fit'])
             self.apply_nonlinear_fit_checkbox.setChecked(params['apply_nonlinear_fit'])
         
+            # Load iteration amplitudes (for amplitude iterations)
             amps = params.get("amps") or ([params["amp"]] if "amp" in params else None)
             if amps:
                 try:
@@ -504,6 +516,31 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 except (TypeError, ValueError):
                     amp_text = ", ".join(str(amp) for amp in amps)
                 self.amp_edit.setText(amp_text)
+            
+            # Load per-section amplitudes if they exist
+            section_amps = params.get("section_amplitudes")
+            if section_amps:
+                try:
+                    section_amp_text = ", ".join(f"{float(amp):g}" for amp in section_amps)
+                    self.section_amps_edit.setText(section_amp_text)
+                except (TypeError, ValueError):
+                    # If section_amplitudes exist but can't be parsed, try to extract from first iteration
+                    pass
+            elif payload.get('results_by_iteration'):
+                # Extract per-section amplitudes from first iteration's data
+                try:
+                    first_iter = payload['results_by_iteration'][0]
+                    section_amps_from_results = []
+                    for idx in sorted(first_iter['data'].keys()):
+                        if isinstance(idx, (int, np.integer)):
+                            amp_val = first_iter['data'][idx].get('sweep_amplitude')
+                            if amp_val is not None:
+                                section_amps_from_results.append(amp_val)
+                    if section_amps_from_results:
+                        section_amp_text = ", ".join(f"{float(amp):g}" for amp in section_amps_from_results)
+                        self.section_amps_edit.setText(section_amp_text)
+                except Exception as e:
+                    print(f"Warning: Could not extract per-section amplitudes from results: {e}")
         except KeyError as e:
             missing = e.args[0]
             msg = (
@@ -632,6 +669,33 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 # Get fitting parameters
                 params_dict['apply_skewed_fit'] = self.apply_skewed_fit_checkbox.isChecked()
                 params_dict['apply_nonlinear_fit'] = self.apply_nonlinear_fit_checkbox.isChecked()
+                
+                # Parse per-section amplitudes
+                section_amps_text = self.section_amps_edit.text().strip()
+                if section_amps_text:
+                    # User specified per-section amplitudes
+                    try:
+                        section_amps = [float(x.strip()) for x in section_amps_text.split(',')]
+                        # Validate length matches number of sections
+                        if len(section_amps) != len(params_dict['resonance_frequencies']):
+                            QtWidgets.QMessageBox.warning(
+                                self, 
+                                "Validation Error", 
+                                f"Number of per-section amplitudes ({len(section_amps)}) must match "
+                                f"number of sweep sections ({len(params_dict['resonance_frequencies'])})."
+                            )
+                            return None
+                        params_dict['section_amplitudes'] = section_amps
+                    except ValueError as e:
+                        QtWidgets.QMessageBox.warning(
+                            self, 
+                            "Input Error", 
+                            f"Invalid per-section amplitude format: {str(e)}"
+                        )
+                        return None
+                else:
+                    # No per-section amplitudes specified, will be broadcast from amp_array in algorithm
+                    params_dict['section_amplitudes'] = None
     
                 # Basic validation
                 if params_dict['span_hz'] <= 0:

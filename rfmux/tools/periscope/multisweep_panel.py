@@ -87,8 +87,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.setWindowTitle(f"Multisweep Results - Module {self.target_module}")
 
         # Data storage and state
-        self.results_by_iteration = {}  # Stores {iteration: {"amplitude": amp_val, "direction": direction, "data": {cf: data_dict}}}
-        self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed
+        self.results_by_iteration = {}  # Stores {iteration: {"direction": direction, "data": {cf: data_dict}}}
+        self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed (for display only)
         self.current_iteration_being_processed = None # Tracks the current iteration
         self.unit_mode = "dbm"  # Current unit for magnitude display ("counts", "dbm", "volts")
         self.normalize_traces = True  # Flag to normalize trace plots (magnitude and phase)
@@ -674,8 +674,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         
         # Store data in iteration-based structure
+        # Note: 'amplitude' is NOT stored at iteration level - each section has its own sweep_amplitude
         self.results_by_iteration[iteration] = {
-            "amplitude": amplitude,
             "direction": direction,
             "data": results_for_plotting
         }
@@ -800,9 +800,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         use_cmap = pg.colormap.get(cmap_name) if cmap_name else None
         
         # Get unique amplitudes to determine color scheme
+        # Extract amplitudes from detector data
         amplitude_values = set()
         for iteration_data in self.results_by_iteration.values():
-            amplitude_values.add(iteration_data["amplitude"])
+            res_data = iteration_data.get("data", {})
+            for det_data in res_data.values():
+                amp_val = det_data.get('sweep_amplitude')
+                if amp_val is not None:
+                    amplitude_values.add(amp_val)
+                    break  # Only need one amplitude per iteration
         num_amps = len(amplitude_values)
             
         # Create a mapping for unique amplitude values to colors
@@ -831,9 +837,18 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Iterate through each iteration's results
         for iteration, iteration_data in self.results_by_iteration.items():
-            amp_val = iteration_data["amplitude"]
             direction = iteration_data["direction"]
             amp_results = iteration_data["data"]
+            
+            # Get representative amplitude from first detector (for legend/color)
+            amp_val = None
+            for det_data in amp_results.values():
+                amp_val = det_data.get('sweep_amplitude')
+                if amp_val is not None:
+                    break
+            
+            if amp_val is None:
+                continue  # Skip if no amplitude data
             
             # Get color for this amplitude
             color = amplitude_to_color[amp_val]
@@ -1068,12 +1083,32 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.spectrum_noise_data:
             spectrum_data = self.spectrum_noise_data
         else:
-            spectrum_data = None 
+            spectrum_data = None
+        
+        # Prepare initial_parameters with section_amplitudes if available
+        export_initial_params = self.initial_params.copy()
+        
+        # Extract per-section amplitudes from first iteration if not already stored
+        if 'section_amplitudes' not in export_initial_params and self.results_by_iteration:
+            # Get first iteration
+            first_iter = self.results_by_iteration[min(self.results_by_iteration.keys())]
+            res_data = first_iter.get("data", {})
+            
+            # Extract amplitudes in detector index order
+            section_amps = []
+            for det_idx in sorted(res_data.keys()):
+                if isinstance(det_idx, (int, np.integer)):
+                    amp = res_data[det_idx].get('sweep_amplitude')
+                    if amp is not None:
+                        section_amps.append(amp)
+            
+            if section_amps:
+                export_initial_params['section_amplitudes'] = section_amps
             
         return {
             'timestamp': datetime.datetime.now().isoformat(),
             'target_module': self.target_module,
-            'initial_parameters': self.initial_params,
+            'initial_parameters': export_initial_params,
             'dac_scales_used': self.dac_scales,
             'results_by_iteration': self.results_by_iteration,
             'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
@@ -1281,7 +1316,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # Get unique amplitudes from iterations
             amplitude_values = set()
             for iteration_data in self.results_by_iteration.values():
-                amplitude_values.add(iteration_data["amplitude"])
+                res_data = iteration_data.get("data", {})
+                for det_data in res_data.values():
+                    amp_val = det_data.get('sweep_amplitude')
+                    if amp_val is not None:
+                        amplitude_values.add(amp_val)
+                        break  # Only need one per iteration
             num_amps = len(amplitude_values)
             
             if num_amps == 0:
@@ -1297,10 +1337,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 latest_iter_idx = None
                 latest_iter_data = None
                 for iter_idx, iter_data in self.results_by_iteration.items():
-                    if iter_data["amplitude"] == amp_val:
-                        if latest_iter_idx is None or iter_idx > latest_iter_idx:
-                            latest_iter_idx = iter_idx
-                            latest_iter_data = iter_data
+                    # Check if any detector in this iteration has this amplitude
+                    res_data = iter_data.get("data", {})
+                    for det_data in res_data.values():
+                        iter_amp = det_data.get('sweep_amplitude')
+                        if iter_amp == amp_val:
+                            if latest_iter_idx is None or iter_idx > latest_iter_idx:
+                                latest_iter_idx = iter_idx
+                                latest_iter_data = iter_data
+                            break
                 
                 if latest_iter_data is None:
                     continue
@@ -1762,19 +1807,31 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         section_data_for_digest = {}
         
         # Group iterations by amplitude and direction
+        # Extract amplitude from first detector's data in each iteration
         amplitude_direction_to_iteration = {}
         for iter_idx, iter_data in self.results_by_iteration.items():
-            amp_val = iter_data["amplitude"]
             direction = iter_data["direction"]
+            res_data = iter_data.get("data", {})
+            
+            # Get amplitude from first available detector
+            amp_val = None
+            for det_data in res_data.values():
+                amp_val = det_data.get('sweep_amplitude')
+                if amp_val is not None:
+                    break
+            
+            if amp_val is None:
+                continue
+                
             key = (amp_val, direction)
             
             if key not in amplitude_direction_to_iteration or iter_idx > amplitude_direction_to_iteration[key]:
                 amplitude_direction_to_iteration[key] = iter_idx
         
-        # Process data for the target detector
+            # Process data for the target detector
         for (amp_val, direction), iter_idx in amplitude_direction_to_iteration.items():
             iter_data = self.results_by_iteration[iter_idx]
-            res_data = iter_data["data"]
+            res_data = iter_data.get("data", {})
             
             if not res_data or detector_idx not in res_data:
                 continue
@@ -1821,8 +1878,19 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             detector_resonance_data = {}
             amplitude_direction_to_iteration_det = {}
             for iter_idx, iter_data in self.results_by_iteration.items():
-                amp_val = iter_data["amplitude"]
                 direction = iter_data["direction"]
+                res_data_temp = iter_data.get("data", {})
+                
+                # Get amplitude from first available detector
+                amp_val = None
+                for det_data_temp in res_data_temp.values():
+                    amp_val = det_data_temp.get('sweep_amplitude')
+                    if amp_val is not None:
+                        break
+                
+                if amp_val is None:
+                    continue
+                    
                 key = (amp_val, direction)
                 
                 if key not in amplitude_direction_to_iteration_det or iter_idx > amplitude_direction_to_iteration_det[key]:
@@ -1830,7 +1898,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             
             for (amp_val, direction), iter_idx in amplitude_direction_to_iteration_det.items():
                 iter_data = self.results_by_iteration[iter_idx]
-                res_data = iter_data["data"]
+                res_data = iter_data.get("data", {})
                 
                 if not res_data or det_idx not in res_data:
                     continue

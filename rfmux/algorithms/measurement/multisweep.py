@@ -89,7 +89,7 @@ async def multisweep(
     center_frequencies: list[float],
     span_hz: float,
     npoints_per_sweep: int,
-    amp: float,
+    amp: float | list[float],
     nsamps: int = 10,
     bias_frequency_method: Optional[str] = "max-diq", # Options: "min-s21", "max-diq", or None
     rotate_saved_data: bool = False,  # Whether to rotate sweep data based on TOD analysis
@@ -115,7 +115,9 @@ async def multisweep(
         center_frequencies (list[float]): List of center frequencies (Hz) for each resonance.
         span_hz (float): Total frequency width (Hz) of each sweep.
         npoints_per_sweep (int): Number of points to measure within each sweep's span.
-        amp (float): Amplitude (normalized DAC units) for all tones.
+        amp (float | list[float]): Amplitude (normalized DAC units). Can be:
+            - A single float: Applied to all tones.
+            - A list of floats: Per-section amplitudes (must match length of center_frequencies).
         nsamps (int, optional): Number of samples to average per frequency point for the main sweep.
                                 Defaults to 10. The TOD acquisition for rotation uses 1000 samples.
         bias_frequency_method (Optional[str], optional):
@@ -200,6 +202,22 @@ async def multisweep(
               However, this structure is created by the GUI task, not by this algorithm directly.
     """
 
+    # --- Normalize amplitude input to array ---
+    if isinstance(amp, (int, float)):
+        amp_array = [float(amp)] * len(center_frequencies)
+    else:
+        amp_array = list(amp)
+        if len(amp_array) != len(center_frequencies):
+            raise ValueError(
+                f"Length of amp array ({len(amp_array)}) must match "
+                f"center_frequencies ({len(center_frequencies)})"
+            )
+    
+    # Validate amplitude values
+    for i, a in enumerate(amp_array):
+        if a <= 0:
+            warnings.warn(f"Amplitude for section {i} (amp={a}) is non-positive. Results may be invalid.")
+    
     # --- Handle parallel execution if module is a list ---
     if isinstance(module, list):
         if not module:
@@ -220,7 +238,7 @@ async def multisweep(
                 center_frequencies=center_frequencies,
                 span_hz=span_hz,
                 npoints_per_sweep=npoints_per_sweep,
-                amp=amp,
+                amp=amp,  # Pass original amp (already validated above)
                 nsamps=nsamps,
                 bias_frequency_method=bias_frequency_method,
                 rotate_saved_data=rotate_saved_data,
@@ -252,8 +270,6 @@ async def multisweep(
         raise ValueError("npoints_per_sweep must be at least 2.")
     if span_hz <= 0:
         raise ValueError("span_hz must be positive.")
-    if amp <= 0:
-        warnings.warn(f"Amplitude amp={amp} is non-positive. Results may be invalid.")
     # --- End input validation ---
 
     # --- Define Constants ---
@@ -356,7 +372,9 @@ async def multisweep(
                     freq_rel = freq - current_nco_freq # Use current_nco_freq
                     ctx.set_frequency(freq_rel, channel=channel, module=module)
                     if not point_idx: # only set amplitude once per sweep
-                        ctx.set_amplitude(amp, channel=channel, module=module)
+                        # Use per-section amplitude from amp_array
+                        section_amp = amp_array[idx - 1]  # idx is 1-based, amp_array is 0-based
+                        ctx.set_amplitude(section_amp, channel=channel, module=module)
 
                 # Zero out unused resonance channels
                 if not point_idx: # only need to do this once per sweep
@@ -446,7 +464,9 @@ async def multisweep(
                     for res_info in resonances_needing_tod:
                         freq_for_tod_rel = res_info["bias_freq"] - current_nco_freq
                         ctx.set_frequency(freq_for_tod_rel, channel=res_info["channel_hw"], module=module)
-                        ctx.set_amplitude(amp, channel=res_info["channel_hw"], module=module)
+                        # Use per-section amplitude
+                        tod_amp = amp_array[res_info["idx"] - 1]  # idx is 1-based
+                        ctx.set_amplitude(tod_amp, channel=res_info["channel_hw"], module=module)
                     await ctx()
 
                 try:
@@ -580,7 +600,7 @@ async def multisweep(
             'rotation_tod': data_entry.get('rotation_tod'),
             'applied_rotation_degrees': data_entry.get('applied_rotation_degrees'),
             'sweep_direction': sweep_direction,
-            'sweep_amplitude': amp,  # Store the amplitude used in the sweep
+            'sweep_amplitude': amp_array[idx - 1],  # Store the per-section amplitude used
             'iq_complex_volts': iq_complex_volts,  # Sweep IQ data in voltage units
             'df_calibration': df_calibration,  # Calibration parameters
             'calibrated_tod_df': calibrated_tod_df  # Calibrated TOD data

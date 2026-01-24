@@ -271,7 +271,7 @@ def prepare_detector_data_from_iterations(results_by_iteration):
     Convert iteration-based results to detector-based format for grid plotting.
     
     Args:
-        results_by_iteration: Dict {iteration: {amplitude, direction, data: {detector_id: {...}}}}
+        results_by_iteration: Dict {iteration: {direction, data: {detector_id: {...}}}}
         
     Returns:
         Dict {detector_id: {amplitude: {'freq': array, 'iq': array, ...}}}
@@ -281,8 +281,19 @@ def prepare_detector_data_from_iterations(results_by_iteration):
     # Group by detector and amplitude, keeping latest iteration for each (amp, direction) pair
     amplitude_direction_to_iteration = {}
     for iter_idx, iter_data in results_by_iteration.items():
-        amp_val = iter_data["amplitude"]
         direction = iter_data["direction"]
+        res_data = iter_data.get("data", {})
+        
+        # Get amplitude from first available detector
+        amp_val = None
+        for det_data in res_data.values():
+            amp_val = det_data.get('sweep_amplitude')
+            if amp_val is not None:
+                break
+        
+        if amp_val is None:
+            continue
+            
         key = (amp_val, direction)
         
         # Keep the latest iteration for this amplitude+direction

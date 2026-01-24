@@ -549,11 +549,21 @@ class MultisweepTask(QtCore.QThread):
                     
                     self.signals.starting_iteration.emit(module_idx, iteration_index, amp_val, direction_val)
                     
+                    # Determine amplitude to pass to multisweep
+                    # If section_amplitudes are specified, use them; otherwise use single amp_val
+                    section_amps = self.params.get('section_amplitudes')
+                    if section_amps is not None:
+                        # Use per-section amplitudes
+                        amp_to_pass = section_amps
+                    else:
+                        # Use single amplitude (will be broadcast to all sections in algorithm)
+                        amp_to_pass = amp_val
+                    
                     multisweep_params = {
                         'center_frequencies': current_sweep_cfs_for_this_amp,
                         'span_hz': self.params['span_hz'],
                         'npoints_per_sweep': self.params['npoints_per_sweep'],
-                        'amp': amp_val,
+                        'amp': amp_to_pass,
                         'nsamps': self.params.get('nsamps', 10),
                         'module': module_idx,
                         'progress_callback': self._progress_callback_wrapper,

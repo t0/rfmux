@@ -256,29 +256,23 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _update_plots(self):
         """Update all plots with current settings."""
         if not self.plot_data:
-            print("[DEBUG] _update_plots: No plot_data")
             return
         
         fit_params = self.plot_data.get('fit_params', {})
         
         if self.amplitude_idx is None:
             # Show all amplitudes (stacked)
-            print("[DEBUG] _update_plots: Showing all amplitudes (stacked)")
             self._update_plots_all_amplitudes()
         else:
             # Show single amplitude
             if self.amplitude_idx >= len(self.available_amplitudes):
-                print(f"[DEBUG] _update_plots: amplitude_idx {self.amplitude_idx} >= len(available_amplitudes) {len(self.available_amplitudes)}")
                 return
             
             amp = self.available_amplitudes[self.amplitude_idx]
-            print(f"\n[DEBUG] _update_plots: Processing amplitude index {self.amplitude_idx} (value: {amp})")
-            print(f"[DEBUG] Number of detectors in fit_params: {len(fit_params)}")
             
             # Check cache first
             cache_key = self.amplitude_idx
             if cache_key in self.histogram_cache:
-                print("[DEBUG] Using cached histogram data")
                 cached_data = self.histogram_cache[cache_key]
                 self._plot_frequency_scatter(cached_data['fr_dict'])
                 self._plot_q_histogram(self.qr_plot, cached_data['qr_dict'], "Qr")
@@ -292,13 +286,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
                 qr_values, qr_ids = get_parameter_arrays(fit_params, 'Qr', self.amplitude_idx)
                 qc_values, qc_ids = get_parameter_arrays(fit_params, 'Qc', self.amplitude_idx)
                 qi_values, qi_ids = get_parameter_arrays(fit_params, 'Qi', self.amplitude_idx)
-                
-                print(f"[DEBUG] Extracted fr: {len(fr_values)} values")
-                print(f"[DEBUG] Extracted Qr: {len(qr_values)} values")
-                print(f"[DEBUG] Extracted Qc: {len(qc_values)} values")
-                print(f"[DEBUG] Extracted Qi: {len(qi_values)} values")
             except Exception as e:
-                print(f"[DEBUG] Error extracting parameters: {e}")
                 import traceback
                 traceback.print_exc()
                 return
@@ -314,8 +302,6 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             qr_valid = filter_failed_fits(qr_dict)
             qc_valid = filter_failed_fits(qc_dict)
             qi_valid = filter_failed_fits(qi_dict)
-            
-            print(f"[DEBUG] After filtering - fr: {len(fr_valid)}, Qr: {len(qr_valid)}, Qc: {len(qc_valid)}, Qi: {len(qi_valid)}")
             
             # Cache the filtered data
             self.histogram_cache[cache_key] = {
@@ -380,7 +366,6 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Check if cached
         cache_key = 'all_amplitudes'
         if cache_key in self.histogram_cache:
-            print("[DEBUG] Using cached all-amplitudes data")
             cached_data = self.histogram_cache[cache_key]
             self._plot_frequency_scatter_all_amplitudes(cached_data['fr_by_amp'])
             self._plot_stacked_q_histogram(self.qr_plot, cached_data['qr_by_amp'], "Qr")
@@ -417,7 +402,6 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
                     qi_by_amp[amp_idx] = qi_dict
                     
             except Exception as e:
-                print(f"[DEBUG] Error extracting data for amplitude index {amp_idx}: {e}")
                 continue
         
         # Compute and store global Q-factor ranges
@@ -605,8 +589,8 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             )
             plot_item.addItem(bar_graph)
             
-            # Add to legend with amplitude label
-            legend.addItem(bar_graph, f"Amp {amp_value:.6f}")
+            # Add to legend with amplitude index (matching the selector labels)
+            legend.addItem(bar_graph, str(amp_idx))
         
         # Add title
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")

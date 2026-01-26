@@ -89,9 +89,6 @@ def _group_by_detector(results_by_iteration: Dict[int, Dict]) -> Tuple[Dict[int,
         if amp not in amp_to_index:
             amp_to_index[amp] = len(amp_to_index)
     
-    print(f"[DEBUG] _group_by_detector: Processing {len(results_by_iteration)} iterations")
-    print(f"[DEBUG] Amplitude to index mapping: {amp_to_index}")
-    
     # Reorganize by detector
     for iter_idx in sorted(results_by_iteration.keys()):
         iteration_data = results_by_iteration[iter_idx]
@@ -99,12 +96,6 @@ def _group_by_detector(results_by_iteration: Dict[int, Dict]) -> Tuple[Dict[int,
         amp_idx = amp_to_index[amp]
         
         detector_data = iteration_data.get('data', {})
-        
-        # Debug: print keys for first detector in first iteration
-        if iter_idx == sorted(results_by_iteration.keys())[0] and detector_data:
-            first_det_id = list(detector_data.keys())[0]
-            print(f"[DEBUG] First iteration {iter_idx}, first detector {first_det_id}")
-            print(f"[DEBUG] Available keys in det_data: {list(detector_data[first_det_id].keys())}")
         
         for detector_id, det_data in detector_data.items():
             if detector_id not in detector_dict:
@@ -198,31 +189,15 @@ def get_parameter_arrays(fit_params: Dict[int, Dict[int, Dict]],
     values = []
     detector_ids = []
     
-    print(f"[DEBUG] get_parameter_arrays called: param_name={param_name}, amp_idx={amp_idx}")
-    print(f"[DEBUG] Total detectors in fit_params: {len(fit_params)}")
-    
-    # Debug: show available amp indices for first detector
-    if fit_params:
-        first_det_id = list(fit_params.keys())[0]
-        print(f"[DEBUG] First detector {first_det_id} has amp indices: {list(fit_params[first_det_id].keys())}")
-        if amp_idx is not None and amp_idx in fit_params[first_det_id]:
-            print(f"[DEBUG] First detector params at amp_idx {amp_idx}: {fit_params[first_det_id][amp_idx]}")
-    
-    skipped_no_amp = 0
-    skipped_no_param = 0
-    skipped_nan = 0
-    
     for detector_id, amp_dict in fit_params.items():
         # Select amplitude index
         if amp_idx is not None:
             if amp_idx not in amp_dict:
-                skipped_no_amp += 1
                 continue
             params = amp_dict[amp_idx]
         else:
             # Use first available amplitude
             if not amp_dict:
-                skipped_no_amp += 1
                 continue
             params = amp_dict[min(amp_dict.keys())]
         
@@ -233,13 +208,6 @@ def get_parameter_arrays(fit_params: Dict[int, Dict[int, Dict]],
             if val != 'nan' and not (isinstance(val, float) and np.isnan(val)):
                 values.append(float(val))
                 detector_ids.append(detector_id)
-            else:
-                skipped_nan += 1
-        else:
-            skipped_no_param += 1
-    
-    print(f"[DEBUG] Extraction complete: found {len(values)} valid values")
-    print(f"[DEBUG] Skipped: {skipped_no_amp} (no amp_idx), {skipped_no_param} (no param), {skipped_nan} (NaN)")
     
     return values, detector_ids
 

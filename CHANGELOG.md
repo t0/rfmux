@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.4.0](https://github.com/t0/rfmux/compare/v1.3.2...v1.4.0) (2026-01-26)
+
+
+### Features
+
+* **Channel Noise collection:** Implemented direct collection of noise spectra for selected channels from the main window.  ([#63](https://github.com/t0/rfmux/issues/63)) ([5c5ee4c](https://github.com/t0/rfmux/commit/5c5ee4c8c71a8ae4cbb9eabbdf25ae100038aa2c))
+* **firmware:** release r1.6.0rc3 ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **firmware:** replace r1.6.0rc1 with r1.6.0rc2 ([2a29b1c](https://github.com/t0/rfmux/commit/2a29b1c57eca4ececaa2c22520a09314c2f16ba8))
+* **Pfb streamer periscope:** Script to run pfb streamer using firmware v1.6.0 and beyond ([#74](https://github.com/t0/rfmux/issues/74)) ([ad27431](https://github.com/t0/rfmux/commit/ad27431537c8d2c20b13f76e2198312ebd032479))
+* **set_aux_sma_mode:** allow aux SMA to drive IRIG-B test-mode timestamps ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **timestamp:** add _set_timestamp call for test-mode IRIG-B ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **timestamp:** add "set time" functionality in test-mode IRIG-B encoder ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **timestamp:** allow timestamp input via SMA_AUX ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+
+
+### Bug Fixes
+
+* **dump_housekeeping:** support rev2 and earlier CRS hardware that ([2a29b1c](https://github.com/t0/rfmux/commit/2a29b1c57eca4ececaa2c22520a09314c2f16ba8))
+* **high banking:** high-bank modules often need -4 offsets applied when indexing into firmware ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **parser:** correct missing pygetdata import ([bdfd930](https://github.com/t0/rfmux/commit/bdfd93093e048df377da641d27bbde71f6a80bad))
+* **parser:** correct timestamp message generation (c++ churn) ([4004220](https://github.com/t0/rfmux/commit/4004220eb180aed54c7f35e29709c85ea619c31f))
+* **parser:** don't require pygetdata as a top-level dependency ([c2a94dd](https://github.com/t0/rfmux/commit/c2a94dd3c03e8ef12486f153a80c4ee0022559da))
+* **parser:** PFB mode: when reporting slot allocations, use 1-indexed channels ([e0fd263](https://github.com/t0/rfmux/commit/e0fd2638162399f51e9310a92daad0de7570e232))
+* **pfb_streamer:** fix field swap between version and mode ([2a29b1c](https://github.com/t0/rfmux/commit/2a29b1c57eca4ececaa2c22520a09314c2f16ba8))
+* **pfb_streamer:** PFB packets now contain 1000 I/Q samples, rather than ([2a29b1c](https://github.com/t0/rfmux/commit/2a29b1c57eca4ececaa2c22520a09314c2f16ba8))
+* **streamer:** bump bandwidth derating from 0.5 to 0.8 ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **streamer:** export PFB_PACKET_SIZE in rfmux.streamer and ._receiver ([7a20d29](https://github.com/t0/rfmux/commit/7a20d2996f11bb5aaf6b4b0835c86a9c6049c4c6))
+* **streamer:** update maximum PFB packet length to match 1.6.0rc2 firmware ([35cef8d](https://github.com/t0/rfmux/commit/35cef8dd28a6733fad5f71df87e8bf7fb277758e))
+* **streamer:** validate bandwidth derating is between 0.5 and 1.0. ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **timestamp:** teach encoder how to serialize "C" field ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+
 ## [1.3.2](https://github.com/t0/rfmux/compare/v1.3.1...v1.3.2) (2026-01-12)
 
 

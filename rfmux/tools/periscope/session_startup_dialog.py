@@ -116,7 +116,7 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         
         # Set reasonable size
         self.setMinimumWidth(600)
-        self.setMinimumHeight(550)
+        self.setMinimumHeight(600)
         
     def _create_connection_section(self) -> QtWidgets.QGroupBox:
         """Create the connection mode section."""

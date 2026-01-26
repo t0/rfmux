@@ -1,5 +1,31 @@
 # Changelog
 
+# r1.6.0rc3 - 2026-01-23
+
+- streamer: bump bandwidth derating from 0.5 to 0.8, and validate it when
+  provided
+
+- high banking / PFB streaming: correct missed "high bank" module calculation
+  (upshot: fixes ioctl error when calling get_pfb_streamer in high-bank
+  configuration, which in turn is called in get_decimation.)
+
+- IRIG-B timestamping upgrades
+
+  - adds _set_timestamp call for test-mode IRIG-B generator
+  - adds set_aux_sma_mode(d.SMA_AUX_MODE.TEST_IRIG) to output IRIG-B timestamps via AUX
+  - adds set_timestamp_port(d.TIMESTAMP_PORT.AUX_SMA) to input IRIG-B timestamps via AUX
+  - test-mode IRIG-B encoder now populates "c" field
+
+# r1.6.0rc2 - 2026-01-16
+
+- PFB packets now contain 1000 I/Q samples, rather than
+  2000 (better match for MTU 9000 jumbo-frame networks).
+
+- pfb_streamer: fix field swap between version and mode
+
+- dump_housekeeping: support rev2 and earlier CRS hardware that
+  lacked an I2C housekeeping thermometer
+
 # r1.6.0rc1 - 2026-01-09
 
 ## Decimation and Streaming

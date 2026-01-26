@@ -175,6 +175,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.test_noise_samples = {}           ##### debugging purposes 
         self.noise_count = 0                   ##### debugging purposes 
         self.phase_shifts = []                 ##### debugging purposes 
+
+        self.channel_noise_data = {}
+        self.channel_noise_panel_count = 0
+        self.loaded_channel_noise = False
         
         # --- df Calibration Storage ---
         # Stores calibration factors for frequency shift/dissipation conversion
@@ -378,6 +382,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if self.crs is None and self.host != "OFFLINE":
             self.btn_load_bias.setEnabled(False)
             self.btn_load_bias.setToolTip("CRS object not available - load Bias disabled.")
+
+        self.btn_noise_spec = QtWidgets.QPushButton("Noise Spectrum")
+        self.btn_noise_spec.setToolTip("Get Noise Spectrum for a Channel")
+        self.btn_noise_spec.clicked.connect(self._get_channel_noise)
+        if self.crs is None and self.host != "OFFLINE":
+            self.btn_noise_spec.setEnabled(False)
+            self.btn_noise_spec.setToolTip("CRS object not available - noise spectrum disabled.")
 
         self.btn_toggle_cfg = QtWidgets.QPushButton("Show Configuration")
         self.btn_toggle_cfg.setCheckable(True)
@@ -653,6 +664,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         # Create the MainPlotPanel
         self.main_plot_panel = MainPlotPanel(self)
+
+        if hasattr(self.main_plot_panel, 'data_ready') and hasattr(self, 'session_manager'):
+            self.main_plot_panel.data_ready.connect(self.session_manager.handle_data_ready)
         
         # Set up references for backward compatibility with PeriscopeRuntime
         self.container = self.main_plot_panel.container
@@ -1364,6 +1378,27 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                         return
                     self._start_multisweep_analysis(params)
     
+    
+    def _get_channel_noise(self) -> None:
+        ''' Open Dialog to get noise spectrum dialog '''
+
+        default_dac_scales = {m: -0.5 for m in range(1, 9)}
+        # NetworkAnalysisDialog from .ui (which imports from .dialogs)
+        dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
+        dialog.module_entry.setText(str(self.module))
+        
+        # Fetch DAC scales if CRS is available
+        self._fetch_dac_scales_for_dialog(dialog)
+        if self.crs is None:
+            self.dac_scales = default_dac_scales.copy()
+        
+        from .noise_spectrum_dialog import NoiseSpectrumDialog
+        num_res = 0 ### a place holder from the dialog 
+        noise_dialog = NoiseSpectrumDialog(self, num_res, self.crs, channel=True)
+        if noise_dialog.exec():
+            params = noise_dialog.get_parameters()
+            self._collect_channel_noise(params)
+
     
     def handle_bias_from_file(self) -> None:
         """Slot for the 'Load Bias…' button in the main application window."""
@@ -2648,6 +2683,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 self._load_bias_from_session(data, file_path)
             elif file_type == 'noise':
                 self._load_noise_from_session(data, file_path)
+            elif file_type == 'channel_noise':
+                self._load_channel_noise_from_session(data, file_path)
             else:
                 QtWidgets.QMessageBox.information(
                     self,
@@ -2791,7 +2828,21 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Re-raise the multisweep dock to keep focus on it
         if dock:
             dock.raise_()
-    
+
+    def _load_channel_noise_from_session(self, data: dict, file_path: str):
+        """Load multisweep data from session file into a new panel."""
+        if 'channel_noise_data' not in data:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid Channel Noise File",
+                f"File does not contain multisweep data:\n{file_path}\n\n"
+                "Cannot load this noise file."
+            )
+            return
+        
+        # Use existing load mechanism
+        self._collect_channel_noise(data, loaded=True)
+        
     def _open_file_with_system_default(self, file_path: str):
         """
         Open a file with the system's default application.

@@ -40,6 +40,7 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
         all_detectors_data: dict | None = None,
         initial_detector_idx: int | None = None,
         spectrum_data: dict | None = None,
+        channels: list | None = None
     ):
         super().__init__(parent)
 
@@ -82,6 +83,9 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.pfb_freq_iq = None
         self.pfb_freq_dsb = None
         self.pfb_dual_psd = None
+
+        ### channel stuff ###
+        self.noise_channels = channels
 
         self._load_detector_noise_products()
 
@@ -152,7 +156,10 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self._load_detector_noise_products()
 
-        title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
+        if self.noise_channels is not None:
+            title_text = f"Channel {self.noise_channels[self.detector_id-1]} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
+        else:
+            title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
         self.setWindowTitle(f"Noise Spectrum: {title_text}")
         if hasattr(self, "title_label"):
             self.title_label.setText(title_text)
@@ -213,7 +220,10 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
         nav_layout.addWidget(self.prev_button)
 
         title_color_str = "white" if self.dark_mode else "black"
-        title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
+        if self.noise_channels is not None:
+            title_text = f"Channel {self.noise_channels[self.detector_id-1]} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
+        else:
+            title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
         self.title_label = QtWidgets.QLabel(title_text)
         self.title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         font = self.title_label.font()
@@ -438,15 +448,26 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
         log_freqs = np.log10(np.clip(full_freq, 1e-12, None))
 
         # Summary box
-        amplitude = float(self.tone_amp)
-        slow_freq = float(self.slow_freq)
-        fast_freq_mhz = (self.fast_freq / 1e6) if self.fast_freq else 0.0
-        summary_text = (
-            f"<span style='font-size:12pt; color:grey;'>"
-            f"Tone Amp: {amplitude:.1f} dBm <br>"
-            f"Slow Bandwidth: {slow_freq:.0f} Hz <br>"
-            f"Fast Bandwidth: {fast_freq_mhz:.2f} MHz </span>"
-        )
+        if self.tone_amp != 0:
+            amplitude = float(self.tone_amp)
+            slow_freq = float(self.slow_freq)
+            fast_freq_mhz = (self.fast_freq / 1e6) if self.fast_freq else 0.0
+            summary_text = (
+                f"<span style='font-size:12pt; color:grey;'>"
+                f"Tone Amp: {amplitude:.1f} dBm <br>"
+                f"Slow Bandwidth: {slow_freq:.0f} Hz <br>"
+                f"Fast Bandwidth: {fast_freq_mhz:.2f} MHz </span>"
+            )
+        else:
+            amplitude = "Listener"
+            slow_freq = float(self.slow_freq)
+            fast_freq_mhz = (self.fast_freq / 1e6) if self.fast_freq else 0.0
+            summary_text = (
+                f"<span style='font-size:12pt; color:grey;'>"
+                f"Tone Amp: {amplitude} <br>"
+                f"Slow Bandwidth: {slow_freq:.0f} Hz <br>"
+                f"Fast Bandwidth: {fast_freq_mhz:.2f} MHz </span>"
+            )
 
         self.summary_label = pg.TextItem(html=summary_text, anchor=(0, 0), border="w", fill=(0, 0, 0, 150))
         self.plot_noise_spectrum.addItem(self.summary_label)

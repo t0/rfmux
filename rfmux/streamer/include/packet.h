@@ -58,7 +58,7 @@ struct pfb_packet_header {
 } PACKED;
 
 /* Maximum sample count for PFB packets */
-#define PFBPACKET_NSAMP_MAX 2000
+#define PFBPACKET_NSAMP_MAX 1000
 
 /* Maximum-size PFB packet buffer for ioctl/DMA allocation
  * This is a fixed-size buffer that can hold any valid PFB packet */

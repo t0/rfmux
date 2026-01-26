@@ -34,6 +34,7 @@ KEY_SESSION_MODE = "session/last_mode"
 KEY_LAST_SESSION_PATH = "session/last_loaded_path"
 KEY_USER_LIBRARY_PATH = "notebook/user_library_path"
 KEY_CUSTOM_MATERIALS = "materials/custom_materials"
+KEY_MULTISWEEP_DEFAULTS = "multisweep/defaults"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
@@ -387,3 +388,72 @@ def get_material_properties(name: str) -> dict:
         return mat
     
     raise ValueError(f"Material '{name}' not found in built-in or custom materials")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Multisweep Settings
+# ─────────────────────────────────────────────────────────────────
+
+def get_multisweep_defaults() -> dict:
+    """
+    Get saved multisweep default parameters.
+    
+    Returns:
+        dict: Saved multisweep parameters or empty dict if none saved.
+              Expected keys:
+              - span_hz: Span per section in Hz
+              - npoints_per_sweep: Number of points per sweep
+              - nsamps: Samples to average per point
+              - amp_arrays: List of amplitude arrays for iterations
+              - bias_frequency_method: Method for recalculating center frequencies
+              - rotate_saved_data: Whether to rotate saved data
+              - sweep_direction: Direction of frequency sweep
+              - apply_skewed_fit: Whether to apply skewed fit
+              - apply_nonlinear_fit: Whether to apply nonlinear fit
+    """
+    import json
+    settings = _get_settings()
+    json_str = settings.value(KEY_MULTISWEEP_DEFAULTS, "{}")
+    try:
+        return json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def set_multisweep_defaults(params: dict) -> None:
+    """
+    Save multisweep default parameters for future sessions.
+    
+    Args:
+        params: Dictionary of multisweep parameters to save.
+                Should include keys like span_hz, npoints_per_sweep, nsamps,
+                amp_arrays, bias_frequency_method, rotate_saved_data,
+                sweep_direction, apply_skewed_fit, apply_nonlinear_fit.
+                
+    Note:
+        Only saves parameters that should persist across sessions.
+        Module-specific or session-specific data (like resonance_frequencies)
+        should not be included.
+    """
+    import json
+    
+    # Filter params to only include the fields we want to persist
+    # Exclude session-specific data like resonance_frequencies, module, etc.
+    persist_keys = {
+        'span_hz',
+        'npoints_per_sweep',
+        'nsamps',
+        'amp_arrays',
+        'base_amplitude_mode',
+        'base_amplitude_values',
+        'bias_frequency_method',
+        'rotate_saved_data',
+        'sweep_direction',
+        'apply_skewed_fit',
+        'apply_nonlinear_fit'
+    }
+    
+    filtered_params = {k: v for k, v in params.items() if k in persist_keys}
+    
+    settings = _get_settings()
+    settings.setValue(KEY_MULTISWEEP_DEFAULTS, json.dumps(filtered_params))

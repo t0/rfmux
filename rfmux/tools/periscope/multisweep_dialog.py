@@ -11,6 +11,7 @@ from .utils import (
 )
 from .network_analysis_base import NetworkAnalysisDialogBase
 from .tasks import DACScaleFetcher # Import DACScaleFetcher from tasks.py
+from . import settings  # Import settings module for persistence
 import pickle
 import numpy as np
 from PyQt6.QtCore import Qt
@@ -83,7 +84,17 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             current_module: The module ID on which the multisweep will be performed.
             initial_params: Dictionary of initial parameters to populate fields.
         """
-        super().__init__(parent, params=initial_params, dac_scales=dac_scales)
+        # Load saved defaults if no initial params provided
+        merged_params = {}
+        if initial_params is None or not initial_params:
+            # No initial params, load from saved defaults
+            merged_params = settings.get_multisweep_defaults()
+        else:
+            # Start with saved defaults, then override with initial_params
+            merged_params = settings.get_multisweep_defaults()
+            merged_params.update(initial_params)
+        
+        super().__init__(parent, params=merged_params, dac_scales=dac_scales)
         self.section_center_frequencies = section_center_frequencies or []
         self.current_module = current_module # Store the current module for DAC scale and params
         self.load_multisweep = load_multisweep
@@ -375,6 +386,15 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.uniform_sweep_radio.toggled.connect(self._on_iteration_mode_changed)
         self.scaling_radio.toggled.connect(self._on_iteration_mode_changed)
         
+        # Add Clear button for amplitude settings
+        clear_amp_layout = QtWidgets.QHBoxLayout()
+        clear_amp_layout.addStretch()  # Push button to the right
+        self.clear_amp_btn = QtWidgets.QPushButton("Clear Amplitude Settings")
+        self.clear_amp_btn.setToolTip("Reset all amplitude fields to their default empty state")
+        self.clear_amp_btn.clicked.connect(self._clear_amplitude_fields)
+        clear_amp_layout.addWidget(self.clear_amp_btn)
+        param_form_layout.addRow(clear_amp_layout)
+        
         # Option to recalculate center frequencies
         self.recalc_cf_combo = QtWidgets.QComboBox()
         self.recalc_cf_combo.addItems(["max-dIQ","min-S21","None"])
@@ -488,6 +508,174 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.numpad_enter_shortcut.activated.connect(self.accept)
         
         self.setMinimumWidth(500) # Ensure dialog is wide enough
+        
+        # Populate amplitude fields from stored parameters (if available)
+        self._populate_amplitude_fields_from_params()
+
+    def _populate_amplitude_fields_from_params(self):
+        """
+        Populate amplitude-related fields from self.params if available.
+        Uses metadata (base_amplitude_mode, base_amplitude_values) if present,
+        otherwise detects the mode from amp_arrays structure.
+        """
+        amp_arrays = self.params.get('amp_arrays')
+        
+        if not amp_arrays or not isinstance(amp_arrays, list):
+            # No amplitude data to populate, or wrong format
+            return
+        
+        if len(amp_arrays) == 0:
+            return
+        
+        num_iterations = len(amp_arrays)
+        
+        # Set number of steps
+        self.num_steps_edit.setText(str(num_iterations))
+        
+        # Get the first amplitude array as reference
+        first_array = amp_arrays[0]
+        if not first_array:
+            return
+        
+        # Check for metadata about how base amplitude was originally specified
+        base_amp_mode = self.params.get('base_amplitude_mode')
+        base_amp_values = self.params.get('base_amplitude_values')
+        
+        # If we have metadata, use it to populate the correct field
+        if base_amp_mode and base_amp_values is not None:
+            if base_amp_mode == 'global':
+                self.global_amp_edit.setText(f"{base_amp_values:.4g}")
+            elif base_amp_mode == 'array':
+                if isinstance(base_amp_values, list):
+                    amp_text = ", ".join(f"{amp:.4g}" for amp in base_amp_values)
+                    self.amp_array_edit.setText(amp_text)
+        else:
+            # No metadata - fall back to inference from amp_arrays structure
+            # Check if this is a global amplitude (all values in array are the same)
+            is_global_amp = len(set(first_array)) == 1
+            
+            if is_global_amp:
+                self.global_amp_edit.setText(f"{first_array[0]:.4g}")
+            else:
+                amp_text = ", ".join(f"{amp:.4g}" for amp in first_array)
+                self.amp_array_edit.setText(amp_text)
+        
+        # Now handle iteration settings
+        if num_iterations == 1:
+            # Single iteration mode
+            self.single_iteration_radio.setChecked(True)
+        
+        elif num_iterations > 1:
+            # Multiple iterations - detect pattern
+            # Extract the representative amplitude from each iteration (first value)
+            iteration_amps = [arr[0] if arr else 0.0 for arr in amp_arrays]
+            
+            # Check if all arrays have the same structure (global vs array)
+            all_global = all(len(set(arr)) == 1 for arr in amp_arrays if arr)
+            all_array_same_structure = len(set(len(arr) for arr in amp_arrays)) == 1
+            
+            if all_global:
+                # All iterations use global amplitude - check for uniform or scaling
+                # Check for uniform progression (linear)
+                if self._is_uniform_progression(iteration_amps):
+                    self.uniform_sweep_radio.setChecked(True)
+                    self.uniform_start_edit.setText(f"{iteration_amps[0]:.4g}")
+                    self.uniform_stop_edit.setText(f"{iteration_amps[-1]:.4g}")
+                
+                # Check for scaling progression (multiplicative)
+                elif self._is_scaling_progression(amp_arrays, first_array):
+                    self.scaling_radio.setChecked(True)
+                    # Calculate scale factors
+                    base_amp = first_array[0]
+                    start_factor = iteration_amps[0] / base_amp if base_amp != 0 else 1.0
+                    stop_factor = iteration_amps[-1] / base_amp if base_amp != 0 else 1.0
+                    self.scale_start_edit.setText(f"{start_factor:.4g}")
+                    self.scale_stop_edit.setText(f"{stop_factor:.4g}")
+                
+                else:
+                    # Unknown pattern, just keep as single iteration
+                    self.single_iteration_radio.setChecked(True)
+            
+            elif all_array_same_structure:
+                # Amplitude arrays with consistent structure
+                # Check if this follows a scaling pattern
+                if self._is_scaling_progression(amp_arrays, first_array):
+                    self.scaling_radio.setChecked(True)
+                    # Calculate scale factors from first element
+                    base_amp = first_array[0]
+                    start_factor = iteration_amps[0] / base_amp if base_amp != 0 else 1.0
+                    stop_factor = iteration_amps[-1] / base_amp if base_amp != 0 else 1.0
+                    self.scale_start_edit.setText(f"{start_factor:.4g}")
+                    self.scale_stop_edit.setText(f"{stop_factor:.4g}")
+                else:
+                    # No clear pattern, keep as single iteration
+                    self.single_iteration_radio.setChecked(True)
+    
+    def _is_uniform_progression(self, values):
+        """Check if values follow a uniform (linear) progression."""
+        if len(values) < 2:
+            return False
+        
+        # Calculate differences
+        diffs = [values[i+1] - values[i] for i in range(len(values)-1)]
+        
+        # Check if all differences are approximately equal (within 1% tolerance)
+        if len(diffs) == 0:
+            return False
+        
+        avg_diff = sum(diffs) / len(diffs)
+        if avg_diff == 0:
+            return all(d == 0 for d in diffs)
+        
+        tolerance = 0.01 * abs(avg_diff)
+        return all(abs(d - avg_diff) < tolerance for d in diffs)
+    
+    def _is_scaling_progression(self, amp_arrays, base_array):
+        """Check if amp_arrays follow a multiplicative scaling pattern relative to base_array."""
+        if len(amp_arrays) < 2 or not base_array or base_array[0] == 0:
+            return False
+        
+        # Calculate scale factors for each iteration
+        scale_factors = []
+        for arr in amp_arrays:
+            if not arr or len(arr) != len(base_array):
+                return False
+            # Use first element to calculate scale factor
+            factor = arr[0] / base_array[0] if base_array[0] != 0 else 1.0
+            scale_factors.append(factor)
+        
+        # Check if scale factors are uniformly distributed
+        if self._is_uniform_progression(scale_factors):
+            # Also verify that all elements in each array are scaled by the same factor
+            for i, arr in enumerate(amp_arrays):
+                expected_factor = scale_factors[i]
+                for j, amp in enumerate(arr):
+                    expected_val = base_array[j] * expected_factor
+                    if abs(amp - expected_val) > 0.01 * abs(expected_val):
+                        return False
+            return True
+        
+        return False
+    
+    def _clear_amplitude_fields(self):
+        """Clear all amplitude-related fields to their default empty/initial state."""
+        # Clear base amplitude fields
+        self.global_amp_edit.clear()
+        self.amp_array_edit.clear()
+        
+        # Reset number of steps to 1
+        self.num_steps_edit.setText("1")
+        
+        # Clear uniform sweep fields
+        self.uniform_start_edit.clear()
+        self.uniform_stop_edit.clear()
+        
+        # Clear scaling fields
+        self.scale_start_edit.clear()
+        self.scale_stop_edit.clear()
+        
+        # Reset to single iteration mode
+        self.single_iteration_radio.setChecked(True)
 
     def _load_data_avail(self):
         """Mark that data should be loaded from file and accept the dialog."""
@@ -734,6 +922,9 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                     )
                     return None
                 base_amp_array = [base_amp] * num_sections
+                # Store metadata about how base amplitude was specified
+                params_dict['base_amplitude_mode'] = 'global'
+                params_dict['base_amplitude_values'] = base_amp
             else:
                 # Parse amplitude array
                 base_amp_array = [float(x.strip()) for x in amp_array_text.split(',')]
@@ -754,6 +945,9 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                             f"All amplitudes must be positive (section {i+1} has {amp})."
                         )
                         return None
+                # Store metadata about how base amplitude was specified
+                params_dict['base_amplitude_mode'] = 'array'
+                params_dict['base_amplitude_values'] = base_amp_array.copy()
             
             # STEP 2: Handle iterations
             num_steps = int(self.num_steps_edit.text())
@@ -876,6 +1070,15 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             if num_sections < 1:
                 QtWidgets.QMessageBox.warning(self, "Configuration Error", "No target sweep sections specified for multisweep.")
                 return None
+            
+            # Save these parameters as defaults for future sessions
+            # (only if not loading from file)
+            if not self.use_data_from_file:
+                try:
+                    settings.set_multisweep_defaults(params_dict)
+                except Exception as e:
+                    # Don't fail the dialog if settings save fails
+                    print(f"Warning: Could not save multisweep defaults: {e}")
             
             return params_dict
             

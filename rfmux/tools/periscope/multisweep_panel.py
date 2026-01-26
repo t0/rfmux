@@ -1210,7 +1210,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             if not new_params_from_dialog:
                 return # Dialog returned None, likely due to validation error
 
-            new_amps_for_this_run = list(new_params_from_dialog.get('amps', []))
+            # Extract amplitudes from amp_arrays (new structure)
+            amp_arrays = new_params_from_dialog.get('amp_arrays', [])
+            if amp_arrays:
+                # Get first value from each array for tracking purposes
+                # (each array represents per-section amplitudes for one iteration)
+                new_amps_for_this_run = [arr[0] if arr else 0.0 for arr in amp_arrays]
+            else:
+                new_amps_for_this_run = []
+            
             # section_frequencies_from_dialog are the ones dialog was seeded with, as it doesn't change them.
             section_frequencies_from_dialog = list(new_params_from_dialog.get('resonance_frequencies', []))
 

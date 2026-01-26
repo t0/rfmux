@@ -517,142 +517,49 @@ class MultisweepTask(QtCore.QThread):
             return
         
         try:
-            # Check if we have amp_arrays (new mode) or use legacy amplitudes
+            # Get amp_arrays from parameters (now always present from dialog)
             amp_arrays = self.params.get('amp_arrays')
+            if amp_arrays is None:
+                self.signals.error.emit(module_idx, -1, "No amplitude arrays specified in parameters.")
+                return
+            
             sweep_direction = self.params.get('sweep_direction', 'upward')
             conceptual_frequencies_from_window = self.window.conceptual_section_frequencies
             iteration_index = 0
 
-            if amp_arrays is not None:
-                # New mode: Use amp_arrays for iterations (per-section amplitudes)
-                for amp_array in amp_arrays:
-                    if self.isInterruptionRequested():
-                        self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep canceled.")
-                        return
-                    
-                    # Set current amplitude to first value in array for display purposes
-                    self.current_amplitude = amp_array[0] if amp_array else DEFAULT_AMPLITUDE
-                    current_sweep_cfs_for_this_amp = []
-
-                    if not conceptual_frequencies_from_window:
-                        self.signals.error.emit(module_idx, self.current_amplitude, "Conceptual frequencies not available from window.")
-                        return
-
-                    for idx, conceptual_cf in enumerate(conceptual_frequencies_from_window):
-                        remembered_cf = self.window._get_closest_remembered_cf(idx, self.current_amplitude)
-                        chosen_input_cf = remembered_cf if remembered_cf is not None else self.baseline_resonance_frequencies[idx]
-                        current_sweep_cfs_for_this_amp.append(chosen_input_cf)
-                    
-                    directions_to_sweep = ["upward","downward"] if sweep_direction == "both" else [sweep_direction]
-                    
-                    for direction_val in directions_to_sweep:
-                        self.current_iteration = iteration_index
-                        self.current_direction = direction_val
-                        
-                        self.signals.starting_iteration.emit(module_idx, iteration_index, self.current_amplitude, direction_val)
-                        
-                        # Pass the full amp_array to multisweep
-                        amp_to_pass = amp_array
-                        
-                        multisweep_params = {
-                            'center_frequencies': current_sweep_cfs_for_this_amp,
-                            'span_hz': self.params['span_hz'],
-                            'npoints_per_sweep': self.params['npoints_per_sweep'],
-                            'amp': amp_to_pass,
-                            'nsamps': self.params.get('nsamps', 10),
-                            'module': module_idx,
-                            'progress_callback': self._progress_callback_wrapper,
-                            'bias_frequency_method': self.params.get('bias_frequency_method', 'max-diq'),
-                            'rotate_saved_data': self.params.get('rotate_saved_data', False),
-                            'sweep_direction': direction_val
-                        }
-                        
-                        raw_results_from_crs = loop.run_until_complete(self._process_multisweep(loop, multisweep_params))
-                        
-                        if self.isInterruptionRequested():
-                            self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep canceled during execution.")
-                            return
-                        
-                        # Process bifurcation detection first
-                        if raw_results_from_crs:
-                            for res_key, data_dict_val in raw_results_from_crs.items():
-                                if not isinstance(res_key, (int, np.integer)): continue
-                                iq_data = data_dict_val.get('iq_complex')
-                                if iq_data is not None:
-                                    try:
-                                        data_dict_val['is_bifurcated'] = fitting_module_direct.identify_bifurcation(iq_data, threshold_factor=7)
-                                    except Exception as e:
-                                        print(f"Warning: Bifurcation detection failed for index {res_key}: {e}", file=sys.stderr)
-                                        data_dict_val['is_bifurcated'] = False
-                                else:
-                                    data_dict_val['is_bifurcated'] = False
-                        
-                        # Apply fitting analysis
-                        enhanced_results = loop.run_until_complete(
-                            self._process_fitting_async(raw_results_from_crs)
-                        )
-                        results_for_plotting = enhanced_results 
-                        
-                        results_for_history = {}
-                        if enhanced_results: 
-                            for res_idx, data_dict_val in enhanced_results.items():
-                                if isinstance(res_idx, (int, np.integer)):
-                                    bias_freq = data_dict_val.get('bias_frequency', data_dict_val.get('original_center_frequency'))
-                                    if bias_freq is not None:
-                                        conceptual_idx = res_idx - 1
-                                        results_for_history[conceptual_idx] = bias_freq
-                                    else: print(f"Warning: No bias frequency found for index {res_idx}", file=sys.stderr)
-                                else: print(f"Warning (MultisweepTask): Non-integer key {res_idx} in results", file=sys.stderr)
-                        
-                        if results_for_plotting is not None:
-                            self.signals.data_update.emit(module_idx, iteration_index, self.current_amplitude, direction_val, results_for_plotting, results_for_history)
-                        
-                        self.signals.completed_iteration.emit(module_idx, iteration_index, self.current_amplitude, direction_val)
-                        iteration_index += 1
-            else:
-                # Legacy mode: Use amps list for iterations (global amplitudes)
-                amplitudes = self.params.get('amps', [DEFAULT_AMPLITUDE])
+            # Iterate over amplitude arrays
+            for amp_array in amp_arrays:
+                if self.isInterruptionRequested():
+                    self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep canceled.")
+                    return
                 
-                for amp_val in amplitudes:
-                    if self.isInterruptionRequested():
-                        self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep canceled.")
-                        return
-                    
-                    self.current_amplitude = amp_val
-                    current_sweep_cfs_for_this_amp = []
+                # Set current amplitude to first value in array for display purposes
+                self.current_amplitude = amp_array[0] if amp_array else DEFAULT_AMPLITUDE
+                current_sweep_cfs_for_this_amp = []
 
-                    if not conceptual_frequencies_from_window:
-                        self.signals.error.emit(module_idx, amp_val, "Conceptual frequencies not available from window.")
-                        return
+                if not conceptual_frequencies_from_window:
+                    self.signals.error.emit(module_idx, self.current_amplitude, "Conceptual frequencies not available from window.")
+                    return
 
-                    for idx, conceptual_cf in enumerate(conceptual_frequencies_from_window):
-                        remembered_cf = self.window._get_closest_remembered_cf(idx, amp_val)
-                        chosen_input_cf = remembered_cf if remembered_cf is not None else self.baseline_resonance_frequencies[idx]
-                        current_sweep_cfs_for_this_amp.append(chosen_input_cf)
+                for idx, conceptual_cf in enumerate(conceptual_frequencies_from_window):
+                    remembered_cf = self.window._get_closest_remembered_cf(idx, self.current_amplitude)
+                    chosen_input_cf = remembered_cf if remembered_cf is not None else self.baseline_resonance_frequencies[idx]
+                    current_sweep_cfs_for_this_amp.append(chosen_input_cf)
+                
+                directions_to_sweep = ["upward","downward"] if sweep_direction == "both" else [sweep_direction]
+                
+                for direction_val in directions_to_sweep:
+                    self.current_iteration = iteration_index
+                    self.current_direction = direction_val
                     
-                    directions_to_sweep = ["upward","downward"] if sweep_direction == "both" else [sweep_direction]
+                    self.signals.starting_iteration.emit(module_idx, iteration_index, self.current_amplitude, direction_val)
                     
-                    for direction_val in directions_to_sweep:
-                        self.current_iteration = iteration_index
-                        self.current_direction = direction_val
-                        
-                        self.signals.starting_iteration.emit(module_idx, iteration_index, amp_val, direction_val)
-                        
-                        # Determine amplitude to pass to multisweep
-                        # If section_amplitudes are specified, use them; otherwise use single amp_val
-                        section_amps = self.params.get('section_amplitudes')
-                        if section_amps is not None:
-                            # Use per-section amplitudes
-                            amp_to_pass = section_amps
-                        else:
-                            # Use single amplitude (will be broadcast to all sections in algorithm)
-                            amp_to_pass = amp_val
-                        
-                        multisweep_params = {
+                    # Pass the full amp_array to multisweep
+                    multisweep_params = {
                         'center_frequencies': current_sweep_cfs_for_this_amp,
                         'span_hz': self.params['span_hz'],
                         'npoints_per_sweep': self.params['npoints_per_sweep'],
-                        'amp': amp_to_pass,
+                        'amp': amp_array,
                         'nsamps': self.params.get('nsamps', 10),
                         'module': module_idx,
                         'progress_callback': self._progress_callback_wrapper,
@@ -664,7 +571,7 @@ class MultisweepTask(QtCore.QThread):
                     raw_results_from_crs = loop.run_until_complete(self._process_multisweep(loop, multisweep_params))
                     
                     if self.isInterruptionRequested():
-                        self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution.")
+                        self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep canceled during execution.")
                         return
                     
                     # Process bifurcation detection first
@@ -681,8 +588,7 @@ class MultisweepTask(QtCore.QThread):
                             else:
                                 data_dict_val['is_bifurcated'] = False
                     
-                    # Now apply fitting analysis using the (potentially) bifurcation-annotated data
-                    # Use async version with ThreadPoolExecutor for better responsiveness
+                    # Apply fitting analysis
                     enhanced_results = loop.run_until_complete(
                         self._process_fitting_async(raw_results_from_crs)
                     )
@@ -694,16 +600,15 @@ class MultisweepTask(QtCore.QThread):
                             if isinstance(res_idx, (int, np.integer)):
                                 bias_freq = data_dict_val.get('bias_frequency', data_dict_val.get('original_center_frequency'))
                                 if bias_freq is not None:
-                                    # Convert 1-based detector index to 0-based conceptual index
                                     conceptual_idx = res_idx - 1
                                     results_for_history[conceptual_idx] = bias_freq
                                 else: print(f"Warning: No bias frequency found for index {res_idx}", file=sys.stderr)
                             else: print(f"Warning (MultisweepTask): Non-integer key {res_idx} in results", file=sys.stderr)
                     
                     if results_for_plotting is not None:
-                        self.signals.data_update.emit(module_idx, iteration_index, amp_val, direction_val, results_for_plotting, results_for_history)
+                        self.signals.data_update.emit(module_idx, iteration_index, self.current_amplitude, direction_val, results_for_plotting, results_for_history)
                     
-                    self.signals.completed_iteration.emit(module_idx, iteration_index, amp_val, direction_val)
+                    self.signals.completed_iteration.emit(module_idx, iteration_index, self.current_amplitude, direction_val)
                     iteration_index += 1
             
             self.signals.all_completed.emit()

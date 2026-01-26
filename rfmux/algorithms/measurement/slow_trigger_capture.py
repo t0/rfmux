@@ -27,7 +27,7 @@ Also the buffer used by periscope returns already FIFO ordered data, we do not h
 
 class PulseCapture:
 
-    def __init__(self, buf_size, channels, thresh, noise_level, pre=20):
+    def __init__(self, buf_size, channels, thresh, noise_level, thresh_type, pre=20):
         self.buf = {}
         self.channels = channels
         self.buf_size = buf_size
@@ -51,6 +51,8 @@ class PulseCapture:
         self.abs_n = 0
         self.trig_abs = None
         self.trigger_value = None
+
+        self.data_type = thresh_type #### Can be 'I' or 'Q' 
 
     def _calculate_relative_timestamp(self, pkt) -> float | None:
         ts = pkt.ts
@@ -84,20 +86,25 @@ class PulseCapture:
             self.buf[c]["Q"].add(float(sample.imag))
             self.buf[c]["ts"].add(arr_time)
 
+            if self.data_type == "Q":
+                data_val = sample.imag
+            else:
+                data_val = sample.real
+
             # --- trigger detection ---
-            if (sample.real > self.thresh) and (not self.capturing):
+            if (data_val > self.thresh) and (not self.capturing):
                 self.capturing = True
                 self.end_ptr_count = 0
                 self.trig_abs = self.abs_n
-                self.trigger_value = float(sample.real)
+                self.trigger_value = float(data_val)
 
                 print("\nFound trigger abs_n", self.trig_abs,
                       "time", arr_time,
-                      "Sample value", sample.real)
+                      "Sample value", data_val)
 
             # --- end condition and save ---
             if self.capturing:
-                if sample.real < self.noise_level:
+                if data_val < self.noise_level:
                     self.end_ptr_count += 1
                 else:
                     self.end_ptr_count = 0
@@ -171,10 +178,15 @@ class PulseCapture:
                     }
 
                     #### Logging capture ####
+                    if self.data_type == "Q":
+                        data_win = Q_win
+                    else:
+                        data_win = I_win
+                        
                     print("Pulse:", self.pulse_count,
-                          "Saving Now: trigger sample (window)", I_win[pre_actual],
-                          "end sample", I_win[-1],
-                          "len", len(I_win),
+                          "Saving Now: trigger sample (window)", data_win[pre_actual],
+                          "end sample", data_win[-1],
+                          "len", len(data_win),
                           "pre_actual", pre_actual,
                           "trigger sample (at trigger time)", self.trigger_value)
 
@@ -185,18 +197,27 @@ class PulseCapture:
                     self.trigger_value = None
     
 
-def get_noise_level(packets, thresh, channels):
+def get_noise_level(packets, thresh, channels, thresh_type):
     ### Find ideal solution ####
     samples = np.stack([p.samples for p in packets]) / 256.0
     real_all = samples.real
+    imag_all = samples.imag
 
     noise_levels = []
 
     for c in channels:
         real_ch = real_all[:, c-1]
+        imag_ch = imag_all[:, c-1]
+
+        
+        if thresh_type == "Q":
+            thresh_ch = imag_ch
+        else:
+            thresh_ch = real_ch
 
         below_thresh = [] 
-        for r in real_ch:
+    
+        for r in thresh_ch:
             if r < thresh:
                 below_thresh.append(r) #### collecting all the samples below the threshold #####
                 
@@ -229,6 +250,7 @@ async def slow_trigger_capture(crs: CRS,
                                thresh : float = None, 
                                noise : float = None, ### if None run a calculation script
                                buf_size : int = 5000,
+                               thresh_type : str = "I", #### or can be Q #####
                                in_volts : bool = False, ### add volts conversion  ####
                                _extra_metadata: bool = False):
 
@@ -293,13 +315,13 @@ async def slow_trigger_capture(crs: CRS,
                 noise_packets.append(p)
     
     
-        noise_level = get_noise_level(noise_packets, thresh, channels)
+        noise_level = get_noise_level(noise_packets, thresh, channels, thresh_type)
     
         noise = noise_level[0] ### running it only for one channel now ###
     
         print("Updated the noise to", noise)
             
-    pcap = PulseCapture(buf_size, channels, thresh, noise)
+    pcap = PulseCapture(buf_size, channels, thresh, noise, thresh_type)
     with streamer.get_multicast_socket(host) as sock:
 
         # To use asyncio, we need a non-blocking socket

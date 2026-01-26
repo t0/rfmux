@@ -403,6 +403,9 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                     )
         sys.exit(0)
 
+    if args.dirfile:
+        import pygetdata as gd
+
     signal.signal(signal.SIGINT, signal_handler)
 
     # Main receive loop

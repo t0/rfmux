@@ -1251,6 +1251,11 @@ class PeriscopeRuntime:
                 data = iteration_params[i]['data']
                 panel.update_data(target_module, i, amplitude, direction, data, None)
             
+            # Generate histograms now that data is loaded
+            if panel.results_by_iteration:
+                panel._generate_histograms()
+                panel.histograms_generated = True
+            
             # Extract and load df_calibrations if bias_kids_output exists
             if has_bias_data:
                 bias_output = load_params['bias_kids_output']

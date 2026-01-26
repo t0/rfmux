@@ -11,6 +11,7 @@ from .utils import (
 from .aggregate_data_adapter import (
     extract_multisweep_data, get_parameter_arrays, filter_failed_fits
 )
+from .multisweep_grid_helpers import create_amplitude_color_map
 
 
 class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
@@ -53,6 +54,13 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Data storage
         self.plot_data = None
         self.available_amplitudes = []
+        
+        # Histogram cache for performance
+        # Structure: {amp_idx: {'upward': {...}, 'downward': {...}}}
+        self.histogram_cache = {}
+        
+        # Global Q-factor ranges for consistent x-axis scaling
+        self.global_q_ranges = {'Qr': None, 'Qc': None, 'Qi': None}
         
         # Plot widgets
         self.freq_plot = None
@@ -194,6 +202,9 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             )
             return
         
+        # Invalidate cache on data reload
+        self.histogram_cache.clear()
+        
         # Get available amplitudes from the data
         self._populate_amplitude_selector()
         
@@ -214,86 +225,111 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Populate combo box
         self.amp_combo.clear()
-        for amp in self.available_amplitudes:
-            self.amp_combo.addItem(f"{amp:.6f}")
         
-        # Select the amplitude index (default to last/highest)
-        if self.amplitude_idx is not None and self.amplitude_idx < len(self.available_amplitudes):
-            self.amp_combo.setCurrentIndex(self.amplitude_idx)
-        else:
-            self.amp_combo.setCurrentIndex(len(self.available_amplitudes) - 1)
+        # Add "All Amplitudes" as first option
+        self.amp_combo.addItem("All Amplitudes")
+        
+        # Add individual amplitudes with integer indices
+        for idx in range(len(self.available_amplitudes)):
+            self.amp_combo.addItem(str(idx))
+        
+        # Set default to "All Amplitudes" (index 0)
+        self.amp_combo.setCurrentIndex(0)
             
     def _amplitude_changed(self, index):
         """Handle amplitude selection change."""
         if index >= 0:
-            self.amplitude_idx = index
+            # Index 0 is "All Amplitudes", indices 1+ are specific amplitudes
+            if index == 0:
+                self.amplitude_idx = None  # None means show all
+            else:
+                self.amplitude_idx = index - 1  # Adjust for "All Amplitudes" offset
             self._update_plots()
             
     def _bins_changed(self, value):
         """Handle bin count change."""
         self.nbins = value
+        # Invalidate cache since bin count changed
+        self.histogram_cache.clear()
         self._update_plots()
         
     def _update_plots(self):
         """Update all plots with current settings."""
-        if not self.plot_data or self.amplitude_idx is None:
-            print("[DEBUG] _update_plots: No plot_data or amplitude_idx is None")
-            return
-            
-        if self.amplitude_idx >= len(self.available_amplitudes):
-            print(f"[DEBUG] _update_plots: amplitude_idx {self.amplitude_idx} >= len(available_amplitudes) {len(self.available_amplitudes)}")
+        if not self.plot_data:
+            print("[DEBUG] _update_plots: No plot_data")
             return
         
-        amp = self.available_amplitudes[self.amplitude_idx]
         fit_params = self.plot_data.get('fit_params', {})
         
-        print(f"\n[DEBUG] _update_plots: Processing amplitude index {self.amplitude_idx} (value: {amp})")
-        print(f"[DEBUG] Number of detectors in fit_params: {len(fit_params)}")
-        
-        # Extract parameter arrays (pass amplitude_idx, not amplitude value)
-        try:
-            fr_values, fr_ids = get_parameter_arrays(fit_params, 'fr', self.amplitude_idx)
-            qr_values, qr_ids = get_parameter_arrays(fit_params, 'Qr', self.amplitude_idx)
-            qc_values, qc_ids = get_parameter_arrays(fit_params, 'Qc', self.amplitude_idx)
-            qi_values, qi_ids = get_parameter_arrays(fit_params, 'Qi', self.amplitude_idx)
+        if self.amplitude_idx is None:
+            # Show all amplitudes (stacked)
+            print("[DEBUG] _update_plots: Showing all amplitudes (stacked)")
+            self._update_plots_all_amplitudes()
+        else:
+            # Show single amplitude
+            if self.amplitude_idx >= len(self.available_amplitudes):
+                print(f"[DEBUG] _update_plots: amplitude_idx {self.amplitude_idx} >= len(available_amplitudes) {len(self.available_amplitudes)}")
+                return
             
-            print(f"[DEBUG] Extracted fr: {len(fr_values)} values, detector_ids: {fr_ids}")
-            print(f"[DEBUG] Extracted Qr: {len(qr_values)} values, detector_ids: {qr_ids}")
-            print(f"[DEBUG] Extracted Qc: {len(qc_values)} values, detector_ids: {qc_ids}")
-            print(f"[DEBUG] Extracted Qi: {len(qi_values)} values, detector_ids: {qi_ids}")
-        except Exception as e:
-            print(f"[DEBUG] Error extracting parameters: {e}")
-            import traceback
-            traceback.print_exc()
-            return
-        
-        # Convert to dictionaries for filtering
-        fr_dict = dict(zip(fr_ids, fr_values))
-        qr_dict = dict(zip(qr_ids, qr_values))
-        qc_dict = dict(zip(qc_ids, qc_values))
-        qi_dict = dict(zip(qi_ids, qi_values))
-        
-        print(f"[DEBUG] Created dicts - fr: {len(fr_dict)}, Qr: {len(qr_dict)}, Qc: {len(qc_dict)}, Qi: {len(qi_dict)}")
-        
-        # Filter out failed fits (NaN values)
-        fr_valid = filter_failed_fits(fr_dict)
-        qr_valid = filter_failed_fits(qr_dict)
-        qc_valid = filter_failed_fits(qc_dict)
-        qi_valid = filter_failed_fits(qi_dict)
-        
-        print(f"[DEBUG] After filtering - fr: {len(fr_valid)}, Qr: {len(qr_valid)}, Qc: {len(qc_valid)}, Qi: {len(qi_valid)}")
-        if fr_valid:
-            print(f"[DEBUG] Sample fr data: {list(fr_valid.items())[:3]}")
-        if qr_valid:
-            print(f"[DEBUG] Sample Qr data: {list(qr_valid.items())[:3]}")
-        
-        # Update frequency scatter plot
-        self._plot_frequency_scatter(fr_valid)
-        
-        # Update Q histograms
-        self._plot_q_histogram(self.qr_plot, qr_valid, "Qr")
-        self._plot_q_histogram(self.qc_plot, qc_valid, "Qc")
-        self._plot_q_histogram(self.qi_plot, qi_valid, "Qi")
+            amp = self.available_amplitudes[self.amplitude_idx]
+            print(f"\n[DEBUG] _update_plots: Processing amplitude index {self.amplitude_idx} (value: {amp})")
+            print(f"[DEBUG] Number of detectors in fit_params: {len(fit_params)}")
+            
+            # Check cache first
+            cache_key = self.amplitude_idx
+            if cache_key in self.histogram_cache:
+                print("[DEBUG] Using cached histogram data")
+                cached_data = self.histogram_cache[cache_key]
+                self._plot_frequency_scatter(cached_data['fr_dict'])
+                self._plot_q_histogram(self.qr_plot, cached_data['qr_dict'], "Qr")
+                self._plot_q_histogram(self.qc_plot, cached_data['qc_dict'], "Qc")
+                self._plot_q_histogram(self.qi_plot, cached_data['qi_dict'], "Qi")
+                return
+            
+            # Extract parameter arrays (pass amplitude_idx, not amplitude value)
+            try:
+                fr_values, fr_ids = get_parameter_arrays(fit_params, 'fr', self.amplitude_idx)
+                qr_values, qr_ids = get_parameter_arrays(fit_params, 'Qr', self.amplitude_idx)
+                qc_values, qc_ids = get_parameter_arrays(fit_params, 'Qc', self.amplitude_idx)
+                qi_values, qi_ids = get_parameter_arrays(fit_params, 'Qi', self.amplitude_idx)
+                
+                print(f"[DEBUG] Extracted fr: {len(fr_values)} values")
+                print(f"[DEBUG] Extracted Qr: {len(qr_values)} values")
+                print(f"[DEBUG] Extracted Qc: {len(qc_values)} values")
+                print(f"[DEBUG] Extracted Qi: {len(qi_values)} values")
+            except Exception as e:
+                print(f"[DEBUG] Error extracting parameters: {e}")
+                import traceback
+                traceback.print_exc()
+                return
+            
+            # Convert to dictionaries for filtering
+            fr_dict = dict(zip(fr_ids, fr_values))
+            qr_dict = dict(zip(qr_ids, qr_values))
+            qc_dict = dict(zip(qc_ids, qc_values))
+            qi_dict = dict(zip(qi_ids, qi_values))
+            
+            # Filter out failed fits (NaN values)
+            fr_valid = filter_failed_fits(fr_dict)
+            qr_valid = filter_failed_fits(qr_dict)
+            qc_valid = filter_failed_fits(qc_dict)
+            qi_valid = filter_failed_fits(qi_dict)
+            
+            print(f"[DEBUG] After filtering - fr: {len(fr_valid)}, Qr: {len(qr_valid)}, Qc: {len(qc_valid)}, Qi: {len(qi_valid)}")
+            
+            # Cache the filtered data
+            self.histogram_cache[cache_key] = {
+                'fr_dict': fr_valid,
+                'qr_dict': qr_valid,
+                'qc_dict': qc_valid,
+                'qi_dict': qi_valid
+            }
+            
+            # Update plots
+            self._plot_frequency_scatter(fr_valid)
+            self._plot_q_histogram(self.qr_plot, qr_valid, "Qr")
+            self._plot_q_histogram(self.qc_plot, qc_valid, "Qc")
+            self._plot_q_histogram(self.qi_plot, qi_valid, "Qi")
         
     def _plot_frequency_scatter(self, fr_dict):
         """Plot resonance frequency scatter."""
@@ -334,8 +370,255 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Auto range
         self.freq_plot.autoRange()
         
+    def _update_plots_all_amplitudes(self):
+        """Update plots showing all amplitudes (stacked histograms)."""
+        if not self.plot_data:
+            return
+        
+        fit_params = self.plot_data.get('fit_params', {})
+        
+        # Check if cached
+        cache_key = 'all_amplitudes'
+        if cache_key in self.histogram_cache:
+            print("[DEBUG] Using cached all-amplitudes data")
+            cached_data = self.histogram_cache[cache_key]
+            self._plot_frequency_scatter_all_amplitudes(cached_data['fr_by_amp'])
+            self._plot_stacked_q_histogram(self.qr_plot, cached_data['qr_by_amp'], "Qr")
+            self._plot_stacked_q_histogram(self.qc_plot, cached_data['qc_by_amp'], "Qc")
+            self._plot_stacked_q_histogram(self.qi_plot, cached_data['qi_by_amp'], "Qi")
+            return
+        
+        # Extract data for all amplitudes
+        fr_by_amp = {}
+        qr_by_amp = {}
+        qc_by_amp = {}
+        qi_by_amp = {}
+        
+        for amp_idx in range(len(self.available_amplitudes)):
+            try:
+                fr_values, fr_ids = get_parameter_arrays(fit_params, 'fr', amp_idx)
+                qr_values, qr_ids = get_parameter_arrays(fit_params, 'Qr', amp_idx)
+                qc_values, qc_ids = get_parameter_arrays(fit_params, 'Qc', amp_idx)
+                qi_values, qi_ids = get_parameter_arrays(fit_params, 'Qi', amp_idx)
+                
+                # Store as dictionaries
+                fr_dict = filter_failed_fits(dict(zip(fr_ids, fr_values)))
+                qr_dict = filter_failed_fits(dict(zip(qr_ids, qr_values)))
+                qc_dict = filter_failed_fits(dict(zip(qc_ids, qc_values)))
+                qi_dict = filter_failed_fits(dict(zip(qi_ids, qi_values)))
+                
+                if fr_dict:
+                    fr_by_amp[amp_idx] = fr_dict
+                if qr_dict:
+                    qr_by_amp[amp_idx] = qr_dict
+                if qc_dict:
+                    qc_by_amp[amp_idx] = qc_dict
+                if qi_dict:
+                    qi_by_amp[amp_idx] = qi_dict
+                    
+            except Exception as e:
+                print(f"[DEBUG] Error extracting data for amplitude index {amp_idx}: {e}")
+                continue
+        
+        # Compute and store global Q-factor ranges
+        self._compute_global_q_ranges(qr_by_amp, qc_by_amp, qi_by_amp)
+        
+        # Cache the data
+        self.histogram_cache[cache_key] = {
+            'fr_by_amp': fr_by_amp,
+            'qr_by_amp': qr_by_amp,
+            'qc_by_amp': qc_by_amp,
+            'qi_by_amp': qi_by_amp
+        }
+        
+        # Plot
+        self._plot_frequency_scatter_all_amplitudes(fr_by_amp)
+        self._plot_stacked_q_histogram(self.qr_plot, qr_by_amp, "Qr")
+        self._plot_stacked_q_histogram(self.qc_plot, qc_by_amp, "Qc")
+        self._plot_stacked_q_histogram(self.qi_plot, qi_by_amp, "Qi")
+    
+    def _compute_global_q_ranges(self, qr_by_amp, qc_by_amp, qi_by_amp):
+        """Compute and store global Q-factor ranges for consistent x-axis scaling."""
+        # Compute Qr range
+        all_qr = []
+        for amp_data in qr_by_amp.values():
+            all_qr.extend(list(amp_data.values()))
+        if all_qr:
+            all_qr = np.array(all_qr)
+            qr_min, qr_max = np.min(all_qr), np.max(all_qr)
+            if qr_min > 0 and qr_max > 0:
+                self.global_q_ranges['Qr'] = (qr_min, qr_max)
+        
+        # Compute Qc range
+        all_qc = []
+        for amp_data in qc_by_amp.values():
+            all_qc.extend(list(amp_data.values()))
+        if all_qc:
+            all_qc = np.array(all_qc)
+            qc_min, qc_max = np.min(all_qc), np.max(all_qc)
+            if qc_min > 0 and qc_max > 0:
+                self.global_q_ranges['Qc'] = (qc_min, qc_max)
+        
+        # Compute Qi range
+        all_qi = []
+        for amp_data in qi_by_amp.values():
+            all_qi.extend(list(amp_data.values()))
+        if all_qi:
+            all_qi = np.array(all_qi)
+            qi_min, qi_max = np.min(all_qi), np.max(all_qi)
+            if qi_min > 0 and qi_max > 0:
+                self.global_q_ranges['Qi'] = (qi_min, qi_max)
+    
+    def _plot_frequency_scatter_all_amplitudes(self, fr_by_amp):
+        """Plot resonance frequencies for all amplitudes with color coding."""
+        if not self.freq_plot:
+            return
+        
+        freq_item = self.freq_plot.getPlotItem()
+        if not freq_item:
+            return
+        
+        # Clear previous plot
+        freq_item.clear()
+        
+        if not fr_by_amp:
+            return
+        
+        # Get amplitude color mapping
+        amp_values = [self.available_amplitudes[idx] for idx in sorted(fr_by_amp.keys())]
+        amplitude_to_color = create_amplitude_color_map(amp_values, self.dark_mode)
+        
+        # Plot each amplitude with its color
+        total_count = 0
+        for amp_idx in sorted(fr_by_amp.keys()):
+            fr_dict = fr_by_amp[amp_idx]
+            if not fr_dict:
+                continue
+            
+            amp_value = self.available_amplitudes[amp_idx]
+            color = amplitude_to_color.get(amp_value, TABLEAU10_COLORS[0])
+            
+            detector_ids = sorted(fr_dict.keys())
+            freqs = [fr_dict[det_id] for det_id in detector_ids]
+            
+            scatter = pg.ScatterPlotItem(
+                x=detector_ids,
+                y=freqs,
+                size=8,
+                pen=pg.mkPen(color, width=1),
+                brush=pg.mkBrush(color)
+            )
+            freq_item.addItem(scatter)
+            total_count += len(detector_ids)
+        
+        # Add title
+        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        title = f"Resonance Frequencies - All Amplitudes"
+        freq_item.setTitle(title, color=pen_color)
+        
+        # Auto range
+        self.freq_plot.autoRange()
+    
+    def _plot_stacked_q_histogram(self, plot_widget, q_by_amp, param_name):
+        """Plot stacked Q factor histograms for all amplitudes."""
+        if not plot_widget:
+            return
+        
+        plot_item = plot_widget.getPlotItem()
+        if not plot_item:
+            return
+        
+        # Clear previous plot and legend
+        plot_item.clear()
+        if hasattr(plot_item, 'legend') and plot_item.legend:
+            plot_item.legend.scene().removeItem(plot_item.legend)
+            plot_item.legend = None
+        
+        if not q_by_amp:
+            return
+        
+        # Collect all Q values to determine global bins
+        all_q_values = []
+        for amp_idx in q_by_amp:
+            all_q_values.extend(list(q_by_amp[amp_idx].values()))
+        
+        if len(all_q_values) == 0:
+            return
+        
+        all_q_values = np.array(all_q_values)
+        q_min = np.min(all_q_values)
+        q_max = np.max(all_q_values)
+        
+        # Create shared bins
+        if q_min <= 0 or q_max <= 0:
+            bins = np.linspace(q_min, q_max, self.nbins + 1)
+        else:
+            bins = np.logspace(np.log10(q_min), np.log10(q_max), self.nbins + 1)
+        
+        # Get bin centers and widths
+        x = (bins[:-1] + bins[1:]) / 2
+        width = bins[1:] - bins[:-1]
+        
+        # Get amplitude color mapping
+        amp_values = [self.available_amplitudes[idx] for idx in sorted(q_by_amp.keys())]
+        amplitude_to_color = create_amplitude_color_map(amp_values, self.dark_mode)
+        
+        # Calculate opacity gradient (back to front)
+        num_amps = len(q_by_amp)
+        alphas = np.linspace(0.4, 0.8, num_amps)
+        
+        # Plot from highest amplitude to lowest (back to front for stacking)
+        sorted_amp_indices = sorted(q_by_amp.keys(), reverse=True)
+        
+        # Add legend
+        legend = plot_item.addLegend(offset=(-10, 10))
+        
+        for i, amp_idx in enumerate(sorted_amp_indices):
+            q_dict = q_by_amp[amp_idx]
+            if not q_dict:
+                continue
+            
+            q_values = np.array(list(q_dict.values()))
+            amp_value = self.available_amplitudes[amp_idx]
+            
+            # Compute histogram with shared bins
+            counts, _ = np.histogram(q_values, bins=bins)
+            
+            # Get color and alpha
+            color = amplitude_to_color.get(amp_value, TABLEAU10_COLORS[1])
+            alpha = alphas[num_amps - 1 - i]  # Reverse alpha for front-to-back
+            
+            # Convert color to rgba with alpha
+            if isinstance(color, tuple) and len(color) >= 3:
+                rgba = (*color[:3], int(alpha * 255))
+            else:
+                # Fallback if color format is unexpected
+                rgba = (100, 100, 255, int(alpha * 255))
+            
+            # Create bar graph with transparency
+            bar_graph = pg.BarGraphItem(
+                x=x,
+                height=counts,
+                width=width,
+                brush=pg.mkBrush(*rgba),
+                pen=pg.mkPen(color, width=1)
+            )
+            plot_item.addItem(bar_graph)
+            
+            # Add to legend with amplitude label
+            legend.addItem(bar_graph, f"Amp {amp_value:.6f}")
+        
+        # Add title
+        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        total_count = sum(len(q_by_amp[idx]) for idx in q_by_amp)
+        title = f"{param_name} Distribution - All Amplitudes (N={total_count})"
+        plot_item.setTitle(title, color=pen_color)
+        
+        # Auto range
+        plot_widget.autoRange()
+    
     def _plot_q_histogram(self, plot_widget, q_dict, param_name):
-        """Plot Q factor histogram with log binning."""
+        """Plot Q factor histogram with log binning and consistent transparency."""
         if not plot_widget:
             return
         
@@ -355,10 +638,15 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         if len(q_values) == 0:
             return
         
-        # Use log-spaced bins for Q factors
-        q_min = np.min(q_values)
-        q_max = np.max(q_values)
+        # Use global Q ranges if available for consistent x-axis
+        global_range = self.global_q_ranges.get(param_name)
+        if global_range:
+            q_min, q_max = global_range
+        else:
+            q_min = np.min(q_values)
+            q_max = np.max(q_values)
         
+        # Create bins
         if q_min <= 0 or q_max <= 0:
             # Fall back to linear bins if we have non-positive values
             bins = np.linspace(q_min, q_max, self.nbins + 1)
@@ -373,15 +661,41 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         x = (edges[:-1] + edges[1:]) / 2  # Bin centers
         width = edges[1:] - edges[:-1]
         
-        color = TABLEAU10_COLORS[1]
+        # Calculate consistent transparency based on amplitude index
+        if self.amplitude_idx is not None and len(self.available_amplitudes) > 0:
+            num_amps = len(self.available_amplitudes)
+            alphas = np.linspace(0.4, 0.8, num_amps)
+            # Reverse so that higher amplitudes (later in sorted list) get higher alpha
+            alpha = alphas[num_amps - 1 - self.amplitude_idx]
+            
+            # Get amplitude color mapping for consistency
+            amp_values = self.available_amplitudes
+            amplitude_to_color = create_amplitude_color_map(amp_values, self.dark_mode)
+            amp_value = self.available_amplitudes[self.amplitude_idx]
+            color = amplitude_to_color.get(amp_value, TABLEAU10_COLORS[1])
+            
+            # Convert color to rgba with alpha
+            if isinstance(color, tuple) and len(color) >= 3:
+                rgba = (*color[:3], int(alpha * 255))
+            else:
+                rgba = (100, 100, 255, int(alpha * 255))
+        else:
+            # Fallback for single color
+            color = TABLEAU10_COLORS[1]
+            rgba = color
+        
         bar_graph = pg.BarGraphItem(
             x=x,
             height=counts,
             width=width,
-            brush=color,
+            brush=pg.mkBrush(*rgba) if isinstance(rgba, tuple) else rgba,
             pen=pg.mkPen(color, width=1)
         )
         plot_item.addItem(bar_graph)
+        
+        # Apply fixed x-axis range if available
+        if global_range:
+            plot_item.setXRange(q_min, q_max, padding=0.02)
         
         # Calculate statistics
         mean_q = np.mean(q_values)
@@ -398,8 +712,9 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         )
         plot_item.setTitle(stats_text, color=pen_color)
         
-        # Auto range
-        plot_widget.autoRange()
+        # Auto range for y-axis only
+        if not global_range:
+            plot_widget.autoRange()
         
     def apply_theme(self, dark_mode: bool):
         """Apply theme and redraw plots."""

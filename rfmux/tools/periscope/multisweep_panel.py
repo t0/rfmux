@@ -129,6 +129,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Histogram panel (created lazily in _setup_plot_area)
         self.histogram_panel = None
+        self.histograms_generated = False  # Track if histograms have been generated
 
         self._setup_ui()
         
@@ -403,33 +404,64 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         return tab
     
-    def _ensure_histogram_panel(self):
-        """Lazily create the histogram panel when first needed with data."""
-        if self.histogram_panel is not None:
-            # Panel already exists, just reload data
-            if hasattr(self.histogram_panel, '_load_and_plot_data'):
-                self.histogram_panel._load_and_plot_data()
+    def _generate_histograms(self):
+        """
+        Generate histogram plots once when multisweep data is complete.
+        This is called from all_sweeps_completed() to create the plots when fit data is ready.
+        """
+        if not self.results_by_iteration:
             return
         
-        # Find the histogram tab widget and create the panel
-        if hasattr(self, 'histogram_tab') and self.histogram_tab:
-            # Clear placeholder
-            layout = self.histogram_tab.layout()
-            if layout:
-                while layout.count():
-                    item = layout.takeAt(0)
-                    if item.widget():
-                        item.widget().deleteLater()
-                
-                # Create the actual histogram panel now that we have data
-                self.histogram_panel = ParameterHistogramsPanel(
-                    parent=self.histogram_tab,
-                    multisweep_panel=self,
-                    amplitude_idx=None,  # Will use last/highest amplitude by default
-                    nbins=30,
-                    dark_mode=self.dark_mode
-                )
-                layout.addWidget(self.histogram_panel)
+        # Check if we have any fit data
+        has_fit_data = False
+        for iteration_data in self.results_by_iteration.values():
+            for detector_data in iteration_data.get("data", {}).values():
+                if 'fit_params' in detector_data or 'nonlinear_fit_params' in detector_data:
+                    has_fit_data = True
+                    break
+            if has_fit_data:
+                break
+        
+        if not has_fit_data:
+            print("Note: No fit data available for histogram generation")
+            return
+        
+        # Create the histogram panel if it doesn't exist
+        if self.histogram_panel is None:
+            if hasattr(self, 'histogram_tab') and self.histogram_tab:
+                # Clear placeholder
+                layout = self.histogram_tab.layout()
+                if layout:
+                    while layout.count():
+                        item = layout.takeAt(0)
+                        if item.widget():
+                            item.widget().deleteLater()
+                    
+                    # Create the actual histogram panel with data
+                    self.histogram_panel = ParameterHistogramsPanel(
+                        parent=self.histogram_tab,
+                        multisweep_panel=self,
+                        amplitude_idx=None,  # Will use last/highest amplitude by default
+                        nbins=30,
+                        dark_mode=self.dark_mode
+                    )
+                    layout.addWidget(self.histogram_panel)
+        else:
+            # Panel exists, just reload data (for re-run scenario)
+            if hasattr(self.histogram_panel, '_load_and_plot_data'):
+                self.histogram_panel._load_and_plot_data()
+    
+    def _ensure_histogram_panel(self):
+        """Ensure the histogram panel exists - no longer regenerates plots on tab open."""
+        # If histograms haven't been generated yet, just return
+        # They will be generated when all_sweeps_completed() is called
+        if not self.histograms_generated:
+            return
+        
+        # If we get here and panel doesn't exist but should, create it
+        # This handles edge cases like theme changes
+        if self.histogram_panel is None and self.results_by_iteration:
+            self._generate_histograms()
 
 
     def _on_plot_tab_changed(self, index):
@@ -966,6 +998,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             identifier = f"module{self.target_module}"
             self.data_ready.emit("multisweep", identifier, export_data)
         
+        # Generate histogram plots once when all data is complete
+        if self.results_by_iteration and not self.histograms_generated:
+            self._generate_histograms()
+            self.histograms_generated = True
+        
         # Auto-open detector digest for the first detector (lowest frequency)
         if self.results_by_iteration:
             self._open_detector_digest_for_index(1)
@@ -1224,6 +1261,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
             # Reset window state for the new sweep
             self.results_by_iteration.clear()
+            self.histograms_generated = False  # Reset histogram flag for new run
             
             self._redraw_plots() # Clear plots
             if self.progress_bar: self.progress_bar.setValue(0)

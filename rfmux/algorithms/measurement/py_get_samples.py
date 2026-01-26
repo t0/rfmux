@@ -215,8 +215,8 @@ async def py_get_samples(crs: CRS,
             # Sort packets by sequence number
             return sorted(packets, key=lambda p: p.seq)
 
-        # Allow up to 10 packet-loss retries
-        for attempt in range(NUM_ATTEMPTS := 10):
+        # Allow up to 5 packet-loss retries
+        for attempt in range(NUM_ATTEMPTS := 5):
             packets = await receive_attempt()
 
             sequence_steps = np.diff([p.seq for p in packets])

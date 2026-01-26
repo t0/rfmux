@@ -311,7 +311,7 @@ async def slow_trigger_capture(crs: CRS,
                                thresh : float = None, 
                                noise : float, ### Will have to initialize and maybe add a script to calculate
                                buf_size : int = 5000,
-                               in_volts : bool = False ### add volts conversion  ####
+                               in_volts : bool = False, ### add volts conversion  ####
                                _extra_metadata: bool = False):
 
 

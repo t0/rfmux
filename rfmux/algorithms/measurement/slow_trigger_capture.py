@@ -8,6 +8,7 @@ import socket
 import sys
 import warnings
 import time
+from typing import Union, List
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
@@ -23,126 +24,6 @@ You have ovewritten the first 100 values in the buffer, so make sure you have sa
 
 Also the buffer used by periscope returns already FIFO ordered data, we do not have to touch it again, we just have to figure out the correct indices to call. 
 '''
-
-# class PulseCapture():
-
-#     def __init__(self, buf_size, channels, thresh, noise_level):
-        
-#         self.buf = {}
-#         self.channels = channels
-#         self.buf_size = buf_size
-        
-#         for c in self.channels:
-#             self.buf[c] = {k: Circular(buf_size) for k in ("I", "Q", "ts")}
-            
-#         self.thresh = thresh
-#         self.noise_level = noise_level
-        
-#         self.start_time = None
-        
-#         self.pulses = {}
-#         self.pulse_count = 0
-#         self.capturing = False
-#         self.trigger_ptr = None
-#         self.end_ptr_count = 0
-
-#         self.abs_n = 0          # absolute sample counter (monotonic)
-#         self.trig_abs = None
-
-#     def _calculate_relative_timestamp(self, pkt) -> float | None:
-#         """
-#         Calculate a relative timestamp for a packet.
-
-#         If the packet's timestamp is recent, it's adjusted slightly and
-#         converted to seconds relative to the first packet's timestamp.
-
-#         Args:
-#             pkt: The incoming packet object.
-
-#         Returns:
-#             float | None: Relative timestamp in seconds, or None if not recent.
-#         """
-#         # streamer from .utils
-#         ts = pkt.ts
-#         if ts.recent:
-#             # Apply a small offset to ensure timestamps are strictly increasing for plotting
-#             ts.ss += int(0.02 * streamer.SS_PER_SECOND); ts.renormalize()
-#             t_now = ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND
-#             if self.start_time is None: self.start_time = t_now
-#             return t_now - self.start_time
-
-
-#     def _ordered(self, circ):
-#         '''
-#         We need this, since the lesser value of pointer points to an older value of time in the buffer.
-#         Say we started dump while data is being parsed. So time pointer value at 120 is 15 seconds. 
-#         '''
-#         d = circ.data()
-#         p = circ.ptr
-#         return np.concatenate([d[p:], d[:p]]) ## Making sure the time data gets ordered ##
-
-
-#     # def _calculate_noise_level(self, samples):
-        
-
-
-#     def _update_buffer_and_capture(self, pkt):
-#         samples = pkt.samples / 256
-#         seq = pkt.seq
-#         ts = pkt.ts
-#         arr_time = self._calculate_relative_timestamp(pkt)
-    
-#         for c in self.channels: 
-#             sample = samples[c-1]
-    
-#             self.buf[c]["I"].add(sample.real)
-#             self.buf[c]["Q"].add(sample.imag)
-#             self.buf[c]["ts"].add(arr_time)
-
-#             ptr = self.buf[c]["I"].ptr
-
-#             self.abs_n += 1
-
-#             # if self.thresh is not None:
-#             if sample.real > self.thresh and not self.capturing:
-#                 print("\nFound trigger at ptr", ptr, "at time", arr_time, "Sample value", sample.real)
-#                 self.trigger_ptr = ptr - 1
-#                 self.capturing = True
-#                 self.end_ptr_count = 0
-#                 self.trig_abs = self.abs_n
-
-#             if self.capturing:
-#                 if sample.real < self.noise_level:
-#                     self.end_ptr_count += 1
-#                 else:
-#                     self.end_ptr_count = 0
-
-#                 if self.end_ptr_count > 10: ### Stop after 10 noise samples
-
-#                     start = self.trigger_ptr - 20
-#                     end = ptr
-
-#                     if (start > 1) and (end < self.buf_size): #### This might be missing pulses #####
-#                         print("Saving capture at ptr", end, "at time", arr_time, "Sample value", sample.real)
-#                         self.pulse_count += 1
-                        
-#                         I_ord  = self._ordered(self.buf[c]["I"])
-#                         ts_ord = self._ordered(self.buf[c]["ts"])
-
-#                         # I_ord = self.buf[c]["I"].data()
-#                         # ts_ord = self.buf[c]["ts"].data()
-
-#                         print("Saving Now: Sample value trigger was", I_ord[start+20], "the end value is", I_ord[end-1])
-                        
-#                         self.pulses[self.pulse_count] = {
-#                             "Amp":  I_ord[start:end],
-#                             "Time": ts_ord[start:end]
-#                         }
-    
-#                     self.trigger_ptr = None
-#                     self.capturing = False
-#                     self.end_ptr_count = 0
-
 
 class PulseCapture:
 

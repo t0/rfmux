@@ -123,9 +123,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.current_batch = 0
         self.batch_size = 50
         
-        # Storage for sweep grid plots
-        self.mag_sweep_plots = {}  # {detector_id: plot_widget}
-        self.iq_sweep_plots = {}   # {detector_id: plot_widget}
+        # Storage for sweep grid plots - cached to avoid recreating widgets
+        self.mag_sweep_plots_cache = []  # List of plot widgets for magnitude tab
+        self.iq_sweep_plots_cache = []   # List of plot widgets for IQ tab
         
         # Histogram panel (created lazily in _setup_plot_area)
         self.histogram_panel = None
@@ -740,15 +740,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Create amplitude color mapping (matches combined plot colors)
         amplitude_to_color = create_amplitude_color_map(all_amps, self.dark_mode)
         
-        # Determine plot type and grid
+        # Determine plot type, grid, and cache based on tab
         if tab_idx == 0:
             plot_type = 'magnitude'
             grid_layout = self.mag_sweeps_grid
+            widget_cache = self.mag_sweep_plots_cache
         else:  # tab_idx == 1
             plot_type = 'iq'
             grid_layout = self.iq_sweeps_grid
+            widget_cache = self.iq_sweep_plots_cache
         
-        # Update the grid
+        # Update the grid with widget caching
         update_sweep_grid(
             grid_layout=grid_layout,
             data_by_detector=detector_data,
@@ -761,7 +763,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             normalize=self.normalize_traces,
             prev_btn=self.prev_batch_btn,
             next_btn=self.next_batch_btn,
-            batch_label=self.batch_info_label
+            batch_label=self.batch_info_label,
+            widget_cache=widget_cache
         )
     
     def _redraw_combined_plots(self):

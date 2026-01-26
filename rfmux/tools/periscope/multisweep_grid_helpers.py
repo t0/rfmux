@@ -14,7 +14,7 @@ from .utils import LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COL
 
 def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, batch_size,
                       amplitude_to_color, dark_mode, unit_mode='dbm', normalize=False, 
-                      prev_btn=None, next_btn=None, batch_label=None):
+                      prev_btn=None, next_btn=None, batch_label=None, widget_cache=None):
     """
     Update a grid layout with per-detector sweep plots.
     
@@ -31,6 +31,7 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
         prev_btn: Optional previous batch button to enable/disable
         next_btn: Optional next batch button to enable/disable
         batch_label: Optional label to update with batch info
+        widget_cache: Optional list to cache plot widgets for reuse
         
     Returns:
         None (updates grid_layout in place)
@@ -38,11 +39,9 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
     if not data_by_detector:
         return
     
-    # Clear existing plots
+    # Remove all items from grid without deleting widgets (we'll reuse them)
     while grid_layout.count():
-        item = grid_layout.takeAt(0)
-        if item.widget():
-            item.widget().deleteLater()
+        grid_layout.takeAt(0)
     
     # Get sorted detector IDs
     detector_ids = sorted(data_by_detector.keys())
@@ -73,16 +72,29 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
     # Theme colors
     bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
     
-    # Create plots
+    # Ensure widget cache exists if provided
+    if widget_cache is None:
+        widget_cache = []
+    
+    # Expand cache if needed
+    while len(widget_cache) < num_plots:
+        plot_widget = pg.PlotWidget()
+        widget_cache.append(plot_widget)
+    
+    # Reuse widgets from cache
     for idx, detector_id in enumerate(batch_detectors):
         row = idx // ncols
         col = idx % ncols
         
-        plot_widget = pg.PlotWidget()
+        # Reuse widget from cache
+        plot_widget = widget_cache[idx]
         plot_widget.setBackground(bg_color)
         plot_item = plot_widget.getPlotItem()
         
         if plot_item:
+            # Clear previous data
+            plot_item.clear()
+            
             title = f"Detector {detector_id}"
             plot_item.setTitle(title, color=pen_color)
             

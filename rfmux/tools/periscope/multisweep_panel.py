@@ -761,7 +761,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             normalize=self.normalize_traces,
             prev_btn=self.prev_batch_btn,
             next_btn=self.next_batch_btn,
-            batch_label=self.batch_info_label
+            batch_label=self.batch_info_label,
+            dac_scales=self.dac_scales,
+            target_module=self.target_module
         )
     
     def _redraw_combined_plots(self):

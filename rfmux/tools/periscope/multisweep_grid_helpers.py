@@ -14,7 +14,7 @@ from .utils import LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COL
 
 def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, batch_size,
                       amplitude_to_color, dark_mode, unit_mode='dbm', normalize=False, 
-                      prev_btn=None, next_btn=None, batch_label=None):
+                      prev_btn=None, next_btn=None, batch_label=None, dac_scales=None, target_module=None):
     """
     Update a grid layout with per-detector sweep plots.
     
@@ -31,6 +31,8 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
         prev_btn: Optional previous batch button to enable/disable
         next_btn: Optional next batch button to enable/disable
         batch_label: Optional label to update with batch info
+        dac_scales: Optional dict of DAC scales for unit conversion
+        target_module: Optional module number for DAC scale lookup
         
     Returns:
         None (updates grid_layout in place)
@@ -97,7 +99,7 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
             detector_data = data_by_detector.get(detector_id, {})
             
             if plot_type == 'magnitude':
-                plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_color, unit_mode, normalize)
+                plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_color, unit_mode, normalize, dac_scales, target_module)
                 
                 # Set Y-axis label based on unit_mode and normalize
                 if normalize:
@@ -115,7 +117,7 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
                 
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             else:  # IQ
-                plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color)
+                plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color, unit_mode, dac_scales, target_module)
                 plot_item.setLabel('left', 'Q (Imaginary)')
                 plot_item.setLabel('bottom', 'I (Real)')
                 # Lock aspect ratio to 1:1 to keep circles circular
@@ -136,25 +138,39 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
         batch_label.setText(f"{current_batch + 1} of {total_batches}")
 
 
-def plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_color, unit_mode='dbm', normalize=False):
+def plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_color, unit_mode='dbm', normalize=False, dac_scales=None, target_module=None):
     """
     Plot S21 magnitude sweeps for a single detector across multiple amplitudes.
     
     Args:
         plot_item: PyQtGraph PlotItem to draw on
-        detector_data: Dict {amplitude: {'freq': [...], 'iq': [...]}}
+        detector_data: Dict {amplitude: {'freq': [...], 'iq': [...], 'direction': str}}
         amplitude_to_color: Dict mapping amplitude values to colors
         pen_color: Fallback pen color for single amplitude
         unit_mode: Unit mode for magnitude display ('counts', 'dbm', 'volts')
         normalize: Whether to normalize traces
+        dac_scales: Optional dict of DAC scales for unit conversion
+        target_module: Optional module number for DAC scale lookup
     """
+    from PyQt6.QtCore import Qt
+    
     amplitudes = sorted(detector_data.keys())
+    
+    if not amplitudes:
+        return
+    
+    # Create legend in top-left corner
+    legend = plot_item.addLegend(offset=(-10, 10), labelTextColor=pen_color)
+    
+    # Track which amplitude+direction combinations we've added to legend
+    legend_entries = set()
     
     for amp in amplitudes:
         amp_data = detector_data.get(amp, {})
         
         freqs = amp_data.get('freq')
         iq = amp_data.get('iq')
+        direction = amp_data.get('direction', 'upward')
         
         if freqs is None or iq is None or len(freqs) == 0:
             continue
@@ -165,33 +181,58 @@ def plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_co
         
         # Get color for this amplitude
         if len(amplitudes) == 1:
-            pen = pg.mkPen(color=pen_color, width=LINE_WIDTH)
+            color = pen_color
         else:
             color = amplitude_to_color.get(amp, pen_color)
-            pen = pg.mkPen(color=color, width=LINE_WIDTH)
+        
+        # Set linestyle based on direction
+        line_style = Qt.PenStyle.DotLine if direction == "downward" else Qt.PenStyle.SolidLine
+        pen = pg.mkPen(color=color, width=LINE_WIDTH, style=line_style)
         
         # Plot relative to mean frequency (in kHz)
         freqs_rel_khz = 1e-3 * (freqs - np.mean(freqs))
         
-        plot_item.plot(freqs_rel_khz, mag_converted, pen=pen)
+        curve = plot_item.plot(freqs_rel_khz, mag_converted, pen=pen)
+        
+        # Format amplitude label
+        legend_key = (amp, direction)
+        if legend_key not in legend_entries:
+            legend_name = _format_amplitude_label(amp, unit_mode, dac_scales, target_module)
+            legend.addItem(curve, legend_name)
+            legend_entries.add(legend_key)
 
 
-def plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color):
+def plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color, unit_mode='dbm', dac_scales=None, target_module=None):
     """
     Plot IQ circles for a single detector across multiple amplitudes.
     
     Args:
         plot_item: PyQtGraph PlotItem to draw on
-        detector_data: Dict {amplitude: {'freq': [...], 'iq': [...]}}
+        detector_data: Dict {amplitude: {'freq': [...], 'iq': [...], 'direction': str}}
         amplitude_to_color: Dict mapping amplitude values to colors
         pen_color: Fallback pen color for single amplitude
+        unit_mode: Unit mode for amplitude display in legend ('counts', 'dbm', 'volts')
+        dac_scales: Optional dict of DAC scales for unit conversion
+        target_module: Optional module number for DAC scale lookup
     """
+    from PyQt6.QtCore import Qt
+    
     amplitudes = sorted(detector_data.keys())
+    
+    if not amplitudes:
+        return
+    
+    # Create legend in top-left corner
+    legend = plot_item.addLegend(offset=(-10, 10), labelTextColor=pen_color)
+    
+    # Track which amplitude+direction combinations we've added to legend
+    legend_entries = set()
     
     for amp in amplitudes:
         amp_data = detector_data.get(amp, {})
         
         iq = amp_data.get('iq')
+        direction = amp_data.get('direction', 'upward')
         
         if iq is None or len(iq) == 0:
             continue
@@ -208,12 +249,62 @@ def plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color):
         
         # Get color for this amplitude
         if len(amplitudes) == 1:
-            pen = pg.mkPen(color=pen_color, width=LINE_WIDTH)
+            color = pen_color
         else:
             color = amplitude_to_color.get(amp, pen_color)
-            pen = pg.mkPen(color=color, width=LINE_WIDTH)
         
-        plot_item.plot(i_vals, q_vals, pen=pen)
+        # Set linestyle based on direction
+        line_style = Qt.PenStyle.DotLine if direction == "downward" else Qt.PenStyle.SolidLine
+        pen = pg.mkPen(color=color, width=LINE_WIDTH, style=line_style)
+        
+        curve = plot_item.plot(i_vals, q_vals, pen=pen)
+        
+        # Format amplitude label
+        legend_key = (amp, direction)
+        if legend_key not in legend_entries:
+            legend_name = _format_amplitude_label(amp, unit_mode, dac_scales, target_module)
+            legend.addItem(curve, legend_name)
+            legend_entries.add(legend_key)
+
+
+def _format_amplitude_label(amp_val, unit_mode, dac_scales=None, target_module=None):
+    """
+    Format an amplitude value for display in legend.
+    
+    Args:
+        amp_val: Amplitude value (normalized)
+        unit_mode: Unit mode ('dbm', 'volts', 'counts')
+        dac_scales: Optional dict of DAC scales
+        target_module: Optional module number for DAC scale lookup
+        
+    Returns:
+        Formatted string for legend
+    """
+    # Get DAC scale for the target module
+    dac_scale_for_module = None
+    if dac_scales and target_module is not None:
+        dac_scale_for_module = dac_scales.get(target_module)
+    
+    if unit_mode == "dbm":
+        if dac_scale_for_module is not None:
+            dbm_val = UnitConverter.normalize_to_dbm(amp_val, dac_scale_for_module)
+            return f"{dbm_val:.2f} dBm"
+        else:
+            # Fallback if DAC scale is missing
+            return f"{amp_val:.3e} (Norm)"
+    elif unit_mode == "volts":
+        if dac_scale_for_module is not None:
+            dbm_val = UnitConverter.normalize_to_dbm(amp_val, dac_scale_for_module)
+            power_watts = 10**((dbm_val - 30)/10)  # Convert dBm to Watts
+            resistance = 50.0  # Standard impedance assumption
+            voltage_rms = np.sqrt(power_watts * resistance)
+            voltage_peak_uv = voltage_rms * np.sqrt(2) * 1e6  # Convert RMS to peak uV
+            return f"{voltage_peak_uv:.1f} uVpk"
+        else:
+            # Fallback if DAC scale is missing
+            return f"{amp_val:.3e} (Norm)"
+    else:  # Counts or other modes
+        return f"{amp_val:.3e} Norm"
 
 
 def create_amplitude_color_map(amplitude_values, dark_mode):

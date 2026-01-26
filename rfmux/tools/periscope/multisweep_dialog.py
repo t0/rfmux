@@ -515,147 +515,45 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     def _populate_amplitude_fields_from_params(self):
         """
         Populate amplitude-related fields from self.params if available.
-        Uses metadata (base_amplitude_mode, base_amplitude_values) if present,
-        otherwise detects the mode from amp_arrays structure.
+        Uses saved metadata for robust reconstruction.
         """
-        amp_arrays = self.params.get('amp_arrays')
-        
-        if not amp_arrays or not isinstance(amp_arrays, list):
-            # No amplitude data to populate, or wrong format
-            return
-        
-        if len(amp_arrays) == 0:
-            return
-        
-        num_iterations = len(amp_arrays)
-        
-        # Set number of steps
-        self.num_steps_edit.setText(str(num_iterations))
-        
-        # Get the first amplitude array as reference
-        first_array = amp_arrays[0]
-        if not first_array:
-            return
-        
-        # Check for metadata about how base amplitude was originally specified
+        # Populate base amplitude fields
         base_amp_mode = self.params.get('base_amplitude_mode')
         base_amp_values = self.params.get('base_amplitude_values')
         
-        # If we have metadata, use it to populate the correct field
-        if base_amp_mode and base_amp_values is not None:
-            if base_amp_mode == 'global':
-                self.global_amp_edit.setText(f"{base_amp_values:.4g}")
-            elif base_amp_mode == 'array':
-                if isinstance(base_amp_values, list):
-                    amp_text = ", ".join(f"{amp:.4g}" for amp in base_amp_values)
-                    self.amp_array_edit.setText(amp_text)
-        else:
-            # No metadata - fall back to inference from amp_arrays structure
-            # Check if this is a global amplitude (all values in array are the same)
-            is_global_amp = len(set(first_array)) == 1
-            
-            if is_global_amp:
-                self.global_amp_edit.setText(f"{first_array[0]:.4g}")
-            else:
-                amp_text = ", ".join(f"{amp:.4g}" for amp in first_array)
+        if base_amp_mode == 'global' and base_amp_values is not None:
+            self.global_amp_edit.setText(f"{base_amp_values:.4g}")
+        elif base_amp_mode == 'array' and base_amp_values is not None:
+            if isinstance(base_amp_values, list):
+                amp_text = ", ".join(f"{amp:.4g}" for amp in base_amp_values)
                 self.amp_array_edit.setText(amp_text)
         
-        # Now handle iteration settings
-        if num_iterations == 1:
-            # Single iteration mode
+        # Populate iteration settings using saved metadata
+        num_steps = self.params.get('num_steps', 1)
+        self.num_steps_edit.setText(str(num_steps))
+        
+        iteration_mode = self.params.get('iteration_mode', 'single')
+        
+        if iteration_mode == 'single':
             self.single_iteration_radio.setChecked(True)
         
-        elif num_iterations > 1:
-            # Multiple iterations - detect pattern
-            # Extract the representative amplitude from each iteration (first value)
-            iteration_amps = [arr[0] if arr else 0.0 for arr in amp_arrays]
-            
-            # Check if all arrays have the same structure (global vs array)
-            all_global = all(len(set(arr)) == 1 for arr in amp_arrays if arr)
-            all_array_same_structure = len(set(len(arr) for arr in amp_arrays)) == 1
-            
-            if all_global:
-                # All iterations use global amplitude - check for uniform or scaling
-                # Check for uniform progression (linear)
-                if self._is_uniform_progression(iteration_amps):
-                    self.uniform_sweep_radio.setChecked(True)
-                    self.uniform_start_edit.setText(f"{iteration_amps[0]:.4g}")
-                    self.uniform_stop_edit.setText(f"{iteration_amps[-1]:.4g}")
-                
-                # Check for scaling progression (multiplicative)
-                elif self._is_scaling_progression(amp_arrays, first_array):
-                    self.scaling_radio.setChecked(True)
-                    # Calculate scale factors
-                    base_amp = first_array[0]
-                    start_factor = iteration_amps[0] / base_amp if base_amp != 0 else 1.0
-                    stop_factor = iteration_amps[-1] / base_amp if base_amp != 0 else 1.0
-                    self.scale_start_edit.setText(f"{start_factor:.4g}")
-                    self.scale_stop_edit.setText(f"{stop_factor:.4g}")
-                
-                else:
-                    # Unknown pattern, just keep as single iteration
-                    self.single_iteration_radio.setChecked(True)
-            
-            elif all_array_same_structure:
-                # Amplitude arrays with consistent structure
-                # Check if this follows a scaling pattern
-                if self._is_scaling_progression(amp_arrays, first_array):
-                    self.scaling_radio.setChecked(True)
-                    # Calculate scale factors from first element
-                    base_amp = first_array[0]
-                    start_factor = iteration_amps[0] / base_amp if base_amp != 0 else 1.0
-                    stop_factor = iteration_amps[-1] / base_amp if base_amp != 0 else 1.0
-                    self.scale_start_edit.setText(f"{start_factor:.4g}")
-                    self.scale_stop_edit.setText(f"{stop_factor:.4g}")
-                else:
-                    # No clear pattern, keep as single iteration
-                    self.single_iteration_radio.setChecked(True)
-    
-    def _is_uniform_progression(self, values):
-        """Check if values follow a uniform (linear) progression."""
-        if len(values) < 2:
-            return False
+        elif iteration_mode == 'uniform':
+            self.uniform_sweep_radio.setChecked(True)
+            uniform_start = self.params.get('uniform_start_amplitude')
+            uniform_stop = self.params.get('uniform_stop_amplitude')
+            if uniform_start is not None:
+                self.uniform_start_edit.setText(f"{uniform_start:.4g}")
+            if uniform_stop is not None:
+                self.uniform_stop_edit.setText(f"{uniform_stop:.4g}")
         
-        # Calculate differences
-        diffs = [values[i+1] - values[i] for i in range(len(values)-1)]
-        
-        # Check if all differences are approximately equal (within 1% tolerance)
-        if len(diffs) == 0:
-            return False
-        
-        avg_diff = sum(diffs) / len(diffs)
-        if avg_diff == 0:
-            return all(d == 0 for d in diffs)
-        
-        tolerance = 0.01 * abs(avg_diff)
-        return all(abs(d - avg_diff) < tolerance for d in diffs)
-    
-    def _is_scaling_progression(self, amp_arrays, base_array):
-        """Check if amp_arrays follow a multiplicative scaling pattern relative to base_array."""
-        if len(amp_arrays) < 2 or not base_array or base_array[0] == 0:
-            return False
-        
-        # Calculate scale factors for each iteration
-        scale_factors = []
-        for arr in amp_arrays:
-            if not arr or len(arr) != len(base_array):
-                return False
-            # Use first element to calculate scale factor
-            factor = arr[0] / base_array[0] if base_array[0] != 0 else 1.0
-            scale_factors.append(factor)
-        
-        # Check if scale factors are uniformly distributed
-        if self._is_uniform_progression(scale_factors):
-            # Also verify that all elements in each array are scaled by the same factor
-            for i, arr in enumerate(amp_arrays):
-                expected_factor = scale_factors[i]
-                for j, amp in enumerate(arr):
-                    expected_val = base_array[j] * expected_factor
-                    if abs(amp - expected_val) > 0.01 * abs(expected_val):
-                        return False
-            return True
-        
-        return False
+        elif iteration_mode == 'scaling':
+            self.scaling_radio.setChecked(True)
+            scale_start = self.params.get('scale_start_factor')
+            scale_stop = self.params.get('scale_stop_factor')
+            if scale_start is not None:
+                self.scale_start_edit.setText(f"{scale_start:.4g}")
+            if scale_stop is not None:
+                self.scale_stop_edit.setText(f"{scale_stop:.4g}")
     
     def _clear_amplitude_fields(self):
         """Clear all amplitude-related fields to their default empty/initial state."""
@@ -962,6 +860,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             if self.single_iteration_radio.isChecked() or num_steps == 1:
                 # Single iteration mode
                 params_dict['amp_arrays'] = [base_amp_array]
+                params_dict['iteration_mode'] = 'single'
             
             elif self.uniform_sweep_radio.isChecked():
                 # Uniform sweep mode
@@ -990,6 +889,11 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 # Generate uniform amplitude values
                 amp_values = np.linspace(start_amp, stop_amp, num_steps)
                 params_dict['amp_arrays'] = [[amp] * num_sections for amp in amp_values]
+                
+                # Store iteration metadata
+                params_dict['iteration_mode'] = 'uniform'
+                params_dict['uniform_start_amplitude'] = start_amp
+                params_dict['uniform_stop_amplitude'] = stop_amp
             
             elif self.scaling_radio.isChecked():
                 # Multiplicative scaling mode
@@ -1021,6 +925,11 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                     [amp * factor for amp in base_amp_array] 
                     for factor in factors
                 ]
+                
+                # Store iteration metadata
+                params_dict['iteration_mode'] = 'scaling'
+                params_dict['scale_start_factor'] = start_factor
+                params_dict['scale_stop_factor'] = stop_factor
             
             else:
                 QtWidgets.QMessageBox.warning(
@@ -1029,6 +938,9 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                     "Must select an iteration mode."
                 )
                 return None
+            
+            # Store number of steps for all modes
+            params_dict['num_steps'] = num_steps
             
             # Parse other parameters
             recalc_method_text = self.recalc_cf_combo.currentText()

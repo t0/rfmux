@@ -116,7 +116,7 @@ class PulseCapture:
                         continue
 
                     # Use CURRENT available FIFO/buffer length
-                    L = self.buf[c]["I"].count  # <= buf_size
+                    L = self.buf[c]["I"].count  
 
                     trig_fifo = (L - 1) - (self.abs_n - self.trig_abs) ### indices in buffer data that has the trigger
 
@@ -160,11 +160,13 @@ class PulseCapture:
                     #### Actually storing the data ######
 
                     I_win = self._pulse_window(self.buf[c]["I"], start_clamped, end_clamped)
+                    Q_win = self._pulse_window(self.buf[c]["Q"], start_clamped, end_clamped)
                     ts_win = self._pulse_window(self.buf[c]["ts"], start_clamped, end_clamped)
 
                     self.pulse_count += 1
                     self.pulses[self.pulse_count] = {
-                        "Amp": I_win,
+                        "Amp_I": I_win,
+                        "Amp_Q": Q_win,
                         "Time": ts_win,
                     }
 
@@ -183,6 +185,41 @@ class PulseCapture:
                     self.trigger_value = None
     
 
+def get_noise_level(packets, thresh, channels):
+    ### Find ideal solution ####
+    samples = np.stack([p.samples for p in packets]) / 256.0
+    real_all = samples.real
+
+    noise_levels = []
+
+    for c in channels:
+        real_ch = real_all[:, c-1]
+
+        below_thresh = [] 
+        for r in real_ch:
+            if r < thresh:
+                below_thresh.append(r) #### collecting all the samples below the threshold #####
+                
+        below_thresh = np.array(below_thresh)
+        
+        max_val = np.max(below_thresh)
+        min_val = np.min(below_thresh)
+        std = np.std(below_thresh)
+        mean = np.mean(below_thresh)
+        median = np.mean(below_thresh)
+
+        print("Channel:", c,
+              "Min:", min_val,
+              "Max:", max_val,
+              "Std:", std,
+              "Mean:", mean,
+              "Median:", median,
+              "Sample_below:", len(below_thresh))
+        
+        noise_levels.append(median) ##### This is a pretty good approximation for ~ 250-300 samples wide burst ####
+
+    return noise_levels
+
 @macro(CRS, register=True)
 async def slow_trigger_capture(crs: CRS,
                                channel : Union[None, int, List[int]] = None,
@@ -190,13 +227,13 @@ async def slow_trigger_capture(crs: CRS,
                                *,
                                time_run : float = 10.0,
                                thresh : float = None, 
-                               noise : float, ### Will have to initialize and maybe add a script to calculate
+                               noise : float = None, ### if None run a calculation script
                                buf_size : int = 5000,
                                in_volts : bool = False, ### add volts conversion  ####
                                _extra_metadata: bool = False):
 
 
-    ##### I don't think it has to be killed because of dropped packets unlike Noise, but we can maybe keep a drop counter ######
+    ##### I don't think it has to be killed because of dropped packets unlike Noise Spectrum, but we can maybe keep a drop counter ######
     ##### Not inserting any receiver_attempt loops here, as it is in py_get_samples #####
     
     async with crs.tuber_context() as tc:
@@ -234,6 +271,34 @@ async def slow_trigger_capture(crs: CRS,
     else:
         host = crs.tuber_hostname
 
+
+    ##### Add noise level estimate here #####
+    ### Taking only 1000 noise samples, will fail if the burst is 1000 samples wide. Find ideal strategy ###
+
+    if noise is None:
+        with streamer.get_multicast_socket(host) as sock:
+    
+            # To use asyncio, we need a non-blocking socket
+            loop = asyncio.get_running_loop()
+            sock.setblocking(False)
+            noise_packets = []
+    
+            while len(noise_packets) <= 1000: 
+    
+                data = await asyncio.wait_for(
+                    loop.sock_recv(sock, streamer.LONG_PACKET_SIZE),
+                    streamer.STREAMER_TIMEOUT,
+                )
+                p = streamer.ReadoutPacket(data)
+                noise_packets.append(p)
+    
+    
+        noise_level = get_noise_level(noise_packets, thresh, channels)
+    
+        noise = noise_level[0] ### running it only for one channel now ###
+    
+        print("Updated the noise to", noise)
+            
     pcap = PulseCapture(buf_size, channels, thresh, noise)
     with streamer.get_multicast_socket(host) as sock:
 

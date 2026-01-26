@@ -127,7 +127,7 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
                 
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             else:  # IQ
-                plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color)
+                plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color, normalize)
                 plot_item.setLabel('left', 'Q (Imaginary)')
                 plot_item.setLabel('bottom', 'I (Real)')
                 # Lock aspect ratio to 1:1 to keep circles circular
@@ -188,7 +188,7 @@ def plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_co
         plot_item.plot(freqs_rel_khz, mag_converted, pen=pen)
 
 
-def plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color):
+def plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color, normalize=False):
     """
     Plot IQ circles for a single detector across multiple amplitudes.
     
@@ -197,6 +197,7 @@ def plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color):
         detector_data: Dict {amplitude: {'freq': [...], 'iq': [...]}}
         amplitude_to_color: Dict mapping amplitude values to colors
         pen_color: Fallback pen color for single amplitude
+        normalize: Whether to normalize IQ data by max magnitude
     """
     amplitudes = sorted(detector_data.keys())
     
@@ -212,11 +213,12 @@ def plot_detector_iq(plot_item, detector_data, amplitude_to_color, pen_color):
         i_vals = np.real(iq)
         q_vals = np.imag(iq)
         
-        # Normalize by max magnitude
-        mag = np.abs(iq)
-        if len(mag) > 0 and np.max(mag) > 0:
-            i_vals = i_vals / np.max(mag)
-            q_vals = q_vals / np.max(mag)
+        # Optionally normalize by max magnitude
+        if normalize:
+            mag = np.abs(iq)
+            if len(mag) > 0 and np.max(mag) > 0:
+                i_vals = i_vals / np.max(mag)
+                q_vals = q_vals / np.max(mag)
         
         # Get color for this amplitude
         if len(amplitudes) == 1:

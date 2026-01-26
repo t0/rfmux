@@ -391,6 +391,10 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             self.session_path = base_path
             # Save this directory for next time
             settings.set_last_session_directory(base_path)
+            # Also save the full session path so it's pre-selected next time
+            import os
+            full_session_path = os.path.join(base_path, self.session_folder_name)
+            settings.set_last_session_path(full_session_path)
             
         elif self.rb_load_session.isChecked():
             self.session_mode = self.SESS_LOAD

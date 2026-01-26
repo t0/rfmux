@@ -168,6 +168,10 @@ class SessionManager(QtCore.QObject):
         
         # Initialize session state
         self._session_path = session_path
+        
+        # Save the full session path so it's pre-selected next time
+        from . import settings
+        settings.set_last_session_path(str(session_path))
         self._export_count = 0
         self._session_start_time = datetime.datetime.now()
         self._session_metadata = {

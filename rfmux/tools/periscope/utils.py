@@ -323,6 +323,171 @@ def find_parent_with_attr(widget: QtWidgets.QWidget, attr_name: str) -> Optional
         parent = parent.parent()
     return parent
 
+
+class SquareGridLayout(QtWidgets.QLayout):
+    """
+    A custom grid layout that maintains square aspect ratios for its items.
+    
+    This layout arranges widgets in a grid pattern where each cell is forced
+    to be square, ensuring that IQ circle plots maintain their circular shape.
+    """
+    
+    def __init__(self, parent=None, spacing=10):
+        super().__init__(parent)
+        self._items = []
+        self._spacing = spacing
+        self._ncols = 1
+        
+    def addItem(self, item):
+        """Add an item to the layout."""
+        self._items.append(item)
+        
+    def addWidget(self, widget, row, col):
+        """Add a widget at a specific grid position."""
+        # For simplicity, we'll just append items and calculate grid positions
+        # based on the order they were added
+        self.addItem(QtWidgets.QWidgetItem(widget))
+        
+    def count(self):
+        """Return the number of items in the layout."""
+        return len(self._items)
+    
+    def itemAt(self, index):
+        """Return the item at the given index."""
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+    
+    def takeAt(self, index):
+        """Remove and return the item at the given index."""
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+    
+    def setGeometry(self, rect):
+        """Set the geometry of the layout and arrange items."""
+        super().setGeometry(rect)
+        
+        if not self._items:
+            return
+        
+        # Calculate grid dimensions
+        num_items = len(self._items)
+        ncols = int(np.ceil(np.sqrt(num_items)))
+        nrows = int(np.ceil(num_items / ncols))
+        self._ncols = ncols
+        
+        # Calculate available space
+        available_width = rect.width() - (ncols + 1) * self._spacing
+        available_height = rect.height() - (nrows + 1) * self._spacing
+        
+        # Calculate cell size (make it square - use the smaller dimension)
+        cell_width = available_width / ncols
+        cell_height = available_height / nrows
+        cell_size = int(min(cell_width, cell_height))
+        
+        # Make sure we have a reasonable minimum size
+        cell_size = max(cell_size, 100)
+        
+        # Calculate starting positions to center the grid
+        total_grid_width = ncols * cell_size + (ncols - 1) * self._spacing
+        total_grid_height = nrows * cell_size + (nrows - 1) * self._spacing
+        start_x = rect.x() + (rect.width() - total_grid_width) // 2
+        start_y = rect.y() + (rect.height() - total_grid_height) // 2
+        
+        # Position each item
+        for idx, item in enumerate(self._items):
+            row = idx // ncols
+            col = idx % ncols
+            
+            x = start_x + col * (cell_size + self._spacing)
+            y = start_y + row * (cell_size + self._spacing)
+            
+            item.setGeometry(QtCore.QRect(x, y, cell_size, cell_size))
+    
+    def sizeHint(self):
+        """Return the preferred size of the layout."""
+        if not self._items:
+            return QtCore.QSize(100, 100)
+        
+        num_items = len(self._items)
+        ncols = int(np.ceil(np.sqrt(num_items)))
+        nrows = int(np.ceil(num_items / ncols))
+        
+        # Assume 300x300 per cell
+        cell_size = 300
+        width = ncols * cell_size + (ncols + 1) * self._spacing
+        height = nrows * cell_size + (nrows + 1) * self._spacing
+        
+        return QtCore.QSize(width, height)
+    
+    def minimumSize(self):
+        """Return the minimum size of the layout."""
+        if not self._items:
+            return QtCore.QSize(100, 100)
+        
+        num_items = len(self._items)
+        ncols = int(np.ceil(np.sqrt(num_items)))
+        nrows = int(np.ceil(num_items / ncols))
+        
+        # Minimum 200x200 per cell
+        cell_size = 200
+        width = ncols * cell_size + (ncols + 1) * self._spacing
+        height = nrows * cell_size + (nrows + 1) * self._spacing
+        
+        return QtCore.QSize(width, height)
+
+
+class SquarePlotWidget(pg.PlotWidget):
+    """
+    A PlotWidget that works well with SquareGridLayout.
+    Useful for IQ circle plots where preserving the circular shape is important.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set size policy to expanding
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding
+        )
+        # Set minimum size
+        self.setMinimumSize(200, 200)
+    
+    def sizeHint(self) -> QtCore.QSize:
+        """Provide a default square size hint."""
+        return QtCore.QSize(300, 300)
+
+
+def square_axes(plot_item: pg.PlotItem):
+    """
+    Make the axes have the same scale and equal extent in both directions, so that the
+    resulting plot is square and shows a to-scale representation of the data. This is
+    particularly useful for IQ circle plots where preserving the true circular shape is important.
+    
+    Parameters:
+    -----------
+    plot_item : pg.PlotItem
+        PyQtGraph PlotItem to make square
+        
+    Example:
+    --------
+    plot_widget = pg.PlotWidget()
+    plot_item = plot_widget.getPlotItem()
+    plot_item.plot(x_data, y_data)
+    square_axes(plot_item)  # Make it square with equal scaling
+    """
+    if plot_item is None:
+        return
+    
+    view_box = plot_item.getViewBox()
+    if view_box is None:
+        return
+    
+    # Lock the aspect ratio to 1:1 - this is the key setting
+    # This ensures equal scaling on both axes
+    view_box.setAspectLocked(True, ratio=1.0)
+
 def mode_title(mode: str) -> str:
     """
     Provide a more user-friendly label for each plot mode.

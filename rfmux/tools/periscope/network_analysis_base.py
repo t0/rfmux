@@ -95,10 +95,12 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         
         button_layout = QtWidgets.QHBoxLayout()
         self.fill_amp_button = QtWidgets.QPushButton("Fill Normalized Amplitude")
+        self.fill_amp_button.setAutoDefault(False)  # Prevent this button from capturing Enter key
         self.fill_amp_button.clicked.connect(self._on_fill_amplitude_clicked)
         button_layout.addWidget(self.fill_amp_button)
 
         self.fill_dbm_button = QtWidgets.QPushButton("Fill Power (dBm)")
+        self.fill_dbm_button.setAutoDefault(False)  # Prevent this button from capturing Enter key
         self.fill_dbm_button.clicked.connect(self._on_fill_dbm_clicked)
         button_layout.addWidget(self.fill_dbm_button)
         

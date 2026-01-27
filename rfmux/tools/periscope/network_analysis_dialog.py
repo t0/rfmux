@@ -1,7 +1,7 @@
 """Network analysis parameter dialogs."""
 
 from .utils import (
-    QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator,
+    QtWidgets, QtCore, QtGui, QRegularExpression, QRegularExpressionValidator,
     QDoubleValidator, QIntValidator,
     DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
     DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
@@ -126,6 +126,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         # Buttons for starting or canceling the analysis
         btn_layout = QtWidgets.QHBoxLayout()
         self.start_btn = QtWidgets.QPushButton("Start Analysis")
+        self.start_btn.setDefault(True)  # Make this the default button (highlighted, triggered by Enter)
         self.load_btn = QtWidgets.QPushButton("Load Analysis")
         self.load_btn.setEnabled(False) ### Will enable once file is available.
         self.cancel_btn = QtWidgets.QPushButton("Cancel")
@@ -139,6 +140,15 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         self.load_btn.clicked.connect(self._load_data_avail) 
         
         self.cancel_btn.clicked.connect(self.reject) # Connect to QDialog's reject slot
+        
+        # Create keyboard shortcuts for Enter/Return keys to trigger "Start Analysis"
+        # This works regardless of which widget has focus
+        self.enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Return), self)
+        self.enter_shortcut.activated.connect(self.accept)
+        
+        # Also handle numpad Enter
+        self.numpad_enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Enter), self)
+        self.numpad_enter_shortcut.activated.connect(self.accept)
         
         self._update_dbm_from_normalized() # Initial update of dBm field based on default amplitude
         self.setMinimumSize(500, 600) # Set a reasonable minimum size

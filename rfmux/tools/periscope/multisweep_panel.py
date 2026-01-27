@@ -121,7 +121,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Initialize batch tracking for sweep tabs (before _setup_ui)
         self.current_batch = 0
-        self.batch_size = 50
+        self.batch_size = 12
         
         # Storage for sweep grid plots - cached to avoid recreating widgets
         self.mag_sweep_plots_cache = []  # List of plot widgets for magnitude tab
@@ -194,27 +194,36 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         self.prev_batch_btn = QtWidgets.QPushButton("◀")
         self.prev_batch_btn.setToolTip("Previous batch")
+        self.prev_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
         self.prev_batch_btn.clicked.connect(self._prev_batch)
         toolbar_layout.addWidget(self.prev_batch_btn)
         
         self.batch_info_label = QtWidgets.QLabel("1 of 1")
         self.batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.batch_info_label.setMinimumWidth(60)
+        self.batch_info_label.setMinimumWidth(40)
         toolbar_layout.addWidget(self.batch_info_label)
         
         self.next_batch_btn = QtWidgets.QPushButton("▶")
         self.next_batch_btn.setToolTip("Next batch")
+        self.next_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
         self.next_batch_btn.clicked.connect(self._next_batch)
         toolbar_layout.addWidget(self.next_batch_btn)
         
+        self.batch_size_label = QtWidgets.QLabel("Size:")
+        toolbar_layout.addWidget(self.batch_size_label)
+        
         self.batch_size_spin = QtWidgets.QSpinBox()
-        self.batch_size_spin.setRange(10, 200)
+        self.batch_size_spin.setRange(1, 200)
         self.batch_size_spin.setValue(self.batch_size)
-        self.batch_size_spin.setSingleStep(10)
-        self.batch_size_spin.setToolTip("Detectors per batch")
-        self.batch_size_spin.setPrefix("Size: ")
-        self.batch_size_spin.valueChanged.connect(self._batch_size_changed)
+        self.batch_size_spin.setSingleStep(1)
+        self.batch_size_spin.setToolTip("Detectors per batch (press Update to apply)")
+        # Note: No longer connects to immediate redraw
         toolbar_layout.addWidget(self.batch_size_spin)
+        
+        self.batch_update_btn = QtWidgets.QPushButton("Update")
+        self.batch_update_btn.setToolTip("Apply new batch size and regenerate plots")
+        self.batch_update_btn.clicked.connect(self._apply_batch_size)
+        toolbar_layout.addWidget(self.batch_update_btn)
 
         # Normalization Checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
@@ -473,17 +482,21 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.prev_batch_btn.setVisible(is_sweep_tab)
         self.batch_info_label.setVisible(is_sweep_tab)
         self.next_batch_btn.setVisible(is_sweep_tab)
+        self.batch_size_label.setVisible(is_sweep_tab)
         self.batch_size_spin.setVisible(is_sweep_tab)
+        self.batch_update_btn.setVisible(is_sweep_tab)
         
         # Redraw the active tab's plots if we have data
         if self.results_by_iteration:
             self._redraw_plots()
     
-    def _batch_size_changed(self, value):
-        """Handle batch size change."""
-        self.batch_size = value
-        self.current_batch = 0
-        self._redraw_plots()
+    def _apply_batch_size(self):
+        """Apply the batch size from the spin box and regenerate plots."""
+        new_batch_size = self.batch_size_spin.value()
+        if new_batch_size != self.batch_size:
+            self.batch_size = new_batch_size
+            self.current_batch = 0
+            self._redraw_plots()
     
     def _prev_batch(self):
         """Show previous batch."""

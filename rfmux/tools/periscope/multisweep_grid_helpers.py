@@ -72,6 +72,13 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
     # Theme colors
     bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
     
+    # Set uniform stretch factors for all rows and columns to ensure even sizing
+    # This prevents widgets from being resized differently when switching batches
+    for r in range(nrows):
+        grid_layout.setRowStretch(r, 1)
+    for c in range(ncols):
+        grid_layout.setColumnStretch(c, 1)
+    
     # Ensure widget cache exists if provided
     if widget_cache is None:
         widget_cache = []
@@ -79,7 +86,16 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
     # Expand cache if needed
     while len(widget_cache) < num_plots:
         plot_widget = pg.PlotWidget()
+        # Set size policy to ensure widgets expand to fill grid cells uniformly
+        plot_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding
+        )
         widget_cache.append(plot_widget)
+    
+    # Hide all cached widgets first to prevent overlap when switching batches
+    for widget in widget_cache:
+        widget.hide()
     
     # Reuse widgets from cache
     for idx, detector_id in enumerate(batch_detectors):
@@ -136,6 +152,7 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
             plot_item.showGrid(x=True, y=True, alpha=0.3)
         
         grid_layout.addWidget(plot_widget, row, col)
+        plot_widget.show()  # Show only the widgets in the current batch
     
     # Update batch navigation
     total_batches = max(1, (len(detector_ids) + batch_size - 1) // batch_size)

@@ -121,7 +121,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Initialize batch tracking for sweep tabs (before _setup_ui)
         self.current_batch = 0
-        self.batch_size = 12
+        self.batch_size = 8
         
         # Storage for sweep grid plots - cached to avoid recreating widgets
         self.mag_sweep_plots_cache = []  # List of plot widgets for magnitude tab

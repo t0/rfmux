@@ -111,7 +111,22 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
             # Clear previous data
             plot_item.clear()
             
-            title = f"Detector {detector_id}"
+            # Get detector data to extract center frequency
+            detector_data = data_by_detector.get(detector_id, {})
+            
+            # Extract original center frequency from first available amplitude
+            center_freq_hz = None
+            if detector_data:
+                first_amp_data = next(iter(detector_data.values()), {})
+                center_freq_hz = first_amp_data.get('original_center_frequency')
+            
+            # Format title with detector ID and center frequency
+            if center_freq_hz is not None:
+                center_freq_mhz = center_freq_hz / 1e6
+                title = f"{detector_id}: {center_freq_mhz:.3f} MHz"
+            else:
+                title = f"Detector {detector_id}"
+            
             plot_item.setTitle(title, color=pen_color)
             
             # Style axes
@@ -121,8 +136,7 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
                     ax.setPen(pen_color)
                     ax.setTextPen(pen_color)
             
-            # Plot data
-            detector_data = data_by_detector.get(detector_id, {})
+            # Plot data (detector_data already retrieved above)
             
             if plot_type == 'magnitude':
                 plot_detector_magnitude(plot_item, detector_data, amplitude_to_color, pen_color, unit_mode, normalize)
@@ -334,11 +348,15 @@ def prepare_detector_data_from_iterations(results_by_iteration):
             iq_complex = sweep_data.get('iq_complex_volts', np.array([]))
             
             if len(freqs) > 0 and len(iq_complex) > 0:
+                # Get the original center frequency for this sweep section
+                original_cf = sweep_data.get('original_center_frequency')
+                
                 detector_data[detector_id][amp_val] = {
                     'freq': freqs,
                     'iq': iq_complex,
                     'amplitude': amp_val,
-                    'direction': direction
+                    'direction': direction,
+                    'original_center_frequency': original_cf
                 }
     
     return detector_data

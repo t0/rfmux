@@ -812,7 +812,7 @@ class ServerMockCRS:
 
     # --- Quasiparticle Pulse Control ---
     async def set_pulse_mode(self, mode, **kwargs):
-        if not hasattr(self, 'resonator_model') or self._resonator_model is None:
+        if not hasattr(self, '_resonator_model') or self._resonator_model is None:
             raise RuntimeError("Resonator model not available.")
         if not hasattr(self._resonator_model, 'set_pulse_mode'):
             raise RuntimeError("Resonator model does not support pulse functionality.")
@@ -820,7 +820,7 @@ class ServerMockCRS:
         return self._resonator_model.set_pulse_mode(mode, **kwargs)
 
     async def add_pulse_event(self, resonator_index, start_time, amplitude=None):
-        if not hasattr(self, 'resonator_model') or self._resonator_model is None:
+        if not hasattr(self, '_resonator_model') or self._resonator_model is None:
             raise RuntimeError("Resonator model not available.")
         if not hasattr(self._resonator_model, 'add_pulse_event'):
             raise RuntimeError("Resonator model does not support pulse functionality.")
@@ -828,7 +828,7 @@ class ServerMockCRS:
         return self._resonator_model.add_pulse_event(resonator_index, start_time, amplitude)
 
     async def get_pulse_status(self):
-        if not hasattr(self, 'resonator_model') or self._resonator_model is None:
+        if not hasattr(self, '_resonator_model') or self._resonator_model is None:
             return {'mode': 'unavailable', 'active_pulses': 0, 'error': 'Resonator model not available'}
         if not hasattr(self._resonator_model, 'pulse_config'):
             return {'mode': 'unsupported', 'active_pulses': 0, 'error': 'Pulse functionality not supported'}

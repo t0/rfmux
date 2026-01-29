@@ -1,5 +1,12 @@
 # Changelog
 
+# r1.6.0 - 2026-01-30
+
+- set_decimation / get_decimation: docstring fixup
+
+- get_samples / get_pfb_samples: these now drop the GIL on the board, so async
+  calls to these functions are not implicitly serialized
+
 # r1.6.0rc3 - 2026-01-23
 
 - streamer: bump bandwidth derating from 0.5 to 0.8, and validate it when

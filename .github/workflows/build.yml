@@ -58,3 +58,7 @@ jobs:
         CRS_EMBEDDED: "1"  # Skip PyQt6/GUI imports
       run: |
         pytest test/test_packets.py -v
+
+  build-wheels:
+    name: Build Wheels
+    uses: ./.github/workflows/build-wheels.yml

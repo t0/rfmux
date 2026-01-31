@@ -57,7 +57,6 @@ else()
     target_compile_options(_receiver PRIVATE
         -Wall -Wextra       # Warnings
         -O3                 # Aggressive optimization with auto-vectorization
-        -march=native       # Use all available CPU instructions
         -ffast-math         # Fast floating-point (convert divisions to multiplications)
     )
 endif()

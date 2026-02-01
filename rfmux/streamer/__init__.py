@@ -9,6 +9,20 @@ Unified API for CRS packet streaming, including:
 """
 
 # Import C++ packet receiver and structures
+try:
+    import _receiver
+except ModuleNotFoundError as e:
+    import textwrap
+    raise ModuleNotFoundError(textwrap.dedent(
+        '''
+        rfmux recently integrated a c++ extension for faster packet processing.
+        This extension requires a compile/install step that was not previously
+        necessary.
+
+        Try `pip install -e .` from the repository root, or see README.md for
+        details.
+        ''')) from e
+
 from ._receiver import (
 	# Packet classes
 	ReadoutPacket,

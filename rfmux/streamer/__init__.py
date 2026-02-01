@@ -8,9 +8,10 @@ Unified API for CRS packet streaming, including:
 - Protocol constants
 """
 
-# Import C++ packet receiver and structures
+# Import C++ packet receiver and structures, and ensure version parity
+_PY_API_VERSION = 0  # must match _SO_API_VERSION in bindings.cpp
 try:
-    import _receiver
+    from ._receiver import _SO_API_VERSION
 except ModuleNotFoundError as e:
     import textwrap
     raise ModuleNotFoundError(textwrap.dedent(
@@ -22,6 +23,23 @@ except ModuleNotFoundError as e:
         Try `pip install -e .` from the repository root, or see README.md for
         details.
         ''')) from e
+except ImportError as e:
+    _SO_API_VERSION = 0
+
+if _SO_API_VERSION != _PY_API_VERSION:
+    import textwrap
+    raise ImportError(textwrap.dedent(
+    f'''
+    C++ fastpath: API version mismatch; {_SO_API_VERSION=}, {_PY_API_VERSION=}
+
+    You probably need to recompile the _receiver extension. You can do this
+    with something like
+
+        pip install -e . --force-reinstall
+
+    from the repository root. _receiver is a fairly recent addition to rfmux;
+    please see README.md for details.
+    '''))
 
 from ._receiver import (
 	# Packet classes

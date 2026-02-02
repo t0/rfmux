@@ -347,4 +347,7 @@ PYBIND11_MODULE(_receiver, m) {
 	m.attr("SHORT_PACKET_VERSION") = SHORT_PACKET_VERSION;
 	m.attr("PFBPACKET_NSAMP_MAX") = PFBPACKET_NSAMP_MAX;
 	m.attr("SS_PER_SECOND") = SS_PER_SECOND;
+
+	/* Must match PY_API_VERSION in rfmux/streamer/__init__.py */
+	m.attr("_SO_API_VERSION") = 0;
 }

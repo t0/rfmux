@@ -329,7 +329,7 @@ def mode_title(mode: str) -> str:
     """
     mode_titles = {
         "T": "Timestream", "IQ": "IQ", "F": "Raw FFT",
-        "S": "Single Sideband PSD", "D": "Dual Sideband PSD", "NA": "Network Analysis"
+        "S": "Single Sideband PSD", "D": "Dual Sideband PSD", "NA": "Network Analysis", "H": "Histogram"
     }
     return mode_titles.get(mode, mode)
 

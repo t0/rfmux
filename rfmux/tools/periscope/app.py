@@ -228,7 +228,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._start_timer()
         
         # Set initial window size (wider and taller for better visibility)
-        self.resize(900, 450)
+        self.resize(900, 600)
         
         # Show session startup dialog (unless already handled by launcher)
         self._skip_startup_dialog = skip_startup_dialog
@@ -1358,7 +1358,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         # --- Launch dialog even if no resonances yet ---
         dialog = MultisweepDialog( parent=netanal_dialog, 
-                                   resonance_frequencies=resonances,   # may be []
+                                   section_center_frequencies=resonances,   # may be []
                                    dac_scales=netanal_dialog.dac_scales,   # may be {}
                                    current_module=active_module,       # may be None
                                    initial_params=None ,                # nothing prefilled
@@ -1898,6 +1898,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                                 print("[Periscope] Re-applied random QP pulses with updated parameters")
                     except Exception as e2:
                         print(f"[Periscope] Warning: failed to re-apply QP pulse mode after reconfigure: {e2}")
+
+                    # Save mock config to session if one is active
+                    if self.session_manager.is_active:
+                        self.session_manager.save_mock_config(config)
 
                     print(f"Regenerated {resonator_count} resonators with new parameters")
                     QtWidgets.QMessageBox.information(self, "Configuration Applied", 
@@ -2526,6 +2530,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             success = self.session_manager.load_session(session_path)
             
             if success:
+                # Restore mock config if present and in mock mode
+                self._restore_mock_config_from_session()
+                
                 # Show the session browser dock
                 if hasattr(self, 'session_browser_dock'):
                     self.session_browser_dock.show()
@@ -2598,6 +2605,39 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             if connection_mode == UnifiedStartupDialog.CONN_OFFLINE:
                 print("[Connection] Offline mode selected - feature not yet implemented")
                 # Future: Initialize in offline mode, disable CRS-dependent features
+    
+    def _restore_mock_config_from_session(self):
+        """
+        Restore mock configuration from the loaded session.
+        
+        If the session contains mock configuration and we're currently in mock mode,
+        this will apply the configuration to regenerate the resonators with the
+        same parameters as when the session was created.
+        
+        Note: This is only called when loading a session via the Session menu after
+        Periscope has already started. The startup flow handles restoration differently.
+        """
+        if not self.session_manager.has_mock_config():
+            return
+        
+        if not self.is_mock_mode:
+            print("[Session] Session contains mock config, but not in mock mode - skipping restore")
+            return
+        
+        # Get the config from session
+        mock_config = self.session_manager.get_mock_config()
+        
+        if mock_config:
+            print(f"[Session] Restoring mock configuration from session ({len(mock_config)} parameters)")
+            
+            # Store it in self.mock_config
+            self.mock_config = mock_config
+            
+            # Apply it to regenerate resonators
+            self._apply_mock_configuration(mock_config)
+            
+            # Console message is sufficient - no need for popup
+            print(f"[Session] Mock configuration restored successfully")
     
     def _toggle_auto_export(self, checked: bool):
         """

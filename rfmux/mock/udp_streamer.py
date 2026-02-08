@@ -448,11 +448,20 @@ class MockCRSUDPStreamer(threading.Thread):
 
 
 class MockUDPManager:
-    """Manages the lifecycle of the MockCRSUDPStreamer thread with proper cleanup."""
+    """Manages the lifecycle of both the slow readout streamer and the PFB streamer.
+
+    Both streamers are independent and can run simultaneously, mirroring real
+    hardware where the slow readout stream is always-on and PFB streaming is
+    enabled/disabled on demand.
+    """
     def __init__(self, mock_crs):
         self.mock_crs = mock_crs
         self.udp_thread = None
         self._udp_streaming_active = False # Internal flag
+
+        # PFB streamer (independent of slow streamer)
+        self._pfb_thread = None
+        self._pfb_streaming_active = False
 
     async def start_udp_streaming(self, host='239.192.0.2', port=STREAMER_PORT, use_multicast=True):
         """Start UDP streaming with proper error handling.
@@ -525,14 +534,100 @@ class MockUDPManager:
     def get_udp_streaming_status(self):
         return {
             "active": self._udp_streaming_active,
-            "thread_alive": self.udp_thread is not None and self.udp_thread.is_alive()
+            "thread_alive": self.udp_thread is not None and self.udp_thread.is_alive(),
+            "pfb_active": self._pfb_streaming_active,
+            "pfb_thread_alive": self._pfb_thread is not None and self._pfb_thread.is_alive(),
         }
-    
+
+    # ── PFB streaming (independent of slow streamer) ──────────────
+
+    async def start_pfb_streaming(self, channels, module, host='239.192.0.2',
+                                   port=None, use_multicast=True):
+        """Start PFB streaming for up to 4 channels.
+
+        This is independent of the slow readout streamer — both can be active
+        simultaneously, mirroring real hardware.
+        """
+        from .pfb_streamer import MockCRSPFBStreamer
+        from ..streamer import PFB_STREAMER_PORT
+
+        if port is None:
+            port = PFB_STREAMER_PORT
+
+        try:
+            # Stop any existing PFB streamer first
+            if self._pfb_streaming_active and self._pfb_thread:
+                await self.stop_pfb_streaming()
+
+            self._pfb_streaming_active = True
+            self._pfb_thread = MockCRSPFBStreamer(
+                self.mock_crs,
+                channels=channels,
+                module=module,
+                host=host,
+                port=port,
+                use_multicast=use_multicast,
+            )
+            self._pfb_thread.start()
+            await asyncio.sleep(0.1)  # Give thread time to start
+            print(f"[Manager] PFB Streaming started for channels {channels} on module {module}")
+            return True
+        except Exception as e:
+            print(f"[Manager] Error starting PFB streaming: {e}")
+            self._pfb_streaming_active = False
+            if self._pfb_thread:
+                self._pfb_thread.emergency_stop()
+                self._pfb_thread = None
+            raise
+
+    async def stop_pfb_streaming(self):
+        """Stop PFB streaming (does not affect slow readout streamer)."""
+        if self._pfb_streaming_active and self._pfb_thread:
+            try:
+                self._pfb_streaming_active = False
+                self._pfb_thread.stop()
+
+                try:
+                    await asyncio.to_thread(self._pfb_thread.join, timeout=2.0)
+                except Exception as e:
+                    print(f"[Manager] Error during PFB thread join: {e}")
+
+                if self._pfb_thread.is_alive():
+                    print("[Manager] Warning: PFB thread did not stop in time, forcing emergency stop")
+                    self._pfb_thread.emergency_stop()
+
+                self._pfb_thread = None
+                print("[Manager] PFB Streaming stopped.")
+                return True
+            except Exception as e:
+                print(f"[Manager] Error stopping PFB streaming: {e}")
+                if self._pfb_thread:
+                    self._pfb_thread.emergency_stop()
+                    self._pfb_thread = None
+                return False
+        else:
+            # Not active — nothing to do (not an error)
+            return False
+
+    # ── Cleanup ────────────────────────────────────────────────────
+
+    def _emergency_stop_all(self):
+        """Force-stop both slow and PFB streamers."""
+        if self.udp_thread:
+            self.udp_thread.emergency_stop()
+            self.udp_thread = None
+        if self._pfb_thread:
+            self._pfb_thread.emergency_stop()
+            self._pfb_thread = None
+        self._udp_streaming_active = False
+        self._pfb_streaming_active = False
+
     def __del__(self):
         """Destructor to ensure cleanup."""
-        if self._udp_streaming_active and self.udp_thread:
-            print("[Manager] Destructor cleanup: stopping UDP streamer")
-            self.udp_thread.emergency_stop()
+        if (self._udp_streaming_active and self.udp_thread) or \
+           (self._pfb_streaming_active and self._pfb_thread):
+            print("[Manager] Destructor cleanup: stopping streamers")
+            self._emergency_stop_all()
     
     def __enter__(self):
         """Context manager entry."""
@@ -540,6 +635,7 @@ class MockUDPManager:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit with cleanup."""
-        if self._udp_streaming_active and self.udp_thread:
-            print("[Manager] Context exit cleanup: stopping UDP streamer")
-            self.udp_thread.emergency_stop()
+        if (self._udp_streaming_active and self.udp_thread) or \
+           (self._pfb_streaming_active and self._pfb_thread):
+            print("[Manager] Context exit cleanup: stopping streamers")
+            self._emergency_stop_all()

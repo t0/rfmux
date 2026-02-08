@@ -94,6 +94,7 @@ class MockResonatorModel:
         }
         self.last_pulse_time = {}  # Track last pulse time for each resonator
         self.last_update_time = 0  # Track last time we updated QP densities
+        self._pfb_min_time = None  # If PFB is active, its earliest simulation time
         
         # Vectorized parameter arrays (populated by _extract_param_arrays)
         self._param_arrays_cached = False
@@ -542,7 +543,7 @@ class MockResonatorModel:
         
         self.invalidate_caches()
 
-    def s21_lc_response(self, frequency, amplitude=1.0):
+    def s21_lc_response(self, frequency, amplitude=1.0, pulse_time=None):
         """
         Calculate S21 response with optimized convergence.
         
@@ -553,21 +554,39 @@ class MockResonatorModel:
         - Physics-based Lk and R from combined nqp
         - OPTIMIZED: Skip convergence for noise-only changes via caching
         
+        Parameters
+        ----------
+        pulse_time : float or None
+            If provided, use this time for pulse contribution calculations
+            instead of ``self.last_update_time``.  This allows the PFB
+            streamer to evaluate S21 at its own simulation time without
+            competing with the slow streamer for ``last_update_time``.
+        
         THREAD SAFETY: This method is protected by _physics_lock because it 
         updates the shared state (self.mr_lekids) during calculation.
         """
         # Acquire lock to prevent race conditions with other threads (e.g. Streamer vs get_samples)
         # This is critical because update_lekids_for_current modifies shared state.
         with self._physics_lock:
-            return self._s21_lc_response_internal(frequency, amplitude)
+            return self._s21_lc_response_internal(frequency, amplitude, pulse_time)
 
-    def _s21_lc_response_internal(self, frequency, amplitude=1.0):
-        """Internal implementation of s21_lc_response (assumes lock held)."""
+    def _s21_lc_response_internal(self, frequency, amplitude=1.0, pulse_time=None):
+        """Internal implementation of s21_lc_response (assumes lock held).
+
+        Parameters
+        ----------
+        pulse_time : float or None
+            If provided, use this time for pulse contribution calculations
+            instead of ``self.last_update_time``.
+        """
         import time
         t_start = time.perf_counter()
         
         if not self.mr_lekids:
             return 1.0 + 0j
+        
+        # Use provided pulse_time or fall back to shared last_update_time
+        t_for_pulses = pulse_time if pulse_time is not None else self.last_update_time
         
         # Calculate effective nqp with fresh noise for ALL resonators (vectorized)
         base_nqp_array = np.array(self.base_nqp_values, dtype=np.float64)
@@ -579,7 +598,7 @@ class MockResonatorModel:
         for pulse in self.pulse_events:
             i = pulse['resonator_index']
             if i < len(effective_nqp_array):
-                pulse_dt = self.last_update_time - pulse['start_time']
+                pulse_dt = t_for_pulses - pulse['start_time']
                 if pulse_dt >= 0:
                     if pulse_dt < pulse['tau_rise']:
                         time_factor = (1 - np.exp(-pulse_dt / pulse['tau_rise']))
@@ -1005,9 +1024,16 @@ class MockResonatorModel:
             self.update_base_params_from_nqp(pulse_nqp_values)
             self.invalidate_caches()
         
-        # Clean up old pulses (after n decay constants)
+        # Clean up old pulses (after n decay constants).
+        # When PFB streaming is active, its simulation time may lag behind the
+        # slow streamer's current_time.  Use the minimum of both times as the
+        # cleanup reference so the PFB can still evaluate pulse contributions
+        # that the slow streamer has already moved past.
+        cleanup_ref = current_time
+        if self._pfb_min_time is not None:
+            cleanup_ref = min(current_time, self._pfb_min_time)
         self.pulse_events = [p for p in self.pulse_events 
-                           if current_time - p['start_time'] < p['tau_rise'] + p['tau_decay'] * 15]
+                           if cleanup_ref - p['start_time'] < p['tau_rise'] + p['tau_decay'] * 15]
     
     def _sample_random_pulse_amplitude(self):
         """Sample a pulse amplitude for random mode based on configured distribution."""
@@ -1193,7 +1219,7 @@ class MockResonatorModel:
         # CIC droop can make the response much less than 1 at high frequencies
         return max(filter_response, 0.0)
     
-    def calculate_module_response_coupled(self, module, num_samples=1, sample_rate=None, start_time=0):
+    def calculate_module_response_coupled(self, module, num_samples=1, sample_rate=None, start_time=0, pulse_time=None):
         """
         Calculate coupled response for all channels in a module using vectorized operations.
         
@@ -1289,7 +1315,7 @@ class MockResonatorModel:
             if num_samples == 1:
                 # Apply S21 response using FAST path (state already updated for this packet)
                 # Note: s21_lc_response acquires _physics_lock internally
-                s21_complex = self.s21_lc_response(total_freq, amp)
+                s21_complex = self.s21_lc_response(total_freq, amp, pulse_time=pulse_time)
                 s21_call_count += 1
                 
                 # Combine amplitude, S21, and phase
@@ -1360,53 +1386,76 @@ class MockResonatorModel:
                 responses[ch] = complex(signals[i])
         
         else:
-            # Multiple time samples - evaluate S21 for each sample to get fresh noise
+            # Multiple time samples — evaluate S21 for each sample with fresh
+            # noise AND per-sample pulse_time.
+            #
+            # THREAD SAFETY: Hold _physics_lock for the entire batch so the
+            # slow streamer cannot modify shared LEKID state between samples.
+            # This prevents "jumps" where intervening slow-streamer S21 calls
+            # would temporarily shift the resonator parameters mid-batch.
+            #
+            # Per-sample pulse_time ensures the QP density (and therefore the
+            # pulse shape) evolves correctly across the batch, rather than
+            # being frozen at a single t_start for all N samples.
+
             t = start_time + np.arange(num_samples) / sample_rate
             responses = {}
-            
-            # For each observing channel
-            for i, ch in enumerate(obs_channels):
-                signal = np.zeros(num_samples, dtype=complex)
-                obs_freq = obs_freqs_arr[i]
-                
-                # For each time sample
-                for sample_idx in range(num_samples):
-                    sample_contribution = 0 + 0j
-                    
-                    # Process each active tone with fresh S21 evaluation
-                    for j in range(len(active_tone_freqs)):
-                        if within_bandwidth[i, j]:
-                            tone_freq = active_tone_freqs[j]
-                            tone_amp_base = active_tone_amps[j]
-                            freq_diff = freq_diffs[i, j]
-                            
-                            # Get fresh S21 for this tone at this time sample
-                            # This gives us new QP noise realization for each sample
-                            amp_magnitude = abs(tone_amp_base)
-                            if amp_magnitude > 0:
-                                # Re-evaluate S21 with fresh noise
-                                s21_fresh = self.s21_lc_response(tone_freq, amp_magnitude)
-                                
-                                # Apply phase from original tone
-                                phase_original = np.angle(tone_amp_base)
-                                tone_amp_fresh = amp_magnitude * s21_fresh * np.exp(1j * phase_original)
-                            else:
-                                tone_amp_fresh = 0 + 0j
-                            
-                            # Apply CIC filter response
-                            cic_response = self._get_cached_cic_response(freq_diff, dec_stage)
-                            
-                            # Calculate beat contribution at this time
-                            if abs(freq_diff) < 0.1:  # DC
-                                sample_contribution += tone_amp_fresh * cic_response
-                            else:
-                                # Beat frequency at time t[sample_idx]
-                                beat_phase = 2 * np.pi * freq_diff * t[sample_idx]
-                                sample_contribution += tone_amp_fresh * cic_response * np.exp(1j * beat_phase)
-                    
-                    signal[sample_idx] = sample_contribution
-                
-                responses[ch] = signal
+
+            # Base pulse time — will be advanced per sample
+            base_pulse_time = pulse_time  # May be None (slow streamer) or float (PFB)
+
+            with self._physics_lock:
+                # For each observing channel
+                for i, ch in enumerate(obs_channels):
+                    signal = np.zeros(num_samples, dtype=complex)
+                    obs_freq = obs_freqs_arr[i]
+
+                    # For each time sample
+                    for sample_idx in range(num_samples):
+                        sample_contribution = 0 + 0j
+
+                        # Per-sample pulse time: advance from base by sample offset
+                        if base_pulse_time is not None:
+                            sample_pulse_time = base_pulse_time + sample_idx / sample_rate
+                        else:
+                            sample_pulse_time = None
+
+                        # Process each active tone with fresh S21 evaluation
+                        for j in range(len(active_tone_freqs)):
+                            if within_bandwidth[i, j]:
+                                tone_freq = active_tone_freqs[j]
+                                tone_amp_base = active_tone_amps[j]
+                                freq_diff = freq_diffs[i, j]
+
+                                # Get fresh S21 for this tone at this time sample
+                                # This gives us new QP noise realization for each sample
+                                amp_magnitude = abs(tone_amp_base)
+                                if amp_magnitude > 0:
+                                    # Call internal (lock already held) with per-sample pulse_time
+                                    s21_fresh = self._s21_lc_response_internal(
+                                        tone_freq, amp_magnitude, pulse_time=sample_pulse_time
+                                    )
+
+                                    # Apply phase from original tone
+                                    phase_original = np.angle(tone_amp_base)
+                                    tone_amp_fresh = amp_magnitude * s21_fresh * np.exp(1j * phase_original)
+                                else:
+                                    tone_amp_fresh = 0 + 0j
+
+                                # Apply CIC filter response
+                                cic_response = self._get_cached_cic_response(freq_diff, dec_stage)
+
+                                # Calculate beat contribution at this time
+                                if abs(freq_diff) < 0.1:  # DC
+                                    sample_contribution += tone_amp_fresh * cic_response
+                                else:
+                                    # Beat frequency at time t[sample_idx]
+                                    beat_phase = 2 * np.pi * freq_diff * t[sample_idx]
+                                    sample_contribution += tone_amp_fresh * cic_response * np.exp(1j * beat_phase)
+
+                        signal[sample_idx] = sample_contribution
+
+                    responses[ch] = signal
         
         return responses
 

@@ -8,24 +8,51 @@ import socket
 import sys
 import warnings
 import time
-from typing import Union, List
+from typing import Union, List, Optional
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...tuber.codecs import TuberResult
 from ...core.transferfunctions import VOLTS_PER_ROC, spectrum_from_slow_tod
 from ... import streamer
-from rfmux.tools.periscope.utils import Circular
+from .pulse_detection import PulseCapture, Circular, estimate_noise_levels
 from dataclasses import dataclass
+
+
+# ── Timestamp → absolute seconds-of-day ───────────────────────────
+
+def _ts_to_seconds(ts) -> Optional[float]:
+    """Convert a streamer Timestamp to seconds-of-day (None if not recent)."""
+    if not ts.recent:
+        return None
+    return ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND
+
+
+# NOTE: PulseCapture, Circular, and estimate_noise_levels are the canonical
+# implementations in pulse_detection.py.  This file's _SlowStreamPulseCapture
+# is a thin wrapper that adds packet-level timestamp handling on top of the
+# generic PulseCapture.process_sample() API.  It will be removed once the
+# unified trigger_capture (Phase 3) supersedes slow_trigger_capture.
 
 @dataclass
 class _ChState:
+    """Per-channel state — kept only for _SlowStreamPulseCapture below."""
     capturing: bool = False
-    end_ptr_count: int = 0
+    end_ptr_count: int | None = None
     trig_abs: int | None = None
     trigger_value: float | None = None
 
-class PulseCapture:
+class _SlowStreamPulseCapture:
+    """Packet-oriented wrapper around PulseCapture for slow readout packets.
+
+    This class adds ReadoutPacket-specific timestamp handling (+20 ms offset,
+    IRIG-B conversion) and the ``_update_buffer_and_capture(pkt)`` method that
+    the ``slow_trigger_capture`` macro currently calls.
+
+    TODO(feature-branch): Remove this wrapper once ``trigger_capture`` (Phase 3)
+    is implemented and this module can call ``PulseCapture.process_sample()``
+    directly from the packet-receive loop.
+    """
     """
     Streaming multi-channel pulse detector and capture buffer for CRS readout packets.
     
@@ -491,17 +518,31 @@ async def slow_trigger_capture(crs: CRS,
     
         print("Updated the noise to", noise)
             
-    pcap = PulseCapture(buf_size, channels, thresh, noise, thresh_type)
+    # TODO(feature-branch): Replace _SlowStreamPulseCapture with direct
+    # PulseCapture.process_sample() calls once unified trigger_capture (Phase 3)
+    # is implemented and this macro can be deprecated.
+    pcap = _SlowStreamPulseCapture(buf_size, channels, thresh, noise, thresh_type)
+
+    # ── Sample-time based capture loop ────────────────────────────
+    #
+    # Terminates when elapsed *sample time* (from packet timestamps)
+    # reaches ``time_run``.  For real hardware sample time ≡ wall time.
+    # For mock streamers this is simulation time, making captures
+    # deterministic regardless of physics throughput.
+    _start_time_ref: Optional[float] = None
+    elapsed_sample_time: float = 0.0
+
     with streamer.get_multicast_socket(host) as sock:
 
         # To use asyncio, we need a non-blocking socket
         loop = asyncio.get_running_loop()
         sock.setblocking(False)
 
-        start = time.monotonic()
-        print("Starting capture at socket", sock)
-        # Start receiving packets
-        while time.monotonic() - start < time_run:
+        wall_start = time.monotonic()
+        print(f"Starting capture for {time_run}s of sample time at socket {sock}")
+
+        # Start receiving packets — terminate on sample time
+        while elapsed_sample_time < time_run:
             data = await asyncio.wait_for(
                 loop.sock_recv(sock, streamer.LONG_PACKET_SIZE),
                 streamer.STREAMER_TIMEOUT,
@@ -511,7 +552,7 @@ async def slow_trigger_capture(crs: CRS,
             p = streamer.ReadoutPacket(data)
 
             if crs.serial == "MOCK0001":
-                packets.append(p)  
+                pcap._update_buffer_and_capture(p)
             else:
                 if p.serial != int(crs.serial):
                     warnings.warn(
@@ -529,5 +570,15 @@ async def slow_trigger_capture(crs: CRS,
 
                 pcap._update_buffer_and_capture(p)
 
+            # Track elapsed sample time from packet timestamps
+            pkt_ts_sec = _ts_to_seconds(p.ts)
+            if pkt_ts_sec is not None:
+                if _start_time_ref is None:
+                    _start_time_ref = pkt_ts_sec
+                elapsed_sample_time = pkt_ts_sec - _start_time_ref
+
+        wall_elapsed = time.monotonic() - wall_start
+        print(f"[slow_trigger_capture] Sample time covered: {elapsed_sample_time:.4f}s "
+              f"(wall time: {wall_elapsed:.1f}s)")
 
     return pcap.start_time, pcap.pulses, noise_data

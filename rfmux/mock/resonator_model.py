@@ -94,7 +94,6 @@ class MockResonatorModel:
         }
         self.last_pulse_time = {}  # Track last pulse time for each resonator
         self.last_update_time = 0  # Track last time we updated QP densities
-        self._pfb_min_time = None  # If PFB is active, its earliest simulation time
         
         # Vectorized parameter arrays (populated by _extract_param_arrays)
         self._param_arrays_cached = False
@@ -1024,16 +1023,9 @@ class MockResonatorModel:
             self.update_base_params_from_nqp(pulse_nqp_values)
             self.invalidate_caches()
         
-        # Clean up old pulses (after n decay constants).
-        # When PFB streaming is active, its simulation time may lag behind the
-        # slow streamer's current_time.  Use the minimum of both times as the
-        # cleanup reference so the PFB can still evaluate pulse contributions
-        # that the slow streamer has already moved past.
-        cleanup_ref = current_time
-        if self._pfb_min_time is not None:
-            cleanup_ref = min(current_time, self._pfb_min_time)
+        # Clean up old pulses (after 15 decay constants).
         self.pulse_events = [p for p in self.pulse_events 
-                           if cleanup_ref - p['start_time'] < p['tau_rise'] + p['tau_decay'] * 15]
+                           if current_time - p['start_time'] < p['tau_rise'] + p['tau_decay'] * 15]
     
     def _sample_random_pulse_amplitude(self):
         """Sample a pulse amplitude for random mode based on configured distribution."""

@@ -7,8 +7,8 @@ import warnings
 import asyncio
 import numpy as np
 import scipy.signal as signal
-from rfmux.core.hardware_map import macro
-from rfmux.core.schema import CRS
+from ...core.hardware_map import macro
+from ...core.schema import CRS
 
 
 @macro(CRS, register=True)

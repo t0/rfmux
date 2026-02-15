@@ -91,6 +91,12 @@ class MockResonatorModel:
             'random_amp_max': default_config['pulse_random_amp_max'],
             'random_amp_logmean': default_config['pulse_random_amp_logmean'],
             'random_amp_logsigma': default_config['pulse_random_amp_logsigma'],
+            # Random pulse tau_decay distribution
+            'random_tau_mode': default_config['pulse_random_tau_mode'],
+            'random_tau_min': default_config['pulse_random_tau_min'],
+            'random_tau_max': default_config['pulse_random_tau_max'],
+            'random_tau_logmean': default_config['pulse_random_tau_logmean'],
+            'random_tau_logsigma': default_config['pulse_random_tau_logsigma'],
         }
         self.last_pulse_time = {}  # Track last pulse time for each resonator
         self.last_update_time = 0  # Track last time we updated QP densities
@@ -292,9 +298,14 @@ class MockResonatorModel:
             'random_amp_max': config.get('pulse_random_amp_max', 3.0),
             'random_amp_logmean': config.get('pulse_random_amp_logmean', 0.7),
             'random_amp_logsigma': config.get('pulse_random_amp_logsigma', 0.3),
+            'random_tau_mode': config.get('pulse_random_tau_mode', 'fixed'),
+            'random_tau_min': config.get('pulse_random_tau_min', 5e-4),
+            'random_tau_max': config.get('pulse_random_tau_max', 5e-3),
+            'random_tau_logmean': config.get('pulse_random_tau_logmean', -6.9),
+            'random_tau_logsigma': config.get('pulse_random_tau_logsigma', 0.5),
         })
         
-        print(f"Pulse config updated: tau_rise={self.pulse_config['tau_rise']}, tau_decay={self.pulse_config['tau_decay']}")
+        print(f"Pulse config updated: tau_rise={self.pulse_config['tau_rise']}, tau_decay={self.pulse_config['tau_decay']}, random_tau_mode={self.pulse_config['random_tau_mode']}")
 
         # Step 1: Create a reference MR_complex_resonator to compute Lk and R from T and Popt
         print(f"Computing Lk and R from T={T} K and Popt={Popt} W")
@@ -532,12 +543,18 @@ class MockResonatorModel:
                 tau_decay=config.get('pulse_tau_decay', 1e-3),
                 amplitude=config.get('pulse_amplitude', 2.0),
                 resonators=config.get('pulse_resonators', 'all'),
-                # Random amplitude distribution (random mode)
+                # Random amplitude distribution
                 random_amp_mode=config.get('pulse_random_amp_mode', 'fixed'),
                 random_amp_min=config.get('pulse_random_amp_min', 1.5),
                 random_amp_max=config.get('pulse_random_amp_max', 3.0),
                 random_amp_logmean=config.get('pulse_random_amp_logmean', 0.7),
                 random_amp_logsigma=config.get('pulse_random_amp_logsigma', 0.3),
+                # Random tau_decay distribution
+                random_tau_mode=config.get('pulse_random_tau_mode', 'fixed'),
+                random_tau_min=config.get('pulse_random_tau_min', 5e-4),
+                random_tau_max=config.get('pulse_random_tau_max', 5e-3),
+                random_tau_logmean=config.get('pulse_random_tau_logmean', -6.9),
+                random_tau_logsigma=config.get('pulse_random_tau_logsigma', 0.5),
             )
         
         self.invalidate_caches()
@@ -1028,7 +1045,11 @@ class MockResonatorModel:
                            if current_time - p['start_time'] < p['tau_rise'] + p['tau_decay'] * 15]
     
     def _sample_random_pulse_amplitude(self):
-        """Sample a pulse amplitude for random mode based on configured distribution."""
+        """Sample a pulse amplitude based on configured distribution.
+        
+        Works in all pulse modes (periodic, random, manual).
+        Returns the config default when random_amp_mode is 'fixed'.
+        """
         mode = self.pulse_config.get('random_amp_mode', 'fixed')
         if mode == 'uniform':
             amin = float(self.pulse_config.get('random_amp_min', 1.5))
@@ -1042,6 +1063,30 @@ class MockResonatorModel:
             amp = float(self.pulse_config.get('amplitude', 2.0))
         # Enforce non-decreasing QP unless explicitly configured otherwise
         return max(1.0, amp)
+
+    def _sample_random_pulse_tau(self):
+        """Sample a pulse tau_decay based on configured distribution.
+        
+        In MKID physics, tau_rise is quasi-instantaneous (~µs) and fixed,
+        while tau_decay (QP recombination) varies with QP density, temperature,
+        material defects, etc.  This method randomises tau_decay only.
+        
+        Works in all pulse modes (periodic, random, manual).
+        Returns the config default when random_tau_mode is 'fixed'.
+        """
+        mode = self.pulse_config.get('random_tau_mode', 'fixed')
+        if mode == 'uniform':
+            tmin = float(self.pulse_config.get('random_tau_min', 5e-4))
+            tmax = float(self.pulse_config.get('random_tau_max', 5e-3))
+            tau = np.random.uniform(tmin, tmax)
+        elif mode == 'lognormal':
+            mu = float(self.pulse_config.get('random_tau_logmean', -6.9))
+            sigma = float(self.pulse_config.get('random_tau_logsigma', 0.5))
+            tau = np.random.lognormal(mean=mu, sigma=sigma)
+        else:
+            tau = float(self.pulse_config.get('tau_decay', 0.1))
+        # tau_decay must be strictly positive
+        return max(1e-9, tau)
 
     def _check_trigger_pulses(self, current_time, dt):
         """Check if new pulses should be triggered based on mode.
@@ -1070,7 +1115,9 @@ class MockResonatorModel:
             for res_idx in target_resonators:
                 last_time = self.last_pulse_time.get(res_idx, -period)
                 if current_time - last_time >= period:
-                    self.add_pulse_event(res_idx, current_time)
+                    amp = self._sample_random_pulse_amplitude()
+                    tau = self._sample_random_pulse_tau()
+                    self.add_pulse_event(res_idx, current_time, amplitude=amp, tau_decay=tau)
                     self.last_pulse_time[res_idx] = current_time
         
         elif mode == 'random':
@@ -1079,10 +1126,11 @@ class MockResonatorModel:
             for res_idx in target_resonators:
                 if np.random.random() < prob * dt:
                     amp = self._sample_random_pulse_amplitude()
-                    self.add_pulse_event(res_idx, current_time, amplitude=amp)
+                    tau = self._sample_random_pulse_tau()
+                    self.add_pulse_event(res_idx, current_time, amplitude=amp, tau_decay=tau)
                     self.last_pulse_time[res_idx] = current_time
     
-    def add_pulse_event(self, resonator_index, start_time, amplitude=None):
+    def add_pulse_event(self, resonator_index, start_time, amplitude=None, tau_decay=None):
         """Manually add a pulse event to a specific resonator.
         
         Parameters
@@ -1093,6 +1141,9 @@ class MockResonatorModel:
             Time when the pulse starts (seconds)
         amplitude : float, optional
             Maximum QP density increase. If None, uses config default.
+        tau_decay : float, optional
+            Decay time constant in seconds. If None, uses config default.
+            Typically sampled from _sample_random_pulse_tau() by the caller.
         """
         if resonator_index >= len(self.mr_lekids):
             print(f"Warning: Resonator index {resonator_index} out of range")
@@ -1101,9 +1152,9 @@ class MockResonatorModel:
         pulse = {
             'resonator_index': resonator_index,
             'start_time': start_time,
-            'amplitude': amplitude or self.pulse_config['amplitude'],
+            'amplitude': amplitude if amplitude is not None else self.pulse_config['amplitude'],
             'tau_rise': self.pulse_config['tau_rise'],
-            'tau_decay': self.pulse_config['tau_decay'],
+            'tau_decay': tau_decay if tau_decay is not None else self.pulse_config['tau_decay'],
         }
         self.pulse_events.append(pulse)
         

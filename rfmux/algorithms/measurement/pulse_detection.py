@@ -85,8 +85,9 @@ class _ChState:
     trigger_value_I: Optional[float] = None
     trigger_value_Q: Optional[float] = None
     ch_sample_n: int = 0  # Per-channel sample counter (for buffer arithmetic)
-    warmup_done: bool = False  # True once baseline confirmed after capture start
-    warmup_count: int = 0      # Leaky-bucket counter for baseline confirmation
+    re_trigger_ready: bool = False  # True once signal drops below threshold during capture (pileup detection)
+    prev_max_dev: float = 0.0      # Previous sample's max deviation in σ units (for derivative-based pileup)
+    active_duration: Optional[int] = None  # Frozen pulse duration (trigger → below threshold) for adaptive end
 
 
 # ───────────────────────── PulseCapture ─────────────────────────────
@@ -118,12 +119,21 @@ class PulseCapture:
         to declare pulse end (default 1.0σ).
     sample_rate : float
         Expected sample rate (Hz).
-    pre : int
-        Pre-trigger samples to include in the pulse window.
-    end_samples : int
-        Number of samples signal must stay below end_sigma to declare
-        pulse over (using leaky-bucket counting).
+    margin_fraction : float
+        Fraction of pulse duration to use as pre-trigger margin and
+        adaptive end-of-pulse confirmation count.  Default 0.1 (10%).
+    min_pulse_samples : int
+        Minimum pulse core duration (trigger → end) in samples.
+        Pulses shorter than this are discarded as glitches.  Default 0.
+    enable_pileup : bool
+        Enable derivative-based pileup detection.  When True, a new
+        pulse arriving during the tail of a previous one is split into
+        a separate event.  Default True.
     """
+
+    # Minimum leaky-bucket end confirmation count — prevents premature
+    # termination on very short pulses or when margin_fraction is tiny.
+    _MIN_END_SAMPLES: int = 10
 
     def __init__(
         self,
@@ -133,17 +143,18 @@ class PulseCapture:
         threshold_sigma: float = 5.0,
         end_sigma: float = 1.0,
         sample_rate: float = 38147.0,
-        pre: int = 20,
-        end_samples: int = 100,
+        margin_fraction: float = 0.1,
+        min_pulse_samples: int = 0,
+        enable_pileup: bool = True,
     ):
         self.channels = list(channels)
         self.buf_size = buf_size
         self.sample_rate = sample_rate
         self.threshold_sigma = threshold_sigma
         self.end_sigma = end_sigma
-        self.pre = pre
-
-        self.end_samples = max(1, end_samples)
+        self.margin_fraction = margin_fraction
+        self.min_pulse_samples = min_pulse_samples
+        self.enable_pileup = enable_pileup
 
         # Per-channel noise stats
         self.noise_stats = noise_stats
@@ -203,29 +214,13 @@ class PulseCapture:
         dev_I = abs(i_val - ns.mean_I) / max(ns.std_I, 1e-30)
         dev_Q = abs(q_val - ns.mean_Q) / max(ns.std_Q, 1e-30)
 
-        # ── Warmup: confirm baseline before enabling triggers ─────
-        # Don't trigger until the signal has been confirmed at baseline.
-        # This prevents capturing a pulse already in progress when the
-        # capture starts.  Requirements for warmup completion:
-        #   1. At least `pre` samples collected (buffer has room)
-        #   2. Leaky-bucket baseline counter has reached `end_samples`
-        #      (signal has been consistently at baseline)
-        if not st.warmup_done:
-            # Use threshold_sigma (not end_sigma) for warmup — stronger
-            # condition ensures the signal is fully at baseline, not just
-            # in the tail of a decaying pulse where it might briefly dip
-            # below end_sigma.
-            if dev_I < self.threshold_sigma and dev_Q < self.threshold_sigma:
-                st.warmup_count += 1
-            else:
-                st.warmup_count = max(0, st.warmup_count - 1)
-            if st.warmup_count > self.end_samples and st.ch_sample_n > self.pre:
-                st.warmup_done = True
-
         # ── Trigger: EITHER I or Q exceeds threshold_sigma ────────
+        # NOTE: Baseline confirmation is handled by _wait_for_baseline()
+        # in trigger_capture.py BEFORE the capture loop starts.  This
+        # ensures the first sample fed to PulseCapture is already at a
+        # known-good baseline — no warmup phase needed here.
         if (not st.capturing
             and not self.freeze_triggers
-            and st.warmup_done
             and (dev_I > self.threshold_sigma or dev_Q > self.threshold_sigma)):
             st.capturing = True
             st.end_ptr_count = 0
@@ -233,28 +228,106 @@ class PulseCapture:
             st.trigger_value_I = i_val
             st.trigger_value_Q = q_val
 
-        # ── End condition: BOTH I and Q back within end_sigma ─────
+        # ── End condition & pileup detection ──────────────────────
         #
-        # Uses a leaky-bucket counter instead of requiring strictly
-        # consecutive samples.  A below-threshold sample increments the
-        # counter by 1; an above-threshold sample decrements by 1 (capped
-        # at 0).  This makes the end condition robust to individual noisy
-        # samples that would otherwise reset the counter — critical for
+        # Two ways a pulse capture ends:
+        #
+        # (A) **Return to baseline**: BOTH I and Q stay within end_sigma
+        #     for end_samples leaky-bucket counts.  Normal single-pulse.
+        #
+        # (B) **Pileup re-trigger** (derivative-based): The signal
+        #     dropped below threshold_sigma at some point during capture
+        #     (partial decay), AND we observe a large *jump* in deviation
+        #     from baseline — the sample-to-sample increase in max
+        #     deviation exceeds threshold_sigma.  This catches the sharp
+        #     rising edge of a new pulse while ignoring slow noise
+        #     fluctuations that wander above threshold.
+        #
+        #     For uncorrelated noise with σ=1 (in deviation units), the
+        #     sample-to-sample difference has σ_diff ≈ √2 ≈ 1.4.
+        #     A derivative jump of threshold_sigma (e.g. 3–5σ) is thus
+        #     >>  noise, ensuring only real pulse arrivals trigger splits.
+        #
+        # The leaky-bucket counter is robust to individual noisy samples
+        # that would otherwise reset the counter — critical for
         # high-rate PFB data where Gaussian noise fluctuations frequently
         # exceed 1.5σ on individual samples even during quiet inter-pulse
         # periods.
         if st.capturing:
+            max_dev = max(dev_I, dev_Q)
+
+            # ── Freeze active_duration ────────────────────────────
+            # Freeze the pulse's active duration once the signal starts
+            # returning to baseline.  Two triggers (first one wins):
+            #   1. Signal drops below threshold_sigma (also enables
+            #      pileup re-trigger detection).
+            #   2. Signal drops below end_sigma (both I and Q) — catches
+            #      large-amplitude pulses whose tails never cross below
+            #      threshold_sigma before reaching end_sigma.
+            # Without this freeze, the adaptive end target grows with
+            # pulse_so_far, creating a race condition that extends windows.
+            if max_dev < self.threshold_sigma:
+                if not st.re_trigger_ready:
+                    st.re_trigger_ready = True
+                if st.active_duration is None:
+                    st.active_duration = st.ch_sample_n - (st.trig_abs or st.ch_sample_n)
+            elif (self.enable_pileup
+                  and not st.re_trigger_ready
+                  and (st.ch_sample_n - (st.trig_abs or st.ch_sample_n)) > self._MIN_END_SAMPLES
+                  and max_dev < st.prev_max_dev):
+                # Signal is still above threshold but decaying — enable
+                # pileup re-trigger for large-amplitude pulses.
+                # NOTE: do NOT freeze active_duration here — on noisy
+                # PFB data, max_dev < prev_max_dev fires on the first
+                # random noise dip after trigger, freezing active_duration
+                # at just ~11 samples and causing premature termination.
+                st.re_trigger_ready = True
+
+            # ── Pileup detection (derivative-based, optional) ─────
+            if self.enable_pileup:
+                dev_jump = max_dev - st.prev_max_dev
+                st.prev_max_dev = max_dev
+
+                if (st.re_trigger_ready
+                        and dev_jump > self.threshold_sigma
+                        and (dev_I > self.threshold_sigma
+                             or dev_Q > self.threshold_sigma)):
+                    self._save_pulse(channel, pileup=True)
+                    if not self.freeze_triggers:
+                        st.capturing = True
+                        st.end_ptr_count = 0
+                        st.trig_abs = st.ch_sample_n
+                        st.trigger_value_I = i_val
+                        st.trigger_value_Q = q_val
+                        st.re_trigger_ready = False
+                        st.prev_max_dev = max_dev
+                    return
+            else:
+                st.prev_max_dev = max_dev
+
+            # ── Normal end: leaky-bucket baseline confirmation ────
             if dev_I < self.end_sigma and dev_Q < self.end_sigma:
                 st.end_ptr_count += 1
+                # Also freeze active_duration if not yet frozen —
+                # catches pulses that skip past threshold_sigma.
+                if st.active_duration is None:
+                    st.active_duration = st.ch_sample_n - (st.trig_abs or st.ch_sample_n)
             else:
                 st.end_ptr_count = max(0, st.end_ptr_count - 1)
 
-            if st.end_ptr_count > self.end_samples:
+            # Use frozen active_duration for stable end target
+            ref_duration = st.active_duration or (
+                st.ch_sample_n - (st.trig_abs or st.ch_sample_n))
+            adaptive_end = max(
+                self._MIN_END_SAMPLES,
+                int(self.margin_fraction * ref_duration))
+
+            if st.end_ptr_count > adaptive_end:
                 self._save_pulse(channel)
 
     # ── Internal helpers ──────────────────────────────────────────
 
-    def _save_pulse(self, channel: int) -> None:
+    def _save_pulse(self, channel: int, pileup: bool = False) -> None:
         st = self.state[channel]
         # Use per-channel sample counter for correct buffer arithmetic
         # (abs_n is shared across all channels, causing 2x offset with 2 ch)
@@ -269,6 +342,11 @@ class PulseCapture:
             self._reset(channel)
             return
 
+        # Glitch rejection: discard pulses shorter than min_pulse_samples
+        if post < self.min_pulse_samples:
+            self._reset(channel)
+            return
+
         L = self.buf[channel]["I"].count
         trig_fifo = (L - 1) - (st.ch_sample_n - st.trig_abs)
 
@@ -276,7 +354,13 @@ class PulseCapture:
             self._reset(channel)
             return
 
-        start = max(0, trig_fifo - self.pre)
+        # Pre-trigger margin: margin_fraction of pulse core duration,
+        # minimum 2 samples to always show trigger context.
+        # No post-trigger margin — the leaky-bucket end condition
+        # already includes the return-to-baseline transition.
+        pre_margin = max(2, int(self.margin_fraction * post))
+
+        start = max(0, trig_fifo - pre_margin)
         end = min(L, trig_fifo + post)
         if end <= start:
             self._reset(channel)
@@ -293,6 +377,7 @@ class PulseCapture:
             "Amp_I": np.array(I_win),
             "Amp_Q": np.array(Q_win),
             "Time": np.array(ts_win),
+            "pileup": pileup,
         }
 
         self._reset(channel)
@@ -364,6 +449,9 @@ class PulseCapture:
         st.trig_abs = None
         st.trigger_value_I = None
         st.trigger_value_Q = None
+        st.re_trigger_ready = False
+        st.prev_max_dev = 0.0
+        st.active_duration = None
 
 
 # ───────────────────────── Noise Estimation ─────────────────────────
@@ -422,22 +510,31 @@ def estimate_noise_stats(
         arr = samples_by_channel[c]
         raw_data[c] = arr
 
-        # Robust estimators: median (location) + MAD-based σ (scale)
-        # These resist contamination from pulse outliers in the noise window.
+        # ── Noise estimation: median + high-pass MAD ──────────
+        # Baseline mean: median is robust to asymmetric pulse
+        # contamination (up to 50% outliers).
+        # Noise σ: use the running difference (np.diff) as a
+        # high-pass filter that removes the baseline level and
+        # exponential decay tails.  For stationary Gaussian noise,
+        # std(diff) = √2 × σ_noise, so σ = MAD(diff) / √2.
+        # The MAD on diff is extremely robust because pulse onsets
+        # are only 1-2 samples out of thousands — well under the
+        # 50% breakdown point.
         robust_mean_I = float(np.median(arr.real))
         robust_mean_Q = float(np.median(arr.imag))
-        robust_std_I = _robust_std(arr.real)
-        robust_std_Q = _robust_std(arr.imag)
+        robust_std_I = _robust_std(np.diff(arr.real)) / np.sqrt(2)
+        robust_std_Q = _robust_std(np.diff(arr.imag)) / np.sqrt(2)
 
-        # Diagnostic: detect pulse contamination by comparing naive vs robust
-        naive_std_I = float(np.std(arr.real))
-        naive_std_Q = float(np.std(arr.imag))
-        ratio_I = naive_std_I / max(robust_std_I, 1e-30)
-        ratio_Q = naive_std_Q / max(robust_std_Q, 1e-30)
-        if ratio_I > 1.3 or ratio_Q > 1.3:
-            print(f"[noise_stats] Ch {c}: pulse contamination detected — "
-                  f"I ratio={ratio_I:.2f} (naive={naive_std_I:.2f}, robust={robust_std_I:.2f}), "
-                  f"Q ratio={ratio_Q:.2f} (naive={naive_std_Q:.2f}, robust={robust_std_Q:.2f})")
+        # Refine baseline mean using the now-correct σ to clip
+        # pulse outliers.  The median can be biased when pulses
+        # cross zero (asymmetric contamination), but 3σ clipping
+        # with the correct σ from diff/MAD accurately rejects them.
+        clip = ((np.abs(arr.real - robust_mean_I) < 3 * robust_std_I) &
+                (np.abs(arr.imag - robust_mean_Q) < 3 * robust_std_Q))
+        clean = arr[clip]
+        if len(clean) > 10:
+            robust_mean_I = float(np.mean(clean.real))
+            robust_mean_Q = float(np.mean(clean.imag))
 
         noise_stats[c] = ChannelNoiseStats(
             mean_I=robust_mean_I,

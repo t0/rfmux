@@ -1,4 +1,4 @@
-#!/usr/bin/env -S PYTHONPATH=.. pytest-3 -v -W error::UserWarning
+#!/usr/bin/env -S CRS_EMBEDDED=1 PYTHONPATH=.. pytest-3 -v -W error::UserWarning
 
 """
 Tests for the C++ packet receiver library.

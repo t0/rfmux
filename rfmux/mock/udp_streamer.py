@@ -1,317 +1,296 @@
 """
-Mock CRS Device - UDP Streaming Logic.
-Manages UDP packet generation and streaming for MockCRS.
+Mock CRS Unified Streamer.
+
+Single thread emits both slow (ReadoutPacket) and fast (PFBPacket) data,
+eliminating lock contention and ensuring perfect time synchronization.
+
+Architecture
+------------
+The streamer always emits slow ReadoutPackets at the decimation-determined
+cadence.  When PFB is enabled (via ``enable_pfb()``), it also emits
+PFBPackets in fixed batches of ``PFB_BATCH`` = 32 time samples — the
+natural ratio between PFB rate and the dec-0 slow rate.
+
+At decimation stage *d*, there are ``2^d`` PFB batches per slow sample:
+
+    PFB rate:  625 MHz / 512  ≈ 1.22 MHz
+    Slow rate: 625 MHz / 256 / 64 / 2^d
+    Ratio:     32 × 2^d  PFB samples per slow sample
+    Batches:   2^d  (each of 32 PFB samples)
+
+Both packet types share the same simulation clock, giving perfect
+timestamp synchronization with zero physics-lock contention.
 """
+
 import asyncio
 import socket
-import struct
 import time
 import threading
 import signal
 import atexit
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 import platform
 
-# Import ReadoutPacket and related constants from streamer
 from ..streamer import (
-    ReadoutPacket, Timestamp, TimestampSource,
-    STREAMER_MAGIC,
+    ReadoutPacket, PFBPacket, Timestamp, TimestampSource,
+    STREAMER_MAGIC, PFB_PACKET_MAGIC,
     SHORT_PACKET_VERSION, LONG_PACKET_VERSION,
     SHORT_PACKET_CHANNELS, LONG_PACKET_CHANNELS,
     SS_PER_SECOND,
-    STREAMER_PORT, # Default port for streaming
+    STREAMER_PORT, PFB_STREAMER_PORT,
 )
 
+# ── Global cleanup registry ──────────────────────────────────────
 
-# Global registry to track all active UDP streamers for cleanup
 _active_streamers = []
 _cleanup_registered = False
 
+
 def _emergency_cleanup():
     """Emergency cleanup function called on program exit."""
-    global _active_streamers
-    if _active_streamers:
-        for streamer in _active_streamers[:]:  # Copy list to avoid modification during iteration
-            try:
-                streamer.emergency_stop()
-            except Exception as e:
-                print(f"[UDP] Error during emergency cleanup: {e}")
+    for s in _active_streamers[:]:
+        try:
+            s.emergency_stop()
+        except Exception as e:
+            print(f"[Streamer] Error during emergency cleanup: {e}")
+
 
 def _register_global_cleanup():
     """Register global cleanup handlers (called once)."""
     global _cleanup_registered
     if not _cleanup_registered:
         atexit.register(_emergency_cleanup)
-        # Register signal handlers for graceful shutdown
-        for sig in [signal.SIGTERM, signal.SIGINT]:
+        for sig in (signal.SIGTERM, signal.SIGINT):
             try:
-                signal.signal(sig, lambda signum, frame: _emergency_cleanup())
+                signal.signal(sig, lambda *_: _emergency_cleanup())
             except (ValueError, OSError):
-                pass  # Signal handling may not be available in all contexts
+                pass
         _cleanup_registered = True
 
-class MockCRSUDPStreamer(threading.Thread):
-    """Streams UDP packets with S21 data based on MockCRS state"""
-    
-    def __init__(self, mock_crs, host='239.192.0.2', port=STREAMER_PORT, modules_to_stream=None, use_multicast=True):
+
+# ── Constants ─────────────────────────────────────────────────────
+
+PFB_RATE = 625e6 / 512     # ≈1.22 MHz per PFB bin
+PFB_BATCH = 32              # PFB samples per dec-0 slow sample (fundamental quantum)
+
+
+class MockCRSStreamer(threading.Thread):
+    """Unified mock streamer: emits slow and/or PFB packets from one thread.
+
+    Always emits slow ReadoutPackets at the decimation-determined cadence.
+    When PFB is enabled (via ``enable_pfb()``), also emits PFBPackets at
+    ``PFB_RATE`` in fixed batches of ``PFB_BATCH`` = 32 samples.
+
+    At decimation stage *d*, there are ``2^d`` PFB batches per slow frame.
+    Both packet types share the same simulation clock, giving perfect
+    timestamp synchronization with zero lock contention.
+    """
+
+    def __init__(self, mock_crs, host='239.192.0.2', port=STREAMER_PORT,
+                 modules_to_stream=None, use_multicast=True):
         super().__init__(daemon=True)
-        self.mock_crs = mock_crs # Reference to MockCRS instance
+        self.mock_crs = mock_crs
         self.host = host
         self.port = port
         self.use_multicast = use_multicast
-        
-        # Configure for multicast or unicast
-        if use_multicast:
-            # Use multicast for better hardware emulation
-            self.multicast_group = host if host.startswith('239.') else '239.192.0.2'
-            self.multicast_port = port
-            print(f"[UDP] MockCRSUDPStreamer initialized - multicast to {self.multicast_group}:{self.multicast_port}")
-        else:
-            # Fall back to unicast for specific testing scenarios
-            self.unicast_host = host if host != '239.192.0.2' else '127.0.0.1'
-            self.unicast_port = port
-            print(f"[UDP] MockCRSUDPStreamer initialized - unicast to {self.unicast_host}:{self.unicast_port}")
-        
-        # If modules_to_stream is specified, only stream those modules
-        # Otherwise, we'll determine which modules to stream based on configured channels
-        self.modules_to_stream = modules_to_stream  # Can be None or a list like [1] or [1,2]
-        
-        self.socket = None
-        self.running = False # Controlled by start/stop
-        self.seq_counters = {m: 0 for m in range(1, 5)}  # Per-module sequence numbers (1-4)
+        self.modules_to_stream = modules_to_stream
+
+        # ── Slow state ────────────────────────────────────────
+        self.slow_socket = None
+        self.seq_counters = {m: 0 for m in range(1, 5)}
         self.packets_sent = 0
-        
-        # Track total elapsed time for continuous timestamps across decimation changes
-        self.total_elapsed_time = {m: 0.0 for m in range(1, 5)}  # Total time elapsed per module
+
+        # ── PFB state (toggled at runtime) ────────────────────
+        self.pfb_enabled = False
+        self.pfb_channels: list = []
+        self.pfb_module: int = 1
+        self.pfb_socket = None
+        self.pfb_seq = 0
+        self.pfb_packets_sent = 0
+
+        # ── Timing ────────────────────────────────────────────
+        self.start_datetime = None
+        self.frame_index = 0
+        self.total_elapsed_time = {m: 0.0 for m in range(1, 5)}
         self.last_decimation = None
 
-        self.timestamp_stream = None
-        
-        # Register for global cleanup
-        global _active_streamers
+        # ── Lifecycle ─────────────────────────────────────────
+        self.running = False
         _active_streamers.append(self)
         _register_global_cleanup()
-        
-    def _init_socket(self):
-        """Initialize the UDP socket for multicast or unicast."""
-        if self.socket is None:
-            if self.use_multicast:
-                # Create socket for multicast
-                self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
-                
-                # Enable multicast loopback so local processes can receive
-                self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
-                
-                # Set socket send buffer size for performance
-                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
+        mode = "multicast" if use_multicast else "unicast"
+        print(f"[Streamer] MockCRSStreamer initialized ({mode}) → {host}:{port}")
 
-                if platform.system() == "Windows":
-                    try:
-                        self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
-                        self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("127.0.0.1"))
-                    except:
-                        print("Issue setting up socket on windows")
-                    
-                
-                # Bind multicast to loopback interface (lo) for local testing
-                # Using if_nametoindex to get the interface index for 'lo'  
-                else:
-                    for iface in ("lo", "lo0"): 
-                        # lo is for Linux and lo0 is for Mac 
-                        try:
-                            lo_index = socket.if_nametoindex(iface)
-                            # Use IP_MULTICAST_IF with the loopback address
-                            # Note: IP_MULTICAST_IF expects an IP address, not an interface index
-                            # For interface index, we'd use IPV6_MULTICAST_IF, but we're using IPv4
-                            # So we stick with the loopback IP address
-                            self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton('127.0.0.1'))
-                            print(f"[UDP] Multicast bound to loopback interface ({iface}, index {lo_index})")
-                            break
-                        except OSError:
-                            continue
-                    else:
-                        # Fallback if 'lo or lo0' interface not found (shouldn't happen on Linux or Mac)
-                        print("[UDP] Warning: Could not find 'lo' or 'lo0' interface")
-                        print("[UDP] Warning: The packets are now being launched on your network, rather than on the loopback interface")
-                        self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton('0.0.0.0'))
-                    
-                    print(f"[UDP] Multicast socket initialized for {self.multicast_group}:{self.multicast_port}")
-            else:
-                # Create socket for unicast
-                self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
-                print(f"[UDP] Unicast socket initialized")
-    
-    def _cleanup_socket(self):
-        """Clean up the UDP socket."""
-        if self.socket:
+    # ── Socket management ─────────────────────────────────────
+
+    def _make_multicast_socket(self):
+        """Create a UDP socket configured for multicast on loopback."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
+
+        if platform.system() == "Windows":
             try:
-                self.socket.close()
-            except Exception as e:
-                print(f"[UDP] Error closing socket: {e}")
-            finally:
-                self.socket = None
-        
-    def _get_configured_modules(self):
-        """Determine which modules have configured channels"""
-        configured_modules = set()
-        
-        # Check frequencies, amplitudes, and phases dictionaries
-        for (module, channel) in self.mock_crs._frequencies.keys():
-            configured_modules.add(module)
-        for (module, channel) in self.mock_crs._amplitudes.keys():
-            configured_modules.add(module)
-        for (module, channel) in self.mock_crs._phases.keys():
-            configured_modules.add(module)
-        
-        # Convert to sorted list and ensure it's within valid range (1-4)
-        modules = sorted([m for m in configured_modules if 1 <= m <= 4])
-        
-        if not modules:
-            # If no modules configured, default to module 1
-            modules = [1]
-            
-        return modules
-    
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                                socket.inet_aton("127.0.0.1"))
+            except Exception:
+                print("[Streamer] Issue setting up socket on Windows")
+        else:
+            for iface in ("lo", "lo0"):
+                try:
+                    socket.if_nametoindex(iface)
+                    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                                    socket.inet_aton('127.0.0.1'))
+                    break
+                except OSError:
+                    continue
+            else:
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                                socket.inet_aton('0.0.0.0'))
+        return sock
+
+    def _init_slow_socket(self):
+        if self.slow_socket is None:
+            self.slow_socket = self._make_multicast_socket()
+            print(f"[Streamer] Slow socket ready → {self.host}:{self.port}")
+
+    def _init_pfb_socket(self):
+        if self.pfb_socket is None:
+            self.pfb_socket = self._make_multicast_socket()
+            print(f"[Streamer] PFB socket ready → {self.host}:{PFB_STREAMER_PORT}")
+
+    def _cleanup_sockets(self):
+        for name, sock in [("slow", self.slow_socket), ("pfb", self.pfb_socket)]:
+            if sock:
+                try:
+                    sock.close()
+                except Exception as e:
+                    print(f"[Streamer] Error closing {name} socket: {e}")
+        self.slow_socket = None
+        self.pfb_socket = None
+
+    # ── PFB toggle (called from MockUDPManager) ──────────────
+
+    def enable_pfb(self, channels, module):
+        """Enable PFB packet emission (safe to call while thread is running)."""
+        self.pfb_channels = list(channels)[:4]
+        self.pfb_module = module
+        self.pfb_seq = 0
+        self.pfb_packets_sent = 0
+        self._init_pfb_socket()
+        self.pfb_enabled = True
+        n = len(self.pfb_channels)
+        mode_str = {1: 'PFB1', 2: 'PFB2', 4: 'PFB4'}.get(n, f'PFB{n}')
+        print(f"[Streamer] PFB enabled — {mode_str} ch={self.pfb_channels} module={module}")
+
+    def disable_pfb(self):
+        """Disable PFB packet emission (safe to call while thread is running)."""
+        was_enabled = self.pfb_enabled
+        self.pfb_enabled = False
+        if was_enabled:
+            print(f"[Streamer] PFB disabled (sent {self.pfb_packets_sent} PFB packets)")
+
+    # ── Lifecycle ─────────────────────────────────────────────
+
     def stop(self):
-        """Stop the streaming thread gracefully."""
-        print("[UDP] Stopping UDP streamer...")
+        """Signal the streamer to stop gracefully."""
+        print("[Streamer] Stopping...")
         self.running = False
-        
+
     def emergency_stop(self):
-        """Emergency stop - force shutdown immediately."""
-        print(f"[UDP] Emergency stop for streamer {id(self)}")
+        """Force-stop immediately."""
+        print(f"[Streamer] Emergency stop {id(self)}")
         self.running = False
-        self._cleanup_socket()
-        # Remove from global registry
-        global _active_streamers
+        self._cleanup_sockets()
         if self in _active_streamers:
             _active_streamers.remove(self)
-    
+
+    # ── Main loop ─────────────────────────────────────────────
+
     def run(self):
-        """Stream UDP packets at the configured sample rate with proper cleanup."""
         self.running = True
-        
-        # Initialize start time for deterministic timestamps
         self.start_datetime = datetime.now()
-        
-        last_decimation = None
-        
+        self._init_slow_socket()
+
         try:
-            # Initialize socket
-            self._init_socket()
-            
             while self.running:
                 try:
-                    start_time_loop = time.perf_counter()
-                    
-                    # Get current decimation (dynamically check each iteration)
+                    t_wall_start = time.perf_counter()
+
+                    # ── Read current decimation ───────────────
                     dec = self.mock_crs._fir_stage
                     if dec is None:
-                        dec = 6  # Default only if None, not if 0
-                    sample_rate = 625e6 / (256 * 64 * (2**dec))
-                    frame_time = 1.0 / sample_rate  # Time between frames
-                    
-                    # Log if decimation changed
-                    if dec != last_decimation:
-                        # Before changing decimation, save the elapsed time for each module
-                        if last_decimation is not None:
-                            old_sample_rate = 625e6 / (256 * 64 * (2**last_decimation))
+                        dec = 6
+                    slow_rate = 625e6 / 256 / 64 / (2 ** dec)
+                    frame_time = 1.0 / slow_rate
+
+                    # Track decimation changes for continuous timestamps
+                    if dec != self.last_decimation:
+                        if self.last_decimation is not None:
+                            old_rate = 625e6 / 256 / 64 / (2 ** self.last_decimation)
                             for m in self.seq_counters:
-                                # Add the time elapsed with the old decimation rate
-                                self.total_elapsed_time[m] += self.seq_counters[m] / old_sample_rate
-                        
-                        print(f"[UDP] Decimation changed to stage {dec}, streaming at {sample_rate:.1f} Hz")
-                        last_decimation = dec
+                                self.total_elapsed_time[m] += self.seq_counters[m] / old_rate
+                            # Reset sequence counters for new rate
+                            self.seq_counters = {m: 0 for m in range(1, 5)}
+                        print(f"[Streamer] Decimation → stage {dec}, "
+                              f"slow rate {slow_rate:.1f} Hz")
                         self.last_decimation = dec
-                        
-                    # Determine which modules to stream
+
+                    # Simulation time for this frame
+                    t_frame = (self.total_elapsed_time.get(1, 0.0)
+                               + self.seq_counters.get(1, 0) / slow_rate)
+
+                    # ── PFB batches (if enabled) ──────────────
+                    if self.pfb_enabled and self.pfb_channels:
+                        n_batches = 2 ** dec  # 1 at dec=0, 64 at dec=6
+                        for batch_idx in range(n_batches):
+                            if not self.running:
+                                break
+                            t_batch = t_frame + batch_idx * PFB_BATCH / PFB_RATE
+                            self._emit_pfb_packet(t_batch, dec)
+
+                    # ── Slow packets (always) ─────────────────
                     if self.modules_to_stream:
-                        # Use explicitly specified modules
-                        modules_to_process = self.modules_to_stream
+                        modules = self.modules_to_stream
                     else:
-                        # Auto-detect: only stream modules that have configured channels
-                        modules_to_process = self._get_configured_modules()
-                    
-                    # Generate and send packets for ALL active modules quickly
-                    # Each module gets its own packet at the same time instant
-                    for module_num in modules_to_process:
-                        if not self.running:  # Check if we should stop
+                        modules = self._get_configured_modules()
+
+                    for module_num in modules:
+                        if not self.running:
                             break
-                            
-                        try:
-                            # Generate and send packet
-                            s_time = time.perf_counter()
-                            packet_bytes = self.generate_packet_for_module(module_num, self.seq_counters[module_num], dec)
-                            
-                            if self.use_multicast:
-                                if self.socket:
-                                    try:
-                                        bytes_sent = self.socket.sendto(packet_bytes, (self.multicast_group, self.multicast_port))
-                                    except OSError as e:
-                                        if e.errno == 10051: ## unreachable network on Windows, corner case on first start and for tests
-                                            continue
-                                        else:
-                                            raise
-                                else:
-                                    raise RuntimeError("Socket not initialized")
-                            else:
-                                if self.socket:
-                                    bytes_sent = self.socket.sendto(packet_bytes, (self.unicast_host, self.unicast_port))
-                                else:
-                                    raise RuntimeError("Socket not initialized")
-                            
-                            self.seq_counters[module_num] += 1
-                            self.packets_sent += 1
-                            
-                        except Exception as e:
-                            if self.running:  # Only log if we're still supposed to be running
-                                print(f"[UDP] ERROR generating/sending packet for module {module_num}: {e}")
-                                import traceback
-                                traceback.print_exc()
-                    
-                    # Sleep to maintain sample rate
-                    if self.running:
-                        elapsed_loop = time.perf_counter() - start_time_loop
-                        sleep_duration = frame_time - elapsed_loop
-                        
-                        if sleep_duration > 0:
-                            # Simple sleep approach - let the OS handle timing
-                            time.sleep(sleep_duration)
-                
+                        self._emit_slow_packet(module_num, t_frame, dec)
+
+                    self.frame_index += 1
+
+                    # ── Pace to real time ─────────────────────
+                    elapsed = time.perf_counter() - t_wall_start
+                    sleep_dur = frame_time - elapsed
+                    if sleep_dur > 0:
+                        time.sleep(sleep_dur)
+
                 except KeyboardInterrupt:
-                    print("[UDP] Received KeyboardInterrupt, stopping...")
                     break
                 except Exception as e:
                     if self.running:
-                        print(f"[UDP] Unexpected error in main loop: {e}")
+                        print(f"[Streamer] Error in main loop: {e}")
                         import traceback
                         traceback.print_exc()
-                        time.sleep(0.1)  # Brief pause before retrying
-            
-        except Exception as e:
-            print(f"[UDP] Fatal error in UDP streamer: {e}")
-            import traceback
-            traceback.print_exc()
-        
+                        time.sleep(0.01)
+
         finally:
-            # ALWAYS clean up, regardless of how we exit
-            print(f"[UDP] UDP streaming thread stopped. Total packets sent: {self.packets_sent}")
-            self._cleanup_socket()
-            
-            # Remove from global registry
-            global _active_streamers
+            print(f"[Streamer] Stopped. Slow packets: {self.packets_sent}, "
+                  f"PFB packets: {self.pfb_packets_sent}")
+            self._cleanup_sockets()
             if self in _active_streamers:
                 _active_streamers.remove(self)
-    
-    def generate_packet_for_module(self, module_num, seq, dec):
-        """Generate a ReadoutPacket for a specific module with coupled channels."""
 
-        # Detailed timing
-        timing_start = time.perf_counter()
-        
+    # ── Slow packet emission ──────────────────────────────────
+
+    def _emit_slow_packet(self, module_num, t_frame, dec):
+        """Generate and send one slow ReadoutPacket for *module_num*."""
         if self.mock_crs._short_packets:
             num_channels = SHORT_PACKET_CHANNELS
             version = SHORT_PACKET_VERSION
@@ -319,227 +298,296 @@ class MockCRSUDPStreamer(threading.Thread):
             num_channels = LONG_PACKET_CHANNELS
             version = LONG_PACKET_VERSION
 
-        timing_array_create = time.perf_counter()
+        seq = self.seq_counters[module_num]
+        slow_rate = 625e6 / 256 / 64 / (2 ** dec)
 
-        # Pre-calculate constants from unified configuration (SoT)
-        cfg = getattr(self.mock_crs, "physics_config", {}) or {}
-        scale_factor = cfg.get("scale_factor", 2**21)
-        full_scale = scale_factor * 256. # Full scale in normalized units, scaled up by 256 to account for 24-bit scalar packing into 32-bit packets
-        noise_level = cfg.get("udp_noise_level", 10.0)  # Base noise level
+        # ── Physics ───────────────────────────────────────────
+        cfg = getattr(self.mock_crs, '_physics_config', {}) or {}
+        scale_factor = cfg.get('scale_factor', 2 ** 21)
+        full_scale = scale_factor * 256.0
+        noise_level = cfg.get('udp_noise_level', 10.0)
 
-        # Noise is in normalized units
         noise_i = np.random.normal(0, noise_level, num_channels)
         noise_q = np.random.normal(0, noise_level, num_channels)
         channel_samples = noise_i + 1j * noise_q
 
-        timing_noise = time.perf_counter()
-
-        # Use module-wide coupled calculation if available
-        if hasattr(self.mock_crs._resonator_model, 'calculate_module_response_coupled'):
-            # Get sample rate for time-varying signals
-            dec = dec
-            if dec is None:
-                dec = 6  # Default only if None, not if 0
-            sample_rate = 625e6 / 256 / 64 / (2**dec)
-            
-            # Calculate time for this packet (based on sequence number)
-            # Each packet represents one sample in time
-            t = seq / sample_rate
-            
-            # Update QP densities based on current time (for pulse events)
-            if hasattr(self.mock_crs._resonator_model, 'update_qp_densities_for_time'):
-                self.mock_crs._resonator_model.update_qp_densities_for_time(t)
-            
-            # Count configured channels for debugging
-            num_configured = 0
-            for (mod, ch) in self.mock_crs._frequencies.keys():
-                if mod == module_num:
-                    num_configured += 1
-            
-            # Get all channel responses at once (includes coupling effects and time-varying beats)
-            # Now using the unified method with start_time parameter
-            channel_responses = self.mock_crs._resonator_model.calculate_module_response_coupled(
-                module_num, 
-                num_samples=1,  # Single sample per packet
-                sample_rate=sample_rate,
-                start_time=t   # Pass the current time for this packet
-            )
-            timing_physics = time.perf_counter()
-            
-            # Process each channel's response
-            for ch_num_1, signal in channel_responses.items():
-                ch_idx_0 = ch_num_1 - 1  # Convert to 0-based index
-                
-                # Scale signal from normalized units to ADC counts and add to noise
-                # signal is in normalized units, full_scale converts to ADC counts
-                channel_samples[ch_idx_0] += signal * full_scale
-                
-            timing_fill_array = time.perf_counter()
-            non_zero_channels_count = len(channel_responses)
-        else:
-            print("ERROR WITH COUPLING CODE - this shouldn't happen with updated resonator model")
-            non_zero_channels_count = 0
-            timing_physics = timing_fill_array = time.perf_counter()
-        
-        # Calculate deterministic timestamp based on sequence number and sampling rate
-        # Get the decimation stage and calculate sample rate
-        dec = dec
-        if dec is None:
-            dec = 6  # Default only if None, not if 0
-        sample_rate = 625e6 / 256 / 64 / (2**dec)
-        
-        # Calculate total elapsed time including previous decimation periods
-        # This ensures continuous timestamps even when decimation changes
-        current_period_elapsed = seq / sample_rate
-        total_elapsed_seconds = self.total_elapsed_time.get(module_num, 0.0) + current_period_elapsed
-        
-        # Add elapsed time to start datetime to get packet timestamp
-        # Use the start_datetime that was set when streaming began
-        if hasattr(self, 'start_datetime') and self.start_datetime:
-            base_time = self.start_datetime
-        else:
-            # Fallback if start_datetime not set (shouldn't happen)
-            base_time = datetime.now()
-            self.start_datetime = base_time
-        
-        # Calculate the timestamp for this packet using total elapsed time
-        from datetime import timedelta
-        packet_datetime = base_time + timedelta(seconds=total_elapsed_seconds)
-        
-        # Convert to timestamp fields
-        ts = Timestamp(
-            y=int(packet_datetime.year % 100),
-            d=int(packet_datetime.timetuple().tm_yday),
-            h=int(packet_datetime.hour),
-            m=int(packet_datetime.minute),
-            s=int(packet_datetime.second),
-            ss=int(packet_datetime.microsecond * SS_PER_SECOND / 1e6), # Scaled sub-seconds
-            c=0, # Carrier phase, typically 0 for mock
-            sbs=0, # Sub-block sequence, typically 0 for mock
-            source=TimestampSource.TEST, # Mock data source
-            recent=True
+        model = self.mock_crs._resonator_model
+        channel_responses = model.calculate_module_response_coupled(
+            module_num, num_samples=1, sample_rate=slow_rate,
+            start_time=t_frame,
         )
 
-        timing_timestamp = time.perf_counter()
-        packet = ReadoutPacket(
+        for ch_num_1, signal_val in channel_responses.items():
+            ch_idx_0 = ch_num_1 - 1
+            channel_samples[ch_idx_0] += signal_val * full_scale
+
+        # ── Timestamp ─────────────────────────────────────────
+        total_elapsed = (self.total_elapsed_time.get(module_num, 0.0)
+                         + seq / slow_rate)
+        pkt_dt = self.start_datetime + timedelta(seconds=total_elapsed)
+        ts = Timestamp(
+            y=int(pkt_dt.year % 100),
+            d=int(pkt_dt.timetuple().tm_yday),
+            h=int(pkt_dt.hour),
+            m=int(pkt_dt.minute),
+            s=int(pkt_dt.second),
+            ss=int(pkt_dt.microsecond * SS_PER_SECOND / 1e6),
+            c=0, sbs=0,
+            source=TimestampSource.TEST,
+            recent=True,
+        )
+
+        # ── Build and send packet ─────────────────────────────
+        pkt = ReadoutPacket(
             magic=STREAMER_MAGIC,
             version=version,
-            serial=int(self.mock_crs._serial) if self.mock_crs._serial and self.mock_crs._serial.isdigit() else 0,
-            num_modules=1, # Packet is for one module's data
+            serial=(int(self.mock_crs._serial)
+                    if self.mock_crs._serial and self.mock_crs._serial.isdigit()
+                    else 0),
+            num_modules=1,
             flags=0,
             fir_stage=dec,
-            module=module_num-1,  # ReadoutPacket module is 0-indexed
-            seq=seq)
-
-        # Clip and assign complex samples to packet
-        packet.samples = (np.clip(channel_samples.real, -8388608, 8388607) +
-                1j*np.clip(channel_samples.imag, -8388608, 8388607)).tolist()
-        packet.ts = ts
-
-        timing_packet_create = time.perf_counter()
-
-        packet_bytes = bytes(packet)
+            module=module_num - 1,  # 0-indexed
+            seq=seq,
+        )
+        pkt.samples = (
+            np.clip(channel_samples.real, -8388608, 8388607)
+            + 1j * np.clip(channel_samples.imag, -8388608, 8388607)
+        ).tolist()
+        pkt.ts = ts
         self.mock_crs._last_timestamp = ts
-        timing_serialize = time.perf_counter()
-        
-        # Removed detailed timing logs - no longer needed
-        
-        return packet_bytes
 
+        packet_bytes = bytes(pkt)
+        if self.slow_socket:
+            try:
+                self.slow_socket.sendto(packet_bytes, (self.host, self.port))
+            except OSError as e:
+                if e.errno == 10051:  # Unreachable network (Windows corner case)
+                    return
+                raise
+
+        self.seq_counters[module_num] += 1
+        self.packets_sent += 1
+
+    # ── PFB packet emission ───────────────────────────────────
+
+    def _emit_pfb_packet(self, t_batch, dec):
+        """Generate and send one PFB packet (PFB_BATCH=32 time samples)."""
+        channels = self.pfb_channels
+        n_groups = len(channels)
+        N = PFB_BATCH  # 32 time samples
+
+        # ── Physics ───────────────────────────────────────────
+        cfg = getattr(self.mock_crs, '_physics_config', {}) or {}
+        scale_factor = cfg.get('scale_factor', 2 ** 21)
+        noise_level = cfg.get('udp_noise_level', 10.0)
+        pfb_noise_scale = cfg.get('pfb_noise_scale', 64.0)
+        full_scale = scale_factor * 256.0
+
+        model = self.mock_crs._resonator_model
+        responses = model.calculate_module_response_coupled(
+            self.pfb_module,
+            num_samples=N,
+            sample_rate=PFB_RATE,
+            start_time=t_batch,
+            pulse_time=t_batch,
+        )
+
+        # ── Interleave: [ch1_s0, ch2_s0, …, ch1_s1, …] ──────
+        total = N * n_groups
+        interleaved = np.zeros(total, dtype=np.complex128)
+
+        for slot_idx, ch in enumerate(channels):
+            if ch in responses:
+                sig = responses[ch]
+                if not isinstance(sig, np.ndarray):
+                    sig = np.full(N, sig, dtype=np.complex128)
+                slot_data = sig * full_scale
+            else:
+                slot_data = np.zeros(N, dtype=np.complex128)
+
+            slot_noise = (
+                np.random.normal(0, noise_level * pfb_noise_scale, N)
+                + 1j * np.random.normal(0, noise_level * pfb_noise_scale, N)
+            )
+            slot_data = slot_data + slot_noise
+            interleaved[slot_idx::n_groups] = slot_data
+
+        # ── Build PFBPacket ───────────────────────────────────
+        pkt = PFBPacket()
+        pkt.magic = PFB_PACKET_MAGIC
+        pkt.version = 1
+        pkt.mode = {1: 0, 2: 1, 4: 2}.get(n_groups, 2)
+        pkt.serial = (
+            int(self.mock_crs._serial)
+            if self.mock_crs._serial and self.mock_crs._serial.isdigit()
+            else 0
+        )
+        pkt.slot1 = channels[0] if len(channels) > 0 else 0
+        pkt.slot2 = channels[1] if len(channels) > 1 else 0
+        pkt.slot3 = channels[2] if len(channels) > 2 else 0
+        pkt.slot4 = channels[3] if len(channels) > 3 else 0
+        pkt.num_samples = total
+        pkt.module = self.pfb_module - 1  # 0-indexed
+        pkt.seq = self.pfb_seq
+
+        clipped = (
+            np.clip(interleaved.real, -8388608, 8388607)
+            + 1j * np.clip(interleaved.imag, -8388608, 8388607)
+        )
+        pkt.samples = clipped
+
+        # ── Timestamp ─────────────────────────────────────────
+        pkt_dt = self.start_datetime + timedelta(seconds=t_batch)
+        ts = Timestamp(
+            y=int(pkt_dt.year % 100),
+            d=int(pkt_dt.timetuple().tm_yday),
+            h=int(pkt_dt.hour),
+            m=int(pkt_dt.minute),
+            s=int(pkt_dt.second),
+            ss=int(pkt_dt.microsecond * SS_PER_SECOND / 1e6),
+            c=0, sbs=0,
+            source=TimestampSource.TEST,
+            recent=True,
+        )
+        pkt.ts = ts
+        self.mock_crs._last_timestamp = ts
+
+        if self.pfb_socket:
+            self.pfb_socket.sendto(bytes(pkt), (self.host, PFB_STREAMER_PORT))
+
+        self.pfb_seq += 1
+        self.pfb_packets_sent += 1
+
+    # ── Module detection ──────────────────────────────────────
+
+    def _get_configured_modules(self):
+        """Return sorted list of modules that have configured channels."""
+        configured = set()
+        for (mod, _ch) in self.mock_crs._frequencies.keys():
+            configured.add(mod)
+        for (mod, _ch) in self.mock_crs._amplitudes.keys():
+            configured.add(mod)
+        for (mod, _ch) in self.mock_crs._phases.keys():
+            configured.add(mod)
+        modules = sorted(m for m in configured if 1 <= m <= 4)
+        return modules or [1]
+
+
+# ── Manager ───────────────────────────────────────────────────────
 
 class MockUDPManager:
-    """Manages the lifecycle of the MockCRSUDPStreamer thread with proper cleanup."""
+    """Manages the lifecycle of the unified MockCRSStreamer.
+
+    The streamer always emits slow packets.  PFB emission is toggled
+    on/off without stopping the thread — just a flag flip checked each
+    iteration of the main loop.
+    """
+
     def __init__(self, mock_crs):
         self.mock_crs = mock_crs
-        self.udp_thread = None
-        self._udp_streaming_active = False # Internal flag
+        self._streamer = None
+        self._streaming_active = False
 
-    async def start_udp_streaming(self, host='239.192.0.2', port=STREAMER_PORT, use_multicast=True):
-        """Start UDP streaming with proper error handling.
-        
-        Args:
-            host: Multicast group address (default: '239.192.0.2') or unicast IP
-            port: UDP port number (default: STREAMER_PORT)
-            use_multicast: If True, use multicast; if False, use unicast
-        """
+    async def start_udp_streaming(self, host='239.192.0.2', port=STREAMER_PORT,
+                                   use_multicast=True):
+        """Start the unified streamer thread (slow packets begin immediately)."""
+        if self._streaming_active:
+            print("[Manager] Streaming already active")
+            return False
+
         try:
-            if not self._udp_streaming_active:
-                self._udp_streaming_active = True
-                
-                # Create the streamer with multicast or unicast configuration
-                self.udp_thread = MockCRSUDPStreamer(
-                    self.mock_crs, 
-                    host=host, 
-                    port=port,
-                    use_multicast=use_multicast
-                )
-                self.udp_thread.start()
-                await asyncio.sleep(0.1) # Give thread time to start
-                
-                mode = "multicast" if use_multicast else "unicast"
-                print(f"[Manager] UDP Streaming started ({mode}) to {host}:{port}")
-                return True
-            else:
-                print("[Manager] UDP Streaming already active.")
-                return False # Already active
+            self._streaming_active = True
+            self._streamer = MockCRSStreamer(
+                self.mock_crs, host=host, port=port,
+                use_multicast=use_multicast,
+            )
+            self._streamer.start()
+            await asyncio.sleep(0.1)
+            print(f"[Manager] Streaming started → {host}:{port}")
+            return True
         except Exception as e:
-            print(f"[Manager] Error starting UDP streaming: {e}")
-            self._udp_streaming_active = False
-            if self.udp_thread:
-                self.udp_thread.emergency_stop()
-                self.udp_thread = None
+            print(f"[Manager] Error starting streaming: {e}")
+            self._streaming_active = False
+            if self._streamer:
+                self._streamer.emergency_stop()
+                self._streamer = None
             raise
-    
+
     async def stop_udp_streaming(self):
-        """Stop UDP streaming with proper cleanup and timeout."""
-        if self._udp_streaming_active and self.udp_thread:
+        """Stop the unified streamer thread entirely."""
+        if not self._streaming_active or not self._streamer:
+            return False
+
+        try:
+            self._streaming_active = False
+            self._streamer.stop()
+
             try:
-                self._udp_streaming_active = False
-                self.udp_thread.stop() # Signal thread to stop
-                
-                # Wait for thread to finish with timeout
-                try:
-                    await asyncio.to_thread(self.udp_thread.join, timeout=2.0)
-                except Exception as e:
-                    print(f"[Manager] Error during thread join: {e}")
-                
-                if self.udp_thread.is_alive():
-                    print("[Manager] Warning: UDP thread did not stop in time, forcing emergency stop")
-                    self.udp_thread.emergency_stop()
-                
-                self.udp_thread = None
-                print("[Manager] UDP Streaming stopped.")
-                return True
-                
+                await asyncio.to_thread(self._streamer.join, timeout=2.0)
             except Exception as e:
-                print(f"[Manager] Error stopping UDP streaming: {e}")
-                # Force cleanup in case of error
-                if self.udp_thread:
-                    self.udp_thread.emergency_stop()
-                    self.udp_thread = None
-                return False
-        else:
-            print("[Manager] UDP Streaming not active or thread missing.")
-            return False # Not active or no thread
+                print(f"[Manager] Error during thread join: {e}")
+
+            if self._streamer.is_alive():
+                print("[Manager] Warning: streamer did not stop in time, "
+                      "forcing emergency stop")
+                self._streamer.emergency_stop()
+
+            self._streamer = None
+            print("[Manager] Streaming stopped.")
+            return True
+        except Exception as e:
+            print(f"[Manager] Error stopping streaming: {e}")
+            if self._streamer:
+                self._streamer.emergency_stop()
+                self._streamer = None
+            return False
 
     def get_udp_streaming_status(self):
+        """Return status dict for both slow and PFB streams."""
+        s = self._streamer
         return {
-            "active": self._udp_streaming_active,
-            "thread_alive": self.udp_thread is not None and self.udp_thread.is_alive()
+            "active": self._streaming_active,
+            "thread_alive": s is not None and s.is_alive(),
+            "pfb_active": s.pfb_enabled if s else False,
+            "pfb_thread_alive": s is not None and s.is_alive() and s.pfb_enabled,
         }
-    
+
+    # ── PFB toggle (no thread restart) ───────────────────────
+
+    async def start_pfb_streaming(self, channels, module, host=None,
+                                   port=None, use_multicast=True):
+        """Enable PFB packet emission on the already-running streamer."""
+        if not self._streaming_active or not self._streamer:
+            raise RuntimeError("Cannot enable PFB: slow streamer not running. "
+                               "Call start_udp_streaming() first.")
+        self._streamer.enable_pfb(channels, module)
+        await asyncio.sleep(0.05)
+        return True
+
+    async def stop_pfb_streaming(self):
+        """Disable PFB packet emission (slow continues uninterrupted)."""
+        if self._streamer:
+            self._streamer.disable_pfb()
+        return True
+
+    # ── Cleanup ───────────────────────────────────────────────
+
+    def _emergency_stop_all(self):
+        if self._streamer:
+            self._streamer.emergency_stop()
+            self._streamer = None
+        self._streaming_active = False
+
     def __del__(self):
-        """Destructor to ensure cleanup."""
-        if self._udp_streaming_active and self.udp_thread:
-            print("[Manager] Destructor cleanup: stopping UDP streamer")
-            self.udp_thread.emergency_stop()
-    
+        if self._streaming_active and self._streamer:
+            print("[Manager] Destructor cleanup")
+            self._emergency_stop_all()
+
     def __enter__(self):
-        """Context manager entry."""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit with cleanup."""
-        if self._udp_streaming_active and self.udp_thread:
-            print("[Manager] Context exit cleanup: stopping UDP streamer")
-            self.udp_thread.emergency_stop()
+        if self._streaming_active and self._streamer:
+            print("[Manager] Context exit cleanup")
+            self._emergency_stop_all()

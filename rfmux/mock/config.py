@@ -122,6 +122,15 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "pulse_random_amp_max": 3.0,        # for uniform mode (>= min)
     "pulse_random_amp_logmean": 0.7,    # for lognormal mode
     "pulse_random_amp_logsigma": 0.3,   # for lognormal mode (>= 0)
+
+    # Random pulse tau_decay distribution
+    # In MKID physics, tau_rise is quasi-instantaneous (~µs) and fixed,
+    # while tau_decay (QP recombination) varies with QP density, temperature, etc.
+    "pulse_random_tau_mode": "fixed",    # "fixed" | "uniform" | "lognormal"
+    "pulse_random_tau_min": 5e-4,        # 0.5 ms (for uniform mode, > 0)
+    "pulse_random_tau_max": 5e-3,        # 5 ms (for uniform mode, >= min)
+    "pulse_random_tau_logmean": -6.9,    # ln(0.001) ≈ -6.9 → median ~1ms (for lognormal)
+    "pulse_random_tau_logsigma": 0.5,    # spread (for lognormal mode, >= 0)
 }
 
 # =============================================================================
@@ -169,6 +178,8 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
         "pulse_tau_rise", "pulse_tau_decay", "pulse_amplitude",
         "pulse_random_amp_min", "pulse_random_amp_max",
         "pulse_random_amp_logmean", "pulse_random_amp_logsigma",
+        "pulse_random_tau_min", "pulse_random_tau_max",
+        "pulse_random_tau_logmean", "pulse_random_tau_logsigma",
         "cache_freq_step", "cache_amp_step", "cache_qp_step"
     ):
         if k in cfg and isinstance(cfg[k], str):
@@ -257,5 +268,49 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
         logsigma = 0.0
     cfg["pulse_random_amp_logmean"] = logmean
     cfg["pulse_random_amp_logsigma"] = logsigma
+
+    # Normalize random tau_decay distribution settings
+    tau_mode = cfg.get("pulse_random_tau_mode", "fixed")
+    if isinstance(tau_mode, str):
+        tau_mode_norm = tau_mode.strip().lower()
+        if tau_mode_norm not in ("fixed", "uniform", "lognormal"):
+            tau_mode_norm = "fixed"
+        cfg["pulse_random_tau_mode"] = tau_mode_norm
+    else:
+        cfg["pulse_random_tau_mode"] = "fixed"
+
+    # Enforce numeric constraints for tau distribution
+    try:
+        tau_min = float(cfg.get("pulse_random_tau_min", 5e-4))
+    except Exception:
+        tau_min = 5e-4
+    try:
+        tau_max = float(cfg.get("pulse_random_tau_max", 5e-3))
+    except Exception:
+        tau_max = 5e-3
+
+    # tau_decay must be positive
+    if tau_min <= 0:
+        tau_min = 1e-6
+    if tau_max <= 0:
+        tau_max = 1e-6
+    # Ensure min <= max
+    if tau_max < tau_min:
+        tau_max = tau_min
+    cfg["pulse_random_tau_min"] = tau_min
+    cfg["pulse_random_tau_max"] = tau_max
+
+    try:
+        tau_logmean = float(cfg.get("pulse_random_tau_logmean", -6.9))
+    except Exception:
+        tau_logmean = -6.9
+    try:
+        tau_logsigma = float(cfg.get("pulse_random_tau_logsigma", 0.5))
+    except Exception:
+        tau_logsigma = 0.5
+    if tau_logsigma < 0.0:
+        tau_logsigma = 0.0
+    cfg["pulse_random_tau_logmean"] = tau_logmean
+    cfg["pulse_random_tau_logsigma"] = tau_logsigma
 
     return cfg

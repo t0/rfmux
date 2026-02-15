@@ -342,8 +342,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.cb_fft = QtWidgets.QCheckBox("FFT", checked=self.is_mock_mode)
         self.cb_ssb = QtWidgets.QCheckBox("Single Sideband PSD", checked=not self.is_mock_mode)
         self.cb_dsb = QtWidgets.QCheckBox("Dual Sideband PSD", checked=False)
+        self.cb_hist = QtWidgets.QCheckBox("Amplitude Histogram", checked=False)
         
-        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft):
+        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_hist):
             cb_plot_type.toggled.connect(self._build_layout)
         
         self.cb_ssb.toggled.connect(self._handle_psd_toggle)

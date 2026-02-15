@@ -91,6 +91,12 @@ class MockResonatorModel:
             'random_amp_max': default_config['pulse_random_amp_max'],
             'random_amp_logmean': default_config['pulse_random_amp_logmean'],
             'random_amp_logsigma': default_config['pulse_random_amp_logsigma'],
+            # Random pulse tau_decay distribution
+            'random_tau_mode': default_config['pulse_random_tau_mode'],
+            'random_tau_min': default_config['pulse_random_tau_min'],
+            'random_tau_max': default_config['pulse_random_tau_max'],
+            'random_tau_logmean': default_config['pulse_random_tau_logmean'],
+            'random_tau_logsigma': default_config['pulse_random_tau_logsigma'],
         }
         self.last_pulse_time = {}  # Track last pulse time for each resonator
         self.last_update_time = 0  # Track last time we updated QP densities
@@ -292,9 +298,14 @@ class MockResonatorModel:
             'random_amp_max': config.get('pulse_random_amp_max', 3.0),
             'random_amp_logmean': config.get('pulse_random_amp_logmean', 0.7),
             'random_amp_logsigma': config.get('pulse_random_amp_logsigma', 0.3),
+            'random_tau_mode': config.get('pulse_random_tau_mode', 'fixed'),
+            'random_tau_min': config.get('pulse_random_tau_min', 5e-4),
+            'random_tau_max': config.get('pulse_random_tau_max', 5e-3),
+            'random_tau_logmean': config.get('pulse_random_tau_logmean', -6.9),
+            'random_tau_logsigma': config.get('pulse_random_tau_logsigma', 0.5),
         })
         
-        print(f"Pulse config updated: tau_rise={self.pulse_config['tau_rise']}, tau_decay={self.pulse_config['tau_decay']}")
+        print(f"Pulse config updated: tau_rise={self.pulse_config['tau_rise']}, tau_decay={self.pulse_config['tau_decay']}, random_tau_mode={self.pulse_config['random_tau_mode']}")
 
         # Step 1: Create a reference MR_complex_resonator to compute Lk and R from T and Popt
         print(f"Computing Lk and R from T={T} K and Popt={Popt} W")
@@ -532,17 +543,23 @@ class MockResonatorModel:
                 tau_decay=config.get('pulse_tau_decay', 1e-3),
                 amplitude=config.get('pulse_amplitude', 2.0),
                 resonators=config.get('pulse_resonators', 'all'),
-                # Random amplitude distribution (random mode)
+                # Random amplitude distribution
                 random_amp_mode=config.get('pulse_random_amp_mode', 'fixed'),
                 random_amp_min=config.get('pulse_random_amp_min', 1.5),
                 random_amp_max=config.get('pulse_random_amp_max', 3.0),
                 random_amp_logmean=config.get('pulse_random_amp_logmean', 0.7),
                 random_amp_logsigma=config.get('pulse_random_amp_logsigma', 0.3),
+                # Random tau_decay distribution
+                random_tau_mode=config.get('pulse_random_tau_mode', 'fixed'),
+                random_tau_min=config.get('pulse_random_tau_min', 5e-4),
+                random_tau_max=config.get('pulse_random_tau_max', 5e-3),
+                random_tau_logmean=config.get('pulse_random_tau_logmean', -6.9),
+                random_tau_logsigma=config.get('pulse_random_tau_logsigma', 0.5),
             )
         
         self.invalidate_caches()
 
-    def s21_lc_response(self, frequency, amplitude=1.0):
+    def s21_lc_response(self, frequency, amplitude=1.0, pulse_time=None):
         """
         Calculate S21 response with optimized convergence.
         
@@ -553,21 +570,39 @@ class MockResonatorModel:
         - Physics-based Lk and R from combined nqp
         - OPTIMIZED: Skip convergence for noise-only changes via caching
         
+        Parameters
+        ----------
+        pulse_time : float or None
+            If provided, use this time for pulse contribution calculations
+            instead of ``self.last_update_time``.  This allows the PFB
+            streamer to evaluate S21 at its own simulation time without
+            competing with the slow streamer for ``last_update_time``.
+        
         THREAD SAFETY: This method is protected by _physics_lock because it 
         updates the shared state (self.mr_lekids) during calculation.
         """
         # Acquire lock to prevent race conditions with other threads (e.g. Streamer vs get_samples)
         # This is critical because update_lekids_for_current modifies shared state.
         with self._physics_lock:
-            return self._s21_lc_response_internal(frequency, amplitude)
+            return self._s21_lc_response_internal(frequency, amplitude, pulse_time)
 
-    def _s21_lc_response_internal(self, frequency, amplitude=1.0):
-        """Internal implementation of s21_lc_response (assumes lock held)."""
+    def _s21_lc_response_internal(self, frequency, amplitude=1.0, pulse_time=None):
+        """Internal implementation of s21_lc_response (assumes lock held).
+
+        Parameters
+        ----------
+        pulse_time : float or None
+            If provided, use this time for pulse contribution calculations
+            instead of ``self.last_update_time``.
+        """
         import time
         t_start = time.perf_counter()
         
         if not self.mr_lekids:
             return 1.0 + 0j
+        
+        # Use provided pulse_time or fall back to shared last_update_time
+        t_for_pulses = pulse_time if pulse_time is not None else self.last_update_time
         
         # Calculate effective nqp with fresh noise for ALL resonators (vectorized)
         base_nqp_array = np.array(self.base_nqp_values, dtype=np.float64)
@@ -579,7 +614,7 @@ class MockResonatorModel:
         for pulse in self.pulse_events:
             i = pulse['resonator_index']
             if i < len(effective_nqp_array):
-                pulse_dt = self.last_update_time - pulse['start_time']
+                pulse_dt = t_for_pulses - pulse['start_time']
                 if pulse_dt >= 0:
                     if pulse_dt < pulse['tau_rise']:
                         time_factor = (1 - np.exp(-pulse_dt / pulse['tau_rise']))
@@ -1005,12 +1040,16 @@ class MockResonatorModel:
             self.update_base_params_from_nqp(pulse_nqp_values)
             self.invalidate_caches()
         
-        # Clean up old pulses (after n decay constants)
+        # Clean up old pulses (after 15 decay constants).
         self.pulse_events = [p for p in self.pulse_events 
                            if current_time - p['start_time'] < p['tau_rise'] + p['tau_decay'] * 15]
     
     def _sample_random_pulse_amplitude(self):
-        """Sample a pulse amplitude for random mode based on configured distribution."""
+        """Sample a pulse amplitude based on configured distribution.
+        
+        Works in all pulse modes (periodic, random, manual).
+        Returns the config default when random_amp_mode is 'fixed'.
+        """
         mode = self.pulse_config.get('random_amp_mode', 'fixed')
         if mode == 'uniform':
             amin = float(self.pulse_config.get('random_amp_min', 1.5))
@@ -1024,6 +1063,30 @@ class MockResonatorModel:
             amp = float(self.pulse_config.get('amplitude', 2.0))
         # Enforce non-decreasing QP unless explicitly configured otherwise
         return max(1.0, amp)
+
+    def _sample_random_pulse_tau(self):
+        """Sample a pulse tau_decay based on configured distribution.
+        
+        In MKID physics, tau_rise is quasi-instantaneous (~µs) and fixed,
+        while tau_decay (QP recombination) varies with QP density, temperature,
+        material defects, etc.  This method randomises tau_decay only.
+        
+        Works in all pulse modes (periodic, random, manual).
+        Returns the config default when random_tau_mode is 'fixed'.
+        """
+        mode = self.pulse_config.get('random_tau_mode', 'fixed')
+        if mode == 'uniform':
+            tmin = float(self.pulse_config.get('random_tau_min', 5e-4))
+            tmax = float(self.pulse_config.get('random_tau_max', 5e-3))
+            tau = np.random.uniform(tmin, tmax)
+        elif mode == 'lognormal':
+            mu = float(self.pulse_config.get('random_tau_logmean', -6.9))
+            sigma = float(self.pulse_config.get('random_tau_logsigma', 0.5))
+            tau = np.random.lognormal(mean=mu, sigma=sigma)
+        else:
+            tau = float(self.pulse_config.get('tau_decay', 0.1))
+        # tau_decay must be strictly positive
+        return max(1e-9, tau)
 
     def _check_trigger_pulses(self, current_time, dt):
         """Check if new pulses should be triggered based on mode.
@@ -1052,7 +1115,9 @@ class MockResonatorModel:
             for res_idx in target_resonators:
                 last_time = self.last_pulse_time.get(res_idx, -period)
                 if current_time - last_time >= period:
-                    self.add_pulse_event(res_idx, current_time)
+                    amp = self._sample_random_pulse_amplitude()
+                    tau = self._sample_random_pulse_tau()
+                    self.add_pulse_event(res_idx, current_time, amplitude=amp, tau_decay=tau)
                     self.last_pulse_time[res_idx] = current_time
         
         elif mode == 'random':
@@ -1061,10 +1126,11 @@ class MockResonatorModel:
             for res_idx in target_resonators:
                 if np.random.random() < prob * dt:
                     amp = self._sample_random_pulse_amplitude()
-                    self.add_pulse_event(res_idx, current_time, amplitude=amp)
+                    tau = self._sample_random_pulse_tau()
+                    self.add_pulse_event(res_idx, current_time, amplitude=amp, tau_decay=tau)
                     self.last_pulse_time[res_idx] = current_time
     
-    def add_pulse_event(self, resonator_index, start_time, amplitude=None):
+    def add_pulse_event(self, resonator_index, start_time, amplitude=None, tau_decay=None):
         """Manually add a pulse event to a specific resonator.
         
         Parameters
@@ -1075,6 +1141,9 @@ class MockResonatorModel:
             Time when the pulse starts (seconds)
         amplitude : float, optional
             Maximum QP density increase. If None, uses config default.
+        tau_decay : float, optional
+            Decay time constant in seconds. If None, uses config default.
+            Typically sampled from _sample_random_pulse_tau() by the caller.
         """
         if resonator_index >= len(self.mr_lekids):
             print(f"Warning: Resonator index {resonator_index} out of range")
@@ -1083,9 +1152,9 @@ class MockResonatorModel:
         pulse = {
             'resonator_index': resonator_index,
             'start_time': start_time,
-            'amplitude': amplitude or self.pulse_config['amplitude'],
+            'amplitude': amplitude if amplitude is not None else self.pulse_config['amplitude'],
             'tau_rise': self.pulse_config['tau_rise'],
-            'tau_decay': self.pulse_config['tau_decay'],
+            'tau_decay': tau_decay if tau_decay is not None else self.pulse_config['tau_decay'],
         }
         self.pulse_events.append(pulse)
         
@@ -1193,7 +1262,7 @@ class MockResonatorModel:
         # CIC droop can make the response much less than 1 at high frequencies
         return max(filter_response, 0.0)
     
-    def calculate_module_response_coupled(self, module, num_samples=1, sample_rate=None, start_time=0):
+    def calculate_module_response_coupled(self, module, num_samples=1, sample_rate=None, start_time=0, pulse_time=None):
         """
         Calculate coupled response for all channels in a module using vectorized operations.
         
@@ -1289,7 +1358,7 @@ class MockResonatorModel:
             if num_samples == 1:
                 # Apply S21 response using FAST path (state already updated for this packet)
                 # Note: s21_lc_response acquires _physics_lock internally
-                s21_complex = self.s21_lc_response(total_freq, amp)
+                s21_complex = self.s21_lc_response(total_freq, amp, pulse_time=pulse_time)
                 s21_call_count += 1
                 
                 # Combine amplitude, S21, and phase
@@ -1360,53 +1429,76 @@ class MockResonatorModel:
                 responses[ch] = complex(signals[i])
         
         else:
-            # Multiple time samples - evaluate S21 for each sample to get fresh noise
+            # Multiple time samples — evaluate S21 for each sample with fresh
+            # noise AND per-sample pulse_time.
+            #
+            # THREAD SAFETY: Hold _physics_lock for the entire batch so the
+            # slow streamer cannot modify shared LEKID state between samples.
+            # This prevents "jumps" where intervening slow-streamer S21 calls
+            # would temporarily shift the resonator parameters mid-batch.
+            #
+            # Per-sample pulse_time ensures the QP density (and therefore the
+            # pulse shape) evolves correctly across the batch, rather than
+            # being frozen at a single t_start for all N samples.
+
             t = start_time + np.arange(num_samples) / sample_rate
             responses = {}
-            
-            # For each observing channel
-            for i, ch in enumerate(obs_channels):
-                signal = np.zeros(num_samples, dtype=complex)
-                obs_freq = obs_freqs_arr[i]
-                
-                # For each time sample
-                for sample_idx in range(num_samples):
-                    sample_contribution = 0 + 0j
-                    
-                    # Process each active tone with fresh S21 evaluation
-                    for j in range(len(active_tone_freqs)):
-                        if within_bandwidth[i, j]:
-                            tone_freq = active_tone_freqs[j]
-                            tone_amp_base = active_tone_amps[j]
-                            freq_diff = freq_diffs[i, j]
-                            
-                            # Get fresh S21 for this tone at this time sample
-                            # This gives us new QP noise realization for each sample
-                            amp_magnitude = abs(tone_amp_base)
-                            if amp_magnitude > 0:
-                                # Re-evaluate S21 with fresh noise
-                                s21_fresh = self.s21_lc_response(tone_freq, amp_magnitude)
-                                
-                                # Apply phase from original tone
-                                phase_original = np.angle(tone_amp_base)
-                                tone_amp_fresh = amp_magnitude * s21_fresh * np.exp(1j * phase_original)
-                            else:
-                                tone_amp_fresh = 0 + 0j
-                            
-                            # Apply CIC filter response
-                            cic_response = self._get_cached_cic_response(freq_diff, dec_stage)
-                            
-                            # Calculate beat contribution at this time
-                            if abs(freq_diff) < 0.1:  # DC
-                                sample_contribution += tone_amp_fresh * cic_response
-                            else:
-                                # Beat frequency at time t[sample_idx]
-                                beat_phase = 2 * np.pi * freq_diff * t[sample_idx]
-                                sample_contribution += tone_amp_fresh * cic_response * np.exp(1j * beat_phase)
-                    
-                    signal[sample_idx] = sample_contribution
-                
-                responses[ch] = signal
+
+            # Base pulse time — will be advanced per sample
+            base_pulse_time = pulse_time  # May be None (slow streamer) or float (PFB)
+
+            with self._physics_lock:
+                # For each observing channel
+                for i, ch in enumerate(obs_channels):
+                    signal = np.zeros(num_samples, dtype=complex)
+                    obs_freq = obs_freqs_arr[i]
+
+                    # For each time sample
+                    for sample_idx in range(num_samples):
+                        sample_contribution = 0 + 0j
+
+                        # Per-sample pulse time: advance from base by sample offset
+                        if base_pulse_time is not None:
+                            sample_pulse_time = base_pulse_time + sample_idx / sample_rate
+                        else:
+                            sample_pulse_time = None
+
+                        # Process each active tone with fresh S21 evaluation
+                        for j in range(len(active_tone_freqs)):
+                            if within_bandwidth[i, j]:
+                                tone_freq = active_tone_freqs[j]
+                                tone_amp_base = active_tone_amps[j]
+                                freq_diff = freq_diffs[i, j]
+
+                                # Get fresh S21 for this tone at this time sample
+                                # This gives us new QP noise realization for each sample
+                                amp_magnitude = abs(tone_amp_base)
+                                if amp_magnitude > 0:
+                                    # Call internal (lock already held) with per-sample pulse_time
+                                    s21_fresh = self._s21_lc_response_internal(
+                                        tone_freq, amp_magnitude, pulse_time=sample_pulse_time
+                                    )
+
+                                    # Apply phase from original tone
+                                    phase_original = np.angle(tone_amp_base)
+                                    tone_amp_fresh = amp_magnitude * s21_fresh * np.exp(1j * phase_original)
+                                else:
+                                    tone_amp_fresh = 0 + 0j
+
+                                # Apply CIC filter response
+                                cic_response = self._get_cached_cic_response(freq_diff, dec_stage)
+
+                                # Calculate beat contribution at this time
+                                if abs(freq_diff) < 0.1:  # DC
+                                    sample_contribution += tone_amp_fresh * cic_response
+                                else:
+                                    # Beat frequency at time t[sample_idx]
+                                    beat_phase = 2 * np.pi * freq_diff * t[sample_idx]
+                                    sample_contribution += tone_amp_fresh * cic_response * np.exp(1j * beat_phase)
+
+                        signal[sample_idx] = sample_contribution
+
+                    responses[ch] = signal
         
         return responses
 

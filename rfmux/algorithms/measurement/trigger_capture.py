@@ -132,9 +132,16 @@ async def _wait_for_baseline(
     Called between noise estimation and capture to ensure the first
     sample in the capture loop is at a known-good baseline, eliminating
     the need for a warmup phase in PulseCapture.
+
+    Also refines the baseline mean in ``noise_stats`` using the
+    confirmed-clean samples collected during the baseline wait.
+    This fixes the DC mean bias that occurs when the initial noise
+    estimation window is contaminated by pulse data.
     """
     loop = asyncio.get_running_loop()
     baseline_count: Dict[int, int] = {c: 0 for c in channels}
+    # Collect confirmed-baseline samples for mean refinement
+    baseline_samples: Dict[int, list] = {c: [] for c in channels}
 
     with streamer.get_multicast_socket(host, port=port) as sock:
         sock.setblocking(False)
@@ -150,7 +157,6 @@ async def _wait_for_baseline(
                 pkt = streamer.PFBPacket(data)
                 raw = np.array(pkt.samples)
                 for slot_idx, ch in enumerate(channels):
-                    # Check last sample in this packet for this channel
                     ch_samples = raw[slot_idx::n_groups]
                     if len(ch_samples) > 0:
                         s = ch_samples[-1]
@@ -159,8 +165,11 @@ async def _wait_for_baseline(
                         dev_Q = abs(s.imag - ns.mean_Q) / max(ns.std_Q, 1e-30)
                         if dev_I < threshold_sigma and dev_Q < threshold_sigma:
                             baseline_count[ch] += 1
+                            # Collect all samples from this confirmed-baseline packet
+                            baseline_samples[ch].extend(ch_samples.tolist())
                         else:
                             baseline_count[ch] = 0
+                            baseline_samples[ch].clear()
             else:
                 pkt = streamer.ReadoutPacket(data)
                 if pkt.module != module - 1:
@@ -173,10 +182,18 @@ async def _wait_for_baseline(
                     dev_Q = abs(s.imag - ns.mean_Q) / max(ns.std_Q, 1e-30)
                     if dev_I < threshold_sigma and dev_Q < threshold_sigma:
                         baseline_count[ch] += 1
+                        baseline_samples[ch].append(complex(s))
                     else:
                         baseline_count[ch] = 0
+                        baseline_samples[ch].clear()
 
             if all(c >= confirm_packets for c in baseline_count.values()):
+                # Refine baseline mean from confirmed-clean samples
+                for ch in channels:
+                    if len(baseline_samples[ch]) > 10:
+                        bl = np.array(baseline_samples[ch], dtype=np.complex128)
+                        noise_stats[ch].mean_I = float(np.mean(bl.real))
+                        noise_stats[ch].mean_Q = float(np.mean(bl.imag))
                 return
 
     print(f"[trigger_capture] Warning: baseline confirmation timed out "

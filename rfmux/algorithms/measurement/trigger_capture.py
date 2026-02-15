@@ -460,8 +460,9 @@ async def trigger_capture(
     threshold_sigma: float = 5.0,
     end_sigma: float = 1.5,
     buf_size: int = 5000,
-    pre_samples: int = 20,
-    end_samples: int = 100,
+    margin_fraction: float = 0.1,
+    min_pulse_samples: int = 0,
+    enable_pileup: bool = True,
     noise_packets: int = 1000,
 ):
     """Capture threshold-triggered pulses from slow, fast, or both streamers.
@@ -486,10 +487,9 @@ async def trigger_capture(
         End-of-pulse threshold in σ.
     buf_size : int
         Circular buffer size per channel.
-    pre_samples : int
-        Pre-trigger samples to include in pulse window.
-    end_samples : int
-        Samples signal must stay within end_sigma to end pulse.
+    margin_fraction : float
+        Fraction of pulse duration used as symmetric pre/post margin
+        and adaptive end-of-pulse confirmation count.  Default 0.1.
     noise_packets : int
         Packets for noise estimation.
 
@@ -563,10 +563,9 @@ async def trigger_capture(
             pcap = PulseCapture(
                 buf_size=buf_size, channels=channels, noise_stats=noise,
                 threshold_sigma=threshold_sigma, end_sigma=end_sigma,
-                sample_rate=rate, pre=pre_samples, end_samples=end_samples)
-            # Baseline already confirmed — skip warmup
-            for st in pcap.state.values():
-                st.warmup_done = True
+                sample_rate=rate, margin_fraction=margin_fraction,
+                min_pulse_samples=min_pulse_samples,
+                enable_pileup=enable_pileup)
 
             await _receive_stream(
                 host, port, pkt_sz, pcap, channels, module,
@@ -615,16 +614,15 @@ async def trigger_capture(
         pcap_slow = PulseCapture(
             buf_size=buf_size, channels=channels, noise_stats=slow_noise,
             threshold_sigma=threshold_sigma, end_sigma=end_sigma,
-            sample_rate=slow_rate, pre=pre_samples, end_samples=end_samples)
+            sample_rate=slow_rate, margin_fraction=margin_fraction,
+            min_pulse_samples=min_pulse_samples,
+            enable_pileup=enable_pileup)
         pcap_fast = PulseCapture(
             buf_size=buf_size, channels=channels, noise_stats=fast_noise,
             threshold_sigma=threshold_sigma, end_sigma=end_sigma,
-            sample_rate=pfb_rate, pre=pre_samples, end_samples=end_samples)
-        # Baseline already confirmed — skip warmup on both
-        for st in pcap_slow.state.values():
-            st.warmup_done = True
-        for st in pcap_fast.state.values():
-            st.warmup_done = True
+            sample_rate=pfb_rate, margin_fraction=margin_fraction,
+            min_pulse_samples=min_pulse_samples,
+            enable_pileup=enable_pileup)
 
         # ── Multiplexed receive: both sockets in one loop ─────────
         # Using asyncio.wait(FIRST_COMPLETED) to fairly interleave

@@ -6,6 +6,7 @@ build-backend = "scikit_build_core.build"
 name = "rfmux"
 dynamic = ["version"]
 description = "Python library for t0.technology CRS board running rfmux firmware"
+readme = "README.md"
 authors = [
   {name="Graeme Smecher", email="gsmecher@t0.technology"},
   {name="Joshua Montgomery", email="joshua@t0.technology"},

@@ -465,6 +465,13 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                             mstats.packets_dropped += gap
                     mstats.last_seq = pkt.seq
 
+                    # Clip channel ranges to actual packet size
+                    clipped_channels = [
+                        range(r.start, min(r.stop, len(pkt)))
+                        for r in channels
+                        if r.start < len(pkt)
+                    ]
+
                     # Text dump
                     if args.text:
                         flags = []
@@ -490,11 +497,8 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                         )
 
                         # Sample channels
-                        num_pkt_channels = len(pkt)
-                        for r in channels:
+                        for r in clipped_channels:
                             for ch in r:
-                                if ch >= num_pkt_channels:
-                                    break
                                 sample = pkt[ch]
                                 print(
                                     f"  CH({module+1}.{ch+1}) "
@@ -532,34 +536,28 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                             first_frame=frame,
                         )
 
-                        # Write channel data - extract selected channels from raw int32 I/Q pairs
-                        raw = pkt.raw_samples
-                        num_pkt_channels = len(pkt)
+                        # Write channel data from raw int32 I/Q pairs.
+                        # Each pkt.raw_samples[slice] is a zero-copy view.
+                        sample_offset = 0
+                        for r in clipped_channels:
+                            df.putdata(fields["raw"],
+                                       pkt.raw_samples[2*r.start:2*r.stop],
+                                       first_frame=frame,
+                                       first_sample=2*sample_offset)
+                            sample_offset += len(r)
 
-                        # Build flat list of selected channel indices
-                        selected_chs = [ch for r in channels for ch in r if ch < num_pkt_channels]
+                        # Extend mplex_idx to match the longest module
+                        # Write index if this module is ahead of the shared index
+                        if frame >= bstats.packets_indexed:
+                            df.putdata(
+                                "mplex_idx",
+                                index,
+                                first_frame=bstats.packets_indexed,
+                            )
+                            bstats.packets_indexed = frame + 1
 
-                        if selected_chs:
-                            # Each channel occupies 2 consecutive int32 values (I, Q)
-                            idx = np.array(selected_chs, dtype=np.intp)
-                            raw_data = np.empty(2 * len(idx), dtype=np.int32)
-                            raw_data[0::2] = raw[2 * idx]
-                            raw_data[1::2] = raw[2 * idx + 1]
-
-                            df.putdata(fields["raw"], raw_data, first_frame=frame)
-
-                            # Extend mplex_idx to match the longest module
-                            # Write index if this module is ahead of the shared index
-                            if frame >= bstats.packets_indexed:
-                                df.putdata(
-                                    "mplex_idx",
-                                    index,
-                                    first_frame=bstats.packets_indexed,
-                                )
-                                bstats.packets_indexed = frame + 1
-
-                            # Increment per-module frame counter
-                            mstats.dirfile_frame += 1
+                        # Increment per-module frame counter
+                        mstats.dirfile_frame += 1
 
 
 def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
@@ -748,8 +746,7 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                         df.putdata(fields["slot_idx"], slot_idx, first_frame=frame)
 
                         # Write raw int32 I/Q pairs directly (no scaling needed)
-                        raw = pkt.raw_samples
-                        df.putdata(fields["raw"], raw[:2 * n_samples], first_frame=frame)
+                        df.putdata(fields["raw"], pkt.raw_samples[:2 * n_samples], first_frame=frame)
 
                         # Increment per-module frame counter
                         mstats.dirfile_frame += 1

@@ -395,7 +395,7 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
             for serial, bstats in board_stats.items():
                 for module, mstats in bstats.module_stats.items():
                     print(
-                        f"Serial {serial} module {module}: "
+                        f"Serial {serial} module {module+1}: "
                         f"{mstats.packets_seen} packets seen "
                         f"({mstats.packets_dropped} dropped)",
                         file=sys.stderr,
@@ -458,7 +458,7 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                         if pkt.seq != expected_seq:
                             gap = (pkt.seq - expected_seq) & 0xFFFFFFFF
                             print(
-                                f"Dropped packet: module {module}, "
+                                f"Dropped packet: module {module+1}, "
                                 f"seq {mstats.last_seq:08x} -> {pkt.seq:08x} "
                                 f"({gap} lost)"
                             )
@@ -497,7 +497,7 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                                     break
                                 sample = pkt.get_channel(ch)
                                 print(
-                                    f"  CH({module}.{ch+1}) "
+                                    f"  CH({module+1}.{ch+1}) "
                                     f"i={sample.real:.3f} q={sample.imag:.3f} abs={abs(sample):.3f}"
                                 )
 
@@ -575,7 +575,7 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
             for serial, bstats in board_stats.items():
                 for module, mstats in bstats.module_stats.items():
                     print(
-                        f"Serial {serial} module {module}: "
+                        f"Serial {serial} module {module+1}: "
                         f"{mstats.packets_seen} packets seen "
                         f"({mstats.packets_dropped} dropped)",
                         file=sys.stderr,
@@ -647,7 +647,7 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                         if pkt.seq != expected_seq:
                             gap = (pkt.seq - expected_seq) & 0xFFFFFFFF
                             print(
-                                f"Dropped packet: module {module}, "
+                                f"Dropped packet: module {module+1}, "
                                 f"seq {mstats.last_seq:08x} -> {pkt.seq:08x} "
                                 f"({gap} lost)"
                             )

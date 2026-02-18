@@ -32,6 +32,7 @@ from rfmux.streamer import (
     STREAMER_PORT,
     PFB_STREAMER_PORT,
     PFBPACKET_NSAMP_MAX,
+    SS_PER_SECOND,
 )
 
 
@@ -231,7 +232,7 @@ def setup_dirfile_for_module(
             gd.LINCOM_ENTRY,
             timebase_field,
             0,
-            ((ts_sbs_field, ts_ss_field), (1.0, 1 / 125e6), (0, 0)),
+            ((ts_sbs_field, ts_ss_field), (1.0, 1 / SS_PER_SECOND), (0, 0)),
         )
     )
 
@@ -903,7 +904,7 @@ def setup_pfb_dirfile_for_module(
             gd.LINCOM_ENTRY,
             timebase_field,
             0,
-            ((ts_sbs_field, ts_ss_field), (1.0, 1 / 125e6), (0, 0)),
+            ((ts_sbs_field, ts_ss_field), (1.0, 1 / SS_PER_SECOND), (0, 0)),
         )
     )
 

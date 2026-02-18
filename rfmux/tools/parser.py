@@ -16,9 +16,7 @@ import argparse
 import signal
 import socket
 import sys
-import tempfile
 from collections import defaultdict
-from contextlib import closing
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -406,6 +404,9 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
 
     if args.dirfile:
         import pygetdata as gd
+        main_dirfile = gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
+    else:
+        main_dirfile = None
 
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -415,21 +416,12 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
     index = np.arange(2 * num_channels, dtype=np.uint16)
 
     # Setup packet receiver with large buffer to reduce drops
-    with (
-        closing(
-            get_multicast_socket(
-                crs_hostname=args.hostname,
-                port=STREAMER_PORT,
-                interface=interface_ip,
-                buffer_size=67108864,
-            )
-        ) as sock,
-        closing(
-            gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
-            if args.dirfile
-            else tempfile.TemporaryFile()
-        ) as main_dirfile,
-    ):
+    with get_multicast_socket(
+        crs_hostname=args.hostname,
+        port=STREAMER_PORT,
+        interface=interface_ip,
+        buffer_size=67108864,
+    ) as sock:
         receiver = ReadoutPacketReceiver(sock, reorder_window=args.reorder_window)
 
         while True:
@@ -600,6 +592,12 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
         )
         sys.exit(0)
 
+    if args.dirfile:
+        import pygetdata as gd
+        main_dirfile = gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
+    else:
+        main_dirfile = None
+
     signal.signal(signal.SIGINT, signal_handler)
 
     # Main receive loop
@@ -607,21 +605,12 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
     receiver = None
 
     # Setup packet receiver with large buffer to reduce drops
-    with (
-        closing(
-            get_multicast_socket(
-                crs_hostname=args.hostname,
-                port=PFB_STREAMER_PORT,
-                interface=interface_ip,
-                buffer_size=67108864,
-            )
-        ) as sock,
-        closing(
-            gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
-            if args.dirfile
-            else tempfile.TemporaryFile()
-        ) as main_dirfile,
-    ):
+    with get_multicast_socket(
+        crs_hostname=args.hostname,
+        port=PFB_STREAMER_PORT,
+        interface=interface_ip,
+        buffer_size=67108864,
+    ) as sock:
         receiver = PFBPacketReceiver(sock, reorder_window=args.reorder_window)
 
         while True:

@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.1](https://github.com/t0/rfmux/compare/v1.4.0...v1.4.1) (2026-02-18)
+
+
+### Bug Fixes
+
+* **parser:** correct _timebase field to use SS_PER_SECOND (156.25e6), not 125e6 ([0ae9131](https://github.com/t0/rfmux/commit/0ae9131b5d1cab57d9ef6bfb55d1bf0f8e1194d8))
+* **parser:** don't use 0-indexed numbers when printing channel or module ([07afa47](https://github.com/t0/rfmux/commit/07afa473ff667cd803e6dd6964105e5bbb56df04))
+
+
+### Performance Improvements
+
+* **parser, streamer:** use __array__ API instaed of pkt.samples ([fdfa295](https://github.com/t0/rfmux/commit/fdfa2956ced1ac9cce4797ce8fa6a7a141358015))
+* **parser:** when striping packets to disk, use gd.putdata repeatedly ([23257ae](https://github.com/t0/rfmux/commit/23257aee484b9b5e533e58a04de5fd651af30da0))
+
 ## [1.4.0](https://github.com/t0/rfmux/compare/v1.3.2...v1.4.0) (2026-02-17)
 
 

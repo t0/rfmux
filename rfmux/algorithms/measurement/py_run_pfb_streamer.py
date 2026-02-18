@@ -150,9 +150,8 @@ async def py_run_pfb_streamer(crs : CRS,
                     p = streamer.PFBPacket(data)
                     packets.append(p)
                                     
-                    samples = p.samples
                     for lst, sl in zip(slot_lists, slices):
-                        lst.extend(samples[sl])
+                        lst.extend(p[sl])
     
                     pfb_samps = [np.asarray(lst, dtype=np.complex128) for lst in slot_lists]                
                 return sorted(packets, key=lambda p: p.seq), pfb_samps

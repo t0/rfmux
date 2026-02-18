@@ -490,12 +490,12 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                         )
 
                         # Sample channels
-                        num_pkt_channels = pkt.get_num_channels()
+                        num_pkt_channels = len(pkt)
                         for r in channels:
                             for ch in r:
                                 if ch >= num_pkt_channels:
                                     break
-                                sample = pkt.get_channel(ch)
+                                sample = pkt[ch]
                                 print(
                                     f"  CH({module+1}.{ch+1}) "
                                     f"i={sample.real:.3f} q={sample.imag:.3f} abs={abs(sample):.3f}"
@@ -532,23 +532,19 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                             first_frame=frame,
                         )
 
-                        # Write channel data - extract selected channels and interleave I/Q
-                        samples = pkt.samples
-                        num_pkt_channels = pkt.get_num_channels()
+                        # Write channel data - extract selected channels from raw int32 I/Q pairs
+                        raw = pkt.raw_samples
+                        num_pkt_channels = len(pkt)
 
-                        # Gather selected channel data
-                        selected = []
-                        for r in channels:
-                            for ch in r:
-                                if ch < num_pkt_channels:
-                                    selected.append(samples[ch])
+                        # Build flat list of selected channel indices
+                        selected_chs = [ch for r in channels for ch in r if ch < num_pkt_channels]
 
-                        # Convert to interleaved I/Q format (scaled by 256)
-                        if selected:
-                            complex_array = np.array(selected, dtype=np.complex64)
-                            raw_data = np.empty(2 * len(selected), dtype=np.int32)
-                            raw_data[0::2] = (complex_array.real * 256).astype(np.int32)
-                            raw_data[1::2] = (complex_array.imag * 256).astype(np.int32)
+                        if selected_chs:
+                            # Each channel occupies 2 consecutive int32 values (I, Q)
+                            idx = np.array(selected_chs, dtype=np.intp)
+                            raw_data = np.empty(2 * len(idx), dtype=np.int32)
+                            raw_data[0::2] = raw[2 * idx]
+                            raw_data[1::2] = raw[2 * idx + 1]
 
                             df.putdata(fields["raw"], raw_data, first_frame=frame)
 
@@ -682,20 +678,19 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                         slot_channels = [pkt.slot1, pkt.slot2, pkt.slot3, pkt.slot4][:num_slots]
 
                         # Sample a few interleaved values
-                        samples = pkt.samples
-                        max_display = min(8, pkt.num_samples)
+                        max_display = min(8, len(pkt))
                         for i in range(max_display):
                             # Samples are interleaved across slots
                             slot_idx = i % num_slots
                             ch = slot_channels[slot_idx]
-                            sample = samples[i]
+                            sample = pkt[i]
                             print(
                                 f"  Sample[{i}] slot{slot_idx+1}->ch{ch+1}: "
                                 f"i={sample.real:.3f} q={sample.imag:.3f} abs={abs(sample):.3f}"
                             )
 
-                        if pkt.num_samples > max_display:
-                            print(f"  ... ({pkt.num_samples - max_display} more samples)")
+                        if len(pkt) > max_display:
+                            print(f"  ... ({len(pkt) - max_display} more samples)")
 
                     # Dirfile output
                     if args.dirfile:
@@ -746,19 +741,15 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                         # For PFB4: [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, ...]
                         # Where: 0=slot1_I, 1=slot1_Q, 2=slot2_I, 3=slot2_Q, ...
                         # This repeats with period = 2 * num_slots
-                        num_samples = len(pkt.samples)
+                        n_samples = len(pkt)
                         period = 2 * num_slots
-                        slot_idx = np.tile(np.arange(period, dtype=np.uint16), (num_samples * 2 + period - 1) // period)[:2 * num_samples]
+                        slot_idx = np.tile(np.arange(period, dtype=np.uint16), (n_samples * 2 + period - 1) // period)[:2 * n_samples]
 
                         df.putdata(fields["slot_idx"], slot_idx, first_frame=frame)
 
-                        # Write samples (interleaved I/Q format, scaled by 256)
-                        samples = pkt.samples
-                        raw_data = np.empty(2 * len(samples), dtype=np.int32)
-                        raw_data[0::2] = (np.real(samples) * 256).astype(np.int32)
-                        raw_data[1::2] = (np.imag(samples) * 256).astype(np.int32)
-
-                        df.putdata(fields["raw"], raw_data, first_frame=frame)
+                        # Write raw int32 I/Q pairs directly (no scaling needed)
+                        raw = pkt.raw_samples
+                        df.putdata(fields["raw"], raw[:2 * n_samples], first_frame=frame)
 
                         # Increment per-module frame counter
                         mstats.dirfile_frame += 1

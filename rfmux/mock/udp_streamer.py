@@ -432,8 +432,8 @@ class MockCRSUDPStreamer(threading.Thread):
             seq=seq)
 
         # Clip and assign complex samples to packet
-        packet.samples = (np.clip(channel_samples.real, -8388608, 8388607) +
-                1j*np.clip(channel_samples.imag, -8388608, 8388607)).tolist()
+        packet[:] = (np.clip(channel_samples.real, -8388608, 8388607) +
+                1j*np.clip(channel_samples.imag, -8388608, 8388607))
         packet.ts = ts
 
         timing_packet_create = time.perf_counter()

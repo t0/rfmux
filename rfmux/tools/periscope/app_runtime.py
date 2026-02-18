@@ -603,10 +603,12 @@ class PeriscopeRuntime:
             t_rel (float | None): The relative timestamp for this packet.
         """
         # Convert 24-bit datapath to 16-bit ADC scale
-        samples = pkt.samples / 256
+        # np.array(pkt) applies the first /256 (packetizer gain);
+        # the second /256 brings 24-bit values down to 16-bit ADC scale.
+        samples = np.array(pkt) / 256
 
         for ch_val in self.all_chs: # Renamed ch
-            if len(samples) <= ch_val-1:
+            if len(pkt) <= ch_val-1:
                 continue # don't plot channels that aren't streamed
 
             sample = samples[ch_val-1]

@@ -9,7 +9,7 @@ Unified API for CRS packet streaming, including:
 """
 
 # Import C++ packet receiver and structures, and ensure version parity
-_PY_API_VERSION = 0  # must match _SO_API_VERSION in bindings.cpp
+_PY_API_VERSION = 1  # must match _SO_API_VERSION in bindings.cpp
 try:
     from ._receiver import _SO_API_VERSION
 except ModuleNotFoundError as e:

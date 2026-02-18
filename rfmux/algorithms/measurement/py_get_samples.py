@@ -240,14 +240,14 @@ async def py_get_samples(crs: CRS,
                 f"Failed to retrieve contiguous, consistent packet capture in {NUM_ATTEMPTS} attempts!"
             )
 
-    num_channels = packets[0].get_num_channels()
+    num_channels = len(packets[0])
     if channel is not None and channel > num_channels:
         raise ValueError(f"Invalid channel {channel}! Packets only contain {num_channels} channels in this readout mode.")
 
     # If average => just return time-domain averages
     if average:
         # Stack all samples into a (num_samples, num_channels) array
-        samples = np.stack([p.samples for p in packets])
+        samples = np.stack([np.array(p) for p in packets])
 
         # If reference='absolute', convert to volts
         if reference == 'absolute':
@@ -281,7 +281,7 @@ async def py_get_samples(crs: CRS,
     if channel is None:
         # Return data for all channels
         # Stack all samples into a 2D array: (num_samples, num_channels)
-        samples = np.stack([p.samples for p in packets])
+        samples = np.stack([np.array(p) for p in packets])
         if reference == 'absolute':
             samples *= VOLTS_PER_ROC
 
@@ -289,7 +289,7 @@ async def py_get_samples(crs: CRS,
         results["i"] = samples.real.T.tolist()
         results["q"] = samples.imag.T.tolist()
     else:
-        samples = np.array([p.samples[channel-1] for p in packets])
+        samples = np.array([p[channel-1] for p in packets])
         if reference=='absolute':
             samples *= VOLTS_PER_ROC
 

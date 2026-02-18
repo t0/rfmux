@@ -109,8 +109,9 @@ namespace packets {
 		static ReadoutPacket from_bytes(const void* data, size_t len);
 		py::bytes to_bytes() const;
 
-		const auto& samples() const { return samples_; }
-		auto& samples() { return samples_; }
+		// Raw int32 I/Q pairs as stored on the wire
+		const auto& raw_samples() const { return raw_samples_; }
+		auto& raw_samples() { return raw_samples_; }
 
 		const Timestamp& timestamp() const { return timestamp_; }
 		Timestamp& timestamp() { return timestamp_; }
@@ -121,22 +122,8 @@ namespace packets {
 				   : SHORT_PACKET_CHANNELS;
 		}
 
-		const auto& get_channel(int ch) const {
-			if (ch < 0 || ch >= get_num_channels())
-				throw std::out_of_range("Channel index out of range");
-			return samples_[ch];
-		}
-
-		void set_channel(int ch, std::complex<double> value) {
-			if (ch < 0 || ch >= get_num_channels())
-				throw std::out_of_range("Channel index out of range");
-			if (ch >= (int)samples_.size())
-				samples_.resize(get_num_channels());
-			samples_[ch] = value;
-		}
-
 	private:
-		std::vector<std::complex<double>> samples_;
+		std::vector<int32_t> raw_samples_;  // interleaved I/Q pairs
 		Timestamp timestamp_;
 	};
 
@@ -149,32 +136,17 @@ namespace packets {
 		static PFBPacket from_bytes(const void* data, size_t len);
 		py::bytes to_bytes() const;
 
-		const auto& samples() const { return samples_; }
-		auto& samples() { return samples_; }
+		// Raw int32 I/Q pairs as stored on the wire
+		const auto& raw_samples() const { return raw_samples_; }
+		auto& raw_samples() { return raw_samples_; }
 
 		const Timestamp& timestamp() const { return timestamp_; }
 		Timestamp& timestamp() { return timestamp_; }
 
 		int get_num_samples() const { return num_samples; }
 
-		const auto& get_sample(int idx) const {
-			if (idx < 0 || idx >= get_num_samples())
-				throw std::out_of_range("Sample index out of range");
-			return samples_[idx];
-		}
-
-		void set_sample(int idx, std::complex<double> value) {
-			if (idx < 0 || idx >= PFBPACKET_NSAMP_MAX)
-				throw std::out_of_range("Sample index out of range");
-			if (idx >= (int)samples_.size())
-				samples_.resize(idx + 1);
-			samples_[idx] = value;
-			if (idx + 1 > num_samples)
-				num_samples = idx + 1;
-		}
-
 	private:
-		std::vector<std::complex<double>> samples_;
+		std::vector<int32_t> raw_samples_;  // interleaved I/Q pairs
 		Timestamp timestamp_;
 	};
 

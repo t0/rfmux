@@ -18,6 +18,7 @@ from .utils import (
 from .detector_digest_panel import DetectorDigestPanel
 from .noise_spectrum_panel import NoiseSpectrumPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
+from .parameter_histograms_panel import ParameterHistogramsPanel
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
 
@@ -75,7 +76,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_panel_count = 0    # Counter for naming noise tabs
         
         # Stores the initial/base CFs for detector ID and fallback. Order is important.
-        self.conceptual_resonance_frequencies: list[float] = list(self.initial_params.get('resonance_frequencies', []))
+        self.conceptual_section_frequencies: list[float] = list(self.initial_params.get('resonance_frequencies', []))
         # Stores {amp: {conceptual_idx: output_cf}}
         self.last_output_cfs_by_amp_and_conceptual_idx: dict[float, dict[int, float]] = {}
         # Amps used for the last configured/completed run, to compare if settings changed.
@@ -90,7 +91,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed
         self.current_iteration_being_processed = None # Tracks the current iteration
         self.unit_mode = "dbm"  # Current unit for magnitude display ("counts", "dbm", "volts")
-        self.normalize_traces = False  # Flag to normalize trace plots (magnitude and phase)
+        self.normalize_traces = True  # Flag to normalize trace plots (magnitude and phase)
         self.zoom_box_mode = True  # Flag for enabling/disabling pyqtgraph's zoom box
         
         # Intermediate update data storage
@@ -118,8 +119,27 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.bias_kids_output = None  # Stores the output from bias_kids algorithm
         self.nco_frequency_hz = None  # NCO frequency used when biasing (stored for export)
 
+        # Initialize batch tracking for sweep tabs (before _setup_ui)
+        self.current_batch = 0
+        self.batch_size = 8
+        
+        # Storage for sweep grid plots - cached to avoid recreating widgets
+        self.mag_sweep_plots_cache = []  # List of plot widgets for magnitude tab
+        self.iq_sweep_plots_cache = []   # List of plot widgets for IQ tab
+        
+        # Histogram panel (created lazily in _setup_plot_area)
+        self.histogram_panel = None
+        self.histograms_generated = False  # Track if histograms have been generated
+
         self._setup_ui()
-        self.resize(1200, 800) # Default window size
+        
+        # Set reasonable minimum size but allow flexible sizing
+        self.setMinimumSize(600, 400)
+        # Preferred size policy - adapt to dock size without forcing window resize
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Preferred
+        )
 
     def _setup_ui(self):
         """Sets up the main UI layout, toolbar, and plot area."""
@@ -167,6 +187,43 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Spacer to push subsequent items to the right
         toolbar_layout.addStretch(1)
+        
+        # Batch navigation controls (for sweep tabs)
+        self.batch_label = QtWidgets.QLabel("Batch:")
+        toolbar_layout.addWidget(self.batch_label)
+        
+        self.prev_batch_btn = QtWidgets.QPushButton("◀")
+        self.prev_batch_btn.setToolTip("Previous batch")
+        self.prev_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
+        self.prev_batch_btn.clicked.connect(self._prev_batch)
+        toolbar_layout.addWidget(self.prev_batch_btn)
+        
+        self.batch_info_label = QtWidgets.QLabel("1 of 1")
+        self.batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.batch_info_label.setMinimumWidth(40)
+        toolbar_layout.addWidget(self.batch_info_label)
+        
+        self.next_batch_btn = QtWidgets.QPushButton("▶")
+        self.next_batch_btn.setToolTip("Next batch")
+        self.next_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
+        self.next_batch_btn.clicked.connect(self._next_batch)
+        toolbar_layout.addWidget(self.next_batch_btn)
+        
+        self.batch_size_label = QtWidgets.QLabel("Size:")
+        toolbar_layout.addWidget(self.batch_size_label)
+        
+        self.batch_size_spin = QtWidgets.QSpinBox()
+        self.batch_size_spin.setRange(1, 200)
+        self.batch_size_spin.setValue(self.batch_size)
+        self.batch_size_spin.setSingleStep(1)
+        self.batch_size_spin.setToolTip("Detectors per batch (press Update to apply)")
+        # Note: No longer connects to immediate redraw
+        toolbar_layout.addWidget(self.batch_size_spin)
+        
+        self.batch_update_btn = QtWidgets.QPushButton("Update")
+        self.batch_update_btn.setToolTip("Apply new batch size and regenerate plots")
+        self.batch_update_btn.clicked.connect(self._apply_batch_size)
+        toolbar_layout.addWidget(self.batch_update_btn)
 
         # Normalization Checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
@@ -224,22 +281,70 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         toolbar_layout.addWidget(self.zoom_box_cb)
 
     def _setup_plot_area(self, layout):
-        """Sets up the magnitude and phase plot widgets."""
-        plot_container = QtWidgets.QWidget()
-        plot_layout = QtWidgets.QVBoxLayout(plot_container)
+        """Sets up the tabbed plot area with aggregate and combined views."""
+        # Create tab widget
+        self.plot_tabs = QtWidgets.QTabWidget()
+        self.plot_tabs.currentChanged.connect(self._on_plot_tab_changed)
+        
+        # Tab 0: Magnitude Sweeps (per-detector grid)
+        self.mag_sweeps_tab, self.mag_sweeps_grid = self._create_sweep_tab()
+        self.plot_tabs.addTab(self.mag_sweeps_tab, "Magnitude Sweeps")
+        
+        # Tab 1: IQ Circles (per-detector grid)
+        self.iq_sweeps_tab, self.iq_sweeps_grid = self._create_sweep_tab()
+        self.plot_tabs.addTab(self.iq_sweeps_tab, "IQ Circles")
+        
+        # Tab 2: Combined Plots (original combined view)
+        self.combined_tab = self._create_combined_tab()
+        self.plot_tabs.addTab(self.combined_tab, "Combined Plots")
+        
+        # Tab 3: Histograms (parameter distributions)
+        self.histogram_tab = self._create_histogram_tab()
+        self.plot_tabs.addTab(self.histogram_tab, "Histograms")
+        
+        # Set default tab to Magnitude Sweeps
+        self.plot_tabs.setCurrentIndex(0)
+        
+        layout.addWidget(self.plot_tabs)
+        
+    def _create_sweep_tab(self):
+        """Create a tab for sweep plots (magnitude or IQ). Returns (tab, grid_layout)."""
+        tab = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Scroll area for plots
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        
+        # Container for grid
+        container = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(container)
+        grid.setSpacing(10)
+        
+        scroll.setWidget(container)
+        tab_layout.addWidget(scroll)
+        
+        return tab, grid
+        
+    def _create_combined_tab(self):
+        """Create the combined plots tab (original magnitude + phase plots)."""
+        tab = QtWidgets.QWidget()
+        plot_layout = QtWidgets.QVBoxLayout(tab)
+        plot_layout.setContentsMargins(5, 5, 5, 5)
 
         # Magnitude Plot
-        vb_mag = ClickableViewBox() # Custom viewbox for potential extra click interactions
-        vb_mag.parent_window = self # Link back to this window if needed by viewbox
+        vb_mag = ClickableViewBox()
+        vb_mag.parent_window = self
         self.combined_mag_plot = pg.PlotWidget(viewBox=vb_mag)
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
         plot_item_mag = self.combined_mag_plot.getPlotItem()
-        if plot_item_mag: # Add check for None
+        if plot_item_mag:
             plot_item_mag.setTitle("Combined S21 Magnitude (All Resonances)", color=pen_color)
             plot_item_mag.setLabel('bottom', 'Frequency', units='Hz')
             plot_item_mag.showGrid(x=True, y=True, alpha=0.3)
             self.mag_legend = plot_item_mag.addLegend(offset=(10,-50),labelTextColor=pen_color)
-        self._update_mag_plot_label() # Set initial Y-axis label based on unit mode
+        self._update_mag_plot_label()
         plot_layout.addWidget(self.combined_mag_plot)
 
         # Phase Plot
@@ -247,7 +352,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         vb_phase.parent_window = self
         self.combined_phase_plot = pg.PlotWidget(viewBox=vb_phase)
         plot_item_phase = self.combined_phase_plot.getPlotItem()
-        if plot_item_phase: # Add check for None
+        if plot_item_phase:
             plot_item_phase.setTitle("Combined S21 Phase (All Resonances)", color=pen_color)
             plot_item_phase.setLabel('bottom', 'Frequency', units='Hz')
             plot_item_phase.setLabel('left', 'Phase', units='deg')
@@ -255,20 +360,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.phase_legend = plot_item_phase.addLegend(offset=(10,-50),labelTextColor=pen_color)
         plot_layout.addWidget(self.combined_phase_plot)
         
-        layout.addWidget(plot_container)
-        
-        # Link X-axes of magnitude and phase plots for synchronized zooming/panning
-        if self.combined_phase_plot and self.combined_mag_plot: # Add check for None
+        # Link X-axes for synchronized zooming/panning
+        if self.combined_phase_plot and self.combined_mag_plot:
             self.combined_phase_plot.setXLink(self.combined_mag_plot)
-        self._apply_zoom_box_mode() # Apply initial zoom box mode state
+        self._apply_zoom_box_mode()
         
-        # Apply initial theme based on dark_mode setting
-        # bg_color, pen_color are already defined
-        
+        # Apply theme
         if self.combined_mag_plot:
             self.combined_mag_plot.setBackground(bg_color)
             plot_item_mag_for_axes = self.combined_mag_plot.getPlotItem()
-            if plot_item_mag_for_axes: # Add check for None
+            if plot_item_mag_for_axes:
                 for axis_name in ("left", "bottom", "right", "top"):
                     ax = plot_item_mag_for_axes.getAxis(axis_name)
                     if ax:
@@ -278,25 +379,152 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.combined_phase_plot:
             self.combined_phase_plot.setBackground(bg_color)
             plot_item_phase_for_axes = self.combined_phase_plot.getPlotItem()
-            if plot_item_phase_for_axes: # Add check for None
+            if plot_item_phase_for_axes:
                 for axis_name in ("left", "bottom", "right", "top"):
                     ax = plot_item_phase_for_axes.getAxis(axis_name)
                     if ax:
                         ax.setPen(pen_color)
                         ax.setTextPen(pen_color)
 
-        # Connect double click signal to both magnitude and phase plot viewboxes
-        if self.combined_mag_plot: # Add check for None
+        # Connect double click handlers
+        if self.combined_mag_plot:
             view_box_mag = self.combined_mag_plot.getViewBox()
             if isinstance(view_box_mag, ClickableViewBox):
                 view_box_mag.doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
                 
-        # Also connect the phase plot's viewbox to the same handler
-        if self.combined_phase_plot: # Add check for None
+        if self.combined_phase_plot:
             view_box_phase = self.combined_phase_plot.getViewBox()
             if isinstance(view_box_phase, ClickableViewBox):
                 view_box_phase.doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
+        
+        return tab
+    
+    def _create_histogram_tab(self):
+        """Create the histograms tab containing the ParameterHistogramsPanel."""
+        tab = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Create a placeholder - we'll create the actual panel when data is available
+        placeholder = QtWidgets.QLabel("Histogram plots will appear here when multisweep data is available.")
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder.setStyleSheet("color: gray; font-style: italic;")
+        tab_layout.addWidget(placeholder)
+        
+        return tab
+    
+    def _generate_histograms(self):
+        """
+        Generate histogram plots once when multisweep data is complete.
+        This is called from all_sweeps_completed() to create the plots when fit data is ready.
+        """
+        if not self.results_by_iteration:
+            return
+        
+        # Check if we have any fit data
+        has_fit_data = False
+        for iteration_data in self.results_by_iteration.values():
+            for detector_data in iteration_data.get("data", {}).values():
+                if 'fit_params' in detector_data or 'nonlinear_fit_params' in detector_data:
+                    has_fit_data = True
+                    break
+            if has_fit_data:
+                break
+        
+        if not has_fit_data:
+            print("Note: No fit data available for histogram generation")
+            return
+        
+        # Create the histogram panel if it doesn't exist
+        if self.histogram_panel is None:
+            if hasattr(self, 'histogram_tab') and self.histogram_tab:
+                # Clear placeholder
+                layout = self.histogram_tab.layout()
+                if layout:
+                    while layout.count():
+                        item = layout.takeAt(0)
+                        if item.widget():
+                            item.widget().deleteLater()
+                    
+                    # Create the actual histogram panel with data
+                    self.histogram_panel = ParameterHistogramsPanel(
+                        parent=self.histogram_tab,
+                        multisweep_panel=self,
+                        amplitude_idx=None,  # Will use last/highest amplitude by default
+                        nbins=30,
+                        dark_mode=self.dark_mode
+                    )
+                    layout.addWidget(self.histogram_panel)
+        else:
+            # Panel exists, just reload data (for re-run scenario)
+            if hasattr(self.histogram_panel, '_load_and_plot_data'):
+                self.histogram_panel._load_and_plot_data()
+    
+    def _ensure_histogram_panel(self):
+        """Ensure the histogram panel exists - no longer regenerates plots on tab open."""
+        # If histograms haven't been generated yet, just return
+        # They will be generated when all_sweeps_completed() is called
+        if not self.histograms_generated:
+            return
+        
+        # If we get here and panel doesn't exist but should, create it
+        # This handles edge cases like theme changes
+        if self.histogram_panel is None and self.results_by_iteration:
+            self._generate_histograms()
 
+
+    def _on_plot_tab_changed(self, index):
+        """Handle plot tab changes - show/hide batch controls appropriately."""
+        # Batch controls visible for sweep tabs (0, 1), hidden for combined tab (2)
+        is_sweep_tab = index in (0, 1)
+        
+        self.batch_label.setVisible(is_sweep_tab)
+        self.prev_batch_btn.setVisible(is_sweep_tab)
+        self.batch_info_label.setVisible(is_sweep_tab)
+        self.next_batch_btn.setVisible(is_sweep_tab)
+        self.batch_size_label.setVisible(is_sweep_tab)
+        self.batch_size_spin.setVisible(is_sweep_tab)
+        self.batch_update_btn.setVisible(is_sweep_tab)
+        
+        # Redraw the active tab's plots if we have data
+        if self.results_by_iteration:
+            self._redraw_plots()
+    
+    def _apply_batch_size(self):
+        """Apply the batch size from the spin box and regenerate plots."""
+        new_batch_size = self.batch_size_spin.value()
+        if new_batch_size != self.batch_size:
+            self.batch_size = new_batch_size
+            self.current_batch = 0
+            self._redraw_plots()
+    
+    def _prev_batch(self):
+        """Show previous batch."""
+        if self.current_batch > 0:
+            self.current_batch -= 1
+            self._redraw_plots()
+    
+    def _next_batch(self):
+        """Show next batch."""
+        # Get current tab to determine which data to use
+        current_tab_idx = self.plot_tabs.currentIndex()
+        if current_tab_idx not in (0, 1):  # Only sweep tabs have batches
+            return
+            
+        if not self.results_by_iteration:
+            return
+        
+        # Count detectors
+        detector_ids = set()
+        for iteration_data in self.results_by_iteration.values():
+            detector_ids.update(iteration_data["data"].keys())
+        
+        num_detectors = len(detector_ids)
+        total_batches = max(1, (num_detectors + self.batch_size - 1) // self.batch_size)
+        
+        if self.current_batch < total_batches - 1:
+            self.current_batch += 1
+            self._redraw_plots()
 
     def _toggle_trace_normalization(self, checked):
         """
@@ -507,9 +735,85 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _redraw_plots(self):
         """
-        Clears and redraws all plot items (magnitude and phase curves, legends, CF lines)
-        based on the current `results_by_amplitude` and UI settings (unit, normalization).
+        Redraws plots based on the currently active tab.
+        For sweep tabs (0, 1), uses grid plotting. For combined tab (2), uses original logic.
+        For histogram tab (3), updates histogram panel.
         """
+        # Early return if no data
+        num_iterations = len(self.results_by_iteration)
+        if num_iterations == 0:
+            # Clear any existing plots
+            if hasattr(self, 'combined_mag_plot') and self.combined_mag_plot:
+                self.combined_mag_plot.clear()
+            if hasattr(self, 'combined_phase_plot') and self.combined_phase_plot:
+                self.combined_phase_plot.clear()
+            return
+        
+        # Get current tab
+        current_tab_idx = self.plot_tabs.currentIndex()
+        
+        # Tabs 0 and 1: Grid sweep plots (magnitude and IQ)
+        if current_tab_idx in (0, 1):
+            self._redraw_sweep_grid(current_tab_idx)
+        # Tab 2: Combined plots (original view)
+        elif current_tab_idx == 2:
+            self._redraw_combined_plots()
+        # Tab 3: Histograms (parameter distributions)
+        elif current_tab_idx == 3:
+            # Ensure histogram panel is created and loaded with data
+            self._ensure_histogram_panel()
+    
+    def _redraw_sweep_grid(self, tab_idx):
+        """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
+        from .multisweep_grid_helpers import (
+            prepare_detector_data_from_iterations,
+            create_amplitude_color_map,
+            update_sweep_grid
+        )
+        
+        # Prepare detector-based data from iterations
+        detector_data = prepare_detector_data_from_iterations(self.results_by_iteration)
+        
+        if not detector_data:
+            return
+        
+        # Get all amplitudes for color mapping
+        all_amps = set()
+        for det_data in detector_data.values():
+            all_amps.update(det_data.keys())
+        
+        # Create amplitude color mapping (matches combined plot colors)
+        amplitude_to_color = create_amplitude_color_map(all_amps, self.dark_mode)
+        
+        # Determine plot type, grid, and cache based on tab
+        if tab_idx == 0:
+            plot_type = 'magnitude'
+            grid_layout = self.mag_sweeps_grid
+            widget_cache = self.mag_sweep_plots_cache
+        else:  # tab_idx == 1
+            plot_type = 'iq'
+            grid_layout = self.iq_sweeps_grid
+            widget_cache = self.iq_sweep_plots_cache
+        
+        # Update the grid with widget caching
+        update_sweep_grid(
+            grid_layout=grid_layout,
+            data_by_detector=detector_data,
+            plot_type=plot_type,
+            current_batch=self.current_batch,
+            batch_size=self.batch_size,
+            amplitude_to_color=amplitude_to_color,
+            dark_mode=self.dark_mode,
+            unit_mode=self.unit_mode,
+            normalize=self.normalize_traces,
+            prev_btn=self.prev_batch_btn,
+            next_btn=self.next_batch_btn,
+            batch_label=self.batch_info_label,
+            widget_cache=widget_cache
+        )
+    
+    def _redraw_combined_plots(self):
+        """Redraw the combined magnitude and phase plots (original view)."""
         if not self.combined_mag_plot or not self.combined_phase_plot:
             # Plots haven't been initialized yet
             return
@@ -707,6 +1011,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             identifier = f"module{self.target_module}"
             self.data_ready.emit("multisweep", identifier, export_data)
         
+        # Generate histogram plots once when all data is complete
+        if self.results_by_iteration and not self.histograms_generated:
+            self._generate_histograms()
+            self.histograms_generated = True
+        
         # Auto-open detector digest for the first detector (lowest frequency)
         if self.results_by_iteration:
             self._open_detector_digest_for_index(1)
@@ -860,13 +1169,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Ensure MultisweepDialog is available (local import to avoid circular dependencies if any)
         from .dialogs import MultisweepDialog
 
-        if not self.conceptual_resonance_frequencies: # Check conceptual frequencies
+        if not self.conceptual_section_frequencies: # Check conceptual frequencies
             QtWidgets.QMessageBox.warning(self, "Cannot Re-run",
                                           "No center frequencies are known to periscope to run on.")
             return
 
         # --- Determine frequencies to seed the dialog ---
-        dialog_seed_frequencies = list(self.conceptual_resonance_frequencies) # Start with conceptual
+        dialog_seed_frequencies = list(self.conceptual_section_frequencies) # Start with conceptual
 
         ##### Getting the fit values for updating in re-run ######
 
@@ -877,7 +1186,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # Use a representative amplitude from the current/last run to seed the dialog
             # For simplicity, let's use the first amplitude from the current_run_amps.
             representative_amp_for_seeding = self.current_run_amps[0]
-            for idx, conceptual_cf in enumerate(self.conceptual_resonance_frequencies):
+            for idx, conceptual_cf in enumerate(self.conceptual_section_frequencies):
                 remembered_cf = self._get_closest_remembered_cf(idx, representative_amp_for_seeding)
                 if remembered_cf is not None:
                     dialog_seed_frequencies[idx] = remembered_cf
@@ -892,7 +1201,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         dialog = MultisweepDialog(
             parent=self,
-            resonance_frequencies=dialog_seed_frequencies, # Seed with potentially updated CFs
+            section_center_frequencies=dialog_seed_frequencies, # Seed with potentially updated CFs
             dac_scales=self.dac_scales,
             current_module=self.target_module,
             initial_params=dialog_initial_params, # Pass other existing params
@@ -920,39 +1229,39 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 return # Dialog returned None, likely due to validation error
 
             new_amps_for_this_run = list(new_params_from_dialog.get('amps', []))
-            # resonance_frequencies_from_dialog are the ones dialog was seeded with, as it doesn't change them.
-            resonance_frequencies_from_dialog = list(new_params_from_dialog.get('resonance_frequencies', []))
+            # section_frequencies_from_dialog are the ones dialog was seeded with, as it doesn't change them.
+            section_frequencies_from_dialog = list(new_params_from_dialog.get('resonance_frequencies', []))
 
             # --- Determine the final input CFs for the new sweep task ---
             # This list will be passed to the MultisweepTask as its baseline.
             # The task itself will then refine this per amplitude.
-            final_baseline_cfs_for_new_task = list(self.conceptual_resonance_frequencies)
+            final_baseline_cfs_for_new_task = list(self.conceptual_section_frequencies)
 
             if not new_amps_for_this_run: # No amplitudes specified, fall back or warn
                  QtWidgets.QMessageBox.warning(self, "Configuration Error", "No amplitudes specified for the new sweep.")
-                 # Default to conceptual, or could use resonance_frequencies_from_dialog
-                 final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog if resonance_frequencies_from_dialog else list(self.conceptual_resonance_frequencies)
+                 # Default to conceptual, or could use section_frequencies_from_dialog
+                 final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
             elif new_amps_for_this_run == self.current_run_amps:
                 # Amplitudes haven't changed from the last run configuration.
                 # Use the frequencies that were in the dialog (which were seeded from history).
-                final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog if resonance_frequencies_from_dialog else list(self.conceptual_resonance_frequencies)
+                final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
             else:
-                # Amplitudes have changed. For each conceptual resonance,
+                # Amplitudes have changed. For each conceptual section,
                 # find the best historical CF based on the *new* representative amplitude.
                 # If no history, use what was in the dialog (which was seeded based on old rep. amp or conceptual).
                 if new_amps_for_this_run: # Ensure there's at least one new amp
                     representative_new_amp = new_amps_for_this_run[0]
-                    for idx, conceptual_cf in enumerate(self.conceptual_resonance_frequencies):
+                    for idx, conceptual_cf in enumerate(self.conceptual_section_frequencies):
                         remembered_cf = self._get_closest_remembered_cf(idx, representative_new_amp)
                         if remembered_cf is not None:
                             final_baseline_cfs_for_new_task[idx] = remembered_cf
                         else:
                             # Fallback to what was in the dialog for this index if no better history for new amp
-                            if idx < len(resonance_frequencies_from_dialog):
-                                 final_baseline_cfs_for_new_task[idx] = resonance_frequencies_from_dialog[idx]
+                            if idx < len(section_frequencies_from_dialog):
+                                 final_baseline_cfs_for_new_task[idx] = section_frequencies_from_dialog[idx]
                             # Else it remains the conceptual_cf (already initialized)
                 else: # Should be caught by the "No amplitudes specified" case, but as a safeguard
-                    final_baseline_cfs_for_new_task = resonance_frequencies_from_dialog if resonance_frequencies_from_dialog else list(self.conceptual_resonance_frequencies)
+                    final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
 
 
             # Update the 'resonance_frequencies' in new_params_from_dialog to be this chosen baseline
@@ -965,6 +1274,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
             # Reset window state for the new sweep
             self.results_by_iteration.clear()
+            self.histograms_generated = False  # Reset histogram flag for new run
+            
             self._redraw_plots() # Clear plots
             if self.progress_bar: self.progress_bar.setValue(0)
             if self.progress_group: self.progress_group.setVisible(True)
@@ -1146,7 +1457,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
 
     def _open_noise_spectrum_dialog(self):
-        num_res = len(self.conceptual_resonance_frequencies)
+        num_res = len(self.conceptual_section_frequencies)
         periscope = self._get_periscope_parent()
         
         if not periscope or periscope.crs is None: 
@@ -1231,7 +1542,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     
     
                 self.spectrum_noise_data['noise_parameters'] = params
-                num_res = len(self.conceptual_resonance_frequencies)
+                num_res = len(self.conceptual_section_frequencies)
     
                 amplitudes = []
                 dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
@@ -1357,8 +1668,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             return
             
         # Get conceptual frequency for this detector
-        if detector_idx <= len(self.conceptual_resonance_frequencies) and detector_idx > 0:
-            conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[detector_idx - 1]
+        if detector_idx <= len(self.conceptual_section_frequencies) and detector_idx > 0:
+            conceptual_resonance_base_freq_hz = self.conceptual_section_frequencies[detector_idx - 1]
         else:
             print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
             return
@@ -1366,7 +1677,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Gather data for ALL detectors to enable navigation (similar logic to digest panel)
         all_detectors_data = {}
         # We need conceptual frequencies for navigation
-        for i, freq in enumerate(self.conceptual_resonance_frequencies):
+        for i, freq in enumerate(self.conceptual_section_frequencies):
             det_id = i + 1
             all_detectors_data[det_id] = {
                 'conceptual_freq_hz': freq
@@ -1495,14 +1806,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         noise_data = self.noise_data if self.samples_taken else None
         
         # Get conceptual frequency for this detector
-        if detector_idx <= len(self.conceptual_resonance_frequencies) and detector_idx > 0:
-            conceptual_resonance_base_freq_hz = self.conceptual_resonance_frequencies[detector_idx - 1]
+        if detector_idx <= len(self.conceptual_section_frequencies) and detector_idx > 0:
+            conceptual_resonance_base_freq_hz = self.conceptual_section_frequencies[detector_idx - 1]
         else:
             print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
             return
         
         # Gather data for this specific detector across all amplitudes and directions
-        resonance_data_for_digest = {}
+        section_data_for_digest = {}
         
         # Group iterations by amplitude and direction
         amplitude_direction_to_iteration = {}
@@ -1527,14 +1838,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                                                               resonance_sweep_data.get('original_center_frequency'))
             
             combo_key = f"{amp_val}:{direction}"
-            resonance_data_for_digest[combo_key] = {
+            section_data_for_digest[combo_key] = {
                 'data': resonance_sweep_data,
                 'actual_cf_hz': actual_cf_for_this_amp,
                 'direction': direction,
                 'amplitude': amp_val
             }
         
-        if not resonance_data_for_digest:
+        if not section_data_for_digest:
             print(f"Warning: No data for detector {detector_idx}")
             return
         
@@ -1546,8 +1857,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             all_detector_indices.update(res_data.keys())
         
         for det_idx in sorted(all_detector_indices):
-            if det_idx <= len(self.conceptual_resonance_frequencies) and det_idx > 0:
-                conceptual_freq_hz = self.conceptual_resonance_frequencies[det_idx - 1]
+            if det_idx <= len(self.conceptual_section_frequencies) and det_idx > 0:
+                conceptual_freq_hz = self.conceptual_section_frequencies[det_idx - 1]
             else:
                 conceptual_freq_hz = None
                 for iter_data in self.results_by_iteration.values():
@@ -1605,7 +1916,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Create panel
         panel = DetectorDigestPanel(
             parent=self,
-            resonance_data_for_digest=resonance_data_for_digest,
+            resonance_data_for_digest=section_data_for_digest,
             detector_id=detector_idx,
             resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
             dac_scales=self.dac_scales,
@@ -1639,17 +1950,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if my_dock:
             periscope.tabifyDockWidget(my_dock, dock)
         
-        # Show and activate the dock
+        # Show the dock (but don't bring to front)
         dock.show()
-        dock.raise_()
 
     def _get_closest_remembered_cf(self, conceptual_idx: int, target_amp: float) -> float | None:
         """
-        Finds the remembered output CF for a given conceptual resonance index,
+        Finds the remembered output CF for a given conceptual section index,
         for the amplitude in history closest to target_amp.
 
         Args:
-            conceptual_idx: Index in self.conceptual_resonance_frequencies.
+            conceptual_idx: Index in self.conceptual_section_frequencies.
             target_amp: The amplitude we are trying to find a historical match for.
 
         Returns:
@@ -1673,7 +1983,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     pass
         
         return best_cf_found
-        
+    
+    def _get_periscope_parent(self):
+        """Find and return the Periscope parent window."""
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'dock_manager'):
+                return parent
+            parent = parent.parent()
+        return None
+    
     def apply_theme(self, dark_mode: bool):
         """Apply the dark/light theme to all plots in this window."""
         self.dark_mode = dark_mode
@@ -1718,6 +2037,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Redraw plots which will now use the updated legend text colors
         self._redraw_plots()
+            
+        # Propagate to histogram panel
+        if self.histogram_panel and hasattr(self.histogram_panel, 'apply_theme'):
+            self.histogram_panel.apply_theme(dark_mode)
             
         # Also propagate dark mode to any open detector digest windows
         for digest_window in self.detector_digest_windows:
@@ -1822,7 +2145,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Show success dialog
         num_biased = len(biased_results)
-        total_detectors = len(self.conceptual_resonance_frequencies)
+        total_detectors = len(self.conceptual_section_frequencies)
         
         msg = f"Successfully biased {num_biased} out of {total_detectors} detectors.\n\n"
         

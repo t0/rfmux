@@ -168,6 +168,10 @@ class SessionManager(QtCore.QObject):
         
         # Initialize session state
         self._session_path = session_path
+        
+        # Save the full session path so it's pre-selected next time
+        from . import settings
+        settings.set_last_session_path(str(session_path))
         self._export_count = 0
         self._session_start_time = datetime.datetime.now()
         self._session_metadata = {
@@ -461,6 +465,50 @@ class SessionManager(QtCore.QObject):
             'duration': str(duration) if duration else None,
             'auto_export_enabled': self._auto_export_enabled,
         }
+    
+    # ─────────────────────────────────────────────────────────────────
+    # Mock Mode Configuration Methods
+    # ─────────────────────────────────────────────────────────────────
+    
+    def save_mock_config(self, config: Dict[str, Any]):
+        """
+        Save mock mode configuration to session metadata.
+        
+        This preserves the mock simulation parameters so that when the session
+        is loaded later, the same mock configuration can be restored.
+        
+        Args:
+            config: Dictionary of mock configuration parameters from MockConfigurationDialog
+        """
+        if not self.is_active or self._session_path is None:
+            return
+        
+        # Store in metadata
+        self._session_metadata['mock_mode_config'] = config
+        self._save_metadata()
+        
+        print(f"[Session] Saved mock mode configuration with {len(config)} parameters")
+    
+    def get_mock_config(self) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve mock mode configuration from session metadata.
+        
+        Returns:
+            Dictionary of mock configuration parameters, or None if not present
+        """
+        if not self.is_active:
+            return None
+        
+        return self._session_metadata.get('mock_mode_config')
+    
+    def has_mock_config(self) -> bool:
+        """
+        Check if the current session has mock mode configuration.
+        
+        Returns:
+            True if session has mock config, False otherwise
+        """
+        return self.get_mock_config() is not None
     
     # ─────────────────────────────────────────────────────────────────
     # File Operations

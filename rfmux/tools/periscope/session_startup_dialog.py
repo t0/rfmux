@@ -74,6 +74,70 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         # Apply pre-fill values after UI is set up
         self._apply_prefill()
         
+        # Install event filter on radio buttons to prevent them from handling Enter
+        self._disable_enter_on_radio_buttons()
+        
+        # Create keyboard shortcut for Enter/Return keys
+        # This works regardless of which widget has focus
+        self.enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Return), self)
+        self.enter_shortcut.activated.connect(self._validate_and_accept)
+        
+        # Also handle numpad Enter
+        self.numpad_enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Enter), self)
+        self.numpad_enter_shortcut.activated.connect(self._validate_and_accept)
+    
+    def _disable_enter_on_radio_buttons(self):
+        """Install event filters on all radio buttons to prevent Enter key handling."""
+        radio_buttons = [
+            self.rb_hardware,
+            self.rb_mock,
+            self.rb_offline,
+            self.rb_new_session,
+            self.rb_load_session,
+            self.rb_no_session
+        ]
+        
+        class RadioButtonEnterFilter(QtCore.QObject):
+            """Event filter that blocks Enter key on radio buttons."""
+            def eventFilter(self, obj, event):
+                if event.type() == QtCore.QEvent.Type.KeyPress:
+                    if event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                        # Block Enter key - don't let radio button handle it
+                        return True
+                return False
+        
+        # Create single filter instance and apply to all radio buttons
+        self._radio_filter = RadioButtonEnterFilter()
+        for rb in radio_buttons:
+            rb.installEventFilter(self._radio_filter)
+    
+    def _install_enter_key_filter(self, dialog: QtWidgets.QFileDialog):
+        """
+        Install an event filter on a QFileDialog to make Enter key accept the dialog.
+        
+        Args:
+            dialog: The QFileDialog instance to enhance
+        """
+        class EnterKeyFilter(QtCore.QObject):
+            """Event filter that makes Enter key accept the dialog."""
+            def __init__(self, dialog):
+                super().__init__()
+                self.dialog = dialog
+            
+            def eventFilter(self, obj, event):
+                if event.type() == QtCore.QEvent.Type.KeyPress:
+                    if event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                        # Accept the dialog (equivalent to clicking Choose/Open)
+                        self.dialog.accept()
+                        return True  # Event handled
+                return False  # Pass through other events
+        
+        # Create and install the filter
+        key_filter = EnterKeyFilter(dialog)
+        dialog.installEventFilter(key_filter)
+        # Store reference to prevent garbage collection
+        dialog._enter_key_filter = key_filter
+    
     def _setup_ui(self):
         """Create the dialog UI."""
         layout = QtWidgets.QVBoxLayout(self)
@@ -304,44 +368,82 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             # Open folder selection dialog for base path
             # Start from last used directory if available
             start_dir = last_session_dir if last_session_dir else ""
-            base_path = QtWidgets.QFileDialog.getExistingDirectory(
-                self,
-                "Select Session Location",
-                start_dir,
-                QtWidgets.QFileDialog.Option.ShowDirsOnly | 
-                QtWidgets.QFileDialog.Option.DontUseNativeDialog
-            )
             
-            # If user cancelled, stay in dialog
-            if not base_path:
+            # Create non-static dialog to allow Enter key handling
+            dialog = QtWidgets.QFileDialog(self, "Select Session Location", start_dir)
+            dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+            dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly)
+            dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog)
+            
+            # Install Enter key filter
+            self._install_enter_key_filter(dialog)
+            
+            # Show dialog and get result
+            if not dialog.exec():
+                # User cancelled, stay in dialog
                 return
             
+            selected_files = dialog.selectedFiles()
+            if not selected_files:
+                return
+            
+            base_path = selected_files[0]
             self.session_path = base_path
             # Save this directory for next time
             settings.set_last_session_directory(base_path)
+            # Also save the full session path so it's pre-selected next time
+            import os
+            full_session_path = os.path.join(base_path, self.session_folder_name)
+            settings.set_last_session_path(full_session_path)
             
         elif self.rb_load_session.isChecked():
             self.session_mode = self.SESS_LOAD
             
             # Open folder selection dialog for existing session
-            # Start from last used directory if available
-            start_dir = last_session_dir if last_session_dir else ""
-            session_path = QtWidgets.QFileDialog.getExistingDirectory(
-                self,
-                "Select Session Folder",
-                start_dir,
-                QtWidgets.QFileDialog.Option.ShowDirsOnly |
-                QtWidgets.QFileDialog.Option.DontUseNativeDialog
-            )
+            # Try to start from parent of last loaded session path, with session pre-selected
+            import os
+            last_session_path = settings.get_last_session_path()
             
-            # If user cancelled, stay in dialog
-            if not session_path:
+            # Determine starting directory and file to pre-select
+            if last_session_path and os.path.exists(last_session_path):
+                # Start in parent directory of last session
+                start_dir = os.path.dirname(last_session_path)
+                preselect_path = last_session_path
+            else:
+                # Fall back to last session directory
+                start_dir = last_session_dir if last_session_dir else ""
+                preselect_path = None
+            
+            # Use non-static QFileDialog for more control (allows pre-selection)
+            dialog = QtWidgets.QFileDialog(self, "Select Session Folder", start_dir)
+            dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+            dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly)
+            dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog)
+            
+            # Pre-select the last session folder if available
+            if preselect_path:
+                dialog.selectFile(preselect_path)
+            
+            # Install Enter key filter
+            self._install_enter_key_filter(dialog)
+            
+            # Show dialog and get result
+            if not dialog.exec():
+                # User cancelled, stay in dialog
                 return
             
+            selected_files = dialog.selectedFiles()
+            if not selected_files:
+                return
+            
+            session_path = selected_files[0]
             self.session_path = session_path
             self.session_folder_name = None
-            # Save the parent directory for next time (not the session folder itself)
-            import os
+            
+            # Save the loaded session path for quick reload next time
+            settings.set_last_session_path(session_path)
+            
+            # Also save the parent directory for new session creation
             parent_dir = os.path.dirname(session_path)
             if parent_dir:
                 settings.set_last_session_directory(parent_dir)
@@ -365,6 +467,14 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         elif self.connection_mode == self.CONN_OFFLINE:
             settings.set_last_connection_mode("offline")
         
+        # Save session mode for next time
+        if self.session_mode == self.SESS_NEW:
+            settings.set_last_session_mode("new")
+        elif self.session_mode == self.SESS_LOAD:
+            settings.set_last_session_mode("load")
+        elif self.session_mode == self.SESS_NONE:
+            settings.set_last_session_mode("none")
+        
         # All validation passed
         self.accept()
     
@@ -380,6 +490,7 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             saved_mode = settings.get_last_connection_mode()
             saved_serial = settings.get_last_crs_serial()
             saved_module = settings.get_last_module()
+            saved_session_mode = settings.get_last_session_mode()
             
             # Apply saved connection mode
             if saved_mode == "hardware":
@@ -394,6 +505,14 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
                 self.serial_input.setText(saved_serial)
             if saved_module:
                 self.module_input.setValue(saved_module)
+            
+            # Apply saved session mode
+            if saved_session_mode == "new":
+                self.rb_new_session.setChecked(True)
+            elif saved_session_mode == "load":
+                self.rb_load_session.setChecked(True)
+            elif saved_session_mode == "none":
+                self.rb_no_session.setChecked(True)
         else:
             # Apply prefill values from CLI (takes precedence over saved settings)
             conn_mode = self._prefill.get('connection_mode')
@@ -416,6 +535,7 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         
         # Trigger UI updates
         self._on_connection_mode_changed()
+        self._on_session_mode_changed()
     
     def get_configuration(self) -> dict:
         """

@@ -261,18 +261,49 @@ def main():
             print("Starting MockCRS UDP streaming...")
             loop.run_until_complete(crs_obj.start_udp_streaming(host='127.0.0.1', port=9876))
             
-            config_dialog = MockConfigurationDialog()
             initial_mock_config = None  # Store for later
             
-            if config_dialog.exec():
-                # Get configuration
-                mock_config = config_dialog.get_configuration()
-                initial_mock_config = mock_config  # Save for viewer
+            # Check if we're loading a session with mock config
+            load_mock_config_from_session = False
+            if session_mode == UnifiedStartupDialog.SESS_LOAD and session_config['path']:
+                # Try to load session metadata to check for mock config
+                import json
+                from pathlib import Path
+                metadata_file = Path(session_config['path']) / 'session_metadata.json'
+                if metadata_file.exists():
+                    try:
+                        with open(metadata_file, 'r') as f:
+                            metadata = json.load(f)
+                        if 'mock_mode_config' in metadata:
+                            # Session has saved mock config - use it instead of showing dialog
+                            initial_mock_config = metadata['mock_mode_config']
+                            load_mock_config_from_session = True
+                            print("[Session] Loading mock configuration from session")
+                    except Exception as e:
+                        print(f"[Session] Warning: Could not load mock config from session: {e}")
+            
+            # Only show dialog if we're NOT loading config from a session
+            if not load_mock_config_from_session:
+                config_dialog = MockConfigurationDialog()
                 
+                if config_dialog.exec():
+                    # Get configuration
+                    mock_config = config_dialog.get_configuration()
+                    initial_mock_config = mock_config  # Save for viewer
+                else:
+                    # User cancelled - exit
+                    print("Mock configuration cancelled, exiting...")
+                    sys.exit(0)
+            
+            # Apply the mock configuration (either from dialog or loaded from session)
+            if initial_mock_config:
                 try:
                     # Apply configuration to the server
-                    resonator_count = loop.run_until_complete(crs_obj.generate_resonators(mock_config))
-                    #print(f"Mock configuration applied successfully. Generated {resonator_count} resonators.")
+                    resonator_count = loop.run_until_complete(crs_obj.generate_resonators(initial_mock_config))
+                    if load_mock_config_from_session:
+                        print(f"[Session] Mock configuration restored: {resonator_count} resonators generated")
+                    #else:
+                        #print(f"Mock configuration applied successfully. Generated {resonator_count} resonators.")
                 except Exception as e:
                     import traceback
                     print(f"Error applying mock configuration: {e}")
@@ -280,10 +311,6 @@ def main():
                     QtWidgets.QMessageBox.critical(None, "Configuration Error", 
                                                  f"Failed to apply mock configuration:\n{str(e)}\n\n"
                                                  f"Details:\n{traceback.format_exc()}")
-            else:
-                # User cancelled - exit
-                print("Mock configuration cancelled, exiting...")
-                sys.exit(0)
             
         # Check if it's a hostname in the format rfmux####.local
         elif "rfmux" in crs_board and ".local" in crs_board:
@@ -360,6 +387,12 @@ def main():
                     session_config['path'],
                     session_config['folder_name']
                 )
+                
+                # If we're in mock mode, save the config to the new session
+                if is_mock and initial_mock_config is not None:
+                    viewer.session_manager.save_mock_config(initial_mock_config)
+                    print(f"[Session] Saved mock configuration to new session")
+                
                 # Show the session browser dock
                 if hasattr(viewer, 'session_browser_dock'):
                     viewer.session_browser_dock.show()
@@ -373,6 +406,14 @@ def main():
             # Load existing session
             success = viewer.session_manager.load_session(session_config['path'])
             if success:
+                # If we're in mock mode and showed the dialog (no saved config),
+                # save the config now so next load will skip the dialog
+                if is_mock and initial_mock_config is not None:
+                    # Check if session already has mock config
+                    if not viewer.session_manager.has_mock_config():
+                        viewer.session_manager.save_mock_config(initial_mock_config)
+                        print(f"[Session] Saved mock configuration to session for future loads")
+                
                 # Show the session browser dock
                 if hasattr(viewer, 'session_browser_dock'):
                     viewer.session_browser_dock.show()

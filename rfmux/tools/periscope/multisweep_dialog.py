@@ -50,7 +50,7 @@ def load_multisweep_payload(parent: QtWidgets.QWidget, file_path: str | None = N
     if (
         isinstance(payload, dict)
         and isinstance(payload.get("initial_parameters"), dict)
-        and isinstance(payload.get("results_by_iteration"), dict)
+        and (isinstance(payload.get("results_by_detector"), dict) or isinstance(payload.get("results_by_iteration"), dict))
     ):
         return payload
 
@@ -525,22 +525,33 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         else:
             ref_freqs = []
     
-            if params['apply_skewed_fit']:
-                for i in range(len(freqs)):
-                    ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['fit_params']['fr'])
-                ref_freqs.sort()
-                return ref_freqs
-    
-            if params['apply_nonlinear_fit']:
-                for i in range(len(freqs)):
-                    ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['nonlinear_fit_params']['fr'])
-                ref_freqs.sort()
-                return ref_freqs
-    
-            for i in range(len(freqs)):
-                ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['bias_frequency'])
+            # Extract fit frequencies from either new or old format
+            if 'results_by_detector' in payload:
+                # New detector-based format
+                for det_idx in sorted(payload['results_by_detector'].keys()):
+                    amp_dir_dict = payload['results_by_detector'][det_idx]
+                    if not amp_dir_dict:
+                        continue
+                    entry = next(iter(amp_dir_dict.values()))
+                    if params['apply_skewed_fit'] and entry.get('skewed_fit_success') and entry.get('fit_params'):
+                        ref_freqs.append(entry['fit_params']['fr'])
+                    elif params['apply_nonlinear_fit'] and entry.get('nonlinear_fit_success') and entry.get('nonlinear_fit_params'):
+                        ref_freqs.append(entry['nonlinear_fit_params']['fr'])
+                    else:
+                        ref_freqs.append(entry.get('bias_frequency', entry.get('original_center_frequency')))
+            elif 'results_by_iteration' in payload:
+                # Old iteration-based format (backward compatibility)
+                if params['apply_skewed_fit']:
+                    for i in range(len(freqs)):
+                        ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['fit_params']['fr'])
+                elif params['apply_nonlinear_fit']:
+                    for i in range(len(freqs)):
+                        ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['nonlinear_fit_params']['fr'])
+                else:
+                    for i in range(len(freqs)):
+                        ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['bias_frequency'])
+
             ref_freqs.sort()
-                
             return ref_freqs
         
     

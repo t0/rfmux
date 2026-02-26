@@ -1231,7 +1231,6 @@ class PeriscopeRuntime:
             panel._hide_progress_bars()
             
             # Set NCO frequency based on resonance frequencies
-            iteration_params = load_params.get('results_by_iteration', [])
             reso_frequencies = params.get('resonance_frequencies', [])
             
             if reso_frequencies:
@@ -1244,15 +1243,24 @@ class PeriscopeRuntime:
                 else:
                     print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
-            # Load iteration data into panel
-            for i in range(len(iteration_params)):
-                amplitude = iteration_params[i]['amplitude']
-                direction = iteration_params[i]['direction']
-                data = iteration_params[i]['data']
-                panel.update_data(target_module, i, amplitude, direction, data, None)
+            # Load data into panel - handle both old (iteration) and new (detector) formats
+            if 'results_by_detector' in load_params:
+                # New format: load directly into panel
+                panel.results_by_detector = load_params['results_by_detector']
+                panel._redraw_plots()
+            elif 'results_by_iteration' in load_params:
+                # Old format: convert via migration helper, then feed through update_data
+                iteration_params = load_params.get('results_by_iteration', [])
+                if isinstance(iteration_params, dict):
+                    iteration_params = [iteration_params[k] for k in sorted(iteration_params.keys())]
+                for i in range(len(iteration_params)):
+                    amplitude = iteration_params[i]['amplitude']
+                    direction = iteration_params[i]['direction']
+                    data = iteration_params[i]['data']
+                    panel.update_data(target_module, i, amplitude, direction, data, None)
             
             # Generate histograms now that data is loaded
-            if panel.results_by_iteration:
+            if panel.results_by_detector:
                 panel._generate_histograms()
                 panel.histograms_generated = True
             
@@ -1577,17 +1585,14 @@ class PeriscopeRuntime:
         if panel is None:
             return  # Error already displayed by helper
         
-        # Auto-launch detector digest panel by programmatically triggering the existing
-        # double-click handler which already has all the logic for creating digest panels
-        iteration_params = load_params.get('results_by_iteration', [])
-        if iteration_params and len(iteration_params) > 0:
-            first_iteration_data = iteration_params[0].get('data', {})
-            if first_iteration_data:
-                # Get any detector's frequency to simulate a click location
-                first_detector_id = sorted(first_iteration_data.keys())[0]
-                first_detector_data = first_iteration_data[first_detector_id]
-                click_freq = first_detector_data.get('bias_frequency', 
-                                                    first_detector_data.get('original_center_frequency'))
+        # Auto-launch detector digest panel - find a frequency to click on
+        click_freq = None
+        if panel.results_by_detector:
+            first_det_id = sorted(panel.results_by_detector.keys())[0]
+            first_entry = next(iter(panel.results_by_detector[first_det_id].values()), {})
+            click_freq = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
+        if click_freq is not None:
+            if True:  # Maintain indentation structure
                 
                 if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
                     # Create a fake event at the detector's frequency
@@ -2310,15 +2315,20 @@ class PeriscopeRuntime:
         self.is_mock_mode = getattr(self, "is_mock_mode", True)
         self.mock_config = getattr(self, "mock_config", {"mock": True})
         self.qp_pulse_mode = getattr(self, "qp_pulse_mode", "none")
-        self.results_by_iteration = {0: {"amplitude": 0.1,
-                                         "direction": "up",
-                                         "data": {
-                                             1: {
-                                                 "bias_frequency": 90e6,                     # MUST BE FLOAT
-                                                 "original_center_frequency": 90e6,          # MUST BE FLOAT
-                                                 "sweep_amplitudes": [0.1, 0.2],
-                                                 "some_data": [1, 2, 3]
-                                             }}}}
+        # Mock data in detector-based format for smoke tests
+        self.results_by_detector = {
+            1: {
+                (0.1, "up"): {
+                    "bias_frequency": 90e6,
+                    "original_center_frequency": 90e6,
+                    "amplitude": 0.1,
+                    "direction": "up",
+                    "iteration": 0,
+                    "sweep_amplitudes": [0.1, 0.2],
+                    "some_data": [1, 2, 3]
+                }
+            }
+        }
 
         if not hasattr(self, "crs_init_signals"):
             self.crs_init_signals = MagicMock()
@@ -2377,7 +2387,7 @@ class PeriscopeRuntime:
             multisweep_window = None
             if getattr(self, "multisweep_windows", None):
                 multisweep_window = next(iter(self.multisweep_windows.values())).get("window")
-                multisweep_window.results_by_iteration = self.results_by_iteration
+                multisweep_window.results_by_detector = self.results_by_detector
                 multisweep_window._get_spectrum = MagicMock()
 
             if multisweep_window:

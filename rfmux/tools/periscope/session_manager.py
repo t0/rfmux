@@ -581,16 +581,19 @@ class SessionManager(QtCore.QObject):
         # 2. Fall back to structure-based detection for older files
         # Priority order matters: bias and noise are subsets of multisweep
         
-        # Bias files: have both bias_kids_output AND results_by_iteration
-        if 'bias_kids_output' in data and 'results_by_iteration' in data:
+        # Check for multisweep data (either old or new format)
+        has_multisweep = 'results_by_detector' in data or 'results_by_iteration' in data
+
+        # Bias files: have both bias_kids_output AND multisweep data
+        if 'bias_kids_output' in data and has_multisweep:
             return 'bias'
-        
-        # Noise files: have noise_data AND results_by_iteration
-        if 'noise_data' in data and data['noise_data'] is not None and 'results_by_iteration' in data:
+
+        # Noise files: have noise_data AND multisweep data
+        if 'noise_data' in data and data['noise_data'] is not None and has_multisweep:
             return 'noise'
-        
-        # Multisweep files: have results_by_iteration (but not bias or noise)
-        if 'results_by_iteration' in data:
+
+        # Multisweep files: have multisweep data (but not bias or noise)
+        if has_multisweep:
             return 'multisweep'
         
         # Network analysis files: have 'parameters' and 'modules' keys

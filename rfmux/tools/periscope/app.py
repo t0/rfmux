@@ -1369,7 +1369,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if dialog.exec():
             params = dialog.get_parameters()
             if params:
-                if "results_by_iteration" in params.keys():
+                if "results_by_detector" in params.keys() or "results_by_iteration" in params.keys():
                     self._load_multisweep_analysis(params)
                 else:
                     if self.crs is None:
@@ -2758,7 +2758,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     
     def _load_multisweep_from_session(self, data: dict, file_path: str):
         """Load multisweep data from session file into a new panel."""
-        if 'results_by_iteration' not in data:
+        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
             QtWidgets.QMessageBox.information(
                 self,
                 "Multisweep Loaded",
@@ -2779,7 +2779,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         - Set bias (apply to hardware only)
         - Set + Plot bias (apply to hardware and create visualization panel)
         """
-        if 'results_by_iteration' not in data:
+        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
             QtWidgets.QMessageBox.warning(
                 self,
                 "Invalid Bias File",
@@ -2787,7 +2787,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 "Cannot load this bias file."
             )
             return
-        
+
         # Show the same dialog that the "Load Bias" button shows
         from .bias_kids_dialog import BiasKidsDialog
         dialog = BiasKidsDialog(self, self.module, load_bias=True, loaded_data=data)
@@ -2810,7 +2810,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Creates a MultisweepPanel, opens the DetectorDigestPanel (fit), and 
         opens a separate NoiseSpectrumPanel for the noise visualization.
         """
-        if 'results_by_iteration' not in data:
+        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
             QtWidgets.QMessageBox.warning(
                 self,
                 "Invalid Noise File",
@@ -2829,15 +2829,25 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         # Auto-launch detector digest panel (fit panel) by simulating a double-click
         # This is the same logic used in _load_multisweep_analysis
-        iteration_params = data.get('results_by_iteration', [])
-        if iteration_params and len(iteration_params) > 0:
-            first_iteration_data = iteration_params[0].get('data', {})
-            if first_iteration_data:
-                # Get any detector's frequency to simulate a click location
-                first_detector_id = sorted(first_iteration_data.keys())[0]
-                first_detector_data = first_iteration_data[first_detector_id]
-                click_freq = first_detector_data.get('bias_frequency', 
-                                                    first_detector_data.get('original_center_frequency'))
+        # Find first detector frequency to auto-open digest
+        click_freq = None
+        if 'results_by_detector' in data:
+            det_data = data['results_by_detector']
+            if det_data:
+                first_det_id = sorted(det_data.keys())[0]
+                first_entry = next(iter(det_data[first_det_id].values()), {})
+                click_freq = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
+        elif 'results_by_iteration' in data:
+            iteration_params = data.get('results_by_iteration', [])
+            if iteration_params and len(iteration_params) > 0:
+                first_iteration_data = iteration_params[0].get('data', {})
+                if first_iteration_data:
+                    first_detector_id = sorted(first_iteration_data.keys())[0]
+                    first_detector_data = first_iteration_data[first_detector_id]
+                    click_freq = first_detector_data.get('bias_frequency',
+                                                        first_detector_data.get('original_center_frequency'))
+        if click_freq is not None:
+            if True:  # Replaces the old nested if block
                 
                 if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
                     # Create a fake event at the detector's frequency

@@ -8,9 +8,6 @@ import pyqtgraph as pg
 from .utils import (
     ScreenshotMixin, find_parent_with_attr, TABLEAU10_COLORS, LINE_WIDTH
 )
-from .aggregate_data_adapter import (
-    extract_multisweep_data, get_parameter_arrays, filter_failed_fits
-)
 from .multisweep_grid_helpers import create_amplitude_color_map
 
 
@@ -181,47 +178,40 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
                 ax.setTextPen(pen_color)
                 
     def _load_and_plot_data(self):
-        """Load data from multisweep panel and create plots."""
+        """Load data directly from the multisweep panel's results_by_detector."""
         if not self.multisweep_panel:
             return
             
-        # Extract data using adapter
-        try:
-            self.plot_data = extract_multisweep_data(self.multisweep_panel)
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(
-                self, "Data Error", 
-                f"Failed to extract multisweep data: {str(e)}"
-            )
+        results = getattr(self.multisweep_panel, 'results_by_detector', {})
+        if not results:
             return
-            
-        if not self.plot_data or not self.plot_data.get('fit_params'):
-            QtWidgets.QMessageBox.information(
-                self, "No Data", 
-                "No fit parameters available to plot."
-            )
+        
+        # Collect available amplitudes and check for fit data
+        amplitudes_set = set()
+        has_fit_data = False
+        for amp_dir_dict in results.values():
+            for (amp, direction) in amp_dir_dict.keys():
+                amplitudes_set.add(amp)
+            for entry in amp_dir_dict.values():
+                if entry.get('fit_params') or entry.get('nonlinear_fit_params'):
+                    has_fit_data = True
+        
+        if not has_fit_data:
             return
+        
+        self.available_amplitudes = sorted(amplitudes_set)
         
         # Invalidate cache on data reload
         self.histogram_cache.clear()
         
-        # Get available amplitudes from the data
+        # Populate amplitude selector and plot
         self._populate_amplitude_selector()
-        
-        # Plot data for initial amplitude
         self._update_plots()
         
     def _populate_amplitude_selector(self):
         """Populate amplitude selector with available amplitudes."""
-        if not self.plot_data or not self.plot_data.get('data'):
+        if not self.available_amplitudes:
             return
-        
-        # Get all unique amplitudes from any detector
-        amplitudes_set = set()
-        for detector_data in self.plot_data['data'].values():
-            amplitudes_set.update(detector_data.keys())
-        
-        self.available_amplitudes = sorted(amplitudes_set)
         
         # Populate combo box
         self.amp_combo.clear()
@@ -253,18 +243,57 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.histogram_cache.clear()
         self._update_plots()
         
+    def _extract_params_for_amplitude(self, amplitude):
+        """Extract fit parameters for all detectors at a given amplitude.
+        
+        Reads directly from results_by_detector — no adapter needed.
+        
+        Returns:
+            dict: {detector_id: {param_name: value, ...}} for detectors with fits at this amplitude.
+        """
+        results = self.multisweep_panel.results_by_detector
+        params_by_detector = {}
+        
+        for detector_id, amp_dir_dict in results.items():
+            # Find entry for this amplitude (any direction)
+            for (amp, direction), entry in amp_dir_dict.items():
+                if amp != amplitude:
+                    continue
+                # Prefer nonlinear fit params, fall back to skewed
+                fit_params = None
+                if entry.get('nonlinear_fit_params'):
+                    fit_params = dict(entry['nonlinear_fit_params'])
+                elif entry.get('fit_params'):
+                    fit_params = dict(entry['fit_params'])
+                if fit_params:
+                    params_by_detector[detector_id] = fit_params
+                break  # Use first matching direction
+        
+        return params_by_detector
+
+    @staticmethod
+    def _extract_param_values(params_by_detector, param_name):
+        """Extract values and IDs for a specific parameter, filtering NaN."""
+        values = []
+        ids = []
+        for det_id, params in params_by_detector.items():
+            val = params.get(param_name)
+            if val is None or val == 'nan':
+                continue
+            if isinstance(val, float) and np.isnan(val):
+                continue
+            values.append(float(val))
+            ids.append(det_id)
+        return dict(zip(ids, values))
+
     def _update_plots(self):
         """Update all plots with current settings."""
-        if not self.plot_data:
+        if not self.multisweep_panel or not self.multisweep_panel.results_by_detector:
             return
         
-        fit_params = self.plot_data.get('fit_params', {})
-        
         if self.amplitude_idx is None:
-            # Show all amplitudes (stacked)
             self._update_plots_all_amplitudes()
         else:
-            # Show single amplitude
             if self.amplitude_idx >= len(self.available_amplitudes):
                 return
             
@@ -280,30 +309,15 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
                 self._plot_q_histogram(self.qi_plot, cached_data['qi_dict'], "Qi")
                 return
             
-            # Extract parameter arrays (pass amplitude_idx, not amplitude value)
-            try:
-                fr_values, fr_ids = get_parameter_arrays(fit_params, 'fr', self.amplitude_idx)
-                qr_values, qr_ids = get_parameter_arrays(fit_params, 'Qr', self.amplitude_idx)
-                qc_values, qc_ids = get_parameter_arrays(fit_params, 'Qc', self.amplitude_idx)
-                qi_values, qi_ids = get_parameter_arrays(fit_params, 'Qi', self.amplitude_idx)
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                return
+            # Extract parameters directly from results_by_detector
+            params_by_det = self._extract_params_for_amplitude(amp)
             
-            # Convert to dictionaries for filtering
-            fr_dict = dict(zip(fr_ids, fr_values))
-            qr_dict = dict(zip(qr_ids, qr_values))
-            qc_dict = dict(zip(qc_ids, qc_values))
-            qi_dict = dict(zip(qi_ids, qi_values))
+            fr_valid = self._extract_param_values(params_by_det, 'fr')
+            qr_valid = self._extract_param_values(params_by_det, 'Qr')
+            qc_valid = self._extract_param_values(params_by_det, 'Qc')
+            qi_valid = self._extract_param_values(params_by_det, 'Qi')
             
-            # Filter out failed fits (NaN values)
-            fr_valid = filter_failed_fits(fr_dict)
-            qr_valid = filter_failed_fits(qr_dict)
-            qc_valid = filter_failed_fits(qc_dict)
-            qi_valid = filter_failed_fits(qi_dict)
-            
-            # Cache the filtered data
+            # Cache
             self.histogram_cache[cache_key] = {
                 'fr_dict': fr_valid,
                 'qr_dict': qr_valid,
@@ -311,14 +325,14 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
                 'qi_dict': qi_valid
             }
             
-            # Update plots
+            # Plot
             self._plot_frequency_scatter(fr_valid)
             self._plot_q_histogram(self.qr_plot, qr_valid, "Qr")
             self._plot_q_histogram(self.qc_plot, qc_valid, "Qc")
             self._plot_q_histogram(self.qi_plot, qi_valid, "Qi")
         
     def _plot_frequency_scatter(self, fr_dict):
-        """Plot resonance frequency scatter."""
+        """Plot resonance frequency scatter. fr_dict: {detector_id: freq_hz}."""
         if not self.freq_plot:
             return
         
@@ -358,10 +372,8 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         
     def _update_plots_all_amplitudes(self):
         """Update plots showing all amplitudes (stacked histograms)."""
-        if not self.plot_data:
+        if not self.multisweep_panel or not self.multisweep_panel.results_by_detector:
             return
-        
-        fit_params = self.plot_data.get('fit_params', {})
         
         # Check if cached
         cache_key = 'all_amplitudes'
@@ -373,36 +385,24 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._plot_stacked_q_histogram(self.qi_plot, cached_data['qi_by_amp'], "Qi")
             return
         
-        # Extract data for all amplitudes
+        # Extract data for all amplitudes directly from results_by_detector
         fr_by_amp = {}
         qr_by_amp = {}
         qc_by_amp = {}
         qi_by_amp = {}
         
-        for amp_idx in range(len(self.available_amplitudes)):
-            try:
-                fr_values, fr_ids = get_parameter_arrays(fit_params, 'fr', amp_idx)
-                qr_values, qr_ids = get_parameter_arrays(fit_params, 'Qr', amp_idx)
-                qc_values, qc_ids = get_parameter_arrays(fit_params, 'Qc', amp_idx)
-                qi_values, qi_ids = get_parameter_arrays(fit_params, 'Qi', amp_idx)
-                
-                # Store as dictionaries
-                fr_dict = filter_failed_fits(dict(zip(fr_ids, fr_values)))
-                qr_dict = filter_failed_fits(dict(zip(qr_ids, qr_values)))
-                qc_dict = filter_failed_fits(dict(zip(qc_ids, qc_values)))
-                qi_dict = filter_failed_fits(dict(zip(qi_ids, qi_values)))
-                
-                if fr_dict:
-                    fr_by_amp[amp_idx] = fr_dict
-                if qr_dict:
-                    qr_by_amp[amp_idx] = qr_dict
-                if qc_dict:
-                    qc_by_amp[amp_idx] = qc_dict
-                if qi_dict:
-                    qi_by_amp[amp_idx] = qi_dict
-                    
-            except Exception as e:
-                continue
+        for amp_idx, amp in enumerate(self.available_amplitudes):
+            params_by_det = self._extract_params_for_amplitude(amp)
+            
+            fr_dict = self._extract_param_values(params_by_det, 'fr')
+            qr_dict = self._extract_param_values(params_by_det, 'Qr')
+            qc_dict = self._extract_param_values(params_by_det, 'Qc')
+            qi_dict = self._extract_param_values(params_by_det, 'Qi')
+            
+            if fr_dict: fr_by_amp[amp_idx] = fr_dict
+            if qr_dict: qr_by_amp[amp_idx] = qr_dict
+            if qc_dict: qc_by_amp[amp_idx] = qc_dict
+            if qi_dict: qi_by_amp[amp_idx] = qi_dict
         
         # Compute and store global Q-factor ranges
         self._compute_global_q_ranges(qr_by_amp, qc_by_amp, qi_by_amp)

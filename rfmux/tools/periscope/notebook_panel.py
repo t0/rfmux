@@ -14,6 +14,7 @@ from datetime import datetime
 from PyQt6 import QtCore, QtWidgets, QtGui
 from . import settings
 from .utils import find_parent_with_attr
+from ...paths import get_reference_notebook_dir, get_user_notebook_dir
 import sys
 
 
@@ -334,15 +335,6 @@ class NotebookPanel(QtWidgets.QWidget):
         self.server.server_ready.connect(self._on_server_ready)
         self.server.server_error.connect(self._on_server_error)
     
-    def _get_default_user_library(self) -> Path:
-        """Get the default user library path for this platform."""
-        if os.name == 'nt':
-            # Windows: ~/AppData/Local/rfmux/notebooks
-            return Path.home() / "AppData" / "Local" / "rfmux" / "notebooks"
-        else:
-            # Linux/macOS: ~/.local/share/rfmux/notebooks
-            return Path.home() / ".local" / "share" / "rfmux" / "notebooks"
-    
     def _prompt_for_user_library(self) -> Path | None:
         """
         Prompt user for their notebook library directory.
@@ -357,7 +349,7 @@ class NotebookPanel(QtWidgets.QWidget):
         if saved_path:
             default_path = Path(saved_path)
         else:
-            default_path = self._get_default_user_library()
+            default_path = get_user_notebook_dir()
         
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("User Notebook Library")
@@ -395,7 +387,7 @@ class NotebookPanel(QtWidgets.QWidget):
         reset_btn = QtWidgets.QPushButton("Reset to Default")
         reset_btn.setToolTip("Reset to platform default location")
         reset_btn.clicked.connect(
-            lambda: path_edit.setText(str(self._get_default_user_library()))
+            lambda: path_edit.setText(str(get_user_notebook_dir()))
         )
         path_layout.addWidget(reset_btn)
         
@@ -552,38 +544,26 @@ class NotebookPanel(QtWidgets.QWidget):
         Create symlinks to shared notebook resources.
         
         Creates symlinks in the session folder to:
-        - rfmux/home/ subfolders (Demos, Technical Documentation, Release Notes)
-        - User notebook library (~/.local/share/rfmux/notebooks/)
-        
-        Symlinks use underscore prefix to group them at the top of file listings.
+        - Shipped reference notebooks (provisioned to per-user data dir)
+        - User notebook library (~/.local/share/rfmux/user-notebooks/)
         """
         session_dir = Path(self.notebook_dir)
         
-        # Find the rfmux package directory
+        # Provision shipped notebooks and symlink into session
         try:
-            import rfmux
-            rfmux_pkg_dir = Path(rfmux.__file__).parent
-            home_dir = rfmux_pkg_dir.parent / "home"
-            
-            if home_dir.exists():                
-                # Symlink specific home subfolders
-                folders_to_link = ["Demos", "Release Notes", "Technical Documentation"]
-                
-                for folder_name in folders_to_link:
-                    source = home_dir / folder_name
-                    if source.exists() and source.is_dir():
-                        # Use folder name as-is (no underscore prefix)
-                        link_name = folder_name
-                        link_path = session_dir / link_name
-                        
-                        # Create symlink if it doesn't exist
-                        if not link_path.exists():
-                            try:
-                                # link_path.symlink_to(source, target_is_directory=True)
-                                self.create_dir_link(link_path, source)
-                                print(f"[Notebook] Linked: {link_name} -> {source}")
-                            except OSError as e:
-                                print(f"[Notebook] Could not create symlink {link_name}: {e}")
+            home_dir = get_reference_notebook_dir()
+
+            for source in home_dir.iterdir():
+                if not source.is_dir() or source.name.startswith("."):
+                    continue
+                link_path = session_dir / source.name
+
+                if not link_path.exists():
+                    try:
+                        self.create_dir_link(link_path, source)
+                        print(f"[Notebook] Linked: {source.name} -> {source}")
+                    except OSError as e:
+                        print(f"[Notebook] Could not create symlink {source.name}: {e}")
         except Exception as e:
             print(f"[Notebook] Could not setup home directory links: {e}")
         

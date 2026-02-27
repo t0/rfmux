@@ -182,7 +182,7 @@ except ImportError:
 # Local imports (adjusted for new location)
 import rfmux # Ensure rfmux is available for the console
 from rfmux import streamer # Adjusted import
-from rfmux.awaitless import load_ipython_extension as load_awaitless_extension # Adjusted import
+from awaitless import load_ipython_extension as load_awaitless_extension
 from rfmux.core.transferfunctions import ( # Adjusted import
     spectrum_from_slow_tod,
     convert_roc_to_volts,

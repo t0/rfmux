@@ -71,6 +71,7 @@ class JupyterServerManager(QtCore.QObject):
             '--no-browser',
             '--ServerApp.token=periscope',
             '--ServerApp.disable_check_xsrf=True',
+            '--InteractiveShellApp.extensions=awaitless',
         ]
         
         try:

@@ -49,7 +49,7 @@ for package, min_version in tuples:
 
 # For ipython sessions, activate awaitless
 try:
-    from . import awaitless
+    import awaitless
     awaitless.load_ipython_extension()
 except (ImportError, RuntimeError):
     pass

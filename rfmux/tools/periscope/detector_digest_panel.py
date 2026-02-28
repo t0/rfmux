@@ -796,10 +796,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                         pen_color_plot3 = pg.mkColor(color)
                     current_pen = pg.mkPen(pen_color_plot3, width=LINE_WIDTH, style=line_style)
                     dac_scale = self.dac_scales.get(self.target_module)
-                    legend_name = f"{amp_val_float:.2e} Norm"
-                    if dac_scale:
-                        try: legend_name = f"{UnitConverter.normalize_to_dbm(amp_val_float, dac_scale):.2f} dBm"
-                        except: pass
+                    legend_name = UnitConverter.format_probe_label(amp_val_float, "dbm", dac_scale)
                     legend_name += " (Down)" if direction == "downward" else " (Up)"
                     if is_bifurcated: legend_name += " (bifurcated)"
                     self.plot3_bias_opt.plot(x_axis_hz_offset, s21_mag_db, pen=current_pen, name=legend_name)

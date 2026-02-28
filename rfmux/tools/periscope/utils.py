@@ -545,6 +545,43 @@ class UnitConverter:
                 if ref_val != 0 and np.isfinite(ref_val): result = result / ref_val
         return result
 
+    @staticmethod
+    def format_probe_label(amp_value: float, unit_mode: str = "dbm",
+                           dac_scale: Optional[float] = None) -> str:
+        """Format a normalized amplitude as a compact human-readable power string.
+
+        Consolidates the label-formatting logic previously duplicated across
+        multisweep_panel, network_analysis_panel, detector_digest_panel, and
+        parameter_histograms_panel.
+
+        Args:
+            amp_value:  Normalized amplitude (0–1 scale).
+            unit_mode:  One of ``"dbm"``, ``"volts"``, or ``"counts"``.
+            dac_scale:  DAC full-scale in dBm for the active module.
+                        If *None*, the label falls back to showing the raw
+                        normalized value.
+
+        Returns:
+            A compact string such as ``"-23.45 dBm"`` or ``"152.3 µVpk"``.
+        """
+        if unit_mode == "dbm":
+            if dac_scale is not None:
+                dbm_val = UnitConverter.normalize_to_dbm(amp_value, dac_scale)
+                return f"{dbm_val:.2f} dBm"
+            return f"{amp_value:.3e} (Norm)"
+
+        if unit_mode == "volts":
+            if dac_scale is not None:
+                dbm_val = UnitConverter.normalize_to_dbm(amp_value, dac_scale)
+                power_watts = 10 ** ((dbm_val - 30) / 10)
+                voltage_rms = np.sqrt(power_watts * 50.0)
+                voltage_peak_uv = voltage_rms * np.sqrt(2) * 1e6
+                return f"{voltage_peak_uv:.1f} µVpk"
+            return f"{amp_value:.3e} (Norm)"
+
+        # counts or anything else
+        return f"{amp_value:.3e} Norm"
+
 # ───────────────────────── Lock‑Free Ring Buffer ─────────────────────────
 class Circular:
     def __init__(self, size: int, dtype=float) -> None:

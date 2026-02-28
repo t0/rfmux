@@ -87,7 +87,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.setWindowTitle(f"Multisweep Results - Module {self.target_module}")
 
         # Data storage and state — detector-based format:
-        # {detector_id: {(amplitude, direction): {all_detector_data_fields + amplitude, direction, iteration metadata}}}
+        # {detector_id: {iteration_index: {all_detector_data_fields + amplitude, direction, iteration metadata}}}
         self.results_by_detector = {}
         self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed
         self.current_iteration_being_processed = None # Tracks the current iteration
@@ -714,17 +714,19 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.current_iteration_being_processed = iteration
 
         
-        # Store data in detector-based structure
+        # Store data in detector-based structure, keyed by iteration index.
+        # The amplitude and direction are stored inside each entry, not as keys,
+        # so that all detectors share the same iteration indices even if they
+        # use different amplitudes in the future.
         if results_for_plotting:
             for detector_id, det_data in results_for_plotting.items():
                 if detector_id not in self.results_by_detector:
                     self.results_by_detector[detector_id] = {}
-                # Augment detector data with amplitude/direction/iteration metadata
                 entry = dict(det_data)
                 entry['amplitude'] = amplitude
                 entry['direction'] = direction
                 entry['iteration'] = iteration
-                self.results_by_detector[detector_id][(amplitude, direction)] = entry
+                self.results_by_detector[detector_id][iteration] = entry
 
         # --- Update CF history using the pre-mapped results_for_history ---
         if results_for_history:
@@ -771,14 +773,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         )
         
         # Prepare detector data for grid plotting directly from results_by_detector
+        # Key by (amp_val, direction) for the grid helpers
         detector_data = {}
-        for detector_id, amp_dir_dict in self.results_by_detector.items():
+        for detector_id, iter_dict in self.results_by_detector.items():
             detector_data[detector_id] = {}
-            for (amp_val, direction), det_entry in amp_dir_dict.items():
+            for det_entry in iter_dict.values():
+                amp_val = det_entry.get('amplitude')
+                direction = det_entry.get('direction', 'upward')
                 freqs = det_entry.get('frequencies', np.array([]))
                 iq_complex = det_entry.get('iq_complex_volts', np.array([]))
-                if len(freqs) > 0 and len(iq_complex) > 0:
-                    detector_data[detector_id][amp_val] = {
+                if amp_val is not None and len(freqs) > 0 and len(iq_complex) > 0:
+                    detector_data[detector_id][(amp_val, direction)] = {
                         'freq': freqs,
                         'iq': iq_complex,
                         'amplitude': amp_val,
@@ -789,13 +794,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if not detector_data:
             return
         
-        # Get all amplitudes for color mapping
+        # Get all amplitudes for color mapping (unique amplitude values only)
         all_amps = set()
         for det_data in detector_data.values():
-            all_amps.update(det_data.keys())
+            for (amp_val, _direction) in det_data.keys():
+                all_amps.add(amp_val)
         
         # Create amplitude color mapping (matches combined plot colors)
         amplitude_to_color = create_amplitude_color_map(all_amps, self.dark_mode)
+        
+        # Get DAC scale for label formatting
+        dac_scale = self.dac_scales.get(self.active_module_for_dac)
         
         # Determine plot type, grid, and cache based on tab
         if tab_idx == 0:
@@ -821,7 +830,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             prev_btn=self.prev_batch_btn,
             next_btn=self.next_batch_btn,
             batch_label=self.batch_info_label,
-            widget_cache=widget_cache
+            widget_cache=widget_cache,
+            dac_scale=dac_scale
         )
     
     def _redraw_combined_plots(self):
@@ -857,13 +867,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         cmap_name = COLORMAP_CHOICES.get("AMPLITUDE_SWEEP", "inferno")
         use_cmap = pg.colormap.get(cmap_name) if cmap_name else None
         
-        # Collect unique (amplitude, direction) pairs and amplitude values
+        # Collect unique (amplitude, direction) pairs and amplitude values from entries
         amplitude_values = set()
         amp_dir_pairs = set()
-        for amp_dir_dict in self.results_by_detector.values():
-            for (amp, direction) in amp_dir_dict.keys():
-                amplitude_values.add(amp)
-                amp_dir_pairs.add((amp, direction))
+        for iter_dict in self.results_by_detector.values():
+            for entry in iter_dict.values():
+                amp = entry.get('amplitude')
+                direction = entry.get('direction', 'upward')
+                if amp is not None:
+                    amplitude_values.add(amp)
+                    amp_dir_pairs.add((amp, direction))
         num_amps = len(amplitude_values)
             
         # Create a mapping for unique amplitude values to colors
@@ -900,29 +913,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             pen = pg.mkPen(color, width=LINE_WIDTH, style=line_style)
             
             # --- Prepare Legend Entry for this Amplitude ---
-            legend_name_amp = ""
             dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
-
-            if self.unit_mode == "dbm":
-                if dac_scale_for_module is not None:
-                    dbm_val = UnitConverter.normalize_to_dbm(amp_val, dac_scale_for_module)
-                    legend_name_amp = f"Probe: {dbm_val:.2f} dBm"
-                else: # Fallback if DAC scale is missing
-                    legend_name_amp = f"Probe: {amp_val:.3e} (Norm)" 
-            elif self.unit_mode == "volts":
-                if dac_scale_for_module is not None:
-                    dbm_val = UnitConverter.normalize_to_dbm(amp_val, dac_scale_for_module)
-                    power_watts = 10**((dbm_val - 30)/10) # Convert dBm to Watts
-                    resistance = 50.0 # Standard impedance assumption
-                    voltage_rms = np.sqrt(power_watts * resistance)
-                    voltage_peak_uv = voltage_rms * np.sqrt(2) * 1e6 # Convert RMS to peak uV
-                    legend_name_amp = f"Probe: {voltage_peak_uv:.1f} uVpk"
-                else: # Fallback if DAC scale is missing
-                    legend_name_amp = f"Probe: {amp_val:.3e} (Norm)"
-            else: # Counts or other modes
-                legend_name_amp = f"Probe: {amp_val:.3e} Norm"
-
-            # Add direction to legend name
+            legend_name_amp = UnitConverter.format_probe_label(amp_val, self.unit_mode, dac_scale_for_module)
             direction_suffix = " (Down)" if direction == "downward" else " (Up)"
             full_legend_name = legend_name_amp + direction_suffix
             
@@ -941,8 +933,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 legend_items_phase[legend_key] = dummy_phase_curve_for_legend
 
             # --- Plot Data for Each Detector at this Amplitude+Direction ---
-            for res_idx, amp_dir_dict in self.results_by_detector.items():
-                data = amp_dir_dict.get((amp_val, direction))
+            for res_idx, iter_dict in self.results_by_detector.items():
+                # Find the entry matching this (amp_val, direction) pair
+                data = None
+                for entry in iter_dict.values():
+                    if entry.get('amplitude') == amp_val and entry.get('direction') == direction:
+                        data = entry
+                        break
                 if data is None:
                     continue
                 freqs_hz = data.get('frequencies')
@@ -1352,9 +1349,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # Show lines. Create them if they don't exist.
             # Get unique amplitudes from iterations
             amplitude_values = set()
-            for amp_dir_dict in self.results_by_detector.values():
-                for (amp, _dir) in amp_dir_dict.keys():
-                    amplitude_values.add(amp)
+            for iter_dict in self.results_by_detector.values():
+                for entry in iter_dict.values():
+                    amp = entry.get('amplitude')
+                    if amp is not None:
+                        amplitude_values.add(amp)
             num_amps = len(amplitude_values)
             
             if num_amps == 0:
@@ -1396,11 +1395,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 existing_mag_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_mag[amp_val]}
                 existing_phase_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_phase[amp_val]}
 
-                for res_idx, amp_dir_dict in self.results_by_detector.items():
+                for res_idx, iter_dict in self.results_by_detector.items():
                     # Get detector data for this amplitude (any direction)
                     data = None
-                    for (a, d), entry in amp_dir_dict.items():
-                        if a == amp_val:
+                    for entry in iter_dict.values():
+                        if entry.get('amplitude') == amp_val:
                             data = entry
                             break
                     if data is None:
@@ -1831,7 +1830,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         section_data_for_digest = {}
         
         if detector_idx in self.results_by_detector:
-            for (amp_val, direction), det_entry in self.results_by_detector[detector_idx].items():
+            for det_entry in self.results_by_detector[detector_idx].values():
+                amp_val = det_entry.get('amplitude')
+                direction = det_entry.get('direction', 'upward')
                 actual_cf_for_this_amp = det_entry.get('bias_frequency',
                                                        det_entry.get('original_center_frequency'))
                 combo_key = f"{amp_val}:{direction}"
@@ -1862,7 +1863,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 continue
             
             detector_resonance_data = {}
-            for (amp_val, direction), det_entry in self.results_by_detector[det_idx].items():
+            for det_entry in self.results_by_detector[det_idx].values():
+                amp_val = det_entry.get('amplitude')
+                direction = det_entry.get('direction', 'upward')
                 actual_cf = det_entry.get('bias_frequency', det_entry.get('original_center_frequency'))
                 combo_key = f"{amp_val}:{direction}"
                 detector_resonance_data[combo_key] = {
@@ -2056,11 +2059,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Get parameters from dialog
         bias_params = dialog.get_parameters()
         
-        # Convert detector-based format to iteration format expected by bias_kids
-        from .multisweep_format_migration import detector_format_to_iteration_format
-        iteration_format = detector_format_to_iteration_format(self.results_by_detector)
+        # Pass detector-indexed format directly to bias_kids
         gui_format_results = {
-            'results_by_iteration': list(iteration_format.values())
+            'results_by_detector': self.results_by_detector
         }
         
         # Import BiasKidsTask and BiasKidsSignals from tasks module

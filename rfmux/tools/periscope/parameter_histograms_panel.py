@@ -6,7 +6,8 @@ import pyqtgraph as pg
 
 # Imports from within the 'periscope' subpackage
 from .utils import (
-    ScreenshotMixin, find_parent_with_attr, TABLEAU10_COLORS, LINE_WIDTH
+    ScreenshotMixin, find_parent_with_attr, TABLEAU10_COLORS, LINE_WIDTH,
+    UnitConverter
 )
 from .multisweep_grid_helpers import create_amplitude_color_map
 
@@ -50,10 +51,10 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Data storage
         self.plot_data = None
-        self.available_amplitudes = []
+        self.available_sweep_keys = []  # List of (amplitude, direction) tuples
         
         # Histogram cache for performance
-        # Structure: {amp_idx: {'upward': {...}, 'downward': {...}}}
+        # Structure: {sweep_idx: {fr_dict, qr_dict, ...}} or 'all_sweeps'
         self.histogram_cache = {}
         
         # Global Q-factor ranges for consistent x-axis scaling
@@ -169,6 +170,16 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         layout.addWidget(plot_container)
         
+    @staticmethod
+    def _color_to_rgb(color):
+        """Convert a color (hex string or tuple) to an (R, G, B) tuple."""
+        if isinstance(color, str) and color.startswith('#'):
+            color = color.lstrip('#')
+            return (int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16))
+        if isinstance(color, (tuple, list)) and len(color) >= 3:
+            return (int(color[0]), int(color[1]), int(color[2]))
+        return (100, 100, 255)  # fallback
+
     def _style_axes(self, plot_item, pen_color):
         """Apply consistent axis styling."""
         for axis_name in ("left", "bottom", "right", "top"):
@@ -186,20 +197,23 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         if not results:
             return
         
-        # Collect available amplitudes and check for fit data
-        amplitudes_set = set()
+        # Collect available (amplitude, direction) pairs and check for fit data
+        sweep_keys_set = set()
         has_fit_data = False
-        for amp_dir_dict in results.values():
-            for (amp, direction) in amp_dir_dict.keys():
-                amplitudes_set.add(amp)
-            for entry in amp_dir_dict.values():
+        for iter_dict in results.values():
+            for entry in iter_dict.values():
+                amp = entry.get('amplitude')
+                direction = entry.get('direction', 'upward')
+                if amp is not None:
+                    sweep_keys_set.add((amp, direction))
                 if entry.get('fit_params') or entry.get('nonlinear_fit_params'):
                     has_fit_data = True
         
         if not has_fit_data:
             return
         
-        self.available_amplitudes = sorted(amplitudes_set)
+        # Sort by amplitude first, then direction (so "downward" < "upward" alphabetically)
+        self.available_sweep_keys = sorted(sweep_keys_set, key=lambda x: (x[0], x[1]))
         
         # Invalidate cache on data reload
         self.histogram_cache.clear()
@@ -208,32 +222,55 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._populate_amplitude_selector()
         self._update_plots()
         
+    def _format_sweep_label(self, amp_value, direction):
+        """Format a human-readable label for a sweep.
+        
+        Produces labels like '-23.45 dBm (Up)' or '152.3 µVpk (Down)'.
+        
+        Args:
+            amp_value: Normalized amplitude value
+            direction: Sweep direction string ('upward' or 'downward')
+            
+        Returns:
+            str: Formatted label with power and direction
+        """
+        # Get unit mode and DAC scale from the multisweep panel
+        unit_mode = getattr(self.multisweep_panel, 'unit_mode', 'dbm')
+        dac_scales = getattr(self.multisweep_panel, 'dac_scales', {})
+        active_module = getattr(self.multisweep_panel, 'active_module_for_dac', None)
+        dac_scale = dac_scales.get(active_module) if active_module is not None else None
+        
+        label = UnitConverter.format_probe_label(amp_value, unit_mode, dac_scale)
+        direction_suffix = " (Down)" if direction == "downward" else " (Up)"
+        return label + direction_suffix
+    
     def _populate_amplitude_selector(self):
-        """Populate amplitude selector with available amplitudes."""
-        if not self.available_amplitudes:
+        """Populate amplitude selector with available sweep keys."""
+        if not self.available_sweep_keys:
             return
         
         # Populate combo box
         self.amp_combo.clear()
         
-        # Add "All Amplitudes" as first option
-        self.amp_combo.addItem("All Amplitudes")
+        # Add "All Sweeps" as first option
+        self.amp_combo.addItem("All Sweeps")
         
-        # Add individual amplitudes with integer indices
-        for idx in range(len(self.available_amplitudes)):
-            self.amp_combo.addItem(str(idx))
+        # Add individual sweeps with power + direction labels
+        for amp_value, direction in self.available_sweep_keys:
+            label = self._format_sweep_label(amp_value, direction)
+            self.amp_combo.addItem(label)
         
-        # Set default to "All Amplitudes" (index 0)
+        # Set default to "All Sweeps" (index 0)
         self.amp_combo.setCurrentIndex(0)
             
     def _amplitude_changed(self, index):
         """Handle amplitude selection change."""
         if index >= 0:
-            # Index 0 is "All Amplitudes", indices 1+ are specific amplitudes
+            # Index 0 is "All Sweeps", indices 1+ are specific sweeps
             if index == 0:
                 self.amplitude_idx = None  # None means show all
             else:
-                self.amplitude_idx = index - 1  # Adjust for "All Amplitudes" offset
+                self.amplitude_idx = index - 1  # Adjust for "All Sweeps" offset
             self._update_plots()
             
     def _bins_changed(self, value):
@@ -243,31 +280,39 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.histogram_cache.clear()
         self._update_plots()
         
-    def _extract_params_for_amplitude(self, amplitude):
-        """Extract fit parameters for all detectors at a given amplitude.
+    def _extract_params_for_sweep(self, amplitude, direction):
+        """Extract fit parameters for all detectors at a given (amplitude, direction).
         
-        Reads directly from results_by_detector — no adapter needed.
+        Reads directly from results_by_detector, searching entry values for
+        matching amplitude and direction.
+        
+        Args:
+            amplitude: The amplitude value to match
+            direction: The sweep direction to match ('upward' or 'downward')
         
         Returns:
-            dict: {detector_id: {param_name: value, ...}} for detectors with fits at this amplitude.
+            dict: {detector_id: {param_name: value, ...}} for detectors with fits.
         """
         results = self.multisweep_panel.results_by_detector
         params_by_detector = {}
         
-        for detector_id, amp_dir_dict in results.items():
-            # Find entry for this amplitude (any direction)
-            for (amp, direction), entry in amp_dir_dict.items():
-                if amp != amplitude:
-                    continue
-                # Prefer nonlinear fit params, fall back to skewed
-                fit_params = None
-                if entry.get('nonlinear_fit_params'):
-                    fit_params = dict(entry['nonlinear_fit_params'])
-                elif entry.get('fit_params'):
-                    fit_params = dict(entry['fit_params'])
-                if fit_params:
-                    params_by_detector[detector_id] = fit_params
-                break  # Use first matching direction
+        for detector_id, iter_dict in results.items():
+            # Find entry matching this amplitude + direction
+            entry = None
+            for e in iter_dict.values():
+                if e.get('amplitude') == amplitude and e.get('direction') == direction:
+                    entry = e
+                    break
+            if entry is None:
+                continue
+            # Prefer nonlinear fit params, fall back to skewed
+            fit_params = None
+            if entry.get('nonlinear_fit_params'):
+                fit_params = dict(entry['nonlinear_fit_params'])
+            elif entry.get('fit_params'):
+                fit_params = dict(entry['fit_params'])
+            if fit_params:
+                params_by_detector[detector_id] = fit_params
         
         return params_by_detector
 
@@ -292,12 +337,12 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             return
         
         if self.amplitude_idx is None:
-            self._update_plots_all_amplitudes()
+            self._update_plots_all_sweeps()
         else:
-            if self.amplitude_idx >= len(self.available_amplitudes):
+            if self.amplitude_idx >= len(self.available_sweep_keys):
                 return
             
-            amp = self.available_amplitudes[self.amplitude_idx]
+            amp, direction = self.available_sweep_keys[self.amplitude_idx]
             
             # Check cache first
             cache_key = self.amplitude_idx
@@ -309,8 +354,8 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
                 self._plot_q_histogram(self.qi_plot, cached_data['qi_dict'], "Qi")
                 return
             
-            # Extract parameters directly from results_by_detector
-            params_by_det = self._extract_params_for_amplitude(amp)
+            # Extract parameters for this specific (amplitude, direction) pair
+            params_by_det = self._extract_params_for_sweep(amp, direction)
             
             fr_valid = self._extract_param_values(params_by_det, 'fr')
             qr_valid = self._extract_param_values(params_by_det, 'Qr')
@@ -370,56 +415,56 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Auto range
         self.freq_plot.autoRange()
         
-    def _update_plots_all_amplitudes(self):
-        """Update plots showing all amplitudes (stacked histograms)."""
+    def _update_plots_all_sweeps(self):
+        """Update plots showing all sweeps (stacked histograms)."""
         if not self.multisweep_panel or not self.multisweep_panel.results_by_detector:
             return
         
         # Check if cached
-        cache_key = 'all_amplitudes'
+        cache_key = 'all_sweeps'
         if cache_key in self.histogram_cache:
             cached_data = self.histogram_cache[cache_key]
-            self._plot_frequency_scatter_all_amplitudes(cached_data['fr_by_amp'])
-            self._plot_stacked_q_histogram(self.qr_plot, cached_data['qr_by_amp'], "Qr")
-            self._plot_stacked_q_histogram(self.qc_plot, cached_data['qc_by_amp'], "Qc")
-            self._plot_stacked_q_histogram(self.qi_plot, cached_data['qi_by_amp'], "Qi")
+            self._plot_frequency_scatter_all_sweeps(cached_data['fr_by_sweep'])
+            self._plot_stacked_q_histogram(self.qr_plot, cached_data['qr_by_sweep'], "Qr")
+            self._plot_stacked_q_histogram(self.qc_plot, cached_data['qc_by_sweep'], "Qc")
+            self._plot_stacked_q_histogram(self.qi_plot, cached_data['qi_by_sweep'], "Qi")
             return
         
-        # Extract data for all amplitudes directly from results_by_detector
-        fr_by_amp = {}
-        qr_by_amp = {}
-        qc_by_amp = {}
-        qi_by_amp = {}
+        # Extract data for all sweeps directly from results_by_detector
+        fr_by_sweep = {}
+        qr_by_sweep = {}
+        qc_by_sweep = {}
+        qi_by_sweep = {}
         
-        for amp_idx, amp in enumerate(self.available_amplitudes):
-            params_by_det = self._extract_params_for_amplitude(amp)
+        for sweep_idx, (amp, direction) in enumerate(self.available_sweep_keys):
+            params_by_det = self._extract_params_for_sweep(amp, direction)
             
             fr_dict = self._extract_param_values(params_by_det, 'fr')
             qr_dict = self._extract_param_values(params_by_det, 'Qr')
             qc_dict = self._extract_param_values(params_by_det, 'Qc')
             qi_dict = self._extract_param_values(params_by_det, 'Qi')
             
-            if fr_dict: fr_by_amp[amp_idx] = fr_dict
-            if qr_dict: qr_by_amp[amp_idx] = qr_dict
-            if qc_dict: qc_by_amp[amp_idx] = qc_dict
-            if qi_dict: qi_by_amp[amp_idx] = qi_dict
+            if fr_dict: fr_by_sweep[sweep_idx] = fr_dict
+            if qr_dict: qr_by_sweep[sweep_idx] = qr_dict
+            if qc_dict: qc_by_sweep[sweep_idx] = qc_dict
+            if qi_dict: qi_by_sweep[sweep_idx] = qi_dict
         
         # Compute and store global Q-factor ranges
-        self._compute_global_q_ranges(qr_by_amp, qc_by_amp, qi_by_amp)
+        self._compute_global_q_ranges(qr_by_sweep, qc_by_sweep, qi_by_sweep)
         
         # Cache the data
         self.histogram_cache[cache_key] = {
-            'fr_by_amp': fr_by_amp,
-            'qr_by_amp': qr_by_amp,
-            'qc_by_amp': qc_by_amp,
-            'qi_by_amp': qi_by_amp
+            'fr_by_sweep': fr_by_sweep,
+            'qr_by_sweep': qr_by_sweep,
+            'qc_by_sweep': qc_by_sweep,
+            'qi_by_sweep': qi_by_sweep
         }
         
         # Plot
-        self._plot_frequency_scatter_all_amplitudes(fr_by_amp)
-        self._plot_stacked_q_histogram(self.qr_plot, qr_by_amp, "Qr")
-        self._plot_stacked_q_histogram(self.qc_plot, qc_by_amp, "Qc")
-        self._plot_stacked_q_histogram(self.qi_plot, qi_by_amp, "Qi")
+        self._plot_frequency_scatter_all_sweeps(fr_by_sweep)
+        self._plot_stacked_q_histogram(self.qr_plot, qr_by_sweep, "Qr")
+        self._plot_stacked_q_histogram(self.qc_plot, qc_by_sweep, "Qc")
+        self._plot_stacked_q_histogram(self.qi_plot, qi_by_sweep, "Qi")
     
     def _compute_global_q_ranges(self, qr_by_amp, qc_by_amp, qi_by_amp):
         """Compute and store global Q-factor ranges for consistent x-axis scaling."""
@@ -453,8 +498,8 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             if qi_min > 0 and qi_max > 0:
                 self.global_q_ranges['Qi'] = (qi_min, qi_max)
     
-    def _plot_frequency_scatter_all_amplitudes(self, fr_by_amp):
-        """Plot resonance frequencies for all amplitudes with color coding."""
+    def _plot_frequency_scatter_all_sweeps(self, fr_by_sweep):
+        """Plot resonance frequencies for all sweeps with color coding."""
         if not self.freq_plot:
             return
         
@@ -465,21 +510,21 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Clear previous plot
         freq_item.clear()
         
-        if not fr_by_amp:
+        if not fr_by_sweep:
             return
         
-        # Get amplitude color mapping
-        amp_values = [self.available_amplitudes[idx] for idx in sorted(fr_by_amp.keys())]
+        # Get amplitude color mapping (extract amp values from sweep keys)
+        amp_values = [self.available_sweep_keys[idx][0] for idx in sorted(fr_by_sweep.keys())]
         amplitude_to_color = create_amplitude_color_map(amp_values, self.dark_mode)
         
-        # Plot each amplitude with its color
+        # Plot each sweep with its color
         total_count = 0
-        for amp_idx in sorted(fr_by_amp.keys()):
-            fr_dict = fr_by_amp[amp_idx]
+        for sweep_idx in sorted(fr_by_sweep.keys()):
+            fr_dict = fr_by_sweep[sweep_idx]
             if not fr_dict:
                 continue
             
-            amp_value = self.available_amplitudes[amp_idx]
+            amp_value = self.available_sweep_keys[sweep_idx][0]
             color = amplitude_to_color.get(amp_value, TABLEAU10_COLORS[0])
             
             detector_ids = sorted(fr_dict.keys())
@@ -497,14 +542,14 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Add title
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-        title = f"Resonance Frequencies - All Amplitudes"
+        title = f"Resonance Frequencies - All Sweeps"
         freq_item.setTitle(title, color=pen_color)
         
         # Auto range
         self.freq_plot.autoRange()
     
-    def _plot_stacked_q_histogram(self, plot_widget, q_by_amp, param_name):
-        """Plot stacked Q factor histograms for all amplitudes."""
+    def _plot_stacked_q_histogram(self, plot_widget, q_by_sweep, param_name):
+        """Plot stacked Q factor histograms for all sweeps."""
         if not plot_widget:
             return
         
@@ -518,13 +563,13 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             plot_item.legend.scene().removeItem(plot_item.legend)
             plot_item.legend = None
         
-        if not q_by_amp:
+        if not q_by_sweep:
             return
         
         # Collect all Q values to determine global bins
         all_q_values = []
-        for amp_idx in q_by_amp:
-            all_q_values.extend(list(q_by_amp[amp_idx].values()))
+        for sweep_idx in q_by_sweep:
+            all_q_values.extend(list(q_by_sweep[sweep_idx].values()))
         
         if len(all_q_values) == 0:
             return
@@ -543,41 +588,38 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         x = (bins[:-1] + bins[1:]) / 2
         width = bins[1:] - bins[:-1]
         
-        # Get amplitude color mapping
-        amp_values = [self.available_amplitudes[idx] for idx in sorted(q_by_amp.keys())]
+        # Get amplitude color mapping (extract amp values from sweep keys)
+        amp_values = [self.available_sweep_keys[idx][0] for idx in sorted(q_by_sweep.keys())]
         amplitude_to_color = create_amplitude_color_map(amp_values, self.dark_mode)
         
         # Calculate opacity gradient (back to front)
-        num_amps = len(q_by_amp)
-        alphas = np.linspace(0.4, 0.8, num_amps)
+        num_sweeps = len(q_by_sweep)
+        alphas = np.linspace(0.4, 0.8, num_sweeps)
         
         # Plot from highest amplitude to lowest (back to front for stacking)
-        sorted_amp_indices = sorted(q_by_amp.keys(), reverse=True)
+        sorted_sweep_indices = sorted(q_by_sweep.keys(), reverse=True)
         
         # Add legend
         legend = plot_item.addLegend(offset=(-10, 10))
         
-        for i, amp_idx in enumerate(sorted_amp_indices):
-            q_dict = q_by_amp[amp_idx]
+        for i, sweep_idx in enumerate(sorted_sweep_indices):
+            q_dict = q_by_sweep[sweep_idx]
             if not q_dict:
                 continue
             
             q_values = np.array(list(q_dict.values()))
-            amp_value = self.available_amplitudes[amp_idx]
+            amp_value, direction = self.available_sweep_keys[sweep_idx]
             
             # Compute histogram with shared bins
             counts, _ = np.histogram(q_values, bins=bins)
             
             # Get color and alpha
             color = amplitude_to_color.get(amp_value, TABLEAU10_COLORS[1])
-            alpha = alphas[num_amps - 1 - i]  # Reverse alpha for front-to-back
+            alpha = alphas[num_sweeps - 1 - i]  # Reverse alpha for front-to-back
             
             # Convert color to rgba with alpha
-            if isinstance(color, tuple) and len(color) >= 3:
-                rgba = (*color[:3], int(alpha * 255))
-            else:
-                # Fallback if color format is unexpected
-                rgba = (100, 100, 255, int(alpha * 255))
+            rgb = self._color_to_rgb(color)
+            rgba = (*rgb, int(alpha * 255))
             
             # Create bar graph with transparency
             bar_graph = pg.BarGraphItem(
@@ -589,13 +631,13 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             )
             plot_item.addItem(bar_graph)
             
-            # Add to legend with amplitude index (matching the selector labels)
-            legend.addItem(bar_graph, str(amp_idx))
+            # Add to legend with power + direction label
+            legend.addItem(bar_graph, self._format_sweep_label(amp_value, direction))
         
         # Add title
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-        total_count = sum(len(q_by_amp[idx]) for idx in q_by_amp)
-        title = f"{param_name} Distribution - All Amplitudes (N={total_count})"
+        total_count = sum(len(q_by_sweep[idx]) for idx in q_by_sweep)
+        title = f"{param_name} Distribution - All Sweeps (N={total_count})"
         plot_item.setTitle(title, color=pen_color)
         
         # Auto range
@@ -645,34 +687,33 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         x = (edges[:-1] + edges[1:]) / 2  # Bin centers
         width = edges[1:] - edges[:-1]
         
-        # Calculate consistent transparency based on amplitude index
-        if self.amplitude_idx is not None and len(self.available_amplitudes) > 0:
-            num_amps = len(self.available_amplitudes)
-            alphas = np.linspace(0.4, 0.8, num_amps)
+        # Calculate consistent transparency based on sweep index
+        if self.amplitude_idx is not None and len(self.available_sweep_keys) > 0:
+            num_sweeps = len(self.available_sweep_keys)
+            alphas = np.linspace(0.4, 0.8, num_sweeps)
             # Reverse so that higher amplitudes (later in sorted list) get higher alpha
-            alpha = alphas[num_amps - 1 - self.amplitude_idx]
+            alpha = alphas[num_sweeps - 1 - self.amplitude_idx]
             
             # Get amplitude color mapping for consistency
-            amp_values = self.available_amplitudes
+            amp_values = [ak[0] for ak in self.available_sweep_keys]
             amplitude_to_color = create_amplitude_color_map(amp_values, self.dark_mode)
-            amp_value = self.available_amplitudes[self.amplitude_idx]
+            amp_value = self.available_sweep_keys[self.amplitude_idx][0]
             color = amplitude_to_color.get(amp_value, TABLEAU10_COLORS[1])
             
             # Convert color to rgba with alpha
-            if isinstance(color, tuple) and len(color) >= 3:
-                rgba = (*color[:3], int(alpha * 255))
-            else:
-                rgba = (100, 100, 255, int(alpha * 255))
+            rgb = self._color_to_rgb(color)
+            rgba = (*rgb, int(alpha * 255))
         else:
             # Fallback for single color
             color = TABLEAU10_COLORS[1]
-            rgba = color
+            rgb = self._color_to_rgb(color)
+            rgba = (*rgb, 200)
         
         bar_graph = pg.BarGraphItem(
             x=x,
             height=counts,
             width=width,
-            brush=pg.mkBrush(*rgba) if isinstance(rgba, tuple) else rgba,
+            brush=pg.mkBrush(*rgba),
             pen=pg.mkPen(color, width=1)
         )
         plot_item.addItem(bar_graph)

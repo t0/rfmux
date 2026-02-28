@@ -575,12 +575,30 @@ class UnitConverter:
                 dbm_val = UnitConverter.normalize_to_dbm(amp_value, dac_scale)
                 power_watts = 10 ** ((dbm_val - 30) / 10)
                 voltage_rms = np.sqrt(power_watts * 50.0)
-                voltage_peak_uv = voltage_rms * np.sqrt(2) * 1e6
-                return f"{voltage_peak_uv:.1f} µVpk"
+                voltage_peak = voltage_rms * np.sqrt(2)
+                return UnitConverter._format_si_volts(voltage_peak) + "pk"
             return f"{amp_value:.3e} (Norm)"
 
         # counts or anything else
         return f"{amp_value:.3e} Norm"
+
+    @staticmethod
+    def _format_si_volts(volts: float) -> str:
+        """Format a voltage value with the appropriate SI prefix.
+
+        Examples: 0.00012 → '120 µV', 0.0034 → '3.4 mV', 1.2 → '1.20 V'
+        """
+        abs_v = abs(volts)
+        if abs_v == 0:
+            return "0 V"
+        elif abs_v < 1e-6:
+            return f"{volts * 1e9:.1f} nV"
+        elif abs_v < 1e-3:
+            return f"{volts * 1e6:.1f} µV"
+        elif abs_v < 1:
+            return f"{volts * 1e3:.2f} mV"
+        else:
+            return f"{volts:.3f} V"
 
 # ───────────────────────── Lock‑Free Ring Buffer ─────────────────────────
 class Circular:

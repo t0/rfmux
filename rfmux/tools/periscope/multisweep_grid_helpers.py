@@ -19,7 +19,7 @@ from .utils import (
 def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, batch_size,
                       amplitude_to_color, dark_mode, unit_mode='dbm', normalize=False,
                       prev_btn=None, next_btn=None, batch_label=None, widget_cache=None,
-                      dac_scale=None):
+                      dac_scale=None, show_legend=True):
     """
     Update a grid layout with per-detector sweep plots.
 
@@ -57,21 +57,22 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
     if not batch_detectors:
         return
 
-    # Calculate grid dimensions
+    # Calculate grid dimensions — use ceil(sqrt(n)) for a balanced grid
     num_plots = len(batch_detectors)
-    MIN_COLS = 4
-
-    if num_plots <= MIN_COLS:
-        ncols = MIN_COLS
-        nrows = 1
-    else:
-        ncols = max(MIN_COLS, int(np.ceil(np.sqrt(num_plots))))
-        nrows = int(np.ceil(num_plots / ncols))
+    ncols = max(1, int(np.ceil(np.sqrt(num_plots))))
+    nrows = int(np.ceil(num_plots / ncols))
 
     # Theme colors
     bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
 
-    # Set uniform stretch factors
+    # Reset ALL existing stretch factors to 0 (clears stale rows/cols from
+    # a previously-larger grid that would otherwise keep consuming space).
+    for r in range(grid_layout.rowCount()):
+        grid_layout.setRowStretch(r, 0)
+    for c in range(grid_layout.columnCount()):
+        grid_layout.setColumnStretch(c, 0)
+
+    # Set uniform stretch factors for the active grid
     for r in range(nrows):
         grid_layout.setRowStretch(r, 1)
     for c in range(ncols):
@@ -145,8 +146,8 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
                     ax.setPen(pen_color)
                     ax.setTextPen(pen_color)
 
-            # Plot data with legend labels
-            labels = sweep_labels if len(sweep_labels) > 0 else None
+            # Plot data with legend labels (suppressed when colorbar is active)
+            labels = sweep_labels if (show_legend and len(sweep_labels) > 0) else None
 
             if plot_type == 'magnitude':
                 _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
@@ -166,12 +167,15 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
             else:  # IQ
                 _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
                                   pen_color, normalize, labels)
-                plot_item.setLabel('left', 'Q (Imaginary)')
-                plot_item.setLabel('bottom', 'I (Real)')
+                iq_units = 'Counts' if unit_mode == 'counts' else 'V'
+                plot_item.setLabel('left', 'Q (Imaginary)', units=iq_units)
+                plot_item.setLabel('bottom', 'I (Real)', units=iq_units)
                 square_axes(plot_item)
 
             plot_item.showGrid(x=True, y=True, alpha=0.3)
 
+        # Store detector ID on widget for double-click navigation
+        plot_widget._detector_id = detector_id
         grid_layout.addWidget(plot_widget, row, col)
         plot_widget.show()
 
@@ -208,7 +212,13 @@ def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
 
     # Add legend in lower-left corner (usually free space)
     if sweep_labels:
-        plot_item.addLegend(offset=(10, -10))
+        legend_color = '#CCCCCC' if amplitude_to_color else '#333333'
+        # Infer dark mode from pen_color
+        if pen_color == 'w' or pen_color == (255, 255, 255):
+            legend_color = '#CCCCCC'
+        else:
+            legend_color = '#333333'
+        plot_item.addLegend(offset=(10, -10), labelTextColor=legend_color)
 
     for (amp_val, direction) in sorted_keys:
         entry = detector_data[(amp_val, direction)]
@@ -249,7 +259,11 @@ def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
     single_sweep = len(sorted_keys) == 1
 
     if sweep_labels:
-        plot_item.addLegend(offset=(10, -10))
+        if pen_color == 'w' or pen_color == (255, 255, 255):
+            legend_color = '#CCCCCC'
+        else:
+            legend_color = '#333333'
+        plot_item.addLegend(offset=(10, -10), labelTextColor=legend_color)
 
     for (amp_val, direction) in sorted_keys:
         entry = detector_data[(amp_val, direction)]

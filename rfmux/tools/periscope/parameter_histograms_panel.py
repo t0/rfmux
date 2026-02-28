@@ -7,9 +7,10 @@ import pyqtgraph as pg
 # Imports from within the 'periscope' subpackage
 from .utils import (
     ScreenshotMixin, find_parent_with_attr, TABLEAU10_COLORS, LINE_WIDTH,
-    UnitConverter
+    UnitConverter, AMPLITUDE_COLORMAP_THRESHOLD
 )
 from .multisweep_grid_helpers import create_amplitude_color_map
+from .amplitude_colorbar import AmplitudeColorBar
 
 
 class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
@@ -76,6 +77,10 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Create toolbar
         self._setup_toolbar(main_layout)
+        
+        # Amplitude colorbar (shown when inferno colormap is active)
+        self.colorbar = AmplitudeColorBar(self)
+        main_layout.addWidget(self.colorbar)
         
         # Create plot area with 2x2 grid
         self._setup_plot_area(main_layout)
@@ -172,11 +177,11 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         
     @staticmethod
     def _color_to_rgb(color):
-        """Convert a color (hex string or tuple) to an (R, G, B) tuple."""
+        """Convert a color (hex string, tuple, list, or numpy array) to an (R, G, B) tuple."""
         if isinstance(color, str) and color.startswith('#'):
             color = color.lstrip('#')
             return (int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16))
-        if isinstance(color, (tuple, list)) and len(color) >= 3:
+        if isinstance(color, (tuple, list, np.ndarray)) and len(color) >= 3:
             return (int(color[0]), int(color[1]), int(color[2]))
         return (100, 100, 255)  # fallback
 
@@ -339,6 +344,8 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.amplitude_idx is None:
             self._update_plots_all_sweeps()
         else:
+            # Single amplitude selected — hide colorbar, use per-plot color
+            self.colorbar.hide()
             if self.amplitude_idx >= len(self.available_sweep_keys):
                 return
             
@@ -419,6 +426,26 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         """Update plots showing all sweeps (stacked histograms)."""
         if not self.multisweep_panel or not self.multisweep_panel.results_by_detector:
             return
+        
+        # Determine colorbar vs legend based on number of unique amplitudes
+        unique_amps = sorted(set(ak[0] for ak in self.available_sweep_keys))
+        num_amps = len(unique_amps)
+        has_downward = any(d == 'downward' for _, d in self.available_sweep_keys)
+        
+        if num_amps > AMPLITUDE_COLORMAP_THRESHOLD:
+            # Get DAC scale and unit mode for colorbar labels
+            unit_mode = getattr(self.multisweep_panel, 'unit_mode', 'dbm')
+            dac_scales = getattr(self.multisweep_panel, 'dac_scales', {})
+            active_module = getattr(self.multisweep_panel, 'active_module_for_dac', None)
+            dac_scale = dac_scales.get(active_module) if active_module is not None else None
+            self.colorbar.update_range(unique_amps[0], unique_amps[-1],
+                                       dac_scale, unit_mode,
+                                       self.dark_mode, has_downward)
+            self.colorbar.show()
+            self._use_legend = False
+        else:
+            self.colorbar.hide()
+            self._use_legend = True
         
         # Check if cached
         cache_key = 'all_sweeps'
@@ -599,8 +626,13 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Plot from highest amplitude to lowest (back to front for stacking)
         sorted_sweep_indices = sorted(q_by_sweep.keys(), reverse=True)
         
-        # Add legend
-        legend = plot_item.addLegend(offset=(-10, 10))
+        # Only add legend when colorbar is not active
+        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        use_legend = getattr(self, '_use_legend', True)
+        legend = None
+        if use_legend:
+            legend_color = '#CCCCCC' if self.dark_mode else '#333333'
+            legend = plot_item.addLegend(offset=(-10, 10), labelTextColor=legend_color)
         
         for i, sweep_idx in enumerate(sorted_sweep_indices):
             q_dict = q_by_sweep[sweep_idx]
@@ -631,8 +663,9 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             )
             plot_item.addItem(bar_graph)
             
-            # Add to legend with power + direction label
-            legend.addItem(bar_graph, self._format_sweep_label(amp_value, direction))
+            # Add to legend with power + direction label (only when legend is active)
+            if legend:
+                legend.addItem(bar_graph, self._format_sweep_label(amp_value, direction))
         
         # Add title
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
@@ -727,15 +760,24 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         median_q = np.median(q_values)
         std_q = np.std(q_values)
         
-        # Add statistics text
+        # Clean title with just parameter name and count
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        plot_item.setTitle(f"{param_name} Distribution (N={len(q_values)})", color=pen_color)
+        
+        # Add statistics as an in-plot text box (upper-right corner)
+        legend_color = '#CCCCCC' if self.dark_mode else '#333333'
         stats_text = (
-            f"{param_name} Distribution (N={len(q_values)})\n"
             f"Mean: {mean_q:.2e}\n"
             f"Median: {median_q:.2e}\n"
             f"Std: {std_q:.2e}"
         )
-        plot_item.setTitle(stats_text, color=pen_color)
+        text_item = pg.TextItem(text=stats_text, color=legend_color, anchor=(1, 0))
+        plot_item.addItem(text_item, ignoreBounds=True)
+        # Position in top-right of the view after auto-range
+        vb = plot_item.getViewBox()
+        if vb:
+            view_range = vb.viewRange()
+            text_item.setPos(view_range[0][1], view_range[1][1])
         
         # Auto range for y-axis only
         if not global_range:

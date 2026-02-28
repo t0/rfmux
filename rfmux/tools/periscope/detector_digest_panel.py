@@ -147,15 +147,32 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         nav_layout.addWidget(self.prev_button)
         
 
-        # Title in the center
-        title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
-        self.title_label = QtWidgets.QLabel(title_text)
-        self.title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        font = self.title_label.font()
-        font.setPointSize(font.pointSize() + 2); font.setBold(False) 
-        self.title_label.setFont(font)
-        self.title_label.setStyleSheet(f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}")
-        nav_layout.addWidget(self.title_label, 1)  # Stretch factor 1 to center
+        # Title in the center with editable detector number
+        title_container = QtWidgets.QWidget()
+        title_layout = QtWidgets.QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.addStretch(1)
+        
+        det_label = QtWidgets.QLabel("Detector")
+        det_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+        title_layout.addWidget(det_label)
+        
+        self.detector_spinbox = QtWidgets.QSpinBox()
+        if self.detector_indices:
+            self.detector_spinbox.setRange(min(self.detector_indices), max(self.detector_indices))
+        else:
+            self.detector_spinbox.setRange(1, 9999)
+        self.detector_spinbox.setValue(self.detector_id)
+        self.detector_spinbox.setToolTip("Enter a detector number to jump directly")
+        self.detector_spinbox.valueChanged.connect(self._on_detector_spinbox_changed)
+        title_layout.addWidget(self.detector_spinbox)
+        
+        self.freq_label = QtWidgets.QLabel(f"({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
+        self.freq_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+        title_layout.addWidget(self.freq_label)
+        
+        title_layout.addStretch(1)
+        nav_layout.addWidget(title_container, 1)  # Stretch factor 1 to center
         
         # Next button
         self.next_button = QtWidgets.QPushButton("Next ▶")
@@ -414,6 +431,16 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.current_detector_index_in_list = (self.current_detector_index_in_list + 1) % len(self.detector_indices)
         self._switch_to_detector(self.detector_indices[self.current_detector_index_in_list])
     
+    def _on_detector_spinbox_changed(self, value):
+        """Handle direct detector number entry via spinbox."""
+        if value in self.all_detectors_data:
+            # Update the index in the list
+            try:
+                self.current_detector_index_in_list = self.detector_indices.index(value)
+            except ValueError:
+                pass
+            self._switch_to_detector(value)
+    
     def _navigate_previous_trace(self):
         """Navigate to the previous amplitude trace."""
         if not self.resonance_data_for_digest or len(self.resonance_data_for_digest) <= 1:
@@ -539,8 +566,12 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.current_plot_offset_hz = self.resonance_frequency_ghz_title * 1e9
         
         # Update UI elements
-        title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
-        self.title_label.setText(title_text)
+        if hasattr(self, 'detector_spinbox'):
+            self.detector_spinbox.blockSignals(True)
+            self.detector_spinbox.setValue(self.detector_id)
+            self.detector_spinbox.blockSignals(False)
+        if hasattr(self, 'freq_label'):
+            self.freq_label.setText(f"({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
         self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
         
         # Update detector count label

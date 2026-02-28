@@ -2415,18 +2415,16 @@ class PeriscopeRuntime:
     
                 multisweep_window._handle_multisweep_plot_double_click(fake_event)
 
-                print(">>> Testing Detector Digest Panel")
-    
-                before = len(multisweep_window.detector_digest_windows)
-                
+                print(">>> Testing Detector Digest Panel (embedded sub-tab)")
+
                 multisweep_window._open_detector_digest_for_index(1)
-                
-                after = len(multisweep_window.detector_digest_windows)
-                assert after == before + 1
-                
-                digest_panel = multisweep_window.detector_digest_windows[-1]
-                assert isinstance(digest_panel, rfmux.tools.periscope.detector_digest_panel.DetectorDigestPanel)
-                assert digest_panel.detector_id == 1
+
+                # Digest panel is now embedded as a sub-tab within MultisweepPanel
+                assert multisweep_window.digest_panel is not None
+                assert isinstance(multisweep_window.digest_panel, rfmux.tools.periscope.detector_digest_panel.DetectorDigestPanel)
+                assert multisweep_window.digest_panel.detector_id == 1
+                # Backward-compatible list should also be populated
+                assert len(multisweep_window.detector_digest_windows) == 1
                 
                 print(">>> Testing Noise Spectrum Panel")
                 

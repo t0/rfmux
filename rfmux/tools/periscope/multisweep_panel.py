@@ -304,6 +304,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.histogram_tab = self._create_histogram_tab()
         self.plot_tabs.addTab(self.histogram_tab, "Histograms")
         
+        # Tab 4: Detector Digest (single-detector detail view)
+        self.digest_tab = self._create_digest_tab()
+        self.plot_tabs.addTab(self.digest_tab, "Detector Digest")
+        
         # Set default tab to Magnitude Sweeps
         self.plot_tabs.setCurrentIndex(0)
         
@@ -422,6 +426,26 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         placeholder.setStyleSheet("color: gray; font-style: italic;")
         tab_layout.addWidget(placeholder)
+        
+        return tab
+    
+    def _create_digest_tab(self):
+        """Create the detector digest tab (single-detector detail view, lazily populated)."""
+        tab = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Placeholder until data is available and a detector is selected
+        self._digest_placeholder = QtWidgets.QLabel(
+            "Detector digest will appear here when multisweep data is available.\n"
+            "Double-click a resonance in the Combined or grid plots to view its digest."
+        )
+        self._digest_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._digest_placeholder.setStyleSheet("color: gray; font-style: italic;")
+        tab_layout.addWidget(self._digest_placeholder)
+        
+        # The actual DetectorDigestPanel (created lazily)
+        self.digest_panel = None
         
         return tab
     
@@ -854,10 +878,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             colorbar.hide()
             use_legend = True  # show per-plot legends
         
-        # Install double-click event filter on grid plot widgets
-        for pw in widget_cache:
-            pw.installEventFilter(self)
-        
         # Update the grid with widget caching
         update_sweep_grid(
             grid_layout=grid_layout,
@@ -876,6 +896,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             dac_scale=dac_scale,
             show_legend=use_legend
         )
+        
+        # Install double-click event filter on grid plot widgets
+        # Must be AFTER update_sweep_grid so newly created widgets are included
+        for pw in widget_cache:
+            pw.installEventFilter(self)
     
     def _redraw_combined_plots(self):
         """Redraw the combined magnitude and phase plots (original view)."""
@@ -1079,9 +1104,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._generate_histograms()
             self.histograms_generated = True
         
-        # Auto-open detector digest for the first detector (lowest frequency)
+        # Auto-populate detector digest for the first detector (lowest frequency)
+        # Don't switch focus — user should stay on the current tab (magnitude sweeps)
         if self.results_by_detector:
-            self._open_detector_digest_for_index(1)
+            self._open_detector_digest_for_index(1, switch_to_tab=False)
         
     def _check_all_complete(self):
         """
@@ -1810,24 +1836,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         return super().eventFilter(obj, event)
     
     def _navigate_digest_to_detector(self, detector_id: int):
-        """Navigate an existing digest panel to the given detector, or open a new one."""
-        # Try to navigate an existing digest panel
-        for digest_panel in self.detector_digest_windows:
-            if hasattr(digest_panel, '_switch_to_detector') and hasattr(digest_panel, 'all_detectors_data'):
-                if detector_id in digest_panel.all_detectors_data:
+        """Navigate the embedded digest panel to the given detector, or create it."""
+        # If the digest panel already exists in the tab, just navigate it
+        if self.digest_panel is not None:
+            if hasattr(self.digest_panel, '_switch_to_detector') and hasattr(self.digest_panel, 'all_detectors_data'):
+                if detector_id in self.digest_panel.all_detectors_data:
                     try:
-                        digest_panel.current_detector_index_in_list = digest_panel.detector_indices.index(detector_id)
+                        self.digest_panel.current_detector_index_in_list = self.digest_panel.detector_indices.index(detector_id)
                     except ValueError:
                         pass
-                    digest_panel._switch_to_detector(detector_id)
-                    # Raise the digest dock to bring it to front
-                    periscope = self._get_periscope_parent()
-                    if periscope:
-                        dock = periscope.dock_manager.find_dock_for_widget(digest_panel)
-                        if dock:
-                            dock.raise_()
+                    self.digest_panel._switch_to_detector(detector_id)
+                    # Switch to the Detector Digest tab
+                    self.plot_tabs.setCurrentWidget(self.digest_tab)
                     return
-        # No existing digest panel — open a new one
+        # No existing digest panel — create one in the tab
         self._open_detector_digest_for_index(detector_id)
     
     @QtCore.pyqtSlot(object)
@@ -1875,18 +1897,37 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             ev.accept()
             self._open_detector_digest_for_index(clicked_res_idx)
 
-    def _open_detector_digest_for_index(self, detector_idx: int):
+    def _open_detector_digest_for_index(self, detector_idx: int, switch_to_tab: bool = True):
         """
-        Open a detector digest panel for a specific detector index.
+        Open or update the detector digest panel for a specific detector index.
         
-        This method extracts and reuses the panel creation logic from the double-click handler,
-        making it callable programmatically (e.g., for auto-opening on completion).
+        The digest panel is embedded as a sub-tab (Tab 4) within this MultisweepPanel,
+        following the same lazy-initialization pattern as the Histograms tab.
+        If the panel already exists, it navigates to the requested detector.
+        If not, it creates the panel and adds it to the digest tab.
         
         Args:
             detector_idx: Detector index (1-based) to open digest for
+            switch_to_tab: If True (default), switch focus to the Detector Digest tab.
+                          If False, populate the tab without switching focus (used by auto-populate on completion).
         """
         if not self.results_by_detector:
             return
+        
+        # If digest panel already exists, just navigate to the requested detector
+        if self.digest_panel is not None:
+            if hasattr(self.digest_panel, '_switch_to_detector') and hasattr(self.digest_panel, 'all_detectors_data'):
+                if detector_idx in self.digest_panel.all_detectors_data:
+                    try:
+                        self.digest_panel.current_detector_index_in_list = self.digest_panel.detector_indices.index(detector_idx)
+                    except ValueError:
+                        pass
+                    self.digest_panel._switch_to_detector(detector_idx)
+                    # Switch to the Detector Digest tab
+                    self.plot_tabs.setCurrentWidget(self.digest_tab)
+                    return
+        
+        # --- First time: create the digest panel and embed it in the tab ---
         
         # Get debug data from Periscope parent
         periscope = self.parent()
@@ -1965,13 +2006,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     'conceptual_freq_hz': conceptual_freq_hz
                 }
         
-        # Find Periscope parent to create docked panel
-        periscope = self._get_periscope_parent()
-        if not periscope:
-            print("ERROR: Could not find Periscope parent for detector digest panel")
-            return
-        
-        # Create panel
+        # Create the DetectorDigestPanel
         panel = DetectorDigestPanel(
             parent=self,
             resonance_data_for_digest=section_data_for_digest,
@@ -1993,23 +2028,25 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Store direct reference to this MultisweepPanel for noise sampling
         panel.multisweep_panel_ref = self
         
-        # Increment counter and use for tab name
-        self.digest_window_count += 1
-        loaded_suffix = " (Loaded)" if self.is_loaded_data else ""
-        dock_title = f"Detector Digest #{self.digest_window_count}{loaded_suffix}"
-        dock_id = f"digest_{self.digest_window_count}_{int(time.time())}"
-        dock = periscope.dock_manager.create_dock(panel, dock_title, dock_id)
+        # Embed the panel into the digest tab (replacing placeholder)
+        layout = self.digest_tab.layout()
+        if layout:
+            # Remove placeholder
+            while layout.count():
+                item = layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            # Add the actual digest panel
+            layout.addWidget(panel)
         
-        # Track panel reference to prevent garbage collection
-        self.detector_digest_windows.append(panel)
+        # Store the panel reference
+        self.digest_panel = panel
+        # Also keep backward-compatible list reference
+        self.detector_digest_windows = [panel]
         
-        # Tabify with this multisweep panel's dock
-        my_dock = periscope.dock_manager.find_dock_for_widget(self)
-        if my_dock:
-            periscope.tabifyDockWidget(my_dock, dock)
-        
-        # Show the dock (but don't bring to front)
-        dock.show()
+        # Switch to the Detector Digest tab (unless suppressed, e.g. auto-populate on completion)
+        if switch_to_tab:
+            self.plot_tabs.setCurrentWidget(self.digest_tab)
 
     def _get_closest_remembered_cf(self, conceptual_idx: int, target_amp: float) -> float | None:
         """

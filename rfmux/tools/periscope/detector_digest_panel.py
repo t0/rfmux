@@ -111,8 +111,8 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._update_plots()
 
         self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
-        self.setWindowFlags(QtCore.Qt.WindowType.Window)
-        self.resize(1200, 800) # Increased size to accommodate tables properly
+        # Note: No longer setting WindowType.Window or resize — this panel is now
+        # embedded as a sub-tab within MultisweepPanel rather than a standalone dock/window.
 
     
     def _setup_ui(self):

@@ -20,6 +20,7 @@ from .noise_spectrum_panel import NoiseSpectrumPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
 from .parameter_histograms_panel import ParameterHistogramsPanel
 from .amplitude_colorbar import AmplitudeColorBar
+from .multisweep_grid_helpers import create_amplitude_color_map
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
 
@@ -767,6 +768,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if results_for_history:
             self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {}).update(results_for_history)
 
+        # Invalidate digest panel so it gets recreated with fresh data
+        # (the panel takes a snapshot at creation time and doesn't track live changes)
+        if self.digest_panel is not None:
+            self.digest_panel = None
+        
+        # Invalidate histogram cache so plots reflect the latest iteration
+        if self.histogram_panel is not None:
+            self.histogram_panel.histogram_cache.clear()
+        
         self._redraw_plots() # Refresh plots with the new data
         
         # Note: We now update the status in handle_starting_iteration() instead of here
@@ -797,8 +807,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._redraw_combined_plots()
         # Tab 3: Histograms (parameter distributions)
         elif current_tab_idx == 3:
-            # Ensure histogram panel is created and loaded with data
-            self._ensure_histogram_panel()
+            self._generate_histograms()  # Creates or reloads histogram panel with latest data
+            self.histograms_generated = True
+        # Tab 4: Detector Digest (recreate if invalidated by new data)
+        elif current_tab_idx == 4:
+            if self.digest_panel is None and self.results_by_detector:
+                self._open_detector_digest_for_index(1, switch_to_tab=False)
     
     def _redraw_sweep_grid(self, tab_idx):
         """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
@@ -931,10 +945,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.combined_mag_plot.autoRange(); self.combined_phase_plot.autoRange()
             return
         
-        # Define color schemes for plotting multiple amplitudes
-        cmap_name = COLORMAP_CHOICES.get("AMPLITUDE_SWEEP", "inferno")
-        use_cmap = pg.colormap.get(cmap_name) if cmap_name else None
-        
         # Collect unique (amplitude, direction) pairs and amplitude values from entries
         amplitude_values = set()
         amp_dir_pairs = set()
@@ -949,24 +959,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             
         # Create a mapping for unique amplitude values to colors
         sorted_amplitudes = sorted(amplitude_values)
-        amplitude_to_color = {}
-        for amp_idx, amp_val in enumerate(sorted_amplitudes):
-            # Determine color for this amplitude's curves
-            if num_amps <= AMPLITUDE_COLORMAP_THRESHOLD: # Use distinct colors if few amplitudes
-                color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
-            else: # Use a colormap for many amplitudes
-                if use_cmap:
-                    normalized_idx = amp_idx / max(1, num_amps - 1) # Normalize index for colormap base [0,1]
-                    if self.dark_mode:
-                        # For dark mode, map to [0.3, 1.0]
-                        map_value = 0.3 + normalized_idx * 0.7
-                    else:
-                        # For light mode, map to [0.0, 0.75]
-                        map_value = normalized_idx * 0.75
-                    color = use_cmap.map(map_value)
-                else: # Fallback if colormap is somehow None
-                    color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
-            amplitude_to_color[amp_val] = color
+        amplitude_to_color = create_amplitude_color_map(amplitude_values, self.dark_mode)
         
         # Colorbar vs legend: show colorbar only when inferno colormap is active
         has_downward = any(d == 'downward' for _, d in amp_dir_pairs)
@@ -1369,6 +1362,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
             # Reset window state for the new sweep
             self.results_by_detector.clear()
+            self.digest_panel = None  # Force recreation with fresh data on completion
             self.histograms_generated = False  # Reset histogram flag for new run
             
             self._redraw_plots() # Clear plots
@@ -1439,31 +1433,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             if num_amps == 0:
                 return
 
-            # Color definitions (consistent with _redraw_plots)
-            cmap_name = COLORMAP_CHOICES.get("AMPLITUDE_SWEEP", "inferno")
-            use_cmap = pg.colormap.get(cmap_name) if cmap_name else None
+            # Use the canonical color mapping function
+            amplitude_to_color = create_amplitude_color_map(amplitude_values, self.dark_mode)
             sorted_amplitudes = sorted(amplitude_values)
 
-            for amp_idx, amp_val in enumerate(sorted_amplitudes):
-                
-                # Determine color for this amplitude's lines
-                if num_amps <= AMPLITUDE_COLORMAP_THRESHOLD: # Use consistent threshold from utils.py
-                    color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
-                else: # Use a colormap for many amplitudes
-                    if use_cmap:
-                        normalized_idx = amp_idx / max(1, num_amps - 1) # Normalize index for colormap base [0,1]
-                        if self.dark_mode:
-                            # For dark mode, map to [0.3, 1.0]
-                            map_value = 0.3 + normalized_idx * 0.7
-                        else:
-                            # For light mode, map to [0.0, 0.75]
-                            map_value = normalized_idx * 0.75
-                        color = use_cmap.map(map_value)
-                    else: # Fallback if colormap is somehow None
-                        color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
-                
-                # Define pen for CF lines (consistent with _redraw_plots)
-                # Note: LINE_WIDTH should be available from 'from .utils import LINE_WIDTH'
+            for amp_val in sorted_amplitudes:
+                color = amplitude_to_color[amp_val]
                 cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2)
 
                 # Ensure lists for this amplitude exist in cf_lines_mag/phase
@@ -1522,6 +1497,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
 
     def _take_noise_samps(self):
+        """Collect a short noise sample from the CRS for diagnostic purposes.
+
+        Takes 100 samples from all channels on the target module using
+        ``crs.get_samples`` and stores them in ``self.noise_data``.
+
+        Returns:
+            The collected samples, or None if the CRS is unavailable.
+        """
         total = 100
         # self.take_samp_btn.setEnabled(False)
 
@@ -1575,6 +1558,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             asyncio.run(crs.set_decimation(decimation, module = self.target_module, short = True))
 
     def _get_spectrum(self, params, use_loaded_noise = False):
+        """Acquire or load a noise spectrum and open the NoiseSpectrumPanel.
+
+        When *use_loaded_noise* is ``True`` the method expects pre-collected
+        data inside *params* (keys ``noise_parameters`` and ``data``) and
+        simply opens the panel.  Otherwise it drives the CRS to collect slow
+        and (optionally) PFB spectrum data, stores the results in
+        ``self.spectrum_noise_data``, emits the ``data_ready`` signal for
+        session auto-export, and opens the panel.
+
+        Args:
+            params: Dictionary of acquisition parameters (from NoiseSpectrumDialog)
+                    or loaded noise data when *use_loaded_noise* is True.
+            use_loaded_noise: If True, skip acquisition and use data already in *params*.
+        """
         if use_loaded_noise:
             print(f"[Bias] Plotting noise data taken at decimation {params['noise_parameters']['decimation']}")
             self.spectrum_noise_data['noise_parameters'] = params['noise_parameters']
@@ -2080,7 +2077,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         return best_cf_found
     
     def _get_periscope_parent(self):
-        """Find and return the Periscope parent window."""
+        """Find and return the Periscope parent window.
+
+        Walks up the widget hierarchy looking for the main Periscope instance,
+        identified by the ``dock_manager`` attribute.  This intentionally
+        overrides :meth:`ScreenshotMixin._get_periscope_parent` (which
+        searches for ``crs``) because panel operations need the dock manager,
+        and the Periscope instance always carries both attributes.
+        """
         parent = self.parent()
         while parent:
             if hasattr(parent, 'dock_manager'):

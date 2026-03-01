@@ -112,7 +112,7 @@ async def find_optimal_phases_parallel(
     return optimal_phases
 
 
-def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[int, Dict[Tuple[float, str], Dict]]], Dict]:
+def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[int, Dict[int, Dict]]], Dict]:
     """
     Extract detector data from the legacy GUI multisweep results format.
 
@@ -124,12 +124,13 @@ def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[int,
 
     Returns:
         Tuple of (results_by_detector, metadata).
+        ``results_by_detector`` is ``{detector_id: {iteration_index: entry_dict}}``.
         Returns (None, {}) if not GUI format.
     """
     if 'results_by_iteration' not in gui_results:
         return None, {}
 
-    results_by_detector: Dict[int, Dict[Tuple[float, str], Dict]] = {}
+    results_by_detector: Dict[int, Dict[int, Dict]] = {}
     metadata: Dict[str, Any] = {
         'iterations': [],
         'amplitudes': set(),

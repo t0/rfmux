@@ -297,6 +297,15 @@ def main():
             
             # Apply the mock configuration (either from dialog or loaded from session)
             if initial_mock_config:
+                # Ensure a concrete random seed exists before sending to server.
+                # generate_resonators() is a tuber RPC — mutations on the server
+                # side don't propagate back.  By fixing the seed here, the client's
+                # config dict (which gets saved to the session) already contains the
+                # concrete seed, so restoring the session reproduces the same resonators.
+                if initial_mock_config.get('resonator_random_seed') is None:
+                    import random as _rng
+                    initial_mock_config['resonator_random_seed'] = _rng.randint(0, 2**31 - 1)
+
                 try:
                     # Apply configuration to the server
                     resonator_count = loop.run_until_complete(crs_obj.generate_resonators(initial_mock_config))

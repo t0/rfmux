@@ -33,7 +33,17 @@ class AmplitudeColorBar(QtWidgets.QWidget):
     def update_range(self, min_amp: float, max_amp: float,
                      dac_scale, unit_mode: str,
                      dark_mode: bool, has_downward: bool):
-        """Recompute labels and repaint."""
+        """Recompute endpoint labels and trigger a repaint.
+
+        Args:
+            min_amp: Lowest normalised amplitude in the sweep set.
+            max_amp: Highest normalised amplitude in the sweep set.
+            dac_scale: DAC full-scale in dBm (or *None* for raw labels).
+            unit_mode: ``"dbm"``, ``"volts"``, or ``"counts"``.
+            dark_mode: Current theme flag.
+            has_downward: Whether the sweep set includes downward sweeps
+                         (adds a direction legend note below the bar).
+        """
         self._min_amp = min_amp
         self._max_amp = max_amp
         self._dark_mode = dark_mode

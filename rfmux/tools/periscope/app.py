@@ -247,7 +247,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # IQ plot worker tracking: maps row index to a boolean indicating if a worker is active.
         # IQSignals (from .tasks) handles signals for IQ task completion.
         self.iq_workers: Dict[int, bool] = {}  # Tracks active IQ workers per plot row
-        self.iq_signals = IQSignals()           # Signal object for IQ tasks
+        self.iq_signals = IQSignals()          # Signal object for IQ tasks
         self.iq_signals.done.connect(self._iq_done) # Connect completion signal to handler
 
         # PSD concurrency tracking: nested dictionary [row_index][psd_type_char][channel_id] -> bool
@@ -1859,6 +1859,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     asyncio.set_event_loop(loop)
                 
                 try:
+                    # Ensure a concrete random seed exists before sending to server.
+                    # generate_resonators() is a tuber RPC — mutations on the server
+                    # side don't propagate back to the client's config dict.
+                    if config.get('resonator_random_seed') is None:
+                        config['resonator_random_seed'] = random.randint(0, 2**31 - 1)
+
                     # Apply configuration to server
                     future = asyncio.ensure_future(self.crs.generate_resonators(config))
                     resonator_count = loop.run_until_complete(future)
@@ -2847,25 +2853,23 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     click_freq = first_detector_data.get('bias_frequency',
                                                         first_detector_data.get('original_center_frequency'))
         if click_freq is not None:
-            if True:  # Replaces the old nested if block
-                
-                if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
-                    # Create a fake event at the detector's frequency
-                    class FakeEvent:
-                        def __init__(self, x, y):
-                            self._scene_pos = QtCore.QPointF(x, y)
-                        def scenePos(self):
-                            return self._scene_pos
-                        def accept(self):
-                            pass
-                    
-                    # Map the frequency to view coordinates (x position)
-                    view_box = panel.combined_mag_plot.getViewBox()
-                    if view_box:
-                        view_point = QtCore.QPointF(click_freq, 0)
-                        scene_point = view_box.mapViewToScene(view_point)
-                        fake_event = FakeEvent(scene_point.x(), scene_point.y())
-                        panel._handle_multisweep_plot_double_click(fake_event)
+            if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
+                # Create a fake event at the detector's frequency
+                class FakeEvent:
+                    def __init__(self, x, y):
+                        self._scene_pos = QtCore.QPointF(x, y)
+                    def scenePos(self):
+                        return self._scene_pos
+                    def accept(self):
+                        pass
+
+                # Map the frequency to view coordinates (x position)
+                view_box = panel.combined_mag_plot.getViewBox()
+                if view_box:
+                    view_point = QtCore.QPointF(click_freq, 0)
+                    scene_point = view_box.mapViewToScene(view_point)
+                    fake_event = FakeEvent(scene_point.x(), scene_point.y())
+                    panel._handle_multisweep_plot_double_click(fake_event)
         
         # Load noise data if present and open the NoiseSpectrumPanel
         if data.get('noise_data') is not None:

@@ -324,139 +324,32 @@ def find_parent_with_attr(widget: QtWidgets.QWidget, attr_name: str) -> Optional
     return parent
 
 
-class SquareGridLayout(QtWidgets.QLayout):
-    """
-    A custom grid layout that maintains square aspect ratios for its items.
-    
-    This layout arranges widgets in a grid pattern where each cell is forced
-    to be square, ensuring that IQ circle plots maintain their circular shape.
-    """
-    
-    def __init__(self, parent=None, spacing=10):
-        super().__init__(parent)
-        self._items = []
-        self._spacing = spacing
-        self._ncols = 1
-        
-    def addItem(self, item):
-        """Add an item to the layout."""
-        self._items.append(item)
-        
-    def addWidget(self, widget, row, col):
-        """Add a widget at a specific grid position."""
-        # For simplicity, we'll just append items and calculate grid positions
-        # based on the order they were added
-        self.addItem(QtWidgets.QWidgetItem(widget))
-        
-    def count(self):
-        """Return the number of items in the layout."""
-        return len(self._items)
-    
-    def itemAt(self, index):
-        """Return the item at the given index."""
-        if 0 <= index < len(self._items):
-            return self._items[index]
-        return None
-    
-    def takeAt(self, index):
-        """Remove and return the item at the given index."""
-        if 0 <= index < len(self._items):
-            return self._items.pop(index)
-        return None
-    
-    def setGeometry(self, rect):
-        """Set the geometry of the layout and arrange items."""
-        super().setGeometry(rect)
-        
-        if not self._items:
-            return
-        
-        # Calculate grid dimensions
-        num_items = len(self._items)
-        ncols = int(np.ceil(np.sqrt(num_items)))
-        nrows = int(np.ceil(num_items / ncols))
-        self._ncols = ncols
-        
-        # Calculate available space
-        available_width = rect.width() - (ncols + 1) * self._spacing
-        available_height = rect.height() - (nrows + 1) * self._spacing
-        
-        # Calculate cell size (make it square - use the smaller dimension)
-        cell_width = available_width / ncols
-        cell_height = available_height / nrows
-        cell_size = int(min(cell_width, cell_height))
-        
-        # Make sure we have a reasonable minimum size
-        cell_size = max(cell_size, 100)
-        
-        # Calculate starting positions to center the grid
-        total_grid_width = ncols * cell_size + (ncols - 1) * self._spacing
-        total_grid_height = nrows * cell_size + (nrows - 1) * self._spacing
-        start_x = rect.x() + (rect.width() - total_grid_width) // 2
-        start_y = rect.y() + (rect.height() - total_grid_height) // 2
-        
-        # Position each item
-        for idx, item in enumerate(self._items):
-            row = idx // ncols
-            col = idx % ncols
-            
-            x = start_x + col * (cell_size + self._spacing)
-            y = start_y + row * (cell_size + self._spacing)
-            
-            item.setGeometry(QtCore.QRect(x, y, cell_size, cell_size))
-    
-    def sizeHint(self):
-        """Return the preferred size of the layout."""
-        if not self._items:
-            return QtCore.QSize(100, 100)
-        
-        num_items = len(self._items)
-        ncols = int(np.ceil(np.sqrt(num_items)))
-        nrows = int(np.ceil(num_items / ncols))
-        
-        # Assume 300x300 per cell
-        cell_size = 300
-        width = ncols * cell_size + (ncols + 1) * self._spacing
-        height = nrows * cell_size + (nrows + 1) * self._spacing
-        
-        return QtCore.QSize(width, height)
-    
-    def minimumSize(self):
-        """Return the minimum size of the layout."""
-        if not self._items:
-            return QtCore.QSize(100, 100)
-        
-        num_items = len(self._items)
-        ncols = int(np.ceil(np.sqrt(num_items)))
-        nrows = int(np.ceil(num_items / ncols))
-        
-        # Minimum 200x200 per cell
-        cell_size = 200
-        width = ncols * cell_size + (ncols + 1) * self._spacing
-        height = nrows * cell_size + (nrows + 1) * self._spacing
-        
-        return QtCore.QSize(width, height)
+# ───────────────────────── Theme Constants ─────────────────────────
+# Common theme-dependent colors used across multiple panels.
+LEGEND_TEXT_DARK = '#CCCCCC'   # Legend text colour for dark mode
+LEGEND_TEXT_LIGHT = '#333333'  # Legend text colour for light mode
 
 
-class SquarePlotWidget(pg.PlotWidget):
+def theme_colors(dark_mode: bool) -> tuple[str, str]:
+    """Return ``(bg_color, pen_color)`` for the given theme.
+
+    This is a small helper that eliminates the repeated inline tuple
+    ``("k", "w") if dark_mode else ("w", "k")`` across all plotting
+    modules.
+
+    Args:
+        dark_mode: ``True`` for dark theme, ``False`` for light theme.
+
+    Returns:
+        A ``(background, foreground)`` colour-string pair suitable for
+        PyQtGraph plot styling.
     """
-    A PlotWidget that works well with SquareGridLayout.
-    Useful for IQ circle plots where preserving the circular shape is important.
-    """
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Set size policy to expanding
-        self.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding
-        )
-        # Set minimum size
-        self.setMinimumSize(200, 200)
-    
-    def sizeHint(self) -> QtCore.QSize:
-        """Provide a default square size hint."""
-        return QtCore.QSize(300, 300)
+    return ("k", "w") if dark_mode else ("w", "k")
+
+
+def legend_text_color(dark_mode: bool) -> str:
+    """Return the legend text colour appropriate for *dark_mode*."""
+    return LEGEND_TEXT_DARK if dark_mode else LEGEND_TEXT_LIGHT
 
 
 def square_axes(plot_item: pg.PlotItem):
@@ -567,8 +460,8 @@ class UnitConverter:
         if unit_mode == "dbm":
             if dac_scale is not None:
                 dbm_val = UnitConverter.normalize_to_dbm(amp_value, dac_scale)
-                return f"{dbm_val:.2f} dBm"
-            return f"{amp_value:.3e} (Norm)"
+                return f"{dbm_val:.1f} dBm"
+            return f"{amp_value:.2e} (Norm)"
 
         if unit_mode == "volts":
             if dac_scale is not None:
@@ -577,10 +470,10 @@ class UnitConverter:
                 voltage_rms = np.sqrt(power_watts * 50.0)
                 voltage_peak = voltage_rms * np.sqrt(2)
                 return UnitConverter._format_si_volts(voltage_peak) + "pk"
-            return f"{amp_value:.3e} (Norm)"
+            return f"{amp_value:.2e} (Norm)"
 
         # counts or anything else
-        return f"{amp_value:.3e} Norm"
+        return f"{amp_value:.2e} Norm"
 
     @staticmethod
     def _format_si_volts(volts: float) -> str:

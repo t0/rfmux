@@ -494,36 +494,19 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._plot_stacked_q_histogram(self.qi_plot, qi_by_sweep, "Qi")
     
     def _compute_global_q_ranges(self, qr_by_amp, qc_by_amp, qi_by_amp):
-        """Compute and store global Q-factor ranges for consistent x-axis scaling."""
-        # Compute Qr range
-        all_qr = []
-        for amp_data in qr_by_amp.values():
-            all_qr.extend(list(amp_data.values()))
-        if all_qr:
-            all_qr = np.array(all_qr)
-            qr_min, qr_max = np.min(all_qr), np.max(all_qr)
-            if qr_min > 0 and qr_max > 0:
-                self.global_q_ranges['Qr'] = (qr_min, qr_max)
-        
-        # Compute Qc range
-        all_qc = []
-        for amp_data in qc_by_amp.values():
-            all_qc.extend(list(amp_data.values()))
-        if all_qc:
-            all_qc = np.array(all_qc)
-            qc_min, qc_max = np.min(all_qc), np.max(all_qc)
-            if qc_min > 0 and qc_max > 0:
-                self.global_q_ranges['Qc'] = (qc_min, qc_max)
-        
-        # Compute Qi range
-        all_qi = []
-        for amp_data in qi_by_amp.values():
-            all_qi.extend(list(amp_data.values()))
-        if all_qi:
-            all_qi = np.array(all_qi)
-            qi_min, qi_max = np.min(all_qi), np.max(all_qi)
-            if qi_min > 0 and qi_max > 0:
-                self.global_q_ranges['Qi'] = (qi_min, qi_max)
+        """Compute and store global Q-factor ranges for consistent x-axis scaling.
+
+        Iterates over the three Q-factor dictionaries and stores the (min, max)
+        range for each parameter so that all per-amplitude histograms share the
+        same x-axis extent.
+        """
+        for param_name, by_amp in [('Qr', qr_by_amp), ('Qc', qc_by_amp), ('Qi', qi_by_amp)]:
+            all_vals = [v for amp_data in by_amp.values() for v in amp_data.values()]
+            if all_vals:
+                arr = np.array(all_vals)
+                vmin, vmax = np.min(arr), np.max(arr)
+                if vmin > 0 and vmax > 0:
+                    self.global_q_ranges[param_name] = (vmin, vmax)
     
     def _plot_frequency_scatter_all_sweeps(self, fr_by_sweep):
         """Plot resonance frequencies for all sweeps with color coding."""

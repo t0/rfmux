@@ -985,17 +985,25 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         """Apply the dark/light theme to all plots and UI elements in this panel."""
         self.dark_mode = dark_mode
         
-        # Apply background color directly to self (QWidget base)
+        # Apply background and text color to self and all child widgets
         bg_color_hex = "#1C1C1C" if dark_mode else "#FFFFFF"
-        self.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}")
+        fg_color_hex = "#FFFFFF" if dark_mode else "#000000"
+        self.setStyleSheet(
+            f"QWidget {{ background-color: {bg_color_hex}; color: {fg_color_hex}; }}"
+        )
         
         title_color_str = "white" if dark_mode else "black"
         plot_bg_color, plot_pen_color = ("k", "w") if dark_mode else ("w", "k")
     
-        # ----- Titles -----
-        if hasattr(self, 'title_label'):
-            self.title_label.setStyleSheet(
-                f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}"
+        # ----- Navigation title bar (det_label, spinbox, freq_label) -----
+        label_style = f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
+        if hasattr(self, 'det_label'):
+            self.det_label.setStyleSheet(label_style)  # type: ignore[union-attr]
+        if hasattr(self, 'freq_label'):
+            self.freq_label.setStyleSheet(label_style)  # type: ignore[union-attr]
+        if hasattr(self, 'detector_spinbox'):
+            self.detector_spinbox.setStyleSheet(
+                f"QSpinBox {{ color: {fg_color_hex}; background-color: {bg_color_hex}; }}"
             )
         # ----- Plots -----
         plot_widgets_legends = [

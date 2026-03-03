@@ -563,7 +563,11 @@ class PeriscopeRuntime:
 
             self.pkt_cnt += 1
             if hasattr(pkt, 'fir_stage'):
-                self.actual_dec_stage = pkt.fir_stage
+                # The fir_stage field is a 4-bit packed value:
+                #   Bit 3 (MSB): short/long packet flag (1=short/128ch, 0=long/1024ch)
+                #   Bits 2-0:    decimation stage (0-6)
+                self.actual_dec_stage = pkt.fir_stage & 0x7
+                self.is_short_packet = bool(pkt.fir_stage & 0x8)
             t_rel = self._calculate_relative_timestamp(pkt)
             self._update_buffers(pkt, t_rel)
 
@@ -791,7 +795,7 @@ class PeriscopeRuntime:
 
             #### Update labels ####
             self.fps_label.setText(f"FPS: {fps:.1f}")
-            self.pps_label.setText(f"Packets/s: {pps:.1f}")
+            self.pps_label.setText(f"| Packets/s: {pps:.1f}")
             
             # Calculate and display simulation speed for mock mode
             if self.is_mock_mode and hasattr(self, 'sim_speed_label'):
@@ -799,9 +803,9 @@ class PeriscopeRuntime:
                 if sim_speed is not None:
                     # Format the display
                     if sim_speed < 0.01:
-                        speed_text = f"Sim Speed: {sim_speed:.3f}x real-time"
+                        speed_text = f"| Sim Speed: {sim_speed:.3f}x real-time"
                     else:
-                        speed_text = f"Sim Speed: {sim_speed:.2f}x real-time"
+                        speed_text = f"| Sim Speed: {sim_speed:.2f}x real-time"
                     self.sim_speed_label.setText(speed_text)
                     
                     # Color code based on speed
@@ -812,16 +816,17 @@ class PeriscopeRuntime:
 
             # Color packet loss red if > 1%
             if percent > 1:
-                color = "red"
-                self.packet_loss_label.setStyleSheet(f"color: {color};")
+                self.packet_loss_label.setStyleSheet("color: red;")
                 self.info_text.setText("PACKET LOSS HIGH - CONSULT HELP FOR NETWORKING SUGGESTIONS")
+                self.info_text.setStyleSheet("color: red;")
             else: 
                 self.packet_loss_label.setStyleSheet(f"color: {self.default_packet_loss_color};")
                 self.info_text.clear()
+                self.info_text.setStyleSheet("")
                 
-            self.packet_loss_label.setText(f"Packet Loss: {percent:.1f}%")
+            self.packet_loss_label.setText(f"| Packet Loss: {percent:.1f}%")
 
-            self.dropped_label.setText(f"Dropped: {dropped}")
+            self.dropped_label.setText(f"| Dropped: {dropped}")
             
             #### Showing on status bar ####
             # self.statusBar().showMessage(f"FPS {fps:.1f} | Packets/s {pps:.1f} | Packet Loss : {percent_x}% | Dropped : {dropped}") 
@@ -837,21 +842,37 @@ class PeriscopeRuntime:
         Update the decimation stage from the actual packet data.
         Falls back to inferring from data rate if packet doesn't have fir_stage.
         This is used for accurate PSD frequency axis scaling.
+        Also updates the streaming info label in the status bar.
         """
         # Use actual decimation stage from packets if available
         if hasattr(self, 'actual_dec_stage'):
             self.dec_stage = self.actual_dec_stage
-            return
-            
-        # Fall back to inferring from data rate (legacy behavior)
-        # infer_dec_stage from .utils
-        if not self.channel_list or not self.channel_list[0]: return
-        ch_val = self.channel_list[0][0] # Renamed ch
-        tarr = self.tbuf[ch_val].data()
-        if len(tarr) < 2: return # Need at least two points to calculate dt
-        dt = (tarr[-1] - tarr[0]) / max(1, (len(tarr) - 1)) # Average time step
-        fs = 1.0 / dt if dt > 0 else 1.0 # Sample rate
-        self.dec_stage = infer_dec_stage(fs)
+        else:
+            # Fall back to inferring from data rate (legacy behavior)
+            # infer_dec_stage from .utils
+            if not self.channel_list or not self.channel_list[0]: return
+            ch_val = self.channel_list[0][0] # Renamed ch
+            tarr = self.tbuf[ch_val].data()
+            if len(tarr) < 2: return # Need at least two points to calculate dt
+            dt = (tarr[-1] - tarr[0]) / max(1, (len(tarr) - 1)) # Average time step
+            fs = 1.0 / dt if dt > 0 else 1.0 # Sample rate
+            self.dec_stage = infer_dec_stage(fs)
+
+        # Update streaming info label in the status bar
+        if hasattr(self, 'streaming_info_label'):
+            from rfmux.core.transferfunctions import decimation_to_sampling
+            fs = decimation_to_sampling(self.dec_stage)
+            if fs >= 1000:
+                fs_str = f"{fs/1000:.1f} kHz"
+            else:
+                fs_str = f"{fs:.1f} Hz"
+            if self.is_short_packet:
+                pkt_str = "Short Packets (Ch 1-128)"
+            else:
+                pkt_str = "Long Packets (Ch 1-1024)"
+            self.streaming_info_label.setText(
+                f"| Dec Stage: {self.dec_stage} | Fs: {fs_str} | {pkt_str}"
+            )
 
     @QtCore.pyqtSlot(int, str, object)
     def _iq_done(self, row: int, task_mode: str, payload):

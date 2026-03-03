@@ -158,6 +158,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Decimation stage, dynamically updated based on inferred sample rate.
         # This is used for PSD calculations.
         self.dec_stage: int = 6
+        self.is_short_packet: bool = False       # True when firmware is sending short (128-ch) packets
         self.last_dec_update: float = 0.0       # Timestamp of last decimation stage update
 
         # --- Display Settings ---
@@ -709,6 +710,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         self.packet_loss_label = QtWidgets.QLabel()
         self.dropped_label = QtWidgets.QLabel()
+        self.streaming_info_label = QtWidgets.QLabel()
+        self.streaming_info_label.setToolTip(
+            "Current streaming configuration:\n"
+            "  Dec Stage: decimation stage (0-6)\n"
+            "  Fs: effective sampling frequency\n"
+            "  Short/Long: packet mode (128 or 1024 channels)"
+        )
         self.info_text = QtWidgets.QLabel()
 
         self.default_packet_loss_color = self.packet_loss_label.palette().color(QtGui.QPalette.WindowText).name()
@@ -723,6 +731,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         self.statusBar().addWidget(self.packet_loss_label)
         self.statusBar().addWidget(self.dropped_label)
+        self.statusBar().addWidget(self.streaming_info_label)
         self.statusBar().addPermanentWidget(self.info_text)
         
 

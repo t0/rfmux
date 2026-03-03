@@ -427,7 +427,7 @@ class MockCRSUDPStreamer(threading.Thread):
             serial=int(self.mock_crs._serial) if self.mock_crs._serial and self.mock_crs._serial.isdigit() else 0,
             num_modules=1, # Packet is for one module's data
             flags=0,
-            fir_stage=dec,
+            fir_stage=dec | (0x8 if self.mock_crs._short_packets else 0),
             module=module_num-1,  # ReadoutPacket module is 0-indexed
             seq=seq)
 

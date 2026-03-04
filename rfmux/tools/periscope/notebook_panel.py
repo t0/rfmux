@@ -361,7 +361,7 @@ class NotebookPanel(QtWidgets.QWidget):
         desc_label = QtWidgets.QLabel(
             "Choose a directory for your personal notebook library.\n\n"
             "This library will be accessible across all Periscope sessions "
-            "as '_user_notebooks' in Jupyter Lab."
+            "as 'User Notebooks' in Jupyter Lab."
         )
         desc_label.setWordWrap(True)
         layout.addWidget(desc_label)
@@ -576,11 +576,11 @@ class NotebookPanel(QtWidgets.QWidget):
                 user_lib.mkdir(parents=True, exist_ok=True)
                 
                 # Create symlink in session
-                link_path = session_dir / "_user_notebooks"
+                link_path = session_dir / "User Notebooks"
                 if not link_path.exists():
                     try:
                         link_path.symlink_to(user_lib, target_is_directory=True)
-                        print(f"[Notebook] Linked: _user_notebooks -> {user_lib}")
+                        print(f"[Notebook] Linked: User Notebooks -> {user_lib}")
                     except OSError as e:
                         print(f"[Notebook] Could not create user library symlink: {e}")
             except Exception as e:

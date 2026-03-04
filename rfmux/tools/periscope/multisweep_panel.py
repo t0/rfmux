@@ -834,7 +834,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 if self.unit_mode == "counts":
                     iq_complex = det_entry.get('iq_complex', np.array([]))
                 else:
-                    iq_complex = det_entry.get('iq_complex_volts', det_entry.get('iq_complex', np.array([])))
+                    iq_complex = det_entry.get('iq_complex', np.array([]))
                 if amp_val is not None and len(freqs) > 0 and len(iq_complex) > 0:
                     detector_data[detector_id][(amp_val, direction)] = {
                         'freq': freqs,
@@ -1017,7 +1017,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     continue
 
                 freqs_hz = data.get('frequencies', np.array([]))
-                iq_complex = data.get('iq_complex_volts', np.array([]))
+                iq_complex = data.get('iq_complex', np.array([]))
 
                 if freqs_hz is None or iq_complex is None or len(freqs_hz) == 0 or len(iq_complex) == 0:
                     continue

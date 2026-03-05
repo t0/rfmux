@@ -111,8 +111,8 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._update_plots()
 
         self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
-        self.setWindowFlags(QtCore.Qt.WindowType.Window)
-        self.resize(1200, 800) # Increased size to accommodate tables properly
+        # Note: No longer setting WindowType.Window or resize — this panel is now
+        # embedded as a sub-tab within MultisweepPanel rather than a standalone dock/window.
 
     
     def _setup_ui(self):
@@ -147,15 +147,32 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         nav_layout.addWidget(self.prev_button)
         
 
-        # Title in the center
-        title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
-        self.title_label = QtWidgets.QLabel(title_text)
-        self.title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        font = self.title_label.font()
-        font.setPointSize(font.pointSize() + 2); font.setBold(False) 
-        self.title_label.setFont(font)
-        self.title_label.setStyleSheet(f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}")
-        nav_layout.addWidget(self.title_label, 1)  # Stretch factor 1 to center
+        # Title in the center with editable detector number
+        title_container = QtWidgets.QWidget()
+        title_layout = QtWidgets.QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.addStretch(1)
+        
+        det_label = QtWidgets.QLabel("Detector")
+        det_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+        title_layout.addWidget(det_label)
+        
+        self.detector_spinbox = QtWidgets.QSpinBox()
+        if self.detector_indices:
+            self.detector_spinbox.setRange(min(self.detector_indices), max(self.detector_indices))
+        else:
+            self.detector_spinbox.setRange(1, 9999)
+        self.detector_spinbox.setValue(self.detector_id)
+        self.detector_spinbox.setToolTip("Enter a detector number to jump directly")
+        self.detector_spinbox.valueChanged.connect(self._on_detector_spinbox_changed)
+        title_layout.addWidget(self.detector_spinbox)
+        
+        self.freq_label = QtWidgets.QLabel(f"({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
+        self.freq_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
+        title_layout.addWidget(self.freq_label)
+        
+        title_layout.addStretch(1)
+        nav_layout.addWidget(title_container, 1)  # Stretch factor 1 to center
         
         # Next button
         self.next_button = QtWidgets.QPushButton("Next ▶")
@@ -414,6 +431,16 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.current_detector_index_in_list = (self.current_detector_index_in_list + 1) % len(self.detector_indices)
         self._switch_to_detector(self.detector_indices[self.current_detector_index_in_list])
     
+    def _on_detector_spinbox_changed(self, value):
+        """Handle direct detector number entry via spinbox."""
+        if value in self.all_detectors_data:
+            # Update the index in the list
+            try:
+                self.current_detector_index_in_list = self.detector_indices.index(value)
+            except ValueError:
+                pass
+            self._switch_to_detector(value)
+    
     def _navigate_previous_trace(self):
         """Navigate to the previous amplitude trace."""
         if not self.resonance_data_for_digest or len(self.resonance_data_for_digest) <= 1:
@@ -539,8 +566,12 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.current_plot_offset_hz = self.resonance_frequency_ghz_title * 1e9
         
         # Update UI elements
-        title_text = f"Detector {self.detector_id} ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)"
-        self.title_label.setText(title_text)
+        if hasattr(self, 'detector_spinbox'):
+            self.detector_spinbox.blockSignals(True)
+            self.detector_spinbox.setValue(self.detector_id)
+            self.detector_spinbox.blockSignals(False)
+        if hasattr(self, 'freq_label'):
+            self.freq_label.setText(f"({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
         self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
         
         # Update detector count label
@@ -796,10 +827,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                         pen_color_plot3 = pg.mkColor(color)
                     current_pen = pg.mkPen(pen_color_plot3, width=LINE_WIDTH, style=line_style)
                     dac_scale = self.dac_scales.get(self.target_module)
-                    legend_name = f"{amp_val_float:.2e} Norm"
-                    if dac_scale:
-                        try: legend_name = f"{UnitConverter.normalize_to_dbm(amp_val_float, dac_scale):.2f} dBm"
-                        except: pass
+                    legend_name = UnitConverter.format_probe_label(amp_val_float, "dbm", dac_scale)
                     legend_name += " (Down)" if direction == "downward" else " (Up)"
                     if is_bifurcated: legend_name += " (bifurcated)"
                     self.plot3_bias_opt.plot(x_axis_hz_offset, s21_mag_db, pen=current_pen, name=legend_name)
@@ -957,17 +985,25 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         """Apply the dark/light theme to all plots and UI elements in this panel."""
         self.dark_mode = dark_mode
         
-        # Apply background color directly to self (QWidget base)
+        # Apply background and text color to self and all child widgets
         bg_color_hex = "#1C1C1C" if dark_mode else "#FFFFFF"
-        self.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}")
+        fg_color_hex = "#FFFFFF" if dark_mode else "#000000"
+        self.setStyleSheet(
+            f"QWidget {{ background-color: {bg_color_hex}; color: {fg_color_hex}; }}"
+        )
         
         title_color_str = "white" if dark_mode else "black"
         plot_bg_color, plot_pen_color = ("k", "w") if dark_mode else ("w", "k")
     
-        # ----- Titles -----
-        if hasattr(self, 'title_label'):
-            self.title_label.setStyleSheet(
-                f"QLabel {{ margin-bottom: 10px; color: {title_color_str}; background-color: transparent; }}"
+        # ----- Navigation title bar (det_label, spinbox, freq_label) -----
+        label_style = f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
+        if hasattr(self, 'det_label'):
+            self.det_label.setStyleSheet(label_style)  # type: ignore[union-attr]
+        if hasattr(self, 'freq_label'):
+            self.freq_label.setStyleSheet(label_style)  # type: ignore[union-attr]
+        if hasattr(self, 'detector_spinbox'):
+            self.detector_spinbox.setStyleSheet(
+                f"QSpinBox {{ color: {fg_color_hex}; background-color: {bg_color_hex}; }}"
             )
         # ----- Plots -----
         plot_widgets_legends = [

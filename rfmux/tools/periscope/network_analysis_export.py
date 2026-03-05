@@ -744,7 +744,7 @@ class NetworkAnalysisExportMixin:
         # Create and show the dialog
         dialog = MultisweepDialog(
             parent=self, 
-            resonance_frequencies=resonances, 
+            section_center_frequencies=resonances, 
             dac_scales=dac_scales_for_dialog, 
             current_module=active_module
         )

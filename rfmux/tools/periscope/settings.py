@@ -30,12 +30,15 @@ KEY_CONNECTION_MODE = "connection/last_mode"
 KEY_CRS_SERIAL = "connection/last_crs_serial"
 KEY_MODULE = "connection/last_module"
 KEY_SESSION_DIRECTORY = "session/last_base_directory"
+KEY_SESSION_MODE = "session/last_mode"
+KEY_LAST_SESSION_PATH = "session/last_loaded_path"
 KEY_USER_LIBRARY_PATH = "notebook/user_library_path"
 KEY_CUSTOM_MATERIALS = "materials/custom_materials"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
 DEFAULT_MODULE = 1
+DEFAULT_SESSION_MODE = "new"
 
 
 def _get_settings() -> QSettings:
@@ -143,6 +146,55 @@ def set_last_session_directory(path: str) -> None:
     """
     settings = _get_settings()
     settings.setValue(KEY_SESSION_DIRECTORY, str(path))
+
+
+def get_last_session_mode() -> str:
+    """
+    Get the last used session mode.
+    
+    Returns:
+        str: "new", "load", or "none"
+    """
+    settings = _get_settings()
+    return settings.value(KEY_SESSION_MODE, DEFAULT_SESSION_MODE)
+
+
+def set_last_session_mode(mode: str) -> None:
+    """
+    Save the session mode.
+    
+    Args:
+        mode: "new", "load", or "none"
+    """
+    if mode not in ("new", "load", "none"):
+        raise ValueError(f"Invalid session mode: {mode}")
+    settings = _get_settings()
+    settings.setValue(KEY_SESSION_MODE, mode)
+
+
+def get_last_session_path() -> str:
+    """
+    Get the last loaded session path.
+    
+    This is the full path to the most recently loaded session folder.
+    Used to pre-select the session in the file dialog for quick reloading.
+    
+    Returns:
+        str: Session folder path or empty string
+    """
+    settings = _get_settings()
+    return settings.value(KEY_LAST_SESSION_PATH, "")
+
+
+def set_last_session_path(path: str) -> None:
+    """
+    Save the last loaded session path.
+    
+    Args:
+        path: Full path to session folder
+    """
+    settings = _get_settings()
+    settings.setValue(KEY_LAST_SESSION_PATH, str(path))
 
 
 # ─────────────────────────────────────────────────────────────────

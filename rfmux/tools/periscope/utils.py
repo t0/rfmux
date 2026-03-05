@@ -323,6 +323,64 @@ def find_parent_with_attr(widget: QtWidgets.QWidget, attr_name: str) -> Optional
         parent = parent.parent()
     return parent
 
+
+# ───────────────────────── Theme Constants ─────────────────────────
+# Common theme-dependent colors used across multiple panels.
+LEGEND_TEXT_DARK = '#CCCCCC'   # Legend text colour for dark mode
+LEGEND_TEXT_LIGHT = '#333333'  # Legend text colour for light mode
+
+
+def theme_colors(dark_mode: bool) -> tuple[str, str]:
+    """Return ``(bg_color, pen_color)`` for the given theme.
+
+    This is a small helper that eliminates the repeated inline tuple
+    ``("k", "w") if dark_mode else ("w", "k")`` across all plotting
+    modules.
+
+    Args:
+        dark_mode: ``True`` for dark theme, ``False`` for light theme.
+
+    Returns:
+        A ``(background, foreground)`` colour-string pair suitable for
+        PyQtGraph plot styling.
+    """
+    return ("k", "w") if dark_mode else ("w", "k")
+
+
+def legend_text_color(dark_mode: bool) -> str:
+    """Return the legend text colour appropriate for *dark_mode*."""
+    return LEGEND_TEXT_DARK if dark_mode else LEGEND_TEXT_LIGHT
+
+
+def square_axes(plot_item: pg.PlotItem):
+    """
+    Make the axes have the same scale and equal extent in both directions, so that the
+    resulting plot is square and shows a to-scale representation of the data. This is
+    particularly useful for IQ circle plots where preserving the true circular shape is important.
+    
+    Parameters:
+    -----------
+    plot_item : pg.PlotItem
+        PyQtGraph PlotItem to make square
+        
+    Example:
+    --------
+    plot_widget = pg.PlotWidget()
+    plot_item = plot_widget.getPlotItem()
+    plot_item.plot(x_data, y_data)
+    square_axes(plot_item)  # Make it square with equal scaling
+    """
+    if plot_item is None:
+        return
+    
+    view_box = plot_item.getViewBox()
+    if view_box is None:
+        return
+    
+    # Lock the aspect ratio to 1:1 - this is the key setting
+    # This ensures equal scaling on both axes
+    view_box.setAspectLocked(True, ratio=1.0)
+
 def mode_title(mode: str) -> str:
     """
     Provide a more user-friendly label for each plot mode.
@@ -379,6 +437,61 @@ class UnitConverter:
             else:
                 if ref_val != 0 and np.isfinite(ref_val): result = result / ref_val
         return result
+
+    @staticmethod
+    def format_probe_label(amp_value: float, unit_mode: str = "dbm",
+                           dac_scale: Optional[float] = None) -> str:
+        """Format a normalized amplitude as a compact human-readable power string.
+
+        Consolidates the label-formatting logic previously duplicated across
+        multisweep_panel, network_analysis_panel, detector_digest_panel, and
+        parameter_histograms_panel.
+
+        Args:
+            amp_value:  Normalized amplitude (0–1 scale).
+            unit_mode:  One of ``"dbm"``, ``"volts"``, or ``"counts"``.
+            dac_scale:  DAC full-scale in dBm for the active module.
+                        If *None*, the label falls back to showing the raw
+                        normalized value.
+
+        Returns:
+            A compact string such as ``"-23.45 dBm"`` or ``"152.3 µVpk"``.
+        """
+        if unit_mode == "dbm":
+            if dac_scale is not None:
+                dbm_val = UnitConverter.normalize_to_dbm(amp_value, dac_scale)
+                return f"{dbm_val:.1f} dBm"
+            return f"{amp_value:.2e} (Norm)"
+
+        if unit_mode == "volts":
+            if dac_scale is not None:
+                dbm_val = UnitConverter.normalize_to_dbm(amp_value, dac_scale)
+                power_watts = 10 ** ((dbm_val - 30) / 10)
+                voltage_rms = np.sqrt(power_watts * 50.0)
+                voltage_peak = voltage_rms * np.sqrt(2)
+                return UnitConverter._format_si_volts(voltage_peak) + "pk"
+            return f"{amp_value:.2e} (Norm)"
+
+        # counts or anything else
+        return f"{amp_value:.2e} Norm"
+
+    @staticmethod
+    def _format_si_volts(volts: float) -> str:
+        """Format a voltage value with the appropriate SI prefix.
+
+        Examples: 0.00012 → '120 µV', 0.0034 → '3.4 mV', 1.2 → '1.20 V'
+        """
+        abs_v = abs(volts)
+        if abs_v == 0:
+            return "0 V"
+        elif abs_v < 1e-6:
+            return f"{volts * 1e9:.1f} nV"
+        elif abs_v < 1e-3:
+            return f"{volts * 1e6:.1f} µV"
+        elif abs_v < 1:
+            return f"{volts * 1e3:.2f} mV"
+        else:
+            return f"{volts:.3f} V"
 
 # ───────────────────────── Lock‑Free Ring Buffer ─────────────────────────
 class Circular:

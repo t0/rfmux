@@ -229,7 +229,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._start_timer()
         
         # Set initial window size (wider and taller for better visibility)
-        self.resize(900, 450)
+        self.resize(900, 600)
         
         # Show session startup dialog (unless already handled by launcher)
         self._skip_startup_dialog = skip_startup_dialog
@@ -248,7 +248,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # IQ plot worker tracking: maps row index to a boolean indicating if a worker is active.
         # IQSignals (from .tasks) handles signals for IQ task completion.
         self.iq_workers: Dict[int, bool] = {}  # Tracks active IQ workers per plot row
-        self.iq_signals = IQSignals()           # Signal object for IQ tasks
+        self.iq_signals = IQSignals()          # Signal object for IQ tasks
         self.iq_signals.done.connect(self._iq_done) # Connect completion signal to handler
 
         # PSD concurrency tracking: nested dictionary [row_index][psd_type_char][channel_id] -> bool
@@ -1367,7 +1367,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         # --- Launch dialog even if no resonances yet ---
         dialog = MultisweepDialog( parent=netanal_dialog, 
-                                   resonance_frequencies=resonances,   # may be []
+                                   section_center_frequencies=resonances,   # may be []
                                    dac_scales=netanal_dialog.dac_scales,   # may be {}
                                    current_module=active_module,       # may be None
                                    initial_params=None ,                # nothing prefilled
@@ -1378,7 +1378,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if dialog.exec():
             params = dialog.get_parameters()
             if params:
-                if "results_by_iteration" in params.keys():
+                if "results_by_detector" in params.keys() or "results_by_iteration" in params.keys():
                     self._load_multisweep_analysis(params)
                 else:
                     if self.crs is None:
@@ -1868,6 +1868,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     asyncio.set_event_loop(loop)
                 
                 try:
+                    # Ensure a concrete random seed exists before sending to server.
+                    # generate_resonators() is a tuber RPC — mutations on the server
+                    # side don't propagate back to the client's config dict.
+                    if config.get('resonator_random_seed') is None:
+                        config['resonator_random_seed'] = random.randint(0, 2**31 - 1)
+
                     # Apply configuration to server
                     future = asyncio.ensure_future(self.crs.generate_resonators(config))
                     resonator_count = loop.run_until_complete(future)
@@ -1907,6 +1913,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                                 print("[Periscope] Re-applied random QP pulses with updated parameters")
                     except Exception as e2:
                         print(f"[Periscope] Warning: failed to re-apply QP pulse mode after reconfigure: {e2}")
+
+                    # Save mock config to session if one is active
+                    if self.session_manager.is_active:
+                        self.session_manager.save_mock_config(config)
 
                     print(f"Regenerated {resonator_count} resonators with new parameters")
                     QtWidgets.QMessageBox.information(self, "Configuration Applied", 
@@ -2535,6 +2545,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             success = self.session_manager.load_session(session_path)
             
             if success:
+                # Restore mock config if present and in mock mode
+                self._restore_mock_config_from_session()
+                
                 # Show the session browser dock
                 if hasattr(self, 'session_browser_dock'):
                     self.session_browser_dock.show()
@@ -2607,6 +2620,39 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             if connection_mode == UnifiedStartupDialog.CONN_OFFLINE:
                 print("[Connection] Offline mode selected - feature not yet implemented")
                 # Future: Initialize in offline mode, disable CRS-dependent features
+    
+    def _restore_mock_config_from_session(self):
+        """
+        Restore mock configuration from the loaded session.
+        
+        If the session contains mock configuration and we're currently in mock mode,
+        this will apply the configuration to regenerate the resonators with the
+        same parameters as when the session was created.
+        
+        Note: This is only called when loading a session via the Session menu after
+        Periscope has already started. The startup flow handles restoration differently.
+        """
+        if not self.session_manager.has_mock_config():
+            return
+        
+        if not self.is_mock_mode:
+            print("[Session] Session contains mock config, but not in mock mode - skipping restore")
+            return
+        
+        # Get the config from session
+        mock_config = self.session_manager.get_mock_config()
+        
+        if mock_config:
+            print(f"[Session] Restoring mock configuration from session ({len(mock_config)} parameters)")
+            
+            # Store it in self.mock_config
+            self.mock_config = mock_config
+            
+            # Apply it to regenerate resonators
+            self._apply_mock_configuration(mock_config)
+            
+            # Console message is sufficient - no need for popup
+            print(f"[Session] Mock configuration restored successfully")
     
     def _toggle_auto_export(self, checked: bool):
         """
@@ -2727,7 +2773,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     
     def _load_multisweep_from_session(self, data: dict, file_path: str):
         """Load multisweep data from session file into a new panel."""
-        if 'results_by_iteration' not in data:
+        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
             QtWidgets.QMessageBox.information(
                 self,
                 "Multisweep Loaded",
@@ -2748,7 +2794,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         - Set bias (apply to hardware only)
         - Set + Plot bias (apply to hardware and create visualization panel)
         """
-        if 'results_by_iteration' not in data:
+        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
             QtWidgets.QMessageBox.warning(
                 self,
                 "Invalid Bias File",
@@ -2756,7 +2802,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 "Cannot load this bias file."
             )
             return
-        
+
         # Show the same dialog that the "Load Bias" button shows
         from .bias_kids_dialog import BiasKidsDialog
         dialog = BiasKidsDialog(self, self.module, load_bias=True, loaded_data=data)
@@ -2779,7 +2825,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Creates a MultisweepPanel, opens the DetectorDigestPanel (fit), and 
         opens a separate NoiseSpectrumPanel for the noise visualization.
         """
-        if 'results_by_iteration' not in data:
+        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
             QtWidgets.QMessageBox.warning(
                 self,
                 "Invalid Noise File",
@@ -2798,33 +2844,41 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         # Auto-launch detector digest panel (fit panel) by simulating a double-click
         # This is the same logic used in _load_multisweep_analysis
-        iteration_params = data.get('results_by_iteration', [])
-        if iteration_params and len(iteration_params) > 0:
-            first_iteration_data = iteration_params[0].get('data', {})
-            if first_iteration_data:
-                # Get any detector's frequency to simulate a click location
-                first_detector_id = sorted(first_iteration_data.keys())[0]
-                first_detector_data = first_iteration_data[first_detector_id]
-                click_freq = first_detector_data.get('bias_frequency', 
-                                                    first_detector_data.get('original_center_frequency'))
-                
-                if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
-                    # Create a fake event at the detector's frequency
-                    class FakeEvent:
-                        def __init__(self, x, y):
-                            self._scene_pos = QtCore.QPointF(x, y)
-                        def scenePos(self):
-                            return self._scene_pos
-                        def accept(self):
-                            pass
-                    
-                    # Map the frequency to view coordinates (x position)
-                    view_box = panel.combined_mag_plot.getViewBox()
-                    if view_box:
-                        view_point = QtCore.QPointF(click_freq, 0)
-                        scene_point = view_box.mapViewToScene(view_point)
-                        fake_event = FakeEvent(scene_point.x(), scene_point.y())
-                        panel._handle_multisweep_plot_double_click(fake_event)
+        # Find first detector frequency to auto-open digest
+        click_freq = None
+        if 'results_by_detector' in data:
+            det_data = data['results_by_detector']
+            if det_data:
+                first_det_id = sorted(det_data.keys())[0]
+                first_entry = next(iter(det_data[first_det_id].values()), {})
+                click_freq = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
+        elif 'results_by_iteration' in data:
+            iteration_params = data.get('results_by_iteration', [])
+            if iteration_params and len(iteration_params) > 0:
+                first_iteration_data = iteration_params[0].get('data', {})
+                if first_iteration_data:
+                    first_detector_id = sorted(first_iteration_data.keys())[0]
+                    first_detector_data = first_iteration_data[first_detector_id]
+                    click_freq = first_detector_data.get('bias_frequency',
+                                                        first_detector_data.get('original_center_frequency'))
+        if click_freq is not None:
+            if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
+                # Create a fake event at the detector's frequency
+                class FakeEvent:
+                    def __init__(self, x, y):
+                        self._scene_pos = QtCore.QPointF(x, y)
+                    def scenePos(self):
+                        return self._scene_pos
+                    def accept(self):
+                        pass
+
+                # Map the frequency to view coordinates (x position)
+                view_box = panel.combined_mag_plot.getViewBox()
+                if view_box:
+                    view_point = QtCore.QPointF(click_freq, 0)
+                    scene_point = view_box.mapViewToScene(view_point)
+                    fake_event = FakeEvent(scene_point.x(), scene_point.y())
+                    panel._handle_multisweep_plot_double_click(fake_event)
         
         # Load noise data if present and open the NoiseSpectrumPanel
         if data.get('noise_data') is not None:

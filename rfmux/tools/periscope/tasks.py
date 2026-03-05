@@ -519,7 +519,7 @@ class MultisweepTask(QtCore.QThread):
         try:
             amplitudes = self.params.get('amps', [DEFAULT_AMPLITUDE])
             sweep_direction = self.params.get('sweep_direction', 'upward')
-            conceptual_frequencies_from_window = self.window.conceptual_resonance_frequencies
+            conceptual_frequencies_from_window = self.window.conceptual_section_frequencies
             iteration_index = 0
 
             for amp_val in amplitudes:

@@ -543,6 +543,12 @@ async def multisweep(
             # Convert sweep IQ data from ADC counts to volts
             iq_complex_volts = convert_roc_to_volts(final_iq_complex)
             
+            # Ensure frequencies are in ascending order for interpolation
+            # (downward sweeps produce a decreasing sequence which scipy rejects)
+            sort_idx = np.argsort(data_entry['frequencies'])
+            cal_freqs = data_entry['frequencies'][sort_idx]
+            cal_iq_volts = iq_complex_volts[sort_idx]
+            
             # Calculate calibration at bias frequency
             try:
                 # Calculate the calibration factor by converting iq=1 (in volts)
@@ -551,8 +557,8 @@ async def multisweep(
                 df_calibration = convert_iq_to_df(
                     np.array([1.0 + 0j]),  # Unit IQ in volts
                     bias_freq,
-                    data_entry['frequencies'],
-                    iq_complex_volts
+                    cal_freqs,
+                    cal_iq_volts
                 )[0]  # Get the single complex value
                 
                 # If we have a TOD, calibrate it too
@@ -561,8 +567,8 @@ async def multisweep(
                     calibrated_tod_df = convert_iq_to_df(
                         rotation_tod_volts, 
                         bias_freq,
-                        data_entry['frequencies'],
-                        iq_complex_volts
+                        cal_freqs,
+                        cal_iq_volts
                     )
                     
             except Exception as e:

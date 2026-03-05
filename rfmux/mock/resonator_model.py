@@ -176,10 +176,17 @@ class MockResonatorModel:
         
         print('Using config:', {k: v for k, v in config.items() if k in ['num_resonances', 'freq_start', 'freq_end', 'T', 'Popt']})
         
-        # Set random seed for reproducible resonator generation
+        # Set random seed for reproducible resonator generation.
         # Use separate RandomState for C/Cc variations to avoid pollution from
-        # varying iteration counts in the binary search convergence loop
+        # varying iteration counts in the binary search convergence loop.
+        # When seed is None (the default from config.py), generate a concrete
+        # seed from system entropy and write it back into *config* so that any
+        # subsequent save of the config dict (e.g. to session metadata) will
+        # reproduce the exact same resonator set.
         seed = config.get('resonator_random_seed', 42)
+        if seed is None:
+            seed = int(np.random.default_rng().integers(0, 2**31))
+            config['resonator_random_seed'] = seed
         np.random.seed(seed)  # Global seed for any internal MR_complex_resonator randomness
         variation_rng = np.random.RandomState(seed)  # Dedicated RNG for circuit variations
         

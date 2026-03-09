@@ -19,6 +19,8 @@ from .detector_digest_panel import DetectorDigestPanel
 from .noise_spectrum_panel import NoiseSpectrumPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
 from .parameter_histograms_panel import ParameterHistogramsPanel
+from .amplitude_colorbar import AmplitudeColorBar
+from .multisweep_grid_helpers import create_amplitude_color_map
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
 
@@ -80,15 +82,23 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Stores {amp: {conceptual_idx: output_cf}}
         self.last_output_cfs_by_amp_and_conceptual_idx: dict[float, dict[int, float]] = {}
         # Amps used for the last configured/completed run, to compare if settings changed.
-        self.current_run_amps: list[float] = list(self.initial_params.get('amps', []))
+        # Use amp_arrays (new format) if present, falling back to amps (old format).
+        _init_amp_arrays = self.initial_params.get('amp_arrays', [])
+        if _init_amp_arrays:
+            self.current_run_amps: list[float] = [arr[0] for arr in _init_amp_arrays if arr]
+        else:
+            self.current_run_amps: list[float] = list(self.initial_params.get('amps', []))
         # probe_amplitudes is used for progress display, should reflect current_run_amps
         self.probe_amplitudes = list(self.current_run_amps) # Ensure it's a copy and reflects current run
 
         self.setWindowTitle(f"Multisweep Results - Module {self.target_module}")
 
-        # Data storage and state
-        self.results_by_iteration = {}  # Stores {iteration: {"direction": direction, "data": {cf: data_dict}}}
-        self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed (for display only)
+
+        # Data storage and state — detector-based format:
+        # {detector_id: {iteration_index: {all_detector_data_fields + amplitude, direction, iteration metadata}}}
+        self.results_by_detector = {}
+        self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed
+
         self.current_iteration_being_processed = None # Tracks the current iteration
         self.unit_mode = "dbm"  # Current unit for magnitude display ("counts", "dbm", "volts")
         self.normalize_traces = True  # Flag to normalize trace plots (magnitude and phase)
@@ -121,14 +131,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Initialize batch tracking for sweep tabs (before _setup_ui)
         self.current_batch = 0
-        self.batch_size = 50
+
+        self.batch_size = 8
         
-        # Storage for sweep grid plots
-        self.mag_sweep_plots = {}  # {detector_id: plot_widget}
-        self.iq_sweep_plots = {}   # {detector_id: plot_widget}
+        # Storage for sweep grid plots - cached to avoid recreating widgets
+        self.mag_sweep_plots_cache = []  # List of plot widgets for magnitude tab
+        self.iq_sweep_plots_cache = []   # List of plot widgets for IQ tab
         
         # Histogram panel (created lazily in _setup_plot_area)
         self.histogram_panel = None
+        self.histograms_generated = False  # Track if histograms have been generated
 
         self._setup_ui()
         
@@ -193,27 +205,41 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         self.prev_batch_btn = QtWidgets.QPushButton("◀")
         self.prev_batch_btn.setToolTip("Previous batch")
+
+        self.prev_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
+
         self.prev_batch_btn.clicked.connect(self._prev_batch)
         toolbar_layout.addWidget(self.prev_batch_btn)
         
         self.batch_info_label = QtWidgets.QLabel("1 of 1")
         self.batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.batch_info_label.setMinimumWidth(60)
+
+        self.batch_info_label.setMinimumWidth(40)
+
         toolbar_layout.addWidget(self.batch_info_label)
         
         self.next_batch_btn = QtWidgets.QPushButton("▶")
         self.next_batch_btn.setToolTip("Next batch")
+
+        self.next_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
         self.next_batch_btn.clicked.connect(self._next_batch)
         toolbar_layout.addWidget(self.next_batch_btn)
         
+        self.batch_size_label = QtWidgets.QLabel("Subplots:")
+        toolbar_layout.addWidget(self.batch_size_label)
+        
         self.batch_size_spin = QtWidgets.QSpinBox()
-        self.batch_size_spin.setRange(10, 200)
+        self.batch_size_spin.setRange(1, 200)
         self.batch_size_spin.setValue(self.batch_size)
-        self.batch_size_spin.setSingleStep(10)
-        self.batch_size_spin.setToolTip("Detectors per batch")
-        self.batch_size_spin.setPrefix("Size: ")
-        self.batch_size_spin.valueChanged.connect(self._batch_size_changed)
+        self.batch_size_spin.setSingleStep(1)
+        self.batch_size_spin.setToolTip("Detectors per batch (press Update to apply)")
+        # Note: No longer connects to immediate redraw
         toolbar_layout.addWidget(self.batch_size_spin)
+        
+        self.batch_update_btn = QtWidgets.QPushButton("Update")
+        self.batch_update_btn.setToolTip("Apply new batch size and regenerate plots")
+        self.batch_update_btn.clicked.connect(self._apply_batch_size)
+        toolbar_layout.addWidget(self.batch_update_btn)
 
         # Normalization Checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
@@ -277,11 +303,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.plot_tabs.currentChanged.connect(self._on_plot_tab_changed)
         
         # Tab 0: Magnitude Sweeps (per-detector grid)
-        self.mag_sweeps_tab, self.mag_sweeps_grid = self._create_sweep_tab()
+
+        self.mag_sweeps_tab, self.mag_sweeps_grid, self.mag_colorbar = self._create_sweep_tab()
         self.plot_tabs.addTab(self.mag_sweeps_tab, "Magnitude Sweeps")
         
         # Tab 1: IQ Circles (per-detector grid)
-        self.iq_sweeps_tab, self.iq_sweeps_grid = self._create_sweep_tab()
+        self.iq_sweeps_tab, self.iq_sweeps_grid, self.iq_colorbar = self._create_sweep_tab()
         self.plot_tabs.addTab(self.iq_sweeps_tab, "IQ Circles")
         
         # Tab 2: Combined Plots (original combined view)
@@ -292,16 +319,26 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.histogram_tab = self._create_histogram_tab()
         self.plot_tabs.addTab(self.histogram_tab, "Histograms")
         
+
+        # Tab 4: Detector Digest (single-detector detail view)
+        self.digest_tab = self._create_digest_tab()
+        self.plot_tabs.addTab(self.digest_tab, "Detector Digest")
+        
         # Set default tab to Magnitude Sweeps
         self.plot_tabs.setCurrentIndex(0)
         
         layout.addWidget(self.plot_tabs)
         
     def _create_sweep_tab(self):
-        """Create a tab for sweep plots (magnitude or IQ). Returns (tab, grid_layout)."""
+
+        """Create a tab for sweep plots (magnitude or IQ). Returns (tab, grid_layout, colorbar)."""
         tab = QtWidgets.QWidget()
         tab_layout = QtWidgets.QVBoxLayout(tab)
         tab_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Amplitude colorbar (shown for >5 sweeps, hidden otherwise)
+        colorbar = AmplitudeColorBar(tab)
+        tab_layout.addWidget(colorbar)
         
         # Scroll area for plots
         scroll = QtWidgets.QScrollArea()
@@ -315,13 +352,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         scroll.setWidget(container)
         tab_layout.addWidget(scroll)
         
-        return tab, grid
+        return tab, grid, colorbar
         
     def _create_combined_tab(self):
         """Create the combined plots tab (original magnitude + phase plots)."""
         tab = QtWidgets.QWidget()
         plot_layout = QtWidgets.QVBoxLayout(tab)
         plot_layout.setContentsMargins(5, 5, 5, 5)
+
+        # Amplitude colorbar (shown for >5 sweeps)
+        self.combined_colorbar = AmplitudeColorBar(tab)
+        plot_layout.addWidget(self.combined_colorbar)
 
         # Magnitude Plot
         vb_mag = ClickableViewBox()
@@ -333,7 +374,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             plot_item_mag.setTitle("Combined S21 Magnitude (All Resonances)", color=pen_color)
             plot_item_mag.setLabel('bottom', 'Frequency', units='Hz')
             plot_item_mag.showGrid(x=True, y=True, alpha=0.3)
-            self.mag_legend = plot_item_mag.addLegend(offset=(10,-50),labelTextColor=pen_color)
+            legend_color = '#CCCCCC' if self.dark_mode else '#333333'
+            self.mag_legend = plot_item_mag.addLegend(offset=(10,-50),labelTextColor=legend_color)
         self._update_mag_plot_label()
         plot_layout.addWidget(self.combined_mag_plot)
 
@@ -347,7 +389,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             plot_item_phase.setLabel('bottom', 'Frequency', units='Hz')
             plot_item_phase.setLabel('left', 'Phase', units='deg')
             plot_item_phase.showGrid(x=True, y=True, alpha=0.3)
-            self.phase_legend = plot_item_phase.addLegend(offset=(10,-50),labelTextColor=pen_color)
+            legend_color = '#CCCCCC' if self.dark_mode else '#333333'
+            self.phase_legend = plot_item_phase.addLegend(offset=(10,-50),labelTextColor=legend_color)
         plot_layout.addWidget(self.combined_phase_plot)
         
         # Link X-axes for synchronized zooming/panning
@@ -403,33 +446,85 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         return tab
     
-    def _ensure_histogram_panel(self):
-        """Lazily create the histogram panel when first needed with data."""
-        if self.histogram_panel is not None:
-            # Panel already exists, just reload data
-            if hasattr(self.histogram_panel, '_load_and_plot_data'):
-                self.histogram_panel._load_and_plot_data()
+
+    def _create_digest_tab(self):
+        """Create the detector digest tab (single-detector detail view, lazily populated)."""
+        tab = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Placeholder until data is available and a detector is selected
+        self._digest_placeholder = QtWidgets.QLabel(
+            "Detector digest will appear here when multisweep data is available.\n"
+            "Double-click a resonance in the Combined or grid plots to view its digest."
+        )
+        self._digest_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._digest_placeholder.setStyleSheet("color: gray; font-style: italic;")
+        tab_layout.addWidget(self._digest_placeholder)
+        
+        # The actual DetectorDigestPanel (created lazily)
+        self.digest_panel = None
+        
+        return tab
+    
+    def _generate_histograms(self):
+        """
+        Generate histogram plots once when multisweep data is complete.
+        This is called from all_sweeps_completed() to create the plots when fit data is ready.
+        """
+        if not self.results_by_detector:
             return
         
-        # Find the histogram tab widget and create the panel
-        if hasattr(self, 'histogram_tab') and self.histogram_tab:
-            # Clear placeholder
-            layout = self.histogram_tab.layout()
-            if layout:
-                while layout.count():
-                    item = layout.takeAt(0)
-                    if item.widget():
-                        item.widget().deleteLater()
-                
-                # Create the actual histogram panel now that we have data
-                self.histogram_panel = ParameterHistogramsPanel(
-                    parent=self.histogram_tab,
-                    multisweep_panel=self,
-                    amplitude_idx=None,  # Will use last/highest amplitude by default
-                    nbins=30,
-                    dark_mode=self.dark_mode
-                )
-                layout.addWidget(self.histogram_panel)
+        # Check if we have any fit data
+        has_fit_data = False
+        for amp_dir_dict in self.results_by_detector.values():
+            for det_data in amp_dir_dict.values():
+                if 'fit_params' in det_data or 'nonlinear_fit_params' in det_data:
+                    has_fit_data = True
+                    break
+            if has_fit_data:
+                break
+        
+        if not has_fit_data:
+            print("Note: No fit data available for histogram generation")
+            return
+        
+        # Create the histogram panel if it doesn't exist
+        if self.histogram_panel is None:
+            if hasattr(self, 'histogram_tab') and self.histogram_tab:
+                # Clear placeholder
+                layout = self.histogram_tab.layout()
+                if layout:
+                    while layout.count():
+                        item = layout.takeAt(0)
+                        if item.widget():
+                            item.widget().deleteLater()
+                    
+                    # Create the actual histogram panel with data
+                    self.histogram_panel = ParameterHistogramsPanel(
+                        parent=self.histogram_tab,
+                        multisweep_panel=self,
+                        amplitude_idx=None,  # Will use last/highest amplitude by default
+                        nbins=30,
+                        dark_mode=self.dark_mode
+                    )
+                    layout.addWidget(self.histogram_panel)
+        else:
+            # Panel exists, just reload data (for re-run scenario)
+            if hasattr(self.histogram_panel, '_load_and_plot_data'):
+                self.histogram_panel._load_and_plot_data()
+    
+    def _ensure_histogram_panel(self):
+        """Ensure the histogram panel exists - no longer regenerates plots on tab open."""
+        # If histograms haven't been generated yet, just return
+        # They will be generated when all_sweeps_completed() is called
+        if not self.histograms_generated:
+            return
+        
+        # If we get here and panel doesn't exist but should, create it
+        # This handles edge cases like theme changes
+        if self.histogram_panel is None and self.results_by_detector:
+            self._generate_histograms()
 
 
     def _on_plot_tab_changed(self, index):
@@ -441,17 +536,22 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.prev_batch_btn.setVisible(is_sweep_tab)
         self.batch_info_label.setVisible(is_sweep_tab)
         self.next_batch_btn.setVisible(is_sweep_tab)
+
+        self.batch_size_label.setVisible(is_sweep_tab)
         self.batch_size_spin.setVisible(is_sweep_tab)
+        self.batch_update_btn.setVisible(is_sweep_tab)
         
         # Redraw the active tab's plots if we have data
-        if self.results_by_iteration:
+        if self.results_by_detector:
             self._redraw_plots()
     
-    def _batch_size_changed(self, value):
-        """Handle batch size change."""
-        self.batch_size = value
-        self.current_batch = 0
-        self._redraw_plots()
+    def _apply_batch_size(self):
+        """Apply the batch size from the spin box and regenerate plots."""
+        new_batch_size = self.batch_size_spin.value()
+        if new_batch_size != self.batch_size:
+            self.batch_size = new_batch_size
+            self.current_batch = 0
+            self._redraw_plots()
     
     def _prev_batch(self):
         """Show previous batch."""
@@ -466,15 +566,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if current_tab_idx not in (0, 1):  # Only sweep tabs have batches
             return
             
-        if not self.results_by_iteration:
+        if not self.results_by_detector:
             return
         
-        # Count detectors
-        detector_ids = set()
-        for iteration_data in self.results_by_iteration.values():
-            detector_ids.update(iteration_data["data"].keys())
-        
-        num_detectors = len(detector_ids)
+        num_detectors = len(self.results_by_detector)
         total_batches = max(1, (num_detectors + self.batch_size - 1) // self.batch_size)
         
         if self.current_batch < total_batches - 1:
@@ -573,7 +668,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 direction_text = "Unknown"
                 print(f"WARNING: Unexpected sweep_direction value: '{sweep_direction}'")
                 
-            self.current_amp_label.setText(f"Iteration 1/{self.total_iterations}: Amplitude {self.probe_amplitudes[0]:.4f} ({direction_text})")
+            self.current_amp_label.setText(f"Iteration 1/{self.total_iterations} ({direction_text})")
         else:
             self.current_amp_label.setText("No sweeps defined. (Waiting...)")
         self.current_amp_label.setAlignment(Qt.AlignmentFlag.AlignCenter) # Center the text
@@ -622,7 +717,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.total_iterations = max(self.total_iterations, current_display_iteration)
         
         # Set the status message BEFORE the sweep starts
-        status_message = f"Iteration {current_display_iteration}/{self.total_iterations}: Amplitude {amplitude:.4f} ({direction_text})"
+        status_message = f"Iteration {current_display_iteration}/{self.total_iterations} ({direction_text})"
         self.current_amp_label.setText(status_message)
 
     def handle_fitting_progress(self, module: int, status_message: str):
@@ -673,17 +768,33 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.current_iteration_being_processed = iteration
 
         
-        # Store data in iteration-based structure
-        # Note: 'amplitude' is NOT stored at iteration level - each section has its own sweep_amplitude
-        self.results_by_iteration[iteration] = {
-            "direction": direction,
-            "data": results_for_plotting
-        }
+        # Store data in detector-based structure, keyed by iteration index.
+        # The amplitude and direction are stored inside each entry, not as keys,
+        # so that all detectors share the same iteration indices even if they
+        # use different amplitudes in the future.
+        if results_for_plotting:
+            for detector_id, det_data in results_for_plotting.items():
+                if detector_id not in self.results_by_detector:
+                    self.results_by_detector[detector_id] = {}
+                entry = dict(det_data)
+                entry['amplitude'] = amplitude
+                entry['direction'] = direction
+                entry['iteration'] = iteration
+                self.results_by_detector[detector_id][iteration] = entry
 
         # --- Update CF history using the pre-mapped results_for_history ---
         if results_for_history:
             self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {}).update(results_for_history)
 
+        # Invalidate digest panel so it gets recreated with fresh data
+        # (the panel takes a snapshot at creation time and doesn't track live changes)
+        if self.digest_panel is not None:
+            self.digest_panel = None
+        
+        # Invalidate histogram cache so plots reflect the latest iteration
+        if self.histogram_panel is not None:
+            self.histogram_panel.histogram_cache.clear()
+        
         self._redraw_plots() # Refresh plots with the new data
         
         # Note: We now update the status in handle_starting_iteration() instead of here
@@ -695,8 +806,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         For histogram tab (3), updates histogram panel.
         """
         # Early return if no data
-        num_iterations = len(self.results_by_iteration)
-        if num_iterations == 0:
+
+        if not self.results_by_detector:
             # Clear any existing plots
             if hasattr(self, 'combined_mag_plot') and self.combined_mag_plot:
                 self.combined_mag_plot.clear()
@@ -715,40 +826,96 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._redraw_combined_plots()
         # Tab 3: Histograms (parameter distributions)
         elif current_tab_idx == 3:
-            # Ensure histogram panel is created and loaded with data
-            self._ensure_histogram_panel()
+
+            self._generate_histograms()  # Creates or reloads histogram panel with latest data
+            self.histograms_generated = True
+        # Tab 4: Detector Digest (recreate if invalidated by new data)
+        elif current_tab_idx == 4:
+            if self.digest_panel is None and self.results_by_detector:
+                self._open_detector_digest_for_index(1, switch_to_tab=False)
     
     def _redraw_sweep_grid(self, tab_idx):
         """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
         from .multisweep_grid_helpers import (
-            prepare_detector_data_from_iterations,
+
             create_amplitude_color_map,
             update_sweep_grid
         )
         
-        # Prepare detector-based data from iterations
-        detector_data = prepare_detector_data_from_iterations(self.results_by_iteration)
+        # Prepare detector data for grid plotting directly from results_by_detector
+        # Key by (amp_val, direction) for the grid helpers
+        detector_data = {}
+        for detector_id, iter_dict in self.results_by_detector.items():
+            detector_data[detector_id] = {}
+            for det_entry in iter_dict.values():
+                amp_val = det_entry.get('amplitude')
+                direction = det_entry.get('direction', 'upward')
+                freqs = det_entry.get('frequencies', np.array([]))
+                # Use raw counts when in counts mode, otherwise voltage-converted data
+                if self.unit_mode == "counts":
+                    iq_complex = det_entry.get('iq_complex', np.array([]))
+                else:
+                    iq_complex = det_entry.get('iq_complex', np.array([]))
+                if amp_val is not None and len(freqs) > 0 and len(iq_complex) > 0:
+                    detector_data[detector_id][(amp_val, direction)] = {
+                        'freq': freqs,
+                        'iq': iq_complex,
+                        'amplitude': amp_val,
+                        'direction': direction,
+                        'original_center_frequency': det_entry.get('original_center_frequency')
+                    }
         
         if not detector_data:
             return
         
-        # Get all amplitudes for color mapping
+
+        # Get all amplitudes for color mapping (unique amplitude values only)
         all_amps = set()
         for det_data in detector_data.values():
-            all_amps.update(det_data.keys())
+            for (amp_val, _direction) in det_data.keys():
+                all_amps.add(amp_val)
         
         # Create amplitude color mapping (matches combined plot colors)
         amplitude_to_color = create_amplitude_color_map(all_amps, self.dark_mode)
         
-        # Determine plot type and grid
+
+        # Get DAC scale for label formatting
+        dac_scale = self.dac_scales.get(self.active_module_for_dac)
+        
+        # Determine plot type, grid, cache, and colorbar based on tab
         if tab_idx == 0:
             plot_type = 'magnitude'
             grid_layout = self.mag_sweeps_grid
+            widget_cache = self.mag_sweep_plots_cache
+            colorbar = self.mag_colorbar
         else:  # tab_idx == 1
             plot_type = 'iq'
             grid_layout = self.iq_sweeps_grid
+            widget_cache = self.iq_sweep_plots_cache
+            colorbar = self.iq_colorbar
         
-        # Update the grid
+        # Count unique (amp, direction) pairs to decide legend vs colorbar
+        all_sweep_keys = set()
+        for det_data in detector_data.values():
+            all_sweep_keys.update(det_data.keys())
+        num_sweeps = len(all_sweep_keys)
+        has_downward = any(d == 'downward' for _, d in all_sweep_keys)
+        
+        # Show colorbar when the inferno colormap is active (num_amps > threshold),
+        # otherwise use per-plot legends with TABLEAU10 colors.
+        num_amps = len(all_amps)
+        if num_amps > AMPLITUDE_COLORMAP_THRESHOLD:
+            sorted_amps = sorted(all_amps)
+            colorbar.update_range(sorted_amps[0], sorted_amps[-1],
+                                  dac_scale, self.unit_mode,
+                                  self.dark_mode, has_downward)
+            colorbar.show()
+            use_legend = False  # colorbar replaces per-plot legends
+        else:
+            colorbar.hide()
+            use_legend = True  # show per-plot legends
+        
+        # Update the grid with widget caching
         update_sweep_grid(
             grid_layout=grid_layout,
             data_by_detector=detector_data,
@@ -762,9 +929,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             prev_btn=self.prev_batch_btn,
             next_btn=self.next_batch_btn,
             batch_label=self.batch_info_label,
-            dac_scales=self.dac_scales,
-            target_module=self.target_module
+            widget_cache=widget_cache,
+            dac_scale=dac_scale,
+            show_legend=use_legend
         )
+        
+        # Install double-click event filter on grid plot widgets
+        # Must be AFTER update_sweep_grid so newly created widgets are included
+        for pw in widget_cache:
+            pw.installEventFilter(self)
     
     def _redraw_combined_plots(self):
         """Redraw the combined magnitude and phase plots (original view)."""
@@ -791,67 +964,48 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             for line in amp_val_lines: self.combined_phase_plot.removeItem(line)
         self.cf_lines_phase.clear()
 
-        num_iterations = len(self.results_by_iteration)
-        if num_iterations == 0: # No data to plot
-            self.combined_mag_plot.autoRange(); self.combined_phase_plot.autoRange() # Ensure plots are reset
+        if not self.results_by_detector:
+            self.combined_mag_plot.autoRange(); self.combined_phase_plot.autoRange()
             return
         
-        # Define color schemes for plotting multiple amplitudes
-        # Use a distinct color family for few amplitudes, switch to a colormap for many
-        cmap_name = COLORMAP_CHOICES.get("AMPLITUDE_SWEEP", "inferno") # Fallback if key missing
-        use_cmap = pg.colormap.get(cmap_name) if cmap_name else None
-        
-        # Get unique amplitudes to determine color scheme
-        # Extract amplitudes from detector data
+
+        # Collect unique (amplitude, direction) pairs and amplitude values from entries
         amplitude_values = set()
-        for iteration_data in self.results_by_iteration.values():
-            res_data = iteration_data.get("data", {})
-            for det_data in res_data.values():
-                amp_val = det_data.get('sweep_amplitude')
-                if amp_val is not None:
-                    amplitude_values.add(amp_val)
-                    break  # Only need one amplitude per iteration
+        amp_dir_pairs = set()
+        for iter_dict in self.results_by_detector.values():
+            for entry in iter_dict.values():
+                amp = entry.get('amplitude')
+                direction = entry.get('direction', 'upward')
+                if amp is not None:
+                    amplitude_values.add(amp)
+                    amp_dir_pairs.add((amp, direction))
         num_amps = len(amplitude_values)
             
         # Create a mapping for unique amplitude values to colors
         sorted_amplitudes = sorted(amplitude_values)
-        amplitude_to_color = {}
-        for amp_idx, amp_val in enumerate(sorted_amplitudes):
-            # Determine color for this amplitude's curves
-            if num_amps <= AMPLITUDE_COLORMAP_THRESHOLD: # Use distinct colors if few amplitudes
-                color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
-            else: # Use a colormap for many amplitudes
-                if use_cmap:
-                    normalized_idx = amp_idx / max(1, num_amps - 1) # Normalize index for colormap base [0,1]
-                    if self.dark_mode:
-                        # For dark mode, map to [0.3, 1.0]
-                        map_value = 0.3 + normalized_idx * 0.7
-                    else:
-                        # For light mode, map to [0.0, 0.75]
-                        map_value = normalized_idx * 0.75
-                    color = use_cmap.map(map_value)
-                else: # Fallback if colormap is somehow None
-                    color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
-            amplitude_to_color[amp_val] = color
+        amplitude_to_color = create_amplitude_color_map(amplitude_values, self.dark_mode)
+        
+        # Colorbar vs legend: show colorbar only when inferno colormap is active
+        has_downward = any(d == 'downward' for _, d in amp_dir_pairs)
+        dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
+        
+        if num_amps > AMPLITUDE_COLORMAP_THRESHOLD:
+            self.combined_colorbar.update_range(
+                sorted_amplitudes[0], sorted_amplitudes[-1],
+                dac_scale_for_module, self.unit_mode,
+                self.dark_mode, has_downward)
+            self.combined_colorbar.show()
+            show_combined_legend = False
+        else:
+            self.combined_colorbar.hide()
+            show_combined_legend = True
         
         legend_items_mag = {} # To avoid duplicate legend entries for the same amplitude/direction combination
         legend_items_phase = {}
         
-        # Iterate through each iteration's results
-        for iteration, iteration_data in self.results_by_iteration.items():
-            direction = iteration_data["direction"]
-            amp_results = iteration_data["data"]
-            
-            # Get representative amplitude from first detector (for legend/color)
-            amp_val = None
-            for det_data in amp_results.values():
-                amp_val = det_data.get('sweep_amplitude')
-                if amp_val is not None:
-                    break
-            
-            if amp_val is None:
-                continue  # Skip if no amplitude data
-            
+
+        # Iterate through each (amplitude, direction) pair across all detectors
+        for (amp_val, direction) in sorted(amp_dir_pairs):
             # Get color for this amplitude
             color = amplitude_to_color[amp_val]
             
@@ -859,54 +1013,38 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
             pen = pg.mkPen(color, width=LINE_WIDTH, style=line_style)
             
-            # --- Prepare Legend Entry for this Amplitude ---
-            legend_name_amp = ""
-            dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
+            # --- Prepare Legend Entry for this Amplitude (only if legends active) ---
+            if show_combined_legend:
+                legend_name_amp = UnitConverter.format_probe_label(amp_val, self.unit_mode, dac_scale_for_module)
+                direction_suffix = " (Down)" if direction == "downward" else " (Up)"
+                full_legend_name = legend_name_amp + direction_suffix
+                
+                legend_key = (amp_val, direction)
+                
+                if legend_key not in legend_items_mag and self.mag_legend:
+                    dummy_mag_curve_for_legend = pg.PlotDataItem(pen=pen) 
+                    self.mag_legend.addItem(dummy_mag_curve_for_legend, full_legend_name)
+                    legend_items_mag[legend_key] = dummy_mag_curve_for_legend
+                if legend_key not in legend_items_phase and self.phase_legend:
+                    dummy_phase_curve_for_legend = pg.PlotDataItem(pen=pen)
+                    self.phase_legend.addItem(dummy_phase_curve_for_legend, full_legend_name)
+                    legend_items_phase[legend_key] = dummy_phase_curve_for_legend
 
-            if self.unit_mode == "dbm":
-                if dac_scale_for_module is not None:
-                    dbm_val = UnitConverter.normalize_to_dbm(amp_val, dac_scale_for_module)
-                    legend_name_amp = f"Probe: {dbm_val:.2f} dBm"
-                else: # Fallback if DAC scale is missing
-                    legend_name_amp = f"Probe: {amp_val:.3e} (Norm)" 
-            elif self.unit_mode == "volts":
-                if dac_scale_for_module is not None:
-                    dbm_val = UnitConverter.normalize_to_dbm(amp_val, dac_scale_for_module)
-                    power_watts = 10**((dbm_val - 30)/10) # Convert dBm to Watts
-                    resistance = 50.0 # Standard impedance assumption
-                    voltage_rms = np.sqrt(power_watts * resistance)
-                    voltage_peak_uv = voltage_rms * np.sqrt(2) * 1e6 # Convert RMS to peak uV
-                    legend_name_amp = f"Probe: {voltage_peak_uv:.1f} uVpk"
-                else: # Fallback if DAC scale is missing
-                    legend_name_amp = f"Probe: {amp_val:.3e} (Norm)"
-            else: # Counts or other modes
-                legend_name_amp = f"Probe: {amp_val:.3e} Norm"
+            # --- Plot data for each detector at this (amplitude, direction) ---
+            for res_idx, iter_dict in self.results_by_detector.items():
+                # Find the entry matching this amplitude and direction
+                data = None
+                for entry in iter_dict.values():
+                    if entry.get('amplitude') == amp_val and entry.get('direction', 'upward') == direction:
+                        data = entry
+                        break
+                if data is None:
+                    continue
 
-            # Add direction to legend name
-            direction_suffix = " (Down)" if direction == "downward" else " (Up)"
-            full_legend_name = legend_name_amp + direction_suffix
-            
-            # Create a unique key for this amplitude+direction combination
-            legend_key = (amp_val, direction)
-            
-            # Add legend item once per amplitude+direction combination
-            if legend_key not in legend_items_mag and self.mag_legend:
-                # Create a dummy item for the legend (actual curves are added later)
-                dummy_mag_curve_for_legend = pg.PlotDataItem(pen=pen) 
-                self.mag_legend.addItem(dummy_mag_curve_for_legend, full_legend_name)
-                legend_items_mag[legend_key] = dummy_mag_curve_for_legend # Mark as added
-            if legend_key not in legend_items_phase and self.phase_legend:
-                dummy_phase_curve_for_legend = pg.PlotDataItem(pen=pen)
-                self.phase_legend.addItem(dummy_phase_curve_for_legend, full_legend_name)
-                legend_items_phase[legend_key] = dummy_phase_curve_for_legend
+                freqs_hz = data.get('frequencies', np.array([]))
+                iq_complex = data.get('iq_complex', np.array([]))
 
-            # --- Plot Data for Each Resonance (by index) at this Amplitude ---
-            for res_idx, data in amp_results.items():
-                freqs_hz = data.get('frequencies')
-                iq_complex = data.get('iq_complex')
-
-                if freqs_hz is None or iq_complex is None or len(freqs_hz) == 0:
-                    # Skip if essential data is missing or empty
+                if freqs_hz is None or iq_complex is None or len(freqs_hz) == 0 or len(iq_complex) == 0:
                     continue
                 
                 # Calculate magnitude and phase
@@ -918,37 +1056,36 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 # Use pre-calculated phase if available, otherwise calculate from IQ
                 phase_deg = data.get('phase_degrees', np.degrees(np.angle(iq_complex))) 
                 
-                if self.normalize_traces and len(phase_deg) > 0: # New phase normalization
+                if self.normalize_traces and len(phase_deg) > 0:
                     first_phase_val = phase_deg[0]
-                    if np.isfinite(first_phase_val): # Avoid issues with NaN/inf
+                    if np.isfinite(first_phase_val):
                         phase_deg = phase_deg - first_phase_val
                 
                 # Plot magnitude curve
                 mag_curve = self.combined_mag_plot.plot(pen=pen)
                 mag_curve.setData(freqs_hz, s21_mag_processed)
                 if amp_val not in self.curves_mag: self.curves_mag[amp_val] = {}
-                self.curves_mag[amp_val][res_idx] = mag_curve # Store reference by index
+                self.curves_mag[amp_val][res_idx] = mag_curve
 
                 # Plot phase curve
                 phase_curve = self.combined_phase_plot.plot(pen=pen)
                 phase_curve.setData(freqs_hz, phase_deg)
                 if amp_val not in self.curves_phase: self.curves_phase[amp_val] = {}
-                self.curves_phase[amp_val][res_idx] = phase_curve # Store reference by index
+                self.curves_phase[amp_val][res_idx] = phase_curve
 
                 # Add center frequency (CF) lines if enabled
                 if self.show_cf_lines_cb and self.show_cf_lines_cb.isChecked():
-                    # Get the actual bias frequency for CF line
                     bias_freq = data.get('bias_frequency', data.get('original_center_frequency'))
                     if bias_freq is not None:
                         cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2)
                         
                         mag_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
                         self.combined_mag_plot.addItem(mag_cf_line)
-                        self.cf_lines_mag.setdefault(amp_val, []).append(mag_cf_line) # Store reference
+                        self.cf_lines_mag.setdefault(amp_val, []).append(mag_cf_line)
 
                         phase_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
                         self.combined_phase_plot.addItem(phase_cf_line)
-                        self.cf_lines_phase.setdefault(amp_val, []).append(phase_cf_line) # Store reference
+                        self.cf_lines_phase.setdefault(amp_val, []).append(phase_cf_line)
         
         # Adjust plot ranges to fit all data
         self.combined_mag_plot.autoRange()
@@ -975,14 +1112,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.current_amp_label.setText("All Amplitudes Processed")
         
         # Emit data_ready signal for session auto-export
-        if self.results_by_iteration:
+        if self.results_by_detector:
             export_data = self._prepare_export_data()
             identifier = f"module{self.target_module}"
             self.data_ready.emit("multisweep", identifier, export_data)
         
-        # Auto-open detector digest for the first detector (lowest frequency)
-        if self.results_by_iteration:
-            self._open_detector_digest_for_index(1)
+        # Generate histogram plots once when all data is complete
+        if self.results_by_detector and not self.histograms_generated:
+            self._generate_histograms()
+            self.histograms_generated = True
+        
+        # Auto-populate detector digest for the first detector (lowest frequency)
+        # Don't switch focus — user should stay on the current tab (magnitude sweeps)
+        if self.results_by_detector:
+            self._open_detector_digest_for_index(1, switch_to_tab=False)
         
     def _check_all_complete(self):
         """
@@ -1042,7 +1185,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                                         QtCore.Qt.ConnectionType.QueuedConnection)
             return
             
-        if not self.results_by_iteration:
+        if not self.results_by_detector:
             QtWidgets.QMessageBox.warning(self, "No Data", "No data to export.")
             return
         
@@ -1090,20 +1233,18 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Prepare initial_parameters with section_amplitudes if available
         export_initial_params = self.initial_params.copy()
         
-        # Extract per-section amplitudes from first iteration if not already stored
-        if 'section_amplitudes' not in export_initial_params and self.results_by_iteration:
-            # Get first iteration
-            first_iter = self.results_by_iteration[min(self.results_by_iteration.keys())]
-            res_data = first_iter.get("data", {})
-            
-            # Extract amplitudes in detector index order
+        # Extract per-section amplitudes from detector data if not already stored
+        if 'section_amplitudes' not in export_initial_params and self.results_by_detector:
             section_amps = []
-            for det_idx in sorted(res_data.keys()):
+            for det_idx in sorted(self.results_by_detector.keys()):
                 if isinstance(det_idx, (int, np.integer)):
-                    amp = res_data[det_idx].get('sweep_amplitude')
-                    if amp is not None:
-                        section_amps.append(amp)
-            
+                    iter_dict = self.results_by_detector[det_idx]
+                    if iter_dict:
+                        first_entry = iter_dict[min(iter_dict.keys())]
+                        amp = first_entry.get('sweep_amplitude', first_entry.get('amplitude'))
+                        if amp is not None:
+                            section_amps.append(amp)
+
             if section_amps:
                 export_initial_params['section_amplitudes'] = section_amps
             
@@ -1112,7 +1253,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             'target_module': self.target_module,
             'initial_parameters': export_initial_params,
             'dac_scales_used': self.dac_scales,
-            'results_by_iteration': self.results_by_iteration,
+            'results_by_detector': self.results_by_detector,
             'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
             'nco_frequency_hz': self.nco_frequency_hz,  # NCO frequency used for biasing
             'noise_data': spectrum_data
@@ -1132,15 +1273,21 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
 
     def _get_fit_frequencies(self, freqs):
+        """Get fitted resonance frequencies from the first available amplitude data."""
         ref_freqs = []
-        for i in range(len(freqs)):
-            if self.results_by_iteration[0]['data'][i+1]['skewed_fit_success']:
-                ref_freqs.append(self.results_by_iteration[0]['data'][i+1]['fit_params']['fr'])
-            elif self.results_by_iteration[0]['data'][i+1]['nonlinear_fit_success']:
-                ref_freqs.append(self.results_by_iteration[0]['data'][i+1]['nonlinear_fit_params']['fr'])
+        for det_idx in range(1, len(freqs) + 1):
+            if det_idx not in self.results_by_detector:
+                continue
+            amp_dir_dict = self.results_by_detector[det_idx]
+            if not amp_dir_dict:
+                continue
+            first_entry = next(iter(amp_dir_dict.values()))
+            if first_entry.get('skewed_fit_success'):
+                ref_freqs.append(first_entry['fit_params']['fr'])
+            elif first_entry.get('nonlinear_fit_success'):
+                ref_freqs.append(first_entry['nonlinear_fit_params']['fr'])
             else:
-                ref_freqs.append(self.results_by_iteration[0]['data'][i+1]['bias_frequency'])
-                
+                ref_freqs.append(first_entry.get('bias_frequency', first_entry.get('original_center_frequency')))
         ref_freqs.sort()
         return ref_freqs
     
@@ -1212,15 +1359,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             if not new_params_from_dialog:
                 return # Dialog returned None, likely due to validation error
 
-            # Extract amplitudes from amp_arrays (new structure)
-            amp_arrays = new_params_from_dialog.get('amp_arrays', [])
-            if amp_arrays:
-                # Get first value from each array for tracking purposes
-                # (each array represents per-section amplitudes for one iteration)
-                new_amps_for_this_run = [arr[0] if arr else 0.0 for arr in amp_arrays]
+
+            # Use amp_arrays (new format) if present, falling back to amps (old format).
+            _new_amp_arrays = new_params_from_dialog.get('amp_arrays', [])
+            if _new_amp_arrays:
+                new_amps_for_this_run = [arr[0] for arr in _new_amp_arrays if arr]
             else:
-                new_amps_for_this_run = []
-            
+                new_amps_for_this_run = list(new_params_from_dialog.get('amps', []))
             # section_frequencies_from_dialog are the ones dialog was seeded with, as it doesn't change them.
             section_frequencies_from_dialog = list(new_params_from_dialog.get('resonance_frequencies', []))
 
@@ -1265,8 +1410,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.probe_amplitudes = list(self.current_run_amps) # For progress display
 
             # Reset window state for the new sweep
-            self.results_by_iteration.clear()
-            
+            self.results_by_detector.clear()
+            self.digest_panel = None  # Force recreation with fresh data on completion
+            self.histograms_generated = False  # Reset histogram flag for new run
             self._redraw_plots() # Clear plots
             if self.progress_bar: self.progress_bar.setValue(0)
             if self.progress_group: self.progress_group.setVisible(True)
@@ -1284,8 +1430,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             
             if self.current_amp_label:
                 if num_amplitudes > 0:
-                    first_amplitude = self.probe_amplitudes[0]
-                    self.current_amp_label.setText(f"Iteration 1/{self.total_iterations}: Amplitude {first_amplitude:.4f} ({direction_text})")
+                    self.current_amp_label.setText(f"Iteration 1/{self.total_iterations} ({direction_text})")
                 else:
                     self.current_amp_label.setText("No sweeps defined. (Waiting...)")
             
@@ -1325,61 +1470,24 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # Show lines. Create them if they don't exist.
             # Get unique amplitudes from iterations
             amplitude_values = set()
-            for iteration_data in self.results_by_iteration.values():
-                res_data = iteration_data.get("data", {})
-                for det_data in res_data.values():
-                    amp_val = det_data.get('sweep_amplitude')
-                    if amp_val is not None:
-                        amplitude_values.add(amp_val)
-                        break  # Only need one per iteration
+
+            for iter_dict in self.results_by_detector.values():
+                for entry in iter_dict.values():
+                    amp = entry.get('amplitude')
+                    if amp is not None:
+                        amplitude_values.add(amp)
             num_amps = len(amplitude_values)
             
             if num_amps == 0:
                 return
 
-            # Color definitions (consistent with _redraw_plots)
-            cmap_name = COLORMAP_CHOICES.get("AMPLITUDE_SWEEP", "inferno")
-            use_cmap = pg.colormap.get(cmap_name) if cmap_name else None
+            # Use the canonical color mapping function
+            amplitude_to_color = create_amplitude_color_map(amplitude_values, self.dark_mode)
             sorted_amplitudes = sorted(amplitude_values)
 
-            for amp_idx, amp_val in enumerate(sorted_amplitudes):
-                # Find the latest iteration for this amplitude
-                latest_iter_idx = None
-                latest_iter_data = None
-                for iter_idx, iter_data in self.results_by_iteration.items():
-                    # Check if any detector in this iteration has this amplitude
-                    res_data = iter_data.get("data", {})
-                    for det_data in res_data.values():
-                        iter_amp = det_data.get('sweep_amplitude')
-                        if iter_amp == amp_val:
-                            if latest_iter_idx is None or iter_idx > latest_iter_idx:
-                                latest_iter_idx = iter_idx
-                                latest_iter_data = iter_data
-                            break
-                
-                if latest_iter_data is None:
-                    continue
-                    
-                amp_results = latest_iter_data.get("data", {})
-                
-                # Determine color for this amplitude's lines
-                if num_amps <= AMPLITUDE_COLORMAP_THRESHOLD: # Use consistent threshold from utils.py
-                    color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
-                else: # Use a colormap for many amplitudes
-                    if use_cmap:
-                        normalized_idx = amp_idx / max(1, num_amps - 1) # Normalize index for colormap base [0,1]
-                        if self.dark_mode:
-                            # For dark mode, map to [0.3, 1.0]
-                            map_value = 0.3 + normalized_idx * 0.7
-                        else:
-                            # For light mode, map to [0.0, 0.75]
-                            map_value = normalized_idx * 0.75
-                        color = use_cmap.map(map_value)
-                    else: # Fallback if colormap is somehow None
-                        color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
-                
-                # Define pen for CF lines (consistent with _redraw_plots)
-                # Note: LINE_WIDTH should be available from 'from .utils import LINE_WIDTH'
+
+            for amp_val in sorted_amplitudes:
+                color = amplitude_to_color[amp_val]
                 cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2)
 
                 # Ensure lists for this amplitude exist in cf_lines_mag/phase
@@ -1391,7 +1499,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 existing_mag_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_mag[amp_val]}
                 existing_phase_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_phase[amp_val]}
 
-                for res_idx, data in amp_results.items(): # Iterate through resonances by index
+                for res_idx, iter_dict in self.results_by_detector.items():
+                    # Get detector data for this amplitude (any direction)
+                    data = None
+                    for entry in iter_dict.values():
+                        if entry.get('amplitude') == amp_val:
+                            data = entry
+                            break
+                    if data is None:
+                        continue
                     # Get the actual bias frequency for CF line
                     bias_freq = data.get('bias_frequency', data.get('original_center_frequency'))
                     if bias_freq is None:
@@ -1430,6 +1546,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
 
     def _take_noise_samps(self):
+        """Collect a short noise sample from the CRS for diagnostic purposes.
+
+        Takes 100 samples from all channels on the target module using
+        ``crs.get_samples`` and stores them in ``self.noise_data``.
+
+        Returns:
+            The collected samples, or None if the CRS is unavailable.
+        """
         total = 100
         # self.take_samp_btn.setEnabled(False)
 
@@ -1483,6 +1607,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             asyncio.run(crs.set_decimation(decimation, module = self.target_module, short = True))
 
     def _get_spectrum(self, params, use_loaded_noise = False):
+        """Acquire or load a noise spectrum and open the NoiseSpectrumPanel.
+
+        When *use_loaded_noise* is ``True`` the method expects pre-collected
+        data inside *params* (keys ``noise_parameters`` and ``data``) and
+        simply opens the panel.  Otherwise it drives the CRS to collect slow
+        and (optionally) PFB spectrum data, stores the results in
+        ``self.spectrum_noise_data``, emits the ``data_ready`` signal for
+        session auto-export, and opens the panel.
+
+        Args:
+            params: Dictionary of acquisition parameters (from NoiseSpectrumDialog)
+                    or loaded noise data when *use_loaded_noise* is True.
+            use_loaded_noise: If True, skip acquisition and use data already in *params*.
+        """
         if use_loaded_noise:
             print(f"[Bias] Plotting noise data taken at decimation {params['noise_parameters']['decimation']}")
             self.spectrum_noise_data['noise_parameters'] = params['noise_parameters']
@@ -1734,13 +1872,39 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         dock.show()
         dock.raise_()
 
+    def eventFilter(self, obj, event):
+        """Catch double-clicks on grid subplot widgets to navigate the digest panel."""
+        if event.type() == QtCore.QEvent.Type.MouseButtonDblClick:
+            detector_id = getattr(obj, '_detector_id', None)
+            if detector_id is not None:
+                self._navigate_digest_to_detector(detector_id)
+                return True
+        return super().eventFilter(obj, event)
+    
+    def _navigate_digest_to_detector(self, detector_id: int):
+        """Navigate the embedded digest panel to the given detector, or create it."""
+        # If the digest panel already exists in the tab, just navigate it
+        if self.digest_panel is not None:
+            if hasattr(self.digest_panel, '_switch_to_detector') and hasattr(self.digest_panel, 'all_detectors_data'):
+                if detector_id in self.digest_panel.all_detectors_data:
+                    try:
+                        self.digest_panel.current_detector_index_in_list = self.digest_panel.detector_indices.index(detector_id)
+                    except ValueError:
+                        pass
+                    self.digest_panel._switch_to_detector(detector_id)
+                    # Switch to the Detector Digest tab
+                    self.plot_tabs.setCurrentWidget(self.digest_tab)
+                    return
+        # No existing digest panel — create one in the tab
+        self._open_detector_digest_for_index(detector_id)
+    
     @QtCore.pyqtSlot(object)
     def _handle_multisweep_plot_double_click(self, ev):
         """
         Handles a double-click event on the multisweep magnitude plot.
         Identifies the clicked resonance and opens detector digest for it.
         """
-        if not self.results_by_iteration:
+        if not self.results_by_detector:
             return
 
         # Get click coordinates in view space from the event's scenePos
@@ -1756,12 +1920,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Find the resonance whose center/bias frequency is closest to the click
         resonance_centers = {}  # {res_idx: center_freq}
         
-        for iteration_data in self.results_by_iteration.values():
-            res_data = iteration_data.get("data", {})
-            for res_idx, data in res_data.items():
-                center_freq = data.get('bias_frequency', data.get('original_center_frequency'))
+        for res_idx, amp_dir_dict in self.results_by_detector.items():
+            # Use first available entry to get center frequency
+            for det_data in amp_dir_dict.values():
+                center_freq = det_data.get('bias_frequency', det_data.get('original_center_frequency'))
                 if center_freq is not None:
                     resonance_centers[res_idx] = center_freq
+                    break
         
         # Find the resonance with center frequency closest to the click
         min_distance = np.inf
@@ -1778,18 +1943,37 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             ev.accept()
             self._open_detector_digest_for_index(clicked_res_idx)
 
-    def _open_detector_digest_for_index(self, detector_idx: int):
+    def _open_detector_digest_for_index(self, detector_idx: int, switch_to_tab: bool = True):
         """
-        Open a detector digest panel for a specific detector index.
+        Open or update the detector digest panel for a specific detector index.
         
-        This method extracts and reuses the panel creation logic from the double-click handler,
-        making it callable programmatically (e.g., for auto-opening on completion).
+        The digest panel is embedded as a sub-tab (Tab 4) within this MultisweepPanel,
+        following the same lazy-initialization pattern as the Histograms tab.
+        If the panel already exists, it navigates to the requested detector.
+        If not, it creates the panel and adds it to the digest tab.
         
         Args:
             detector_idx: Detector index (1-based) to open digest for
+            switch_to_tab: If True (default), switch focus to the Detector Digest tab.
+                          If False, populate the tab without switching focus (used by auto-populate on completion).
         """
-        if not self.results_by_iteration:
+        if not self.results_by_detector:
             return
+        
+        # If digest panel already exists, just navigate to the requested detector
+        if self.digest_panel is not None:
+            if hasattr(self.digest_panel, '_switch_to_detector') and hasattr(self.digest_panel, 'all_detectors_data'):
+                if detector_idx in self.digest_panel.all_detectors_data:
+                    try:
+                        self.digest_panel.current_detector_index_in_list = self.digest_panel.detector_indices.index(detector_idx)
+                    except ValueError:
+                        pass
+                    self.digest_panel._switch_to_detector(detector_idx)
+                    # Switch to the Detector Digest tab
+                    self.plot_tabs.setCurrentWidget(self.digest_tab)
+                    return
+        
+        # --- First time: create the digest panel and embed it in the tab ---
         
         # Get debug data from Periscope parent
         periscope = self.parent()
@@ -1816,47 +2000,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Gather data for this specific detector across all amplitudes and directions
         section_data_for_digest = {}
         
-        # Group iterations by amplitude and direction
-        # Extract amplitude from first detector's data in each iteration
-        amplitude_direction_to_iteration = {}
-        for iter_idx, iter_data in self.results_by_iteration.items():
-            direction = iter_data["direction"]
-            res_data = iter_data.get("data", {})
-            
-            # Get amplitude from first available detector
-            amp_val = None
-            for det_data in res_data.values():
-                amp_val = det_data.get('sweep_amplitude')
-                if amp_val is not None:
-                    break
-            
-            if amp_val is None:
-                continue
-                
-            key = (amp_val, direction)
-            
-            if key not in amplitude_direction_to_iteration or iter_idx > amplitude_direction_to_iteration[key]:
-                amplitude_direction_to_iteration[key] = iter_idx
-        
-            # Process data for the target detector
-        for (amp_val, direction), iter_idx in amplitude_direction_to_iteration.items():
-            iter_data = self.results_by_iteration[iter_idx]
-            res_data = iter_data.get("data", {})
-            
-            if not res_data or detector_idx not in res_data:
-                continue
-            
-            resonance_sweep_data = res_data[detector_idx]
-            actual_cf_for_this_amp = resonance_sweep_data.get('bias_frequency', 
-                                                              resonance_sweep_data.get('original_center_frequency'))
-            
-            combo_key = f"{amp_val}:{direction}"
-            section_data_for_digest[combo_key] = {
-                'data': resonance_sweep_data,
-                'actual_cf_hz': actual_cf_for_this_amp,
-                'direction': direction,
-                'amplitude': amp_val
-            }
+
+        if detector_idx in self.results_by_detector:
+            for det_entry in self.results_by_detector[detector_idx].values():
+                amp_val = det_entry.get('amplitude')
+                direction = det_entry.get('direction', 'upward')
+                actual_cf_for_this_amp = det_entry.get('bias_frequency',
+                                                       det_entry.get('original_center_frequency'))
+                combo_key = f"{amp_val}:{direction}"
+                section_data_for_digest[combo_key] = {
+                    'data': det_entry,
+                    'actual_cf_hz': actual_cf_for_this_amp,
+                    'direction': direction,
+                    'amplitude': amp_val
+                }
         
         if not section_data_for_digest:
             print(f"Warning: No data for detector {detector_idx}")
@@ -1864,63 +2021,30 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Gather data for ALL detectors to enable navigation
         all_detectors_data = {}
-        all_detector_indices = set()
-        for iter_data in self.results_by_iteration.values():
-            res_data = iter_data.get("data", {})
-            all_detector_indices.update(res_data.keys())
         
-        for det_idx in sorted(all_detector_indices):
+
+        for det_idx in sorted(self.results_by_detector.keys()):
             if det_idx <= len(self.conceptual_section_frequencies) and det_idx > 0:
                 conceptual_freq_hz = self.conceptual_section_frequencies[det_idx - 1]
             else:
                 conceptual_freq_hz = None
-                for iter_data in self.results_by_iteration.values():
-                    res_data = iter_data.get("data", {})
-                    if det_idx in res_data:
-                        det_data = res_data[det_idx]
-                        conceptual_freq_hz = det_data.get('bias_frequency', det_data.get('original_center_frequency'))
-                        if conceptual_freq_hz:
-                            break
+                # Try to get frequency from first available entry
+                first_entry = next(iter(self.results_by_detector[det_idx].values()), {})
+                conceptual_freq_hz = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
             
             if conceptual_freq_hz is None:
                 continue
             
             detector_resonance_data = {}
-            amplitude_direction_to_iteration_det = {}
-            for iter_idx, iter_data in self.results_by_iteration.items():
-                direction = iter_data["direction"]
-                res_data_temp = iter_data.get("data", {})
-                
-                # Get amplitude from first available detector
-                amp_val = None
-                for det_data_temp in res_data_temp.values():
-                    amp_val = det_data_temp.get('sweep_amplitude')
-                    if amp_val is not None:
-                        break
-                
-                if amp_val is None:
-                    continue
-                    
-                key = (amp_val, direction)
-                
-                if key not in amplitude_direction_to_iteration_det or iter_idx > amplitude_direction_to_iteration_det[key]:
-                    amplitude_direction_to_iteration_det[key] = iter_idx
-            
-            for (amp_val, direction), iter_idx in amplitude_direction_to_iteration_det.items():
-                iter_data = self.results_by_iteration[iter_idx]
-                res_data = iter_data.get("data", {})
-                
-                if not res_data or det_idx not in res_data:
-                    continue
-                
-                resonance_sweep_data = res_data[det_idx]
-                actual_cf_for_this_amp = resonance_sweep_data.get('bias_frequency', 
-                                                                  resonance_sweep_data.get('original_center_frequency'))
-                
+
+            for det_entry in self.results_by_detector[det_idx].values():
+                amp_val = det_entry.get('amplitude')
+                direction = det_entry.get('direction', 'upward')
+                actual_cf = det_entry.get('bias_frequency', det_entry.get('original_center_frequency'))
                 combo_key = f"{amp_val}:{direction}"
                 detector_resonance_data[combo_key] = {
-                    'data': resonance_sweep_data,
-                    'actual_cf_hz': actual_cf_for_this_amp,
+                    'data': det_entry,
+                    'actual_cf_hz': actual_cf,
                     'direction': direction,
                     'amplitude': amp_val
                 }
@@ -1931,13 +2055,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     'conceptual_freq_hz': conceptual_freq_hz
                 }
         
-        # Find Periscope parent to create docked panel
-        periscope = self._get_periscope_parent()
-        if not periscope:
-            print("ERROR: Could not find Periscope parent for detector digest panel")
-            return
-        
-        # Create panel
+        # Create the DetectorDigestPanel
         panel = DetectorDigestPanel(
             parent=self,
             resonance_data_for_digest=section_data_for_digest,
@@ -1959,23 +2077,26 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Store direct reference to this MultisweepPanel for noise sampling
         panel.multisweep_panel_ref = self
         
-        # Increment counter and use for tab name
-        self.digest_window_count += 1
-        loaded_suffix = " (Loaded)" if self.is_loaded_data else ""
-        dock_title = f"Detector Digest #{self.digest_window_count}{loaded_suffix}"
-        dock_id = f"digest_{self.digest_window_count}_{int(time.time())}"
-        dock = periscope.dock_manager.create_dock(panel, dock_title, dock_id)
+        # Embed the panel into the digest tab (replacing placeholder)
+        layout = self.digest_tab.layout()
+        if layout:
+            # Remove placeholder
+            while layout.count():
+                item = layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            # Add the actual digest panel
+            layout.addWidget(panel)
         
-        # Track panel reference to prevent garbage collection
-        self.detector_digest_windows.append(panel)
+        # Store the panel reference
+        self.digest_panel = panel
+        # Also keep backward-compatible list reference
+        self.detector_digest_windows = [panel]
         
-        # Tabify with this multisweep panel's dock
-        my_dock = periscope.dock_manager.find_dock_for_widget(self)
-        if my_dock:
-            periscope.tabifyDockWidget(my_dock, dock)
-        
-        # Show the dock (but don't bring to front)
-        dock.show()
+
+        # Switch to the Detector Digest tab (unless suppressed, e.g. auto-populate on completion)
+        if switch_to_tab:
+            self.plot_tabs.setCurrentWidget(self.digest_tab)
 
     def _get_closest_remembered_cf(self, conceptual_idx: int, target_amp: float) -> float | None:
         """
@@ -2009,7 +2130,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         return best_cf_found
     
     def _get_periscope_parent(self):
-        """Find and return the Periscope parent window."""
+        """Find and return the Periscope parent window.
+
+        Walks up the widget hierarchy looking for the main Periscope instance,
+        identified by the ``dock_manager`` attribute.  This intentionally
+        overrides :meth:`ScreenshotMixin._get_periscope_parent` (which
+        searches for ``crs``) because panel operations need the dock manager,
+        and the Periscope instance always carries both attributes.
+        """
         parent = self.parent()
         while parent:
             if hasattr(parent, 'dock_manager'):
@@ -2037,7 +2165,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                         ax.setTextPen(pen_color)
             if self.mag_legend:
                 try:
-                    self.mag_legend.setLabelTextColor(pen_color)
+                    legend_color = '#CCCCCC' if dark_mode else '#333333'
+                    self.mag_legend.setLabelTextColor(legend_color)
                 except Exception as e:
                     print(f"Error updating magnitude legend text color: {e}")
 
@@ -2055,7 +2184,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                         ax.setTextPen(pen_color)
             if self.phase_legend:
                 try:
-                    self.phase_legend.setLabelTextColor(pen_color)
+                    legend_color = '#CCCCCC' if dark_mode else '#333333'
+                    self.phase_legend.setLabelTextColor(legend_color)
                 except Exception as e:
                     print(f"Error updating phase legend text color: {e}")
         
@@ -2082,7 +2212,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         Programs detectors at optimal operating points and stores calibration data.
         """
         # Check prerequisites
-        if not self.results_by_iteration:
+        if not self.results_by_detector:
             QtWidgets.QMessageBox.warning(self, "No Data", 
                                         "No multisweep data available. Please run a multisweep first.")
             return
@@ -2109,9 +2239,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Get parameters from dialog
         bias_params = dialog.get_parameters()
         
-        # Prepare data in GUI format expected by bias_kids
+        # Pass detector-indexed format directly to bias_kids
         gui_format_results = {
-            'results_by_iteration': list(self.results_by_iteration.values())
+            'results_by_detector': self.results_by_detector
         }
         
         # Import BiasKidsTask and BiasKidsSignals from tasks module

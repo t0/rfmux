@@ -16,9 +16,7 @@ import argparse
 import signal
 import socket
 import sys
-import tempfile
 from collections import defaultdict
-from contextlib import closing
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -32,6 +30,7 @@ from rfmux.streamer import (
     STREAMER_PORT,
     PFB_STREAMER_PORT,
     PFBPACKET_NSAMP_MAX,
+    SS_PER_SECOND,
 )
 
 
@@ -231,7 +230,7 @@ def setup_dirfile_for_module(
             gd.LINCOM_ENTRY,
             timebase_field,
             0,
-            ((ts_sbs_field, ts_ss_field), (1.0, 1 / 125e6), (0, 0)),
+            ((ts_sbs_field, ts_ss_field), (1.0, 1 / SS_PER_SECOND), (0, 0)),
         )
     )
 
@@ -396,12 +395,18 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
             for serial, bstats in board_stats.items():
                 for module, mstats in bstats.module_stats.items():
                     print(
-                        f"Serial {serial} module {module}: "
+                        f"Serial {serial} module {module+1}: "
                         f"{mstats.packets_seen} packets seen "
                         f"({mstats.packets_dropped} dropped)",
                         file=sys.stderr,
                     )
         sys.exit(0)
+
+    if args.dirfile:
+        import pygetdata as gd
+        main_dirfile = gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
+    else:
+        main_dirfile = None
 
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -411,21 +416,12 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
     index = np.arange(2 * num_channels, dtype=np.uint16)
 
     # Setup packet receiver with large buffer to reduce drops
-    with (
-        closing(
-            get_multicast_socket(
-                crs_hostname=args.hostname,
-                port=STREAMER_PORT,
-                interface=interface_ip,
-                buffer_size=67108864,
-            )
-        ) as sock,
-        closing(
-            gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
-            if args.dirfile
-            else tempfile.TemporaryFile()
-        ) as main_dirfile,
-    ):
+    with get_multicast_socket(
+        crs_hostname=args.hostname,
+        port=STREAMER_PORT,
+        interface=interface_ip,
+        buffer_size=67108864,
+    ) as sock:
         receiver = ReadoutPacketReceiver(sock, reorder_window=args.reorder_window)
 
         while True:
@@ -462,12 +458,19 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                         if pkt.seq != expected_seq:
                             gap = (pkt.seq - expected_seq) & 0xFFFFFFFF
                             print(
-                                f"Dropped packet: module {module}, "
+                                f"Dropped packet: module {module+1}, "
                                 f"seq {mstats.last_seq:08x} -> {pkt.seq:08x} "
                                 f"({gap} lost)"
                             )
                             mstats.packets_dropped += gap
                     mstats.last_seq = pkt.seq
+
+                    # Clip channel ranges to actual packet size
+                    clipped_channels = [
+                        range(r.start, min(r.stop, len(pkt)))
+                        for r in channels
+                        if r.start < len(pkt)
+                    ]
 
                     # Text dump
                     if args.text:
@@ -494,14 +497,11 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                         )
 
                         # Sample channels
-                        num_pkt_channels = pkt.get_num_channels()
-                        for r in channels:
+                        for r in clipped_channels:
                             for ch in r:
-                                if ch >= num_pkt_channels:
-                                    break
-                                sample = pkt.get_channel(ch)
+                                sample = pkt[ch]
                                 print(
-                                    f"  CH({module}.{ch+1}) "
+                                    f"  CH({module+1}.{ch+1}) "
                                     f"i={sample.real:.3f} q={sample.imag:.3f} abs={abs(sample):.3f}"
                                 )
 
@@ -536,38 +536,28 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                             first_frame=frame,
                         )
 
-                        # Write channel data - extract selected channels and interleave I/Q
-                        samples = pkt.samples
-                        num_pkt_channels = pkt.get_num_channels()
+                        # Write channel data from raw int32 I/Q pairs.
+                        # Each pkt.raw_samples[slice] is a zero-copy view.
+                        sample_offset = 0
+                        for r in clipped_channels:
+                            df.putdata(fields["raw"],
+                                       pkt.raw_samples[2*r.start:2*r.stop],
+                                       first_frame=frame,
+                                       first_sample=2*sample_offset)
+                            sample_offset += len(r)
 
-                        # Gather selected channel data
-                        selected = []
-                        for r in channels:
-                            for ch in r:
-                                if ch < num_pkt_channels:
-                                    selected.append(samples[ch])
+                        # Extend mplex_idx to match the longest module
+                        # Write index if this module is ahead of the shared index
+                        if frame >= bstats.packets_indexed:
+                            df.putdata(
+                                "mplex_idx",
+                                index,
+                                first_frame=bstats.packets_indexed,
+                            )
+                            bstats.packets_indexed = frame + 1
 
-                        # Convert to interleaved I/Q format (scaled by 256)
-                        if selected:
-                            complex_array = np.array(selected, dtype=np.complex64)
-                            raw_data = np.empty(2 * len(selected), dtype=np.int32)
-                            raw_data[0::2] = (complex_array.real * 256).astype(np.int32)
-                            raw_data[1::2] = (complex_array.imag * 256).astype(np.int32)
-
-                            df.putdata(fields["raw"], raw_data, first_frame=frame)
-
-                            # Extend mplex_idx to match the longest module
-                            # Write index if this module is ahead of the shared index
-                            if frame >= bstats.packets_indexed:
-                                df.putdata(
-                                    "mplex_idx",
-                                    index,
-                                    first_frame=bstats.packets_indexed,
-                                )
-                                bstats.packets_indexed = frame + 1
-
-                            # Increment per-module frame counter
-                            mstats.dirfile_frame += 1
+                        # Increment per-module frame counter
+                        mstats.dirfile_frame += 1
 
 
 def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
@@ -579,7 +569,7 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
             for serial, bstats in board_stats.items():
                 for module, mstats in bstats.module_stats.items():
                     print(
-                        f"Serial {serial} module {module}: "
+                        f"Serial {serial} module {module+1}: "
                         f"{mstats.packets_seen} packets seen "
                         f"({mstats.packets_dropped} dropped)",
                         file=sys.stderr,
@@ -596,6 +586,12 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
         )
         sys.exit(0)
 
+    if args.dirfile:
+        import pygetdata as gd
+        main_dirfile = gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
+    else:
+        main_dirfile = None
+
     signal.signal(signal.SIGINT, signal_handler)
 
     # Main receive loop
@@ -603,21 +599,12 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
     receiver = None
 
     # Setup packet receiver with large buffer to reduce drops
-    with (
-        closing(
-            get_multicast_socket(
-                crs_hostname=args.hostname,
-                port=PFB_STREAMER_PORT,
-                interface=interface_ip,
-                buffer_size=67108864,
-            )
-        ) as sock,
-        closing(
-            gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
-            if args.dirfile
-            else tempfile.TemporaryFile()
-        ) as main_dirfile,
-    ):
+    with get_multicast_socket(
+        crs_hostname=args.hostname,
+        port=PFB_STREAMER_PORT,
+        interface=interface_ip,
+        buffer_size=67108864,
+    ) as sock:
         receiver = PFBPacketReceiver(sock, reorder_window=args.reorder_window)
 
         while True:
@@ -654,7 +641,7 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                         if pkt.seq != expected_seq:
                             gap = (pkt.seq - expected_seq) & 0xFFFFFFFF
                             print(
-                                f"Dropped packet: module {module}, "
+                                f"Dropped packet: module {module+1}, "
                                 f"seq {mstats.last_seq:08x} -> {pkt.seq:08x} "
                                 f"({gap} lost)"
                             )
@@ -689,20 +676,19 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                         slot_channels = [pkt.slot1, pkt.slot2, pkt.slot3, pkt.slot4][:num_slots]
 
                         # Sample a few interleaved values
-                        samples = pkt.samples
-                        max_display = min(8, pkt.num_samples)
+                        max_display = min(8, len(pkt))
                         for i in range(max_display):
                             # Samples are interleaved across slots
                             slot_idx = i % num_slots
                             ch = slot_channels[slot_idx]
-                            sample = samples[i]
+                            sample = pkt[i]
                             print(
                                 f"  Sample[{i}] slot{slot_idx+1}->ch{ch+1}: "
                                 f"i={sample.real:.3f} q={sample.imag:.3f} abs={abs(sample):.3f}"
                             )
 
-                        if pkt.num_samples > max_display:
-                            print(f"  ... ({pkt.num_samples - max_display} more samples)")
+                        if len(pkt) > max_display:
+                            print(f"  ... ({len(pkt) - max_display} more samples)")
 
                     # Dirfile output
                     if args.dirfile:
@@ -753,19 +739,14 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                         # For PFB4: [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, ...]
                         # Where: 0=slot1_I, 1=slot1_Q, 2=slot2_I, 3=slot2_Q, ...
                         # This repeats with period = 2 * num_slots
-                        num_samples = len(pkt.samples)
+                        n_samples = len(pkt)
                         period = 2 * num_slots
-                        slot_idx = np.tile(np.arange(period, dtype=np.uint16), (num_samples * 2 + period - 1) // period)[:2 * num_samples]
+                        slot_idx = np.tile(np.arange(period, dtype=np.uint16), (n_samples * 2 + period - 1) // period)[:2 * n_samples]
 
                         df.putdata(fields["slot_idx"], slot_idx, first_frame=frame)
 
-                        # Write samples (interleaved I/Q format, scaled by 256)
-                        samples = pkt.samples
-                        raw_data = np.empty(2 * len(samples), dtype=np.int32)
-                        raw_data[0::2] = (np.real(samples) * 256).astype(np.int32)
-                        raw_data[1::2] = (np.imag(samples) * 256).astype(np.int32)
-
-                        df.putdata(fields["raw"], raw_data, first_frame=frame)
+                        # Write raw int32 I/Q pairs directly (no scaling needed)
+                        df.putdata(fields["raw"], pkt.raw_samples[:2 * n_samples], first_frame=frame)
 
                         # Increment per-module frame counter
                         mstats.dirfile_frame += 1
@@ -900,7 +881,7 @@ def setup_pfb_dirfile_for_module(
             gd.LINCOM_ENTRY,
             timebase_field,
             0,
-            ((ts_sbs_field, ts_ss_field), (1.0, 1 / 125e6), (0, 0)),
+            ((ts_sbs_field, ts_ss_field), (1.0, 1 / SS_PER_SECOND), (0, 0)),
         )
     )
 

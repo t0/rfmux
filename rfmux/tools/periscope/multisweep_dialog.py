@@ -51,7 +51,7 @@ def load_multisweep_payload(parent: QtWidgets.QWidget, file_path: str | None = N
     if (
         isinstance(payload, dict)
         and isinstance(payload.get("initial_parameters"), dict)
-        and isinstance(payload.get("results_by_iteration"), dict)
+        and (isinstance(payload.get("results_by_detector"), dict) or isinstance(payload.get("results_by_iteration"), dict))
     ):
         return payload
 
@@ -84,6 +84,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             current_module: The module ID on which the multisweep will be performed.
             initial_params: Dictionary of initial parameters to populate fields.
         """
+
         # Load saved defaults if no initial params provided
         merged_params = {}
         if initial_params is None or not initial_params:
@@ -95,6 +96,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             merged_params.update(initial_params)
         
         super().__init__(parent, params=merged_params, dac_scales=dac_scales)
+
         self.section_center_frequencies = section_center_frequencies or []
         self.current_module = current_module # Store the current module for DAC scale and params
         self.load_multisweep = load_multisweep
@@ -506,6 +508,13 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         # Also handle numpad Enter
         self.numpad_enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Enter), self)
         self.numpad_enter_shortcut.activated.connect(self.accept)
+
+        # Initial update of dBm field if DAC scales are already known
+        # TODO reinstate when this functionality added back in 
+        # if self.dac_scales: # Check if dac_scales were passed or fetched synchronously before UI setup
+        #     self._update_dac_scale_info() # Ensure info label is also up-to-date
+        #     self._update_dbm_from_normalized()
+
         
         self.setMinimumWidth(500) # Ensure dialog is wide enough
         
@@ -685,14 +694,14 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                     amp_text = ", ".join(f"{float(amp):g}" for amp in amps)
                 except (TypeError, ValueError):
                     amp_text = ", ".join(str(amp) for amp in amps)
-                self.amp_edit.setText(amp_text)
+                self.global_amp_edit.setText(amp_text)
             
             # Load per-section amplitudes if they exist
             section_amps = params.get("section_amplitudes")
             if section_amps:
                 try:
                     section_amp_text = ", ".join(f"{float(amp):g}" for amp in section_amps)
-                    self.section_amps_edit.setText(section_amp_text)
+                    self.amp_array_edit.setText(section_amp_text)
                 except (TypeError, ValueError):
                     # If section_amplitudes exist but can't be parsed, try to extract from first iteration
                     pass
@@ -708,7 +717,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                                 section_amps_from_results.append(amp_val)
                     if section_amps_from_results:
                         section_amp_text = ", ".join(f"{float(amp):g}" for amp in section_amps_from_results)
-                        self.section_amps_edit.setText(section_amp_text)
+                        self.amp_array_edit.setText(section_amp_text)
                 except Exception as e:
                     print(f"Warning: Could not extract per-section amplitudes from results: {e}")
         except KeyError as e:
@@ -732,22 +741,33 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         else:
             ref_freqs = []
     
-            if params['apply_skewed_fit']:
-                for i in range(len(freqs)):
-                    ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['fit_params']['fr'])
-                ref_freqs.sort()
-                return ref_freqs
-    
-            if params['apply_nonlinear_fit']:
-                for i in range(len(freqs)):
-                    ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['nonlinear_fit_params']['fr'])
-                ref_freqs.sort()
-                return ref_freqs
-    
-            for i in range(len(freqs)):
-                ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['bias_frequency'])
+            # Extract fit frequencies from either new or old format
+            if 'results_by_detector' in payload:
+                # New detector-based format
+                for det_idx in sorted(payload['results_by_detector'].keys()):
+                    amp_dir_dict = payload['results_by_detector'][det_idx]
+                    if not amp_dir_dict:
+                        continue
+                    entry = next(iter(amp_dir_dict.values()))
+                    if params['apply_skewed_fit'] and entry.get('skewed_fit_success') and entry.get('fit_params'):
+                        ref_freqs.append(entry['fit_params']['fr'])
+                    elif params['apply_nonlinear_fit'] and entry.get('nonlinear_fit_success') and entry.get('nonlinear_fit_params'):
+                        ref_freqs.append(entry['nonlinear_fit_params']['fr'])
+                    else:
+                        ref_freqs.append(entry.get('bias_frequency', entry.get('original_center_frequency')))
+            elif 'results_by_iteration' in payload:
+                # Old iteration-based format (backward compatibility)
+                if params['apply_skewed_fit']:
+                    for i in range(len(freqs)):
+                        ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['fit_params']['fr'])
+                elif params['apply_nonlinear_fit']:
+                    for i in range(len(freqs)):
+                        ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['nonlinear_fit_params']['fr'])
+                else:
+                    for i in range(len(freqs)):
+                        ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['bias_frequency'])
+
             ref_freqs.sort()
-                
             return ref_freqs
         
     
@@ -787,6 +807,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 for f in freqs:
                     params_dict['resonance_frequencies'].append(np.float64(f) * 1e6)
             else:
+
                 params_dict['resonance_frequencies'] = self.section_center_frequencies
             
             num_sections = len(params_dict['resonance_frequencies'])
@@ -814,8 +835,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 base_amp = float(global_amp_text)
                 if base_amp <= 0:
                     QtWidgets.QMessageBox.warning(
-                        self, 
-                        "Validation Error", 
+                        self,
+                        "Validation Error",
                         "Global amplitude must be positive."
                     )
                     return None
@@ -994,7 +1015,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             
             return params_dict
             
-        except ValueError as e:
+        except ValueError as e: # Handles errors from float() or int() conversion
+
             QtWidgets.QMessageBox.critical(self, "Input Error", f"Invalid numerical input: {str(e)}")
             return None
         except Exception as e:

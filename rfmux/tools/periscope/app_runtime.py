@@ -563,7 +563,11 @@ class PeriscopeRuntime:
 
             self.pkt_cnt += 1
             if hasattr(pkt, 'fir_stage'):
-                self.actual_dec_stage = pkt.fir_stage
+                # The fir_stage field is a 4-bit packed value:
+                #   Bit 3 (MSB): short/long packet flag (1=short/128ch, 0=long/1024ch)
+                #   Bits 2-0:    decimation stage (0-6)
+                self.actual_dec_stage = pkt.fir_stage & 0x7
+                self.is_short_packet = bool(pkt.fir_stage & 0x8)
             t_rel = self._calculate_relative_timestamp(pkt)
             self._update_buffers(pkt, t_rel)
 
@@ -603,10 +607,12 @@ class PeriscopeRuntime:
             t_rel (float | None): The relative timestamp for this packet.
         """
         # Convert 24-bit datapath to 16-bit ADC scale
-        samples = pkt.samples / 256
+        # np.array(pkt) applies the first /256 (packetizer gain);
+        # the second /256 brings 24-bit values down to 16-bit ADC scale.
+        samples = np.array(pkt) / 256
 
         for ch_val in self.all_chs: # Renamed ch
-            if len(samples) <= ch_val-1:
+            if len(pkt) <= ch_val-1:
                 continue # don't plot channels that aren't streamed
 
             sample = samples[ch_val-1]
@@ -789,7 +795,7 @@ class PeriscopeRuntime:
 
             #### Update labels ####
             self.fps_label.setText(f"FPS: {fps:.1f}")
-            self.pps_label.setText(f"Packets/s: {pps:.1f}")
+            self.pps_label.setText(f"| Packets/s: {pps:.1f}")
             
             # Calculate and display simulation speed for mock mode
             if self.is_mock_mode and hasattr(self, 'sim_speed_label'):
@@ -797,9 +803,9 @@ class PeriscopeRuntime:
                 if sim_speed is not None:
                     # Format the display
                     if sim_speed < 0.01:
-                        speed_text = f"Sim Speed: {sim_speed:.3f}x real-time"
+                        speed_text = f"| Sim Speed: {sim_speed:.3f}x real-time"
                     else:
-                        speed_text = f"Sim Speed: {sim_speed:.2f}x real-time"
+                        speed_text = f"| Sim Speed: {sim_speed:.2f}x real-time"
                     self.sim_speed_label.setText(speed_text)
                     
                     # Color code based on speed
@@ -810,16 +816,17 @@ class PeriscopeRuntime:
 
             # Color packet loss red if > 1%
             if percent > 1:
-                color = "red"
-                self.packet_loss_label.setStyleSheet(f"color: {color};")
+                self.packet_loss_label.setStyleSheet("color: red;")
                 self.info_text.setText("PACKET LOSS HIGH - CONSULT HELP FOR NETWORKING SUGGESTIONS")
+                self.info_text.setStyleSheet("color: red;")
             else: 
                 self.packet_loss_label.setStyleSheet(f"color: {self.default_packet_loss_color};")
                 self.info_text.clear()
+                self.info_text.setStyleSheet("")
                 
-            self.packet_loss_label.setText(f"Packet Loss: {percent:.1f}%")
+            self.packet_loss_label.setText(f"| Packet Loss: {percent:.1f}%")
 
-            self.dropped_label.setText(f"Dropped: {dropped}")
+            self.dropped_label.setText(f"| Dropped: {dropped}")
             
             #### Showing on status bar ####
             # self.statusBar().showMessage(f"FPS {fps:.1f} | Packets/s {pps:.1f} | Packet Loss : {percent_x}% | Dropped : {dropped}") 
@@ -835,21 +842,37 @@ class PeriscopeRuntime:
         Update the decimation stage from the actual packet data.
         Falls back to inferring from data rate if packet doesn't have fir_stage.
         This is used for accurate PSD frequency axis scaling.
+        Also updates the streaming info label in the status bar.
         """
         # Use actual decimation stage from packets if available
         if hasattr(self, 'actual_dec_stage'):
             self.dec_stage = self.actual_dec_stage
-            return
-            
-        # Fall back to inferring from data rate (legacy behavior)
-        # infer_dec_stage from .utils
-        if not self.channel_list or not self.channel_list[0]: return
-        ch_val = self.channel_list[0][0] # Renamed ch
-        tarr = self.tbuf[ch_val].data()
-        if len(tarr) < 2: return # Need at least two points to calculate dt
-        dt = (tarr[-1] - tarr[0]) / max(1, (len(tarr) - 1)) # Average time step
-        fs = 1.0 / dt if dt > 0 else 1.0 # Sample rate
-        self.dec_stage = infer_dec_stage(fs)
+        else:
+            # Fall back to inferring from data rate (legacy behavior)
+            # infer_dec_stage from .utils
+            if not self.channel_list or not self.channel_list[0]: return
+            ch_val = self.channel_list[0][0] # Renamed ch
+            tarr = self.tbuf[ch_val].data()
+            if len(tarr) < 2: return # Need at least two points to calculate dt
+            dt = (tarr[-1] - tarr[0]) / max(1, (len(tarr) - 1)) # Average time step
+            fs = 1.0 / dt if dt > 0 else 1.0 # Sample rate
+            self.dec_stage = infer_dec_stage(fs)
+
+        # Update streaming info label in the status bar
+        if hasattr(self, 'streaming_info_label'):
+            from rfmux.core.transferfunctions import decimation_to_sampling
+            fs = decimation_to_sampling(self.dec_stage)
+            if fs >= 1000:
+                fs_str = f"{fs/1000:.1f} kHz"
+            else:
+                fs_str = f"{fs:.1f} Hz"
+            if self.is_short_packet:
+                pkt_str = "Short Packets (Ch 1-128)"
+            else:
+                pkt_str = "Long Packets (Ch 1-1024)"
+            self.streaming_info_label.setText(
+                f"| Dec Stage: {self.dec_stage} | Fs: {fs_str} | {pkt_str}"
+            )
 
     @QtCore.pyqtSlot(int, str, object)
     def _iq_done(self, row: int, task_mode: str, payload):
@@ -1231,7 +1254,6 @@ class PeriscopeRuntime:
             panel._hide_progress_bars()
             
             # Set NCO frequency based on resonance frequencies
-            iteration_params = load_params.get('results_by_iteration', [])
             reso_frequencies = params.get('resonance_frequencies', [])
             
             if reso_frequencies:
@@ -1244,24 +1266,26 @@ class PeriscopeRuntime:
                 else:
                     print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
-            # Load iteration data into panel
-            for i in range(len(iteration_params)):
-                direction = iteration_params[i]['direction']
-                data = iteration_params[i]['data']
-                
-                # Extract amplitude from first detector's data (amplitude is stored per-detector, not per-iteration)
-                amplitude = None
-                for det_data in data.values():
-                    amplitude = det_data.get('sweep_amplitude')
-                    if amplitude is not None:
-                        break
-                
-                if amplitude is None:
-                    # Fallback value if no amplitude found in detector data
-                    print(f"Warning: No amplitude found for iteration {i}, using 0.0 as fallback")
-                    amplitude = 0.0
-                
-                panel.update_data(target_module, i, amplitude, direction, data, None)
+            # Load data into panel - handle both old (iteration) and new (detector) formats
+            if 'results_by_detector' in load_params:
+                # New format: load directly into panel
+                panel.results_by_detector = load_params['results_by_detector']
+                panel._redraw_plots()
+            elif 'results_by_iteration' in load_params:
+                # Old format: convert via migration helper, then feed through update_data
+                iteration_params = load_params.get('results_by_iteration', [])
+                if isinstance(iteration_params, dict):
+                    iteration_params = [iteration_params[k] for k in sorted(iteration_params.keys())]
+                for i in range(len(iteration_params)):
+                    amplitude = iteration_params[i]['amplitude']
+                    direction = iteration_params[i]['direction']
+                    data = iteration_params[i]['data']
+                    panel.update_data(target_module, i, amplitude, direction, data, None)
+            
+            # Generate histograms now that data is loaded
+            if panel.results_by_detector:
+                panel._generate_histograms()
+                panel.histograms_generated = True
             
             # Extract and load df_calibrations if bias_kids_output exists
             if has_bias_data:
@@ -1584,40 +1608,39 @@ class PeriscopeRuntime:
         if panel is None:
             return  # Error already displayed by helper
         
-        # Auto-launch detector digest panel by programmatically triggering the existing
-        # double-click handler which already has all the logic for creating digest panels
-        iteration_params = load_params.get('results_by_iteration', [])
-        if iteration_params and len(iteration_params) > 0:
-            first_iteration_data = iteration_params[0].get('data', {})
-            if first_iteration_data:
-                # Get any detector's frequency to simulate a click location
-                first_detector_id = sorted(first_iteration_data.keys())[0]
-                first_detector_data = first_iteration_data[first_detector_id]
-                click_freq = first_detector_data.get('bias_frequency', 
-                                                    first_detector_data.get('original_center_frequency'))
+        # Auto-launch detector digest panel - find a frequency to click on
+        click_freq = None
+        if panel.results_by_detector:
+            first_det_id = sorted(panel.results_by_detector.keys())[0]
+            first_entry = next(iter(panel.results_by_detector[first_det_id].values()), {})
+            click_freq = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
+        if click_freq is not None:
+            if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
+                # Create a fake event at the detector's frequency
+                class FakeEvent:
+                    def __init__(self, x, y):
+                        self._scene_pos = QtCore.QPointF(x, y)
+                    def scenePos(self):
+                        return self._scene_pos
+                    def accept(self):
+                        pass
                 
-                if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
-                    # Create a fake event at the detector's frequency
-                    class FakeEvent:
-                        def __init__(self, x, y):
-                            self._scene_pos = QtCore.QPointF(x, y)
-                        def scenePos(self):
-                            return self._scene_pos
-                        def accept(self):
-                            pass
+                # Map the frequency to view coordinates (x position)
+                view_box = panel.combined_mag_plot.getViewBox()
+                if view_box:
+                    view_point = QtCore.QPointF(click_freq, 0)
+                    scene_point = view_box.mapViewToScene(view_point)
+                    fake_event = FakeEvent(scene_point.x(), scene_point.y())
+                    panel._handle_multisweep_plot_double_click(fake_event)
                     
-                    # Map the frequency to view coordinates (x position)
-                    view_box = panel.combined_mag_plot.getViewBox()
-                    if view_box:
-                        view_point = QtCore.QPointF(click_freq, 0)
-                        scene_point = view_box.mapViewToScene(view_point)
-                        fake_event = FakeEvent(scene_point.x(), scene_point.y())
-                        panel._handle_multisweep_plot_double_click(fake_event)
-                        
-                        # Re-raise the multisweep dock to keep focus on it
-                        multisweep_dock = self.dock_manager.find_dock_for_widget(panel)
-                        if multisweep_dock:
-                            multisweep_dock.raise_()
+                    # Re-raise the multisweep dock to keep focus on it
+                    multisweep_dock = self.dock_manager.find_dock_for_widget(panel)
+                    if multisweep_dock:
+                        multisweep_dock.raise_()
+        
+        # Ensure the Magnitude Sweeps tab is shown (not the Detector Digest tab)
+        if hasattr(panel, 'plot_tabs'):
+            panel.plot_tabs.setCurrentIndex(0)
 
     def _start_multisweep_analysis_for_window(self, window_instance: 'MultisweepPanel', params: dict):
         """
@@ -2317,15 +2340,20 @@ class PeriscopeRuntime:
         self.is_mock_mode = getattr(self, "is_mock_mode", True)
         self.mock_config = getattr(self, "mock_config", {"mock": True})
         self.qp_pulse_mode = getattr(self, "qp_pulse_mode", "none")
-        self.results_by_iteration = {0: {"amplitude": 0.1,
-                                         "direction": "up",
-                                         "data": {
-                                             1: {
-                                                 "bias_frequency": 90e6,                     # MUST BE FLOAT
-                                                 "original_center_frequency": 90e6,          # MUST BE FLOAT
-                                                 "sweep_amplitudes": [0.1, 0.2],
-                                                 "some_data": [1, 2, 3]
-                                             }}}}
+        # Mock data in detector-based format for smoke tests
+        self.results_by_detector = {
+            1: {
+                (0.1, "up"): {
+                    "bias_frequency": 90e6,
+                    "original_center_frequency": 90e6,
+                    "amplitude": 0.1,
+                    "direction": "up",
+                    "iteration": 0,
+                    "sweep_amplitudes": [0.1, 0.2],
+                    "some_data": [1, 2, 3]
+                }
+            }
+        }
 
         if not hasattr(self, "crs_init_signals"):
             self.crs_init_signals = MagicMock()
@@ -2384,7 +2412,7 @@ class PeriscopeRuntime:
             multisweep_window = None
             if getattr(self, "multisweep_windows", None):
                 multisweep_window = next(iter(self.multisweep_windows.values())).get("window")
-                multisweep_window.results_by_iteration = self.results_by_iteration
+                multisweep_window.results_by_detector = self.results_by_detector
                 multisweep_window._get_spectrum = MagicMock()
 
             if multisweep_window:
@@ -2412,18 +2440,16 @@ class PeriscopeRuntime:
     
                 multisweep_window._handle_multisweep_plot_double_click(fake_event)
 
-                print(">>> Testing Detector Digest Panel")
-    
-                before = len(multisweep_window.detector_digest_windows)
-                
+                print(">>> Testing Detector Digest Panel (embedded sub-tab)")
+
                 multisweep_window._open_detector_digest_for_index(1)
-                
-                after = len(multisweep_window.detector_digest_windows)
-                assert after == before + 1
-                
-                digest_panel = multisweep_window.detector_digest_windows[-1]
-                assert isinstance(digest_panel, rfmux.tools.periscope.detector_digest_panel.DetectorDigestPanel)
-                assert digest_panel.detector_id == 1
+
+                # Digest panel is now embedded as a sub-tab within MultisweepPanel
+                assert multisweep_window.digest_panel is not None
+                assert isinstance(multisweep_window.digest_panel, rfmux.tools.periscope.detector_digest_panel.DetectorDigestPanel)
+                assert multisweep_window.digest_panel.detector_id == 1
+                # Backward-compatible list should also be populated
+                assert len(multisweep_window.detector_digest_windows) == 1
                 
                 print(">>> Testing Noise Spectrum Panel")
                 

@@ -540,42 +540,23 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         for module in self.plots:
             self.plots[module]['amp_legend'].clear()
             self.plots[module]['phase_legend'].clear()
-            
+
             for amplitude, curve in self.plots[module]['amp_curves'].items():
-                label = "" 
-                if self.unit_mode == "dbm":
-                    if module not in self.dac_scales:
-                        print(f"Warning: No DAC scale available for module {module}, cannot display accurate probe power in dBm.")
-                        self.rb_counts.setChecked(True)  
-                        return  
-                    
-                    dac_scale = self.dac_scales[module]
-                    dbm_value = UnitConverter.normalize_to_dbm(amplitude, dac_scale)
-                    label = f"Probe: {dbm_value:.2f} dBm"
-                elif self.unit_mode == "volts":
-                    if module not in self.dac_scales:
-                        print(f"Warning: No DAC scale available for module {module}, cannot display accurate probe amplitude in Volts.")
-                        self.rb_counts.setChecked(True)  
-                        return  
-                    else:
-                        dac_scale = self.dac_scales[module]
-                        dbm_value = UnitConverter.normalize_to_dbm(amplitude, dac_scale)
-                        
-                        power_watts = 10**((dbm_value - 30)/10)
-                        resistance = 50.0  
-                        voltage_rms = np.sqrt(power_watts * resistance)
-                        voltage_peak = voltage_rms * np.sqrt(2)
-                        voltage_peak = voltage_peak*1e6
-                        
-                        label = f"Probe: {voltage_peak:.1f} uV (peak)"
-                else:  # "counts"
-                    label = f"Probe: {amplitude} Normalized Units"
-                
+                # Check DAC scale availability for physical-unit modes
+                if self.unit_mode in ("dbm", "volts") and module not in self.dac_scales:
+                    unit_name = "dBm" if self.unit_mode == "dbm" else "Volts"
+                    print(f"Warning: No DAC scale available for module {module}, cannot display accurate probe power in {unit_name}.")
+                    self.rb_counts.setChecked(True)
+                    return
+
+                dac_scale = self.dac_scales.get(module)
+                label = UnitConverter.format_probe_label(amplitude, self.unit_mode, dac_scale)
+
                 self.plots[module]['amp_legend'].addItem(curve, label)
-                
+
                 phase_curve = self.plots[module]['phase_curves'].get(amplitude)
                 if phase_curve:
-                    self.plots[module]['phase_legend'].addItem(phase_curve, label)         
+                    self.plots[module]['phase_legend'].addItem(phase_curve, label)
     
     def _update_amplitude_labels(self, plot):
         """Update plot labels based on current unit mode and normalization state."""

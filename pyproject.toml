@@ -6,6 +6,7 @@ build-backend = "scikit_build_core.build"
 name = "rfmux"
 dynamic = ["version"]
 description = "Python library for t0.technology CRS board running rfmux firmware"
+readme = "README.md"
 authors = [
   {name="Graeme Smecher", email="gsmecher@t0.technology"},
   {name="Joshua Montgomery", email="joshua@t0.technology"},
@@ -13,6 +14,7 @@ authors = [
 dependencies = [
   "PyQt6",
   "aiohttp",
+  "awaitless",
   "ipykernel<7",  # Pin to 6.x for qtconsole in-process kernel compatibility (ipykernel 7.x has a bug)
   "ipython",
   "jupyterlab",

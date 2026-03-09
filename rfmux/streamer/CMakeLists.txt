@@ -22,6 +22,8 @@ if(NOT fmt_FOUND)
 		GIT_REPOSITORY https://github.com/fmtlib/fmt.git
 		GIT_TAG 11.0.2
 	)
+	# Don't install fmt (it's statically linked into _receiver)
+	set(FMT_INSTALL OFF CACHE BOOL "" FORCE)
 	FetchContent_MakeAvailable(fmt)
 endif()
 
@@ -57,7 +59,6 @@ else()
     target_compile_options(_receiver PRIVATE
         -Wall -Wextra       # Warnings
         -O3                 # Aggressive optimization with auto-vectorization
-        -march=native       # Use all available CPU instructions
         -ffast-math         # Fast floating-point (convert divisions to multiplications)
     )
 endif()

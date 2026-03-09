@@ -640,7 +640,10 @@ def compute_s21_parallel(
     S21_raw = Z_eff / (Z_eff + Z0)
     
     # Apply fixed attenuation and gain
-    S21 = S21_raw * att_factor * GLNA
+    # Factor of 2 converts the voltage divider ratio V_load/V_source = Z/(Z+Z0)
+    # into the proper S-parameter S21 = 2*Z/(Z+Z0), which equals 1.0 for a
+    # matched thru (Z == Z0).
+    S21 = 2.0 * S21_raw * att_factor * GLNA
     
     return S21
 

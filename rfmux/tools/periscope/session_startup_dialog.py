@@ -6,6 +6,8 @@ This dialog is shown when Periscope launches, prompting the user to configure
 both connection mode (Hardware/Mock/Offline) and session management (New/Load/None).
 """
 
+import os
+
 from PyQt6 import QtWidgets, QtCore, QtGui
 import datetime
 from . import settings
@@ -391,13 +393,13 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             self.session_path = base_path
             # Save this directory for next time
             settings.set_last_session_directory(base_path)
+            # Also save the full session path so it's pre-selected next time
+            full_session_path = os.path.join(base_path, self.session_folder_name)
+            settings.set_last_session_path(full_session_path)
             
         elif self.rb_load_session.isChecked():
             self.session_mode = self.SESS_LOAD
             
-            # Open folder selection dialog for existing session
-            # Try to start from parent of last loaded session path, with session pre-selected
-            import os
             last_session_path = settings.get_last_session_path()
             
             # Determine starting directory and file to pre-select

@@ -13,7 +13,7 @@ import time
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
     TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
-    ScreenshotMixin
+    ScreenshotMixin, mag_axis_label
 )
 from .detector_digest_panel import DetectorDigestPanel
 from .noise_spectrum_panel import NoiseSpectrumPanel
@@ -597,21 +597,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             
     def _update_mag_plot_label(self):
         """Updates the Y-axis label of the magnitude plot based on current unit and normalization settings."""
-        if not self.combined_mag_plot: return
-
-        if self.normalize_traces:
-            label = "Normalized Magnitude" # Label for magnitude part of the trace
-            # Normalized dBm is still in dB, other normalized units are unitless or relative.
-            units = "dB" if self.unit_mode == "dbm" else "" 
-        else:
-            if self.unit_mode == "counts":
-                label, units = "Magnitude", "Counts"
-            elif self.unit_mode == "dbm":
-                label, units = "Power", "dBm"
-            elif self.unit_mode == "volts":
-                label, units = "Magnitude", "V"
-            else: # Fallback, should not ideally be reached if UI is constrained
-                label, units = "Magnitude", ""
+        if not self.combined_mag_plot:
+            return
+        label, units = mag_axis_label(self.unit_mode, self.normalize_traces)
         self.combined_mag_plot.setLabel('left', label, units=units)
 
     def _toggle_zoom_box_mode(self, enable):
@@ -1049,9 +1037,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 
                 # Calculate magnitude and phase
                 s21_mag_raw = np.abs(iq_complex)
+                # Compute probe_amp_dbm for dBm normalization if DAC scale available
+                probe_amp_dbm = None
+                if self.normalize_traces and self.unit_mode == 'dbm' and dac_scale_for_module is not None:
+                    probe_amp_dbm = UnitConverter.normalize_to_dbm(amp_val, dac_scale_for_module)
                 s21_mag_processed = UnitConverter.convert_amplitude(
                     s21_mag_raw, iq_complex, self.unit_mode, 
-                    normalize=self.normalize_traces
+                    normalize=self.normalize_traces, probe_amp_dbm=probe_amp_dbm
                 )
                 # Use pre-calculated phase if available, otherwise calculate from IQ
                 phase_deg = data.get('phase_degrees', np.degrees(np.angle(iq_complex))) 

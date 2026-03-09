@@ -12,8 +12,9 @@ from PyQt6 import QtWidgets, QtCore
 from .utils import (
     LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD,
     UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
-    square_axes, UnitConverter,
+    square_axes, UnitConverter, mag_axis_label,
 )
+from rfmux.core.transferfunctions import convert_roc_to_volts
 
 
 def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, batch_size,
@@ -151,23 +152,14 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
 
             if plot_type == 'magnitude':
                 _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
-                                         pen_color, unit_mode, normalize, labels)
-                # Y-axis label
-                if normalize:
-                    units = 'dB' if unit_mode == "dbm" else ''
-                    plot_item.setLabel('left', 'Normalized Magnitude', units=units)
-                else:
-                    if unit_mode == "counts":
-                        plot_item.setLabel('left', 'Magnitude', units='Counts')
-                    elif unit_mode == "dbm":
-                        plot_item.setLabel('left', 'Power', units='dBm')
-                    elif unit_mode == "volts":
-                        plot_item.setLabel('left', 'Magnitude', units='V')
+                                         pen_color, unit_mode, normalize, labels, dac_scale)
+                lbl, units = mag_axis_label(unit_mode, normalize)
+                plot_item.setLabel('left', lbl, units=units)
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             else:  # IQ
                 _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
-                                  pen_color, normalize, labels)
-                iq_units = 'Counts' if unit_mode == 'counts' else 'V'
+                                  pen_color, normalize, labels, unit_mode=unit_mode)
+                iq_units = 'V' if unit_mode == 'volts' else 'Counts'
                 plot_item.setLabel('left', 'Q (Imaginary)', units=iq_units)
                 plot_item.setLabel('bottom', 'I (Real)', units=iq_units)
                 square_axes(plot_item)
@@ -195,7 +187,7 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
 
 def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
                              pen_color, unit_mode='dbm', normalize=False,
-                             sweep_labels=None):
+                             sweep_labels=None, dac_scale=None):
     """Plot S21 magnitude sweeps for a single detector.
 
     Args:
@@ -206,6 +198,7 @@ def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
         unit_mode: 'counts', 'dbm', or 'volts'
         normalize: Whether to normalize traces
         sweep_labels: Optional dict {(amp, direction): label} for legend names.
+        dac_scale: DAC full-scale in dBm (for computing probe_amp_dbm when normalizing)
     """
     sorted_keys = sorted(detector_data.keys())
     single_sweep = len(sorted_keys) == 1
@@ -228,7 +221,11 @@ def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
             continue
 
         mag = np.abs(iq)
-        mag_converted = UnitConverter.convert_amplitude(mag, iq, unit_mode, normalize=normalize)
+        # Compute probe_amp_dbm for dBm normalization if dac_scale available
+        probe_amp_dbm = None
+        if normalize and unit_mode == 'dbm' and dac_scale is not None:
+            probe_amp_dbm = UnitConverter.normalize_to_dbm(amp_val, dac_scale)
+        mag_converted = UnitConverter.convert_amplitude(mag, iq, unit_mode, normalize=normalize, probe_amp_dbm=probe_amp_dbm)
 
         # Color from amplitude, line style from direction
         if single_sweep:
@@ -244,7 +241,7 @@ def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
 
 
 def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
-                      pen_color, normalize=False, sweep_labels=None):
+                      pen_color, normalize=False, sweep_labels=None, unit_mode='counts'):
     """Plot IQ circles for a single detector.
 
     Args:
@@ -254,6 +251,11 @@ def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
         pen_color: Fallback pen color
         normalize: Whether to normalize IQ by max magnitude
         sweep_labels: Optional dict {(amp, direction): label} for legend names.
+        unit_mode: ``'counts'``, ``'volts'``, or ``'dbm'``.  When ``'volts'``
+            the I and Q arrays are converted via ``convert_roc_to_volts``
+            before plotting.  For ``'counts'`` and ``'dbm'`` the raw ROC
+            counts are used unchanged (dBm has no meaningful per-component
+            interpretation for complex IQ data).
     """
     sorted_keys = sorted(detector_data.keys())
     single_sweep = len(sorted_keys) == 1
@@ -274,8 +276,14 @@ def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
         i_vals = np.real(iq)
         q_vals = np.imag(iq)
 
+        # Convert to volts when requested.  dBm is skipped — it has no
+        # meaningful per-component interpretation for complex IQ data.
+        if unit_mode == 'volts':
+            i_vals = convert_roc_to_volts(i_vals)
+            q_vals = convert_roc_to_volts(q_vals)
+
         if normalize:
-            mag = np.abs(iq)
+            mag = np.abs(iq) if unit_mode != 'volts' else np.sqrt(i_vals**2 + q_vals**2)
             if len(mag) > 0 and np.max(mag) > 0:
                 i_vals = i_vals / np.max(mag)
                 q_vals = q_vals / np.max(mag)

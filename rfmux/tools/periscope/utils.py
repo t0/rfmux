@@ -525,6 +525,36 @@ def mode_title(mode: str) -> str:
     return mode_titles.get(mode, mode)
 
 # ───────────────────────── Unit Conversion ─────────────────────────
+
+def mag_axis_label(unit_mode: str, normalize: bool) -> tuple[str, str]:
+    """Return ``(label_text, units_str)`` for a magnitude Y-axis.
+
+    Centralises the label mapping that was previously duplicated between
+    ``MultisweepPanel._update_mag_plot_label`` and
+    ``multisweep_grid_helpers.update_sweep_grid``.
+
+    Args:
+        unit_mode: One of ``"counts"``, ``"dbm"``, or ``"volts"``.
+        normalize: Whether the trace is being normalised.
+
+    Returns:
+        A ``(label_text, units_str)`` tuple suitable for
+        ``PlotItem.setLabel('left', label_text, units=units_str)``.
+    """
+    if normalize:
+        if unit_mode == "dbm":
+            return "S21", "dB"
+        else:  # counts or volts
+            return "Normalized Magnitude", ""
+    if unit_mode == "counts":
+        return "Magnitude", "Counts"
+    if unit_mode == "dbm":
+        return "Power", "dBm"
+    if unit_mode == "volts":
+        return "Magnitude", "V"
+    return "Magnitude", ""  # fallback for any unexpected mode
+
+
 class UnitConverter:
     """
     Utility class for converting between different units.
@@ -556,19 +586,50 @@ class UnitConverter:
 
     @staticmethod
     def convert_amplitude(amps: np.ndarray, iq_data: np.ndarray, unit_mode: str = None, 
-                          current_mode: str = "counts", normalize: bool = False) -> np.ndarray:
-        mode_to_use = unit_mode if unit_mode is not None else current_mode # Renamed mode
-        if mode_to_use == "counts": result = amps.copy()
-        elif mode_to_use == "volts": result = convert_roc_to_volts(amps) # from rfmux.core.transferfunctions
-        elif mode_to_use == "dbm": result = convert_roc_to_dbm(amps)   # from rfmux.core.transferfunctions
-        else: result = amps.copy()
+                          current_mode: str = "counts", normalize: bool = False,
+                          probe_amp_dbm: float | None = None) -> np.ndarray:
+        """Convert magnitude amplitudes between different unit representations.
+
+        Args:
+            amps: Raw magnitude values (typically from np.abs(iq)).
+            iq_data: Complex IQ data (unused but kept for signature compatibility).
+            unit_mode: Target unit mode — ``'counts'``, ``'volts'``, or ``'dbm'``.
+            current_mode: Fallback mode if *unit_mode* is None.
+            normalize: Whether to normalize the result.
+            probe_amp_dbm: Probe tone power in dBm at the DAC output (used when
+                ``normalize=True`` and ``unit_mode='dbm'``).  If not provided,
+                normalization falls back to subtracting the last bin value.
+
+        Returns:
+            Converted (and optionally normalized) magnitude array.
+
+        Normalization behavior:
+            - counts/volts: divide by the last bin value (rightmost frequency point)
+            - dBm with probe_amp_dbm: subtract probe_amp_dbm (displays system gain S21)
+            - dBm without probe_amp_dbm: subtract last bin value (graceful degradation)
+        """
+        mode_to_use = unit_mode if unit_mode is not None else current_mode
+        if mode_to_use == "counts":
+            result = amps.copy()
+        elif mode_to_use == "volts":
+            result = convert_roc_to_volts(amps)
+        elif mode_to_use == "dbm":
+            result = convert_roc_to_dbm(amps)
+        else:
+            result = amps.copy()
             
         if normalize and len(result) > 0:
-            ref_val = result[0]
+            ref_val = result[-1]  # Rightmost frequency bin
             if mode_to_use == "dbm":
-                if np.isfinite(ref_val): result = result - ref_val
-            else:
-                if ref_val != 0 and np.isfinite(ref_val): result = result / ref_val
+                if probe_amp_dbm is not None:
+                    # Subtract probe tone power → displays true system gain (S21)
+                    result = result - probe_amp_dbm
+                elif np.isfinite(ref_val):
+                    # Fallback: subtract last bin value
+                    result = result - ref_val
+            else:  # counts or volts
+                if ref_val != 0 and np.isfinite(ref_val):
+                    result = result / ref_val
         return result
 
     @staticmethod

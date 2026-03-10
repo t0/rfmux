@@ -479,9 +479,11 @@ def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) 
     
     frequencies = resonance_data.get('frequencies')
     iq_complex = resonance_data.get('iq_complex')
-    original_cf = resonance_data.get('original_center_frequency')
+    # Use bias_frequency (canonical) or sweep_center_frequency as reference for messages
+    ref_cf = (resonance_data.get('bias_frequency')
+              or resonance_data.get('sweep_center_frequency'))
     
-    if frequencies is None or iq_complex is None or original_cf is None:
+    if frequencies is None or iq_complex is None:
         # Mark as failed
         updated_data['nonlinear_fit_params'] = None
         updated_data['nonlinear_fit_errors'] = None
@@ -529,7 +531,9 @@ def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) 
             updated_data['nonlinear_fit_params']['Qi'] = Qi
             
     except Exception as e:
-        warnings.warn(f"Nonlinear fitting failed for {original_cf*1e-6:.3f} MHz: {e}")
+        msg = (f"Nonlinear fitting failed for {ref_cf*1e-6:.3f} MHz: {e}"
+               if ref_cf else f"Nonlinear fitting failed for resonator {res_key!r}: {e}")
+        warnings.warn(msg)
         updated_data['nonlinear_fit_params'] = None
         updated_data['nonlinear_fit_errors'] = None
         updated_data['nonlinear_fit_residual'] = np.inf
@@ -600,23 +604,22 @@ def fit_nonlinear_iq_multisweep(
         if not isinstance(resonance_data, dict):
             continue
         
-        # Expect index-based keys only
-        if not isinstance(res_key, (int, np.integer)):
+        # Expect string resonator code keys only
+        if not isinstance(res_key, str):
             if verbose:
-                print(f"Skipping non-integer key {res_key}: expected index-based keys only")
+                print(f"Skipping non-string key {res_key!r}: expected resonator code keys only")
             continue
         
         # Check required fields
-        if (resonance_data.get('frequencies') is not None and 
-            resonance_data.get('iq_complex') is not None and
-            resonance_data.get('original_center_frequency') is not None):
+        if (resonance_data.get('frequencies') is not None and
+            resonance_data.get('iq_complex') is not None):
             valid_resonances.append((res_key, resonance_data))
         elif verbose:
-            cf = resonance_data.get('original_center_frequency')
+            cf = resonance_data.get('bias_frequency') or resonance_data.get('sweep_center_frequency')
             if cf:
-                print(f"Skipping resonance at {cf*1e-6:.3f} MHz: missing data")
+                print(f"Skipping resonator {res_key!r} at {cf*1e-6:.3f} MHz: missing data")
             else:
-                print(f"Skipping resonance at index {res_key}: missing data")
+                print(f"Skipping resonator {res_key!r}: missing data")
     
     # Decide whether to use parallel processing
     if parallel and len(valid_resonances) > 1:

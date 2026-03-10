@@ -95,8 +95,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
 
         # Data storage and state — detector-based format:
-        # {detector_id: {iteration_index: {all_detector_data_fields + amplitude, direction, iteration metadata}}}
+        # {detector_code: {iteration_index: {all_detector_data_fields + amplitude, direction, iteration metadata}}}
         self.results_by_detector = {}
+        # Lightweight resonator registry {code: {bias_frequency, bias_amplitude, channel_number}}
+        self.res_info_dict: dict = {}
         self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed
 
         self.current_iteration_being_processed = None # Tracks the current iteration
@@ -737,31 +739,31 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # When fitting is completed, just show the base text
             self.current_amp_label.setText(base_text)
         
-    def update_data(self, module: int, iteration: int, amplitude: float, direction: str, results_for_plotting: dict, results_for_history: dict):
+    def update_data(self, module: int, iteration: int, amplitude: float, direction: str,
+                    multisweep_data_dict: dict, res_info_dict: dict):
         """
         Receives final data for a completed iteration of a multisweep for the target module.
-        Stores the data for plotting and updates the CF history.
+        Stores the sweep data dict for plotting and updates the resonator registry.
 
         Args:
             module (int): The module reporting data.
             iteration (int): The current iteration index.
             amplitude (float): The probe amplitude for which data is provided.
             direction (str): The sweep direction ("upward" or "downward").
-            results_for_plotting (dict): Data for plotting, format: {output_cf: data_dict_val}.
-            results_for_history (dict): Data for history, format: {conceptual_idx: output_cf_key}.
+            multisweep_data_dict (dict): Sweep data keyed by resonator code.
+            res_info_dict (dict): Resonator registry keyed by code
+                                  ({code: {bias_frequency, bias_amplitude, channel_number}}).
         """
         if module != self.target_module: return
-        
+
         self.current_amplitude_being_processed = amplitude
         self.current_iteration_being_processed = iteration
 
-        
         # Store data in detector-based structure, keyed by iteration index.
-        # The amplitude and direction are stored inside each entry, not as keys,
-        # so that all detectors share the same iteration indices even if they
-        # use different amplitudes in the future.
-        if results_for_plotting:
-            for detector_id, det_data in results_for_plotting.items():
+        # The amplitude and direction are stored inside each entry so that all
+        # detectors share the same iteration indices regardless of per-section amplitudes.
+        if multisweep_data_dict:
+            for detector_id, det_data in multisweep_data_dict.items():
                 if detector_id not in self.results_by_detector:
                     self.results_by_detector[detector_id] = {}
                 entry = dict(det_data)
@@ -770,9 +772,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 entry['iteration'] = iteration
                 self.results_by_detector[detector_id][iteration] = entry
 
-        # --- Update CF history using the pre-mapped results_for_history ---
-        if results_for_history:
-            self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {}).update(results_for_history)
+        # --- Update the live resonator registry ---
+        if res_info_dict:
+            self.res_info_dict = res_info_dict
 
         # Invalidate digest panel so it gets recreated with fresh data
         # (the panel takes a snapshot at creation time and doesn't track live changes)
@@ -820,7 +822,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Tab 4: Detector Digest (recreate if invalidated by new data)
         elif current_tab_idx == 4:
             if self.digest_panel is None and self.results_by_detector:
-                self._open_detector_digest_for_index(1, switch_to_tab=False)
+                first_key = next(iter(self.results_by_detector))
+                self._open_detector_digest_for_index(first_key, switch_to_tab=False)
     
     def _redraw_sweep_grid(self, tab_idx):
         """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
@@ -1114,10 +1117,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._generate_histograms()
             self.histograms_generated = True
         
-        # Auto-populate detector digest for the first detector (lowest frequency)
+        # Auto-populate detector digest for the first detector in insertion order.
         # Don't switch focus — user should stay on the current tab (magnitude sweeps)
         if self.results_by_detector:
-            self._open_detector_digest_for_index(1, switch_to_tab=False)
+            first_key = next(iter(self.results_by_detector))
+            self._open_detector_digest_for_index(first_key, switch_to_tab=False)
         
     def _check_all_complete(self):
         """
@@ -1428,7 +1432,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             
             parent_widget = self._get_periscope_parent()
             if parent_widget and hasattr(parent_widget, '_start_multisweep_analysis_for_window'):
-                # Pass self.initial_params which now contains the correctly determined baseline CFs
+                # Pass self.initial_params which now contains the correctly determined baseline CFs.
+                # Also inject the live res_info_dict so MultisweepTask uses Option B (res_info_dict=...)
+                # on every subsequent call, preserving the same resonator codes and channel assignments.
+                if self.res_info_dict:
+                    self.initial_params['res_info_dict'] = self.res_info_dict
                 parent_widget._start_multisweep_analysis_for_window(self, self.initial_params) # type: ignore
             else:
                 QtWidgets.QMessageBox.warning(self, "Error",
@@ -1982,13 +1990,24 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Get noise data if available
         noise_data = self.noise_data if self.samples_taken else None
         
-        # Get conceptual frequency for this detector
-        if detector_idx <= len(self.conceptual_section_frequencies) and detector_idx > 0:
+        # Get reference frequency for this detector.
+        # New format: string codes — read bias_frequency from data.
+        # Old format: integer indices — use conceptual_section_frequencies.
+        if isinstance(detector_idx, str):
+            first_entry = next(iter(self.results_by_detector.get(detector_idx, {}).values()), {})
+            conceptual_resonance_base_freq_hz = (
+                first_entry.get('bias_frequency')
+                or first_entry.get('sweep_center_frequency')
+            )
+            if conceptual_resonance_base_freq_hz is None:
+                print(f"Warning: Could not determine frequency for detector {detector_idx!r}")
+                return
+        elif isinstance(detector_idx, (int, np.integer)) and 0 < detector_idx <= len(self.conceptual_section_frequencies):
             conceptual_resonance_base_freq_hz = self.conceptual_section_frequencies[detector_idx - 1]
         else:
-            print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
+            print(f"Warning: Detector index {detector_idx!r} not found or out of range.")
             return
-        
+
         # Gather data for this specific detector across all amplitudes and directions
         section_data_for_digest = {}
         
@@ -2015,12 +2034,18 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         all_detectors_data = {}
         
 
-        for det_idx in sorted(self.results_by_detector.keys()):
-            if det_idx <= len(self.conceptual_section_frequencies) and det_idx > 0:
+        for det_idx in sorted(self.results_by_detector.keys(), key=lambda k: str(k)):
+            # Determine reference frequency — handle both string codes and legacy int indices
+            if isinstance(det_idx, str):
+                _entry = next(iter(self.results_by_detector[det_idx].values()), {})
+                conceptual_freq_hz = (
+                    _entry.get('bias_frequency')
+                    or _entry.get('sweep_center_frequency')
+                    or _entry.get('original_center_frequency')
+                )
+            elif isinstance(det_idx, (int, np.integer)) and 0 < det_idx <= len(self.conceptual_section_frequencies):
                 conceptual_freq_hz = self.conceptual_section_frequencies[det_idx - 1]
             else:
-                conceptual_freq_hz = None
-                # Try to get frequency from first available entry
                 first_entry = next(iter(self.results_by_detector[det_idx].values()), {})
                 conceptual_freq_hz = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
             

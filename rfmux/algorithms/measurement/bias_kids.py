@@ -313,15 +313,17 @@ async def bias_kids(
         
         if suitable or fallback_to_lowest:
             # Prepare bias configuration
-            bias_freq = det_data.get('bias_frequency', det_data.get('original_center_frequency'))
+            bias_freq = det_data.get('bias_frequency')
             sweep_amp = det_data.get('sweep_amplitude')
-            
+            channel = det_data.get('channel_number')
+
             if bias_freq is None or sweep_amp is None:
-                warnings.warn(f"Detector {det_idx}: Missing bias frequency or amplitude")
+                warnings.warn(f"Detector {det_idx!r}: Missing bias frequency or amplitude. Skipping.")
                 continue
-                
-            # Channel assignment: det_idx is already 1-based from multisweep
-            channel = det_idx
+
+            if channel is None:
+                warnings.warn(f"Detector {det_idx!r}: Missing channel_number. Skipping.")
+                continue
             
             # Quantize the absolute bias frequency to nearest multiple of base frequency
             quantized_bias_freq = round(bias_freq / base_freq) * base_freq
@@ -411,15 +413,7 @@ async def bias_kids(
             biased_data['bias_successful'] = True
             biased_data['optimal_phase_degrees'] = optimal_phase
             biased_data['phase_optimization_std'] = phase_std
-            
-            # If we have df calibration and applied a phase, rotate it
-            if 'df_calibration' in biased_data and biased_data['df_calibration'] is not None and optimal_phase != 0.0:
-                # Rotate the df calibration by the applied phase
-                phase_rad = np.radians(optimal_phase)
-                rotation_factor = np.exp(1j * phase_rad)
-                biased_data['df_calibration'] *= rotation_factor
-                biased_data['df_calibration_rotated'] = True
-            
+
             successfully_biased[det_idx] = biased_data
             
         except Exception as e:
@@ -460,14 +454,16 @@ def analyze_multiamp_data(
         bifurcation_ever_seen = False
 
         # Iterate entries sorted by amplitude (highest first) for deterministic order
+        # 'sweep_amplitude' is the new key; fall back to 'amplitude' for old pkl files.
         sorted_entries = sorted(
             iter_dict.values(),
-            key=lambda e: (-(e.get('amplitude') or 0), e.get('direction', ''))
+            key=lambda e: (-(e.get('sweep_amplitude') or e.get('amplitude') or 0),
+                           e.get('sweep_direction') or e.get('direction', ''))
         )
 
         for det_data in sorted_entries:
-            amp = det_data.get('amplitude')
-            direction = det_data.get('direction', 'upward')
+            amp = det_data.get('sweep_amplitude') or det_data.get('amplitude')
+            direction = (det_data.get('sweep_direction') or det_data.get('direction', 'upward'))
             if amp is None:
                 continue
 

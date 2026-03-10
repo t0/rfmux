@@ -1695,8 +1695,15 @@ class PeriscopeRuntime:
         self.multisweep_signals.fitting_progress.connect(window_instance.handle_fitting_progress,
                                                         QtCore.Qt.ConnectionType.QueuedConnection)
 
-        # Connect data_ready signal for session auto-export
+        # Connect data_ready signal for session auto-export.
+        # Disconnect first to prevent a double-connection (and therefore double-file)
+        # on each re-run, since the signal was already connected when the panel was
+        # first created in _start_multisweep_analysis().
         if hasattr(window_instance, 'data_ready') and hasattr(self, 'session_manager'):
+            try:
+                window_instance.data_ready.disconnect(self.session_manager.handle_data_ready)
+            except TypeError:
+                pass  # Not yet connected — that's fine
             window_instance.data_ready.connect(self.session_manager.handle_data_ready)
         
         task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window_instance)

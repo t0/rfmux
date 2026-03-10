@@ -76,8 +76,16 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.phase_debug = debug_phase_data
         
         if self.noise_data is not None:
-            self.noise_i_data = self.noise_data.i[self.detector_id-1]
-            self.noise_q_data = self.noise_data.q[self.detector_id-1]
+            # channel_number is 1-based; new format stores it in sweep data.
+            # Old format: detector_id itself was the 1-based channel number.
+            if isinstance(self.detector_id, (int, np.integer)):
+                _ch = int(self.detector_id)
+            elif self.active_sweep_data:
+                _ch = self.active_sweep_data.get('channel_number', 1)
+            else:
+                _ch = 1
+            self.noise_i_data = self.noise_data.i[_ch - 1]
+            self.noise_q_data = self.noise_data.q[_ch - 1]
 
 
         if self.resonance_data_for_digest:
@@ -157,14 +165,13 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         det_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
         title_layout.addWidget(det_label)
         
-        self.detector_spinbox = QtWidgets.QSpinBox()
-        if self.detector_indices:
-            self.detector_spinbox.setRange(min(self.detector_indices), max(self.detector_indices))
-        else:
-            self.detector_spinbox.setRange(1, 9999)
-        self.detector_spinbox.setValue(self.detector_id)
-        self.detector_spinbox.setToolTip("Enter a detector number to jump directly")
-        self.detector_spinbox.valueChanged.connect(self._on_detector_spinbox_changed)
+        self.detector_spinbox = QtWidgets.QComboBox()
+        self.detector_spinbox.setEditable(True)
+        for det_id in (self.detector_indices if self.detector_indices else [self.detector_id]):
+            self.detector_spinbox.addItem(str(det_id))
+        self.detector_spinbox.setCurrentText(str(self.detector_id))
+        self.detector_spinbox.setToolTip("Select or type a detector code/number to jump directly")
+        self.detector_spinbox.currentTextChanged.connect(self._on_detector_spinbox_changed)
         title_layout.addWidget(self.detector_spinbox)
         
         self.freq_label = QtWidgets.QLabel(f"({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
@@ -346,8 +353,15 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         if hasattr(self, 'multisweep_panel_ref') and self.multisweep_panel_ref:
             self.noise_data = self.multisweep_panel_ref._take_noise_samps()
             if self.noise_data:
-                self.noise_i_data = self.noise_data.i[self.current_detector - 1]
-                self.noise_q_data = self.noise_data.q[self.current_detector - 1]
+                # channel_number is 1-based; new format stores it in sweep data.
+                if isinstance(self.current_detector, (int, np.integer)):
+                    _ch = int(self.current_detector)
+                elif self.active_sweep_data:
+                    _ch = self.active_sweep_data.get('channel_number', 1)
+                else:
+                    _ch = 1
+                self.noise_i_data = self.noise_data.i[_ch - 1]
+                self.noise_q_data = self.noise_data.q[_ch - 1]
         else:
             print("Warning: No MultisweepPanel reference available for noise sampling")
         
@@ -431,15 +445,26 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.current_detector_index_in_list = (self.current_detector_index_in_list + 1) % len(self.detector_indices)
         self._switch_to_detector(self.detector_indices[self.current_detector_index_in_list])
     
-    def _on_detector_spinbox_changed(self, value):
-        """Handle direct detector number entry via spinbox."""
-        if value in self.all_detectors_data:
-            # Update the index in the list
+    def _on_detector_spinbox_changed(self, text):
+        """Handle direct detector code/number entry via combo box."""
+        # Try exact string match first (new format: "AXQR")
+        if text in self.all_detectors_data:
+            det_id = text
+        else:
+            # Try integer conversion for backward compat (old format: "1", "2", ...)
             try:
-                self.current_detector_index_in_list = self.detector_indices.index(value)
+                int_val = int(text)
+                if int_val in self.all_detectors_data:
+                    det_id = int_val
+                else:
+                    return  # Neither string nor int match found
             except ValueError:
-                pass
-            self._switch_to_detector(value)
+                return  # Not a valid detector code or integer
+        try:
+            self.current_detector_index_in_list = self.detector_indices.index(det_id)
+        except ValueError:
+            pass
+        self._switch_to_detector(det_id)
     
     def _navigate_previous_trace(self):
         """Navigate to the previous amplitude trace."""
@@ -535,9 +560,16 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         # print("For detector", self.detector_id, "the noise is", self.debug_noise)
         
         if self.noise_data is not None:
-            self.noise_i_data = self.noise_data.i[self.detector_id-1]
-            self.noise_q_data = self.noise_data.q[self.detector_id-1]
-        
+            # Use channel_number from sweep data for new format; fall back to int detector_id for old
+            if isinstance(self.detector_id, (int, np.integer)):
+                _ch = int(self.detector_id)
+            elif self.active_sweep_data:
+                _ch = self.active_sweep_data.get('channel_number', 1)
+            else:
+                _ch = 1
+            self.noise_i_data = self.noise_data.i[_ch - 1]
+            self.noise_q_data = self.noise_data.q[_ch - 1]
+
         # Select the first sweep for this detector
         if self.resonance_data_for_digest:
             try:
@@ -568,7 +600,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Update UI elements
         if hasattr(self, 'detector_spinbox'):
             self.detector_spinbox.blockSignals(True)
-            self.detector_spinbox.setValue(self.detector_id)
+            self.detector_spinbox.setCurrentText(str(self.detector_id))
             self.detector_spinbox.blockSignals(False)
         if hasattr(self, 'freq_label'):
             self.freq_label.setText(f"({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
@@ -1003,7 +1035,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.freq_label.setStyleSheet(label_style)  # type: ignore[union-attr]
         if hasattr(self, 'detector_spinbox'):
             self.detector_spinbox.setStyleSheet(
-                f"QSpinBox {{ color: {fg_color_hex}; background-color: {bg_color_hex}; }}"
+                f"QComboBox {{ color: {fg_color_hex}; background-color: {bg_color_hex}; }}"
             )
         # ----- Plots -----
         plot_widgets_legends = [

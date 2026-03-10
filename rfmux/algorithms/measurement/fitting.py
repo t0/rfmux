@@ -589,22 +589,22 @@ def fit_skewed_multisweep(
             warnings.warn(f"fit_skewed_multisweep: resonance data for key {res_key} is not a dictionary. Skipping.")
             continue
 
-        # Expect index-based keys only
-        if not isinstance(res_key, (int, np.integer)):
-            warnings.warn(f"fit_skewed_multisweep: Expected integer index key, got {type(res_key)} for key {res_key}. Skipping.")
+        # Expect string resonator code keys only
+        if not isinstance(res_key, str):
+            warnings.warn(f"fit_skewed_multisweep: Expected string resonator code key, got {type(res_key)} for key {res_key!r}. Skipping.")
             continue
 
         frequencies = resonance_data.get('frequencies')
         iq_complex = resonance_data.get('iq_complex')
-        original_cf = resonance_data.get('original_center_frequency')
-        bias_freq = resonance_data.get('bias_frequency', original_cf)
-        
-        if original_cf is None:
-            warnings.warn(f"fit_skewed_multisweep: 'original_center_frequency' missing for index {res_key}. Skipping.")
+        # Use bias_frequency (canonical) or sweep_center_frequency as fallback
+        bias_freq = resonance_data.get('bias_frequency') or resonance_data.get('sweep_center_frequency')
+
+        if bias_freq is None:
+            warnings.warn(f"fit_skewed_multisweep: 'bias_frequency' missing for resonator {res_key!r}. Skipping.")
             continue
 
         if frequencies is None or iq_complex is None:
-            warnings.warn(f"fit_skewed_multisweep: 'frequencies' or 'iq_complex' missing for index {res_key}. Skipping.")
+            warnings.warn(f"fit_skewed_multisweep: 'frequencies' or 'iq_complex' missing for resonator {res_key!r}. Skipping.")
             continue
 
         # Initialize new result keys (don't overwrite existing data)
@@ -613,9 +613,6 @@ def fit_skewed_multisweep(
 
         if fit_resonances:
             try:
-                # Use the bias frequency for fitting constraints
-                fit_center_freq = bias_freq if bias_freq is not None else original_cf
-                
                 # Set fr_lim based on the sweep span if not provided and we have frequency data
                 if fr_lim_fit is None and len(frequencies) > 1:
                     freq_span = frequencies[-1] - frequencies[0]
@@ -631,17 +628,9 @@ def fit_skewed_multisweep(
                     fr_lim=auto_fr_lim
                 )
                 resonance_data['fit_params'] = fit_params_result
-                
-                # Log successful fit for debugging
-                if fit_params_result.get('fr') != 'nan':
-                    fitted_freq = fit_params_result.get('fr', 'nan')
-                    fitted_Qr = fit_params_result.get('Qr', 'nan')
-                    # if fitted_freq != 'nan' and fitted_Qr != 'nan':
-                    #     print(f"Fitted resonance: original_cf={original_cf*1e-6:.3f} MHz, "
-                    #           f"fitted_fr={fitted_freq*1e-6:.3f} MHz, Qr={fitted_Qr:.0f}")
-                        
+
             except Exception as e:
-                warnings.warn(f"Fitting failed for resonance at {original_cf*1e-6:.3f} MHz during post-processing: {e}")
+                warnings.warn(f"Fitting failed for resonator {res_key!r} at {bias_freq*1e-6:.3f} MHz during post-processing: {e}")
                 # resonance_data['fit_params'] remains None
 
         if center_iq_circle:
@@ -649,19 +638,9 @@ def fit_skewed_multisweep(
                 # Always center the current iq_complex data
                 iq_centered_result = center_resonance_iq_circle(iq_complex)
                 resonance_data['iq_centered'] = iq_centered_result
-                
-                # Provide some feedback on centering
-                if iq_centered_result is not None and len(iq_centered_result) > 0:
-                    # Calculate how much the centering moved the data
-                    original_mean = np.mean(iq_complex)
-                    centered_mean = np.mean(iq_centered_result)
-                    shift_magnitude = abs(original_mean - centered_mean)
-                    # if shift_magnitude > 1e-6:  # Only log if significant shift
-                    #     print(f"IQ centering applied to {original_cf*1e-6:.3f} MHz: "
-                    #           f"shifted by {shift_magnitude:.6f} units")
-                        
+
             except Exception as e:
-                warnings.warn(f"IQ centering failed for resonance at {original_cf*1e-6:.3f} MHz during post-processing: {e}")
+                warnings.warn(f"IQ centering failed for resonator {res_key!r} at {bias_freq*1e-6:.3f} MHz during post-processing: {e}")
                 # resonance_data['iq_centered'] remains None
                 
     return multisweep_data

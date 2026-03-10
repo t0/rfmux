@@ -763,8 +763,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 if detector_id not in self.results_by_detector:
                     self.results_by_detector[detector_id] = {}
                 entry = dict(det_data)
-                entry['amplitude'] = amplitude
-                entry['direction'] = direction
                 entry['iteration'] = iteration
                 self.results_by_detector[detector_id][iteration] = entry
 
@@ -835,8 +833,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         for detector_id, iter_dict in self.results_by_detector.items():
             detector_data[detector_id] = {}
             for det_entry in iter_dict.values():
-                amp_val = det_entry.get('amplitude')
-                direction = det_entry.get('direction', 'upward')
+                amp_val = det_entry.get('sweep_amplitude')
+                direction = det_entry.get('sweep_direction', 'upward')
                 freqs = det_entry.get('frequencies', np.array([]))
                 # Use raw counts when in counts mode, otherwise voltage-converted data
                 if self.unit_mode == "counts":
@@ -961,8 +959,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         amp_dir_pairs = set()
         for iter_dict in self.results_by_detector.values():
             for entry in iter_dict.values():
-                amp = entry.get('amplitude')
-                direction = entry.get('direction', 'upward')
+                amp = entry.get('sweep_amplitude')
+                direction = entry.get('sweep_direction', 'upward')
                 if amp is not None:
                     amplitude_values.add(amp)
                     amp_dir_pairs.add((amp, direction))
@@ -1022,7 +1020,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 # Find the entry matching this amplitude and direction
                 data = None
                 for entry in iter_dict.values():
-                    if entry.get('amplitude') == amp_val and entry.get('direction', 'upward') == direction:
+                    if entry.get('sweep_amplitude') == amp_val and entry.get('sweep_direction', 'upward') == direction:
                         data = entry
                         break
                 if data is None:
@@ -1233,7 +1231,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     iter_dict = self.results_by_detector[det_idx]
                     if iter_dict:
                         first_entry = iter_dict[min(iter_dict.keys())]
-                        amp = first_entry.get('sweep_amplitude', first_entry.get('amplitude'))
+                        amp = first_entry.get('sweep_amplitude')
                         if amp is not None:
                             section_amps.append(amp)
 
@@ -1322,10 +1320,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.res_info_dict[c]['bias_frequency'] for c in sorted_codes
         ]
 
-        # Fall back to resonance_frequencies from initial_params if res_info_dict is empty
-        # (e.g. loaded data without res_info_dict)
+        # Fall back to sweep_center_frequencies (or legacy resonance_frequencies) from
+        # initial_params if res_info_dict is empty (e.g. loaded data without res_info_dict)
         if not dialog_seed_frequencies:
-            dialog_seed_frequencies = list(self.initial_params.get('resonance_frequencies', []))
+            dialog_seed_frequencies = list(
+                self.initial_params.get('sweep_center_frequencies')
+                or self.initial_params.get('resonance_frequencies', [])
+            )
 
         if not dialog_seed_frequencies:
             QtWidgets.QMessageBox.warning(self, "Cannot Re-run",
@@ -1433,7 +1434,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
             for iter_dict in self.results_by_detector.values():
                 for entry in iter_dict.values():
-                    amp = entry.get('amplitude')
+                    amp = entry.get('sweep_amplitude')
                     if amp is not None:
                         amplitude_values.add(amp)
             num_amps = len(amplitude_values)
@@ -1463,7 +1464,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     # Get detector data for this amplitude (any direction)
                     data = None
                     for entry in iter_dict.values():
-                        if entry.get('amplitude') == amp_val:
+                        if entry.get('sweep_amplitude') == amp_val:
                             data = entry
                             break
                     if data is None:
@@ -1981,8 +1982,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         if detector_idx in self.results_by_detector:
             for det_entry in self.results_by_detector[detector_idx].values():
-                amp_val = det_entry.get('amplitude')
-                direction = det_entry.get('direction', 'upward')
+                amp_val = det_entry.get('sweep_amplitude')
+                direction = det_entry.get('sweep_direction', 'upward')
                 actual_cf_for_this_amp = det_entry.get('bias_frequency',
                                                        det_entry.get('original_center_frequency'))
                 combo_key = f"{amp_val}:{direction}"
@@ -2020,8 +2021,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             detector_resonance_data = {}
 
             for det_entry in self.results_by_detector[det_idx].values():
-                amp_val = det_entry.get('amplitude')
-                direction = det_entry.get('direction', 'upward')
+                amp_val = det_entry.get('sweep_amplitude')
+                direction = det_entry.get('sweep_direction', 'upward')
                 actual_cf = det_entry.get('bias_frequency', det_entry.get('original_center_frequency'))
                 combo_key = f"{amp_val}:{direction}"
                 detector_resonance_data[combo_key] = {

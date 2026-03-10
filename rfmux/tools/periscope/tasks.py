@@ -485,7 +485,9 @@ class MultisweepTask(QtCore.QThread):
         self.params = params 
         self.signals = signals
         self.window = window 
-        self.baseline_resonance_frequencies = list(params.get('resonance_frequencies', []))
+        self.baseline_resonance_frequencies = list(
+            params.get('sweep_center_frequencies') or params.get('resonance_frequencies', [])
+        )
         self._running = True
         self.current_amplitude = -1
         self.current_iteration = -1

@@ -693,7 +693,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         """Extract section center frequencies from payload, optionally using fitted or sweep data."""
         
         params = payload['initial_parameters']
-        freqs = params['resonance_frequencies']  # Legacy key name for backward compatibility
+        # Support both new key name and legacy key name for backward compatibility
+        freqs = params.get('sweep_center_frequencies') or params.get('resonance_frequencies', [])
         
         if raw_section_centers:
             return freqs
@@ -762,15 +763,15 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             
             # Get center frequencies
             if self.load_multisweep:
-                params_dict['resonance_frequencies'] = []
+                params_dict['sweep_center_frequencies'] = []
                 freqs = self.sections_edit.text().split(',')
                 for f in freqs:
-                    params_dict['resonance_frequencies'].append(np.float64(f) * 1e6)
+                    params_dict['sweep_center_frequencies'].append(np.float64(f) * 1e6)
             else:
 
-                params_dict['resonance_frequencies'] = self.section_center_frequencies
+                params_dict['sweep_center_frequencies'] = self.section_center_frequencies
             
-            num_sections = len(params_dict['resonance_frequencies'])
+            num_sections = len(params_dict['sweep_center_frequencies'])
             
             # STEP 1: Parse base amplitude
             global_amp_text = self.global_amp_edit.text().strip()

@@ -1253,8 +1253,11 @@ class PeriscopeRuntime:
 
             panel._hide_progress_bars()
             
-            # Set NCO frequency based on resonance frequencies
-            reso_frequencies = params.get('resonance_frequencies', [])
+            # Set NCO frequency based on sweep center frequencies
+            reso_frequencies = (
+                params.get('sweep_center_frequencies')
+                or params.get('resonance_frequencies', [])
+            )
             
             if reso_frequencies:
                 span_hz = params.get('span_hz', 0)
@@ -2003,7 +2006,7 @@ class PeriscopeRuntime:
             "bias_frequency_method": None,
             "rotate_saved_data": False,
             "sweep_direction": "upward",
-            "resonance_frequencies": {self.module: [90e6, 91e6]},
+            "sweep_center_frequencies": {self.module: [90e6, 91e6]},
             "module": self.module,
             "apply_skewed_fit": False,
             "apply_nonlinear_fit": False,
@@ -2350,13 +2353,13 @@ class PeriscopeRuntime:
         # Mock data in detector-based format for smoke tests
         self.results_by_detector = {
             1: {
-                (0.1, "up"): {
+                0: {
                     "bias_frequency": 90e6,
                     "original_center_frequency": 90e6,
-                    "amplitude": 0.1,
-                    "direction": "up",
+                    "sweep_amplitude": 0.1,
+                    "sweep_direction": "upward",
+                    "sweep_center_frequency": 90e6,
                     "iteration": 0,
-                    "sweep_amplitudes": [0.1, 0.2],
                     "some_data": [1, 2, 3]
                 }
             }

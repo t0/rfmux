@@ -282,7 +282,7 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     # Display fit results
     print("\n   Fit results summary:")
     for idx, res_data in multisweep_results.items():
-        if isinstance(idx, (int, np.integer)):
+        if isinstance(idx, str):
             fit_params = res_data.get('fit_params', {})
             if fit_params.get('fr') != 'nan':
                 print(f"     Resonance {idx}: fr={fit_params['fr']/1e6:.3f} MHz, "

@@ -133,7 +133,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         if freq_item:
             freq_item.setTitle("Resonance Frequencies", color=pen_color)
             freq_item.setLabel('left', 'Frequency', units='Hz')
-            freq_item.setLabel('bottom', 'Detector ID')
+            freq_item.setLabel('bottom', 'Frequency Rank')
             freq_item.showGrid(x=True, y=True, alpha=0.3)
             self._style_axes(freq_item, pen_color)
         grid.addWidget(self.freq_plot, 0, 0)
@@ -386,7 +386,11 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._plot_q_histogram(self.qi_plot, qi_valid, "Qi")
         
     def _plot_frequency_scatter(self, fr_dict):
-        """Plot resonance frequency scatter. fr_dict: {detector_id: freq_hz}."""
+        """Plot resonance frequency scatter. fr_dict: {detector_id: freq_hz}.
+
+        The x-axis shows frequency rank (0-based index sorted by ascending frequency)
+        rather than raw detector IDs, so that string codes and integer keys both work.
+        """
         if not self.freq_plot:
             return
         
@@ -400,14 +404,15 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         if not fr_dict:
             return
         
-        # Extract detector IDs and frequencies
-        detector_ids = sorted(fr_dict.keys())
-        freqs = [fr_dict[det_id] for det_id in detector_ids]
+        # Sort detectors by frequency value; use rank as x-axis
+        sorted_ids = sorted(fr_dict, key=lambda k: fr_dict[k])
+        freqs = [fr_dict[det_id] for det_id in sorted_ids]
+        x_rank = list(range(len(sorted_ids)))
         
         # Create scatter plot
         color = TABLEAU10_COLORS[0]
         scatter = pg.ScatterPlotItem(
-            x=detector_ids,
+            x=x_rank,
             y=freqs,
             size=8,
             pen=pg.mkPen(color, width=1),
@@ -417,7 +422,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Add yield count to title
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-        total = len(detector_ids)
+        total = len(sorted_ids)
         title = f"Resonance Frequencies (Yield: {total})"
         freq_item.setTitle(title, color=pen_color)
         
@@ -529,7 +534,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         amp_values = [self.available_sweep_keys[idx][0] for idx in sorted(fr_by_sweep.keys())]
         amplitude_to_color = create_amplitude_color_map(amp_values, self.dark_mode)
         
-        # Plot each sweep with its color
+        # Plot each sweep with its color, using frequency rank as x-axis
         total_count = 0
         for sweep_idx in sorted(fr_by_sweep.keys()):
             fr_dict = fr_by_sweep[sweep_idx]
@@ -539,18 +544,20 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             amp_value = self.available_sweep_keys[sweep_idx][0]
             color = amplitude_to_color.get(amp_value, TABLEAU10_COLORS[0])
             
-            detector_ids = sorted(fr_dict.keys())
-            freqs = [fr_dict[det_id] for det_id in detector_ids]
+            # Sort by frequency value; use rank as x so string keys work
+            sorted_ids = sorted(fr_dict, key=lambda k: fr_dict[k])
+            freqs = [fr_dict[det_id] for det_id in sorted_ids]
+            x_rank = list(range(len(sorted_ids)))
             
             scatter = pg.ScatterPlotItem(
-                x=detector_ids,
+                x=x_rank,
                 y=freqs,
                 size=8,
                 pen=pg.mkPen(color, width=1),
                 brush=pg.mkBrush(color)
             )
             freq_item.addItem(scatter)
-            total_count += len(detector_ids)
+            total_count += len(sorted_ids)
         
         # Add title
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")

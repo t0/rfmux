@@ -77,10 +77,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.digest_window_count = 0  # Counter for naming digest tabs
         self.noise_panel_count = 0    # Counter for naming noise tabs
         
-        # Stores the initial/base CFs for detector ID and fallback. Order is important.
-        self.conceptual_section_frequencies: list[float] = list(self.initial_params.get('resonance_frequencies', []))
-        # Stores {amp: {conceptual_idx: output_cf}}
-        self.last_output_cfs_by_amp_and_conceptual_idx: dict[float, dict[int, float]] = {}
         # Amps used for the last configured/completed run, to compare if settings changed.
         # Use amp_arrays (new format) if present, falling back to amps (old format).
         _init_amp_arrays = self.initial_params.get('amp_arrays', [])
@@ -1249,6 +1245,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             'target_module': self.target_module,
             'initial_parameters': export_initial_params,
             'dac_scales_used': self.dac_scales,
+            'res_info_dict': self.res_info_dict,        # Lightweight resonator registry
             'results_by_detector': self.results_by_detector,
             'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
             'nco_frequency_hz': self.nco_frequency_hz,  # NCO frequency used for biasing
@@ -1268,179 +1265,142 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
 
-    def _get_fit_frequencies(self, freqs):
-        """Get fitted resonance frequencies from the first available amplitude data."""
+    def _get_fit_frequencies(self) -> list[float]:
+        """Get fitted resonance frequencies, ordered by channel_number.
+
+        Iterates through res_info_dict codes (sorted by channel_number) and looks up
+        the best available fit frequency from results_by_detector.  Falls back to
+        bias_frequency when no fit result is present.
+
+        Returns:
+            List of frequencies in Hz, sorted by channel_number.
+        """
+        if not self.res_info_dict:
+            return []
+
+        sorted_codes = sorted(
+            self.res_info_dict,
+            key=lambda c: self.res_info_dict[c].get('channel_number', 0)
+        )
+
         ref_freqs = []
-        for det_idx in range(1, len(freqs) + 1):
-            if det_idx not in self.results_by_detector:
+        for code in sorted_codes:
+            fallback = self.res_info_dict[code].get('bias_frequency', 0.0)
+            iter_dict = self.results_by_detector.get(code)
+            if not iter_dict:
+                ref_freqs.append(fallback)
                 continue
-            amp_dir_dict = self.results_by_detector[det_idx]
-            if not amp_dir_dict:
-                continue
-            first_entry = next(iter(amp_dir_dict.values()))
-            if first_entry.get('skewed_fit_success'):
+            first_entry = next(iter(iter_dict.values()))
+            if first_entry.get('skewed_fit_success') and first_entry.get('fit_params'):
                 ref_freqs.append(first_entry['fit_params']['fr'])
-            elif first_entry.get('nonlinear_fit_success'):
+            elif first_entry.get('nonlinear_fit_success') and first_entry.get('nonlinear_fit_params'):
                 ref_freqs.append(first_entry['nonlinear_fit_params']['fr'])
             else:
-                ref_freqs.append(first_entry.get('bias_frequency', first_entry.get('original_center_frequency')))
-        ref_freqs.sort()
+                ref_freqs.append(first_entry.get('bias_frequency', fallback))
         return ref_freqs
     
     
     def _rerun_multisweep(self):
         """
-        Allows the user to re-run the multisweep analysis, potentially with modified parameters.
-        Opens a MultisweepDialog to gather new parameters.
+        Re-run the multisweep analysis, seeding the dialog from the live res_info_dict.
+        Opens a MultisweepDialog for the user to adjust parameters before re-running.
         """
-        # Ensure MultisweepDialog is available (local import to avoid circular dependencies if any)
         from .dialogs import MultisweepDialog
 
-        if not self.conceptual_section_frequencies: # Check conceptual frequencies
+        if not self.res_info_dict and not self.results_by_detector:
+            QtWidgets.QMessageBox.warning(self, "Cannot Re-run",
+                                          "No detector data available to re-run from.")
+            return
+
+        # Build ordered list of current bias frequencies (sorted by channel_number)
+        sorted_codes = sorted(
+            self.res_info_dict,
+            key=lambda c: self.res_info_dict[c].get('channel_number', 0)
+        ) if self.res_info_dict else []
+
+        dialog_seed_frequencies = [
+            self.res_info_dict[c]['bias_frequency'] for c in sorted_codes
+        ]
+
+        # Fall back to resonance_frequencies from initial_params if res_info_dict is empty
+        # (e.g. loaded data without res_info_dict)
+        if not dialog_seed_frequencies:
+            dialog_seed_frequencies = list(self.initial_params.get('resonance_frequencies', []))
+
+        if not dialog_seed_frequencies:
             QtWidgets.QMessageBox.warning(self, "Cannot Re-run",
                                           "No center frequencies are known to periscope to run on.")
             return
 
-        # --- Determine frequencies to seed the dialog ---
-        dialog_seed_frequencies = list(self.conceptual_section_frequencies) # Start with conceptual
-
-        ##### Getting the fit values for updating in re-run ######
-
-        fit_freqs = self._get_fit_frequencies(dialog_seed_frequencies)
-
-        
-        if self.current_run_amps: # If there was a previous/current run configuration
-            # Use a representative amplitude from the current/last run to seed the dialog
-            # For simplicity, let's use the first amplitude from the current_run_amps.
-            representative_amp_for_seeding = self.current_run_amps[0]
-            for idx, conceptual_cf in enumerate(self.conceptual_section_frequencies):
-                remembered_cf = self._get_closest_remembered_cf(idx, representative_amp_for_seeding)
-                if remembered_cf is not None:
-                    dialog_seed_frequencies[idx] = remembered_cf
-        
-        
-        # Prepare other parameters for the dialog
-        dialog_initial_params = self.initial_params.copy() # Use a copy of the window's last run parameters
-        # The 'resonance_frequencies' in dialog_initial_params will be overwritten by dialog_seed_frequencies
-        # when creating the dialog instance if MultisweepDialog uses its 'initial_params' argument
-        # to populate its own 'resonance_frequencies' field.
-        # However, MultisweepDialog takes 'resonance_frequencies' as a direct argument.
+        # Fit frequencies (for user's "use fit frequency" option in dialog)
+        fit_freqs = self._get_fit_frequencies() or None
 
         dialog = MultisweepDialog(
             parent=self,
-            section_center_frequencies=dialog_seed_frequencies, # Seed with potentially updated CFs
+            section_center_frequencies=dialog_seed_frequencies,
             dac_scales=self.dac_scales,
             current_module=self.target_module,
-            initial_params=dialog_initial_params, # Pass other existing params
-            load_multisweep = False,
-            fit_frequencies = fit_freqs
+            initial_params=self.initial_params.copy(),
+            load_multisweep=False,
+            fit_frequencies=fit_freqs,
         )
 
-        if dialog.exec(): # True if user clicked OK
-            # Reset the loaded data flag since we're now generating fresh data
-            self.is_loaded_data = False
-            
-            # Update the dock title to remove "(Loaded)" suffix
-            periscope = self._get_periscope_parent()
-            if periscope:
-                my_dock = periscope.dock_manager.find_dock_for_widget(self)
-                if my_dock:
-                    # Get current title and remove " (Loaded)" if present
-                    current_title = my_dock.windowTitle()
-                    new_title = current_title.replace(" (Loaded)", "")
-                    my_dock.setWindowTitle(new_title)
-            
-            self.noise_spectrum_btn.setEnabled(False)
-            new_params_from_dialog = dialog.get_parameters()
-            if not new_params_from_dialog:
-                return # Dialog returned None, likely due to validation error
+        if not dialog.exec():
+            return
 
+        self.is_loaded_data = False
 
-            # Use amp_arrays (new format) if present, falling back to amps (old format).
-            _new_amp_arrays = new_params_from_dialog.get('amp_arrays', [])
-            if _new_amp_arrays:
-                new_amps_for_this_run = [arr[0] for arr in _new_amp_arrays if arr]
+        # Update dock title
+        periscope = self._get_periscope_parent()
+        if periscope:
+            my_dock = periscope.dock_manager.find_dock_for_widget(self)
+            if my_dock:
+                my_dock.setWindowTitle(my_dock.windowTitle().replace(" (Loaded)", ""))
+
+        self.noise_spectrum_btn.setEnabled(False)
+        new_params = dialog.get_parameters()
+        if not new_params:
+            return
+
+        # Update current_run_amps
+        _new_amp_arrays = new_params.get('amp_arrays', [])
+        if _new_amp_arrays:
+            self.current_run_amps = [arr[0] for arr in _new_amp_arrays if arr]
+        else:
+            self.current_run_amps = list(new_params.get('amps', []))
+        self.probe_amplitudes = list(self.current_run_amps)
+
+        # Apply parameters and inject res_info_dict so MultisweepTask re-uses existing codes
+        self.initial_params.update(new_params)
+        if self.res_info_dict:
+            self.initial_params['res_info_dict'] = self.res_info_dict
+
+        # Reset window state for the new sweep
+        self.results_by_detector.clear()
+        self.digest_panel = None
+        self.histograms_generated = False
+        self._redraw_plots()
+        if self.progress_bar: self.progress_bar.setValue(0)
+        if self.progress_group: self.progress_group.setVisible(True)
+
+        num_amplitudes = len(self.probe_amplitudes)
+        sweep_direction = self.initial_params.get('sweep_direction', 'upward')
+        self.total_iterations = num_amplitudes * (2 if sweep_direction == "both" else 1)
+        sweep_direction_norm = sweep_direction.lower().strip() if sweep_direction else ""
+        direction_text = "Down" if sweep_direction_norm == "downward" else "Up"
+
+        if self.current_amp_label:
+            if num_amplitudes > 0:
+                self.current_amp_label.setText(f"Iteration 1/{self.total_iterations} ({direction_text})")
             else:
-                new_amps_for_this_run = list(new_params_from_dialog.get('amps', []))
-            # section_frequencies_from_dialog are the ones dialog was seeded with, as it doesn't change them.
-            section_frequencies_from_dialog = list(new_params_from_dialog.get('resonance_frequencies', []))
+                self.current_amp_label.setText("No sweeps defined. (Waiting...)")
 
-            # --- Determine the final input CFs for the new sweep task ---
-            # This list will be passed to the MultisweepTask as its baseline.
-            # The task itself will then refine this per amplitude.
-            final_baseline_cfs_for_new_task = list(self.conceptual_section_frequencies)
-
-            if not new_amps_for_this_run: # No amplitudes specified, fall back or warn
-                 QtWidgets.QMessageBox.warning(self, "Configuration Error", "No amplitudes specified for the new sweep.")
-                 # Default to conceptual, or could use section_frequencies_from_dialog
-                 final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
-            elif new_amps_for_this_run == self.current_run_amps:
-                # Amplitudes haven't changed from the last run configuration.
-                # Use the frequencies that were in the dialog (which were seeded from history).
-                final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
-            else:
-                # Amplitudes have changed. For each conceptual section,
-                # find the best historical CF based on the *new* representative amplitude.
-                # If no history, use what was in the dialog (which was seeded based on old rep. amp or conceptual).
-                if new_amps_for_this_run: # Ensure there's at least one new amp
-                    representative_new_amp = new_amps_for_this_run[0]
-                    for idx, conceptual_cf in enumerate(self.conceptual_section_frequencies):
-                        remembered_cf = self._get_closest_remembered_cf(idx, representative_new_amp)
-                        if remembered_cf is not None:
-                            final_baseline_cfs_for_new_task[idx] = remembered_cf
-                        else:
-                            # Fallback to what was in the dialog for this index if no better history for new amp
-                            if idx < len(section_frequencies_from_dialog):
-                                 final_baseline_cfs_for_new_task[idx] = section_frequencies_from_dialog[idx]
-                            # Else it remains the conceptual_cf (already initialized)
-                else: # Should be caught by the "No amplitudes specified" case, but as a safeguard
-                    final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
-
-
-            # Update the 'resonance_frequencies' in new_params_from_dialog to be this chosen baseline
-            new_params_from_dialog['resonance_frequencies'] = final_baseline_cfs_for_new_task
-            
-            # Store the parameters that will actually be used for this run
-            self.initial_params.update(new_params_from_dialog)
-            self.current_run_amps = new_amps_for_this_run # Update current run amps
-            self.probe_amplitudes = list(self.current_run_amps) # For progress display
-
-            # Reset window state for the new sweep
-            self.results_by_detector.clear()
-            self.digest_panel = None  # Force recreation with fresh data on completion
-            self.histograms_generated = False  # Reset histogram flag for new run
-            self._redraw_plots() # Clear plots
-            if self.progress_bar: self.progress_bar.setValue(0)
-            if self.progress_group: self.progress_group.setVisible(True)
-            
-            # Re-calculate total iterations based on new sweep direction
-            num_amplitudes = len(self.probe_amplitudes)
-            sweep_direction = self.initial_params.get('sweep_direction', 'upward')
-            self.total_iterations = num_amplitudes * (2 if sweep_direction == "both" else 1)
-            
-            # Determine initial direction text - consistent with our other direction text logic
-            sweep_direction_norm = sweep_direction.lower().strip() if sweep_direction else ""
-            direction_text = "Down" if sweep_direction_norm == "downward" else "Up"
-
-            
-            
-            if self.current_amp_label:
-                if num_amplitudes > 0:
-                    self.current_amp_label.setText(f"Iteration 1/{self.total_iterations} ({direction_text})")
-                else:
-                    self.current_amp_label.setText("No sweeps defined. (Waiting...)")
-            
-            parent_widget = self._get_periscope_parent()
-            if parent_widget and hasattr(parent_widget, '_start_multisweep_analysis_for_window'):
-                # Pass self.initial_params which now contains the correctly determined baseline CFs.
-                # Also inject the live res_info_dict so MultisweepTask uses Option B (res_info_dict=...)
-                # on every subsequent call, preserving the same resonator codes and channel assignments.
-                if self.res_info_dict:
-                    self.initial_params['res_info_dict'] = self.res_info_dict
-                parent_widget._start_multisweep_analysis_for_window(self, self.initial_params) # type: ignore
-            else:
-                QtWidgets.QMessageBox.warning(self, "Error",
-                                              "Cannot trigger re-run. Parent linkage or method missing.")
+        parent_widget = self._get_periscope_parent()
+        if parent_widget and hasattr(parent_widget, '_start_multisweep_analysis_for_window'):
+            parent_widget._start_multisweep_analysis_for_window(self, self.initial_params)  # type: ignore
+        else:
+            QtWidgets.QMessageBox.warning(self, "Error",
+                                          "Cannot trigger re-run. Parent linkage or method missing.")
 
     def closeEvent(self, event: pg.QtGui.QCloseEvent):
         """
@@ -1582,7 +1542,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
 
     def _open_noise_spectrum_dialog(self):
-        num_res = len(self.conceptual_section_frequencies)
+        num_res = len(self.res_info_dict) if self.res_info_dict else len(self.results_by_detector)
         periscope = self._get_periscope_parent()
         
         if not periscope or periscope.crs is None: 
@@ -1681,7 +1641,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     
     
                 self.spectrum_noise_data['noise_parameters'] = params
-                num_res = len(self.conceptual_section_frequencies)
+                num_res = len(self.res_info_dict) if self.res_info_dict else len(self.results_by_detector)
     
                 amplitudes = []
                 dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
@@ -1806,21 +1766,24 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             print("Warning: No noise spectrum data available")
             return
             
-        # Get conceptual frequency for this detector
-        if detector_idx <= len(self.conceptual_section_frequencies) and detector_idx > 0:
-            conceptual_resonance_base_freq_hz = self.conceptual_section_frequencies[detector_idx - 1]
-        else:
-            print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
+        # Get resonance frequency for this detector, keyed by channel_number.
+        # Build a {channel_number: bias_frequency} map from res_info_dict.
+        ch_to_freq = {
+            info.get('channel_number', 0): info.get('bias_frequency')
+            for info in self.res_info_dict.values()
+        } if self.res_info_dict else {}
+        conceptual_resonance_base_freq_hz = ch_to_freq.get(detector_idx)
+        if conceptual_resonance_base_freq_hz is None:
+            print(f"Warning: Detector channel {detector_idx} not found in res_info_dict.")
             return
-            
-        # Gather data for ALL detectors to enable navigation (similar logic to digest panel)
+
+        # Gather data for ALL detectors (channel_number → freq) to enable navigation
         all_detectors_data = {}
-        # We need conceptual frequencies for navigation
-        for i, freq in enumerate(self.conceptual_section_frequencies):
-            det_id = i + 1
-            all_detectors_data[det_id] = {
-                'conceptual_freq_hz': freq
-            }
+        for code, info in self.res_info_dict.items():
+            ch = info.get('channel_number', 0)
+            freq = info.get('bias_frequency')
+            if ch and freq is not None:
+                all_detectors_data[ch] = {'conceptual_freq_hz': freq}
             
         # Find Periscope parent to create docked panel
         periscope = self._get_periscope_parent()
@@ -2002,11 +1965,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             if conceptual_resonance_base_freq_hz is None:
                 print(f"Warning: Could not determine frequency for detector {detector_idx!r}")
                 return
-        elif isinstance(detector_idx, (int, np.integer)) and 0 < detector_idx <= len(self.conceptual_section_frequencies):
-            conceptual_resonance_base_freq_hz = self.conceptual_section_frequencies[detector_idx - 1]
         else:
-            print(f"Warning: Detector index {detector_idx!r} not found or out of range.")
-            return
+            # Legacy integer keys (old format) — read frequency from sweep data directly
+            first_entry = next(iter(self.results_by_detector.get(detector_idx, {}).values()), {})
+            conceptual_resonance_base_freq_hz = first_entry.get(
+                'bias_frequency', first_entry.get('original_center_frequency')
+            )
+            if conceptual_resonance_base_freq_hz is None:
+                print(f"Warning: Detector index {detector_idx!r} not found or has no frequency.")
+                return
 
         # Gather data for this specific detector across all amplitudes and directions
         section_data_for_digest = {}
@@ -2035,19 +2002,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
 
         for det_idx in sorted(self.results_by_detector.keys(), key=lambda k: str(k)):
-            # Determine reference frequency — handle both string codes and legacy int indices
+            # Determine reference frequency from sweep data (works for both string codes and legacy ints)
+            _entry = next(iter(self.results_by_detector[det_idx].values()), {})
             if isinstance(det_idx, str):
-                _entry = next(iter(self.results_by_detector[det_idx].values()), {})
                 conceptual_freq_hz = (
                     _entry.get('bias_frequency')
                     or _entry.get('sweep_center_frequency')
                     or _entry.get('original_center_frequency')
                 )
-            elif isinstance(det_idx, (int, np.integer)) and 0 < det_idx <= len(self.conceptual_section_frequencies):
-                conceptual_freq_hz = self.conceptual_section_frequencies[det_idx - 1]
             else:
-                first_entry = next(iter(self.results_by_detector[det_idx].values()), {})
-                conceptual_freq_hz = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
+                # Legacy integer keys — read directly from the sweep entry
+                conceptual_freq_hz = _entry.get('bias_frequency', _entry.get('original_center_frequency'))
             
             if conceptual_freq_hz is None:
                 continue
@@ -2115,37 +2080,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if switch_to_tab:
             self.plot_tabs.setCurrentWidget(self.digest_tab)
 
-    def _get_closest_remembered_cf(self, conceptual_idx: int, target_amp: float) -> float | None:
-        """
-        Finds the remembered output CF for a given conceptual section index,
-        for the amplitude in history closest to target_amp.
-
-        Args:
-            conceptual_idx: Index in self.conceptual_section_frequencies.
-            target_amp: The amplitude we are trying to find a historical match for.
-
-        Returns:
-            The remembered output CF (float) or None if no suitable history found.
-        """
-        min_abs_amp_diff = np.inf
-        best_cf_found = None
-
-        if not self.last_output_cfs_by_amp_and_conceptual_idx:
-            return None
-
-        for amp_in_history, cfs_at_this_amp in self.last_output_cfs_by_amp_and_conceptual_idx.items():
-            if conceptual_idx in cfs_at_this_amp:
-                remembered_cf = cfs_at_this_amp[conceptual_idx]
-                current_diff = abs(amp_in_history - target_amp)
-
-                if current_diff < min_abs_amp_diff:
-                    min_abs_amp_diff = current_diff
-                    best_cf_found = remembered_cf
-                elif current_diff == min_abs_amp_diff:
-                    pass
-        
-        return best_cf_found
-    
     def _get_periscope_parent(self):
         """Find and return the Periscope parent window.
 
@@ -2316,8 +2250,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Show success dialog
         num_biased = len(biased_results)
-        total_detectors = len(self.conceptual_section_frequencies)
-        
+        total_detectors = len(self.res_info_dict) if self.res_info_dict else len(self.results_by_detector)
+
         msg = f"Successfully biased {num_biased} out of {total_detectors} detectors.\n\n"
         
         if num_biased > 0:

@@ -1,25 +1,252 @@
-"""Dialog for configuring Bias KIDs algorithm parameters."""
+"""
+Persistent settings panel for the bias-finding algorithm.
 
-from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout, QFormLayout,
-                             QSpinBox, QDoubleSpinBox, QCheckBox, QGroupBox, QLabel)
+``BiasSettingsPanel`` is a non-modal ``QWidget`` (not a ``QDialog``) that
+retains its values between "Find Bias" runs.  Open it from the "⚙ Bias
+Settings" button on the MultisweepPanel toolbar; it appears as a small
+floating window and can be dismissed without disrupting ongoing work.
+
+``get_settings()`` returns a dict that can be passed directly to
+``FindBiasTask`` as *bias_settings*.
+"""
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QFormLayout, QGroupBox, QLabel,
+    QDoubleSpinBox, QCheckBox, QButtonGroup, QRadioButton,
+    QPushButton, QHBoxLayout,
+)
 from PyQt6.QtCore import Qt
-import numpy as np
 
-from .utils import (QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator, QDoubleValidator, QIntValidator)
+
+class BiasSettingsPanel(QWidget):
+    """
+    Persistent, non-modal settings panel for the bias-finding algorithm.
+
+    Intended to be instantiated once by ``MultisweepPanel`` and shown/raised
+    when the user clicks "⚙ Bias Settings".  Values persist for the lifetime
+    of the panel.
+
+    Call :meth:`get_settings` to retrieve the current parameter dict, which
+    can be passed directly to :class:`~rfmux.tools.periscope.tasks.FindBiasTask`
+    as *bias_settings*.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Bias Finding Settings")
+        # Float as a real top-level window when shown without a parent holding it
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowCloseButtonHint |
+            Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setMinimumWidth(380)
+        self._setup_ui()
+
+    # ── UI construction ───────────────────────────────────────────────────────
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        # ── Bifurcation detection ─────────────────────────────────────────────
+        bifurc_group = QGroupBox("Bifurcation Detection")
+        bifurc_layout = QFormLayout()
+        bifurc_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+
+        self.spike_prominence_spin = QDoubleSpinBox()
+        self.spike_prominence_spin.setRange(0.5, 20.0)
+        self.spike_prominence_spin.setSingleStep(0.5)
+        self.spike_prominence_spin.setDecimals(1)
+        self.spike_prominence_spin.setValue(2.0)
+        self.spike_prominence_spin.setToolTip(
+            "Bifurcation spike prominence threshold =\n"
+            "  range(dist) / spike_prominence_factor\n"
+            "Larger → less sensitive."
+        )
+        bifurc_layout.addRow("Spike Prominence Factor:", self.spike_prominence_spin)
+
+        self.spike_height_spin = QDoubleSpinBox()
+        self.spike_height_spin.setRange(0.5, 20.0)
+        self.spike_height_spin.setSingleStep(0.5)
+        self.spike_height_spin.setDecimals(1)
+        self.spike_height_spin.setValue(3.0)
+        self.spike_height_spin.setToolTip(
+            "Bifurcation spike height threshold =\n"
+            "  spike_height_factor × std(distdiff)\n"
+            "Larger → less sensitive."
+        )
+        bifurc_layout.addRow("Spike Height Factor:", self.spike_height_spin)
+
+        self.fallback_cb = QCheckBox("Fallback to Highest Amplitude")
+        self.fallback_cb.setChecked(True)
+        self.fallback_cb.setToolTip(
+            "If no bifurcation is found across all amplitudes,\n"
+            "use the highest available amplitude as the bias point.\n"
+            "If unchecked, resonators without a detected bifurcation\n"
+            "are skipped (bias_found = False)."
+        )
+        bifurc_layout.addRow("", self.fallback_cb)
+
+        bifurc_group.setLayout(bifurc_layout)
+        layout.addWidget(bifurc_group)
+
+        # ── Bias frequency refinement ─────────────────────────────────────────
+        freq_group = QGroupBox("Bias Frequency Refinement")
+        freq_layout = QFormLayout()
+        freq_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+
+        self.max_deriv_dist_spin = QDoubleSpinBox()
+        self.max_deriv_dist_spin.setRange(1.0, 5000.0)
+        self.max_deriv_dist_spin.setSingleStep(10.0)
+        self.max_deriv_dist_spin.setDecimals(0)
+        self.max_deriv_dist_spin.setValue(100.0)
+        self.max_deriv_dist_spin.setSuffix(" kHz")
+        self.max_deriv_dist_spin.setToolTip(
+            "Maximum distance (kHz) that the max-derivative point\n"
+            "may lie from the reference frequency before it is\n"
+            "rejected as an outlier and the reference is used instead."
+        )
+        freq_layout.addRow("Max Deriv Distance:", self.max_deriv_dist_spin)
+
+        # Reference frequency source radio buttons
+        ref_label = QLabel("Reference Frequency Source:")
+        freq_layout.addRow(ref_label)
+
+        self._ref_freq_group = QButtonGroup(self)
+        radio_layout = QVBoxLayout()
+        radio_layout.setSpacing(2)
+
+        self.rb_bias_freq = QRadioButton("Bias frequency (res_info_dict)")
+        self.rb_bias_freq.setChecked(True)
+        self.rb_bias_freq.setToolTip(
+            "Use the existing bias_frequency stored in res_info_dict\n"
+            "(i.e. the sweep-centre frequency set during the multisweep run)."
+        )
+        self._ref_freq_group.addButton(self.rb_bias_freq)
+        radio_layout.addWidget(self.rb_bias_freq)
+
+        self.rb_fit_fr = QRadioButton("Fitted resonance frequency (fr)")
+        self.rb_fit_fr.setToolTip(
+            "Use the fitted fr from fit_params or nonlinear_fit_params\n"
+            "stored in the sweep entry. Falls back to sweep_center_frequency\n"
+            "when no fit result is available."
+        )
+        self._ref_freq_group.addButton(self.rb_fit_fr)
+        radio_layout.addWidget(self.rb_fit_fr)
+
+        self.rb_sweep_center = QRadioButton("Sweep centre frequency")
+        self.rb_sweep_center.setToolTip(
+            "Always use sweep_center_frequency from the sweep entry\n"
+            "(equivalent to the original multisweep centre)."
+        )
+        self._ref_freq_group.addButton(self.rb_sweep_center)
+        radio_layout.addWidget(self.rb_sweep_center)
+
+        freq_layout.addRow(radio_layout)
+        freq_group.setLayout(freq_layout)
+        layout.addWidget(freq_group)
+
+        # ── Diagnostic fit ────────────────────────────────────────────────────
+        fit_group = QGroupBox("Diagnostic Nonlinear Fit")
+        fit_layout = QFormLayout()
+
+        self.fit_selected_cb = QCheckBox("Fit Selected Amplitude")
+        self.fit_selected_cb.setChecked(True)
+        self.fit_selected_cb.setToolTip(
+            "After selecting the optimal (non-bifurcated) amplitude,\n"
+            "run the nonlinear resonator fitter on that sweep as a\n"
+            "diagnostic.  The fit is skipped if the selected entry is\n"
+            "itself bifurcated."
+        )
+        fit_layout.addRow("", self.fit_selected_cb)
+        fit_group.setLayout(fit_layout)
+        layout.addWidget(fit_group)
+
+        # ── Buttons ───────────────────────────────────────────────────────────
+        btn_layout = QHBoxLayout()
+        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn.clicked.connect(self._reset_defaults)
+        btn_layout.addWidget(reset_btn)
+        btn_layout.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.hide)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def get_settings(self) -> dict:
+        """
+        Return the current settings as a dict suitable for passing to
+        :class:`~rfmux.tools.periscope.tasks.FindBiasTask` as *bias_settings*.
+
+        Keys:
+
+        * ``spike_prominence_factor`` (float)
+        * ``spike_height_factor`` (float)
+        * ``max_deriv_distance_hz`` (float) — converted from kHz to Hz
+        * ``fallback_to_highest`` (bool)
+        * ``reference_freq_source`` (str) — one of
+          ``"bias_frequency"``, ``"fit_fr"``, ``"sweep_center"``
+        * ``fit_selected_amplitude`` (bool)
+        """
+        if self.rb_fit_fr.isChecked():
+            ref_source = "fit_fr"
+        elif self.rb_sweep_center.isChecked():
+            ref_source = "sweep_center"
+        else:
+            ref_source = "bias_frequency"
+
+        return {
+            'spike_prominence_factor': self.spike_prominence_spin.value(),
+            'spike_height_factor':     self.spike_height_spin.value(),
+            'max_deriv_distance_hz':   self.max_deriv_dist_spin.value() * 1e3,
+            'fallback_to_highest':     self.fallback_cb.isChecked(),
+            'reference_freq_source':   ref_source,
+            'fit_selected_amplitude':  self.fit_selected_cb.isChecked(),
+        }
+
+    # Alias so that ParamKeyExtractor (which looks for get_parameters) can
+    # validate the settings keys against the smoke-test mock dict.
+    get_parameters = get_settings
+
+    # ── Private helpers ───────────────────────────────────────────────────────
+
+    def _reset_defaults(self):
+        """Restore all controls to their default values."""
+        self.spike_prominence_spin.setValue(2.0)
+        self.spike_height_spin.setValue(3.0)
+        self.max_deriv_dist_spin.setValue(100.0)
+        self.fallback_cb.setChecked(True)
+        self.rb_bias_freq.setChecked(True)
+        self.fit_selected_cb.setChecked(True)
+
+
+# ── Load Bias Dialog (legacy "Load Bias from file" feature) ───────────────────
+
 import pickle
 
-def load_bias_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
-    """
-    Loads a bias payload from a pickle file.
+from PyQt6.QtWidgets import QDialog, QDialogButtonBox
 
-    If file_path is None, it prompts the user (blocking fallback).
-    Otherwise loads directly from the given path.
+
+def load_bias_payload(parent, file_path=None):
     """
+    Load a bias payload dict from a pickle file.
+
+    If *file_path* is None, opens a file chooser dialog.
+    Returns the payload dict on success, or None on failure/cancel.
+    """
+    from PyQt6.QtWidgets import QFileDialog, QMessageBox
+
     if file_path is None:
-        # Fallback blocking dialog if no path is passed
-        options = QtWidgets.QFileDialog.Options()
-        options |= QtWidgets.QFileDialog.Option.DontUseNativeDialog
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+        options = QFileDialog.Options()
+        options |= QFileDialog.Option.DontUseNativeDialog
+        file_path, _ = QFileDialog.getOpenFileName(
             parent,
             "Load Bias Parameters",
             "",
@@ -34,429 +261,149 @@ def load_bias_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
         with open(file_path, "rb") as fh:
             payload = pickle.load(fh)
     except Exception as exc:
-        QtWidgets.QMessageBox.critical(
-            parent,
-            "Load Failed",
-            f"Could not read '{file_path}':\n{exc}",
-        )
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.critical(parent, "Load Failed",
+                             f"Could not read '{file_path}':\n{exc}")
         return None
 
     if (
         isinstance(payload, dict)
         and isinstance(payload.get("initial_parameters"), dict)
-        and (payload.get("bias_kids_output") is not None)
+        and payload.get("bias_kids_output") is not None
     ):
         return payload
 
-    QtWidgets.QMessageBox.warning(
-        parent,
-        "Invalid File",
-        "The selected file does not contain Bias parameters.",
-    )
+    from PyQt6.QtWidgets import QMessageBox
+    QMessageBox.warning(parent, "Invalid File",
+                        "The selected file does not contain Bias parameters.")
     return None
 
 
+class LoadBiasDialog(QDialog):
+    """
+    Dialog for loading a previously saved bias configuration from a pickle file
+    and applying it directly to the hardware, bypassing the Find/Apply Bias workflow.
 
-class BiasKidsDialog(QDialog):
-    """Dialog for configuring Bias KIDs algorithm parameters."""
-    
-    def __init__(self, parent=None, active_module : int | None = None, load_bias = False, loaded_data: dict | None = None):
+    This is a legacy "Load Bias" feature accessible from the main Periscope window.
+    """
+
+    def __init__(self, parent=None, active_module=None, loaded_data=None):
         super().__init__(parent)
-        self.setWindowTitle("Bias KIDs Configuration")
+        self.setWindowTitle("Load Bias")
         self.setModal(True)
-        self.setMinimumWidth(400)
-        self._load_data = loaded_data or {}  # Pre-populate if provided
+        self.setMinimumWidth(500)
+        self._load_data = loaded_data or {}
         self.use_load_file = False
         self.current_module = active_module
+        self._setup_ui()
 
-        if load_bias:
-            self.load_ui()
-        else:
-            self.setup_ui()
+    def _setup_ui(self):
+        from PyQt6.QtWidgets import (
+            QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+        )
+        from PyQt6.QtCore import Qt, QTimer
 
-
-    def setup_ui(self):
-        # Create layout
         layout = QVBoxLayout(self)
-        
-        # Basic parameters group
-        basic_group = QGroupBox("Basic Parameters")
-        basic_layout = QFormLayout()
-        
-        # Nonlinear threshold
-        self.nonlinear_threshold_spin = QDoubleSpinBox()
-        self.nonlinear_threshold_spin.setRange(0.1, 2.0)
-        self.nonlinear_threshold_spin.setValue(0.77)
-        self.nonlinear_threshold_spin.setSingleStep(0.01)
-        self.nonlinear_threshold_spin.setDecimals(2)
-        self.nonlinear_threshold_spin.setToolTip(
-            "Maximum acceptable nonlinear parameter 'a' for biasing.\n"
-            "Detectors with 'a' above this threshold will use fallback amplitude."
-        )
-        basic_layout.addRow("Nonlinear Threshold:", self.nonlinear_threshold_spin)
-        
-        # Fallback to lowest checkbox
-        self.fallback_checkbox = QCheckBox("Fallback to Lowest Amplitude")
-        self.fallback_checkbox.setChecked(True)
-        self.fallback_checkbox.setToolTip(
-            "If no suitable amplitude is found (all bifurcated or above nonlinear threshold),\n"
-            "use the lowest available amplitude. If unchecked, such detectors are skipped."
-        )
-        basic_layout.addRow("", self.fallback_checkbox)
-        
-        basic_group.setLayout(basic_layout)
-        layout.addWidget(basic_group)
-        
-        # Phase optimization group
-        phase_group = QGroupBox("Phase Optimization")
-        phase_layout = QFormLayout()
-        
-        # Optimize phase checkbox
-        self.optimize_phase_checkbox = QCheckBox("Enable Phase Optimization")
-        self.optimize_phase_checkbox.setChecked(False)
-        self.optimize_phase_checkbox.setToolTip(
-            "Scan through ADC phases to find the phase that maximizes\n"
-            "the variance in the bandpass-filtered Q timestream."
-        )
-        phase_layout.addRow("", self.optimize_phase_checkbox)
-        
-        # Bandpass filter parameters
-        filter_label = QLabel("Bandpass Filter:")
-        filter_label.setStyleSheet("font-weight: bold;")
-        phase_layout.addRow(filter_label, QLabel())
-        
-        # Low cutoff frequency
-        self.lowcut_spin = QDoubleSpinBox()
-        self.lowcut_spin.setRange(0.1, 100.0)
-        self.lowcut_spin.setValue(5.0)
-        self.lowcut_spin.setSingleStep(0.5)
-        self.lowcut_spin.setDecimals(1)
-        self.lowcut_spin.setSuffix(" Hz")
-        self.lowcut_spin.setToolTip("Low cutoff frequency for bandpass filter")
-        phase_layout.addRow("Low Cutoff:", self.lowcut_spin)
-        
-        # High cutoff frequency
-        self.highcut_spin = QDoubleSpinBox()
-        self.highcut_spin.setRange(1.0, 500.0)
-        self.highcut_spin.setValue(20.0)
-        self.highcut_spin.setSingleStep(1.0)
-        self.highcut_spin.setDecimals(1)
-        self.highcut_spin.setSuffix(" Hz")
-        self.highcut_spin.setToolTip("High cutoff frequency for bandpass filter")
-        phase_layout.addRow("High Cutoff:", self.highcut_spin)
-        
-        # Sampling frequency
-        self.fs_spin = QDoubleSpinBox()
-        self.fs_spin.setRange(100.0, 10000.0)
-        self.fs_spin.setValue(597.0)
-        self.fs_spin.setSingleStep(1.0)
-        self.fs_spin.setDecimals(1)
-        self.fs_spin.setSuffix(" Hz")
-        self.fs_spin.setToolTip("Sampling frequency for bandpass filter")
-        phase_layout.addRow("Sampling Frequency:", self.fs_spin)
-        
-        # Apply bandpass filter checkbox
-        self.apply_bandpass_checkbox = QCheckBox("Apply Bandpass Filter")
-        self.apply_bandpass_checkbox.setChecked(True)
-        self.apply_bandpass_checkbox.setToolTip(
-            "Apply a bandpass filter to the Q timestream before calculating variance.\n"
-            "This can help isolate the signal of interest from noise."
-        )
-        phase_layout.addRow("", self.apply_bandpass_checkbox)
-        
-        # Phase optimization parameters
-        opt_label = QLabel("Optimization:")
-        opt_label.setStyleSheet("font-weight: bold;")
-        phase_layout.addRow(opt_label, QLabel())
-        
-        # Number of samples per phase
-        self.num_samples_spin = QSpinBox()
-        self.num_samples_spin.setRange(50, 1000)
-        self.num_samples_spin.setValue(300)
-        self.num_samples_spin.setSingleStep(50)
-        self.num_samples_spin.setToolTip(
-            "Number of samples to collect at each phase\n"
-            "for variance calculation"
-        )
-        phase_layout.addRow("Samples per Phase:", self.num_samples_spin)
-        
-        # Phase step size
-        self.phase_step_spin = QSpinBox()
-        self.phase_step_spin.setRange(1, 45)
-        self.phase_step_spin.setValue(5)
-        self.phase_step_spin.setSingleStep(1)
-        self.phase_step_spin.setSuffix("°")
-        self.phase_step_spin.setToolTip(
-            "Phase step size in degrees for optimization scan.\n"
-            "Smaller steps give finer resolution but take longer."
-        )
-        phase_layout.addRow("Phase Step:", self.phase_step_spin)
-        
-        phase_group.setLayout(phase_layout)
-        layout.addWidget(phase_group)
-        
-        # Connect checkbox to enable/disable phase optimization controls
-        self.optimize_phase_checkbox.toggled.connect(self._update_phase_controls)
-        self._update_phase_controls(False)
-        
-        # Dialog buttons
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        
-    def load_ui(self):
-        """Initialize and load the user interface for the Load Bias dialog, 
-        including input fields, buttons, and layout configuration."""
-        
-        self.setWindowTitle("Load Bias")
-        layout = QtWidgets.QVBoxLayout(self)
 
-        # --- Top: Import File Button ---
-        self.import_button = QtWidgets.QPushButton("Import File")
+        self.import_button = QPushButton("Import File")
         self.import_button.clicked.connect(self._import_file)
-        layout.addWidget(self.import_button, alignment=QtCore.Qt.AlignTop)
+        layout.addWidget(self.import_button, alignment=Qt.AlignmentFlag.AlignTop)
 
-        # --- Tones ---
-        tones_layout = QtWidgets.QHBoxLayout()
-        tones_label = QtWidgets.QLabel("Tones (MHz):")
-        self.tones_edit = QtWidgets.QLineEdit()
-        tones_layout.addWidget(tones_label)
+        tones_layout = QHBoxLayout()
+        tones_layout.addWidget(QLabel("Tones (MHz):"))
+        self.tones_edit = QLineEdit()
         tones_layout.addWidget(self.tones_edit)
         layout.addLayout(tones_layout)
 
-        # --- Sweep Amplitude ---
-        amp_layout = QtWidgets.QHBoxLayout()
-        amp_label = QtWidgets.QLabel("Sweep Amplitude (normalized):")
-        self.amp_edit = QtWidgets.QLineEdit()
-        amp_layout.addWidget(amp_label)
+        amp_layout = QHBoxLayout()
+        amp_layout.addWidget(QLabel("Sweep Amplitude (normalized):"))
+        self.amp_edit = QLineEdit()
         amp_layout.addWidget(self.amp_edit)
         layout.addLayout(amp_layout)
 
-        # span_layout = QtWidgets.QHBoxLayout()
-        # span_label = QtWidgets.QLabel("Span (kHz)")
-        # self.span_khz_edit = QtWidgets.QLineEdit(str(50.0))
-        # self.span_khz_edit.setValidator(QDoubleValidator(0.1, 10000.0, 2, self)) # Min 0.1 kHz, Max 10 MHz
-        # span_layout.addWidget(span_label)
-        # span_layout.addWidget(self.span_khz_edit)
-        # layout.addLayout(span_layout)
-
-        # --- Phase ---
-        # phase_layout = QtWidgets.QHBoxLayout()
-        # phase_label = QtWidgets.QLabel("Rotational Phases (degrees):")
-        # self.phase_edit = QtWidgets.QLineEdit("0.0")  # default value
-        # phase_layout.addWidget(phase_label)
-        # phase_layout.addWidget(self.phase_edit)
-        # layout.addLayout(phase_layout)
-
-        # --- Bottom Row: Set Bias / Set and Plot Bias ---
-        bias_layout = QtWidgets.QHBoxLayout()
-        self.set_bias_btn = QtWidgets.QPushButton("Set Bias")
-        self.plot_bias_btn = QtWidgets.QPushButton("Set + Plot Bias")
+        bias_layout = QHBoxLayout()
+        self.set_bias_btn = QPushButton("Set Bias")
+        self.plot_bias_btn = QPushButton("Set + Plot Bias")
         self.plot_bias_btn.setEnabled(False)
-        self.cancel_btn = QtWidgets.QPushButton("Cancel")
-        bias_layout.addWidget(self.set_bias_btn, alignment=QtCore.Qt.AlignLeft)
-        bias_layout.addWidget(self.plot_bias_btn, alignment=QtCore.Qt.AlignCenter)
-        bias_layout.addWidget(self.cancel_btn, alignment=QtCore.Qt.AlignRight)
+        self.cancel_btn = QPushButton("Cancel")
+        bias_layout.addWidget(self.set_bias_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        bias_layout.addWidget(self.plot_bias_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        bias_layout.addWidget(self.cancel_btn, alignment=Qt.AlignmentFlag.AlignRight)
         layout.addLayout(bias_layout)
 
-        # --- Connect actions ---
         self.set_bias_btn.clicked.connect(self.accept)
         self.plot_bias_btn.clicked.connect(self._on_set_and_plot_bias)
         self.cancel_btn.clicked.connect(self.reject)
 
-        self.setMinimumWidth(500) # Ensure dialog is wide enough
-        
-        # If data was pre-loaded (from double-click), populate fields immediately
         if self._load_data:
             self._populate_fields_from_data(self._load_data)
             self.plot_bias_btn.setEnabled(True)
-            self.use_load_file = True  # Mark as using loaded file
+            self.use_load_file = True
 
-    def _populate_fields_from_data(self, payload: dict):
-        """Populate UI fields from loaded payload data."""
-        params = payload['initial_parameters']
-        bias_output = payload['bias_kids_output']
-    
-        bias_freqs = []
-        amplitudes = []
-        phases = []
-    
-        for det_idx, det_data in bias_output.items():
-            if not det_data.get("bias_successful", True):
-                print("Bias was successful")
-    
-            channel = int(det_data.get("bias_channel", det_idx))
+    def _populate_fields_from_data(self, payload):
+        params = payload.get('initial_parameters', {})
+        bias_output = payload.get('bias_kids_output', {})
+        bias_freqs, amplitudes = [], []
+        for det_data in bias_output.values():
             bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
             bias_freqs.append(bias_freq)
-    
-            amplitude = det_data.get("sweep_amplitude")
-            amplitudes.append(amplitude)
-    
-            phase = det_data.get("optimal_phase_degrees", 0)
-            phases.append(phase)
-    
-        self.tones_edit.setText(",".join([f"{f/1e6:.6f}" for f in bias_freqs]))
-        self.amp_edit.setText(",".join([f"{a:.3f}" for a in amplitudes]))
+            amplitudes.append(det_data.get("sweep_amplitude"))
+        self.tones_edit.setText(",".join([f"{f/1e6:.6f}" for f in bias_freqs if f]))
+        self.amp_edit.setText(",".join([f"{a:.3f}" for a in amplitudes if a is not None]))
 
     def _on_set_and_plot_bias(self):
-        """Set flag to use the loaded file and accept the dialog, 
-        triggering both bias setting and plotting actions."""
         self.use_load_file = True
         self.accept()
 
     def _import_file(self):
-        # Use a deferred call so the dialog opens outside the blocked event loop
-        QtCore.QTimer.singleShot(0, self._open_file_dialog_async)
-
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, self._open_file_dialog_async)
 
     def _open_file_dialog_async(self):
-        """Open a non-blocking file dialog for selecting a bias parameter file."""
+        from PyQt6.QtWidgets import QFileDialog
+        from PyQt6.QtCore import Qt
         if not hasattr(self, "_file_dialog") or self._file_dialog is None:
-            self._file_dialog = QtWidgets.QFileDialog(self, "Load Bias Parameters")
-            self._file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
-            self._file_dialog.setNameFilters([
-                "Pickle Files (*.pkl *.pickle)",
-                "All Files (*)",
-            ])
+            self._file_dialog = QFileDialog(self, "Load Bias Parameters")
+            self._file_dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+            self._file_dialog.setNameFilters(["Pickle Files (*.pkl *.pickle)", "All Files (*)"])
             self._file_dialog.setOptions(
-                QtWidgets.QFileDialog.Option.DontUseNativeDialog
-                | QtWidgets.QFileDialog.Option.ReadOnly
+                QFileDialog.Option.DontUseNativeDialog | QFileDialog.Option.ReadOnly
             )
             self._file_dialog.setModal(False)
             self._file_dialog.fileSelected.connect(self._on_file_selected)
-            self._file_dialog.rejected.connect(self._on_file_dialog_closed)
-    
         self._file_dialog.open()
-    
-    
-    @QtCore.pyqtSlot(str)
-    def _on_file_selected(self, path: str):
-        """Handle file selection, load bias data, and populate the UI fields with file contents."""
+
+    def _on_file_selected(self, path):
         payload = load_bias_payload(self, file_path=path)
         if payload is None:
             return
-    
         self.plot_bias_btn.setEnabled(True)
         self._load_data = payload.copy()
-        
-        # Use the helper method to populate fields
         self._populate_fields_from_data(payload)
-    
-    
-    @QtCore.pyqtSlot()
-    def _on_file_dialog_closed(self):
-        """Handle the event when the file dialog is closed without selection."""
-        pass
 
-
-        
-    def get_load_param(self) -> dict | None:
-        """Retrieve and validate user input or loaded data, returning parameters as a dictionary.
-        Performs input validation and displays warnings for invalid configurations."""
-        params_dict = {}
+    def get_load_param(self):
+        """Return the loaded payload dict or manually entered parameters."""
+        if self.use_load_file:
+            return self._load_data
         try:
-            if self.use_load_file:
-                return self._load_data
-            else:
-                amp_text = [x.strip() for x in self.amp_edit.text().split(',')]
-                tone_text = [t.strip() for t in self.tones_edit.text().split(',')]
-                # phase_text = [p.strip() for p in self.phase_edit.text().split(',')]
-    
-                params_dict['module'] = self.current_module
-                params_dict['phases'] = []
-                params_dict['amplitudes'] = []
-                params_dict['bias_frequencies'] = []
-    
-                for i in range(len(amp_text)):
-                    params_dict['amplitudes'].append(float(amp_text[i]))
-                for i in range(len(tone_text)):    
-                    params_dict['bias_frequencies'].append(float(tone_text[i])*1e6)
-    
-                # span_hz = float(self.span_khz_edit.text()) * 1e3
-                # params_dict['span_hz'] = span_hz
-    
-                len_amps = len(params_dict['amplitudes'])
-                len_bias = len(params_dict['bias_frequencies'])
-    
-                # if len(phase_text) == 1: ##### In case user wants to set the same phase value for all the tones ####
-                for i in range(len_amps):
-                    params_dict['phases'].append(float(0)) ## default phase a 0
-                # else:
-                #     for i in range(len(phase_text)):    
-                #         params_dict['phases'].append(float(phase_text[i]))
-    
-                # if params_dict['span_hz'] <= 0:
-                #     QtWidgets.QMessageBox.warning(self, "Validation Error", "Span must be positive.")
-                #     return None
-                if params_dict['module'] is None:
-                    QtWidgets.QMessageBox.warning(self, "Validation Error", "No module identified.")
-                    return None
-                if len_amps < 1:
-                    QtWidgets.QMessageBox.warning(self, "Validation Error", "No amplitudes provided.")
-                    return None
-                if (len_amps != len_bias):
-                    QtWidgets.QMessageBox.warning(self, "Validation Error", "Number of amplitudes and frequencies are not the same")
-                    return None
-                if len_bias < 1:
-                    QtWidgets.QMessageBox.warning(self, "Configuration Error", "No frequencies provided.")
-                    return None
-    
-                return params_dict
-
-        
-        except ValueError as e: # Handles errors from float() or int() conversion
-            QtWidgets.QMessageBox.critical(self, "Input Error", f"Invalid numerical input: {str(e)}")
-            return None
-        except Exception as e: # Catch any other unexpected errors
-            traceback.print_exc()
-            QtWidgets.QMessageBox.critical(self, "Error", f"Could not parse parameters: {str(e)}")
-            return None
-    
-    def _update_phase_controls(self, enabled):
-        """Enable/disable phase optimization controls based on checkbox state."""
-        self.apply_bandpass_checkbox.setEnabled(enabled)
-        self.lowcut_spin.setEnabled(enabled and self.apply_bandpass_checkbox.isChecked())
-        self.highcut_spin.setEnabled(enabled and self.apply_bandpass_checkbox.isChecked())
-        self.fs_spin.setEnabled(enabled and self.apply_bandpass_checkbox.isChecked())
-        self.num_samples_spin.setEnabled(enabled)
-        self.phase_step_spin.setEnabled(enabled)
-        
-        # Connect the bandpass checkbox to update filter controls
-        if enabled:
-            self.apply_bandpass_checkbox.toggled.connect(self._update_filter_controls)
-        else:
-            try:
-                self.apply_bandpass_checkbox.toggled.disconnect(self._update_filter_controls)
-            except TypeError:
-                pass  # Not connected
-    
-    def _update_filter_controls(self, enabled):
-        """Enable/disable bandpass filter controls based on checkbox state."""
-        phase_opt_enabled = self.optimize_phase_checkbox.isChecked()
-        self.lowcut_spin.setEnabled(phase_opt_enabled and enabled)
-        self.highcut_spin.setEnabled(phase_opt_enabled and enabled)
-        self.fs_spin.setEnabled(phase_opt_enabled and enabled)
-        
-    def get_parameters(self):
-        """Get the configured parameters as a dictionary."""
-        params = {
-            'nonlinear_threshold': self.nonlinear_threshold_spin.value(),
-            'fallback_to_lowest': self.fallback_checkbox.isChecked(),
-            'optimize_phase': self.optimize_phase_checkbox.isChecked(),
-            'num_phase_samples': self.num_samples_spin.value(),
-            'phase_step': self.phase_step_spin.value()
-        }
-        
-        # Only include bandpass parameters if phase optimization is enabled
-        if params['optimize_phase']:
-            params['bandpass_params'] = {
-                'apply_bandpass': self.apply_bandpass_checkbox.isChecked(),
-                'lowcut': self.lowcut_spin.value(),
-                'highcut': self.highcut_spin.value(),
-                'fs': self.fs_spin.value()
+            amp_text = [x.strip() for x in self.amp_edit.text().split(',')]
+            tone_text = [t.strip() for t in self.tones_edit.text().split(',')]
+            params = {
+                'module': self.current_module,
+                'phases': [0.0] * len(amp_text),
+                'amplitudes': [float(a) for a in amp_text],
+                'bias_frequencies': [float(t) * 1e6 for t in tone_text],
             }
-        
-        return params
+            from PyQt6.QtWidgets import QMessageBox
+            if params['module'] is None:
+                QMessageBox.warning(self, "Validation Error", "No module identified.")
+                return None
+            if len(params['amplitudes']) != len(params['bias_frequencies']):
+                QMessageBox.warning(self, "Validation Error",
+                                    "Number of amplitudes and frequencies must match.")
+                return None
+            return params
+        except (ValueError, Exception) as exc:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Input Error", f"Invalid input: {exc}")
+            return None

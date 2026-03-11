@@ -123,9 +123,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.cf_lines_mag = {}  # Stores {amplitude: [InfiniteLine_mag]}
         self.cf_lines_phase = {} # Stores {amplitude: [InfiniteLine_phase]}
         
-        # Bias KIDs output storage
-        self.bias_kids_output = None  # Stores the output from bias_kids algorithm
-        self.nco_frequency_hz = None  # NCO frequency used when biasing (stored for export)
+        # Bias task storage
+        self.bias_kids_output = None     # Stores the output from apply_bias (for export)
+        self.nco_frequency_hz = None     # NCO frequency used when biasing (stored for export)
+        self.find_bias_task = None       # Active FindBiasTask, if any
+        self.find_bias_signals = None    # FindBiasSignals instance
+        self.apply_bias_task = None      # Active ApplyBiasTask, if any
+        self.apply_bias_signals = None   # ApplyBiasSignals instance
+        self.bias_settings_panel = None  # Lazy-initialized BiasSettingsPanel instance
 
         # Initialize batch tracking for sweep tabs (before _setup_ui)
         self.current_batch = 0
@@ -179,11 +184,31 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.rerun_btn.clicked.connect(self._rerun_multisweep)
         toolbar_layout.addWidget(self.rerun_btn)
         
-        # Bias KIDs Button
-        self.bias_kids_btn = QtWidgets.QPushButton("Bias KIDs")
-        self.bias_kids_btn.clicked.connect(self._bias_kids)
-        self.bias_kids_btn.setToolTip("Bias detectors at optimal operating points based on multisweep results")
-        toolbar_layout.addWidget(self.bias_kids_btn)
+        # Find Bias button
+        self.find_bias_btn = QtWidgets.QPushButton("Find Bias")
+        self.find_bias_btn.clicked.connect(self._find_bias)
+        self.find_bias_btn.setToolTip(
+            "Analyse multisweep data to identify the optimal bias amplitude\n"
+            "and frequency for each resonator (updates res_info_dict).\n"
+            "Inspect the results before applying to hardware."
+        )
+        toolbar_layout.addWidget(self.find_bias_btn)
+
+        # Apply Bias button — disabled until Find Bias has completed
+        self.apply_bias_btn = QtWidgets.QPushButton("Apply Bias")
+        self.apply_bias_btn.clicked.connect(self._apply_bias)
+        self.apply_bias_btn.setEnabled(False)
+        self.apply_bias_btn.setToolTip(
+            "Programme the CRS hardware channels with the bias conditions\n"
+            "found by Find Bias.  Only available after Find Bias succeeds."
+        )
+        toolbar_layout.addWidget(self.apply_bias_btn)
+
+        # Bias Settings button — opens persistent settings panel
+        self.bias_settings_btn = QtWidgets.QPushButton("⚙ Bias Settings")
+        self.bias_settings_btn.clicked.connect(self._show_bias_settings)
+        self.bias_settings_btn.setToolTip("Open the bias-finding settings panel")
+        toolbar_layout.addWidget(self.bias_settings_btn)
 
         self.noise_spectrum_btn = QtWidgets.QPushButton("Get Noise Spectrum")
         if self.bias_data_avail:
@@ -2158,127 +2183,218 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             if hasattr(noise_window, 'apply_theme'):
                 noise_window.apply_theme(dark_mode)
     
-    def _bias_kids(self):
-        """
-        Run the bias_kids algorithm on the current multisweep results.
-        Programs detectors at optimal operating points and stores calibration data.
-        """
-        # Check prerequisites
-        if not self.results_by_detector:
-            QtWidgets.QMessageBox.warning(self, "No Data", 
-                                        "No multisweep data available. Please run a multisweep first.")
-            return
-        
-        # Get Periscope parent
-        periscope = self._get_periscope_parent()
-        if not periscope:
-            QtWidgets.QMessageBox.warning(self, "Parent Not Available", 
-                                        "Parent window not available. Cannot access CRS object.")
-            return
-            
-        if periscope.crs is None:
-            QtWidgets.QMessageBox.warning(self, "CRS Not Available", 
-                                        "CRS object is None. Cannot bias detectors.")
-            return
-        # Import the dialog
-        from .bias_kids_dialog import BiasKidsDialog
-        
-        # Show dialog to get parameters
-        dialog = BiasKidsDialog(self, self.target_module)
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return  # User cancelled
-        
-        # Get parameters from dialog
-        bias_params = dialog.get_parameters()
-        
-        # Pass detector-indexed format directly to bias_kids
-        gui_format_results = {
-            'results_by_detector': self.results_by_detector
-        }
-        
-        # Import BiasKidsTask and BiasKidsSignals from tasks module
-        from .tasks import BiasKidsTask, BiasKidsSignals
-        
-        # Create signals for communication with the task
-        self.bias_kids_signals = BiasKidsSignals()
-        self.bias_kids_signals.progress.connect(self._bias_kids_progress)
-        self.bias_kids_signals.completed.connect(self._bias_kids_completed)
-        self.bias_kids_signals.error.connect(self._bias_kids_error)
-        
-        # Ensure we have a valid module number
-        if self.target_module is None:
-            QtWidgets.QMessageBox.warning(self, "Module Not Set", 
-                                        "Target module is not set. Cannot bias detectors.")
-            return
-        # Create and start the task with dialog parameters
-        self.bias_kids_task = BiasKidsTask(
-            periscope.crs,
-            self.target_module,
-            gui_format_results,
-            self.bias_kids_signals,
-            bias_params  # Pass the dialog parameters
-        )
-        
-        # Update UI to show operation in progress
-        self.bias_kids_btn.setEnabled(False)
-        self.bias_kids_btn.setText("Biasing...")
-        
-        # Start the task
-        self.bias_kids_task.start()
+    # ── Bias Settings ────────────────────────────────────────────────────────
 
-    def _bias_kids_progress(self, module, progress):
-        """Handle progress updates from the bias_kids task."""
-        # Could update a progress indicator if desired
+    def _show_bias_settings(self):
+        """Show (or create) the persistent BiasSettingsPanel window."""
+        from .bias_kids_dialog import BiasSettingsPanel
+        if self.bias_settings_panel is None:
+            self.bias_settings_panel = BiasSettingsPanel(parent=None)
+        self.bias_settings_panel.show()
+        self.bias_settings_panel.raise_()
+        self.bias_settings_panel.activateWindow()
+
+    # ── Find Bias ─────────────────────────────────────────────────────────────
+
+    def _find_bias(self):
+        """
+        Run find_bias_points on the current multisweep results in a background thread.
+
+        Reads algorithm settings from the BiasSettingsPanel (using defaults when
+        the panel has not been opened yet), then starts a FindBiasTask.
+        """
+        if not self.results_by_detector:
+            QtWidgets.QMessageBox.warning(
+                self, "No Data",
+                "No multisweep data available. Please run a multisweep first."
+            )
+            return
+
+        if not self.res_info_dict:
+            QtWidgets.QMessageBox.warning(
+                self, "No Resonator Registry",
+                "res_info_dict is empty — cannot determine channel assignments."
+            )
+            return
+
+        # Collect settings from the panel (or use defaults)
+        if self.bias_settings_panel is not None:
+            bias_settings = self.bias_settings_panel.get_settings()
+        else:
+            bias_settings = {}  # find_bias_points will use its own defaults
+
+        from .tasks import FindBiasTask, FindBiasSignals
+
+        self.find_bias_signals = FindBiasSignals()
+        self.find_bias_signals.progress.connect(self._find_bias_progress)
+        self.find_bias_signals.completed.connect(self._find_bias_completed)
+        self.find_bias_signals.error.connect(self._find_bias_error)
+
+        self.find_bias_task = FindBiasTask(
+            module=self.target_module,
+            results_by_detector=self.results_by_detector,
+            res_info_dict=self.res_info_dict,
+            signals=self.find_bias_signals,
+            bias_settings=bias_settings,
+        )
+
+        self.find_bias_btn.setEnabled(False)
+        self.find_bias_btn.setText("Finding…")
+        self.apply_bias_btn.setEnabled(False)
+        self.find_bias_task.start()
+
+    def _find_bias_progress(self, module: int, progress: float):
+        """Handle progress updates from FindBiasTask (reserved for future use)."""
         pass
-    
-    def _bias_kids_completed(self, module, biased_results, df_calibrations, nco_frequency_hz):
-        """Handle completion of the bias_kids task."""
-        # Store the output
-        self.bias_kids_output = biased_results
-        
-        # Store the NCO frequency used during biasing
-        self.nco_frequency_hz = nco_frequency_hz
-        
-        # Emit signal with df_calibration data
+
+    def _find_bias_completed(self, module: int, updated_res_info_dict: dict):
+        """
+        Handle successful completion of FindBiasTask.
+
+        Stores the updated res_info_dict, enables Apply Bias, and triggers
+        a redraw of CF lines so they move to the refined bias frequencies.
+        """
+        # Merge the updated fields back into the live res_info_dict
+        for code, info in updated_res_info_dict.items():
+            if code in self.res_info_dict:
+                self.res_info_dict[code].update(info)
+            else:
+                self.res_info_dict[code] = info
+
+        num_found = sum(
+            1 for info in self.res_info_dict.values() if info.get('bias_found', False)
+        )
+        total = len(self.res_info_dict)
+
+        # Re-enable buttons
+        self.find_bias_btn.setEnabled(True)
+        self.find_bias_btn.setText("Find Bias")
+        self.find_bias_task = None
+
+        # Enable Apply Bias only if at least one bias point was found
+        self.apply_bias_btn.setEnabled(num_found > 0)
+
+        # Refresh CF lines — they will now render at the refined bias frequencies
+        if self.show_cf_lines_cb and self.show_cf_lines_cb.isChecked():
+            self._toggle_cf_lines_visibility(False)
+            self._toggle_cf_lines_visibility(True)
+
+        QtWidgets.QMessageBox.information(
+            self,
+            "Find Bias Complete",
+            f"Bias points found for {num_found} / {total} resonators.\n\n"
+            "Inspect the results in the multisweep plots, then click "
+            "\"Apply Bias\" to programme the hardware."
+        )
+
+    def _find_bias_error(self, error_msg: str):
+        """Handle errors from FindBiasTask."""
+        QtWidgets.QMessageBox.critical(self, "Find Bias Error", error_msg)
+        self.find_bias_btn.setEnabled(True)
+        self.find_bias_btn.setText("Find Bias")
+        self.find_bias_task = None
+
+    # ── Apply Bias ────────────────────────────────────────────────────────────
+
+    def _apply_bias(self):
+        """
+        Run apply_bias on the hardware using the bias conditions stored in res_info_dict.
+
+        Requires Find Bias to have completed successfully (i.e. at least one
+        res_info_dict entry has bias_found == True).
+        """
+        periscope = self._get_periscope_parent()
+        if not periscope or periscope.crs is None:
+            QtWidgets.QMessageBox.warning(
+                self, "CRS Not Available",
+                "CRS object is not available.  Cannot programme hardware."
+            )
+            return
+
+        if self.target_module is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Module Not Set",
+                "Target module is not set.  Cannot programme hardware."
+            )
+            return
+
+        num_ready = sum(
+            1 for info in self.res_info_dict.values() if info.get('bias_found', False)
+        )
+        if num_ready == 0:
+            QtWidgets.QMessageBox.warning(
+                self, "No Bias Points",
+                "No bias points are available.  Please run Find Bias first."
+            )
+            return
+
+        from .tasks import ApplyBiasTask, ApplyBiasSignals
+
+        self.apply_bias_signals = ApplyBiasSignals()
+        self.apply_bias_signals.progress.connect(self._apply_bias_progress)
+        self.apply_bias_signals.completed.connect(self._apply_bias_completed)
+        self.apply_bias_signals.error.connect(self._apply_bias_error)
+
+        self.apply_bias_task = ApplyBiasTask(
+            crs=periscope.crs,
+            module=self.target_module,
+            res_info_dict=self.res_info_dict,
+            signals=self.apply_bias_signals,
+        )
+
+        self.apply_bias_btn.setEnabled(False)
+        self.apply_bias_btn.setText("Applying…")
+        self.apply_bias_task.start()
+
+    def _apply_bias_progress(self, module: int, progress: float):
+        """Handle progress updates from ApplyBiasTask."""
+        pass
+
+    def _apply_bias_completed(self, module: int, apply_report: dict):
+        """
+        Handle successful completion of ApplyBiasTask.
+
+        Stores apply_report for export, emits the df_calibration_ready signal
+        so Periscope's df-unit mode picks up the new calibration data, and
+        enables the Noise Spectrum button.
+        """
+        self.bias_kids_output = apply_report  # kept for export compat
+
+        # Extract per-channel df_calibration from res_info_dict
+        # (keyed by channel_number so app_runtime can use it directly)
+        df_calibrations: dict = {}
+        for code, info in self.res_info_dict.items():
+            cal = info.get('df_calibration')
+            ch = info.get('channel_number')
+            if cal is not None and ch is not None:
+                import cmath
+                if not cmath.isnan(cal):
+                    df_calibrations[ch] = cal
+
         if df_calibrations:
             self.df_calibration_ready.emit(module, df_calibrations)
-        
-        # Emit data_ready signal for session auto-export
-        if biased_results:
-            export_data = self._prepare_export_data()
-            identifier = f"module{module}"
-            self.data_ready.emit("bias", identifier, export_data)
-        
-        # Show success dialog
-        num_biased = len(biased_results)
-        total_detectors = len(self.res_info_dict) if self.res_info_dict else len(self.results_by_detector)
 
-        msg = f"Successfully biased {num_biased} out of {total_detectors} detectors.\n\n"
-        
-        if num_biased > 0:
-            msg += "The detectors have been programmed at their optimal operating points."
-            if df_calibrations:
-                msg += "\n\nFrequency shift calibration data has been loaded into the main window."
-        else:
-            msg += "No detectors met the criteria for biasing."
-        
-        QtWidgets.QMessageBox.information(self, "Bias KIDs Complete", msg)
-        
-        # Reset UI
-        self.bias_kids_btn.setEnabled(True)
+        # Emit for session auto-export
+        export_data = self._prepare_export_data()
+        self.data_ready.emit("bias", f"module{module}", export_data)
+
+        # Re-enable buttons
+        self.apply_bias_btn.setEnabled(True)
+        self.apply_bias_btn.setText("Apply Bias")
         self.noise_spectrum_btn.setEnabled(True)
-        self.bias_kids_btn.setText("Bias KIDs")
-        
-        # Clean up the task
-        self.bias_kids_task = None
-    
-    def _bias_kids_error(self, error_msg):
-        """Handle errors from the bias_kids task."""
-        QtWidgets.QMessageBox.critical(self, "Bias KIDs Error", error_msg)
-        
-        # Reset UI
-        self.bias_kids_btn.setEnabled(True)
-        self.bias_kids_btn.setText("Bias KIDs")
-        
-        # Clean up the task
-        self.bias_kids_task = None
+        self.apply_bias_task = None
+
+        num_ok = sum(1 for r in apply_report.values() if r.get('apply_successful'))
+        total = len(self.res_info_dict)
+
+        msg = f"Successfully programmed {num_ok} / {total} resonators.\n\n"
+        if df_calibrations:
+            msg += f"df-calibration loaded for {len(df_calibrations)} channels."
+        QtWidgets.QMessageBox.information(self, "Apply Bias Complete", msg)
+
+    def _apply_bias_error(self, error_msg: str):
+        """Handle errors from ApplyBiasTask."""
+        QtWidgets.QMessageBox.critical(self, "Apply Bias Error", error_msg)
+        self.apply_bias_btn.setEnabled(True)
+        self.apply_bias_btn.setText("Apply Bias")
+        self.apply_bias_task = None

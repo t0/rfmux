@@ -869,122 +869,175 @@ class MultisweepTask(QtCore.QThread):
             return enhanced_results
 
 
-class BiasKidsSignals(QObject):
-    """Signals for BiasKidsTask."""
-    progress = pyqtSignal(int, float)  # module, progress_percentage
-    completed = pyqtSignal(int, dict, dict, float)  # module, biased_results, df_calibrations, nco_frequency_hz
-    error = pyqtSignal(str)  # error_message
+class FindBiasSignals(QObject):
+    """Signals for FindBiasTask."""
+    progress = pyqtSignal(int, float)   # module, progress_percentage (reserved for future use)
+    completed = pyqtSignal(int, dict)   # module, updated_res_info_dict
+    error = pyqtSignal(str)             # error_message
 
 
-class BiasKidsTask(QtCore.QThread):
-    """QThread subclass for running the bias_kids algorithm without blocking the GUI."""
-    
-    def __init__(self, crs: "CRS", module: int, multisweep_results: dict, signals: BiasKidsSignals, bias_params: Optional[Dict[str, Any]] = None):
+class FindBiasTask(QtCore.QThread):
+    """QThread subclass for running find_bias_points without blocking the GUI.
+
+    ``find_bias_points`` is CPU-bound (spline fitting + optional nonlinear fit)
+    so it is run in a worker thread.  No hardware I/O is performed here.
+    """
+
+    def __init__(
+        self,
+        module: int,
+        results_by_detector: dict,
+        res_info_dict: dict,
+        signals: "FindBiasSignals",
+        bias_settings: Optional[Dict[str, Any]] = None,
+    ):
         """
-        Initialize the BiasKidsTask.
-        
-        Args:
-            crs: Control and Readout System object
-            module: Module number to bias
-            multisweep_results: Multisweep results in GUI format
-            signals: Signal object for communication with GUI
-            bias_params: Optional dictionary of bias parameters from dialog
+        Parameters
+        ----------
+        module :
+            Module number (used only for progress/completed signal payloads).
+        results_by_detector :
+            ``MultisweepPanel.results_by_detector`` dict.
+        res_info_dict :
+            Resonator registry to be updated in-place by ``find_bias_points``.
+            A deep copy is taken so the panel's dict is not mutated until
+            ``completed`` is emitted.
+        signals :
+            ``FindBiasSignals`` instance.
+        bias_settings :
+            Dict of settings from ``BiasSettingsPanel.get_settings()``.
+        """
+        super().__init__()
+        self.module = module
+        self.results_by_detector = results_by_detector
+        # Work on a deep copy so the panel's dict is only updated on success
+        import copy
+        self.res_info_dict = copy.deepcopy(res_info_dict)
+        self.signals = signals
+        self.bias_settings = bias_settings or {}
+        self._running = True
+
+    def stop(self):
+        """Request interruption (respected between per-resonator steps)."""
+        self._running = False
+        self.requestInterruption()
+
+    def run(self):
+        """QThread entry point."""
+        try:
+            from rfmux.algorithms.measurement.bias_kids import find_bias_points
+
+            kwargs = {
+                'results_by_detector': self.results_by_detector,
+                'res_info_dict':       self.res_info_dict,
+            }
+            # Forward settings from the settings panel
+            for key in (
+                'spike_prominence_factor',
+                'spike_height_factor',
+                'max_deriv_distance_hz',
+                'fallback_to_highest',
+                'reference_freq_source',
+                'fit_selected_amplitude',
+            ):
+                if key in self.bias_settings:
+                    kwargs[key] = self.bias_settings[key]
+
+            updated = find_bias_points(**kwargs)
+
+            if self.isInterruptionRequested():
+                self.signals.error.emit("Find Bias was cancelled.")
+                return
+
+            self.signals.completed.emit(self.module, updated)
+
+        except Exception as exc:
+            error_msg = (
+                f"Error in FindBiasTask: {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
+            print(error_msg, file=sys.stderr)
+            self.signals.error.emit(str(exc))
+
+
+class ApplyBiasSignals(QObject):
+    """Signals for ApplyBiasTask."""
+    progress = pyqtSignal(int, float)   # module, progress_percentage
+    completed = pyqtSignal(int, dict)   # module, apply_report dict
+    error = pyqtSignal(str)             # error_message
+
+
+class ApplyBiasTask(QtCore.QThread):
+    """QThread subclass for running apply_bias (async hardware I/O) without blocking the GUI."""
+
+    def __init__(
+        self,
+        crs: "CRS",
+        module: int,
+        res_info_dict: dict,
+        signals: "ApplyBiasSignals",
+    ):
+        """
+        Parameters
+        ----------
+        crs :
+            CRS hardware object.
+        module :
+            Target module number.
+        res_info_dict :
+            Resonator registry updated by ``find_bias_points``.
+        signals :
+            ``ApplyBiasSignals`` instance.
         """
         super().__init__()
         self.crs = crs
         self.module = module
-        self.multisweep_results = multisweep_results
+        self.res_info_dict = res_info_dict
         self.signals = signals
-        self.bias_params = bias_params or {}
         self._running = True
-        
+
     def stop(self):
-        """Stop the task."""
+        """Request interruption."""
         self._running = False
         self.requestInterruption()
-        
+
     def run(self):
-        """QThread entry point - runs in a separate thread."""
+        """QThread entry point — creates an asyncio event loop and runs apply_bias."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+
         try:
-            # Progress callback
-            def progress_cb(module, progress):
+            from rfmux.algorithms.measurement.bias_kids import apply_bias
+
+            def progress_cb(module, pct):
                 if self._running:
-                    self.signals.progress.emit(module, progress)
-            
-            # Run the bias_kids algorithm
-            result = loop.run_until_complete(self._run_bias_kids(progress_cb))
-            
+                    self.signals.progress.emit(module, pct)
+
+            apply_report = loop.run_until_complete(
+                apply_bias(
+                    crs=self.crs,
+                    module=self.module,
+                    res_info_dict=self.res_info_dict,
+                    progress_callback=progress_cb,
+                )
+            )
+
             if self.isInterruptionRequested():
-                self.signals.error.emit("Bias KIDs operation was cancelled.")
+                self.signals.error.emit("Apply Bias was cancelled.")
                 return
-                
-            if result:
-                # Handle both dict and list return types from bias_kids
-                if isinstance(result, list):
-                    # For list results (multiple modules), we're only processing one module here
-                    # so this shouldn't happen, but handle it gracefully
-                    if len(result) > 0:
-                        result = result[0]  # Take the first module's results
-                    else:
-                        self.signals.error.emit("Bias KIDs operation returned empty list.")
-                        return
-                
-                # Extract df_calibration values (result is now guaranteed to be a dict)
-                df_calibrations = {}
-                for det_idx, det_data in result.items():
-                    if 'df_calibration' in det_data:
-                        df_calibrations[det_idx] = det_data['df_calibration']
-                
-                # Read the NCO frequency that was used during biasing
-                nco_frequency_hz = loop.run_until_complete(self.crs.get_nco_frequency(module=self.module))
-                
-                # Emit completion with results and NCO frequency
-                self.signals.completed.emit(self.module, result, df_calibrations, float(nco_frequency_hz))
-            else:
-                self.signals.error.emit("Bias KIDs operation returned no results.")
-                
+
+            self.signals.completed.emit(self.module, apply_report)
+
         except asyncio.CancelledError:
-            self.signals.error.emit("Bias KIDs operation was cancelled.")
-        except Exception as e:
-            import traceback
-            error_msg = f"Error in BiasKidsTask: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-            print(error_msg)  # Print detailed message to Console
-            self.signals.error.emit(str(e))
+            self.signals.error.emit("Apply Bias was cancelled.")
+        except Exception as exc:
+            error_msg = (
+                f"Error in ApplyBiasTask: {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
+            print(error_msg, file=sys.stderr)
+            self.signals.error.emit(str(exc))
         finally:
             if loop.is_running():
                 loop.stop()
             loop.close()
-            
-    async def _run_bias_kids(self, progress_callback):
-        """Run the bias_kids algorithm asynchronously."""
-        # Import bias_kids as a regular function
-        from rfmux.algorithms.measurement.bias_kids import bias_kids
-        
-        # Extract parameters from bias_params
-        kwargs = {
-            'crs': self.crs,
-            'multisweep_results': self.multisweep_results,
-            'module': self.module,
-            'progress_callback': progress_callback
-        }
-        
-        # Add optional parameters from dialog
-        if 'nonlinear_threshold' in self.bias_params:
-            kwargs['nonlinear_threshold'] = self.bias_params['nonlinear_threshold']
-        if 'fallback_to_lowest' in self.bias_params:
-            kwargs['fallback_to_lowest'] = self.bias_params['fallback_to_lowest']
-        if 'optimize_phase' in self.bias_params:
-            kwargs['optimize_phase'] = self.bias_params['optimize_phase']
-        if 'bandpass_params' in self.bias_params:
-            kwargs['bandpass_params'] = self.bias_params['bandpass_params']
-        if 'num_phase_samples' in self.bias_params:
-            kwargs['num_phase_samples'] = self.bias_params['num_phase_samples']
-        if 'phase_step' in self.bias_params:
-            kwargs['phase_step'] = self.bias_params['phase_step']
-        
-        # Call bias_kids with all parameters
-        result = await bias_kids(**kwargs)
-        return result

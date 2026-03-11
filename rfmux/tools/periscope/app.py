@@ -1423,8 +1423,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if self.crs is None:
             self.dac_scales = default_dac_scales.copy()
         
-        from .bias_kids_dialog import BiasKidsDialog
-        dialog = BiasKidsDialog(self, self.module, True)
+        from .bias_kids_dialog import LoadBiasDialog
+        dialog = LoadBiasDialog(self, self.module)
 
         if dialog.exec():
             params = dialog.get_load_param()
@@ -2804,8 +2804,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             return
 
         # Show the same dialog that the "Load Bias" button shows
-        from .bias_kids_dialog import BiasKidsDialog
-        dialog = BiasKidsDialog(self, self.module, load_bias=True, loaded_data=data)
+        from .bias_kids_dialog import LoadBiasDialog
+        dialog = LoadBiasDialog(self, self.module, loaded_data=data)
         
         if dialog.exec():
             params = dialog.get_load_param()

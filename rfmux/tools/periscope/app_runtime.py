@@ -2018,26 +2018,17 @@ class PeriscopeRuntime:
         )
     
         self.bias_params = {
-            "nonlinear_threshold": 0.77,
-            "fallback_to_lowest": True,
-            "optimize_phase": True,
-            "num_phase_samples": 300,
-            "phase_step": 5,
-            "bandpass_params": {
-                "apply_bandpass": True,
-                "lowcut": 5.0,
-                "highcut": 20.0,
-                "fs": 597.0,
-            },
-            "apply_bandpass": True,
-            "lowcut": 5.0,
-            "highcut": 20.0,
-            "fs": 597.0,
+            "spike_prominence_factor": 2.0,
+            "spike_height_factor": 3.0,
+            "max_deriv_distance_hz": 100e3,
+            "fallback_to_highest": True,
+            "reference_freq_source": "bias_frequency",
+            "fit_selected_amplitude": True,
         }
         _assert_param_keys(
             self.bias_params,
             "rfmux.tools.periscope.bias_kids_dialog",
-            "BiasKidsDialog",
+            "BiasSettingsPanel",
         )
     
         self.noise_params = {
@@ -2242,8 +2233,10 @@ class PeriscopeRuntime:
             ),
             patch("rfmux.tools.periscope.tasks.NetworkAnalysisTask", MockNATask, create=True),
             patch("rfmux.tools.periscope.tasks.MultisweepTask", MockMultiTask, create=True),
-            patch("rfmux.tools.periscope.tasks.BiasKidsTask", MockBiasTask, create=True),
-            patch("rfmux.tools.periscope.tasks.BiasKidsSignals", MockBiasSignals, create=True),
+            patch("rfmux.tools.periscope.tasks.FindBiasTask", MockBiasTask, create=True),
+            patch("rfmux.tools.periscope.tasks.FindBiasSignals", MockBiasSignals, create=True),
+            patch("rfmux.tools.periscope.tasks.ApplyBiasTask", MockBiasTask, create=True),
+            patch("rfmux.tools.periscope.tasks.ApplyBiasSignals", MockBiasSignals, create=True),
             patch(
                 "rfmux.tools.periscope.dock_manager.PeriscopeDockManager.create_dock",
                 MockDockCreate,
@@ -2426,8 +2419,22 @@ class PeriscopeRuntime:
                 multisweep_window._get_spectrum = MagicMock()
 
             if multisweep_window:
-                print(">>> Testing Bias KIDs Dialog")
-                multisweep_window._bias_kids()
+                print(">>> Testing Find Bias")
+                # Populate res_info_dict so _find_bias() doesn't bail early
+                multisweep_window.res_info_dict = {
+                    "AXQR": {
+                        "bias_frequency": 90e6,
+                        "bias_amplitude": 0.1,
+                        "channel_number": 1,
+                    }
+                }
+                multisweep_window._find_bias()
+
+                print(">>> Testing Apply Bias (simulated after Find Bias)")
+                # Simulate successful completion of Find Bias
+                multisweep_window.apply_bias_btn.setEnabled(True)
+                multisweep_window.res_info_dict["AXQR"]["bias_found"] = True
+                multisweep_window._apply_bias()
 
                 print(">>> Testing Noise Spectrum Dialog")
                 multisweep_window._open_noise_spectrum_dialog()

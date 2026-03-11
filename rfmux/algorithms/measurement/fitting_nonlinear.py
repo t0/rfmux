@@ -478,12 +478,12 @@ def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) 
     updated_data = resonance_data.copy()
     
     frequencies = resonance_data.get('frequencies')
-    iq_complex = resonance_data.get('iq_complex')
+    iq_counts = resonance_data.get('iq_counts')
     # Use bias_frequency (canonical) or sweep_center_frequency as reference for messages
     ref_cf = (resonance_data.get('bias_frequency')
               or resonance_data.get('sweep_center_frequency'))
     
-    if frequencies is None or iq_complex is None:
+    if frequencies is None or iq_counts is None:
         # Mark as failed
         updated_data['nonlinear_fit_params'] = None
         updated_data['nonlinear_fit_errors'] = None
@@ -494,7 +494,7 @@ def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) 
     try:
         # Step 1: Estimate and remove gain
         iq_corrected, gain_mag, gain_phase = estimate_and_remove_gain(
-            frequencies, iq_complex, n_extrema_points
+            frequencies, iq_counts, n_extrema_points
         )
         
         # Store gain info
@@ -612,7 +612,7 @@ def fit_nonlinear_iq_multisweep(
         
         # Check required fields
         if (resonance_data.get('frequencies') is not None and
-            resonance_data.get('iq_complex') is not None):
+            resonance_data.get('iq_counts') is not None):
             valid_resonances.append((res_key, resonance_data))
         elif verbose:
             cf = resonance_data.get('bias_frequency') or resonance_data.get('sweep_center_frequency')
@@ -784,7 +784,7 @@ def test_nonlinear_fitting():
     test_data = {
         150e6: {
             'frequencies': f,
-            'iq_complex': z,
+            'iq_counts': z,
             'original_center_frequency': 150e6
         }
     }
@@ -811,7 +811,7 @@ def test_nonlinear_fitting():
     test_data = {
         200e6: {
             'frequencies': f,
-            'iq_complex': z,
+            'iq_counts': z,
             'original_center_frequency': 200e6
         }
     }
@@ -838,7 +838,7 @@ def test_nonlinear_fitting():
         )
         test_data[fr] = {
             'frequencies': f,
-            'iq_complex': z,
+            'iq_counts': z,
             'original_center_frequency': fr
         }
     

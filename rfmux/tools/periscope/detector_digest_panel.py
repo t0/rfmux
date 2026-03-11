@@ -682,12 +682,12 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         if self.current_plot_offset_hz is not None:
             freqs_hz_active = self.active_sweep_data.get('frequencies')
-            iq_complex_active = self.active_sweep_data.get('iq_complex')
+            iq_counts_active = self.active_sweep_data.get('iq_counts')
 
-            if freqs_hz_active is not None and iq_complex_active is not None and len(freqs_hz_active) > 0:
-                s21_mag_volts = convert_roc_to_volts(np.abs(iq_complex_active))
-                s21_i_volts = convert_roc_to_volts(iq_complex_active.real)
-                s21_q_volts = convert_roc_to_volts(iq_complex_active.imag)
+            if freqs_hz_active is not None and iq_counts_active is not None and len(freqs_hz_active) > 0:
+                s21_mag_volts = convert_roc_to_volts(np.abs(iq_counts_active))
+                s21_i_volts = convert_roc_to_volts(iq_counts_active.real)
+                s21_q_volts = convert_roc_to_volts(iq_counts_active.imag)
                 x_axis_hz_offset = freqs_hz_active - self.current_plot_offset_hz
 
                 # Plot raw data
@@ -709,12 +709,12 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                         # The normalization factor used in fitting is abs(s21_iq[-1])
                         # We can calculate this from the raw data
                         normalization_factor = 1.0
-                        if len(iq_complex_active) > 0:
+                        if len(iq_counts_active) > 0:
                             # Use the last point as the normalization reference (off-resonance baseline)
-                            normalization_factor = np.abs(iq_complex_active[-1])
+                            normalization_factor = np.abs(iq_counts_active[-1])
                             if normalization_factor < 1e-15:
                                 # Fallback if last point is too small
-                                normalization_factor = np.mean(np.abs(iq_complex_active[-10:]))
+                                normalization_factor = np.mean(np.abs(iq_counts_active[-10:]))
                         
                         # Apply the normalization factor to get back to physical scale
                         skewed_model_mag_physical = skewed_model_mag * normalization_factor
@@ -839,9 +839,9 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                 for data_entry in data_by_amplitude[amp_val_float]:
                     sweep_data = data_entry['sweep_info']['data']
                     direction = data_entry['direction']
-                    freqs_hz, iq_complex = sweep_data.get('frequencies'), sweep_data.get('iq_complex')
-                    if freqs_hz is None or iq_complex is None or len(freqs_hz) == 0: continue
-                    s21_mag_db = convert_roc_to_dbm(np.abs(iq_complex))
+                    freqs_hz, iq_counts = sweep_data.get('frequencies'), sweep_data.get('iq_counts')
+                    if freqs_hz is None or iq_counts is None or len(freqs_hz) == 0: continue
+                    s21_mag_db = convert_roc_to_dbm(np.abs(iq_counts))
                     if self.normalize_plot3 and len(s21_mag_db) > 0:
                         ref_val = s21_mag_db[0]
                         if np.isfinite(ref_val): s21_mag_db -= ref_val
@@ -988,10 +988,10 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         for amp_key in sorted_keys: 
             sweep_info = self.resonance_data_for_digest[amp_key]
             sweep_data = sweep_info['data']
-            freqs_hz, iq_complex = sweep_data.get('frequencies'), sweep_data.get('iq_complex')
+            freqs_hz, iq_counts = sweep_data.get('frequencies'), sweep_data.get('iq_counts')
 
-            if freqs_hz is not None and iq_complex is not None and len(freqs_hz) > 0:
-                s21_mag_db_curve = convert_roc_to_dbm(np.abs(iq_complex))
+            if freqs_hz is not None and iq_counts is not None and len(freqs_hz) > 0:
+                s21_mag_db_curve = convert_roc_to_dbm(np.abs(iq_counts))
                 if self.normalize_plot3 and len(s21_mag_db_curve) > 0:
                     ref_val = s21_mag_db_curve[0]
                     if np.isfinite(ref_val): s21_mag_db_curve -= ref_val

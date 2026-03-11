@@ -183,7 +183,7 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     netanal_result = await crs.take_netanal(**NETANAL_PARAMS)
     
     frequencies = netanal_result['frequencies']
-    iq_complex = netanal_result['iq_complex']
+    iq_counts = netanal_result['iq_counts']
     phase_degrees = netanal_result['phase_degrees']
     
     print(f"   ✓ Network analysis complete: {len(frequencies)} points")
@@ -209,7 +209,7 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     
     resonance_result = find_resonances(
         frequencies=frequencies,
-        iq_complex=iq_complex,
+        iq_complex=iq_counts,
         **FIND_RES_PARAMS,
         module_identifier=f"Module {MODULE}"
     )

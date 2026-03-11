@@ -76,7 +76,7 @@ async def take_netanal(
         A dictionary containing the measurement results.
         Keys:
         - 'frequencies': numpy.ndarray - Sorted frequency points (Hz).
-        - 'iq_complex': numpy.ndarray - Complex I/Q data corresponding to 'frequencies'.
+        - 'iq_counts': numpy.ndarray - Complex I/Q data corresponding to 'frequencies'.
         - 'phase_degrees': numpy.ndarray - Phase in degrees corresponding to 'frequencies'.
     """
 
@@ -307,7 +307,7 @@ async def take_netanal(
         # Return arrays in the expected dictionary structure
         return {
             'frequencies': np.array([]),
-            'iq_complex': np.array([]),
+            'iq_counts': np.array([]),
             'phase_degrees': np.array([])
         }
 
@@ -318,7 +318,7 @@ async def take_netanal(
 
     result_dict = {
         'frequencies': fs_sorted,
-        'iq_complex': iq_sorted,
+        'iq_counts': iq_sorted,
         'phase_degrees': phase_sorted
     }
             

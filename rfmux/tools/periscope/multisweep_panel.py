@@ -838,13 +838,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 freqs = det_entry.get('frequencies', np.array([]))
                 # Use raw counts when in counts mode, otherwise voltage-converted data
                 if self.unit_mode == "counts":
-                    iq_complex = det_entry.get('iq_complex', np.array([]))
+                    iq_counts = det_entry.get('iq_counts', np.array([]))
                 else:
-                    iq_complex = det_entry.get('iq_complex', np.array([]))
-                if amp_val is not None and len(freqs) > 0 and len(iq_complex) > 0:
+                    iq_counts = det_entry.get('iq_counts', np.array([]))
+                if amp_val is not None and len(freqs) > 0 and len(iq_counts) > 0:
                     detector_data[detector_id][(amp_val, direction)] = {
                         'freq': freqs,
-                        'iq': iq_complex,
+                        'iq': iq_counts,
                         'amplitude': amp_val,
                         'direction': direction,
                         'original_center_frequency': det_entry.get('original_center_frequency')
@@ -1027,23 +1027,23 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     continue
 
                 freqs_hz = data.get('frequencies', np.array([]))
-                iq_complex = data.get('iq_complex', np.array([]))
+                iq_counts = data.get('iq_counts', np.array([]))
 
-                if freqs_hz is None or iq_complex is None or len(freqs_hz) == 0 or len(iq_complex) == 0:
+                if freqs_hz is None or iq_counts is None or len(freqs_hz) == 0 or len(iq_counts) == 0:
                     continue
                 
                 # Calculate magnitude and phase
-                s21_mag_raw = np.abs(iq_complex)
+                s21_mag_raw = np.abs(iq_counts)
                 # Compute probe_amp_dbm for dBm normalization if DAC scale available
                 probe_amp_dbm = None
                 if self.normalize_traces and self.unit_mode == 'dbm' and dac_scale_for_module is not None:
                     probe_amp_dbm = UnitConverter.normalize_to_dbm(amp_val, dac_scale_for_module)
                 s21_mag_processed = UnitConverter.convert_amplitude(
-                    s21_mag_raw, iq_complex, self.unit_mode, 
+                    s21_mag_raw, iq_counts, self.unit_mode,
                     normalize=self.normalize_traces, probe_amp_dbm=probe_amp_dbm
                 )
                 # Use pre-calculated phase if available, otherwise calculate from IQ
-                phase_deg = data.get('phase_degrees', np.degrees(np.angle(iq_complex))) 
+                phase_deg = data.get('phase_degrees', np.degrees(np.angle(iq_counts)))
                 
                 if self.normalize_traces and len(phase_deg) > 0:
                     first_phase_val = phase_deg[0]

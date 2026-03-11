@@ -330,7 +330,7 @@ class NetworkAnalysisTask(QtCore.QThread):
                 
                 # Process results if available and task wasn't interrupted
                 if not self.isInterruptionRequested() and result:
-                    fs_sorted, iq_sorted = result['frequencies'], result['iq_complex']
+                    fs_sorted, iq_sorted = result['frequencies'], result['iq_counts']
                     phase_sorted, amp_sorted = result['phase_degrees'], np.abs(iq_sorted)
                     self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
                     self.signals.data_update_with_amp.emit(self.module, fs_sorted, amp_sorted, phase_sorted, self.amplitude)
@@ -341,7 +341,7 @@ class NetworkAnalysisTask(QtCore.QThread):
             if loop.is_running():
                 loop.run_until_complete(self._cleanup_channels())
         except KeyError as ke:
-            err_msg = f"KeyError accessing results for module {self.module}: {ke}. Expected 'frequencies', 'iq_complex', 'phase_degrees'."
+            err_msg = f"KeyError accessing results for module {self.module}: {ke}. Expected 'frequencies', 'iq_counts', 'phase_degrees'."
             print(f"ERROR: {err_msg}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             self.signals.error.emit(err_msg)
@@ -594,7 +594,7 @@ class MultisweepTask(QtCore.QThread):
 
                     # Bifurcation detection (operates on string-keyed data)
                     for res_key, data_dict_val in raw_data.items():
-                        iq_data = data_dict_val.get('iq_complex')
+                        iq_data = data_dict_val.get('iq_counts')
                         if iq_data is not None:
                             try:
                                 data_dict_val['is_bifurcated'] = (

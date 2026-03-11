@@ -153,7 +153,7 @@ async def multisweep(
                   # Sweep data
                   "sweep_direction":        str,
                   "frequencies":            np.ndarray,   # Hz
-                  "iq_complex":             np.ndarray,   # complex128
+                  "iq_counts":              np.ndarray,   # complex128
                   "phase_degrees":          np.ndarray,
               }
 
@@ -326,7 +326,7 @@ async def multisweep(
             )
         resonance_data[code] = {
             "frequencies": pts,
-            "iq_complex": np.zeros(npoints_per_sweep, dtype=np.complex128),
+            "iq_counts": np.zeros(npoints_per_sweep, dtype=np.complex128),
         }
 
     # -----------------------------------------------------------------------
@@ -401,7 +401,7 @@ async def multisweep(
             for cf in region_cfs:
                 code = cf_to_code[cf]
                 ch_idx = cf_to_channel[cf] - 1  # 0-based index into samples arrays
-                resonance_data[code]["iq_complex"][point_idx] = (
+                resonance_data[code]["iq_counts"][point_idx] = (
                     samples.mean.i[ch_idx] + 1j * samples.mean.q[ch_idx]
                 )
 
@@ -419,7 +419,7 @@ async def multisweep(
                 intermediate = {
                     code: {
                         "frequencies": resonance_data[code]["frequencies"][:n],
-                        "iq_complex": resonance_data[code]["iq_complex"][:n],
+                        "iq_counts": resonance_data[code]["iq_counts"][:n],
                         "sweep_center_frequency": code_to_cf[code],
                     }
                     for code in codes
@@ -441,9 +441,9 @@ async def multisweep(
             # --- Sweep data ---
             "sweep_direction":        sweep_direction,
             "frequencies":            resonance_data[code]["frequencies"],
-            "iq_complex":             resonance_data[code]["iq_complex"],
+            "iq_counts":              resonance_data[code]["iq_counts"],
             "phase_degrees":          np.degrees(
-                                          np.angle(resonance_data[code]["iq_complex"])
+                                          np.angle(resonance_data[code]["iq_counts"])
                                       ),
         }
         for code in codes

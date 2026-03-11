@@ -114,7 +114,7 @@ def _group_by_detector(results_by_iteration: Dict[int, Dict]) -> Tuple[Dict[int,
             # Extract sweep data
             freq = det_data.get('frequencies', np.array([]))
             # Use iq_complex_volts for normalized voltage units
-            iq = det_data.get('iq_complex_volts', det_data.get('iq_complex', np.array([])))
+            iq = det_data.get('iq_complex_volts', det_data.get('iq_counts', np.array([])))
             bias_freq = det_data.get('bias_frequency', None)
             
             # Store sweep data in detector-indexed structure

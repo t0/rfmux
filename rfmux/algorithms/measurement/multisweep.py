@@ -23,6 +23,7 @@ import warnings
 
 from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
+from rfmux.core.transferfunctions import convert_roc_to_volts
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +154,11 @@ async def multisweep(
                   # Sweep data
                   "sweep_direction":        str,
                   "frequencies":            np.ndarray,   # Hz
-                  "iq_counts":              np.ndarray,   # complex128
+                  "iq_counts":              np.ndarray,   # complex128, in readout counts
+                  "iq_volts":               np.ndarray,   # complex128, in volts at the
+                                                          # board input port, derived by
+                                                          # applying VOLTS_PER_ROC from
+                                                          # core.transferfunctions
                   "phase_degrees":          np.ndarray,
               }
 
@@ -418,8 +423,11 @@ async def multisweep(
                 n = point_idx + 1
                 intermediate = {
                     code: {
-                        "frequencies": resonance_data[code]["frequencies"][:n],
-                        "iq_counts": resonance_data[code]["iq_counts"][:n],
+                        "frequencies":            resonance_data[code]["frequencies"][:n],
+                        "iq_counts":              resonance_data[code]["iq_counts"][:n],
+                        "iq_volts":               convert_roc_to_volts(
+                                                      resonance_data[code]["iq_counts"][:n]
+                                                  ),
                         "sweep_center_frequency": code_to_cf[code],
                     }
                     for code in codes
@@ -442,6 +450,9 @@ async def multisweep(
             "sweep_direction":        sweep_direction,
             "frequencies":            resonance_data[code]["frequencies"],
             "iq_counts":              resonance_data[code]["iq_counts"],
+            "iq_volts":               convert_roc_to_volts(
+                                          resonance_data[code]["iq_counts"]
+                                      ),
             "phase_degrees":          np.degrees(
                                           np.angle(resonance_data[code]["iq_counts"])
                                       ),

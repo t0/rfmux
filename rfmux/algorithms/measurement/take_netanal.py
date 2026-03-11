@@ -9,6 +9,7 @@ import numpy as np
 import scipy.signal as signal
 from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
+from rfmux.core.transferfunctions import convert_roc_to_volts
 
 
 @macro(CRS, register=True)
@@ -76,7 +77,10 @@ async def take_netanal(
         A dictionary containing the measurement results.
         Keys:
         - 'frequencies': numpy.ndarray - Sorted frequency points (Hz).
-        - 'iq_counts': numpy.ndarray - Complex I/Q data corresponding to 'frequencies'.
+        - 'iq_counts': numpy.ndarray - Complex I/Q data corresponding to 'frequencies',
+          in readout counts (ROC).
+        - 'iq_volts': numpy.ndarray - Complex I/Q data in volts at the board input port,
+          derived by applying VOLTS_PER_ROC from core.transferfunctions.
         - 'phase_degrees': numpy.ndarray - Phase in degrees corresponding to 'frequencies'.
     """
 
@@ -306,8 +310,9 @@ async def take_netanal(
     if len(fs_all_np) == 0: # Handle empty data
         # Return arrays in the expected dictionary structure
         return {
-            'frequencies': np.array([]),
-            'iq_counts': np.array([]),
+            'frequencies':  np.array([]),
+            'iq_counts':    np.array([]),
+            'iq_volts':     np.array([]),
             'phase_degrees': np.array([])
         }
 
@@ -317,8 +322,9 @@ async def take_netanal(
     phase_sorted = np.degrees(np.angle(iq_sorted))
 
     result_dict = {
-        'frequencies': fs_sorted,
-        'iq_counts': iq_sorted,
+        'frequencies':  fs_sorted,
+        'iq_counts':    iq_sorted,
+        'iq_volts':     convert_roc_to_volts(iq_sorted),
         'phase_degrees': phase_sorted
     }
             

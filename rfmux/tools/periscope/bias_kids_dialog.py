@@ -80,16 +80,6 @@ class BiasSettingsPanel(QWidget):
         )
         bifurc_layout.addRow("Spike Height Factor:", self.spike_height_spin)
 
-        self.fallback_cb = QCheckBox("Fallback to Highest Amplitude")
-        self.fallback_cb.setChecked(True)
-        self.fallback_cb.setToolTip(
-            "If no bifurcation is found across all amplitudes,\n"
-            "use the highest available amplitude as the bias point.\n"
-            "If unchecked, resonators without a detected bifurcation\n"
-            "are skipped (bias_found = False)."
-        )
-        bifurc_layout.addRow("", self.fallback_cb)
-
         bifurc_group.setLayout(bifurc_layout)
         layout.addWidget(bifurc_group)
 
@@ -121,7 +111,7 @@ class BiasSettingsPanel(QWidget):
         radio_layout = QVBoxLayout()
         radio_layout.setSpacing(2)
 
-        self.rb_bias_freq = QRadioButton("Bias frequency (res_info_dict)")
+        self.rb_bias_freq = QRadioButton("Pre-existing bias frequency (res_info_dict)")
         self.rb_bias_freq.setChecked(True)
         self.rb_bias_freq.setToolTip(
             "Use the existing bias_frequency stored in res_info_dict\n"
@@ -175,8 +165,18 @@ class BiasSettingsPanel(QWidget):
         btn_layout.addStretch(1)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.hide)
+        close_btn.setDefault(True)
         btn_layout.addWidget(close_btn)
         layout.addLayout(btn_layout)
+
+    # ── Event handling ────────────────────────────────────────────────────────
+
+    def keyPressEvent(self, event):
+        """Close the panel when Enter or Return is pressed."""
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.hide()
+        else:
+            super().keyPressEvent(event)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -190,7 +190,6 @@ class BiasSettingsPanel(QWidget):
         * ``spike_prominence_factor`` (float)
         * ``spike_height_factor`` (float)
         * ``max_deriv_distance_hz`` (float) — converted from kHz to Hz
-        * ``fallback_to_highest`` (bool)
         * ``reference_freq_source`` (str) — one of
           ``"bias_frequency"``, ``"fit_fr"``, ``"sweep_center"``
         * ``fit_selected_amplitude`` (bool)
@@ -206,7 +205,6 @@ class BiasSettingsPanel(QWidget):
             'spike_prominence_factor': self.spike_prominence_spin.value(),
             'spike_height_factor':     self.spike_height_spin.value(),
             'max_deriv_distance_hz':   self.max_deriv_dist_spin.value() * 1e3,
-            'fallback_to_highest':     self.fallback_cb.isChecked(),
             'reference_freq_source':   ref_source,
             'fit_selected_amplitude':  self.fit_selected_cb.isChecked(),
         }
@@ -222,7 +220,6 @@ class BiasSettingsPanel(QWidget):
         self.spike_prominence_spin.setValue(2.0)
         self.spike_height_spin.setValue(3.0)
         self.max_deriv_dist_spin.setValue(100.0)
-        self.fallback_cb.setChecked(True)
         self.rb_bias_freq.setChecked(True)
         self.fit_selected_cb.setChecked(True)
 

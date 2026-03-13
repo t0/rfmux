@@ -20,7 +20,7 @@ from rfmux.core.transferfunctions import convert_roc_to_volts
 def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, batch_size,
                       amplitude_to_color, dark_mode, unit_mode='dbm', normalize=False,
                       prev_btn=None, next_btn=None, batch_label=None, widget_cache=None,
-                      dac_scale=None, show_legend=True):
+                      dac_scale=None, show_legend=True, res_info_dict=None):
     """
     Update a grid layout with per-detector sweep plots.
 
@@ -39,6 +39,10 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
         batch_label: Optional label to update with batch info
         widget_cache: Optional list to cache plot widgets for reuse
         dac_scale: Optional DAC scale (dBm) for formatting legend labels
+        res_info_dict: Optional resonator registry {code: {...}} from MultisweepPanel.
+            When provided, bias overlays (thickened chosen-amplitude trace,
+            vertical line / IQ marker at bias frequency) are drawn for each
+            detector whose ``bias_found`` flag is True.
     """
     if not data_by_detector:
         return
@@ -135,7 +139,7 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
 
             # Title
             if center_freq_hz is not None:
-                title = f"{detector_id}: {center_freq_hz / 1e6:.3f} MHz"
+                title = f"{detector_id} (<i>f</i><sub>central</sub> = {center_freq_hz / 1e6:.3f} MHz)"
             else:
                 title = f"Detector {detector_id}"
             plot_item.setTitle(title, color=pen_color)
@@ -150,15 +154,30 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
             # Plot data with legend labels (suppressed when colorbar is active)
             labels = sweep_labels if (show_legend and len(sweep_labels) > 0) else None
 
+            # Look up bias overlay info for this detector from the resonator registry
+            det_bias_info = (res_info_dict or {}).get(detector_id, {})
+            bias_amp = (
+                det_bias_info.get('bias_amplitude')
+                if det_bias_info.get('bias_found') else None
+            )
+            bias_freq_hz = (
+                det_bias_info.get('bias_frequency')
+                if det_bias_info.get('bias_found') else None
+            )
+
             if plot_type == 'magnitude':
                 _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
-                                         pen_color, unit_mode, normalize, labels, dac_scale)
+                                         pen_color, unit_mode, normalize, labels, dac_scale,
+                                         bias_amplitude=bias_amp,
+                                         bias_frequency_hz=bias_freq_hz)
                 lbl, units = mag_axis_label(unit_mode, normalize)
                 plot_item.setLabel('left', lbl, units=units)
-                plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
+                plot_item.setLabel('bottom', '<i>f</i> − <i>f</i><sub>central</sub> [kHz]')
             else:  # IQ
                 _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
-                                  pen_color, normalize, labels, unit_mode=unit_mode)
+                                  pen_color, normalize, labels, unit_mode=unit_mode,
+                                  bias_amplitude=bias_amp,
+                                  bias_frequency_hz=bias_freq_hz)
                 iq_units = 'V' if unit_mode == 'volts' else 'Counts'
                 plot_item.setLabel('left', 'Q (Imaginary)', units=iq_units)
                 plot_item.setLabel('bottom', 'I (Real)', units=iq_units)
@@ -187,7 +206,8 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
 
 def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
                              pen_color, unit_mode='dbm', normalize=False,
-                             sweep_labels=None, dac_scale=None):
+                             sweep_labels=None, dac_scale=None,
+                             bias_amplitude=None, bias_frequency_hz=None):
     """Plot S21 magnitude sweeps for a single detector.
 
     Args:
@@ -199,19 +219,43 @@ def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
         normalize: Whether to normalize traces
         sweep_labels: Optional dict {(amp, direction): label} for legend names.
         dac_scale: DAC full-scale in dBm (for computing probe_amp_dbm when normalizing)
+        bias_amplitude: Chosen bias amplitude from Find Bias (or None).  The
+            trace for this amplitude is rendered with double line width.
+        bias_frequency_hz: Refined bias frequency in Hz from Find Bias (or
+            None).  A solid vertical line is drawn at this frequency when
+            provided.
     """
     sorted_keys = sorted(detector_data.keys())
     single_sweep = len(sorted_keys) == 1
 
-    # Add legend in lower-left corner (usually free space)
-    if sweep_labels:
-        legend_color = '#CCCCCC' if amplitude_to_color else '#333333'
+    # When colorbar mode is active (sweep_labels is None) but Find Bias has run
+    # and the nonlinear fit succeeded for the chosen amplitude, prepare a one-entry
+    # legend label so the 'a' value is still visible on each subplot.
+    chosen_a_label = None
+    if not sweep_labels and bias_amplitude is not None:
+        for (av, dir_) in sorted_keys:
+            if av == bias_amplitude:
+                _entry = detector_data[(av, dir_)]
+                if _entry.get('nonlinear_fit_success') and _entry.get('nonlinear_fit_params'):
+                    _a_val = _entry['nonlinear_fit_params'].get('a')
+                    if _a_val is not None:
+                        chosen_a_label = f"★ a={_a_val:.3f}"
+                        break
+
+    # Add legend: always when sweep_labels are provided (legend mode), or when
+    # colorbar mode is active but we have a chosen-amplitude 'a' value to show.
+    if sweep_labels or chosen_a_label:
         # Infer dark mode from pen_color
         if pen_color == 'w' or pen_color == (255, 255, 255):
             legend_color = '#CCCCCC'
         else:
             legend_color = '#333333'
         plot_item.addLegend(offset=(10, -10), labelTextColor=legend_color)
+
+    # Track the frequency array and color for the chosen amplitude so we can
+    # use them after the loop when drawing the bias vertical line.
+    chosen_freqs_for_vline = None
+    chosen_color_for_vline = pen_color
 
     for (amp_val, direction) in sorted_keys:
         entry = detector_data[(amp_val, direction)]
@@ -227,21 +271,67 @@ def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
             probe_amp_dbm = UnitConverter.normalize_to_dbm(amp_val, dac_scale)
         mag_converted = UnitConverter.convert_amplitude(mag, iq, unit_mode, normalize=normalize, probe_amp_dbm=probe_amp_dbm)
 
+        # Determine whether this sweep is the chosen bias amplitude
+        is_chosen = (bias_amplitude is not None) and (amp_val == bias_amplitude)
+        curve_width = LINE_WIDTH * 2 if is_chosen else LINE_WIDTH
+
         # Color from amplitude, line style from direction
         if single_sweep:
-            pen = pg.mkPen(color=pen_color, width=LINE_WIDTH)
+            pen = pg.mkPen(color=pen_color, width=curve_width)
         else:
             color = amplitude_to_color.get(amp_val, pen_color)
             line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
-            pen = pg.mkPen(color=color, width=LINE_WIDTH, style=line_style)
+            pen = pg.mkPen(color=color, width=curve_width, style=line_style)
+            if is_chosen:
+                chosen_color_for_vline = color
 
         freqs_rel_khz = 1e-3 * (freqs - np.mean(freqs))
-        name = sweep_labels.get((amp_val, direction)) if sweep_labels else None
+
+        # Append ★ and nonlinearity parameter 'a' to the legend name for the chosen amplitude.
+        # In colorbar mode (sweep_labels is None), use the pre-computed chosen_a_label for the
+        # chosen sweep so the 'a' value still appears in the mini one-entry legend.
+        name = None
+        if sweep_labels:
+            base_name = sweep_labels.get((amp_val, direction))
+            if is_chosen and base_name:
+                nl_suffix = ""
+                if entry.get('nonlinear_fit_success') and entry.get('nonlinear_fit_params'):
+                    a_val = entry['nonlinear_fit_params'].get('a')
+                    if a_val is not None:
+                        nl_suffix = f", a={a_val:.3f}"
+                name = base_name + " ★" + nl_suffix
+            else:
+                name = base_name
+        elif is_chosen and chosen_a_label:
+            name = chosen_a_label
+
         plot_item.plot(freqs_rel_khz, mag_converted, pen=pen, name=name)
+
+        # Record this sweep's frequency axis reference for the vertical line
+        if is_chosen:
+            chosen_freqs_for_vline = freqs
+
+    # --- Bias frequency vertical line ---
+    # Draw a thin solid vertical line at the refined bias frequency using the
+    # same colour as the chosen-amplitude traces.  The position is expressed
+    # in the same kHz-offset coordinate as the traces.
+    if bias_frequency_hz is not None and chosen_freqs_for_vline is not None:
+        freq_mean_hz = float(np.mean(chosen_freqs_for_vline))
+        bias_offset_khz = 1e-3 * (bias_frequency_hz - freq_mean_hz)
+        vline_pen = pg.mkPen(
+            chosen_color_for_vline,
+            style=QtCore.Qt.PenStyle.SolidLine,
+            width=1,
+        )
+        plot_item.addItem(pg.InfiniteLine(
+            pos=bias_offset_khz, angle=90,
+            pen=vline_pen, movable=False,
+        ))
 
 
 def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
-                      pen_color, normalize=False, sweep_labels=None, unit_mode='counts'):
+                      pen_color, normalize=False, sweep_labels=None, unit_mode='counts',
+                      bias_amplitude=None, bias_frequency_hz=None):
     """Plot IQ circles for a single detector.
 
     Args:
@@ -256,19 +346,48 @@ def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
             before plotting.  For ``'counts'`` and ``'dbm'`` the raw ROC
             counts are used unchanged (dBm has no meaningful per-component
             interpretation for complex IQ data).
+        bias_amplitude: Chosen bias amplitude from Find Bias (or None).  The
+            trace for this amplitude is rendered with double line width.
+        bias_frequency_hz: Refined bias frequency in Hz from Find Bias (or
+            None).  A ✕ scatter marker is drawn at the IQ point closest to
+            this frequency on the chosen-amplitude trace.
     """
     sorted_keys = sorted(detector_data.keys())
     single_sweep = len(sorted_keys) == 1
 
-    if sweep_labels:
+    # When colorbar mode is active (sweep_labels is None) but Find Bias has run
+    # and the nonlinear fit succeeded for the chosen amplitude, prepare a one-entry
+    # legend label so the 'a' value is still visible on each subplot.
+    chosen_a_label = None
+    if not sweep_labels and bias_amplitude is not None:
+        for (av, dir_) in sorted_keys:
+            if av == bias_amplitude:
+                _entry = detector_data[(av, dir_)]
+                if _entry.get('nonlinear_fit_success') and _entry.get('nonlinear_fit_params'):
+                    _a_val = _entry['nonlinear_fit_params'].get('a')
+                    if _a_val is not None:
+                        chosen_a_label = f"★ a={_a_val:.3f}"
+                        break
+
+    # Add legend: always when sweep_labels are provided (legend mode), or when
+    # colorbar mode is active but we have a chosen-amplitude 'a' value to show.
+    if sweep_labels or chosen_a_label:
         if pen_color == 'w' or pen_color == (255, 255, 255):
             legend_color = '#CCCCCC'
         else:
             legend_color = '#333333'
         plot_item.addLegend(offset=(10, -10), labelTextColor=legend_color)
 
+    # Accumulate the IQ data for the chosen amplitude sweep so that we can
+    # add the bias-point scatter marker after all traces are drawn.
+    chosen_i_for_marker = None
+    chosen_q_for_marker = None
+    chosen_freqs_for_marker = None
+    chosen_color_for_marker = pen_color
+
     for (amp_val, direction) in sorted_keys:
         entry = detector_data[(amp_val, direction)]
+        freqs = entry.get('freq')
         iq = entry.get('iq')
         if iq is None or len(iq) == 0:
             continue
@@ -288,15 +407,64 @@ def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
                 i_vals = i_vals / np.max(mag)
                 q_vals = q_vals / np.max(mag)
 
+        # Determine whether this sweep is the chosen bias amplitude
+        is_chosen = (bias_amplitude is not None) and (amp_val == bias_amplitude)
+        curve_width = LINE_WIDTH * 2 if is_chosen else LINE_WIDTH
+
         if single_sweep:
-            pen = pg.mkPen(color=pen_color, width=LINE_WIDTH)
+            pen = pg.mkPen(color=pen_color, width=curve_width)
         else:
             color = amplitude_to_color.get(amp_val, pen_color)
             line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
-            pen = pg.mkPen(color=color, width=LINE_WIDTH, style=line_style)
+            pen = pg.mkPen(color=color, width=curve_width, style=line_style)
+            if is_chosen:
+                chosen_color_for_marker = color
 
-        name = sweep_labels.get((amp_val, direction)) if sweep_labels else None
+        # Append ★ and nonlinearity parameter 'a' to the legend name for the chosen amplitude.
+        # In colorbar mode (sweep_labels is None), use the pre-computed chosen_a_label for the
+        # chosen sweep so the 'a' value still appears in the mini one-entry legend.
+        name = None
+        if sweep_labels:
+            base_name = sweep_labels.get((amp_val, direction))
+            if is_chosen and base_name:
+                nl_suffix = ""
+                if entry.get('nonlinear_fit_success') and entry.get('nonlinear_fit_params'):
+                    a_val = entry['nonlinear_fit_params'].get('a')
+                    if a_val is not None:
+                        nl_suffix = f", a={a_val:.3f}"
+                name = base_name + " ★" + nl_suffix
+            else:
+                name = base_name
+        elif is_chosen and chosen_a_label:
+            name = chosen_a_label
+
         plot_item.plot(i_vals, q_vals, pen=pen, name=name)
+
+        # Store the converted IQ values for the chosen trace so we can place
+        # the bias-point marker after the loop.
+        if is_chosen:
+            chosen_i_for_marker = i_vals
+            chosen_q_for_marker = q_vals
+            chosen_freqs_for_marker = freqs
+
+    # --- Bias-point IQ marker ---
+    # Find the sweep sample whose frequency is closest to bias_frequency_hz
+    # and draw a ✕ scatter symbol there.
+    if (bias_frequency_hz is not None
+            and chosen_freqs_for_marker is not None
+            and chosen_i_for_marker is not None):
+        freq_arr = np.asarray(chosen_freqs_for_marker)
+        idx_closest = int(np.argmin(np.abs(freq_arr - bias_frequency_hz)))
+        i_bias = float(chosen_i_for_marker[idx_closest])
+        q_bias = float(chosen_q_for_marker[idx_closest])
+        scatter = pg.ScatterPlotItem(
+            x=[i_bias], y=[q_bias],
+            symbol='x',
+            size=18,
+            pen=pg.mkPen(chosen_color_for_marker, width=2),
+            brush=pg.mkBrush(chosen_color_for_marker),
+        )
+        plot_item.addItem(scatter)
 
 
 # ---------------------------------------------------------------------------

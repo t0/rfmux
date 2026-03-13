@@ -73,7 +73,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                  section_center_frequencies: list[float] | None = None, 
                  dac_scales: dict[int, float] = None, 
                  current_module: int | None = None, 
-                 initial_params: dict | None = None, load_multisweep = False, fit_frequencies: list[float] = None):
+                 initial_params: dict | None = None, load_multisweep = False, fit_frequencies: list[float] = None,
+                 bias_frequencies: list[float] | None = None):
         """
         Initializes the Multisweep configuration dialog.
 
@@ -101,6 +102,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.current_module = current_module # Store the current module for DAC scale and params
         self.load_multisweep = load_multisweep
         self.fit_frequencies = fit_frequencies
+        self.bias_frequencies = bias_frequencies or []
 
         self.use_data_from_file = False
         self._load_data = {}
@@ -224,21 +226,42 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.sections_info_label.setWordWrap(True)
             section_label_layout.addWidget(self.sections_info_label, stretch=1)
             
+            # Preserve a copy of the original sweep-center frequencies for the
+            # "Use previous multisweep central frequencies" option.  section_center_frequencies
+            # may be mutated by _scroll_rerun_section when the user switches options.
+            self._original_section_center_frequencies = list(self.section_center_frequencies)
+
             self.section_freq_combo = QtWidgets.QComboBox()
-            self.section_freq_combo.addItems(["Use previous multisweep central frequencies", "Use resonant frequencies from fit"])
+            self.section_freq_combo.addItem("Use previous multisweep central frequencies")
+            # Only add the fit-frequency option when real fit results exist
+            if self.fit_frequencies:
+                self.section_freq_combo.addItem("Use resonant frequencies from fit")
+            # Add "Bias frequencies" option if bias frequencies are available
+            if self.bias_frequencies:
+                self.section_freq_combo.addItem("Use bias frequencies")
             self.section_freq_combo.setToolTip("Select what to use as the central frequency of this sweep")
-            self.section_freq_combo.currentIndexChanged.connect(self._scroll_rerun_section)
-            self.section_freq_combo.setCurrentIndex(0)
+            # Block signals during setup so the slot doesn't fire before sections_edit exists
+            self.section_freq_combo.blockSignals(True)
+            # Default to "Bias frequencies" if they exist, otherwise "previous multisweep central frequencies"
+            if self.bias_frequencies:
+                self.section_freq_combo.setCurrentIndex(self.section_freq_combo.count() - 1)
+                self.section_center_frequencies = list(self.bias_frequencies)
+            else:
+                self.section_freq_combo.setCurrentIndex(0)
+            self.section_freq_combo.blockSignals(False)
             section_label_layout.addWidget(self.section_freq_combo)
             
             section_info_layout.addLayout(section_label_layout)
     
-            # Default input fallback (comma-separated sweep central frequencies in MHz)
+            # Display field showing the selected central frequencies (MHz).
+            # 6 decimal places in MHz = 1 Hz precision.
             self.sections_edit = QtWidgets.QLineEdit()
-            section_freq_rerun = ", ".join([f"{f / 1e6:.9f}" for f in self.section_center_frequencies])
+            section_freq_rerun = ", ".join([f"{f / 1e6:.6f}" for f in self.section_center_frequencies])
             self.sections_edit.setText(section_freq_rerun)
             self.sections_edit.textChanged.connect(self._update_section_count)
             section_info_layout.addWidget(self.sections_edit)
+            # Connect the signal only after sections_edit exists so the slot is safe to call
+            self.section_freq_combo.currentIndexChanged.connect(self._scroll_rerun_section)
             layout.addWidget(section_info_group)
             
         else:
@@ -573,17 +596,26 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.sections_info_label.setText(f"Loaded {len(freqs)} sections from file.")
 
     def _scroll_rerun_section(self):
-        """Refresh section display when rerunning choice between fit or sweep frequencies."""
+        """Refresh section display and update section_center_frequencies when the user
+        changes the frequency source combo in re-run mode."""
         selected = self.section_freq_combo.currentText().lower()
         self.sections_edit.clear()
 
         if "fit" in selected:
-            freqs = self.fit_frequencies
+            freqs = self.fit_frequencies or []
+        elif "bias" in selected:
+            freqs = self.bias_frequencies or []
         else:
-            freqs = self.section_center_frequencies
+            # "previous multisweep central frequencies" — use the original sweep centers
+            # stored in _original_section_center_frequencies (set during _setup_ui)
+            freqs = self._original_section_center_frequencies
 
-        self.sections_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
-        self.sections_info_label.setText(f"Loaded {len(freqs)} sections from file.")
+        # Update section_center_frequencies so get_parameters() picks up the right list
+        self.section_center_frequencies = list(freqs)
+
+        self.sections_edit.setText(", ".join([f"{f/1e6:.6f}" for f in freqs]))
+        n = len(freqs)
+        self.sections_info_label.setText(f"{n} section(s) selected.")
         
     
     def _import_file(self):

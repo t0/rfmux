@@ -122,6 +122,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.show_cf_lines_cb = None # Checkbox for toggling CF lines
         self.cf_lines_mag = {}  # Stores {amplitude: [InfiniteLine_mag]}
         self.cf_lines_phase = {} # Stores {amplitude: [InfiniteLine_phase]}
+
+        # Bias frequency overlay lines (shown after Find Bias completes)
+        # These are InfiniteLine items added to the combined plots to mark the
+        # refined bias frequency for each detector.  Stored so they can be
+        # removed when _redraw_combined_plots is next called.
+        self.bias_freq_lines_mag = []    # InfiniteLine items on combined mag plot
+        self.bias_freq_lines_phase = []  # InfiniteLine items on combined phase plot
         
         # Bias task storage
         self.bias_kids_output = None     # Stores the output from apply_bias (for export)
@@ -219,6 +226,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
         toolbar_layout.addWidget(self.noise_spectrum_btn)
         
+        # Transient "Find Bias" status label — hidden until Find Bias completes,
+        # then shown briefly before auto-hiding after 5 s.
+        self._bias_status_label = QtWidgets.QLabel("✓ Bias found")
+        self._bias_status_label.setStyleSheet(
+            "color: #2a8a2a; font-weight: bold; padding: 2px 6px;"
+        )
+        self._bias_status_label.hide()
+        toolbar_layout.addWidget(self._bias_status_label)
+
         # Spacer to push subsequent items to the right
         toolbar_layout.addStretch(1)
         
@@ -872,7 +888,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                         'iq': iq_counts,
                         'amplitude': amp_val,
                         'direction': direction,
-                        'original_center_frequency': det_entry.get('original_center_frequency')
+                        'original_center_frequency': (
+                            det_entry.get('original_center_frequency')
+                            or det_entry.get('sweep_center_frequency')
+                        ),
+                        'nonlinear_fit_success': det_entry.get('nonlinear_fit_success', False),
+                        'nonlinear_fit_params': det_entry.get('nonlinear_fit_params'),
                     }
         
         if not detector_data:
@@ -941,7 +962,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             batch_label=self.batch_info_label,
             widget_cache=widget_cache,
             dac_scale=dac_scale,
-            show_legend=use_legend
+            show_legend=use_legend,
+            res_info_dict=self.res_info_dict,
         )
         
         # Install double-click event filter on grid plot widgets
@@ -974,10 +996,25 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             for line in amp_val_lines: self.combined_phase_plot.removeItem(line)
         self.cf_lines_phase.clear()
 
+        # Remove existing bias frequency overlay lines
+        for line in self.bias_freq_lines_mag:
+            self.combined_mag_plot.removeItem(line)
+        self.bias_freq_lines_mag.clear()
+        for line in self.bias_freq_lines_phase:
+            self.combined_phase_plot.removeItem(line)
+        self.bias_freq_lines_phase.clear()
+
         if not self.results_by_detector:
             self.combined_mag_plot.autoRange(); self.combined_phase_plot.autoRange()
             return
-        
+
+        # --- Determine which amplitudes are "chosen" by Find Bias ---
+        # An amplitude is "chosen" if at least one detector has bias_found=True
+        # and its bias_amplitude matches.
+        chosen_amplitudes: set = set()
+        for info in self.res_info_dict.values():
+            if info.get('bias_found') and info.get('bias_amplitude') is not None:
+                chosen_amplitudes.add(info['bias_amplitude'])
 
         # Collect unique (amplitude, direction) pairs and amplitude values from entries
         amplitude_values = set()
@@ -1021,22 +1058,27 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             
             # Set line style based on direction using constants from utils.py
             line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
-            pen = pg.mkPen(color, width=LINE_WIDTH, style=line_style)
-            
+
             # --- Prepare Legend Entry for this Amplitude (only if legends active) ---
             if show_combined_legend:
                 legend_name_amp = UnitConverter.format_probe_label(amp_val, self.unit_mode, dac_scale_for_module)
                 direction_suffix = " (Down)" if direction == "downward" else " (Up)"
-                full_legend_name = legend_name_amp + direction_suffix
-                
+                # Append chosen indicator to the legend label when this amplitude was selected
+                chosen_suffix = " ★" if amp_val in chosen_amplitudes else ""
+                full_legend_name = legend_name_amp + direction_suffix + chosen_suffix
+
+                # Use the chosen line width for the legend swatch too
+                legend_width = LINE_WIDTH * 2 if amp_val in chosen_amplitudes else LINE_WIDTH
+                legend_pen = pg.mkPen(color, width=legend_width, style=line_style)
+
                 legend_key = (amp_val, direction)
                 
                 if legend_key not in legend_items_mag and self.mag_legend:
-                    dummy_mag_curve_for_legend = pg.PlotDataItem(pen=pen) 
+                    dummy_mag_curve_for_legend = pg.PlotDataItem(pen=legend_pen)
                     self.mag_legend.addItem(dummy_mag_curve_for_legend, full_legend_name)
                     legend_items_mag[legend_key] = dummy_mag_curve_for_legend
                 if legend_key not in legend_items_phase and self.phase_legend:
-                    dummy_phase_curve_for_legend = pg.PlotDataItem(pen=pen)
+                    dummy_phase_curve_for_legend = pg.PlotDataItem(pen=legend_pen)
                     self.phase_legend.addItem(dummy_phase_curve_for_legend, full_legend_name)
                     legend_items_phase[legend_key] = dummy_phase_curve_for_legend
 
@@ -1056,6 +1098,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
                 if freqs_hz is None or iq_counts is None or len(freqs_hz) == 0 or len(iq_counts) == 0:
                     continue
+
+                # Thicken the line for this detector's chosen bias amplitude
+                det_info = self.res_info_dict.get(res_idx, {})
+                is_chosen_for_det = (
+                    det_info.get('bias_found', False)
+                    and det_info.get('bias_amplitude') == amp_val
+                )
+                curve_width = LINE_WIDTH * 2 if is_chosen_for_det else LINE_WIDTH
+                pen = pg.mkPen(color, width=curve_width, style=line_style)
                 
                 # Calculate magnitude and phase
                 s21_mag_raw = np.abs(iq_counts)
@@ -1100,6 +1151,34 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                         phase_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
                         self.combined_phase_plot.addItem(phase_cf_line)
                         self.cf_lines_phase.setdefault(amp_val, []).append(phase_cf_line)
+
+                # --- Bias frequency overlay line (shown when Find Bias has run) ---
+                # One solid vertical line per detector at its refined bias frequency,
+                # using the same color as the chosen amplitude's curves.
+                if is_chosen_for_det:
+                    bias_freq_refined = det_info.get('bias_frequency')
+                    if bias_freq_refined is not None:
+                        # Thin dashed red line for the combined plots so the
+                        # indicator is clearly distinguishable from the sweep
+                        # traces regardless of their color.
+                        bias_line_pen = pg.mkPen(
+                            'r',
+                            style=QtCore.Qt.PenStyle.DashLine,
+                            width=1,
+                        )
+                        mag_bias_line = pg.InfiniteLine(
+                            pos=bias_freq_refined, angle=90,
+                            pen=bias_line_pen, movable=False,
+                        )
+                        self.combined_mag_plot.addItem(mag_bias_line)
+                        self.bias_freq_lines_mag.append(mag_bias_line)
+
+                        phase_bias_line = pg.InfiniteLine(
+                            pos=bias_freq_refined, angle=90,
+                            pen=bias_line_pen, movable=False,
+                        )
+                        self.combined_phase_plot.addItem(phase_bias_line)
+                        self.bias_freq_lines_phase.append(phase_bias_line)
         
         # Adjust plot ranges to fit all data
         self.combined_mag_plot.autoRange()
@@ -1288,19 +1367,38 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
 
-    def _get_fit_frequencies(self) -> list[float]:
-        """Get fitted resonance frequencies, ordered by channel_number.
+    def _get_fit_result_frequencies(self) -> list[float] | None:
+        """Return the fitted resonance frequencies (fr) from fit results, or None if no
+        fit results exist in the data.
 
         Iterates through res_info_dict codes (sorted by channel_number) and looks up
-        the best available fit frequency from results_by_detector.  Falls back to
-        bias_frequency when no fit result is present.
+        ``fit_params`` or ``nonlinear_fit_params`` for each detector in
+        ``results_by_detector``.  Falls back to ``bias_frequency`` for individual
+        detectors that have no fit result, but only if at least ONE detector in the
+        dataset has a real fit result.  Returns ``None`` when no fit results exist at
+        all, so callers can distinguish "fits ran but gave fallback values" from "no
+        fitter was run".
 
         Returns:
-            List of frequencies in Hz, sorted by channel_number.
+            List of frequencies in Hz (one per detector, ordered by channel_number),
+            or ``None`` if no ``fit_params`` / ``nonlinear_fit_params`` entries are
+            present anywhere in ``results_by_detector``.
         """
         if not self.res_info_dict:
-            return []
+            return None
 
+        # First pass: check whether any detector has real fit results
+        has_any_fit = any(
+            entry.get('fit_params') or entry.get('nonlinear_fit_params')
+            for iter_dict in self.results_by_detector.values()
+            if iter_dict
+            for entry in [next(iter(iter_dict.values()))]
+        )
+        if not has_any_fit:
+            return None
+
+        # Second pass: build the frequency list, using bias_frequency as a per-entry
+        # fallback for the rare detectors that failed to fit
         sorted_codes = sorted(
             self.res_info_dict,
             key=lambda c: self.res_info_dict[c].get('channel_number', 0)
@@ -1358,17 +1456,41 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                                           "No center frequencies are known to periscope to run on.")
             return
 
-        # Fit frequencies (for user's "use fit frequency" option in dialog)
-        fit_freqs = self._get_fit_frequencies() or None
+        # Fit frequencies: only offered in the dialog when real fit results exist.
+        # Pass an empty list when no fitter was run so the dialog still enters
+        # re-run mode (shows the combo + editable field), but omits the fit option.
+        fit_freqs = self._get_fit_result_frequencies() or []
+
+        # Original sweep-center frequencies from initial_params (used by "Use previous
+        # multisweep central frequencies" option in the dialog).
+        original_sweep_centers = list(
+            self.initial_params.get('sweep_center_frequencies')
+            or self.initial_params.get('resonance_frequencies', [])
+        ) or dialog_seed_frequencies
+
+        # Bias frequencies: the refined bias_frequency values stored in res_info_dict
+        # (only meaningful after Find Bias has run; before that they equal the sweep centres).
+        # Only offer bias frequencies in the re-run dialog if Find Bias has actually been
+        # run on the current data (i.e. at least one entry has bias_found == True).
+        # Before Find Bias runs, res_info_dict["bias_frequency"] just holds the sweep
+        # centre frequencies, which are already offered as "previous multisweep central
+        # frequencies" — showing them again as "bias frequencies" would be misleading.
+        has_bias_found = any(
+            info.get('bias_found', False) for info in self.res_info_dict.values()
+        )
+        bias_freqs_for_dialog = (
+            dialog_seed_frequencies if (dialog_seed_frequencies and has_bias_found) else None
+        )
 
         dialog = MultisweepDialog(
             parent=self,
-            section_center_frequencies=dialog_seed_frequencies,
+            section_center_frequencies=original_sweep_centers,
             dac_scales=self.dac_scales,
             current_module=self.target_module,
             initial_params=self.initial_params.copy(),
             load_multisweep=False,
             fit_frequencies=fit_freqs,
+            bias_frequencies=bias_freqs_for_dialog,
         )
 
         if not dialog.exec():
@@ -1395,6 +1517,18 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         else:
             self.current_run_amps = list(new_params.get('amps', []))
         self.probe_amplitudes = list(self.current_run_amps)
+
+        # Clear stale Find Bias results from the previous run so that the new sweep
+        # starts without any bias overlays.  The res_info_dict codes, channel numbers,
+        # and bias_amplitude are preserved (bias_amplitude is required by the multisweep
+        # algorithm's Option B path to know what amplitude to sweep at).  Only
+        # bias_found is cleared because all overlay logic is gated on that flag:
+        #   is_chosen_for_det = det_info.get('bias_found', False) and ...
+        for info in self.res_info_dict.values():
+            info.pop('bias_found', None)
+
+        # Apply Bias is no longer valid until Find Bias is re-run on the new data.
+        self.apply_bias_btn.setEnabled(False)
 
         # Apply parameters and inject res_info_dict so MultisweepTask re-uses existing codes
         self.initial_params.update(new_params)
@@ -2279,13 +2413,18 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._toggle_cf_lines_visibility(False)
             self._toggle_cf_lines_visibility(True)
 
-        QtWidgets.QMessageBox.information(
-            self,
-            "Find Bias Complete",
-            f"Bias points found for {num_found} / {total} resonators.\n\n"
-            "Inspect the results in the multisweep plots, then click "
-            "\"Apply Bias\" to programme the hardware."
-        )
+        # Redraw all active plot tabs so bias overlays (chosen-amplitude highlights,
+        # bias-frequency vertical lines, and IQ markers) appear immediately.
+        self._redraw_plots()
+
+        # Auto-save the updated res_info_dict (with bias results) to the session file
+        # so that the bias points are preserved when the file is reloaded.
+        export_data = self._prepare_export_data()
+        self.data_ready.emit("multisweep", f"module{self.target_module}", export_data)
+
+        # Show a transient "✓ Bias found" label in the toolbar that auto-hides after 5 s
+        self._bias_status_label.show()
+        QtCore.QTimer.singleShot(5000, self._bias_status_label.hide)
 
     def _find_bias_error(self, error_msg: str):
         """Handle errors from FindBiasTask."""

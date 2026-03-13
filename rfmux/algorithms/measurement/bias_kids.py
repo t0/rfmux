@@ -257,7 +257,6 @@ def find_bias_points(
     spike_prominence_factor: float = 2.0,
     spike_height_factor: float = 3.0,
     max_deriv_distance_hz: float = 100e3,
-    fallback_to_highest: bool = True,
     reference_freq_source: Literal["bias_frequency", "fit_fr", "sweep_center"] = "bias_frequency",
     fit_selected_amplitude: bool = True,
 ) -> Dict[str, Dict]:
@@ -271,8 +270,8 @@ def find_bias_points(
        When bifurcation is first detected at amplitude *a*, the previous
        amplitude *a - 1* is selected as the bias amplitude.  If *a* is the
        lowest available amplitude, *a* itself is used.
-    3. If no bifurcation is found and *fallback_to_highest* is ``True``, the
-       highest available amplitude is selected.
+    3. If no bifurcation is found, the highest available amplitude is selected,
+       ensuring every resonator always receives a bias point.
     4. On the selected entry:
 
        * Calls :func:`find_max_derivative_frequency` on the ``iq_volts`` data
@@ -300,11 +299,6 @@ def find_bias_points(
         Passed to :func:`detect_bifurcation_derivative`.  Default: 3.0.
     max_deriv_distance_hz : float
         Passed to :func:`find_max_derivative_frequency`.  Default: 100 kHz.
-    fallback_to_highest : bool
-        If ``True`` (default) and no bifurcation is found, use the highest
-        available amplitude.  If ``False``, ``bias_found`` is set to
-        ``False`` for that code and it will not be programmed by
-        :func:`apply_bias`.
     reference_freq_source : {"bias_frequency", "fit_fr", "sweep_center"}
         Which frequency to use as the sanity-check reference for
         :func:`find_max_derivative_frequency`:
@@ -405,14 +399,13 @@ def find_bias_points(
                 break
 
         if selected_entry is None:
-            # No bifurcation found
-            if fallback_to_highest:
-                for entry in reversed(entries_sorted):
-                    if entry.get('sweep_amplitude') is not None:
-                        selected_entry = entry
-                        selected_amplitude = entry['sweep_amplitude']
-                        selected_is_bifurcated = False
-                        break
+            # No bifurcation found — always fall back to the highest amplitude
+            for entry in reversed(entries_sorted):
+                if entry.get('sweep_amplitude') is not None:
+                    selected_entry = entry
+                    selected_amplitude = entry['sweep_amplitude']
+                    selected_is_bifurcated = False
+                    break
             if selected_entry is None:
                 warnings.warn(
                     f"find_bias_points: {code!r} — no valid sweep entries found."

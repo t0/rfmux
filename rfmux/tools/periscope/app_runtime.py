@@ -1273,6 +1273,16 @@ class PeriscopeRuntime:
             if 'results_by_detector' in load_params:
                 # New format: load directly into panel
                 panel.results_by_detector = load_params['results_by_detector']
+                # Restore the resonator registry so Find Bias can run on loaded data
+                if load_params.get('res_info_dict'):
+                    panel.res_info_dict = load_params['res_info_dict']
+                    # Re-enable Apply Bias if bias points were already found before saving
+                    num_found = sum(
+                        1 for info in panel.res_info_dict.values()
+                        if info.get('bias_found', False)
+                    )
+                    if num_found > 0:
+                        panel.apply_bias_btn.setEnabled(True)
                 panel._redraw_plots()
             elif 'results_by_iteration' in load_params:
                 # Old format: convert via migration helper, then feed through update_data
@@ -2021,7 +2031,6 @@ class PeriscopeRuntime:
             "spike_prominence_factor": 2.0,
             "spike_height_factor": 3.0,
             "max_deriv_distance_hz": 100e3,
-            "fallback_to_highest": True,
             "reference_freq_source": "bias_frequency",
             "fit_selected_amplitude": True,
         }

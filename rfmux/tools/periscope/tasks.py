@@ -936,7 +936,6 @@ class FindBiasTask(QtCore.QThread):
                 'spike_prominence_factor',
                 'spike_height_factor',
                 'max_deriv_distance_hz',
-                'fallback_to_highest',
                 'reference_freq_source',
                 'fit_selected_amplitude',
             ):

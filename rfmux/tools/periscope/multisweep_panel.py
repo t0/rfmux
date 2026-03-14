@@ -175,23 +175,40 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
 
     def _setup_toolbar(self, layout):
-        """Creates and configures the toolbar with controls (using QWidget instead of QToolBar)."""
-        # Use QWidget container instead of QToolBar for QWidget compatibility
+        """Creates and configures the two-row toolbar with controls (using QWidget instead of QToolBar).
+
+        Top row — workflow actions (run, bias, export/screenshot).
+        Bottom row — view and navigation controls (batch, units, normalization, zoom).
+        """
+        # Outer container holds both rows stacked vertically
         toolbar = QtWidgets.QWidget()
-        toolbar_layout = QtWidgets.QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(5, 5, 5, 5)
+        toolbar_vbox = QtWidgets.QVBoxLayout(toolbar)
+        toolbar_vbox.setContentsMargins(5, 3, 5, 3)
+        toolbar_vbox.setSpacing(2)
+
+        # ── Row 1: Workflow / Action buttons ──────────────────────────────────
+        row1 = QtWidgets.QWidget()
+        row1_layout = QtWidgets.QHBoxLayout(row1)
+        row1_layout.setContentsMargins(0, 0, 0, 0)
+        row1_layout.setSpacing(4)
 
         # Export Data Button
         self.export_btn = QtWidgets.QPushButton("💾")
         self.export_btn.setToolTip("Export data")
         self.export_btn.clicked.connect(self._export_data)
-        toolbar_layout.addWidget(self.export_btn)
-        
+        row1_layout.addWidget(self.export_btn)
+
+        # Screenshot button (kept next to Export — both save output)
+        screenshot_btn = QtWidgets.QPushButton("📷")
+        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        screenshot_btn.clicked.connect(self._export_screenshot)
+        row1_layout.addWidget(screenshot_btn)
+
         # Re-run Multisweep Button
         self.rerun_btn = QtWidgets.QPushButton("Re-run Multisweep")
         self.rerun_btn.clicked.connect(self._rerun_multisweep)
-        toolbar_layout.addWidget(self.rerun_btn)
-        
+        row1_layout.addWidget(self.rerun_btn)
+
         # Find Bias button
         self.find_bias_btn = QtWidgets.QPushButton("Find Bias")
         self.find_bias_btn.clicked.connect(self._find_bias)
@@ -200,7 +217,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             "and frequency for each resonator (updates res_info_dict).\n"
             "Inspect the results before applying to hardware."
         )
-        toolbar_layout.addWidget(self.find_bias_btn)
+        row1_layout.addWidget(self.find_bias_btn)
 
         # Apply Bias button — disabled until Find Bias has completed
         self.apply_bias_btn = QtWidgets.QPushButton("Apply Bias")
@@ -210,23 +227,23 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             "Programme the CRS hardware channels with the bias conditions\n"
             "found by Find Bias.  Only available after Find Bias succeeds."
         )
-        toolbar_layout.addWidget(self.apply_bias_btn)
+        row1_layout.addWidget(self.apply_bias_btn)
 
         # Bias Settings button — opens persistent settings panel
         self.bias_settings_btn = QtWidgets.QPushButton("⚙ Bias Settings")
         self.bias_settings_btn.clicked.connect(self._show_bias_settings)
         self.bias_settings_btn.setToolTip("Open the bias-finding settings panel")
-        toolbar_layout.addWidget(self.bias_settings_btn)
+        row1_layout.addWidget(self.bias_settings_btn)
 
+        # Get Noise Spectrum button
         self.noise_spectrum_btn = QtWidgets.QPushButton("Get Noise Spectrum")
-        if self.bias_data_avail:
-            self.noise_spectrum_btn.setEnabled(True)
-        else:
-            self.noise_spectrum_btn.setEnabled(False)
-        self.noise_spectrum_btn.setToolTip("Open a dialog to configure and get the noise spectrum, will only work if KIDS is biased.")
+        self.noise_spectrum_btn.setEnabled(self.bias_data_avail)
+        self.noise_spectrum_btn.setToolTip(
+            "Open a dialog to configure and get the noise spectrum, will only work if KIDS is biased."
+        )
         self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
-        toolbar_layout.addWidget(self.noise_spectrum_btn)
-        
+        row1_layout.addWidget(self.noise_spectrum_btn)
+
         # Transient "Find Bias" status label — hidden until Find Bias completes,
         # then shown briefly before auto-hiding after 5 s.
         self._bias_status_label = QtWidgets.QLabel("✓ Bias found")
@@ -234,73 +251,78 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             "color: #2a8a2a; font-weight: bold; padding: 2px 6px;"
         )
         self._bias_status_label.hide()
-        toolbar_layout.addWidget(self._bias_status_label)
+        row1_layout.addWidget(self._bias_status_label)
 
-        # Spacer to push subsequent items to the right
-        toolbar_layout.addStretch(1)
-        
+        row1_layout.addStretch(1)
+        toolbar_vbox.addWidget(row1)
+
+        # ── Horizontal separator ──────────────────────────────────────────────
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        separator.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+        toolbar_vbox.addWidget(separator)
+
+        # ── Row 2: View / Navigation controls ────────────────────────────────
+        row2 = QtWidgets.QWidget()
+        row2_layout = QtWidgets.QHBoxLayout(row2)
+        row2_layout.setContentsMargins(0, 0, 0, 0)
+        row2_layout.setSpacing(4)
+
         # Batch navigation controls (for sweep tabs)
         self.batch_label = QtWidgets.QLabel("Batch:")
-        toolbar_layout.addWidget(self.batch_label)
-        
+        row2_layout.addWidget(self.batch_label)
+
         self.prev_batch_btn = QtWidgets.QPushButton("◀")
         self.prev_batch_btn.setToolTip("Previous batch")
-
-        self.prev_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
-
+        self.prev_batch_btn.setMaximumWidth(30)
         self.prev_batch_btn.clicked.connect(self._prev_batch)
-        toolbar_layout.addWidget(self.prev_batch_btn)
-        
+        row2_layout.addWidget(self.prev_batch_btn)
+
         self.batch_info_label = QtWidgets.QLabel("1 of 1")
         self.batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
         self.batch_info_label.setMinimumWidth(40)
+        row2_layout.addWidget(self.batch_info_label)
 
-        toolbar_layout.addWidget(self.batch_info_label)
-        
         self.next_batch_btn = QtWidgets.QPushButton("▶")
         self.next_batch_btn.setToolTip("Next batch")
-
-        self.next_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
+        self.next_batch_btn.setMaximumWidth(30)
         self.next_batch_btn.clicked.connect(self._next_batch)
-        toolbar_layout.addWidget(self.next_batch_btn)
-        
+        row2_layout.addWidget(self.next_batch_btn)
+
         self.batch_size_label = QtWidgets.QLabel("Subplots:")
-        toolbar_layout.addWidget(self.batch_size_label)
-        
+        row2_layout.addWidget(self.batch_size_label)
+
         self.batch_size_spin = QtWidgets.QSpinBox()
         self.batch_size_spin.setRange(1, 200)
         self.batch_size_spin.setValue(self.batch_size)
         self.batch_size_spin.setSingleStep(1)
         self.batch_size_spin.setToolTip("Detectors per batch (press Update to apply)")
-        # Note: No longer connects to immediate redraw
-        toolbar_layout.addWidget(self.batch_size_spin)
-        
+        row2_layout.addWidget(self.batch_size_spin)
+
         self.batch_update_btn = QtWidgets.QPushButton("Update")
         self.batch_update_btn.setToolTip("Apply new batch size and regenerate plots")
         self.batch_update_btn.clicked.connect(self._apply_batch_size)
-        toolbar_layout.addWidget(self.batch_update_btn)
+        row2_layout.addWidget(self.batch_update_btn)
+
+        # Spacer to push view toggles to the right
+        row2_layout.addStretch(1)
 
         # Normalization Checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
         self.normalize_checkbox.setChecked(self.normalize_traces)
         self.normalize_checkbox.toggled.connect(self._toggle_trace_normalization)
-        toolbar_layout.addWidget(self.normalize_checkbox)
+        row2_layout.addWidget(self.normalize_checkbox)
 
         # Show Center Frequencies Checkbox
         self.show_cf_lines_cb = QtWidgets.QCheckBox("Show Center Frequencies")
-        self.show_cf_lines_cb.setChecked(False) # Default to off
+        self.show_cf_lines_cb.setChecked(False)
         self.show_cf_lines_cb.toggled.connect(self._toggle_cf_lines_visibility)
-        toolbar_layout.addWidget(self.show_cf_lines_cb)
+        row2_layout.addWidget(self.show_cf_lines_cb)
 
-        self._setup_unit_controls(toolbar_layout)
-        self._setup_zoom_box_control(toolbar_layout)
+        self._setup_unit_controls(row2_layout)
+        self._setup_zoom_box_control(row2_layout)
 
-        # Screenshot button
-        screenshot_btn = QtWidgets.QPushButton("📷")
-        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
-        screenshot_btn.clicked.connect(self._export_screenshot)
-        toolbar_layout.addWidget(screenshot_btn)
+        toolbar_vbox.addWidget(row2)
 
         layout.addWidget(toolbar)
 

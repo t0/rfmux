@@ -145,8 +145,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.batch_size = 8
         
         # Storage for sweep grid plots - cached to avoid recreating widgets
-        self.mag_sweep_plots_cache = []  # List of plot widgets for magnitude tab
-        self.iq_sweep_plots_cache = []   # List of plot widgets for IQ tab
+        self.mag_sweep_plots_cache = []        # List of plot widgets for magnitude tab
+        self.iq_sweep_plots_cache = []         # List of plot widgets for IQ tab
+        self.derivative_plots_cache = []       # List of plot widgets for IQ Derivatives tab
         
         # Histogram panel (created lazily in _setup_plot_area)
         self.histogram_panel = None
@@ -362,6 +363,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Tab 4: Detector Digest (single-detector detail view)
         self.digest_tab = self._create_digest_tab()
         self.plot_tabs.addTab(self.digest_tab, "Detector Digest")
+
+        # Tab 5: IQ Derivatives (shown after Find Bias)
+        self.derivative_tab, self.derivative_grid = self._create_derivative_tab()
+        self.plot_tabs.addTab(self.derivative_tab, "IQ Derivatives")
         
         # Set default tab to Magnitude Sweeps
         self.plot_tabs.setCurrentIndex(0)
@@ -486,6 +491,43 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         return tab
     
 
+    def _create_derivative_tab(self):
+        """Create the IQ Derivatives tab (populated after Find Bias runs).
+
+        Returns
+        -------
+        (tab, grid_layout)
+            The QWidget tab and its inner QGridLayout for derivative subplots.
+        """
+        tab = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(5, 5, 5, 5)
+
+        # Placeholder shown before Find Bias has been run
+        self._derivative_placeholder = QtWidgets.QLabel(
+            "IQ derivative plots will appear here after Find Bias has been run.\n"
+            "Each subplot shows I speed, Q speed, and arc-length speed for the\n"
+            "selected bias amplitude, with the cubic-spline fit overlaid."
+        )
+        self._derivative_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._derivative_placeholder.setStyleSheet("color: gray; font-style: italic;")
+        tab_layout.addWidget(self._derivative_placeholder)
+
+        # Scroll area + grid (identical structure to sweep tabs)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(container)
+        grid.setSpacing(10)
+        scroll.setWidget(container)
+
+        # The scroll area is hidden until Find Bias populates it
+        scroll.hide()
+        self._derivative_scroll = scroll
+        tab_layout.addWidget(scroll)
+
+        return tab, grid
+
     def _create_digest_tab(self):
         """Create the detector digest tab (single-detector detail view, lazily populated)."""
         tab = QtWidgets.QWidget()
@@ -568,8 +610,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _on_plot_tab_changed(self, index):
         """Handle plot tab changes - show/hide batch controls appropriately."""
-        # Batch controls visible for sweep tabs (0, 1), hidden for combined tab (2)
-        is_sweep_tab = index in (0, 1)
+        # Batch controls visible for sweep tabs (0, 1) and IQ Derivatives (5)
+        is_sweep_tab = index in (0, 1, 5)
         
         self.batch_label.setVisible(is_sweep_tab)
         self.prev_batch_btn.setVisible(is_sweep_tab)
@@ -602,13 +644,21 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         """Show next batch."""
         # Get current tab to determine which data to use
         current_tab_idx = self.plot_tabs.currentIndex()
-        if current_tab_idx not in (0, 1):  # Only sweep tabs have batches
+        if current_tab_idx not in (0, 1, 5):  # Only sweep tabs and IQ Derivatives have batches
             return
             
         if not self.results_by_detector:
             return
         
-        num_detectors = len(self.results_by_detector)
+        # For the derivative tab, count only detectors that have bias_finding data
+        if current_tab_idx == 5:
+            num_detectors = sum(
+                1 for iter_dict in self.results_by_detector.values()
+                if any('bias_finding' in entry for entry in iter_dict.values())
+            )
+        else:
+            num_detectors = len(self.results_by_detector)
+        
         total_batches = max(1, (num_detectors + self.batch_size - 1) // self.batch_size)
         
         if self.current_batch < total_batches - 1:
@@ -859,6 +909,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             if self.digest_panel is None and self.results_by_detector:
                 first_key = next(iter(self.results_by_detector))
                 self._open_detector_digest_for_index(first_key, switch_to_tab=False)
+        # Tab 5: IQ Derivatives (populated after Find Bias)
+        elif current_tab_idx == 5:
+            self._redraw_derivative_grid()
     
     def _redraw_sweep_grid(self, tab_idx):
         """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
@@ -2537,3 +2590,60 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.apply_bias_btn.setEnabled(True)
         self.apply_bias_btn.setText("Apply Bias")
         self.apply_bias_task = None
+
+    # ── IQ Derivatives tab ────────────────────────────────────────────────────
+
+    def _redraw_derivative_grid(self):
+        """Redraw the IQ Derivatives tab (Tab 5).
+
+        Collects the ``bias_finding`` sub-dict from the selected-amplitude
+        entry for each detector (set by ``find_bias_points``) and delegates
+        rendering to :func:`multisweep_grid_helpers.update_derivative_grid`.
+
+        If no ``bias_finding`` keys exist (Find Bias has not run yet) the
+        placeholder label is shown and the scroll area is kept hidden.
+        """
+        from .multisweep_grid_helpers import update_derivative_grid
+
+        # Build {detector_id: bias_finding_dict} for all detectors that have
+        # a 'bias_finding' key in at least one of their sweep entries.
+        bias_finding_by_detector: dict = {}
+        for det_id, iter_dict in self.results_by_detector.items():
+            for entry in iter_dict.values():
+                bf = entry.get('bias_finding')
+                if bf is not None:
+                    bias_finding_by_detector[det_id] = bf
+                    break  # Only one entry per detector will have bias_finding
+
+        if not bias_finding_by_detector:
+            # Find Bias hasn't run yet — show the placeholder
+            if hasattr(self, '_derivative_placeholder'):
+                self._derivative_placeholder.show()
+            if hasattr(self, '_derivative_scroll'):
+                self._derivative_scroll.hide()
+            return
+
+        # Data is ready — hide placeholder, show scroll area
+        if hasattr(self, '_derivative_placeholder'):
+            self._derivative_placeholder.hide()
+        if hasattr(self, '_derivative_scroll'):
+            self._derivative_scroll.show()
+
+        update_derivative_grid(
+            grid_layout=self.derivative_grid,
+            bias_finding_by_detector=bias_finding_by_detector,
+            current_batch=self.current_batch,
+            batch_size=self.batch_size,
+            dark_mode=self.dark_mode,
+            prev_btn=self.prev_batch_btn,
+            next_btn=self.next_batch_btn,
+            batch_label=self.batch_info_label,
+            widget_cache=self.derivative_plots_cache,
+            unit_mode=self.unit_mode,
+            dac_scale=self.dac_scales.get(self.active_module_for_dac),
+        )
+
+        # Install double-click event filter so clicking a derivative subplot
+        # navigates the Detector Digest to that detector.
+        for pw in self.derivative_plots_cache:
+            pw.installEventFilter(self)

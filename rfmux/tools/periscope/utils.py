@@ -655,7 +655,7 @@ class UnitConverter:
             if dac_scale is not None:
                 dbm_val = UnitConverter.normalize_to_dbm(amp_value, dac_scale)
                 return f"{dbm_val:.1f} dBm"
-            return f"{amp_value:.2e} (Norm)"
+            return f"{f'{amp_value:.5f}'.rstrip('0').rstrip('.')} (Norm)"
 
         if unit_mode == "volts":
             if dac_scale is not None:
@@ -664,10 +664,10 @@ class UnitConverter:
                 voltage_rms = np.sqrt(power_watts * 50.0)
                 voltage_peak = voltage_rms * np.sqrt(2)
                 return UnitConverter._format_si_volts(voltage_peak) + "pk"
-            return f"{amp_value:.2e} (Norm)"
+            return f"{f'{amp_value:.5f}'.rstrip('0').rstrip('.')} (Norm)"
 
         # counts or anything else
-        return f"{amp_value:.2e} Norm"
+        return f"{f'{amp_value:.5f}'.rstrip('0').rstrip('.')} Norm"
 
     @staticmethod
     def _format_si_volts(volts: float) -> str:

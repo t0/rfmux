@@ -177,7 +177,8 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
                 _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
                                   pen_color, normalize, labels, unit_mode=unit_mode,
                                   bias_amplitude=bias_amp,
-                                  bias_frequency_hz=bias_freq_hz)
+                                  bias_frequency_hz=bias_freq_hz,
+                                  dac_scale=dac_scale)
                 iq_units = 'V' if unit_mode == 'volts' else 'Counts'
                 plot_item.setLabel('left', 'Q (Imaginary)', units=iq_units)
                 plot_item.setLabel('bottom', 'I (Real)', units=iq_units)
@@ -239,7 +240,8 @@ def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
                 if _entry.get('nonlinear_fit_success') and _entry.get('nonlinear_fit_params'):
                     _a_val = _entry['nonlinear_fit_params'].get('a')
                     if _a_val is not None:
-                        chosen_a_label = f"★ a={_a_val:.3f}"
+                        _amp_str = UnitConverter.format_probe_label(bias_amplitude, unit_mode, dac_scale)
+                        chosen_a_label = f"★ {_amp_str}, a={_a_val:.3f}"
                         break
 
     # Add legend: always when sweep_labels are provided (legend mode), or when
@@ -331,7 +333,7 @@ def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
 
 def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
                       pen_color, normalize=False, sweep_labels=None, unit_mode='counts',
-                      bias_amplitude=None, bias_frequency_hz=None):
+                      bias_amplitude=None, bias_frequency_hz=None, dac_scale=None):
     """Plot IQ circles for a single detector.
 
     Args:
@@ -351,6 +353,8 @@ def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
         bias_frequency_hz: Refined bias frequency in Hz from Find Bias (or
             None).  A ✕ scatter marker is drawn at the IQ point closest to
             this frequency on the chosen-amplitude trace.
+        dac_scale: DAC full-scale in dBm (for formatting the amplitude in the
+            colorbar-mode mini legend label).
     """
     sorted_keys = sorted(detector_data.keys())
     single_sweep = len(sorted_keys) == 1
@@ -366,7 +370,8 @@ def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
                 if _entry.get('nonlinear_fit_success') and _entry.get('nonlinear_fit_params'):
                     _a_val = _entry['nonlinear_fit_params'].get('a')
                     if _a_val is not None:
-                        chosen_a_label = f"★ a={_a_val:.3f}"
+                        _amp_str = UnitConverter.format_probe_label(bias_amplitude, unit_mode, dac_scale)
+                        chosen_a_label = f"★ {_amp_str}, a={_a_val:.3f}"
                         break
 
     # Add legend: always when sweep_labels are provided (legend mode), or when
@@ -465,6 +470,300 @@ def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
             brush=pg.mkBrush(chosen_color_for_marker),
         )
         plot_item.addItem(scatter)
+
+
+# ---------------------------------------------------------------------------
+# IQ-derivative grid (shown after Find Bias)
+# ---------------------------------------------------------------------------
+
+def update_derivative_grid(
+    grid_layout,
+    bias_finding_by_detector,
+    current_batch,
+    batch_size,
+    dark_mode,
+    prev_btn=None,
+    next_btn=None,
+    batch_label=None,
+    widget_cache=None,
+    unit_mode='dbm',
+    dac_scale=None,
+):
+    """
+    Update a grid layout with per-detector IQ-derivative plots.
+
+    Only detectors that have a ``bias_finding`` key in at least one of their
+    sweep entries are included.  These are the resonators for which Find Bias
+    has been run and the derivative/spline data saved.
+
+    Parameters
+    ----------
+    grid_layout : QGridLayout
+        Layout to populate.
+    bias_finding_by_detector : dict
+        ``{detector_id: bias_finding_dict}`` — pre-extracted by the panel's
+        ``_redraw_derivative_grid`` method.
+    current_batch : int
+        Zero-based batch index.
+    batch_size : int
+        Number of detectors per batch.
+    dark_mode : bool
+        Theme flag.
+    prev_btn, next_btn : QPushButton or None
+        Batch navigation buttons to enable/disable.
+    batch_label : QLabel or None
+        Label to update with "N of M" text.
+    widget_cache : list or None
+        Reusable ``pg.PlotWidget`` instances.
+    unit_mode : str
+        Unit mode for amplitude display (``'counts'``, ``'dbm'``, or
+        ``'volts'``).  Passed to :func:`UnitConverter.format_probe_label`
+        when formatting the bias amplitude in each subplot title.
+    dac_scale : float or None
+        DAC full-scale in dBm used by :func:`UnitConverter.format_probe_label`
+        to convert raw counts to physical units.
+    """
+    if not bias_finding_by_detector:
+        return
+
+    # Remove all items from grid without destroying widgets
+    while grid_layout.count():
+        grid_layout.takeAt(0)
+
+    detector_ids = sorted(bias_finding_by_detector.keys())
+
+    start_idx = current_batch * batch_size
+    end_idx = min(start_idx + batch_size, len(detector_ids))
+    batch_detectors = detector_ids[start_idx:end_idx]
+
+    if not batch_detectors:
+        return
+
+    num_plots = len(batch_detectors)
+    ncols = max(1, int(np.ceil(np.sqrt(num_plots))))
+    nrows = int(np.ceil(num_plots / ncols))
+
+    bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
+
+    # Reset stale stretch factors
+    for r in range(grid_layout.rowCount()):
+        grid_layout.setRowStretch(r, 0)
+    for c in range(grid_layout.columnCount()):
+        grid_layout.setColumnStretch(c, 0)
+    for r in range(nrows):
+        grid_layout.setRowStretch(r, 1)
+    for c in range(ncols):
+        grid_layout.setColumnStretch(c, 1)
+
+    if widget_cache is None:
+        widget_cache = []
+
+    while len(widget_cache) < num_plots:
+        pw = pg.PlotWidget()
+        pw.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        widget_cache.append(pw)
+
+    for widget in widget_cache:
+        widget.hide()
+
+    for idx, detector_id in enumerate(batch_detectors):
+        row = idx // ncols
+        col = idx % ncols
+
+        plot_widget = widget_cache[idx]
+        plot_widget.setBackground(bg_color)
+        plot_item = plot_widget.getPlotItem()
+
+        if plot_item:
+            plot_item.clear()
+            if hasattr(plot_item, 'legend') and plot_item.legend:
+                plot_item.legend.scene().removeItem(plot_item.legend)
+                plot_item.legend = None
+
+            bf = bias_finding_by_detector[detector_id]
+
+            # Title
+            bias_amp = bf.get('bias_amplitude')
+            bias_freq = bf.get('bias_frequency')
+            if bias_freq is not None:
+                amp_str = (
+                    UnitConverter.format_probe_label(bias_amp, unit_mode, dac_scale)
+                    if bias_amp is not None else None
+                )
+                title = (
+                    f"{detector_id}  "
+                    f"(<i>f</i><sub>bias</sub> = {bias_freq * 1e-6:.3f} MHz"
+                    + (f", amp = {amp_str}" if amp_str is not None else "")
+                    + ")"
+                )
+            else:
+                title = f"Detector {detector_id}"
+            plot_item.setTitle(title, color=pen_color)
+
+            for axis_name in ("left", "bottom", "right", "top"):
+                ax = plot_item.getAxis(axis_name)
+                if ax:
+                    ax.setPen(pen_color)
+                    ax.setTextPen(pen_color)
+
+            if pen_color == 'w' or pen_color == (255, 255, 255):
+                legend_color = '#CCCCCC'
+            else:
+                legend_color = '#333333'
+            plot_item.addLegend(offset=(10, -10), labelTextColor=legend_color)
+
+            _plot_detector_derivatives(plot_item, bf, pen_color)
+
+            plot_item.setLabel('bottom', '<i>f</i> − <i>f</i><sub>center</sub> [kHz]')
+            plot_item.setLabel('left', 'Normalised IQ speed  [1/Hz]')
+            plot_item.showGrid(x=True, y=True, alpha=0.3)
+
+        plot_widget._detector_id = detector_id
+        grid_layout.addWidget(plot_widget, row, col)
+        plot_widget.show()
+
+    total_batches = max(1, (len(detector_ids) + batch_size - 1) // batch_size)
+    if prev_btn:
+        prev_btn.setEnabled(current_batch > 0)
+    if next_btn:
+        next_btn.setEnabled(current_batch < total_batches - 1)
+    if batch_label:
+        batch_label.setText(f"{current_batch + 1} of {total_batches}")
+
+
+def _plot_detector_derivatives(plot_item, bias_finding, pen_color):
+    """
+    Plot IQ-derivative data for a single detector using its ``bias_finding`` dict.
+
+    Three quantities are plotted on a shared kHz-offset x-axis:
+
+    * **I_speed** — normalised per-step I increments ``diff(I/I_range)``
+      (discrete points, color A), with the normalised cubic-spline derivative
+      ``I_speed_spline`` overlaid as a smooth curve (same color A).
+    * **Q_speed** — same treatment in color B.
+    * **arc_length_speed** — overall IQ arc-length speed per Hz (color C).
+    * A thin dashed red vertical line at the refined ``bias_frequency``.
+
+    Parameters
+    ----------
+    plot_item : pg.PlotItem
+        The plot to draw on.
+    bias_finding : dict
+        The ``bias_finding`` sub-dict attached to the selected sweep entry by
+        :func:`rfmux.algorithms.measurement.bias_kids.find_bias_points`.
+    pen_color : str or tuple
+        Fallback axis/text color (``'w'`` dark mode, ``'k'`` light mode).
+    """
+    freq_sorted = bias_finding.get('frequencies_sorted')
+    freq_arc_speed = bias_finding.get('freq_arc_speed')
+    I_speed = bias_finding.get('I_speed')
+    Q_speed = bias_finding.get('Q_speed')
+    arc_length_speed = bias_finding.get('arc_length_speed')
+    I_speed_sp = bias_finding.get('I_speed_spline')
+    Q_speed_sp = bias_finding.get('Q_speed_spline')
+    bias_freq = bias_finding.get('bias_frequency')
+
+    # All arrays must be present and non-empty for a meaningful plot
+    if (freq_sorted is None or freq_arc_speed is None
+            or I_speed is None or Q_speed is None
+            or len(freq_sorted) < 2 or len(freq_arc_speed) == 0):
+        return
+
+    freq_sorted = np.asarray(freq_sorted)
+    freq_arc_speed = np.asarray(freq_arc_speed)
+    I_speed = np.asarray(I_speed)
+    Q_speed = np.asarray(Q_speed)
+
+    # I_speed and Q_speed from detect_bifurcation_derivative are dimensionless
+    # differences (diff(I/I_range)), not per-Hz quantities.  Divide by the
+    # per-step frequency interval so that all three curves share the same
+    # 1/Hz units as arc_length_speed and the spline derivatives.
+    freq_steps_hz = bias_finding.get('freq_steps_hz')
+    if freq_steps_hz is not None and len(freq_steps_hz) == len(I_speed):
+        _df = np.abs(np.asarray(freq_steps_hz))
+        # Guard against zero-length steps (shouldn't happen but be safe)
+        _df = np.where(_df > 0, _df, np.nan)
+        I_speed = I_speed / _df
+        Q_speed = Q_speed / _df
+
+    # Reference frequency for kHz offset (mean of the full sorted array)
+    freq_ref = float(np.mean(freq_sorted))
+
+    def to_khz(f):
+        return 1e-3 * (np.asarray(f) - freq_ref)
+
+    freq_arc_khz = to_khz(freq_arc_speed)
+
+    # Colors: A = blue (I), B = orange (Q), C = green (arc_length_speed)
+    color_I   = TABLEAU10_COLORS[0]
+    color_Q   = TABLEAU10_COLORS[1]
+    color_arc = TABLEAU10_COLORS[2]
+
+    alpha_discrete = 140  # semi-transparent for discrete points
+
+    def make_rgba(color, alpha):
+        """Convert color spec to (R, G, B, alpha) tuple."""
+        if isinstance(color, str):
+            # Named colors like 'b', 'r' etc.
+            c = pg.mkColor(color)
+            return (c.red(), c.green(), c.blue(), alpha)
+        if isinstance(color, (list, tuple)) and len(color) >= 3:
+            return (int(color[0]), int(color[1]), int(color[2]), alpha)
+        return color
+
+    # ── I_speed discrete points ('.-': line + circle symbols) ───────────────
+    pen_I_disc = pg.mkPen(make_rgba(color_I, alpha_discrete), width=LINE_WIDTH)
+    plot_item.plot(
+        freq_arc_khz, I_speed,
+        pen=pen_I_disc,
+        symbol='o', symbolSize=4,
+        symbolPen=pg.mkPen(make_rgba(color_I, alpha_discrete)),
+        symbolBrush=pg.mkBrush(make_rgba(color_I, alpha_discrete)),
+        name='I speed',
+    )
+
+    # ── Q_speed discrete points ('.-': line + circle symbols) ───────────────
+    pen_Q_disc = pg.mkPen(make_rgba(color_Q, alpha_discrete), width=LINE_WIDTH)
+    plot_item.plot(
+        freq_arc_khz, Q_speed,
+        pen=pen_Q_disc,
+        symbol='o', symbolSize=4,
+        symbolPen=pg.mkPen(make_rgba(color_Q, alpha_discrete)),
+        symbolBrush=pg.mkBrush(make_rgba(color_Q, alpha_discrete)),
+        name='Q speed',
+    )
+
+    # ── arc_length_speed: smooth curve derived from stored I/Q splines ───────
+    # Use the normalised I and Q derivative splines (already stored in
+    # bias_finding) to compute |dI/df + j·dQ/df| over a fine frequency grid.
+    # This is identical to what the bias-finding algorithm used, so the curve
+    # faithfully represents the quantity that was maximised to locate the bias
+    # frequency.  Fall back to the raw discrete points if the splines are absent.
+    pen_arc = pg.mkPen(color_arc, width=LINE_WIDTH)
+    if I_speed_sp is not None and Q_speed_sp is not None:
+        try:
+            f_fine = np.linspace(float(freq_sorted[0]), float(freq_sorted[-1]), 500)
+            arc_sp_vals = np.sqrt(I_speed_sp(f_fine) ** 2 + Q_speed_sp(f_fine) ** 2)
+            plot_item.plot(to_khz(f_fine), arc_sp_vals, pen=pen_arc, name='Arc length speed')
+        except Exception:
+            if arc_length_speed is not None and len(arc_length_speed) == len(freq_arc_speed):
+                plot_item.plot(freq_arc_khz, np.asarray(arc_length_speed),
+                               pen=pen_arc, name='Arc length speed')
+    elif arc_length_speed is not None and len(arc_length_speed) == len(freq_arc_speed):
+        plot_item.plot(freq_arc_khz, np.asarray(arc_length_speed),
+                       pen=pen_arc, name='Arc length speed')
+
+    # ── Bias frequency vertical line ─────────────────────────────────────────
+    if bias_freq is not None:
+        bias_khz = 1e-3 * (float(bias_freq) - freq_ref)
+        vline_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine, width=1)
+        plot_item.addItem(pg.InfiniteLine(
+            pos=bias_khz, angle=90, pen=vline_pen, movable=False,
+            label=f'f_bias', labelOpts={'color': 'r', 'position': 0.92},
+        ))
 
 
 # ---------------------------------------------------------------------------

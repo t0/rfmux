@@ -174,7 +174,8 @@ def detect_bifurcation_derivative(
     iq: np.ndarray,
     spike_prominence_factor: float = 2.0,
     spike_height_factor: float = 3.0,
-) -> bool:
+    return_diagnostics: bool = False,
+):
     """
     Detect bifurcation via spikes in the derivative of the IQ arc-length speed.
 
@@ -182,17 +183,17 @@ def detect_bifurcation_derivative(
 
     The normalised IQ arc-length speed is::
 
-        dist = sqrt((dI_norm / df)^2 + (dQ_norm / df)^2)
+        dist = sqrt((I_speed / df)^2 + (Q_speed / df)^2)
 
     where I and Q are each normalised by their own range.  The first derivative
-    of this (``distdiff = diff(dist)``) exhibits a characteristic positive spike
-    immediately followed by a negative spike when the resonance is bifurcated —
-    the IQ trace "jumps" and then returns to the baseline.
+    of this (``arc_speed_gradient = diff(dist)``) exhibits a characteristic
+    positive spike immediately followed by a negative spike when the resonance
+    is bifurcated — the IQ trace "jumps" and then returns to the baseline.
 
     Spike detection thresholds:
 
     * Prominence: ``(dist.max() - dist.min()) / spike_prominence_factor``
-    * Height:     ``spike_height_factor * std(distdiff)``
+    * Height:     ``spike_height_factor * std(arc_speed_gradient)``
 
     Parameters
     ----------
@@ -204,11 +205,33 @@ def detect_bifurcation_derivative(
         Larger value → less sensitive to bifurcation.  Default: 2.0.
     spike_height_factor : float
         Larger value → less sensitive to bifurcation.  Default: 3.0.
+    return_diagnostics : bool
+        If ``True``, return a ``(bool, dict)`` tuple where the dict contains
+        all intermediate arrays and thresholds computed during detection.
+        Default: ``False`` (returns only the boolean, preserving the original
+        API for all existing callers).
 
     Returns
     -------
-    bool
-        ``True`` if bifurcation is detected, ``False`` otherwise.
+    bool or (bool, dict)
+        When *return_diagnostics* is ``False`` (default): ``True`` if
+        bifurcation is detected, ``False`` otherwise.
+
+        When *return_diagnostics* is ``True``: a ``(is_bifurcated, diag)``
+        tuple where *diag* is a dictionary with the following keys:
+
+        * ``I_speed`` — normalised per-step I increments, ``diff(I/I_range)``
+        * ``Q_speed`` — normalised per-step Q increments, ``diff(Q/Q_range)``
+        * ``freq_steps_hz`` — per-step frequency intervals (Hz)
+        * ``arc_length_speed`` — normalised IQ arc-length speed per Hz
+        * ``arc_speed_gradient`` — ``diff(arc_length_speed)``
+        * ``freq_arc_speed`` — frequency midpoints for *arc_length_speed*
+        * ``freq_arc_speed_gradient`` — frequency midpoints for *arc_speed_gradient*
+        * ``spike_prominence_threshold`` — computed prominence threshold
+        * ``spike_height_threshold`` — computed height threshold
+        * ``uppeaks`` — indices into *arc_speed_gradient* of positive spikes
+        * ``downpeaks`` — indices into *arc_speed_gradient* of negative spikes
+        * ``is_bifurcated`` — same as the leading boolean
     """
     sort_idx = np.argsort(frequencies)
     freq_sorted = np.asarray(frequencies)[sort_idx]
@@ -221,6 +244,17 @@ def detect_bifurcation_derivative(
     qrange = float(qarr.max() - qarr.min())
 
     if irange == 0.0 or qrange == 0.0:
+        if return_diagnostics:
+            empty_diag = {
+                'I_speed': np.array([]), 'Q_speed': np.array([]),
+                'freq_steps_hz': np.array([]),
+                'arc_length_speed': np.array([]), 'arc_speed_gradient': np.array([]),
+                'freq_arc_speed': np.array([]), 'freq_arc_speed_gradient': np.array([]),
+                'spike_prominence_threshold': 0.0, 'spike_height_threshold': 0.0,
+                'uppeaks': np.array([], dtype=int), 'downpeaks': np.array([], dtype=int),
+                'is_bifurcated': False,
+            }
+            return False, empty_diag
         return False  # Degenerate sweep
 
     idiffnorm = np.diff(iarr / irange)
@@ -228,12 +262,39 @@ def detect_bifurcation_derivative(
     fdiff = np.diff(freq_sorted)
 
     if np.any(fdiff == 0):
+        if return_diagnostics:
+            empty_diag = {
+                'I_speed': idiffnorm, 'Q_speed': qdiffnorm,
+                'freq_steps_hz': fdiff,
+                'arc_length_speed': np.array([]), 'arc_speed_gradient': np.array([]),
+                'freq_arc_speed': np.array([]), 'freq_arc_speed_gradient': np.array([]),
+                'spike_prominence_threshold': 0.0, 'spike_height_threshold': 0.0,
+                'uppeaks': np.array([], dtype=int), 'downpeaks': np.array([], dtype=int),
+                'is_bifurcated': False,
+            }
+            return False, empty_diag
         return False
 
     dist = np.sqrt(idiffnorm ** 2 + qdiffnorm ** 2) / np.abs(fdiff)
     distdiff = np.diff(dist)
 
+    # Frequency midpoints for the step-level arrays (length N-1) and gradient (length N-2)
+    freq_arc_speed = 0.5 * (freq_sorted[:-1] + freq_sorted[1:])
+    freq_arc_speed_gradient = 0.5 * (freq_arc_speed[:-1] + freq_arc_speed[1:])
+
     if len(distdiff) < 2:
+        if return_diagnostics:
+            diag = {
+                'I_speed': idiffnorm, 'Q_speed': qdiffnorm,
+                'freq_steps_hz': fdiff,
+                'arc_length_speed': dist, 'arc_speed_gradient': distdiff,
+                'freq_arc_speed': freq_arc_speed,
+                'freq_arc_speed_gradient': freq_arc_speed_gradient,
+                'spike_prominence_threshold': 0.0, 'spike_height_threshold': 0.0,
+                'uppeaks': np.array([], dtype=int), 'downpeaks': np.array([], dtype=int),
+                'is_bifurcated': False,
+            }
+            return False, diag
         return False
 
     spike_prominence = (dist.max() - dist.min()) / spike_prominence_factor
@@ -242,11 +303,29 @@ def detect_bifurcation_derivative(
     uppeaks, _ = find_peaks(distdiff, prominence=spike_prominence, height=spike_height)
     downpeaks, _ = find_peaks(-distdiff, prominence=spike_prominence, height=spike_height)
 
+    is_bifurcated = False
     if len(uppeaks) > 0 and len(downpeaks) > 0:
         if downpeaks[0] == uppeaks[0] + 1:
-            return True
+            is_bifurcated = True
 
-    return False
+    if return_diagnostics:
+        diag = {
+            'I_speed':                    idiffnorm,
+            'Q_speed':                    qdiffnorm,
+            'freq_steps_hz':              fdiff,
+            'arc_length_speed':           dist,
+            'arc_speed_gradient':         distdiff,
+            'freq_arc_speed':             freq_arc_speed,
+            'freq_arc_speed_gradient':    freq_arc_speed_gradient,
+            'spike_prominence_threshold': spike_prominence,
+            'spike_height_threshold':     spike_height,
+            'uppeaks':                    uppeaks,
+            'downpeaks':                  downpeaks,
+            'is_bifurcated':              is_bifurcated,
+        }
+        return is_bifurcated, diag
+
+    return is_bifurcated
 
 
 # ── Section C: Multi-amplitude analysis ──────────────────────────────────────
@@ -458,6 +537,13 @@ def find_bias_points(
             )
             iq_for_deriv = np.asarray(selected_entry['iq_counts'])
 
+        # Voltage-calibrated splines (for df_calibration and bias-frequency finding)
+        dI_df_sp = dQ_df_sp = None
+        try:
+            dI_df_sp, dQ_df_sp = compute_iq_derivative_spline(frequencies, iq_for_deriv)
+        except Exception:
+            pass  # Handled below
+
         try:
             bias_freq, dI_df, dQ_df = find_max_derivative_frequency(
                 frequencies,
@@ -472,9 +558,10 @@ def find_bias_points(
             )
             bias_freq = float(ref_freq)
             try:
-                dI_sp, dQ_sp = compute_iq_derivative_spline(frequencies, iq_for_deriv)
-                dI_df = float(dI_sp(bias_freq))
-                dQ_df = float(dQ_sp(bias_freq))
+                if dI_df_sp is None:
+                    dI_df_sp, dQ_df_sp = compute_iq_derivative_spline(frequencies, iq_for_deriv)
+                dI_df = float(dI_df_sp(bias_freq))
+                dQ_df = float(dQ_df_sp(bias_freq))
             except Exception:
                 dI_df = float('nan')
                 dQ_df = float('nan')
@@ -515,6 +602,88 @@ def find_bias_points(
                 warnings.warn(
                     f"find_bias_points: {code!r} — nonlinear diagnostic fit failed: {exc}"
                 )
+
+        # --- Build bias_finding sub-dict and attach to selected_entry ---
+        # Re-run detect_bifurcation_derivative on the selected entry with
+        # return_diagnostics=True to capture all intermediate arrays.
+        iq_counts_sel = selected_entry.get('iq_counts')
+        bif_diag: dict = {}
+        if iq_counts_sel is not None:
+            try:
+                _, bif_diag = detect_bifurcation_derivative(
+                    frequencies,
+                    np.asarray(iq_counts_sel),
+                    spike_prominence_factor=spike_prominence_factor,
+                    spike_height_factor=spike_height_factor,
+                    return_diagnostics=True,
+                )
+            except Exception as exc:
+                warnings.warn(
+                    f"find_bias_points: {code!r} — bifurcation diagnostics failed: {exc}"
+                )
+
+        # Normalized splines: fit CubicSpline to I/I_range and Q/Q_range so that
+        # the derivative is in units of 1/Hz — matching I_speed / Q_speed scale.
+        I_speed_sp = Q_speed_sp = None
+        sort_idx = np.argsort(frequencies)
+        freq_sorted = frequencies[sort_idx]
+        iq_sorted = iq_for_deriv[sort_idx]
+        iarr = iq_sorted.real
+        qarr = iq_sorted.imag
+        irange = float(iarr.max() - iarr.min()) if len(iarr) > 0 else 0.0
+        qrange = float(qarr.max() - qarr.min()) if len(qarr) > 0 else 0.0
+        try:
+            if irange > 0 and qrange > 0:
+                I_speed_sp = CubicSpline(freq_sorted, iarr / irange).derivative()
+                Q_speed_sp = CubicSpline(freq_sorted, qarr / qrange).derivative()
+        except Exception as exc:
+            warnings.warn(
+                f"find_bias_points: {code!r} — normalized spline fitting failed: {exc}"
+            )
+
+        selected_entry['bias_finding'] = {
+            # Sorted frequency axis (ascending, required by splines)
+            'frequencies_sorted':       freq_sorted,
+
+            # Voltage-calibrated derivative splines (V/Hz — for df_calibration physics)
+            'dI_df_spline':             dI_df_sp,
+            'dQ_df_spline':             dQ_df_sp,
+            'dI_df_at_bias':            dI_df,
+            'dQ_df_at_bias':            dQ_df,
+
+            # Normalized derivative splines (1/Hz — matching I_speed/Q_speed scale, for display)
+            'I_speed_spline':           I_speed_sp,
+            'Q_speed_spline':           Q_speed_sp,
+
+            # Discrete arrays from the bifurcation algorithm
+            'I_speed':                  bif_diag.get('I_speed', np.array([])),
+            'Q_speed':                  bif_diag.get('Q_speed', np.array([])),
+            'freq_steps_hz':            bif_diag.get('freq_steps_hz', np.array([])),
+            'arc_length_speed':         bif_diag.get('arc_length_speed', np.array([])),
+            'arc_speed_gradient':       bif_diag.get('arc_speed_gradient', np.array([])),
+            'freq_arc_speed':           bif_diag.get('freq_arc_speed', np.array([])),
+            'freq_arc_speed_gradient':  bif_diag.get('freq_arc_speed_gradient', np.array([])),
+
+            # Bias point
+            'bias_frequency':           bias_freq,
+            'bias_amplitude':           selected_amplitude,
+
+            # Nested sub-dicts
+            'diagnostics': {
+                'spike_prominence_threshold': bif_diag.get('spike_prominence_threshold', float('nan')),
+                'spike_height_threshold':     bif_diag.get('spike_height_threshold', float('nan')),
+                'uppeaks':                    bif_diag.get('uppeaks', np.array([], dtype=int)),
+                'downpeaks':                  bif_diag.get('downpeaks', np.array([], dtype=int)),
+                'is_bifurcated':              selected_is_bifurcated,
+                'bifurcated_at':              bifurcated_at,
+            },
+            'settings': {
+                'spike_prominence_factor':    spike_prominence_factor,
+                'spike_height_factor':        spike_height_factor,
+                'max_deriv_distance_hz':      max_deriv_distance_hz,
+                'reference_freq_source':      reference_freq_source,
+            },
+        }
 
         # --- Update res_info_dict in-place ---
         res_info_dict[code].update({

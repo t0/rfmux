@@ -90,6 +90,22 @@ class BiasSettingsPanel(QWidget):
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
 
+        # ── Max Deriv Distance: two radio+spinbox pairs ───────────────────
+        deriv_container = QWidget()
+        deriv_vbox = QVBoxLayout(deriv_container)
+        deriv_vbox.setContentsMargins(0, 0, 0, 0)
+        deriv_vbox.setSpacing(4)
+
+        self._deriv_mode_group = QButtonGroup(self)
+
+        # Row 1 — Absolute (kHz)
+        abs_row = QHBoxLayout()
+        abs_row.setContentsMargins(0, 0, 0, 0)
+        self.rb_deriv_absolute = QRadioButton("Absolute (kHz)")
+        self.rb_deriv_absolute.setChecked(True)
+        self._deriv_mode_group.addButton(self.rb_deriv_absolute)
+        abs_row.addWidget(self.rb_deriv_absolute)
+
         self.max_deriv_dist_spin = QDoubleSpinBox()
         self.max_deriv_dist_spin.setRange(1.0, 5000.0)
         self.max_deriv_dist_spin.setSingleStep(10.0)
@@ -101,7 +117,38 @@ class BiasSettingsPanel(QWidget):
             "may lie from the reference frequency before it is\n"
             "rejected as an outlier and the reference is used instead."
         )
-        freq_layout.addRow("Max Deriv Distance:", self.max_deriv_dist_spin)
+        abs_row.addWidget(self.max_deriv_dist_spin)
+        abs_row.addStretch(1)
+        deriv_vbox.addLayout(abs_row)
+
+        # Row 2 — Fraction of sweep bandwidth
+        frac_row = QHBoxLayout()
+        frac_row.setContentsMargins(0, 0, 0, 0)
+        self.rb_deriv_fraction = QRadioButton("Fraction of sweep bandwidth")
+        self._deriv_mode_group.addButton(self.rb_deriv_fraction)
+        frac_row.addWidget(self.rb_deriv_fraction)
+
+        self.max_deriv_frac_spin = QDoubleSpinBox()
+        self.max_deriv_frac_spin.setRange(0.001, 1.0)
+        self.max_deriv_frac_spin.setSingleStep(0.05)
+        self.max_deriv_frac_spin.setDecimals(3)
+        self.max_deriv_frac_spin.setValue(0.5)
+        self.max_deriv_frac_spin.setEnabled(False)
+        self.max_deriv_frac_spin.setToolTip(
+            "Maximum distance as a fraction of the sweep bandwidth that\n"
+            "the max-derivative point may lie from the reference frequency\n"
+            "before it is rejected as an outlier and the reference is used\n"
+            "instead.  E.g. 0.5 = ½ × span_hz."
+        )
+        frac_row.addWidget(self.max_deriv_frac_spin)
+        frac_row.addStretch(1)
+        deriv_vbox.addLayout(frac_row)
+
+        # Wire radio buttons to enable/disable their spinboxes
+        self.rb_deriv_absolute.toggled.connect(self._on_deriv_mode_changed)
+        self.rb_deriv_fraction.toggled.connect(self._on_deriv_mode_changed)
+
+        freq_layout.addRow("Max Deriv Distance:", deriv_container)
 
         # Reference frequency source radio buttons
         ref_label = QLabel("Reference Frequency Source:")
@@ -189,7 +236,13 @@ class BiasSettingsPanel(QWidget):
 
         * ``spike_prominence_factor`` (float)
         * ``spike_height_factor`` (float)
-        * ``max_deriv_distance_hz`` (float) — converted from kHz to Hz
+        * ``max_deriv_distance_mode`` (str) — ``"absolute"`` or ``"fraction"``
+        * ``max_deriv_distance_hz`` (float) — set when mode is ``"absolute"``;
+          converted from the kHz spin-box value to Hz
+        * ``max_deriv_distance_fraction`` (float) — set when mode is
+          ``"fraction"``; caller is responsible for multiplying by
+          ``span_hz`` to produce the Hz value passed to
+          :func:`~rfmux.algorithms.measurement.bias_kids.find_bias_points`
         * ``reference_freq_source`` (str) — one of
           ``"bias_frequency"``, ``"fit_fr"``, ``"sweep_center"``
         * ``fit_selected_amplitude`` (bool)
@@ -201,12 +254,23 @@ class BiasSettingsPanel(QWidget):
         else:
             ref_source = "bias_frequency"
 
+        if self.rb_deriv_fraction.isChecked():
+            deriv_mode = "fraction"
+            deriv_hz = self.max_deriv_dist_spin.value() * 1e3   # kept for compat; caller overrides
+            deriv_fraction = self.max_deriv_frac_spin.value()
+        else:
+            deriv_mode = "absolute"
+            deriv_hz = self.max_deriv_dist_spin.value() * 1e3
+            deriv_fraction = self.max_deriv_frac_spin.value()   # stored but not used in abs mode
+
         return {
-            'spike_prominence_factor': self.spike_prominence_spin.value(),
-            'spike_height_factor':     self.spike_height_spin.value(),
-            'max_deriv_distance_hz':   self.max_deriv_dist_spin.value() * 1e3,
-            'reference_freq_source':   ref_source,
-            'fit_selected_amplitude':  self.fit_selected_cb.isChecked(),
+            'spike_prominence_factor':    self.spike_prominence_spin.value(),
+            'spike_height_factor':        self.spike_height_spin.value(),
+            'max_deriv_distance_mode':    deriv_mode,
+            'max_deriv_distance_hz':      deriv_hz,
+            'max_deriv_distance_fraction': deriv_fraction,
+            'reference_freq_source':      ref_source,
+            'fit_selected_amplitude':     self.fit_selected_cb.isChecked(),
         }
 
     # Alias so that ParamKeyExtractor (which looks for get_parameters) can
@@ -215,11 +279,19 @@ class BiasSettingsPanel(QWidget):
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
+    def _on_deriv_mode_changed(self):
+        """Enable the spinbox that belongs to the active deriv-distance radio button."""
+        absolute = self.rb_deriv_absolute.isChecked()
+        self.max_deriv_dist_spin.setEnabled(absolute)
+        self.max_deriv_frac_spin.setEnabled(not absolute)
+
     def _reset_defaults(self):
         """Restore all controls to their default values."""
         self.spike_prominence_spin.setValue(2.0)
         self.spike_height_spin.setValue(3.0)
+        self.rb_deriv_absolute.setChecked(True)   # resets mode → absolute
         self.max_deriv_dist_spin.setValue(100.0)
+        self.max_deriv_frac_spin.setValue(0.5)
         self.rb_bias_freq.setChecked(True)
         self.fit_selected_cb.setChecked(True)
 

@@ -253,6 +253,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._bias_status_label.hide()
         row1_layout.addWidget(self._bias_status_label)
 
+        # Transient "Apply Bias" status label — hidden until Apply Bias completes,
+        # then shown briefly before auto-hiding after 5 s.
+        self._apply_bias_status_label = QtWidgets.QLabel("✓ Bias applied")
+        self._apply_bias_status_label.setStyleSheet(
+            "color: #2a8a2a; font-weight: bold; padding: 2px 6px;"
+        )
+        self._apply_bias_status_label.hide()
+        row1_layout.addWidget(self._apply_bias_status_label)
+
         row1_layout.addStretch(1)
         toolbar_vbox.addWidget(row1)
 
@@ -2432,6 +2441,22 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         else:
             bias_settings = {}  # find_bias_points will use its own defaults
 
+        # Resolve "fraction of sweep bandwidth" → absolute Hz before forwarding
+        # to FindBiasTask (which only understands max_deriv_distance_hz).
+        if bias_settings.get('max_deriv_distance_mode') == 'fraction':
+            span_hz = self.initial_params.get('span_hz', 0.0)
+            fraction = bias_settings.get('max_deriv_distance_fraction', 0.5)
+            if span_hz > 0:
+                bias_settings['max_deriv_distance_hz'] = fraction * span_hz
+            else:
+                # span_hz unavailable — fall back to the absolute kHz value
+                import warnings
+                warnings.warn(
+                    "BiasSettingsPanel: 'fraction of sweep bandwidth' mode selected "
+                    "but span_hz is not available in initial_params; falling back to "
+                    "the absolute kHz value."
+                )
+
         from .tasks import FindBiasTask, FindBiasSignals
 
         self.find_bias_signals = FindBiasSignals()
@@ -2598,13 +2623,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_spectrum_btn.setEnabled(True)
         self.apply_bias_task = None
 
-        num_ok = sum(1 for r in apply_report.values() if r.get('apply_successful'))
-        total = len(self.res_info_dict)
-
-        msg = f"Successfully programmed {num_ok} / {total} resonators.\n\n"
-        if df_calibrations:
-            msg += f"df-calibration loaded for {len(df_calibrations)} channels."
-        QtWidgets.QMessageBox.information(self, "Apply Bias Complete", msg)
+        # Show a transient "✓ Bias applied" label in the toolbar that auto-hides after 5 s
+        self._apply_bias_status_label.show()
+        QtCore.QTimer.singleShot(5000, self._apply_bias_status_label.hide)
 
     def _apply_bias_error(self, error_msg: str):
         """Handle errors from ApplyBiasTask."""

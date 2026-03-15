@@ -451,6 +451,15 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.apply_nonlinear_fit_checkbox = QtWidgets.QCheckBox("Apply Nonlinear Fit")
         self.apply_nonlinear_fit_checkbox.setChecked(self.params.get('apply_nonlinear_fit', True)) # Default to True
         param_form_layout.addRow(self.apply_nonlinear_fit_checkbox)
+
+        self.apply_find_bias_checkbox = QtWidgets.QCheckBox("Find bias")
+        self.apply_find_bias_checkbox.setChecked(self.params.get('run_find_bias', False))
+        self.apply_find_bias_checkbox.setToolTip(
+            "Automatically run Find Bias on the collected multisweep data\n"
+            "once the sweep is complete (equivalent to pressing the\n"
+            "'Find Bias' button on the results panel)."
+        )
+        param_form_layout.addRow(self.apply_find_bias_checkbox)
         
         layout.addWidget(param_group)
 
@@ -678,6 +687,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         
             self.apply_skewed_fit_checkbox.setChecked(params['apply_skewed_fit'])
             self.apply_nonlinear_fit_checkbox.setChecked(params['apply_nonlinear_fit'])
+            if 'run_find_bias' in params:
+                self.apply_find_bias_checkbox.setChecked(params['run_find_bias'])
         
             # Load iteration amplitudes (for amplitude iterations)
             amps = params.get("amps") or ([params["amp"]] if "amp" in params else None)
@@ -970,6 +981,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             params_dict['module'] = self.current_module
             params_dict['apply_skewed_fit'] = self.apply_skewed_fit_checkbox.isChecked()
             params_dict['apply_nonlinear_fit'] = self.apply_nonlinear_fit_checkbox.isChecked()
+            params_dict['run_find_bias'] = self.apply_find_bias_checkbox.isChecked()
             
             # Basic validation
             if params_dict['span_hz'] <= 0:

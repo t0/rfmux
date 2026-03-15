@@ -83,6 +83,11 @@ class SessionManager(QtCore.QObject):
         self._session_metadata: Dict[str, Any] = {}
         self._export_count: int = 0
         self._session_start_time: Optional[datetime.datetime] = None
+        # Tracks the most-recently-written filename for each (data_type, identifier) pair.
+        # Used by handle_data_ready to automatically overwrite the existing file on
+        # subsequent emissions (e.g. Find Bias, Run Fit) rather than creating new
+        # timestamped duplicates.
+        self._last_exported_per_identifier: Dict[tuple, str] = {}
     
     # ─────────────────────────────────────────────────────────────────
     # Properties
@@ -174,6 +179,7 @@ class SessionManager(QtCore.QObject):
         settings.set_last_session_path(str(session_path))
         self._export_count = 0
         self._session_start_time = datetime.datetime.now()
+        self._last_exported_per_identifier = {}  # Fresh session — no prior exports
         self._session_metadata = {
             'created': self._session_start_time.isoformat(),
             'folder_name': folder_name,
@@ -247,6 +253,18 @@ class SessionManager(QtCore.QObject):
             self._session_metadata = {'loaded': datetime.datetime.now().isoformat()}
             self._export_count = len(list(path.glob('*.pkl')))
         
+        # Rebuild _last_exported_per_identifier from existing metadata so that
+        # subsequent Find Bias / Run Fit calls on a loaded panel update the
+        # already-existing session file rather than creating new duplicates.
+        self._last_exported_per_identifier = {}
+        for exp in self._session_metadata.get('exports', []):
+            key = (exp.get('data_type', ''), exp.get('identifier', ''))
+            filename = exp.get('filename', '')
+            if filename and key[0] and key[1]:
+                # Only track it if the file still exists on disk
+                if (path / filename).exists():
+                    self._last_exported_per_identifier[key] = filename
+
         # Emit signal
         self.session_started.emit(str(path))
         
@@ -356,7 +374,12 @@ class SessionManager(QtCore.QObject):
                 'timestamp': datetime.datetime.now().isoformat(),
             })
             self._save_metadata()
-            
+
+            # Remember this filename so subsequent handle_data_ready calls for
+            # the same (data_type, identifier) overwrite it instead of creating
+            # a new timestamped duplicate.
+            self._last_exported_per_identifier[(data_type, identifier)] = filename
+
             # Emit signals
             self.file_exported.emit(str(file_path), data_type)
             self.session_updated.emit()
@@ -655,10 +678,70 @@ class SessionManager(QtCore.QObject):
         This slot should be connected to the data_ready signals emitted
         by NetworkAnalysisPanel, MultisweepPanel, and DetectorDigestPanel.
         
+        If the *data* dict contains the special key ``'_filename_override'``,
+        that value is extracted and forwarded to :meth:`export_data` as
+        *filename_override*, causing the export to overwrite the previously
+        created file rather than generating a new timestamped name.  This
+        mirrors the pattern used by the network-analysis panel so that
+        subsequent updates (Find Bias, Run Fits, …) always update the same
+        multisweep pickle rather than littering the session folder with
+        duplicate files.
+        
         Args:
             data_type: Type of data (netanal, multisweep, bias, noise)
             identifier: Identifier string (e.g., module1)
             data: Dictionary of data to export
         """
         if self.is_active and self._auto_export_enabled:
-            self.export_data(data_type, identifier, data)
+            # 1. Allow the emitter to request an explicit in-place overwrite.
+            filename_override = data.pop('_filename_override', None)
+
+            # 2. If no explicit override was given, check whether we've already
+            #    exported a file for this (data_type, identifier) pair during this
+            #    session (including ones loaded from a previous session via
+            #    load_session).  If so, overwrite that file so that Find Bias and
+            #    Run Fit update the existing multisweep pickle rather than creating
+            #    new timestamped duplicates.
+            if filename_override is None:
+                key = (data_type, identifier)
+                existing = self._last_exported_per_identifier.get(key)
+                if existing and self._session_path and (self._session_path / existing).exists():
+                    filename_override = existing
+
+            self.export_data(data_type, identifier, data, filename_override=filename_override)
+
+    def reset_export_tracking(self, data_type: str, identifier: str) -> None:
+        """Remove the tracked filename for a given (data_type, identifier) pair.
+
+        Call this before starting a re-run sweep so that the new sweep creates
+        a fresh timestamped file rather than overwriting the previous sweep's file.
+
+        Args:
+            data_type: Data type key (e.g. ``"multisweep"``).
+            identifier: Identifier string (e.g. ``"module1"``).
+        """
+        self._last_exported_per_identifier.pop((data_type, identifier), None)
+
+    def register_loaded_file(self, data_type: str, identifier: str, file_path: str) -> None:
+        """Register a specific on-disk file as the export target for a loaded panel.
+
+        When a user loads an existing session file into a new panel and then runs
+        Find Bias or Run Fit, the session manager should overwrite *that* file
+        rather than the most-recently-measured file for the same module.
+
+        Call this immediately after creating a panel from loaded data and
+        connecting its ``data_ready`` signal, passing the path of the loaded
+        ``.pkl`` file.  Subsequent ``handle_data_ready`` calls for this
+        ``(data_type, identifier)`` pair will overwrite that file.
+
+        Args:
+            data_type: Data type key (e.g. ``"multisweep"``).
+            identifier: Identifier string (e.g. ``"module1"``).
+            file_path: Full path (or basename) of the loaded file.  Only the
+                       basename is stored; the file must reside in the active
+                       session folder.
+        """
+        from pathlib import Path
+        filename = Path(file_path).name
+        if filename:
+            self._last_exported_per_identifier[(data_type, identifier)] = filename

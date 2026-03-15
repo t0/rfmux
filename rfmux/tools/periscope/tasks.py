@@ -1040,3 +1040,267 @@ class ApplyBiasTask(QtCore.QThread):
             if loop.is_running():
                 loop.stop()
             loop.close()
+
+
+class RunFitsSignals(QObject):
+    """Signals for RunFitsTask."""
+    progress  = pyqtSignal(int, float)   # module, progress_percentage (reserved)
+    completed = pyqtSignal(int, dict)    # module, updated_results_by_detector
+    error     = pyqtSignal(str)          # error_message
+
+
+class RunFitsTask(QtCore.QThread):
+    """QThread subclass for running resonator fits on existing multisweep data.
+
+    Mirrors the ``FindBiasTask`` pattern: operates on a deep copy of
+    ``MultisweepPanel.results_by_detector``, applies the requested fitting
+    algorithms in a background thread, and emits the updated dict on success
+    so the panel can merge the results back without mutating its own state
+    on failure.
+
+    No hardware I/O is performed; this is purely CPU-bound computation.
+    """
+
+    # Keys that carry fit results and should be merged back into the panel's
+    # results_by_detector after a successful run.
+    _FIT_KEYS = frozenset({
+        'fit_params', 'skewed_fit_success', 'skewed_fit_applied', 'skewed_model_mag',
+        'iq_centered',
+        'nonlinear_fit_params', 'nonlinear_fit_errors', 'nonlinear_fit_residual',
+        'nonlinear_fit_success', 'nonlinear_fit_applied', 'nonlinear_model_iq',
+        'gain_complex', 'iq_gain_corrected',
+    })
+
+    def __init__(
+        self,
+        module: int,
+        results_by_detector: dict,
+        fit_settings: Optional[Dict[str, Any]],
+        signals: "RunFitsSignals",
+    ):
+        """
+        Parameters
+        ----------
+        module :
+            Module number (used only for signal payloads).
+        results_by_detector :
+            ``MultisweepPanel.results_by_detector`` — a deep copy is taken
+            so the panel's dict is only updated on success.
+        fit_settings :
+            Dict from ``FitSettingsPanel.get_settings()``:
+            ``{'apply_skewed_fit': bool, 'apply_nonlinear_fit': bool}``.
+        signals :
+            ``RunFitsSignals`` instance.
+        """
+        super().__init__()
+        self.module = module
+        import copy
+        self.results_by_detector = copy.deepcopy(results_by_detector)
+        self.fit_settings = fit_settings or {}
+        self.signals = signals
+        self._running = True
+        self._max_workers = max(1, min(4, (os.cpu_count() or 1) - 1))
+
+    def stop(self):
+        """Request interruption."""
+        self._running = False
+        self.requestInterruption()
+
+    # ── QThread entry point ───────────────────────────────────────────────────
+
+    def run(self):
+        """Rebuild per-iteration dicts, apply fitting, emit completed dict."""
+        apply_skewed    = bool(self.fit_settings.get('apply_skewed_fit',    True))
+        apply_nonlinear = bool(self.fit_settings.get('apply_nonlinear_fit', True))
+
+        if not apply_skewed and not apply_nonlinear:
+            self.signals.error.emit(
+                "No fits selected.  Enable at least one fit type in Fit Settings."
+            )
+            return
+
+        try:
+            # ── Step 1: group entries by iteration index ──────────────────────
+            # per_iteration: {iter_idx: {code: data_dict}}
+            per_iteration: dict = {}
+            for code, iter_dict in self.results_by_detector.items():
+                for iter_idx, entry in iter_dict.items():
+                    per_iteration.setdefault(iter_idx, {})[code] = entry
+
+            if not per_iteration:
+                self.signals.error.emit("No sweep data found in results_by_detector.")
+                return
+
+            # ── Step 2: fit each iteration in parallel ────────────────────────
+            total = len(per_iteration)
+            done  = 0
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._max_workers
+            ) as executor:
+                future_to_iter = {
+                    executor.submit(
+                        self._fit_iteration,
+                        iter_idx,
+                        iter_data,
+                        apply_skewed,
+                        apply_nonlinear,
+                    ): iter_idx
+                    for iter_idx, iter_data in per_iteration.items()
+                }
+
+                for future in concurrent.futures.as_completed(future_to_iter):
+                    if self.isInterruptionRequested():
+                        self.signals.error.emit("Run Fit was cancelled.")
+                        return
+
+                    iter_idx = future_to_iter[future]
+                    try:
+                        fitted_iter_data = future.result()
+                    except Exception as exc:
+                        print(
+                            f"[RunFitsTask] Error fitting iteration {iter_idx}: {exc}",
+                            file=sys.stderr,
+                        )
+                        traceback.print_exc(file=sys.stderr)
+                        fitted_iter_data = per_iteration[iter_idx]  # keep original
+
+                    # ── Step 3: write fit keys back into the deep copy ────────
+                    for code, fitted_entry in fitted_iter_data.items():
+                        if code in self.results_by_detector:
+                            if iter_idx in self.results_by_detector[code]:
+                                target = self.results_by_detector[code][iter_idx]
+                                for key in self._FIT_KEYS:
+                                    if key in fitted_entry:
+                                        target[key] = fitted_entry[key]
+
+                    done += 1
+                    pct = 100.0 * done / total
+                    self.signals.progress.emit(self.module, pct)
+
+            self.signals.completed.emit(self.module, self.results_by_detector)
+
+        except Exception as exc:
+            error_msg = (
+                f"Error in RunFitsTask: {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
+            print(error_msg, file=sys.stderr)
+            self.signals.error.emit(str(exc))
+
+    # ── Worker ────────────────────────────────────────────────────────────────
+
+    def _fit_iteration(
+        self,
+        iter_idx: int,
+        iter_data: dict,
+        apply_skewed: bool,
+        apply_nonlinear: bool,
+    ) -> dict:
+        """Fit one iteration's worth of data (all detectors at one amplitude/direction).
+
+        Runs in a worker thread.  Returns an updated copy of *iter_data*.
+        """
+        # Work on shallow copies of each entry so we don't mutate the deep-copied
+        # results_by_detector while other threads may be reading it.
+        working = {code: dict(entry) for code, entry in iter_data.items()}
+
+        if apply_skewed:
+            try:
+                skewed_results = fitting_module_direct.fit_skewed_multisweep(
+                    working,
+                    approx_Q_for_fit=1e4,
+                    fit_resonances=True,
+                    center_iq_circle=True,
+                    normalize_fit=True,
+                )
+                for code in working:
+                    if code in skewed_results:
+                        working[code].update(skewed_results[code])
+                        working[code]['skewed_fit_applied'] = True
+                        fit_p = working[code].get('fit_params') or {}
+                        success = (
+                            isinstance(fit_p, dict)
+                            and fit_p.get('fr') is not None
+                            and fit_p.get('fr') != 'nan'
+                        )
+                        working[code]['skewed_fit_success'] = success
+
+                        if success:
+                            freqs = working[code].get('frequencies')
+                            if freqs is not None:
+                                try:
+                                    working[code]['skewed_model_mag'] = (
+                                        fitting_module_direct.s21_skewed(
+                                            freqs,
+                                            fit_p['fr'], fit_p['Qr'],
+                                            fit_p['Qcre'], fit_p['Qcim'],
+                                            fit_p['A'],
+                                        )
+                                    )
+                                except Exception as e:
+                                    print(
+                                        f"[RunFitsTask] skewed model failed for {code!r}: {e}",
+                                        file=sys.stderr,
+                                    )
+                    else:
+                        working[code]['skewed_fit_applied'] = True
+                        working[code]['skewed_fit_success'] = False
+            except Exception as exc:
+                print(f"[RunFitsTask] skewed fit error iter {iter_idx}: {exc}", file=sys.stderr)
+                for code in working:
+                    working[code]['skewed_fit_applied'] = True
+                    working[code]['skewed_fit_success'] = False
+        else:
+            for code in working:
+                working[code]['skewed_fit_applied'] = False
+                working[code]['skewed_fit_success'] = False
+
+        if apply_nonlinear:
+            try:
+                nonlinear_results = fitting_nonlinear.fit_nonlinear_iq_multisweep(
+                    {k: dict(v) for k, v in working.items()},
+                    fit_nonlinearity=True,
+                    n_extrema_points=5,
+                    verbose=False,
+                    parallel=False,   # already inside a ThreadPoolExecutor
+                )
+                for code in working:
+                    if code in nonlinear_results:
+                        working[code].update(nonlinear_results[code])
+                        working[code]['nonlinear_fit_applied'] = True
+                        working[code].setdefault('nonlinear_fit_success', False)
+
+                        if working[code].get('nonlinear_fit_success', False):
+                            nl_params = working[code].get('nonlinear_fit_params') or {}
+                            freqs = working[code].get('frequencies')
+                            if nl_params and freqs is not None:
+                                try:
+                                    working[code]['nonlinear_model_iq'] = (
+                                        fitting_nonlinear.nonlinear_iq(
+                                            freqs,
+                                            nl_params['fr'], nl_params['Qr'],
+                                            nl_params['amp'], nl_params['phi'],
+                                            nl_params['a'],
+                                            nl_params['i0'], nl_params['q0'],
+                                        )
+                                    )
+                                except Exception as e:
+                                    print(
+                                        f"[RunFitsTask] nonlinear model failed for {code!r}: {e}",
+                                        file=sys.stderr,
+                                    )
+                    else:
+                        working[code]['nonlinear_fit_applied'] = True
+                        working[code]['nonlinear_fit_success'] = False
+            except Exception as exc:
+                print(f"[RunFitsTask] nonlinear fit error iter {iter_idx}: {exc}", file=sys.stderr)
+                for code in working:
+                    working[code]['nonlinear_fit_applied'] = True
+                    working[code]['nonlinear_fit_success'] = False
+        else:
+            for code in working:
+                working[code]['nonlinear_fit_applied'] = False
+                working[code]['nonlinear_fit_success'] = False
+
+        return working

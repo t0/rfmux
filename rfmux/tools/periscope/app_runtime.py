@@ -1174,7 +1174,12 @@ class PeriscopeRuntime:
     
         return dac_scales    
     
-    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep") -> tuple:
+    def _create_multisweep_panel_from_loaded_data(
+        self,
+        load_params: dict,
+        source_type: str = "multisweep",
+        file_path: str | None = None,
+    ) -> tuple:
         """
         Create and display a MultisweepPanel from loaded data.
         
@@ -1184,7 +1189,11 @@ class PeriscopeRuntime:
         Args:
             load_params: Loaded data dictionary containing 'initial_parameters', 
                         'results_by_iteration', 'dac_scales_used', etc.
-            source_type: "multisweep", "bias", or "noise" - affects naming and panel behavior
+            source_type: "multisweep", "bias", or "noise" - affects naming and panel behavior.
+            file_path: Optional path to the source ``.pkl`` file.  When provided the
+                session manager is told to overwrite *this specific file* on
+                subsequent Find Bias / Run Fit saves rather than the most-recently-
+                measured file for this module.
             
         Returns:
             tuple: (panel, dock, window_id, target_module) or (None, None, None, None) on error
@@ -1250,6 +1259,17 @@ class PeriscopeRuntime:
             # Connect data_ready signal for session auto-export
             if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
+
+            # If this panel was created from a specific on-disk file (e.g. opened
+            # from the session browser), tell the session manager to overwrite THAT
+            # file when Find Bias / Run Fit save back results.  Without this, the
+            # session manager would fall back to overwriting the most-recently-
+            # measured file for this module — which may be a different sweep.
+            if file_path and hasattr(self, 'session_manager') and self.session_manager.is_active:
+                identifier = f"module{target_module}"
+                self.session_manager.register_loaded_file("multisweep", identifier, file_path)
+                import os as _os
+                print(f"[Session] Registered loaded file for overwrite: {_os.path.basename(file_path)}")
 
             panel._hide_progress_bars()
             
@@ -1606,16 +1626,21 @@ class PeriscopeRuntime:
         dock.show()
         dock.raise_()
         
-    def _load_multisweep_analysis(self, load_params: dict):
+    def _load_multisweep_analysis(self, load_params: dict, file_path: str | None = None):
         """
         Load multisweep analysis data from file and display in a docked panel.
 
         Args:
             load_params (dict): Loaded data dictionary from file.
+            file_path (str | None): Optional path of the source ``.pkl`` file.
+                When provided (i.e. the panel was opened from an existing session
+                file rather than a fresh measurement), the session manager is
+                told to overwrite *this specific file* on subsequent Find Bias /
+                Run Fit saves rather than the most-recently-measured file.
         """
         # Use the unified helper method
         panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
-            load_params, source_type="multisweep"
+            load_params, source_type="multisweep", file_path=file_path
         )
         
         if panel is None:

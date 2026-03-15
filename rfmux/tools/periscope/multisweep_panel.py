@@ -139,6 +139,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.apply_bias_signals = None   # ApplyBiasSignals instance
         self.bias_settings_panel = None  # Lazy-initialized BiasSettingsPanel instance
 
+        # Fit task storage
+        self.run_fits_task    = None     # Active RunFitsTask, if any
+        self.run_fits_signals = None     # RunFitsSignals instance
+        self.fit_settings_panel = None   # Lazy-initialized FitSettingsPanel instance
+
         # Initialize batch tracking for sweep tabs (before _setup_ui)
         self.current_batch = 0
 
@@ -209,6 +214,22 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.rerun_btn.clicked.connect(self._rerun_multisweep)
         row1_layout.addWidget(self.rerun_btn)
 
+        # Run Fit button — runs the selected fitting algorithms on existing data
+        self.run_fit_btn = QtWidgets.QPushButton("Run Fit")
+        self.run_fit_btn.clicked.connect(self._run_fit)
+        self.run_fit_btn.setToolTip(
+            "Re-run resonator fitting algorithms on the existing multisweep data.\n"
+            "Useful when the original sweep was run without fitting, or to re-fit\n"
+            "with different settings.  Configure which fits to apply via ⚙ Fit Settings."
+        )
+        row1_layout.addWidget(self.run_fit_btn)
+
+        # Fit Settings button — opens persistent FitSettingsPanel
+        self.fit_settings_btn = QtWidgets.QPushButton("⚙ Fit Settings")
+        self.fit_settings_btn.clicked.connect(self._show_fit_settings)
+        self.fit_settings_btn.setToolTip("Open the fitting settings panel")
+        row1_layout.addWidget(self.fit_settings_btn)
+
         # Find Bias button
         self.find_bias_btn = QtWidgets.QPushButton("Find Bias")
         self.find_bias_btn.clicked.connect(self._find_bias)
@@ -261,6 +282,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         )
         self._apply_bias_status_label.hide()
         row1_layout.addWidget(self._apply_bias_status_label)
+
+        # Transient "Fits complete" status label — hidden until Run Fit completes,
+        # then shown briefly before auto-hiding after 5 s.
+        self._fits_status_label = QtWidgets.QLabel("✓ Fits complete")
+        self._fits_status_label.setStyleSheet(
+            "color: #2a8a2a; font-weight: bold; padding: 2px 6px;"
+        )
+        self._fits_status_label.hide()
+        row1_layout.addWidget(self._fits_status_label)
 
         row1_layout.addStretch(1)
         toolbar_vbox.addWidget(row1)
@@ -1288,10 +1318,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._check_all_complete()
         self.current_amp_label.setText("All Amplitudes Processed")
         
-        # Emit data_ready signal for session auto-export
+        # Emit data_ready signal for session auto-export.
+        # The session_manager.handle_data_ready will automatically overwrite any
+        # existing file for this (data_type, identifier) pair so that Find Bias
+        # and Run Fit update the same file instead of creating timestamped duplicates.
         if self.results_by_detector:
-            export_data = self._prepare_export_data()
             identifier = f"module{self.target_module}"
+            export_data = self._prepare_export_data()
             self.data_ready.emit("multisweep", identifier, export_data)
         
         # Generate histogram plots once when all data is complete
@@ -1304,6 +1337,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.results_by_detector:
             first_key = next(iter(self.results_by_detector))
             self._open_detector_digest_for_index(first_key, switch_to_tab=False)
+
+        # Auto-run Find Bias if the user requested it in the multisweep dialog.
+        # Deferred via QTimer so all GUI completion signals are processed first.
+        if self.initial_params.get('run_find_bias', False):
+            QtCore.QTimer.singleShot(0, self._find_bias)
         
     def _check_all_complete(self):
         """
@@ -1619,7 +1657,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.res_info_dict:
             self.initial_params['res_info_dict'] = self.res_info_dict
 
-        # Reset window state for the new sweep
+        # Reset window state for the new sweep.
+        # Reset export-file tracking so the new sweep creates a fresh session file
+        # rather than overwriting the previous sweep's file.
+        periscope_for_reset = self._get_periscope_parent()
+        if periscope_for_reset and hasattr(periscope_for_reset, 'session_manager'):
+            periscope_for_reset.session_manager.reset_export_tracking(
+                "multisweep", f"module{self.target_module}"
+            )
         self.results_by_detector.clear()
         self.digest_panel = None
         self.histograms_generated = False
@@ -2519,6 +2564,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Auto-save the updated res_info_dict (with bias results) to the session file
         # so that the bias points are preserved when the file is reloaded.
+        # session_manager.handle_data_ready will automatically overwrite the existing
+        # multisweep file rather than creating a new timestamped duplicate.
         export_data = self._prepare_export_data()
         self.data_ready.emit("multisweep", f"module{self.target_module}", export_data)
 
@@ -2690,3 +2737,131 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # navigates the Detector Digest to that detector.
         for pw in self.derivative_plots_cache:
             pw.installEventFilter(self)
+
+    # ── Fit Settings ─────────────────────────────────────────────────────────
+
+    def _show_fit_settings(self):
+        """Show (or create) the persistent FitSettingsPanel window."""
+        from .fit_settings_panel import FitSettingsPanel
+        if self.fit_settings_panel is None:
+            self.fit_settings_panel = FitSettingsPanel(parent=None)
+        self.fit_settings_panel.show()
+        self.fit_settings_panel.raise_()
+        self.fit_settings_panel.activateWindow()
+
+    # ── Run Fit ───────────────────────────────────────────────────────────────
+
+    def _run_fit(self):
+        """Run the selected fitting algorithms on the current multisweep data.
+
+        Reads fit settings from :class:`FitSettingsPanel` (or loads saved
+        defaults when the panel has not been opened yet), then starts a
+        :class:`~rfmux.tools.periscope.tasks.RunFitsTask` in a background
+        thread.  The task operates on a deep copy of
+        ``self.results_by_detector`` and emits the updated dict on completion;
+        this method's completion handler merges the fit keys back into the
+        live dict.
+        """
+        if not self.results_by_detector:
+            QtWidgets.QMessageBox.warning(
+                self, "No Data",
+                "No multisweep data available.  Please run a multisweep first."
+            )
+            return
+
+        # Collect settings — prefer the open panel, fall back to QSettings defaults.
+        if self.fit_settings_panel is not None:
+            fit_settings = self.fit_settings_panel.get_settings()
+        else:
+            from . import settings as periscope_settings
+            fit_settings = periscope_settings.get_fit_defaults()
+
+        # Guard: at least one fit type must be enabled
+        if not fit_settings.get('apply_skewed_fit') and not fit_settings.get('apply_nonlinear_fit'):
+            QtWidgets.QMessageBox.warning(
+                self, "No Fits Selected",
+                "No fit types are enabled.\n"
+                "Open ⚙ Fit Settings and enable at least one fit."
+            )
+            return
+
+        from .tasks import RunFitsTask, RunFitsSignals
+
+        self.run_fits_signals = RunFitsSignals()
+        self.run_fits_signals.progress.connect(self._run_fits_progress)
+        self.run_fits_signals.completed.connect(self._run_fits_completed)
+        self.run_fits_signals.error.connect(self._run_fits_error)
+
+        self.run_fits_task = RunFitsTask(
+            module=self.target_module,
+            results_by_detector=self.results_by_detector,
+            fit_settings=fit_settings,
+            signals=self.run_fits_signals,
+        )
+
+        self.run_fit_btn.setEnabled(False)
+        self.run_fit_btn.setText("Fitting…")
+        self.run_fits_task.start()
+
+    def _run_fits_progress(self, module: int, progress: float):
+        """Handle progress updates from RunFitsTask (reserved for future use)."""
+        pass
+
+    def _run_fits_completed(self, module: int, updated_results_by_detector: dict):
+        """Handle successful completion of RunFitsTask.
+
+        Merges the fit-related keys from the updated dict back into
+        ``self.results_by_detector``, invalidates cached views that depend on
+        fit data (histograms, detector digest), emits ``data_ready`` for
+        session auto-export, and shows a transient completion label.
+
+        No broad plot redraw is triggered — lazy redraw on the next tab
+        navigation handles everything without blocking the GUI.
+        """
+        # Merge only the fit-related keys back into the live dict.
+        # All other data (sweep data, IQ, metadata) is untouched.
+        from .tasks import RunFitsTask
+        fit_keys = RunFitsTask._FIT_KEYS
+
+        for code, iter_dict in updated_results_by_detector.items():
+            if code not in self.results_by_detector:
+                continue
+            for iter_idx, updated_entry in iter_dict.items():
+                if iter_idx not in self.results_by_detector[code]:
+                    continue
+                target = self.results_by_detector[code][iter_idx]
+                for key in fit_keys:
+                    if key in updated_entry:
+                        target[key] = updated_entry[key]
+
+        # Invalidate histogram panel so it regenerates with the new fit data
+        # on the next visit to the Histograms tab.
+        if self.histogram_panel is not None and hasattr(self.histogram_panel, 'histogram_cache'):
+            self.histogram_panel.histogram_cache.clear()
+        self.histograms_generated = False
+
+        # Invalidate detector digest so it recreates with updated fit data
+        # on the next visit to the Detector Digest tab.
+        self.digest_panel = None
+
+        # Emit for session auto-export so the pickle file is updated immediately.
+        # session_manager.handle_data_ready will automatically overwrite the existing
+        # multisweep file rather than creating a new timestamped duplicate.
+        export_data = self._prepare_export_data()
+        self.data_ready.emit("multisweep", f"module{self.target_module}", export_data)
+
+        # Re-enable button and tidy up task references.
+        self.run_fit_btn.setEnabled(True)
+        self.run_fit_btn.setText("Run Fit")
+        self.run_fits_task = None
+
+        # Show a transient "✓ Fits complete" label that auto-hides after 5 s.
+        self._fits_status_label.show()
+        QtCore.QTimer.singleShot(5000, self._fits_status_label.hide)
+
+    def _run_fits_error(self, error_msg: str):
+        """Handle errors from RunFitsTask."""
+        QtWidgets.QMessageBox.critical(self, "Run Fit Error", error_msg)
+        self.run_fit_btn.setEnabled(True)
+        self.run_fit_btn.setText("Run Fit")
+        self.run_fits_task = None

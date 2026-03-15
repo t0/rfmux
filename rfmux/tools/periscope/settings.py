@@ -35,6 +35,7 @@ KEY_LAST_SESSION_PATH = "session/last_loaded_path"
 KEY_USER_LIBRARY_PATH = "notebook/user_library_path"
 KEY_CUSTOM_MATERIALS = "materials/custom_materials"
 KEY_MULTISWEEP_DEFAULTS = "multisweep/defaults"
+KEY_FIT_DEFAULTS = "fitting/defaults"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
@@ -450,10 +451,56 @@ def set_multisweep_defaults(params: dict) -> None:
         'rotate_saved_data',
         'sweep_direction',
         'apply_skewed_fit',
-        'apply_nonlinear_fit'
+        'apply_nonlinear_fit',
+        'run_find_bias',
     }
     
     filtered_params = {k: v for k, v in params.items() if k in persist_keys}
     
     settings = _get_settings()
     settings.setValue(KEY_MULTISWEEP_DEFAULTS, json.dumps(filtered_params))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Fitting Settings
+# ─────────────────────────────────────────────────────────────────
+
+_FIT_DEFAULTS = {
+    'apply_skewed_fit': True,
+    'apply_nonlinear_fit': True,
+}
+
+
+def get_fit_defaults() -> dict:
+    """
+    Get the saved fit-settings panel defaults.
+
+    Returns:
+        dict: ``{'apply_skewed_fit': bool, 'apply_nonlinear_fit': bool}``
+              Defaults to both fits enabled when no settings have been saved yet.
+    """
+    import json
+    qs = _get_settings()
+    json_str = qs.value(KEY_FIT_DEFAULTS, "{}")
+    try:
+        saved = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        saved = {}
+    # Merge over built-in defaults so new keys always have a fallback
+    result = dict(_FIT_DEFAULTS)
+    result.update(saved)
+    return result
+
+
+def set_fit_defaults(params: dict) -> None:
+    """
+    Persist fit-settings panel state across Periscope sessions.
+
+    Args:
+        params: Dict with any subset of ``{'apply_skewed_fit', 'apply_nonlinear_fit'}``.
+    """
+    import json
+    persist_keys = {'apply_skewed_fit', 'apply_nonlinear_fit'}
+    filtered = {k: bool(v) for k, v in params.items() if k in persist_keys}
+    qs = _get_settings()
+    qs.setValue(KEY_FIT_DEFAULTS, json.dumps(filtered))

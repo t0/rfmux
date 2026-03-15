@@ -2783,8 +2783,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             return
         
-        # Use existing load mechanism
-        self._load_multisweep_analysis(data)
+        # Use existing load mechanism, passing file_path so the session manager
+        # knows which file to overwrite when Find Bias / Run Fit are run.
+        self._load_multisweep_analysis(data, file_path=file_path)
     
     def _load_bias_from_session(self, data: dict, file_path: str):
         """

@@ -2466,6 +2466,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         Reads algorithm settings from the BiasSettingsPanel (using defaults when
         the panel has not been opened yet), then starts a FindBiasTask.
         """
+        # Safety guard: silently reject if either task is still running.
+        # Normally unreachable because both buttons are disabled while a task
+        # runs, but guards against any edge-case re-entry.
+        if (self.find_bias_task is not None and self.find_bias_task.isRunning()) or \
+           (self.run_fits_task is not None and self.run_fits_task.isRunning()):
+            return
+
         if not self.results_by_detector:
             QtWidgets.QMessageBox.warning(
                 self, "No Data",
@@ -2517,8 +2524,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             bias_settings=bias_settings,
         )
 
+        # Disable both Find Bias and Run Fit for the duration of this task.
         self.find_bias_btn.setEnabled(False)
         self.find_bias_btn.setText("Finding…")
+        self.run_fit_btn.setEnabled(False)
         self.apply_bias_btn.setEnabled(False)
         self.find_bias_task.start()
 
@@ -2545,9 +2554,19 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         )
         total = len(self.res_info_dict)
 
-        # Re-enable buttons
+        # Wait for the thread to fully finish before dropping the reference.
+        # run() has already returned (it emitted this signal), so wait() is
+        # nearly instantaneous — it just lets Qt complete its internal join so
+        # the C++ QThread object is in the Finished state before Python may GC
+        # the wrapper.  Without this, dropping the last Python reference while
+        # Qt's thread machinery is still winding down can cause a core dump.
+        if self.find_bias_task is not None:
+            self.find_bias_task.wait()
+
+        # Re-enable both Find Bias and Run Fit buttons
         self.find_bias_btn.setEnabled(True)
         self.find_bias_btn.setText("Find Bias")
+        self.run_fit_btn.setEnabled(True)
         self.find_bias_task = None
 
         # Enable Apply Bias only if at least one bias point was found
@@ -2576,8 +2595,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _find_bias_error(self, error_msg: str):
         """Handle errors from FindBiasTask."""
         QtWidgets.QMessageBox.critical(self, "Find Bias Error", error_msg)
+        if self.find_bias_task is not None:
+            self.find_bias_task.wait()
         self.find_bias_btn.setEnabled(True)
         self.find_bias_btn.setText("Find Bias")
+        self.run_fit_btn.setEnabled(True)
         self.find_bias_task = None
 
     # ── Apply Bias ────────────────────────────────────────────────────────────
@@ -2799,8 +2821,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             signals=self.run_fits_signals,
         )
 
+        # Disable both Run Fit and Find Bias for the duration of this task.
         self.run_fit_btn.setEnabled(False)
         self.run_fit_btn.setText("Fitting…")
+        self.find_bias_btn.setEnabled(False)
         self.run_fits_task.start()
 
     def _run_fits_progress(self, module: int, progress: float):
@@ -2850,9 +2874,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         export_data = self._prepare_export_data()
         self.data_ready.emit("multisweep", f"module{self.target_module}", export_data)
 
-        # Re-enable button and tidy up task references.
+        # Wait for the thread to fully finish before dropping the reference
+        # (same rationale as FindBiasTask — prevents native crash on GC).
+        if self.run_fits_task is not None:
+            self.run_fits_task.wait()
+
+        # Re-enable both Run Fit and Find Bias buttons.
         self.run_fit_btn.setEnabled(True)
         self.run_fit_btn.setText("Run Fit")
+        self.find_bias_btn.setEnabled(True)
         self.run_fits_task = None
 
         # Show a transient "✓ Fits complete" label that auto-hides after 5 s.
@@ -2862,6 +2892,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _run_fits_error(self, error_msg: str):
         """Handle errors from RunFitsTask."""
         QtWidgets.QMessageBox.critical(self, "Run Fit Error", error_msg)
+        if self.run_fits_task is not None:
+            self.run_fits_task.wait()
         self.run_fit_btn.setEnabled(True)
         self.run_fit_btn.setText("Run Fit")
+        self.find_bias_btn.setEnabled(True)
         self.run_fits_task = None

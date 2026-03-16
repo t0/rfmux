@@ -12,7 +12,7 @@ in the Periscope application. It handles:
 Usage:
     session_mgr = SessionManager(parent=main_window)
     session_mgr.start_session("/path/to/data", "my_session")
-    session_mgr.export_data("netanal", "module1", data_dict)
+    session_mgr.export_data("netanal", data_dict)
 """
 
 from __future__ import annotations
@@ -317,7 +317,9 @@ class SessionManager(QtCore.QObject):
         
         Args:
             data_type: Type of data being exported (netanal, multisweep, bias, noise)
-            identifier: Additional identifier (e.g., 'module1', 'module1_det3')
+            identifier: Internal tracking identifier (e.g., 'module1'). Not included
+                        in the filename, but used to de-duplicate exports within a
+                        session (so Find Bias / Run Fit overwrite the same file).
             data: Dictionary of data to export
             filename_override: If provided, use this filename instead of generating
                               a new timestamped one. Enables natural overwriting.
@@ -327,11 +329,11 @@ class SessionManager(QtCore.QObject):
         
         Example:
             >>> session_mgr.export_data('netanal', 'module1', netanal_data)
-            Path('/data/session_20251201/netanal_module1_092000.pkl')
+            Path('/data/session_20251201/netanal_092000.pkl')
             
             # Re-export with same filename to overwrite:
             >>> session_mgr.export_data('netanal', 'module1', updated_data, 
-            ...                         filename_override='netanal_module1_092000.pkl')
+            ...                         filename_override='netanal_092000.pkl')
         """
         if not self.is_active or self._session_path is None:
             print(f"[Session] No active session - skipping export of {data_type}")
@@ -396,22 +398,22 @@ class SessionManager(QtCore.QObject):
         Generate a timestamped filename for data export.
         
         Uses time-only suffix since files are already in a timestamped session folder.
+        The identifier is used only for internal de-duplication tracking and is not
+        included in the filename.
         
         Args:
             data_type: Type of data (netanal, multisweep, bias, noise)
-            identifier: Additional identifier (e.g., module1, detector3)
+            identifier: Internal tracking identifier (not included in filename)
         
         Returns:
-            Filename in format: <type>_<identifier>_HHMMSS.pkl
+            Filename in format: <type>_HHMMSS.pkl
         
         Example:
             >>> session_mgr.generate_filename('netanal', 'module1')
-            'netanal_module1_092000.pkl'
+            'netanal_092000.pkl'
         """
         timestamp = datetime.datetime.now().strftime("%H%M%S")
-        # Clean the identifier (replace spaces with underscores)
-        clean_identifier = identifier.replace(' ', '_').replace('/', '_')
-        return f"{data_type}_{clean_identifier}_{timestamp}.pkl"
+        return f"{data_type}_{timestamp}.pkl"
     
     # ─────────────────────────────────────────────────────────────────
     # Session Query Methods
@@ -449,8 +451,11 @@ class SessionManager(QtCore.QObject):
         if data_type == 'screenshot':
             files = list(self._session_path.glob('screenshot_*.png'))
         else:
-            pattern = f'*_{data_type}_*.pkl'
-            files = list(self._session_path.glob(pattern))
+            # New format: {data_type}_{timestamp}.pkl  (e.g. multisweep_092000.pkl)
+            files = list(self._session_path.glob(f'{data_type}_*.pkl'))
+            # Backwards compat: old format had the module identifier embedded,
+            # e.g. multisweep_module1_092000.pkl  →  *_{data_type}_*.pkl
+            files += list(self._session_path.glob(f'*_{data_type}_*.pkl'))
         files.sort(key=lambda p: p.name, reverse=True)
         return files
     

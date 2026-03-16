@@ -35,6 +35,7 @@ KEY_LAST_SESSION_PATH = "session/last_loaded_path"
 KEY_USER_LIBRARY_PATH = "notebook/user_library_path"
 KEY_CUSTOM_MATERIALS = "materials/custom_materials"
 KEY_MULTISWEEP_DEFAULTS = "multisweep/defaults"
+KEY_NETWORK_ANALYSIS_DEFAULTS = "network_analysis/defaults"
 KEY_FIT_DEFAULTS = "fitting/defaults"
 
 # Default values
@@ -459,6 +460,69 @@ def set_multisweep_defaults(params: dict) -> None:
     
     settings = _get_settings()
     settings.setValue(KEY_MULTISWEEP_DEFAULTS, json.dumps(filtered_params))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Network Analysis Settings
+# ─────────────────────────────────────────────────────────────────
+
+def get_network_analysis_defaults() -> dict:
+    """
+    Get saved network analysis default parameters.
+
+    Returns:
+        dict: Saved network analysis parameters, or empty dict if none saved.
+              Expected keys:
+              - amps: List of normalized amplitude values
+              - fmin: Minimum frequency in Hz
+              - fmax: Maximum frequency in Hz
+              - cable_length: Cable length in metres
+              - npoints: Number of frequency points
+              - nsamps: Samples to average per point
+              - max_chans: Maximum channels per module
+              - max_span: Maximum span in Hz
+              - clear_channels: Whether to clear all channels first
+              - module: Module selection (None / list of ints)
+    """
+    import json
+    qs = _get_settings()
+    json_str = qs.value(KEY_NETWORK_ANALYSIS_DEFAULTS, "{}")
+    try:
+        return json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def set_network_analysis_defaults(params: dict) -> None:
+    """
+    Save network analysis default parameters for future sessions.
+
+    Args:
+        params: Dictionary of network analysis parameters to save.
+
+    Note:
+        Only saves parameters that should persist across sessions.
+        Transient fields such as raw result data are excluded.
+    """
+    import json
+
+    persist_keys = {
+        'amps',
+        'fmin',
+        'fmax',
+        'cable_length',
+        'npoints',
+        'nsamps',
+        'max_chans',
+        'max_span',
+        'clear_channels',
+        'module',
+    }
+
+    filtered_params = {k: v for k, v in params.items() if k in persist_keys}
+
+    qs = _get_settings()
+    qs.setValue(KEY_NETWORK_ANALYSIS_DEFAULTS, json.dumps(filtered_params))
 
 
 # ─────────────────────────────────────────────────────────────────

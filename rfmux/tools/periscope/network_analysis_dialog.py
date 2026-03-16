@@ -10,6 +10,7 @@ from .utils import (
 import pickle
 from .tasks import DACScaleFetcher
 from .network_analysis_base import NetworkAnalysisDialogBase
+from . import settings
 
 
 def load_network_analysis_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
@@ -72,7 +73,8 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             modules: List of available module numbers.
             dac_scales: Pre-fetched DAC scales for the modules.
         """
-        super().__init__(parent, params=None, modules=modules, dac_scales=dac_scales)
+        saved_params = settings.get_network_analysis_defaults()
+        super().__init__(parent, params=saved_params, modules=modules, dac_scales=dac_scales)
         self.setWindowTitle("Network Analysis Configuration")
         self.setModal(False) # Modeless dialog
         self._setup_ui()
@@ -90,35 +92,43 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         param_group = QtWidgets.QGroupBox("Analysis Parameters")
         param_layout = QtWidgets.QFormLayout(param_group)
         
-        self.module_entry = QtWidgets.QLineEdit("All")
+        # Restore module selection from saved params (None → "All", list → comma-separated)
+        saved_module = self.params.get('module')
+        if saved_module is None:
+            module_text = "All"
+        elif isinstance(saved_module, (list, tuple)):
+            module_text = ", ".join(str(m) for m in saved_module)
+        else:
+            module_text = str(saved_module)
+        self.module_entry = QtWidgets.QLineEdit(module_text)
         self.module_entry.setToolTip("Specify modules to analyze (e.g., '1,2,5', '1-4', or 'All' for modules 1-8).")
         self.module_entry.textChanged.connect(self._update_dac_scale_info) # Update DAC info when module selection changes
         param_layout.addRow("Modules:", self.module_entry)
-        
-        self.fmin_edit = QtWidgets.QLineEdit(str(DEFAULT_MIN_FREQ / 1e6)) # Default in MHz
-        self.fmax_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_FREQ / 1e6)) # Default in MHz
+
+        self.fmin_edit = QtWidgets.QLineEdit(str(self.params.get('fmin', DEFAULT_MIN_FREQ) / 1e6))
+        self.fmax_edit = QtWidgets.QLineEdit(str(self.params.get('fmax', DEFAULT_MAX_FREQ) / 1e6))
         param_layout.addRow("Min Frequency (MHz):", self.fmin_edit)
         param_layout.addRow("Max Frequency (MHz):", self.fmax_edit)
 
-        self.cable_length_edit = QtWidgets.QLineEdit(str(DEFAULT_CABLE_LENGTH)) # Default cable length
+        self.cable_length_edit = QtWidgets.QLineEdit(str(self.params.get('cable_length', DEFAULT_CABLE_LENGTH)))
         param_layout.addRow("Cable Length (m):", self.cable_length_edit)
         
         self.setup_amplitude_group(param_layout) # Add shared amplitude settings
         
-        self.points_edit = QtWidgets.QLineEdit(str(DEFAULT_NPOINTS))
+        self.points_edit = QtWidgets.QLineEdit(str(self.params.get('npoints', DEFAULT_NPOINTS)))
         param_layout.addRow("Number of Points:", self.points_edit)
         
-        self.samples_edit = QtWidgets.QLineEdit(str(DEFAULT_NSAMPLES))
+        self.samples_edit = QtWidgets.QLineEdit(str(self.params.get('nsamps', DEFAULT_NSAMPLES)))
         param_layout.addRow("Samples to Average:", self.samples_edit)
         
-        self.max_chans_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_CHANNELS))
+        self.max_chans_edit = QtWidgets.QLineEdit(str(self.params.get('max_chans', DEFAULT_MAX_CHANNELS)))
         param_layout.addRow("Max Channels:", self.max_chans_edit)
         
-        self.max_span_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_SPAN / 1e6)) # Default in MHz
+        self.max_span_edit = QtWidgets.QLineEdit(str(self.params.get('max_span', DEFAULT_MAX_SPAN) / 1e6))
         param_layout.addRow("Max Span (MHz):", self.max_span_edit)
         
         self.clear_channels_cb = QtWidgets.QCheckBox("Clear all channels first")
-        self.clear_channels_cb.setChecked(True) # Default to clearing channels
+        self.clear_channels_cb.setChecked(self.params.get('clear_channels', True))
         param_layout.addRow("", self.clear_channels_cb)
         
         layout.addWidget(param_group)
@@ -322,6 +332,14 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
                 if params_dict['fmin'] >= params_dict['fmax']:
                     QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
                     return None
+
+                # Save these parameters as defaults for future sessions
+                try:
+                    settings.set_network_analysis_defaults(params_dict)
+                except Exception as save_err:
+                    # Don't fail the dialog if settings save fails
+                    print(f"Warning: Could not save network analysis defaults: {save_err}")
+
                 return params_dict
         except Exception as e:
             traceback.print_exc() # Log the full traceback for debugging

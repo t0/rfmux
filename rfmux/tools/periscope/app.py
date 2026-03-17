@@ -1027,13 +1027,17 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             if self.crs is None:
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
-            selected_module_param = params.get('module')
-            if selected_module_param is None:
-                modules_to_run = list(range(1, 9))
-            elif isinstance(selected_module_param, list):
-                modules_to_run = selected_module_param
-            else:
-                modules_to_run = [selected_module_param]
+
+            # Resolve a single target_module — network analysis always sweeps one module
+            # at a time. If the dialog passed None ("all modules") or a list, fall back
+            # to the Periscope instance's current module.
+            target_module = params.get('module')
+            if isinstance(target_module, list):
+                target_module = target_module[0]
+            if target_module is None:
+                target_module = self.module
+            modules_to_run = [target_module]
+
             if not hasattr(self, 'dac_scales'):
                 QtWidgets.QMessageBox.critical(self, "Error", 
                     "DAC scales are not available. Please run the network analysis configuration again.")
@@ -1119,55 +1123,64 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             if self.crs is None and self.host != "OFFLINE":
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
-                
-            selected_module_param = params['parameters'].get('module')
-            if selected_module_param is None:
-                modules_to_run = list(range(1, 9))
-            elif isinstance(selected_module_param, list):
-                modules_to_run = selected_module_param
-            else:
-                modules_to_run = [selected_module_param]
-            
-            # Restore DAC scales from loaded data (using existing 'dac_scales_used' key)
+
+            # Derive the single target module from the actual data (not from params,
+            # which may be None when "all modules" was selected — that would incorrectly
+            # expand to 8 modules even though the file only contains data for 1).
+            target_module = next(iter(params['modules'].keys()))
+            modules_to_run = [target_module]
+
+            # Restore DAC scales from loaded data
             self.dac_scales = params['dac_scales_used']
-            
+
             # Create unique ID for this analysis
             window_id = f"netanal_{self.netanal_window_count}"
             self.netanal_window_count += 1
-            
+
             # Create panel
             dac_scales_local = self.dac_scales.copy()
             window_signals = NetworkAnalysisSignals()
             panel = NetworkAnalysisPanel(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode, is_loaded_data=True)
             panel._hide_progress_bars()
             panel.set_params(params['parameters'])
-            
+
             # Wrap panel in dock
             dock_title = f"Network Analysis #{self.netanal_window_count} (Loaded)"
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
-            
-            # Store panel reference
-            self.netanal_windows[window_id] = {'window': panel, 'dock': dock, 'signals': window_signals}
-            
-            # Load data into panel
+
+            # Store panel reference — include amplitude_queues and current_amp_index so
+            # that _check_all_complete (called from complete_analysis) doesn't KeyError.
+            self.netanal_windows[window_id] = {
+                'window': panel,
+                'dock': dock,
+                'signals': window_signals,
+                'amplitude_queues': {},
+                'current_amp_index': {},
+            }
+
+            # Connect data_ready for session auto-export (same as _start_network_analysis)
+            panel.data_ready.connect(
+                lambda data, p=panel: self._handle_netanal_data_ready(modules_to_run, data, panel=p)
+            )
+
+            # Load sweep data into panel
             amplitudes = params['parameters'].get('amps')
             for mod in modules_to_run:
                 for i in range(len(amplitudes)):
                     freqs = np.array(params['modules'][mod][i]['frequency']['values'])
                     amps = np.array(params['modules'][mod][i]['magnitude']['counts']['raw'])
                     phases = np.array(params['modules'][mod][i]['phase']['values'])
-                    
                     panel.update_data(mod, freqs, amps, phases)
                     panel.update_data_with_amp(mod, freqs, amps, phases, amplitudes[i])
-                
+
                 r_freq = params['modules'][mod]['resonances_hz']
                 panel._use_loaded_resonances(mod, r_freq)
-            
+
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
             if main_dock:
                 self.tabifyDockWidget(main_dock, dock)
-            
+
             # Show the dock and activate it
             dock.show()
             dock.raise_()
@@ -1264,7 +1277,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         try:
             if window_id not in self.netanal_windows: return
             window_data = self.netanal_windows[window_id]
-            self.check_connection(window_data, window_id)
+            # Note: signal connections are established by _start_network_analysis /
+            # _rerun_network_analysis before this method is called; no check_connection needed.
             signals = window_data['signals']
             if module_param not in window_data['amplitude_queues'] or not window_data['amplitude_queues'][module_param]:
                 return
@@ -1289,55 +1303,109 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         Re-run a network analysis for an existing NetworkAnalysisPanel.
 
-        This method is called from a NetworkAnalysisPanel's _edit_parameters method.
-        It stops any ongoing tasks for that window, clears its data and plots, 
-        updates its parameters, and then restarts the analysis sequence.
+        Mirrors _start_multisweep_analysis_for_window: uses a direct panel reference,
+        derives the module from the panel itself (not from params which may expand to 8),
+        and does an explicit disconnect → reconnect of all task signals.
 
         Args:
             params (dict): The new or updated parameters for the network analysis.
-            source_panel: The NetworkAnalysisPanel requesting the re-run (optional, auto-detected if None)
+            source_panel: The NetworkAnalysisPanel requesting the re-run.
+                          Provided by _edit_parameters via source_panel=self;
+                          falls back to a dict-equality search if None.
         """
         try:
-            if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available"); return
-            
-            # Find the panel that's calling this
+            if self.crs is None:
+                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
+                return
+
+            # Find the panel — source_panel should always be set now (via _edit_parameters),
+            # but keep the dict-equality fallback for any legacy callers.
             if source_panel is None:
-                # Try to find it from params (fallback)
                 for w_id, w_data in self.netanal_windows.items():
                     if w_data['window'].current_params == params:
                         source_panel = w_data['window']
                         break
-            
-            # Find window_id for this panel
+
+            # Find window_id by panel identity
             window_id = None
             for w_id, w_data in self.netanal_windows.items():
-                if w_data['window'] == source_panel: 
+                if w_data['window'] == source_panel:
                     window_id = w_id
                     break
-            
-            if not window_id: 
+
+            if not window_id:
                 print("No window_id found for panel")
                 return
+
             window_data = self.netanal_windows[window_id]
             window = window_data['window']
-            window.data.clear(); window.raw_data.clear()
-            for mod, pbar in window.progress_bars.items(): 
-                pbar.setValue(0) # Renamed module
-            window.clear_plots(); window.set_params(params)
-            selected_module_param = params.get('module') # Renamed
-            if selected_module_param is None: modules_to_run = list(range(1, 9))
-            elif isinstance(selected_module_param, list): modules_to_run = selected_module_param
-            else: modules_to_run = [selected_module_param]
+
+            # Derive a single target_module from the panel's own modules list.
+            # Never re-expand from params.get('module') — that may be None → 8 modules.
+            target_module = window.modules[0] if window.modules else self.module
+            modules_to_run = [target_module]
+
+            # Stop any running tasks for this window
             for task_key in list(self.netanal_tasks.keys()):
                 if task_key.startswith(f"{window_id}_"):
-                    task = self.netanal_tasks.pop(task_key); task.stop()
-            amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)]) # DEFAULT_AMPLITUDE from .utils
-            window_data['amplitude_queues'] = {mod: list(amplitudes) for mod in modules_to_run}
-            window_data['current_amp_index'] = {mod: 0 for mod in modules_to_run}
-            if window.progress_group: window.progress_group.setVisible(True)
-            for mod_iter in modules_to_run: # Renamed
-                window.update_amplitude_progress(mod_iter, 1, len(amplitudes), amplitudes[0])
-                self._start_next_amplitude_task(mod_iter, params, window_id)
+                    task = self.netanal_tasks.pop(task_key)
+                    task.stop()
+
+            # Clear panel state and re-apply new params
+            window.data.clear()
+            window.raw_data.clear()
+            for pbar in window.progress_bars.values():
+                pbar.setValue(0)
+            window.clear_plots()
+            window.set_params(params)
+
+            # Explicitly disconnect all previous signal connections, then reconnect.
+            # This is the same pattern as _start_multisweep_analysis_for_window and
+            # prevents stale/duplicate connections from accumulating across re-runs.
+            window_signals = window_data['signals']
+            try:
+                window_signals.progress.disconnect()
+                window_signals.data_update.disconnect()
+                window_signals.data_update_with_amp.disconnect()
+                window_signals.completed.disconnect()
+                window_signals.error.disconnect()
+            except TypeError:
+                pass  # Signals were not previously connected — that's fine
+
+            window_signals.progress.connect(
+                lambda mod, prog: window.update_progress(mod, prog),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+            window_signals.data_update.connect(
+                lambda mod, freqs, amps, phases: window.update_data(mod, freqs, amps, phases),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+            window_signals.data_update_with_amp.connect(
+                lambda mod, freqs, amps, phases, amp_val: window.update_data_with_amp(mod, freqs, amps, phases, amp_val),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+            window_signals.completed.connect(
+                lambda mod: self._handle_analysis_completed(mod, window_id),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+            window_signals.error.connect(
+                lambda error_msg: QtWidgets.QMessageBox.critical(window, "Network Analysis Error", error_msg),
+                QtCore.Qt.ConnectionType.QueuedConnection)
+
+            # Reset session export tracking so the re-run always creates a fresh file
+            # (mirrors _rerun_multisweep which calls session_manager.reset_export_tracking)
+            window._last_export_filename = None
+            if hasattr(self, 'session_manager') and self.session_manager.is_active:
+                identifier = f"module{target_module}"
+                if hasattr(self.session_manager, 'reset_export_tracking'):
+                    self.session_manager.reset_export_tracking('netanal', identifier)
+
+            # Set up amplitude queues for the single target module
+            amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)])
+            window_data['amplitude_queues'] = {target_module: list(amplitudes)}
+            window_data['current_amp_index'] = {target_module: 0}
+
+            if window.progress_group:
+                window.progress_group.setVisible(True)
+
+            window.update_amplitude_progress(target_module, 1, len(amplitudes), amplitudes[0])
+            self._start_next_amplitude_task(target_module, params, window_id)
         except Exception as e:
             print(f"Error in _rerun_network_analysis: {e}")
             traceback.print_exc()

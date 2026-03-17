@@ -897,7 +897,11 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             return
             
         window_data = parent.netanal_windows[window_id]
-        
+
+        # Guard: if this window was loaded from file, amplitude_queues may not exist
+        if 'amplitude_queues' not in window_data:
+            return
+
         no_pending_amplitudes = True
         for module in window_data['amplitude_queues']:
             if window_data['amplitude_queues'][module]:
@@ -942,7 +946,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                 
                 parent_widget = self._get_periscope_parent()
                 if parent_widget and hasattr(parent_widget, '_rerun_network_analysis'):
-                    parent_widget._rerun_network_analysis(self.current_params) # type: ignore
+                    parent_widget._rerun_network_analysis(self.current_params, source_panel=self) # type: ignore
 
     def _rerun_analysis(self):
         """Re-run the analysis with potentially updated parameters."""

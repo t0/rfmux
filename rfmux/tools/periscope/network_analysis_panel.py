@@ -10,7 +10,7 @@ from .tasks import SetCableLengthSignals # Added import
 # from .tasks import * # Not directly used by this class, dialogs will import what they need.
 
 # Dialogs are now imported from .dialogs within the same package
-from .dialogs import NetworkAnalysisParamsDialog, FindResonancesDialog, MultisweepDialog
+from .dialogs import NetworkAnalysisParamsDialog, MultisweepDialog
 from .network_analysis_export import NetworkAnalysisExportMixin
 
 class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, ScreenshotMixin):
@@ -53,6 +53,9 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         
         # Track last session export filename for overwriting
         self._last_export_filename: Optional[str] = None
+
+        # Lazy-initialized FindResonancesSettingsPanel instance
+        self.find_resonances_settings_panel = None
 
         # Initialize signals for SetCableLengthTask
         self.set_cable_length_signals = SetCableLengthSignals()
@@ -162,8 +165,14 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # Find Resonances button
         find_res_btn = QtWidgets.QPushButton("Find Resonances")
         find_res_btn.setToolTip("Identify resonance frequencies from the current sweep data for the active module.")
-        find_res_btn.clicked.connect(self._show_find_resonances_dialog)
+        find_res_btn.clicked.connect(self._find_resonances)
         toolbar_module_layout.addWidget(find_res_btn)
+
+        # Find Resonances Settings button — opens the persistent settings panel
+        find_res_settings_btn = QtWidgets.QPushButton("⚙ Find Resonances Settings")
+        find_res_settings_btn.setToolTip("Open the Find Resonances settings panel")
+        find_res_settings_btn.clicked.connect(self._show_find_resonances_settings)
+        toolbar_module_layout.addWidget(find_res_settings_btn)
 
         # Take Multisweep button
         self.take_multisweep_btn = QtWidgets.QPushButton("Take Multisweep")
@@ -615,27 +624,59 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                 amplitude = DEFAULT_AMPLITUDE
         return amplitude, freqs, amps, phases, iq_data
 
-    def _show_find_resonances_dialog(self):
-        """Show the dialog to configure and run find_resonances."""
+    # ── Find Resonances Settings ──────────────────────────────────────────────
+
+    def _show_find_resonances_settings(self):
+        """Show (or create) the persistent FindResonancesSettingsPanel window."""
+        from .find_resonances_settings_panel import FindResonancesSettingsPanel
+        if self.find_resonances_settings_panel is None:
+            self.find_resonances_settings_panel = FindResonancesSettingsPanel(parent=None)
+        self.find_resonances_settings_panel.show()
+        self.find_resonances_settings_panel.raise_()
+        self.find_resonances_settings_panel.activateWindow()
+
+    # ── Find Resonances ───────────────────────────────────────────────────────
+
+    def _find_resonances(self):
+        """Run find_resonances on the active module using the current settings.
+
+        Reads algorithm parameters directly from
+        :class:`~rfmux.tools.periscope.find_resonances_settings_panel.FindResonancesSettingsPanel`
+        (or falls back to :func:`~rfmux.tools.periscope.settings.get_find_resonances_defaults`
+        when the panel has not been opened yet).  No dialog is shown — adjust
+        settings via the "⚙ Find Resonances Settings" button.
+        """
         current_tab_index = self.tabs.currentIndex()
         if current_tab_index < 0:
-            QtWidgets.QMessageBox.warning(self, "No Module Selected", "Please select a module tab to analyze.")
+            QtWidgets.QMessageBox.warning(self, "No Module Selected",
+                                          "Please select a module tab to analyze.")
             return
+
         active_module_text = self.tabs.tabText(current_tab_index)
         try:
             active_module = int(active_module_text.split(" ")[1])
         except (IndexError, ValueError):
-            QtWidgets.QMessageBox.critical(self, "Error", f"Could not determine active module from tab: {active_module_text}")
+            QtWidgets.QMessageBox.critical(
+                self, "Error",
+                f"Could not determine active module from tab: {active_module_text}"
+            )
             raise
+
         if not self.raw_data or active_module not in self.raw_data or not self.raw_data[active_module]:
-            QtWidgets.QMessageBox.information(self, "No Data", f"No sweep data available for Module {active_module} to find resonances.")
+            QtWidgets.QMessageBox.information(
+                self, "No Data",
+                f"No sweep data available for Module {active_module} to find resonances."
+            )
             return
 
-        dialog = FindResonancesDialog(self)
-        if dialog.exec():
-            params = dialog.get_parameters()
-            if params:
-                self._run_and_plot_resonances(active_module, params)
+        # Collect settings — prefer the open panel, fall back to QSettings defaults.
+        if self.find_resonances_settings_panel is not None:
+            params = self.find_resonances_settings_panel.get_settings()
+        else:
+            from . import settings as periscope_settings
+            params = periscope_settings.get_find_resonances_defaults()
+
+        self._run_and_plot_resonances(active_module, params)
 
     def _run_and_plot_resonances(self, active_module: int, find_resonances_params: dict):
         """Run find_resonances and plot the results on the active module's plots."""

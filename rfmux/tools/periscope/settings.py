@@ -37,6 +37,7 @@ KEY_CUSTOM_MATERIALS = "materials/custom_materials"
 KEY_MULTISWEEP_DEFAULTS = "multisweep/defaults"
 KEY_NETWORK_ANALYSIS_DEFAULTS = "network_analysis/defaults"
 KEY_FIT_DEFAULTS = "fitting/defaults"
+KEY_FIND_RESONANCES_DEFAULTS = "find_resonances/defaults"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
@@ -568,3 +569,62 @@ def set_fit_defaults(params: dict) -> None:
     filtered = {k: bool(v) for k, v in params.items() if k in persist_keys}
     qs = _get_settings()
     qs.setValue(KEY_FIT_DEFAULTS, json.dumps(filtered))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Find Resonances Settings
+# ─────────────────────────────────────────────────────────────────
+
+_FIND_RESONANCES_DEFAULTS = {
+    'expected_resonances':         None,   # None → auto
+    'min_dip_depth_db':            2.0,
+    'min_Q':                       1e4,
+    'max_Q':                       1e7,
+    'min_resonance_separation_hz': 1e4,    # 10 kHz
+    'data_exponent':               2.0,
+}
+
+
+def get_find_resonances_defaults() -> dict:
+    """
+    Get the saved Find Resonances settings panel defaults.
+
+    Returns:
+        dict with keys ``expected_resonances``, ``min_dip_depth_db``,
+        ``min_Q``, ``max_Q``, ``min_resonance_separation_hz``,
+        ``data_exponent``.  Built-in defaults are returned for any key that
+        has not been saved yet.
+    """
+    import json
+    qs = _get_settings()
+    json_str = qs.value(KEY_FIND_RESONANCES_DEFAULTS, "{}")
+    try:
+        saved = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        saved = {}
+    # Merge saved values over built-in defaults so new keys always have a fallback
+    result = dict(_FIND_RESONANCES_DEFAULTS)
+    result.update(saved)
+    return result
+
+
+def set_find_resonances_defaults(params: dict) -> None:
+    """
+    Persist Find Resonances settings panel state across Periscope sessions.
+
+    Args:
+        params: Dict with any subset of the keys in
+                ``_FIND_RESONANCES_DEFAULTS``.
+    """
+    import json
+    persist_keys = {
+        'expected_resonances',
+        'min_dip_depth_db',
+        'min_Q',
+        'max_Q',
+        'min_resonance_separation_hz',
+        'data_exponent',
+    }
+    filtered = {k: v for k, v in params.items() if k in persist_keys}
+    qs = _get_settings()
+    qs.setValue(KEY_FIND_RESONANCES_DEFAULTS, json.dumps(filtered))

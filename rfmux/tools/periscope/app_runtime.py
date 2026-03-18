@@ -1304,6 +1304,9 @@ class PeriscopeRuntime:
                     if num_found > 0:
                         panel.apply_bias_btn.setEnabled(True)
                 panel._redraw_plots()
+                # Enable/check the "Show Bias Info" checkbox if the loaded file
+                # already contains bias results (bias_found=True in res_info_dict).
+                panel._update_bias_info_checkbox_state()
             elif 'results_by_iteration' in load_params:
                 # Old format: convert via migration helper, then feed through update_data
                 iteration_params = load_params.get('results_by_iteration', [])

@@ -118,10 +118,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Module context for DAC scale lookup (can be different from target_module if needed)
         self.active_module_for_dac = self.target_module
 
-        # Center frequency line display
-        self.show_cf_lines_cb = None # Checkbox for toggling CF lines
-        self.cf_lines_mag = {}  # Stores {amplitude: [InfiniteLine_mag]}
-        self.cf_lines_phase = {} # Stores {amplitude: [InfiniteLine_phase]}
+        # "Show Bias Info" checkbox — enabled/checked when bias data is available
+        self.show_bias_info_cb = None  # Checkbox for toggling bias overlays
 
         # Bias frequency overlay lines (shown after Find Bias completes)
         # These are InfiniteLine items added to the combined plots to mark the
@@ -352,11 +350,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.normalize_checkbox.toggled.connect(self._toggle_trace_normalization)
         row2_layout.addWidget(self.normalize_checkbox)
 
-        # Show Center Frequencies Checkbox
-        self.show_cf_lines_cb = QtWidgets.QCheckBox("Show Center Frequencies")
-        self.show_cf_lines_cb.setChecked(False)
-        self.show_cf_lines_cb.toggled.connect(self._toggle_cf_lines_visibility)
-        row2_layout.addWidget(self.show_cf_lines_cb)
+        # Show Bias Info Checkbox — disabled until bias data is available
+        self.show_bias_info_cb = QtWidgets.QCheckBox("Show Bias Info")
+        self.show_bias_info_cb.setChecked(False)
+        self.show_bias_info_cb.setEnabled(False)
+        self.show_bias_info_cb.setToolTip(
+            "Toggle bias overlays: highlighted bias amplitude sweep, bias frequency\n"
+            "vertical lines, and ★/a-value legend details.\n"
+            "Available after Find Bias has been run (or when bias info is loaded from file)."
+        )
+        self.show_bias_info_cb.toggled.connect(self._toggle_bias_info_visibility)
+        row2_layout.addWidget(self.show_bias_info_cb)
 
         self._setup_unit_controls(row2_layout)
         self._setup_zoom_box_control(row2_layout)
@@ -406,7 +410,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Tab 0: Magnitude Sweeps (per-detector grid)
 
         self.mag_sweeps_tab, self.mag_sweeps_grid, self.mag_colorbar = self._create_sweep_tab()
-        self.plot_tabs.addTab(self.mag_sweeps_tab, "Magnitude Sweeps")
+        self.plot_tabs.addTab(self.mag_sweeps_tab, "Mag vs Freq")
         
         # Tab 1: IQ Circles (per-detector grid)
         self.iq_sweeps_tab, self.iq_sweeps_grid, self.iq_colorbar = self._create_sweep_tab()
@@ -414,7 +418,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Tab 2: Combined Plots (original combined view)
         self.combined_tab = self._create_combined_tab()
-        self.plot_tabs.addTab(self.combined_tab, "Combined Plots")
+        self.plot_tabs.addTab(self.combined_tab, "Mag, Phase Overview")
         
         # Tab 3: Histograms (parameter distributions)
         self.histogram_tab = self._create_histogram_tab()
@@ -1122,6 +1126,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             colorbar.hide()
             use_legend = True  # show per-plot legends
         
+        # Pass res_info_dict only when the "Show Bias Info" checkbox is checked;
+        # otherwise pass None so the grid helpers suppress all bias overlays.
+        show_bias_info = (
+            self.show_bias_info_cb is not None and self.show_bias_info_cb.isChecked()
+        )
+
         # Update the grid with widget caching
         update_sweep_grid(
             grid_layout=grid_layout,
@@ -1139,7 +1149,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             widget_cache=widget_cache,
             dac_scale=dac_scale,
             show_legend=use_legend,
-            res_info_dict=self.res_info_dict,
+            res_info_dict=self.res_info_dict if show_bias_info else None,
         )
         
         # Install double-click event filter on grid plot widgets
@@ -1173,14 +1183,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.curves_mag.clear() # Clear stored references to magnitude curves
         self.curves_phase.clear() # Clear stored references to phase curves
 
-        # Remove existing center frequency (CF) lines
-        for amp_val_lines in self.cf_lines_mag.values():
-            for line in amp_val_lines: self.combined_mag_plot.removeItem(line)
-        self.cf_lines_mag.clear()
-        for amp_val_lines in self.cf_lines_phase.values():
-            for line in amp_val_lines: self.combined_phase_plot.removeItem(line)
-        self.cf_lines_phase.clear()
-
         # Remove existing bias frequency overlay lines
         for line in self.bias_freq_lines_mag:
             self.combined_mag_plot.removeItem(line)
@@ -1193,13 +1195,19 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.combined_mag_plot.autoRange(); self.combined_phase_plot.autoRange()
             return
 
+        # Bias overlay visibility is gated on the "Show Bias Info" checkbox.
+        show_bias_info = (
+            self.show_bias_info_cb is not None and self.show_bias_info_cb.isChecked()
+        )
+
         # --- Determine which amplitudes are "chosen" by Find Bias ---
         # An amplitude is "chosen" if at least one detector has bias_found=True
-        # and its bias_amplitude matches.
+        # and its bias_amplitude matches.  Only populated when bias overlays are on.
         chosen_amplitudes: set = set()
-        for info in self.res_info_dict.values():
-            if info.get('bias_found') and info.get('bias_amplitude') is not None:
-                chosen_amplitudes.add(info['bias_amplitude'])
+        if show_bias_info:
+            for info in self.res_info_dict.values():
+                if info.get('bias_found') and info.get('bias_amplitude') is not None:
+                    chosen_amplitudes.add(info['bias_amplitude'])
 
         # Collect unique (amplitude, direction) pairs and amplitude values from entries
         amplitude_values = set()
@@ -1294,9 +1302,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     continue
 
                 # Thicken the line for this detector's chosen bias amplitude
+                # (only when bias overlays are enabled via the checkbox)
                 det_info = self.res_info_dict.get(res_idx, {})
                 is_chosen_for_det = (
-                    det_info.get('bias_found', False)
+                    show_bias_info
+                    and det_info.get('bias_found', False)
                     and det_info.get('bias_amplitude') == amp_val
                 )
                 curve_width = LINE_WIDTH * 2 if is_chosen_for_det else LINE_WIDTH
@@ -1331,20 +1341,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 phase_curve.setData(freqs_hz, phase_deg)
                 if amp_val not in self.curves_phase: self.curves_phase[amp_val] = {}
                 self.curves_phase[amp_val][res_idx] = phase_curve
-
-                # Add center frequency (CF) lines if enabled
-                if self.show_cf_lines_cb and self.show_cf_lines_cb.isChecked():
-                    bias_freq = data.get('bias_frequency', data.get('original_center_frequency'))
-                    if bias_freq is not None:
-                        cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2)
-                        
-                        mag_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
-                        self.combined_mag_plot.addItem(mag_cf_line)
-                        self.cf_lines_mag.setdefault(amp_val, []).append(mag_cf_line)
-
-                        phase_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
-                        self.combined_phase_plot.addItem(phase_cf_line)
-                        self.cf_lines_phase.setdefault(amp_val, []).append(phase_cf_line)
 
                 # --- Bias frequency overlay line (shown when Find Bias has run) ---
                 # One solid vertical line per detector at its refined bias frequency,
@@ -1412,6 +1408,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._generate_histograms()
             self.histograms_generated = True
         
+        # Update the "Show Bias Info" checkbox state in case loaded data already
+        # contains bias results (e.g. a file saved after Find Bias was run).
+        self._update_bias_info_checkbox_state()
+
         # Auto-populate detector digest for the first detector in insertion order.
         # Don't switch focus — user should stay on the current tab (magnitude sweeps)
         if self.results_by_detector:
@@ -1783,99 +1783,46 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             parent_widget.stop_multisweep_task_for_window(self) # type: ignore
         super().closeEvent(event) # Proceed with the standard close event handling
 
-    def _toggle_cf_lines_visibility(self, checked):
-        """
-        Slot for the 'Show Center Frequencies' checkbox.
-        Shows or hides CF lines without a full redraw.
-        Creates lines if they don't exist when showing.
+    def _toggle_bias_info_visibility(self, checked):
+        """Slot for the 'Show Bias Info' checkbox.
+
+        Triggers a full redraw so all tabs pick up the new overlay state.
+        The checkbox controls:
+          - Highlighted (thickened) traces for the chosen bias amplitude
+          - Vertical bias-frequency lines on Combined and grid plots
+          - ★ and nonlinearity-parameter (a) labels in legends
 
         Args:
-            checked (bool): The new state of the checkbox.
+            checked (bool): New checked state of the checkbox.
         """
-        if not self.combined_mag_plot or not self.combined_phase_plot:
-            return # Plots not ready
+        self._redraw_plots()
 
-        if checked:
-            # Show lines. Create them if they don't exist.
-            # Get unique amplitudes from iterations
-            amplitude_values = set()
+    def _update_bias_info_checkbox_state(self):
+        """Enable/disable and auto-check the 'Show Bias Info' checkbox.
 
-            for iter_dict in self.results_by_detector.values():
-                for entry in iter_dict.values():
-                    amp = entry.get('sweep_amplitude')
-                    if amp is not None:
-                        amplitude_values.add(amp)
-            num_amps = len(amplitude_values)
-            
-            if num_amps == 0:
-                return
+        Should be called whenever ``res_info_dict`` may have gained new
+        ``bias_found`` entries (i.e. after Find Bias completes or after
+        loading data that already contains bias results).
 
-            # Use the canonical color mapping function with the full expected
-            # amplitude set so CF-line colours are consistent with the traces.
-            amplitude_to_color = create_amplitude_color_map(
-                amplitude_values, self.dark_mode,
-                reference_amplitudes=self._get_expected_amplitudes()
-            )
-            sorted_amplitudes = sorted(amplitude_values)
-
-
-            for amp_val in sorted_amplitudes:
-                color = amplitude_to_color[amp_val]
-                cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2)
-
-                # Ensure lists for this amplitude exist in cf_lines_mag/phase
-                self.cf_lines_mag.setdefault(amp_val, [])
-                self.cf_lines_phase.setdefault(amp_val, [])
-
-                # Create dictionaries for quick lookup of existing lines by their X-position (CF)
-                # This avoids iterating through the list of lines repeatedly for each CF.
-                existing_mag_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_mag[amp_val]}
-                existing_phase_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_phase[amp_val]}
-
-                for res_idx, iter_dict in self.results_by_detector.items():
-                    # Get detector data for this amplitude (any direction)
-                    data = None
-                    for entry in iter_dict.values():
-                        if entry.get('sweep_amplitude') == amp_val:
-                            data = entry
-                            break
-                    if data is None:
-                        continue
-                    # Get the actual bias frequency for CF line
-                    bias_freq = data.get('bias_frequency', data.get('original_center_frequency'))
-                    if bias_freq is None:
-                        continue
-                        
-                    # Magnitude plot CF line
-                    if bias_freq in existing_mag_lines_for_amp:
-                        existing_mag_lines_for_amp[bias_freq].setVisible(True)
-                    else:
-                        mag_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
-                        self.combined_mag_plot.addItem(mag_cf_line)
-                        self.cf_lines_mag[amp_val].append(mag_cf_line)
-                        # mag_cf_line.setVisible(True) # Already visible by default when added
-
-                    # Phase plot CF line
-                    if bias_freq in existing_phase_lines_for_amp:
-                        existing_phase_lines_for_amp[bias_freq].setVisible(True)
-                    else:
-                        phase_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
-                        self.combined_phase_plot.addItem(phase_cf_line)
-                        self.cf_lines_phase[amp_val].append(phase_cf_line)
-                        # phase_cf_line.setVisible(True) # Already visible by default when added
+        Behaviour:
+          - If at least one detector has ``bias_found=True``:
+              enable the checkbox and check it (so overlays appear immediately).
+          - Otherwise: uncheck and disable the checkbox.
+        """
+        if self.show_bias_info_cb is None:
+            return
+        has_bias = any(
+            info.get('bias_found', False) for info in self.res_info_dict.values()
+        )
+        # Block signals while we update the checkbox state to avoid a spurious
+        # redraw triggered by the programmatic setChecked call.
+        self.show_bias_info_cb.blockSignals(True)
+        self.show_bias_info_cb.setEnabled(has_bias)
+        if has_bias:
+            self.show_bias_info_cb.setChecked(True)
         else:
-            # Hide all existing CF lines
-            for amp_lines_list in self.cf_lines_mag.values():
-                for line in amp_lines_list:
-                    line.setVisible(False)
-            for amp_lines_list in self.cf_lines_phase.values():
-                for line in amp_lines_list:
-                    line.setVisible(False)
-        
-        # Note: No call to self._redraw_plots() here, to preserve zoom.
-        # The _redraw_plots method will still handle full reconstruction of lines
-        # if it's called for other reasons (data update, unit change, etc.),
-        # respecting the checkbox state at that time.
+            self.show_bias_info_cb.setChecked(False)
+        self.show_bias_info_cb.blockSignals(False)
 
 
     def _take_noise_samps(self):
@@ -2656,10 +2603,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Enable Apply Bias only if at least one bias point was found
         self.apply_bias_btn.setEnabled(num_found > 0)
 
-        # Refresh CF lines — they will now render at the refined bias frequencies
-        if self.show_cf_lines_cb and self.show_cf_lines_cb.isChecked():
-            self._toggle_cf_lines_visibility(False)
-            self._toggle_cf_lines_visibility(True)
+        # Enable and auto-check the "Show Bias Info" checkbox so overlays appear
+        # immediately after Find Bias completes.
+        self._update_bias_info_checkbox_state()
 
         # Redraw all active plot tabs so bias overlays (chosen-amplitude highlights,
         # bias-frequency vertical lines, and IQ markers) appear immediately.

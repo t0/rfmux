@@ -906,6 +906,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 if hasattr(window, 'zoom_box_cb'):
                     window.zoom_box_cb.setChecked(enable)
 
+        # Propagate to all open MultisweepPanels.
+        # Setting zoom_box_cb triggers MultisweepPanel._toggle_zoom_box_mode, which
+        # calls the (now fixed) _apply_zoom_box_mode covering all grid tabs as well.
+        for window_id, window_data in self.multisweep_windows.items():
+            window = window_data.get('window')
+            if window and hasattr(window, 'zoom_box_cb'):
+                window.zoom_box_cb.setChecked(enable)
+
     def _show_initialize_crs_dialog(self):
         """
         Display a dialog for initializing the CRS (Control and Readout System) board.

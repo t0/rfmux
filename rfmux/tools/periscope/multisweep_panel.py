@@ -761,11 +761,28 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._apply_zoom_box_mode()
 
     def _apply_zoom_box_mode(self):
-        """Applies the current zoom_box_mode state to both magnitude and phase plot viewboxes."""
+        """Applies the current zoom_box_mode state to all plot viewboxes.
+
+        Covers:
+        - The Combined Plots tab (combined_mag_plot / combined_phase_plot), which use
+          ClickableViewBox and have an ``enableZoomBoxMode`` helper.
+        - All cached grid plot widgets (Magnitude Sweeps, IQ Circles, IQ Derivatives
+          tabs), which use a plain ``pg.ViewBox`` and are updated via ``setMouseMode``
+          directly.
+        """
+        mode = pg.ViewBox.RectMode if self.zoom_box_mode else pg.ViewBox.PanMode
+
+        # Combined Plots tab — ClickableViewBox
         if self.combined_mag_plot and isinstance(self.combined_mag_plot.getViewBox(), ClickableViewBox):
             self.combined_mag_plot.getViewBox().enableZoomBoxMode(self.zoom_box_mode)
         if self.combined_phase_plot and isinstance(self.combined_phase_plot.getViewBox(), ClickableViewBox):
             self.combined_phase_plot.getViewBox().enableZoomBoxMode(self.zoom_box_mode)
+
+        # Grid plot caches (tabs 0, 1, 5) — plain pg.ViewBox
+        for pw in self.mag_sweep_plots_cache + self.iq_sweep_plots_cache + self.derivative_plots_cache:
+            vb = pw.getViewBox()
+            if vb is not None:
+                vb.setMouseMode(mode)
 
     def _setup_progress_bar(self, layout):
         """Set up progress bar in a separate group, similar to NetworkAnalysisWindow."""
@@ -1084,6 +1101,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Must be AFTER update_sweep_grid so newly created widgets are included
         for pw in widget_cache:
             pw.installEventFilter(self)
+
+        # Apply the current zoom box mode to all (potentially new) grid widgets.
+        # update_sweep_grid may have created fresh pg.PlotWidget instances that
+        # default to pyqtgraph's built-in PanMode; we must set them explicitly.
+        mode = pg.ViewBox.RectMode if self.zoom_box_mode else pg.ViewBox.PanMode
+        for pw in widget_cache:
+            vb = pw.getViewBox()
+            if vb is not None:
+                vb.setMouseMode(mode)
     
     def _redraw_combined_plots(self):
         """Redraw the combined magnitude and phase plots (original view)."""
@@ -2759,6 +2785,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # navigates the Detector Digest to that detector.
         for pw in self.derivative_plots_cache:
             pw.installEventFilter(self)
+
+        # Apply the current zoom box mode to all (potentially new) derivative widgets.
+        mode = pg.ViewBox.RectMode if self.zoom_box_mode else pg.ViewBox.PanMode
+        for pw in self.derivative_plots_cache:
+            vb = pw.getViewBox()
+            if vb is not None:
+                vb.setMouseMode(mode)
 
     # ── Fit Settings ─────────────────────────────────────────────────────────
 

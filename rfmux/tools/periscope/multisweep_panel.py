@@ -160,7 +160,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Tab 6 display controls (initialized in _setup_plot_area)
         self._fit_display_mode_rb_index = None
         self._fit_display_mode_rb_bias = None
-        self._fit_display_index_spin = None
+        self._fit_display_index_combo = None
         self._fit_show_skewed_cb = None
         self._fit_show_nonlinear_cb = None
 
@@ -640,16 +640,19 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._fit_display_mode_rb_index = QtWidgets.QRadioButton("Index:")
         self._fit_display_mode_rb_index.setChecked(True)
         self._fit_display_mode_rb_index.setToolTip(
-            "Show the amplitude at position N (0 = lowest)."
+            "Show the amplitude at sorted position N (0 = lowest)."
         )
         controls_layout.addWidget(self._fit_display_mode_rb_index)
 
-        self._fit_display_index_spin = QtWidgets.QSpinBox()
-        self._fit_display_index_spin.setRange(0, 99)
-        self._fit_display_index_spin.setValue(0)
-        self._fit_display_index_spin.setSuffix("  (0=lowest)")
-        self._fit_display_index_spin.setMaximumWidth(130)
-        controls_layout.addWidget(self._fit_display_index_spin)
+        self._fit_display_index_combo = QtWidgets.QComboBox()
+        self._fit_display_index_combo.setMinimumWidth(60)
+        self._fit_display_index_combo.setToolTip(
+            "Select an amplitude index (0 = lowest).\n"
+            "Only indices that have fit data are shown."
+        )
+        self._fit_display_index_combo.addItem("—")  # placeholder until data arrives
+        self._fit_display_index_combo.setEnabled(True)
+        controls_layout.addWidget(self._fit_display_index_combo)
 
         self._fit_display_mode_rb_bias = QtWidgets.QRadioButton("Bias amplitude")
         self._fit_display_mode_rb_bias.setToolTip(
@@ -681,7 +684,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # ── Connect controls → redraw ──────────────────────────────────────────
         self._fit_display_mode_rb_index.toggled.connect(self._on_fit_results_controls_changed)
         self._fit_display_mode_rb_bias.toggled.connect(self._on_fit_results_controls_changed)
-        self._fit_display_index_spin.valueChanged.connect(self._on_fit_results_controls_changed)
+        self._fit_display_index_combo.currentIndexChanged.connect(self._on_fit_results_controls_changed)
         self._fit_show_skewed_cb.toggled.connect(self._on_fit_results_controls_changed)
         self._fit_show_nonlinear_cb.toggled.connect(self._on_fit_results_controls_changed)
 
@@ -790,6 +793,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.batch_size_spin.setVisible(is_sweep_tab)
         self.batch_update_btn.setVisible(is_sweep_tab)
         
+        # When switching to the Fit Results tab, refresh the amplitude index dropdown
+        # so it reflects whatever fit data is currently present.
+        if index == 6 and self.results_by_detector:
+            self._populate_fit_amplitude_combo()
+
         # Redraw the active tab's plots if we have data
         if self.results_by_detector:
             self._redraw_plots()
@@ -2916,6 +2924,61 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     # ── Fit Results tab (Tab 6) ───────────────────────────────────────────────
 
+    def _populate_fit_amplitude_combo(self):
+        """Populate the amplitude index dropdown in the Fit Results tab.
+
+        Scans ``results_by_detector`` to find which sorted amplitude positions
+        (0-based) have at least one successful fit (skewed or nonlinear) across
+        any detector.  Those positions become the combo items (displayed as
+        plain integers: ``"0"``, ``"1"``, etc.).
+
+        The current selection is preserved when possible; if the previously
+        selected index no longer exists in the new set, the first available
+        index is selected.  Signals are blocked during the rebuild to avoid
+        spurious redraws.
+        """
+        if self._fit_display_index_combo is None:
+            return
+        if not self.results_by_detector:
+            return
+
+        # Collect valid positions: for each detector sort its iterations by
+        # sweep_amplitude and record the 0-based positions that have a fit.
+        valid_indices: set = set()
+        for iter_dict in self.results_by_detector.values():
+            sorted_items = sorted(
+                iter_dict.items(),
+                key=lambda kv: kv[1].get('sweep_amplitude', 0.0),
+            )
+            for pos, (_iter_idx, entry) in enumerate(sorted_items):
+                if entry.get('skewed_fit_success') or entry.get('nonlinear_fit_success'):
+                    valid_indices.add(pos)
+
+        if not valid_indices:
+            # No fit data yet — nothing to show
+            return
+
+        sorted_valid = sorted(valid_indices)
+
+        # Block signals while rebuilding so we don't trigger redundant redraws
+        self._fit_display_index_combo.blockSignals(True)
+        prev_data = self._fit_display_index_combo.currentData()
+
+        self._fit_display_index_combo.clear()
+        for idx in sorted_valid:
+            self._fit_display_index_combo.addItem(str(idx), userData=idx)
+
+        # Restore previous selection if it still exists; otherwise select first
+        restore_row = 0
+        if prev_data is not None:
+            for row in range(self._fit_display_index_combo.count()):
+                if self._fit_display_index_combo.itemData(row) == prev_data:
+                    restore_row = row
+                    break
+        self._fit_display_index_combo.setCurrentIndex(restore_row)
+
+        self._fit_display_index_combo.blockSignals(False)
+
     def _on_fit_results_controls_changed(self):
         """Slot for any Tab-6 display control changing — triggers a redraw."""
         if self.plot_tabs.currentIndex() == 6:
@@ -2939,7 +3002,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         display_mode = (
             'bias' if self._fit_display_mode_rb_bias.isChecked() else 'index'
         )
-        display_amp_index = self._fit_display_index_spin.value()
+        # Read amplitude index from the combo (item data stores the actual 0-based index)
+        combo_data = self._fit_display_index_combo.currentData()
+        display_amp_index = combo_data if combo_data is not None else 0
         show_skewed    = self._fit_show_skewed_cb.isChecked()
         show_nonlinear = self._fit_show_nonlinear_cb.isChecked()
         dac_scale = self.dac_scales.get(self.active_module_for_dac)
@@ -3003,6 +3068,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         if hasattr(self, 'plot_tabs') and self.plot_tabs is not None:
             self.plot_tabs.setTabVisible(6, show)
+            if show:
+                # Populate the amplitude index dropdown now that fit data is available
+                self._populate_fit_amplitude_combo()
             if show and self.plot_tabs.currentIndex() == 6:
                 self._redraw_fit_results_grid()
 

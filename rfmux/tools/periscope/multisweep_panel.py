@@ -952,6 +952,43 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Note: We now update the status in handle_starting_iteration() instead of here
 
+    def _get_expected_amplitudes(self) -> set:
+        """Return the full set of amplitude values expected for this sweep.
+
+        Flattens every per-section amplitude array from ``initial_params`` so
+        that the colour map and colourbar threshold are computed against the
+        complete global range — from the smallest probe amplitude used on any
+        section to the largest — right from the very first iteration.
+
+        Falls back to the flat ``amps`` list for sweeps that use a common
+        amplitude across all sections, and absorbs any already-observed values
+        for robustness (e.g. panels loaded from file where ``initial_params``
+        may not contain the original ``amp_arrays``).
+        """
+        expected: set = set()
+
+        # Flatten all values from all per-section amplitude arrays.
+        # amp_arrays[i] is the full sequence of amplitudes swept for section i.
+        for arr in self.initial_params.get('amp_arrays', []):
+            try:
+                expected.update(arr)
+            except TypeError:
+                pass  # guard against non-iterable entries
+
+        # Flat-list fallback (used when all sections share the same amplitude schedule)
+        if not expected:
+            expected.update(self.initial_params.get('amps', []))
+
+        # Also absorb any already-observed amplitudes so loaded/re-run panels
+        # always produce a correct reference set even when initial_params is stale.
+        for iter_dict in self.results_by_detector.values():
+            for entry in iter_dict.values():
+                amp = entry.get('sweep_amplitude')
+                if amp is not None:
+                    expected.add(amp)
+
+        return expected
+
     def _redraw_plots(self):
         """
         Redraws plots based on the currently active tab.
@@ -1037,9 +1074,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             for (amp_val, _direction) in det_data.keys():
                 all_amps.add(amp_val)
         
-        # Create amplitude color mapping (matches combined plot colors)
-        amplitude_to_color = create_amplitude_color_map(all_amps, self.dark_mode)
-        
+        # Build the full expected amplitude set (known from initial_params) so that
+        # the colour map and colourbar threshold are stable across all iterations.
+        expected_amps = self._get_expected_amplitudes()
+
+        # Create amplitude color mapping — pass expected_amps as the reference so
+        # colour positions are assigned based on the total sweep, not just what has
+        # arrived so far.
+        amplitude_to_color = create_amplitude_color_map(
+            all_amps, self.dark_mode, reference_amplitudes=expected_amps
+        )
 
         # Get DAC scale for label formatting
         dac_scale = self.dac_scales.get(self.active_module_for_dac)
@@ -1060,14 +1104,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         all_sweep_keys = set()
         for det_data in detector_data.values():
             all_sweep_keys.update(det_data.keys())
-        num_sweeps = len(all_sweep_keys)
         has_downward = any(d == 'downward' for _, d in all_sweep_keys)
         
-        # Show colorbar when the inferno colormap is active (num_amps > threshold),
-        # otherwise use per-plot legends with TABLEAU10 colors.
-        num_amps = len(all_amps)
-        if num_amps > AMPLITUDE_COLORMAP_THRESHOLD:
-            sorted_amps = sorted(all_amps)
+        # Use total expected amplitude count for the threshold so that the
+        # legend-vs-colourbar decision is made once up-front and doesn't flip
+        # mid-sweep as more iterations arrive.
+        num_amps_expected = len(expected_amps)
+        if num_amps_expected > AMPLITUDE_COLORMAP_THRESHOLD:
+            # Colourbar range is based on the expected global min/max.
+            sorted_amps = sorted(expected_amps)
             colorbar.update_range(sorted_amps[0], sorted_amps[-1],
                                   dac_scale, self.unit_mode,
                                   self.dark_mode, has_downward)
@@ -1168,17 +1213,26 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     amp_dir_pairs.add((amp, direction))
         num_amps = len(amplitude_values)
             
+        # Build the full expected amplitude set so colour positions and the
+        # colourbar threshold are stable from the very first iteration.
+        expected_amps = self._get_expected_amplitudes()
+
         # Create a mapping for unique amplitude values to colors
-        sorted_amplitudes = sorted(amplitude_values)
-        amplitude_to_color = create_amplitude_color_map(amplitude_values, self.dark_mode)
-        
-        # Colorbar vs legend: show colorbar only when inferno colormap is active
+        amplitude_to_color = create_amplitude_color_map(
+            amplitude_values, self.dark_mode, reference_amplitudes=expected_amps
+        )
+
+        # Colorbar vs legend: base the decision on the total expected count so
+        # the display mode doesn't flip mid-sweep as iterations arrive.
         has_downward = any(d == 'downward' for _, d in amp_dir_pairs)
         dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
-        
-        if num_amps > AMPLITUDE_COLORMAP_THRESHOLD:
+        num_amps_expected = len(expected_amps)
+
+        if num_amps_expected > AMPLITUDE_COLORMAP_THRESHOLD:
+            # Colourbar range spans the expected global min/max.
+            sorted_expected = sorted(expected_amps)
             self.combined_colorbar.update_range(
-                sorted_amplitudes[0], sorted_amplitudes[-1],
+                sorted_expected[0], sorted_expected[-1],
                 dac_scale_for_module, self.unit_mode,
                 self.dark_mode, has_downward)
             self.combined_colorbar.show()
@@ -1756,8 +1810,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             if num_amps == 0:
                 return
 
-            # Use the canonical color mapping function
-            amplitude_to_color = create_amplitude_color_map(amplitude_values, self.dark_mode)
+            # Use the canonical color mapping function with the full expected
+            # amplitude set so CF-line colours are consistent with the traces.
+            amplitude_to_color = create_amplitude_color_map(
+                amplitude_values, self.dark_mode,
+                reference_amplitudes=self._get_expected_amplitudes()
+            )
             sorted_amplitudes = sorted(amplitude_values)
 
 

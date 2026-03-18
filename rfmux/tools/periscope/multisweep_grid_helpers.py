@@ -277,15 +277,18 @@ def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
         is_chosen = (bias_amplitude is not None) and (amp_val == bias_amplitude)
         curve_width = LINE_WIDTH * 2 if is_chosen else LINE_WIDTH
 
-        # Color from amplitude, line style from direction
-        if single_sweep:
-            pen = pg.mkPen(color=pen_color, width=curve_width)
-        else:
-            color = amplitude_to_color.get(amp_val, pen_color)
+        # Color from amplitude_to_color when an entry exists (even when only one
+        # sweep has arrived so far), falling back to pen_color only when the
+        # amplitude truly has no colour mapping.
+        if amp_val in amplitude_to_color:
+            color = amplitude_to_color[amp_val]
             line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
             pen = pg.mkPen(color=color, width=curve_width, style=line_style)
             if is_chosen:
                 chosen_color_for_vline = color
+        else:
+            # Genuine fallback: amplitude not in the colour map at all
+            pen = pg.mkPen(color=pen_color, width=curve_width)
 
         freqs_rel_khz = 1e-3 * (freqs - np.mean(freqs))
 
@@ -416,14 +419,18 @@ def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
         is_chosen = (bias_amplitude is not None) and (amp_val == bias_amplitude)
         curve_width = LINE_WIDTH * 2 if is_chosen else LINE_WIDTH
 
-        if single_sweep:
-            pen = pg.mkPen(color=pen_color, width=curve_width)
-        else:
-            color = amplitude_to_color.get(amp_val, pen_color)
+        # Color from amplitude_to_color when an entry exists (even when only one
+        # sweep has arrived so far), falling back to pen_color only when the
+        # amplitude truly has no colour mapping.
+        if amp_val in amplitude_to_color:
+            color = amplitude_to_color[amp_val]
             line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
             pen = pg.mkPen(color=color, width=curve_width, style=line_style)
             if is_chosen:
                 chosen_color_for_marker = color
+        else:
+            # Genuine fallback: amplitude not in the colour map at all
+            pen = pg.mkPen(color=pen_color, width=curve_width)
 
         # Append ★ and nonlinearity parameter 'a' to the legend name for the chosen amplitude.
         # In colorbar mode (sweep_labels is None), use the pre-computed chosen_a_label for the
@@ -774,29 +781,54 @@ plot_detector_magnitude = _plot_detector_magnitude
 plot_detector_iq = _plot_detector_iq
 
 
-def create_amplitude_color_map(amplitude_values, dark_mode):
+def create_amplitude_color_map(amplitude_values, dark_mode, reference_amplitudes=None):
     """
     Create a color mapping for amplitude values.
 
     Uses TABLEAU10_COLORS for few amplitudes, colormap for many.
 
     Args:
-        amplitude_values: Iterable of amplitude values
-        dark_mode: Boolean for theme
+        amplitude_values: Iterable of amplitude values to assign colors to (the
+            amplitudes that have actually been collected so far).
+        dark_mode: Boolean for theme.
+        reference_amplitudes: Optional iterable of *all* amplitude values that
+            will ever be used in this sweep (across all sections and iterations).
+            When provided, the threshold check and colour-position normalisation
+            are based on this full reference set rather than the currently
+            observed values.  This ensures that colours remain stable throughout
+            a live measurement: the first iteration uses the same colour it will
+            have when all iterations are complete, the legend-vs-colorbar
+            decision is made once up-front, and the inferno scale extremes
+            always correspond to the global min/max amplitude over the whole
+            array.  Amplitudes present in *reference_amplitudes* but not yet in
+            *amplitude_values* are simply skipped (no entry is added to the
+            returned dict for them).
 
     Returns:
-        Dict mapping amplitude values to colors
+        Dict mapping amplitude values (from *amplitude_values*) to colors.
     """
-    sorted_amplitudes = sorted(set(amplitude_values))
-    num_amps = len(sorted_amplitudes)
+    # Determine the reference sorted list: use the full expected set when
+    # provided, otherwise fall back to what has been observed so far.
+    if reference_amplitudes is not None:
+        ref_sorted = sorted(set(reference_amplitudes))
+    else:
+        ref_sorted = sorted(set(amplitude_values))
+
+    num_amps = len(ref_sorted)
     if num_amps == 0:
         return {}
 
+    observed = set(amplitude_values)
     amplitude_to_color = {}
     cmap_name = COLORMAP_CHOICES.get("AMPLITUDE_SWEEP", "inferno")
     use_cmap = pg.colormap.get(cmap_name) if cmap_name else None
 
-    for amp_idx, amp_val in enumerate(sorted_amplitudes):
+    for amp_idx, amp_val in enumerate(ref_sorted):
+        # Skip amplitudes that haven't arrived yet — but keep amp_idx stable
+        # so that colours for later amplitudes don't shift as data arrives.
+        if amp_val not in observed:
+            continue
+
         if num_amps <= AMPLITUDE_COLORMAP_THRESHOLD:
             color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
         else:

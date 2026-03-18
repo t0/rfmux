@@ -1077,6 +1077,7 @@ class RunFitsTask(QtCore.QThread):
         results_by_detector: dict,
         fit_settings: Optional[Dict[str, Any]],
         signals: "RunFitsSignals",
+        res_info_dict: Optional[Dict[str, Any]] = None,
     ):
         """
         Parameters
@@ -1088,15 +1089,21 @@ class RunFitsTask(QtCore.QThread):
             so the panel's dict is only updated on success.
         fit_settings :
             Dict from ``FitSettingsPanel.get_settings()``:
-            ``{'apply_skewed_fit': bool, 'apply_nonlinear_fit': bool}``.
+            ``{'apply_skewed_fit': bool, 'apply_nonlinear_fit': bool,
+               'fit_run_amplitude_mode': str, 'fit_run_amplitude_index': int}``.
         signals :
             ``RunFitsSignals`` instance.
+        res_info_dict :
+            Optional resonator registry ``{code: {bias_amplitude, ...}}``.
+            Required when ``fit_run_amplitude_mode == 'bias'`` so the task
+            can look up each resonator's chosen bias amplitude.
         """
         super().__init__()
         self.module = module
         import copy
         self.results_by_detector = copy.deepcopy(results_by_detector)
         self.fit_settings = fit_settings or {}
+        self.res_info_dict = res_info_dict  # may be None
         self.signals = signals
         self._running = True
         self._max_workers = max(1, min(4, (os.cpu_count() or 1) - 1))
@@ -1120,12 +1127,56 @@ class RunFitsTask(QtCore.QThread):
             return
 
         try:
-            # ── Step 1: group entries by iteration index ──────────────────────
-            # per_iteration: {iter_idx: {code: data_dict}}
+            # ── Step 1: determine which (code, iter_idx) pairs to fit ─────────
+            #
+            # mode = 'all'   → fit every iteration for every resonator
+            # mode = 'index' → for each resonator, fit only the iteration whose
+            #                   sweep_amplitude is at sorted position N
+            # mode = 'bias'  → for each resonator, fit only the iteration whose
+            #                   sweep_amplitude matches res_info_dict[code]['bias_amplitude']
+            #
+            # The deep copy taken in __init__ already carries existing fit data for
+            # ALL iterations, so non-fitted iterations keep whatever fit results
+            # they had before — no data is lost.
+
+            mode = self.fit_settings.get('fit_run_amplitude_mode', 'all')
+            amp_idx = int(self.fit_settings.get('fit_run_amplitude_index', 0))
+
+            # per_iteration: {iter_idx: {code: data_dict}} — only filtered pairs
             per_iteration: dict = {}
-            for code, iter_dict in self.results_by_detector.items():
-                for iter_idx, entry in iter_dict.items():
-                    per_iteration.setdefault(iter_idx, {})[code] = entry
+
+            if mode == 'index':
+                for code, iter_dict in self.results_by_detector.items():
+                    if not iter_dict:
+                        continue
+                    # Sort iter_dict items by sweep_amplitude (ascending)
+                    sorted_items = sorted(
+                        iter_dict.items(),
+                        key=lambda kv: kv[1].get('sweep_amplitude', 0.0),
+                    )
+                    # Clamp requested index to the available range
+                    target_pos = min(amp_idx, len(sorted_items) - 1)
+                    target_iter_idx, target_entry = sorted_items[target_pos]
+                    per_iteration.setdefault(target_iter_idx, {})[code] = target_entry
+
+            elif mode == 'bias':
+                for code, iter_dict in self.results_by_detector.items():
+                    if not iter_dict:
+                        continue
+                    # Skip if res_info_dict is unavailable or missing bias_amplitude
+                    bias_amp = (self.res_info_dict or {}).get(code, {}).get('bias_amplitude')
+                    if bias_amp is None:
+                        continue
+                    # Find the iter_idx whose sweep_amplitude matches bias_amplitude
+                    for iter_idx, entry in iter_dict.items():
+                        if entry.get('sweep_amplitude') == bias_amp:
+                            per_iteration.setdefault(iter_idx, {})[code] = entry
+                            break
+
+            else:  # 'all' (default)
+                for code, iter_dict in self.results_by_detector.items():
+                    for iter_idx, entry in iter_dict.items():
+                        per_iteration.setdefault(iter_idx, {})[code] = entry
 
             if not per_iteration:
                 self.signals.error.emit("No sweep data found in results_by_detector.")

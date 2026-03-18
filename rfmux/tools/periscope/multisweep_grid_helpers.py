@@ -774,6 +774,390 @@ def _plot_detector_derivatives(plot_item, bias_finding, pen_color):
 
 
 # ---------------------------------------------------------------------------
+# Fit Results grid (Tab 6 — overlays fitted model curves on measured data)
+# ---------------------------------------------------------------------------
+
+def update_fit_results_grid(
+    grid_layout,
+    data_by_detector,
+    res_info_dict,
+    display_mode,
+    display_amplitude_index,
+    show_skewed,
+    show_nonlinear,
+    current_batch,
+    batch_size,
+    dark_mode,
+    unit_mode='dbm',
+    normalize=True,
+    prev_btn=None,
+    next_btn=None,
+    batch_label=None,
+    widget_cache=None,
+    dac_scale=None,
+):
+    """
+    Update a grid layout with per-detector fit-result plots.
+
+    Each subplot shows the measured sweep magnitude (normalised) for the
+    selected amplitude, with the skewed Lorentzian and/or nonlinear IQ
+    fitted model overlaid as separate coloured curves.
+
+    Parameters
+    ----------
+    grid_layout : QGridLayout
+        Layout to populate.
+    data_by_detector : dict
+        ``MultisweepPanel.results_by_detector`` —
+        ``{code: {iter_idx: entry}}``.
+    res_info_dict : dict or None
+        Resonator registry ``{code: {bias_amplitude, ...}}``.  Required
+        when *display_mode* is ``'bias'``.
+    display_mode : str
+        ``'index'`` — pick the iteration at sorted amplitude position N;
+        ``'bias'``  — pick the iteration whose amplitude matches each
+                      resonator's ``bias_amplitude``.
+    display_amplitude_index : int
+        0-based index used when *display_mode* is ``'index'``.
+    show_skewed : bool
+        Draw the skewed Lorentzian model overlay.
+    show_nonlinear : bool
+        Draw the nonlinear IQ model overlay.
+    current_batch, batch_size : int
+        Batch navigation.
+    dark_mode : bool
+        Theme flag.
+    unit_mode : str
+        Not used for rendering (Fit Results always shows normalised
+        magnitude), kept for API consistency.
+    normalize : bool
+        Not used directly (Fit Results always normalises), kept for API
+        consistency.
+    prev_btn, next_btn : QPushButton or None
+        Batch navigation buttons.
+    batch_label : QLabel or None
+        ``"N of M"`` label.
+    widget_cache : list or None
+        Reusable ``pg.PlotWidget`` instances.
+    dac_scale : float or None
+        DAC full-scale in dBm (for subplot title amplitude labels).
+    """
+    if not data_by_detector:
+        return
+
+    # Remove all items from the grid without destroying widgets
+    while grid_layout.count():
+        grid_layout.takeAt(0)
+
+    detector_ids = sorted(data_by_detector.keys())
+
+    start_idx = current_batch * batch_size
+    end_idx = min(start_idx + batch_size, len(detector_ids))
+    batch_detectors = detector_ids[start_idx:end_idx]
+
+    if not batch_detectors:
+        return
+
+    num_plots = len(batch_detectors)
+    ncols = max(1, int(np.ceil(np.sqrt(num_plots))))
+    nrows = int(np.ceil(num_plots / ncols))
+
+    bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
+
+    # Reset stale stretch factors
+    for r in range(grid_layout.rowCount()):
+        grid_layout.setRowStretch(r, 0)
+    for c in range(grid_layout.columnCount()):
+        grid_layout.setColumnStretch(c, 0)
+    for r in range(nrows):
+        grid_layout.setRowStretch(r, 1)
+    for c in range(ncols):
+        grid_layout.setColumnStretch(c, 1)
+
+    if widget_cache is None:
+        widget_cache = []
+
+    while len(widget_cache) < num_plots:
+        pw = pg.PlotWidget()
+        pw.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        widget_cache.append(pw)
+
+    for widget in widget_cache:
+        widget.hide()
+
+    for idx, detector_id in enumerate(batch_detectors):
+        row = idx // ncols
+        col = idx % ncols
+
+        plot_widget = widget_cache[idx]
+        plot_widget.setBackground(bg_color)
+        plot_item = plot_widget.getPlotItem()
+
+        if plot_item:
+            plot_item.clear()
+            if hasattr(plot_item, 'legend') and plot_item.legend:
+                plot_item.legend.scene().removeItem(plot_item.legend)
+                plot_item.legend = None
+
+            iter_dict = data_by_detector.get(detector_id, {})
+
+            # ── Amplitude selection ───────────────────────────────────────────
+            entry = None
+            selected_amp = None
+
+            if display_mode == 'bias':
+                bias_amp = (res_info_dict or {}).get(detector_id, {}).get('bias_amplitude')
+                if bias_amp is not None:
+                    for it_entry in iter_dict.values():
+                        if it_entry.get('sweep_amplitude') == bias_amp:
+                            entry = it_entry
+                            selected_amp = bias_amp
+                            break
+            else:  # 'index'
+                if iter_dict:
+                    sorted_items = sorted(
+                        iter_dict.items(),
+                        key=lambda kv: kv[1].get('sweep_amplitude', 0.0),
+                    )
+                    target_pos = min(display_amplitude_index, len(sorted_items) - 1)
+                    _iter_idx, entry = sorted_items[target_pos]
+                    selected_amp = entry.get('sweep_amplitude')
+
+            # ── Title ─────────────────────────────────────────────────────────
+            center_freq_hz = None
+            if entry is not None:
+                center_freq_hz = (
+                    entry.get('original_center_frequency')
+                    or entry.get('sweep_center_frequency')
+                )
+            elif iter_dict:
+                first_entry = next(iter(iter_dict.values()))
+                center_freq_hz = (
+                    first_entry.get('original_center_frequency')
+                    or first_entry.get('sweep_center_frequency')
+                )
+
+            amp_str = (
+                UnitConverter.format_probe_label(selected_amp, unit_mode, dac_scale)
+                if selected_amp is not None else "?"
+            )
+            if center_freq_hz is not None:
+                title = (
+                    f"{detector_id}  "
+                    f"(<i>f</i><sub>central</sub> = {center_freq_hz / 1e6:.3f} MHz, "
+                    f"amp = {amp_str})"
+                )
+            else:
+                title = f"Detector {detector_id}  (amp = {amp_str})"
+            plot_item.setTitle(title, color=pen_color)
+
+            for axis_name in ("left", "bottom", "right", "top"):
+                ax = plot_item.getAxis(axis_name)
+                if ax:
+                    ax.setPen(pen_color)
+                    ax.setTextPen(pen_color)
+
+            if entry is None:
+                # No data available for the requested amplitude
+                _add_centred_text(plot_item, "No data for amplitude", color='#FFA500')
+            else:
+                _plot_fit_result(
+                    plot_item, entry,
+                    show_skewed=show_skewed,
+                    show_nonlinear=show_nonlinear,
+                    pen_color=pen_color,
+                    dark_mode=dark_mode,
+                )
+
+            plot_item.setLabel('bottom', '<i>f</i> − <i>f</i><sub>central</sub> [kHz]')
+            plot_item.setLabel('left', '|S₂₁| (normalised)')
+            plot_item.showGrid(x=True, y=True, alpha=0.3)
+
+        plot_widget._detector_id = detector_id
+        grid_layout.addWidget(plot_widget, row, col)
+        plot_widget.show()
+
+    total_batches = max(1, (len(detector_ids) + batch_size - 1) // batch_size)
+    if prev_btn:
+        prev_btn.setEnabled(current_batch > 0)
+    if next_btn:
+        next_btn.setEnabled(current_batch < total_batches - 1)
+    if batch_label:
+        batch_label.setText(f"{current_batch + 1} of {total_batches}")
+
+
+def _add_centred_text(plot_item, message, color='#FFA500'):
+    """Add a centred amber text annotation to a plot (used for empty-state messages)."""
+    text = pg.TextItem(message, color=color, anchor=(0.5, 0.5))
+    plot_item.addItem(text)
+    text.setPos(0, 0.5)
+
+
+def _plot_fit_result(plot_item, entry, show_skewed, show_nonlinear, pen_color, dark_mode):
+    """
+    Plot measured sweep data + fitted model overlays for a single detector entry.
+
+    All curves are shown on a normalised magnitude scale with a kHz-offset
+    x-axis centred on the sweep's mean frequency.
+
+    Curves
+    ------
+    * **Measured** (grey/white): ``|iq_counts| / |iq_counts[-1]|``
+    * **Skewed fit** (red, optional): ``entry['skewed_model_mag']`` —
+      already normalised by the skewed fitter (A ≈ 1).
+      A dashed ``InfiniteLine`` marks ``fit_params['fr']``.
+    * **Nonlinear fit** (green, optional):
+      ``|nonlinear_model_iq| / mean(|nonlinear_model_iq[[0, -1]]|)``
+      A dashed ``InfiniteLine`` marks ``nonlinear_fit_params['fr']``.
+    * **Q-value text** (top-left): Qr, Qi, Qc from whichever fits succeeded.
+    * **"No fit data" text** (amber, centred): shown when neither fit
+      succeeded for this entry.
+
+    Parameters
+    ----------
+    plot_item : pg.PlotItem
+    entry : dict
+        One iteration entry from ``results_by_detector[code][iter_idx]``.
+    show_skewed, show_nonlinear : bool
+    pen_color : str or tuple
+        Fallback axis/text colour.
+    dark_mode : bool
+    """
+    freqs = entry.get('frequencies')
+    iq = entry.get('iq_counts')
+
+    if freqs is None or iq is None or len(freqs) == 0 or len(iq) == 0:
+        _add_centred_text(plot_item, "No sweep data", color='#FFA500')
+        return
+
+    freqs = np.asarray(freqs)
+    iq = np.asarray(iq)
+
+    # kHz offset from the sweep mean frequency
+    freq_ref = float(np.mean(freqs))
+    freqs_khz = 1e-3 * (freqs - freq_ref)
+
+    # ── Measured magnitude (normalised to last point ≈ off-resonance) ────────
+    mag_raw = np.abs(iq)
+    norm_ref = float(np.abs(iq[-1])) if len(iq) > 0 else 1.0
+    if norm_ref == 0.0:
+        norm_ref = 1.0
+    mag_norm = mag_raw / norm_ref
+
+    meas_color = (180, 180, 180) if dark_mode else (100, 100, 100)  # grey
+    plot_item.plot(
+        freqs_khz, mag_norm,
+        pen=pg.mkPen(meas_color, width=LINE_WIDTH),
+        name='Measured',
+    )
+
+    skewed_ok = entry.get('skewed_fit_success', False)
+    nonlinear_ok = entry.get('nonlinear_fit_success', False)
+    q_lines = []   # collect Q-value annotation lines
+
+    # ── Skewed Lorentzian overlay ─────────────────────────────────────────────
+    if show_skewed and skewed_ok:
+        skewed_mag = entry.get('skewed_model_mag')
+        fit_p = entry.get('fit_params') or {}
+        fr_skew = fit_p.get('fr')
+
+        if skewed_mag is not None and fr_skew is not None:
+            plot_item.plot(
+                freqs_khz, np.asarray(skewed_mag),
+                pen=pg.mkPen('r', width=LINE_WIDTH),
+                name='Skewed fit',
+            )
+            fr_offset_khz = 1e-3 * (float(fr_skew) - freq_ref)
+            plot_item.addItem(pg.InfiniteLine(
+                pos=fr_offset_khz, angle=90,
+                pen=pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine, width=1),
+                movable=False,
+                label='fr (skew)',
+                labelOpts={'color': 'r', 'position': 0.85},
+            ))
+
+            # Build Q-value annotation line
+            qr = fit_p.get('Qr')
+            qi = fit_p.get('Qi')
+            qc = fit_p.get('Qc')
+            parts = []
+            if qr is not None:
+                parts.append(f"Qr={qr:.0f}")
+            if qi is not None:
+                parts.append(f"Qi={qi:.0f}")
+            if qc is not None:
+                parts.append(f"Qc={qc:.0f}")
+            if parts:
+                q_lines.append("Skewed: " + "  ".join(parts))
+
+    # ── Nonlinear IQ overlay ──────────────────────────────────────────────────
+    if show_nonlinear and nonlinear_ok:
+        nl_iq = entry.get('nonlinear_model_iq')
+        nl_p = entry.get('nonlinear_fit_params') or {}
+        fr_nl = nl_p.get('fr')
+
+        if nl_iq is not None and fr_nl is not None:
+            nl_iq = np.asarray(nl_iq)
+            nl_mag = np.abs(nl_iq)
+            # Normalise to off-resonance average (first + last point)
+            off_res_avg = float(np.mean(np.abs(nl_iq[[0, -1]])))
+            if off_res_avg == 0.0:
+                off_res_avg = 1.0
+            nl_mag_norm = nl_mag / off_res_avg
+
+            plot_item.plot(
+                freqs_khz, nl_mag_norm,
+                pen=pg.mkPen('g', width=LINE_WIDTH),
+                name='Nonlinear fit',
+            )
+            fr_nl_offset_khz = 1e-3 * (float(fr_nl) - freq_ref)
+            plot_item.addItem(pg.InfiniteLine(
+                pos=fr_nl_offset_khz, angle=90,
+                pen=pg.mkPen('g', style=QtCore.Qt.PenStyle.DashLine, width=1),
+                movable=False,
+                label='fr (nl)',
+                labelOpts={'color': 'g', 'position': 0.78},
+            ))
+
+            # Build Q-value annotation line
+            qr = nl_p.get('Qr')
+            qi = nl_p.get('Qi')
+            qc = nl_p.get('Qc')
+            a_val = nl_p.get('a')
+            parts = []
+            if qr is not None:
+                parts.append(f"Qr={qr:.0f}")
+            if qi is not None:
+                parts.append(f"Qi={qi:.0f}")
+            if qc is not None:
+                parts.append(f"Qc={qc:.0f}")
+            if a_val is not None:
+                parts.append(f"a={a_val:.3f}")
+            if parts:
+                q_lines.append("NL: " + "  ".join(parts))
+
+    # ── Q-value text annotation (top-left) ────────────────────────────────────
+    if q_lines:
+        q_text = "\n".join(q_lines)
+        text_color = '#CCCCCC' if dark_mode else '#222222'
+        q_item = pg.TextItem(q_text, color=text_color, anchor=(0.0, 1.0))
+        plot_item.addItem(q_item)
+        # Position at left edge, top of the data range — use a ViewBox callback
+        # so we don't need to know the axis limits in advance.
+        view_range = plot_item.viewRange()
+        x_left = view_range[0][0]
+        y_top = view_range[1][1]
+        q_item.setPos(x_left, y_top)
+
+    # ── "No fit data" message (shown when both fits are unavailable) ──────────
+    if (show_skewed or show_nonlinear) and not skewed_ok and not nonlinear_ok:
+        _add_centred_text(plot_item, "No fit data", color='#FFA500')
+
+
+# ---------------------------------------------------------------------------
 # Public helpers (kept for backward compatibility & use by other modules)
 # ---------------------------------------------------------------------------
 

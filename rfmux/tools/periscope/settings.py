@@ -533,6 +533,9 @@ def set_network_analysis_defaults(params: dict) -> None:
 _FIT_DEFAULTS = {
     'apply_skewed_fit': True,
     'apply_nonlinear_fit': True,
+    'show_fit_results_tab': False,
+    'fit_run_amplitude_mode': 'all',   # 'all', 'index', or 'bias'
+    'fit_run_amplitude_index': 0,       # 0-based amplitude index (for 'index' mode)
 }
 
 
@@ -562,11 +565,32 @@ def set_fit_defaults(params: dict) -> None:
     Persist fit-settings panel state across Periscope sessions.
 
     Args:
-        params: Dict with any subset of ``{'apply_skewed_fit', 'apply_nonlinear_fit'}``.
+        params: Dict with any subset of the keys in ``_FIT_DEFAULTS``:
+                ``apply_skewed_fit``, ``apply_nonlinear_fit``,
+                ``show_fit_results_tab``, ``fit_run_amplitude_mode``,
+                ``fit_run_amplitude_index``.
     """
     import json
-    persist_keys = {'apply_skewed_fit', 'apply_nonlinear_fit'}
-    filtered = {k: bool(v) for k, v in params.items() if k in persist_keys}
+    persist_keys = {
+        'apply_skewed_fit',
+        'apply_nonlinear_fit',
+        'show_fit_results_tab',
+        'fit_run_amplitude_mode',
+        'fit_run_amplitude_index',
+    }
+    filtered = {}
+    for k, v in params.items():
+        if k not in persist_keys:
+            continue
+        # Boolean keys
+        if k in ('apply_skewed_fit', 'apply_nonlinear_fit', 'show_fit_results_tab'):
+            filtered[k] = bool(v)
+        # Integer key
+        elif k == 'fit_run_amplitude_index':
+            filtered[k] = int(v)
+        # String key
+        else:
+            filtered[k] = v
     qs = _get_settings()
     qs.setValue(KEY_FIT_DEFAULTS, json.dumps(filtered))
 

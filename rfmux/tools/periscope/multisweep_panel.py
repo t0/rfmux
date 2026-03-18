@@ -151,7 +151,19 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.mag_sweep_plots_cache = []        # List of plot widgets for magnitude tab
         self.iq_sweep_plots_cache = []         # List of plot widgets for IQ tab
         self.derivative_plots_cache = []       # List of plot widgets for IQ Derivatives tab
-        
+
+        # Fit Results tab (Tab 6) — optional, enabled via Fit Settings
+        self.fit_results_tab = None
+        self.fit_results_grid = None
+        self.fit_results_plots_cache = []
+        self.fit_results_tab_index = 6
+        # Tab 6 display controls (initialized in _setup_plot_area)
+        self._fit_display_mode_rb_index = None
+        self._fit_display_mode_rb_bias = None
+        self._fit_display_index_spin = None
+        self._fit_show_skewed_cb = None
+        self._fit_show_nonlinear_cb = None
+
         # Histogram panel (created lazily in _setup_plot_area)
         self.histogram_panel = None
         self.histograms_generated = False  # Track if histograms have been generated
@@ -432,7 +444,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Tab 5: IQ Derivatives (shown after Find Bias)
         self.derivative_tab, self.derivative_grid = self._create_derivative_tab()
         self.plot_tabs.addTab(self.derivative_tab, "IQ Derivatives")
-        
+
+        # Tab 6: Fit Results (optional, enabled via Fit Settings; hidden by default)
+        self.fit_results_tab, self.fit_results_grid = self._create_fit_results_tab()
+        self.plot_tabs.addTab(self.fit_results_tab, "Fit Results")
+        self.plot_tabs.setTabVisible(6, False)  # hidden until enabled + fit data present
+
         # Set default tab to Magnitude Sweeps
         self.plot_tabs.setCurrentIndex(0)
         
@@ -593,6 +610,92 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         return tab, grid
 
+    def _create_fit_results_tab(self):
+        """Create the Fit Results tab (Tab 6).
+
+        Shows per-detector magnitude sweeps overlaid with fitted model curves.
+        Optional: enabled via the "Show Fit Results Tab" checkbox in Fit Settings.
+        Hidden by default until both enabled and fit data are present.
+
+        Returns
+        -------
+        (tab, grid_layout)
+            The QWidget tab and its inner QGridLayout for fit-result subplots.
+        """
+        tab = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(5, 5, 5, 5)
+        tab_layout.setSpacing(4)
+
+        # ── Controls row ──────────────────────────────────────────────────────
+        controls_row = QtWidgets.QWidget()
+        controls_layout = QtWidgets.QHBoxLayout(controls_row)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(6)
+
+        # Amplitude display mode
+        amp_label = QtWidgets.QLabel("Show amplitude:")
+        controls_layout.addWidget(amp_label)
+
+        self._fit_display_mode_rb_index = QtWidgets.QRadioButton("Index:")
+        self._fit_display_mode_rb_index.setChecked(True)
+        self._fit_display_mode_rb_index.setToolTip(
+            "Show the amplitude at position N (0 = lowest)."
+        )
+        controls_layout.addWidget(self._fit_display_mode_rb_index)
+
+        self._fit_display_index_spin = QtWidgets.QSpinBox()
+        self._fit_display_index_spin.setRange(0, 99)
+        self._fit_display_index_spin.setValue(0)
+        self._fit_display_index_spin.setSuffix("  (0=lowest)")
+        self._fit_display_index_spin.setMaximumWidth(130)
+        controls_layout.addWidget(self._fit_display_index_spin)
+
+        self._fit_display_mode_rb_bias = QtWidgets.QRadioButton("Bias amplitude")
+        self._fit_display_mode_rb_bias.setToolTip(
+            "Show the bias-amplitude iteration (requires Find Bias to have run)."
+        )
+        controls_layout.addWidget(self._fit_display_mode_rb_bias)
+
+        # Vertical separator
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        sep.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+        controls_layout.addWidget(sep)
+
+        # Model overlay toggles
+        overlay_label = QtWidgets.QLabel("Show:")
+        controls_layout.addWidget(overlay_label)
+
+        self._fit_show_skewed_cb = QtWidgets.QCheckBox("Skewed fit")
+        self._fit_show_skewed_cb.setChecked(True)
+        controls_layout.addWidget(self._fit_show_skewed_cb)
+
+        self._fit_show_nonlinear_cb = QtWidgets.QCheckBox("Nonlinear fit")
+        self._fit_show_nonlinear_cb.setChecked(True)
+        controls_layout.addWidget(self._fit_show_nonlinear_cb)
+
+        controls_layout.addStretch(1)
+        tab_layout.addWidget(controls_row)
+
+        # ── Connect controls → redraw ──────────────────────────────────────────
+        self._fit_display_mode_rb_index.toggled.connect(self._on_fit_results_controls_changed)
+        self._fit_display_mode_rb_bias.toggled.connect(self._on_fit_results_controls_changed)
+        self._fit_display_index_spin.valueChanged.connect(self._on_fit_results_controls_changed)
+        self._fit_show_skewed_cb.toggled.connect(self._on_fit_results_controls_changed)
+        self._fit_show_nonlinear_cb.toggled.connect(self._on_fit_results_controls_changed)
+
+        # ── Scroll area + grid ────────────────────────────────────────────────
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(container)
+        grid.setSpacing(10)
+        scroll.setWidget(container)
+        tab_layout.addWidget(scroll)
+
+        return tab, grid
+
     def _create_digest_tab(self):
         """Create the detector digest tab (single-detector detail view, lazily populated)."""
         tab = QtWidgets.QWidget()
@@ -675,8 +778,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _on_plot_tab_changed(self, index):
         """Handle plot tab changes - show/hide batch controls appropriately."""
-        # Batch controls visible for sweep tabs (0, 1) and IQ Derivatives (5)
-        is_sweep_tab = index in (0, 1, 5)
+        # Batch controls visible for sweep tabs (0, 1), IQ Derivatives (5), and Fit Results (6)
+        is_sweep_tab = index in (0, 1, 5, 6)
         
         self.batch_label.setVisible(is_sweep_tab)
         self.prev_batch_btn.setVisible(is_sweep_tab)
@@ -709,7 +812,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         """Show next batch."""
         # Get current tab to determine which data to use
         current_tab_idx = self.plot_tabs.currentIndex()
-        if current_tab_idx not in (0, 1, 5):  # Only sweep tabs and IQ Derivatives have batches
+        if current_tab_idx not in (0, 1, 5, 6):  # Only sweep tabs, IQ Derivatives, and Fit Results have batches
             return
             
         if not self.results_by_detector:
@@ -722,6 +825,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 if any('bias_finding' in entry for entry in iter_dict.values())
             )
         else:
+            # Tabs 0, 1, 6: all detectors
             num_detectors = len(self.results_by_detector)
         
         total_batches = max(1, (num_detectors + self.batch_size - 1) // self.batch_size)
@@ -782,8 +886,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.combined_phase_plot and isinstance(self.combined_phase_plot.getViewBox(), ClickableViewBox):
             self.combined_phase_plot.getViewBox().enableZoomBoxMode(self.zoom_box_mode)
 
-        # Grid plot caches (tabs 0, 1, 5) — plain pg.ViewBox
-        for pw in self.mag_sweep_plots_cache + self.iq_sweep_plots_cache + self.derivative_plots_cache:
+        # Grid plot caches (tabs 0, 1, 5, 6) — plain pg.ViewBox
+        all_caches = (
+            self.mag_sweep_plots_cache
+            + self.iq_sweep_plots_cache
+            + self.derivative_plots_cache
+            + self.fit_results_plots_cache
+        )
+        for pw in all_caches:
             vb = pw.getViewBox()
             if vb is not None:
                 vb.setMouseMode(mode)
@@ -1031,6 +1141,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Tab 5: IQ Derivatives (populated after Find Bias)
         elif current_tab_idx == 5:
             self._redraw_derivative_grid()
+        # Tab 6: Fit Results (optional, enabled via Fit Settings)
+        elif current_tab_idx == 6:
+            self._redraw_fit_results_grid()
     
     def _redraw_sweep_grid(self, tab_idx):
         """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
@@ -1411,6 +1524,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Update the "Show Bias Info" checkbox state in case loaded data already
         # contains bias results (e.g. a file saved after Find Bias was run).
         self._update_bias_info_checkbox_state()
+
+        # Show or hide the Fit Results tab based on settings and whether the loaded
+        # data already contains fit results (e.g. file saved after Run Fit was run).
+        self._update_fit_results_tab_visibility()
 
         # Auto-populate detector digest for the first detector in insertion order.
         # Don't switch focus — user should stay on the current tab (magnitude sweeps)
@@ -2797,6 +2914,98 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             if vb is not None:
                 vb.setMouseMode(mode)
 
+    # ── Fit Results tab (Tab 6) ───────────────────────────────────────────────
+
+    def _on_fit_results_controls_changed(self):
+        """Slot for any Tab-6 display control changing — triggers a redraw."""
+        if self.plot_tabs.currentIndex() == 6:
+            self._redraw_fit_results_grid()
+
+    def _redraw_fit_results_grid(self):
+        """Redraw the Fit Results tab (Tab 6).
+
+        Reads the tab's display controls and calls
+        :func:`multisweep_grid_helpers.update_fit_results_grid` to render
+        per-detector magnitude sweeps with fitted model overlays.
+        """
+        from .multisweep_grid_helpers import update_fit_results_grid
+
+        if not self.results_by_detector:
+            return
+        if self._fit_display_mode_rb_index is None:
+            return  # Tab not yet created
+
+        # Read controls
+        display_mode = (
+            'bias' if self._fit_display_mode_rb_bias.isChecked() else 'index'
+        )
+        display_amp_index = self._fit_display_index_spin.value()
+        show_skewed    = self._fit_show_skewed_cb.isChecked()
+        show_nonlinear = self._fit_show_nonlinear_cb.isChecked()
+        dac_scale = self.dac_scales.get(self.active_module_for_dac)
+
+        update_fit_results_grid(
+            grid_layout=self.fit_results_grid,
+            data_by_detector=self.results_by_detector,
+            res_info_dict=self.res_info_dict,
+            display_mode=display_mode,
+            display_amplitude_index=display_amp_index,
+            show_skewed=show_skewed,
+            show_nonlinear=show_nonlinear,
+            current_batch=self.current_batch,
+            batch_size=self.batch_size,
+            dark_mode=self.dark_mode,
+            unit_mode=self.unit_mode,
+            normalize=self.normalize_traces,
+            prev_btn=self.prev_batch_btn,
+            next_btn=self.next_batch_btn,
+            batch_label=self.batch_info_label,
+            widget_cache=self.fit_results_plots_cache,
+            dac_scale=dac_scale,
+        )
+
+        # Install double-click event filter and apply zoom box mode
+        for pw in self.fit_results_plots_cache:
+            pw.installEventFilter(self)
+        mode = pg.ViewBox.RectMode if self.zoom_box_mode else pg.ViewBox.PanMode
+        for pw in self.fit_results_plots_cache:
+            vb = pw.getViewBox()
+            if vb is not None:
+                vb.setMouseMode(mode)
+
+    def _update_fit_results_tab_visibility(self):
+        """Show or hide Tab 6 based on settings + whether fit data is present.
+
+        The tab is visible only when **both** conditions are true:
+          1. The "Show Fit Results Tab" checkbox in Fit Settings is enabled.
+          2. At least one entry in ``results_by_detector`` has a successful fit
+             (``skewed_fit_success`` or ``nonlinear_fit_success``).
+
+        Also triggers a redraw if the tab is currently active and becomes
+        visible.
+        """
+        # Read the setting from the open panel or fall back to saved defaults
+        if self.fit_settings_panel is not None:
+            settings_dict = self.fit_settings_panel.get_settings()
+        else:
+            from . import settings as periscope_settings
+            settings_dict = periscope_settings.get_fit_defaults()
+
+        user_wants_tab = settings_dict.get('show_fit_results_tab', False)
+
+        has_fit_data = any(
+            entry.get('skewed_fit_success') or entry.get('nonlinear_fit_success')
+            for iter_dict in self.results_by_detector.values()
+            for entry in iter_dict.values()
+        ) if self.results_by_detector else False
+
+        show = user_wants_tab and has_fit_data
+
+        if hasattr(self, 'plot_tabs') and self.plot_tabs is not None:
+            self.plot_tabs.setTabVisible(6, show)
+            if show and self.plot_tabs.currentIndex() == 6:
+                self._redraw_fit_results_grid()
+
     # ── Fit Settings ─────────────────────────────────────────────────────────
 
     def _show_fit_settings(self):
@@ -2807,6 +3016,18 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.fit_settings_panel.show()
         self.fit_settings_panel.raise_()
         self.fit_settings_panel.activateWindow()
+
+        # Connect show_fit_results_tab_cb.toggled → _update_fit_results_tab_visibility
+        # (safe to call multiple times — Qt deduplicates identical connections)
+        try:
+            self.fit_settings_panel.show_fit_results_tab_cb.toggled.disconnect(
+                self._update_fit_results_tab_visibility
+            )
+        except (TypeError, RuntimeError):
+            pass
+        self.fit_settings_panel.show_fit_results_tab_cb.toggled.connect(
+            self._update_fit_results_tab_visibility
+        )
 
     # ── Run Fit ───────────────────────────────────────────────────────────────
 
@@ -2856,6 +3077,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             results_by_detector=self.results_by_detector,
             fit_settings=fit_settings,
             signals=self.run_fits_signals,
+            res_info_dict=self.res_info_dict,
         )
 
         # Disable both Run Fit and Find Bias for the duration of this task.
@@ -2921,6 +3143,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.run_fit_btn.setText("Run Fit")
         self.find_bias_btn.setEnabled(True)
         self.run_fits_task = None
+
+        # Update Fit Results tab visibility — now that new fit data is present,
+        # the tab should appear if the user has enabled it in Fit Settings.
+        self._update_fit_results_tab_visibility()
 
         # Show a transient "✓ Fits complete" label that auto-hides after 5 s.
         self._fits_status_label.show()

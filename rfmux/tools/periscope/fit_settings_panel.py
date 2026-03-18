@@ -8,11 +8,21 @@ a small floating window and can be dismissed without disrupting ongoing work.
 
 ``get_settings()`` returns a dict that can be passed directly to
 ``RunFitsTask`` as *fit_settings*.
+
+New in this version
+-------------------
+* **"Fit Results Tab"** group: checkbox to enable the optional Tab 6 that
+  overlays the fitted model curves on the measured sweep data.
+* **"Amplitude to Fit"** group: choose which amplitude iterations
+  ``RunFitsTask`` should actually fit — all amplitudes (default), a
+  specific amplitude by sorted index, or the bias amplitude found by
+  Find Bias.
 """
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QFormLayout, QGroupBox,
-    QCheckBox, QPushButton, QHBoxLayout,
+    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
+    QCheckBox, QPushButton, QRadioButton, QSpinBox, QLabel,
+    QButtonGroup,
 )
 from PyQt6.QtCore import Qt
 
@@ -30,6 +40,13 @@ class FitSettingsPanel(QWidget):
     Call :meth:`get_settings` to retrieve the current parameter dict, which
     can be passed directly to :class:`~rfmux.tools.periscope.tasks.RunFitsTask`
     as *fit_settings*.
+
+    Public signals (accessible for external connections)
+    ----------------------------------------------------
+    ``show_fit_results_tab_cb.toggled`` — emitted when the "Show Fit Results
+    Tab" checkbox is toggled.  ``MultisweepPanel._show_fit_settings`` connects
+    this to ``_update_fit_results_tab_visibility`` so the tab appears/
+    disappears immediately without needing to re-open the settings panel.
     """
 
     def __init__(self, parent=None):
@@ -41,7 +58,7 @@ class FitSettingsPanel(QWidget):
             Qt.WindowType.WindowCloseButtonHint |
             Qt.WindowType.WindowStaysOnTopHint
         )
-        self.setMinimumWidth(300)
+        self.setMinimumWidth(340)
         self._setup_ui()
         self._load_settings()
 
@@ -77,11 +94,91 @@ class FitSettingsPanel(QWidget):
         fits_group.setLayout(fits_layout)
         layout.addWidget(fits_group)
 
+        # ── Fit Results Tab ───────────────────────────────────────────────────
+        tab_group = QGroupBox("Fit Results Tab")
+        tab_layout = QFormLayout()
+        tab_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+
+        self.show_fit_results_tab_cb = QCheckBox("Show Fit Results Tab")
+        self.show_fit_results_tab_cb.setChecked(False)
+        self.show_fit_results_tab_cb.setToolTip(
+            "Enable Tab 6 (Fit Results) which shows the fitted model curves\n"
+            "overlaid on the measured sweep data for each resonator.\n"
+            "The tab is only shown when fit data is present."
+        )
+        tab_layout.addRow(self.show_fit_results_tab_cb)
+
+        tab_group.setLayout(tab_layout)
+        layout.addWidget(tab_group)
+
+        # ── Amplitude to Fit ──────────────────────────────────────────────────
+        amp_group = QGroupBox("Amplitude to Fit")
+        amp_layout = QVBoxLayout()
+        amp_layout.setSpacing(4)
+
+        self._amp_mode_btn_group = QButtonGroup(self)
+
+        # Option 1: All amplitudes (default)
+        self.amp_all_rb = QRadioButton("All amplitudes")
+        self.amp_all_rb.setChecked(True)
+        self.amp_all_rb.setToolTip(
+            "Fit every amplitude iteration (current behaviour)."
+        )
+        self._amp_mode_btn_group.addButton(self.amp_all_rb, 0)
+        amp_layout.addWidget(self.amp_all_rb)
+
+        # Option 2: By sorted index
+        index_row = QWidget()
+        index_row_layout = QHBoxLayout(index_row)
+        index_row_layout.setContentsMargins(0, 0, 0, 0)
+        index_row_layout.setSpacing(4)
+
+        self.amp_index_rb = QRadioButton("Amplitude index:")
+        self.amp_index_rb.setToolTip(
+            "Fit only the iteration at the given 0-based position when\n"
+            "amplitudes are sorted from lowest to highest.\n"
+            "Index 0 = lowest amplitude, 1 = next, etc."
+        )
+        self._amp_mode_btn_group.addButton(self.amp_index_rb, 1)
+        index_row_layout.addWidget(self.amp_index_rb)
+
+        self.amp_index_spin = QSpinBox()
+        self.amp_index_spin.setRange(0, 99)
+        self.amp_index_spin.setValue(0)
+        self.amp_index_spin.setSuffix("  (0 = lowest)")
+        self.amp_index_spin.setToolTip(
+            "0-based index into the sorted amplitude list.\n"
+            "Clamped to the last available index if out of range."
+        )
+        self.amp_index_spin.setEnabled(False)  # only active when its radio button is checked
+        index_row_layout.addWidget(self.amp_index_spin)
+        index_row_layout.addStretch(1)
+
+        amp_layout.addWidget(index_row)
+
+        # Option 3: Bias amplitude only
+        self.amp_bias_rb = QRadioButton("Bias amplitude only")
+        self.amp_bias_rb.setToolTip(
+            "Fit only the iteration whose amplitude matches the bias\n"
+            "amplitude stored in res_info_dict for each resonator.\n"
+            "Requires Find Bias to have been run first."
+        )
+        self._amp_mode_btn_group.addButton(self.amp_bias_rb, 2)
+        amp_layout.addWidget(self.amp_bias_rb)
+
+        amp_group.setLayout(amp_layout)
+        layout.addWidget(amp_group)
+
         # ── Auto-save on change ───────────────────────────────────────────────
-        # Settings are persisted immediately when a checkbox is toggled, so
-        # they are preserved even when the panel is closed via the X button.
         self.skewed_fit_cb.toggled.connect(self._save_settings)
         self.nonlinear_fit_cb.toggled.connect(self._save_settings)
+        self.show_fit_results_tab_cb.toggled.connect(self._save_settings)
+        self.amp_all_rb.toggled.connect(self._on_amp_mode_changed)
+        self.amp_index_rb.toggled.connect(self._on_amp_mode_changed)
+        self.amp_bias_rb.toggled.connect(self._on_amp_mode_changed)
+        self.amp_index_spin.valueChanged.connect(self._save_settings)
 
         # ── Buttons ───────────────────────────────────────────────────────────
         btn_layout = QHBoxLayout()
@@ -97,6 +194,11 @@ class FitSettingsPanel(QWidget):
 
     # ── Event handling ────────────────────────────────────────────────────────
 
+    def _on_amp_mode_changed(self):
+        """Enable/disable the index spinbox based on the active radio button."""
+        self.amp_index_spin.setEnabled(self.amp_index_rb.isChecked())
+        self._save_settings()
+
     def keyPressEvent(self, event):
         """Close the panel when Enter or Return is pressed."""
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -111,14 +213,28 @@ class FitSettingsPanel(QWidget):
         Return the current settings as a dict suitable for passing to
         :class:`~rfmux.tools.periscope.tasks.RunFitsTask` as *fit_settings*.
 
-        Keys:
-
+        Keys
+        ----
         * ``apply_skewed_fit`` (bool)
         * ``apply_nonlinear_fit`` (bool)
+        * ``show_fit_results_tab`` (bool)
+        * ``fit_run_amplitude_mode`` (str): ``'all'``, ``'index'``, or ``'bias'``
+        * ``fit_run_amplitude_index`` (int): 0-based index (only relevant when
+          ``fit_run_amplitude_mode == 'index'``)
         """
+        if self.amp_index_rb.isChecked():
+            mode = 'index'
+        elif self.amp_bias_rb.isChecked():
+            mode = 'bias'
+        else:
+            mode = 'all'
+
         return {
-            'apply_skewed_fit':    self.skewed_fit_cb.isChecked(),
-            'apply_nonlinear_fit': self.nonlinear_fit_cb.isChecked(),
+            'apply_skewed_fit':       self.skewed_fit_cb.isChecked(),
+            'apply_nonlinear_fit':    self.nonlinear_fit_cb.isChecked(),
+            'show_fit_results_tab':   self.show_fit_results_tab_cb.isChecked(),
+            'fit_run_amplitude_mode': mode,
+            'fit_run_amplitude_index': self.amp_index_spin.value(),
         }
 
     # Alias so that any generic parameter extractor can find get_parameters.
@@ -129,22 +245,64 @@ class FitSettingsPanel(QWidget):
     def _load_settings(self):
         """Load previously saved settings from QSettings."""
         saved = periscope_settings.get_fit_defaults()
-        # Block signals while we restore values to avoid triggering _save_settings
-        self.skewed_fit_cb.blockSignals(True)
-        self.nonlinear_fit_cb.blockSignals(True)
+
+        # Block all signals while we restore values to avoid triggering _save_settings
+        for widget in (
+            self.skewed_fit_cb, self.nonlinear_fit_cb, self.show_fit_results_tab_cb,
+            self.amp_all_rb, self.amp_index_rb, self.amp_bias_rb,
+            self.amp_index_spin,
+        ):
+            widget.blockSignals(True)
+
         self.skewed_fit_cb.setChecked(saved.get('apply_skewed_fit', True))
         self.nonlinear_fit_cb.setChecked(saved.get('apply_nonlinear_fit', True))
-        self.skewed_fit_cb.blockSignals(False)
-        self.nonlinear_fit_cb.blockSignals(False)
+        self.show_fit_results_tab_cb.setChecked(saved.get('show_fit_results_tab', False))
+
+        mode = saved.get('fit_run_amplitude_mode', 'all')
+        if mode == 'index':
+            self.amp_index_rb.setChecked(True)
+        elif mode == 'bias':
+            self.amp_bias_rb.setChecked(True)
+        else:
+            self.amp_all_rb.setChecked(True)
+
+        self.amp_index_spin.setValue(int(saved.get('fit_run_amplitude_index', 0)))
+        self.amp_index_spin.setEnabled(mode == 'index')
+
+        for widget in (
+            self.skewed_fit_cb, self.nonlinear_fit_cb, self.show_fit_results_tab_cb,
+            self.amp_all_rb, self.amp_index_rb, self.amp_bias_rb,
+            self.amp_index_spin,
+        ):
+            widget.blockSignals(False)
 
     def _save_settings(self):
-        """Persist current settings to QSettings (called on every checkbox toggle)."""
+        """Persist current settings to QSettings (called on every control change)."""
         periscope_settings.set_fit_defaults(self.get_settings())
 
     def _reset_defaults(self):
         """Restore all controls to their default values and persist."""
+        # Block signals during reset to avoid multiple intermediate saves
+        for widget in (
+            self.skewed_fit_cb, self.nonlinear_fit_cb, self.show_fit_results_tab_cb,
+            self.amp_all_rb, self.amp_index_rb, self.amp_bias_rb,
+            self.amp_index_spin,
+        ):
+            widget.blockSignals(True)
+
         self.skewed_fit_cb.setChecked(True)
         self.nonlinear_fit_cb.setChecked(True)
-        # _save_settings is connected to toggled, so it fires automatically above.
-        # Call explicitly in case neither checkbox actually changed state.
+        self.show_fit_results_tab_cb.setChecked(False)
+        self.amp_all_rb.setChecked(True)
+        self.amp_index_spin.setValue(0)
+        self.amp_index_spin.setEnabled(False)
+
+        for widget in (
+            self.skewed_fit_cb, self.nonlinear_fit_cb, self.show_fit_results_tab_cb,
+            self.amp_all_rb, self.amp_index_rb, self.amp_bias_rb,
+            self.amp_index_spin,
+        ):
+            widget.blockSignals(False)
+
+        # One explicit save after all controls have been reset
         self._save_settings()

@@ -1040,6 +1040,10 @@ def _plot_fit_result(plot_item, entry, show_skewed, show_nonlinear, pen_color, d
     freq_ref = float(np.mean(freqs))
     freqs_khz = 1e-3 * (freqs - freq_ref)
 
+    # ── Legend ────────────────────────────────────────────────────────────────
+    legend_color = '#CCCCCC' if dark_mode else '#333333'
+    plot_item.addLegend(offset=(10, 10), labelTextColor=legend_color)
+
     # ── Measured magnitude (normalised to last point ≈ off-resonance) ────────
     mag_raw = np.abs(iq)
     norm_ref = float(np.abs(iq[-1])) if len(iq) > 0 else 1.0
@@ -1056,7 +1060,6 @@ def _plot_fit_result(plot_item, entry, show_skewed, show_nonlinear, pen_color, d
 
     skewed_ok = entry.get('skewed_fit_success', False)
     nonlinear_ok = entry.get('nonlinear_fit_success', False)
-    q_lines = []   # collect Q-value annotation lines
 
     # ── Skewed Lorentzian overlay ─────────────────────────────────────────────
     if show_skewed and skewed_ok:
@@ -1065,33 +1068,33 @@ def _plot_fit_result(plot_item, entry, show_skewed, show_nonlinear, pen_color, d
         fr_skew = fit_p.get('fr')
 
         if skewed_mag is not None and fr_skew is not None:
+            # Build legend name — fr on line 1, Qr/Qi on line 2, Qc on line 3
+            fr_str = f"fr={float(fr_skew) * 1e-6:.3f} MHz"
+            qr = fit_p.get('Qr')
+            qi = fit_p.get('Qi')
+            qc = fit_p.get('Qc')
+            skewed_name = "Skewed  " + fr_str
+            qr_qi_parts = []
+            if qr is not None:
+                qr_qi_parts.append(f"Qr={qr:.0f}")
+            if qi is not None:
+                qr_qi_parts.append(f"Qi={qi:.0f}")
+            if qr_qi_parts:
+                skewed_name += "<br>" + "  ".join(qr_qi_parts)
+            if qc is not None:
+                skewed_name += f"<br>Qc={qc:.0f}"
+
             plot_item.plot(
                 freqs_khz, np.asarray(skewed_mag),
                 pen=pg.mkPen('r', width=LINE_WIDTH),
-                name='Skewed fit',
+                name=skewed_name,
             )
             fr_offset_khz = 1e-3 * (float(fr_skew) - freq_ref)
             plot_item.addItem(pg.InfiniteLine(
                 pos=fr_offset_khz, angle=90,
                 pen=pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine, width=1),
                 movable=False,
-                label='fr (skew)',
-                labelOpts={'color': 'r', 'position': 0.85},
             ))
-
-            # Build Q-value annotation line
-            qr = fit_p.get('Qr')
-            qi = fit_p.get('Qi')
-            qc = fit_p.get('Qc')
-            parts = []
-            if qr is not None:
-                parts.append(f"Qr={qr:.0f}")
-            if qi is not None:
-                parts.append(f"Qi={qi:.0f}")
-            if qc is not None:
-                parts.append(f"Qc={qc:.0f}")
-            if parts:
-                q_lines.append("Skewed: " + "  ".join(parts))
 
     # ── Nonlinear IQ overlay ──────────────────────────────────────────────────
     if show_nonlinear and nonlinear_ok:
@@ -1108,49 +1111,39 @@ def _plot_fit_result(plot_item, entry, show_skewed, show_nonlinear, pen_color, d
                 off_res_avg = 1.0
             nl_mag_norm = nl_mag / off_res_avg
 
+            # Build legend name — fr on line 1, Qr/Qi on line 2, Qc/a on line 3
+            fr_str_nl = f"fr={float(fr_nl) * 1e-6:.3f} MHz"
+            qr = nl_p.get('Qr')
+            qi = nl_p.get('Qi')
+            qc = nl_p.get('Qc')
+            a_val = nl_p.get('a')
+            nl_name = "NL  " + fr_str_nl
+            qr_qi_parts_nl = []
+            if qr is not None:
+                qr_qi_parts_nl.append(f"Qr={qr:.0f}")
+            if qi is not None:
+                qr_qi_parts_nl.append(f"Qi={qi:.0f}")
+            if qr_qi_parts_nl:
+                nl_name += "<br>" + "  ".join(qr_qi_parts_nl)
+            qc_a_parts_nl = []
+            if qc is not None:
+                qc_a_parts_nl.append(f"Qc={qc:.0f}")
+            if a_val is not None:
+                qc_a_parts_nl.append(f"a={a_val:.3f}")
+            if qc_a_parts_nl:
+                nl_name += "<br>" + "  ".join(qc_a_parts_nl)
+
             plot_item.plot(
                 freqs_khz, nl_mag_norm,
                 pen=pg.mkPen('g', width=LINE_WIDTH),
-                name='Nonlinear fit',
+                name=nl_name,
             )
             fr_nl_offset_khz = 1e-3 * (float(fr_nl) - freq_ref)
             plot_item.addItem(pg.InfiniteLine(
                 pos=fr_nl_offset_khz, angle=90,
                 pen=pg.mkPen('g', style=QtCore.Qt.PenStyle.DashLine, width=1),
                 movable=False,
-                label='fr (nl)',
-                labelOpts={'color': 'g', 'position': 0.78},
             ))
-
-            # Build Q-value annotation line
-            qr = nl_p.get('Qr')
-            qi = nl_p.get('Qi')
-            qc = nl_p.get('Qc')
-            a_val = nl_p.get('a')
-            parts = []
-            if qr is not None:
-                parts.append(f"Qr={qr:.0f}")
-            if qi is not None:
-                parts.append(f"Qi={qi:.0f}")
-            if qc is not None:
-                parts.append(f"Qc={qc:.0f}")
-            if a_val is not None:
-                parts.append(f"a={a_val:.3f}")
-            if parts:
-                q_lines.append("NL: " + "  ".join(parts))
-
-    # ── Q-value text annotation (top-left) ────────────────────────────────────
-    if q_lines:
-        q_text = "\n".join(q_lines)
-        text_color = '#CCCCCC' if dark_mode else '#222222'
-        q_item = pg.TextItem(q_text, color=text_color, anchor=(0.0, 1.0))
-        plot_item.addItem(q_item)
-        # Position at left edge, top of the data range — use a ViewBox callback
-        # so we don't need to know the axis limits in advance.
-        view_range = plot_item.viewRange()
-        x_left = view_range[0][0]
-        y_top = view_range[1][1]
-        q_item.setPos(x_left, y_top)
 
     # ── "No fit data" message (shown when both fits are unavailable) ──────────
     if (show_skewed or show_nonlinear) and not skewed_ok and not nonlinear_ok:

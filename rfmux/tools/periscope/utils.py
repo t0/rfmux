@@ -102,7 +102,7 @@ MULTISWEEP_DEFAULT_NPOINTS = 101  # Points per sweep
 MULTISWEEP_DEFAULT_NSAMPLES = DEFAULT_NSAMPLES  # Samples to average (10)
 
 # Find Resonances defaults
-DEFAULT_EXPECTED_RESONANCES = None  # Optional
+DEFAULT_EXPECTED_RESONANCES = 1024  # Default upper limit; lower to restrict results
 DEFAULT_MIN_DIP_DEPTH_DB = 2.0  # dB
 DEFAULT_MIN_Q = 1e4
 DEFAULT_MAX_Q = 1e7

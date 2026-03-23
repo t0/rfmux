@@ -1322,6 +1322,12 @@ class PeriscopeRuntime:
             if panel.results_by_detector:
                 panel._generate_histograms()
                 panel.histograms_generated = True
+
+            # Show or hide the Fit Results tab based on fit settings and whether
+            # the loaded data already contains fit results (e.g. saved after Run
+            # Fit was run).  This mirrors the call in all_sweeps_completed(), which
+            # is only triggered for live sweeps and never called when loading a file.
+            panel._update_fit_results_tab_visibility()
             
             # Extract and load df_calibrations if bias_kids_output exists
             if has_bias_data:

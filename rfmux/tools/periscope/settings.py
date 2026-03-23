@@ -600,7 +600,7 @@ def set_fit_defaults(params: dict) -> None:
 # ─────────────────────────────────────────────────────────────────
 
 _FIND_RESONANCES_DEFAULTS = {
-    'expected_resonances':         None,   # None → auto
+    'expected_resonances':         1024,   # Default upper limit; lower to restrict results
     'min_dip_depth_db':            2.0,
     'min_Q':                       1e4,
     'max_Q':                       1e7,

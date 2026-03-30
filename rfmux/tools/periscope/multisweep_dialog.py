@@ -340,14 +340,6 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         iteration_group = QtWidgets.QGroupBox("Amplitude Iteration Options")
         iteration_layout = QtWidgets.QVBoxLayout(iteration_group)
         
-        # Number of steps field
-        steps_layout = QtWidgets.QFormLayout()
-        self.num_steps_edit = QtWidgets.QLineEdit("1")
-        self.num_steps_edit.setValidator(QIntValidator(1, 100, self))
-        self.num_steps_edit.setToolTip("Number of amplitude iterations to perform")
-        steps_layout.addRow("Number of steps:", self.num_steps_edit)
-        iteration_layout.addLayout(steps_layout)
-        
         # Radio buttons for iteration mode
         self.single_iteration_radio = QtWidgets.QRadioButton("Single iteration (no sweep)")
         self.single_iteration_radio.setChecked(True)
@@ -410,6 +402,22 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.single_iteration_radio.toggled.connect(self._on_iteration_mode_changed)
         self.uniform_sweep_radio.toggled.connect(self._on_iteration_mode_changed)
         self.scaling_radio.toggled.connect(self._on_iteration_mode_changed)
+
+        # Number of steps field — placed after the radio buttons so it sits
+        # logically between the mode selector and the mode-specific controls.
+        steps_layout = QtWidgets.QFormLayout()
+        self.num_steps_edit = QtWidgets.QLineEdit("1")
+        self.num_steps_edit.setValidator(QIntValidator(1, 100, self))
+        self.num_steps_edit.setToolTip("Number of amplitude iterations to perform.\nFixed at 1 when Single iteration is selected.")
+        steps_layout.addRow("Number of steps:", self.num_steps_edit)
+        iteration_layout.addLayout(steps_layout)
+
+        # Tracks the last user-entered number of steps so it can be restored
+        # when the user switches away from Single iteration back to a sweep mode.
+        self._saved_num_steps = "5"
+
+        # Apply initial state (single iteration is checked by default)
+        self._on_iteration_mode_changed()
         
         # Add Clear button for amplitude settings
         clear_amp_layout = QtWidgets.QHBoxLayout()
@@ -515,6 +523,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         
         self.setMinimumWidth(500) # Ensure dialog is wide enough
+        self.resize(500, 780)     # Ensure dialog is tall enough for sweep controls
         
         # Populate amplitude fields from stored parameters (if available)
         self._populate_amplitude_fields_from_params()
@@ -535,17 +544,22 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 amp_text = ", ".join(f"{amp:.4g}" for amp in base_amp_values)
                 self.amp_array_edit.setText(amp_text)
         
-        # Populate iteration settings using saved metadata
+        # Populate iteration settings using saved metadata.
+        # Seed _saved_num_steps with the loaded value so that
+        # _on_iteration_mode_changed (triggered by setting the radio below)
+        # restores the correct count when a sweep mode is active.
         num_steps = self.params.get('num_steps', 1)
-        self.num_steps_edit.setText(str(num_steps))
-        
         iteration_mode = self.params.get('iteration_mode', 'single')
-        
+        if iteration_mode != 'single' and num_steps > 1:
+            self._saved_num_steps = str(num_steps)
+
         if iteration_mode == 'single':
             self.single_iteration_radio.setChecked(True)
+            # _on_iteration_mode_changed will lock the field to "1"
         
         elif iteration_mode == 'uniform':
             self.uniform_sweep_radio.setChecked(True)
+            # _on_iteration_mode_changed restores _saved_num_steps into the field
             uniform_start = self.params.get('uniform_start_amplitude')
             uniform_stop = self.params.get('uniform_stop_amplitude')
             if uniform_start is not None:
@@ -555,6 +569,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         
         elif iteration_mode == 'scaling':
             self.scaling_radio.setChecked(True)
+            # _on_iteration_mode_changed restores _saved_num_steps into the field
             scale_start = self.params.get('scale_start_factor')
             scale_stop = self.params.get('scale_stop_factor')
             if scale_start is not None:
@@ -776,7 +791,27 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         
     
     def _on_iteration_mode_changed(self):
-        """Handle changes to iteration mode radio buttons."""
+        """Handle changes to iteration mode radio buttons.
+
+        When Single iteration is selected the Number of steps field is fixed at 1
+        and made read-only.  When switching to a sweep mode the field is restored
+        to the last user-entered value (saved in ``_saved_num_steps``).
+        """
+        is_single = self.single_iteration_radio.isChecked()
+
+        if is_single:
+            # Save the current value only if it is a real user value (not "1" forced
+            # by a previous switch to single-iteration mode).
+            current = self.num_steps_edit.text().strip()
+            if current and current != "1":
+                self._saved_num_steps = current
+            self.num_steps_edit.setText("1")
+            self.num_steps_edit.setEnabled(False)
+        else:
+            self.num_steps_edit.setEnabled(True)
+            # Restore saved value when switching to a sweep mode
+            self.num_steps_edit.setText(self._saved_num_steps)
+
         self.uniform_controls.setVisible(self.uniform_sweep_radio.isChecked())
         self.scaling_controls.setVisible(self.scaling_radio.isChecked())
     

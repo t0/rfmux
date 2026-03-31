@@ -69,7 +69,8 @@ async def take_netanal(
     progress_callback : callable, optional
         Callback function that receives (module, progress_percentage) updates.
     data_callback : callable, optional
-        Callback function that receives (module, freqs, amps, phases) updates.
+        Callback function that receives (module, freqs, iq_counts) updates,
+        where iq_counts is a complex ndarray in raw ADC counts (ROC).
 
     Returns
     -------
@@ -262,9 +263,7 @@ async def take_netanal(
             if data_callback and chunk_fs_full:
                 fs_array = np.array(fs_all + chunk_fs_full)
                 iq_array = np.array(iq_all + chunk_iq_full)
-                amp_array = np.abs(iq_array)
-                phase_array = np.degrees(np.angle(iq_array))
-                data_callback(module, fs_array, amp_array, phase_array)
+                data_callback(module, fs_array, iq_array)
 
             # Report progress
             if progress_callback:
@@ -294,9 +293,7 @@ async def take_netanal(
         if data_callback:
             fs_array = np.array(fs_all)
             iq_array = np.array(iq_all)
-            amp_array = np.abs(iq_array)
-            phase_array = np.degrees(np.angle(iq_array))
-            data_callback(module, fs_array, amp_array, phase_array)
+            data_callback(module, fs_array, iq_array)
 
     # Clean up before exiting
     async with crs.tuber_context() as ctx:

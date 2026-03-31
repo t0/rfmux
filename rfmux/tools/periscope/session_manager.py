@@ -624,8 +624,10 @@ class SessionManager(QtCore.QObject):
         if has_multisweep:
             return 'multisweep'
         
-        # Network analysis files: have 'parameters' and 'modules' keys
-        if 'parameters' in data and 'modules' in data:
+        # Network analysis files: old schema ('parameters'+'modules') or
+        # new harmonised schema ('initial_parameters'+'results'+'target_module')
+        if ('parameters' in data and 'modules' in data) or \
+           ('initial_parameters' in data and 'results' in data and 'target_module' in data):
             return 'netanal'
 
         if 'channel_noise_data' in data and data['channel_noise_data'] is not None:

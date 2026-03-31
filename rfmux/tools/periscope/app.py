@@ -1007,7 +1007,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.dac_scales = dialog.dac_scales.copy()
             params = dialog.get_parameters()
             if params:
-                if "modules" in params.keys():
+                if "modules" in params.keys() or "results" in params.keys():
                     self._load_network_analysis(params)
                 else:
                     if self.crs is None:
@@ -1079,10 +1079,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 lambda mod, prog: panel.update_progress(mod, prog),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update.connect(
-                lambda mod, freqs, amps, phases: panel.update_data(mod, freqs, amps, phases),
+                lambda mod, freqs, iq: panel.update_data(mod, freqs, iq),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update_with_amp.connect(
-                lambda mod, freqs, amps, phases, amp_val: panel.update_data_with_amp(mod, freqs, amps, phases, amp_val),
+                lambda mod, freqs, iq, amp_val: panel.update_data_with_amp(mod, freqs, iq, amp_val),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.completed.connect(
                 lambda mod: self._handle_analysis_completed(mod, window_id),
@@ -1090,12 +1090,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             window_signals.error.connect(
                 lambda error_msg: QtWidgets.QMessageBox.critical(panel, "Network Analysis Error", error_msg),
                 QtCore.Qt.ConnectionType.QueuedConnection)
-            
+
             # Connect data_ready signal for session auto-export
-            # Use default arg to capture panel reference for filename storage
-            panel.data_ready.connect(
-                lambda data, p=panel: self._handle_netanal_data_ready(modules_to_run, data, panel=p)
-            )
+            panel.data_ready.connect(self.session_manager.handle_data_ready)
             
             amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)])
             window_data = self.netanal_windows[window_id]
@@ -1123,8 +1120,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         Load network analysis data from file and display in a docked panel.
 
+        Handles both the old schema ('parameters' + 'modules') and the new
+        harmonised schema ('initial_parameters' + 'results' + 'target_module').
+
         Args:
-            params (dict): Loaded network analysis data with 'parameters' and 'modules' keys
+            params (dict): Loaded network analysis data dictionary.
         """
         try:
             # Allow loading without CRS in offline mode
@@ -1132,14 +1132,27 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
 
-            # Derive the single target module from the actual data (not from params,
-            # which may be None when "all modules" was selected — that would incorrectly
-            # expand to 8 modules even though the file only contains data for 1).
-            target_module = next(iter(params['modules'].keys()))
+            # ── Detect file format ─────────────────────────────────────────────
+            is_new_format = 'results' in params and 'initial_parameters' in params
+
+            if is_new_format:
+                target_module = params.get('target_module')
+                if target_module is None:
+                    # Fall back: take first key from results dict
+                    results = params.get('results', {})
+                    target_module = 1 if not results else next(
+                        (v.get('module', 1) for v in results.values()), 1
+                    )
+                initial_params = params.get('initial_parameters', {})
+            else:
+                # Old format: 'modules' key
+                target_module = next(iter(params['modules'].keys()))
+                initial_params = params.get('parameters', {})
+
             modules_to_run = [target_module]
 
-            # Restore DAC scales from loaded data
-            self.dac_scales = params['dac_scales_used']
+            # Restore DAC scales
+            self.dac_scales = params.get('dac_scales_used', {})
 
             # Create unique ID for this analysis
             window_id = f"netanal_{self.netanal_window_count}"
@@ -1148,16 +1161,18 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             # Create panel
             dac_scales_local = self.dac_scales.copy()
             window_signals = NetworkAnalysisSignals()
-            panel = NetworkAnalysisPanel(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode, is_loaded_data=True)
+            panel = NetworkAnalysisPanel(
+                self, modules_to_run, dac_scales_local,
+                dark_mode=self.dark_mode, is_loaded_data=True
+            )
             panel._hide_progress_bars()
-            panel.set_params(params['parameters'])
+            panel.set_params(initial_params)
 
             # Wrap panel in dock
             dock_title = f"Network Analysis #{self.netanal_window_count} (Loaded)"
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
 
-            # Store panel reference — include amplitude_queues and current_amp_index so
-            # that _check_all_complete (called from complete_analysis) doesn't KeyError.
+            # Store panel reference
             self.netanal_windows[window_id] = {
                 'window': panel,
                 'dock': dock,
@@ -1166,23 +1181,31 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 'current_amp_index': {},
             }
 
-            # Connect data_ready for session auto-export (same as _start_network_analysis)
-            panel.data_ready.connect(
-                lambda data, p=panel: self._handle_netanal_data_ready(modules_to_run, data, panel=p)
-            )
+            # Connect data_ready for session auto-export
+            panel.data_ready.connect(self.session_manager.handle_data_ready)
 
-            # Load sweep data into panel
-            amplitudes = params['parameters'].get('amps')
-            for mod in modules_to_run:
-                for i in range(len(amplitudes)):
-                    freqs = np.array(params['modules'][mod][i]['frequency']['values'])
-                    amps = np.array(params['modules'][mod][i]['magnitude']['counts']['raw'])
-                    phases = np.array(params['modules'][mod][i]['phase']['values'])
-                    panel.update_data(mod, freqs, amps, phases)
-                    panel.update_data_with_amp(mod, freqs, amps, phases, amplitudes[i])
-
-                r_freq = params['modules'][mod]['resonances_hz']
-                panel._use_loaded_resonances(mod, r_freq)
+            # ── Load sweep data into panel ─────────────────────────────────────
+            if is_new_format:
+                results = params.get('results', {})
+                for iter_idx in sorted(results.keys()):
+                    entry = results[iter_idx]
+                    freqs = np.asarray(entry['frequencies'])
+                    iq_counts = np.asarray(entry['iq_counts'])
+                    amplitude = entry.get('sweep_amplitude', DEFAULT_AMPLITUDE)
+                    panel.update_data_with_amp(target_module, freqs, iq_counts, amplitude)
+                r_freq = params.get('resonances_hz', [])
+                panel._use_loaded_resonances(target_module, r_freq)
+            else:
+                amplitudes = initial_params.get('amps') or []
+                for mod in modules_to_run:
+                    for i in range(len(amplitudes)):
+                        freqs = np.array(params['modules'][mod][i]['frequency']['values'])
+                        amps_raw = np.array(params['modules'][mod][i]['magnitude']['counts']['raw'])
+                        phases_deg = np.array(params['modules'][mod][i]['phase']['values'])
+                        iq_counts = amps_raw * np.exp(1j * np.radians(phases_deg))
+                        panel.update_data_with_amp(mod, freqs, iq_counts, amplitudes[i])
+                    r_freq = params['modules'][mod].get('resonances_hz', [])
+                    panel._use_loaded_resonances(mod, r_freq)
 
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
@@ -1245,14 +1268,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         count = window_signals.receivers(window_signals.progress)
         if count == 0:
             window_signals.progress.connect(
-                lambda mod, prog: window_instance.update_progress(mod, prog), # mod, prog to avoid conflict
+                lambda mod, prog: window_instance.update_progress(mod, prog),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update.connect(
-                lambda mod, freqs, amps, phases: window_instance.update_data(mod, freqs, amps, phases),
+                lambda mod, freqs, iq: window_instance.update_data(mod, freqs, iq),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update_with_amp.connect(
-                lambda mod, freqs, amps, phases, amp_val:  # amp_val to avoid conflict
-                window_instance.update_data_with_amp(mod, freqs, amps, phases, amp_val),
+                lambda mod, freqs, iq, amp_val:
+                window_instance.update_data_with_amp(mod, freqs, iq, amp_val),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.completed.connect(
                 lambda mod: self._handle_analysis_completed(mod, window_id),
@@ -1384,10 +1407,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 lambda mod, prog: window.update_progress(mod, prog),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update.connect(
-                lambda mod, freqs, amps, phases: window.update_data(mod, freqs, amps, phases),
+                lambda mod, freqs, iq: window.update_data(mod, freqs, iq),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update_with_amp.connect(
-                lambda mod, freqs, amps, phases, amp_val: window.update_data_with_amp(mod, freqs, amps, phases, amp_val),
+                lambda mod, freqs, iq, amp_val: window.update_data_with_amp(mod, freqs, iq, amp_val),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.completed.connect(
                 lambda mod: self._handle_analysis_completed(mod, window_id),
@@ -2842,9 +2865,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     
     def _load_netanal_from_session(self, data: dict, file_path: str):
         """Load network analysis data from session file into a new panel."""
-        # Check if data has the expected structure
-        if 'parameters' not in data and 'modules' not in data:
-            # Try to wrap it in expected format
+        # Accept both old format ('parameters'+'modules') and new format
+        # ('initial_parameters'+'results')
+        has_old_format = 'parameters' in data and 'modules' in data
+        has_new_format = 'initial_parameters' in data and 'results' in data
+
+        if not has_old_format and not has_new_format:
             QtWidgets.QMessageBox.information(
                 self,
                 "Network Analysis Loaded",
@@ -2853,7 +2879,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 "(Direct panel display not yet implemented for this format)"
             )
             return
-        
+
         # Use existing load mechanism
         self._load_network_analysis(data)
     

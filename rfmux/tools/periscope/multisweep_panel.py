@@ -1675,12 +1675,36 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             'initial_parameters': export_initial_params,
             'dac_scales_used': self.dac_scales,
             'res_info_dict': self.res_info_dict,        # Lightweight resonator registry
-            'results_by_detector': self.results_by_detector,
+            'results_by_detector': self._results_by_detector_with_iq_volts(),
             'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
             'nco_frequency_hz': self.nco_frequency_hz,  # NCO frequency used for biasing
             'noise_data': spectrum_data
         }
     
+    def _results_by_detector_with_iq_volts(self) -> dict:
+        """Return a shallow copy of results_by_detector with 'iq_volts' injected.
+
+        For each detector entry that contains 'iq_counts', computes
+        ``iq_volts = convert_roc_to_volts(iq_counts)`` and stores it in a
+        per-entry copy.  The live ``results_by_detector`` dict is not mutated.
+        Only executed at export time (not during live sweeps).
+        """
+        from rfmux.core.transferfunctions import convert_roc_to_volts
+
+        result = {}
+        for code, iter_dict in self.results_by_detector.items():
+            result[code] = {}
+            for iter_idx, entry in iter_dict.items():
+                export_entry = dict(entry)  # shallow copy
+                iq = entry.get('iq_counts')
+                if iq is not None and hasattr(iq, '__len__') and len(iq) > 0:
+                    try:
+                        export_entry['iq_volts'] = convert_roc_to_volts(iq)
+                    except Exception:
+                        pass  # silently skip if conversion fails
+                result[code][iter_idx] = export_entry
+        return result
+
     def _handle_export_file_selected(self, filename):
         """Handle the file selection from the non-blocking dialog."""
         if not filename:

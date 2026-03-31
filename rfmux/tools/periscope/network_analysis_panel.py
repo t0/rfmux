@@ -25,8 +25,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         data_ready: Emitted when analysis completes with full export data dict
     """
     
-    # Signal for session auto-export
-    data_ready = QtCore.pyqtSignal(dict)  # Full export data dictionary
+    # Signal for session auto-export: emits (data_type, identifier, data_dict)
+    data_ready = QtCore.pyqtSignal(str, str, dict)
     
     def __init__(self, parent=None, modules=None, dac_scales=None, dark_mode=False, is_loaded_data=False):
         super().__init__(parent)
@@ -599,7 +599,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                             self.plots[module_id_iter_redraw]['phase_curves'][amplitude].setData(freqs, phases)
                 
                 if 'default' in self.raw_data[module_id_iter_redraw] and not has_amp_curves:
-                    freqs, amps, phases, iq_data = self.raw_data[module_id_iter_redraw]['default']
+                    _, freqs, amps, phases, iq_data = self._extract_data_from_tuple(
+                        'default', self.raw_data[module_id_iter_redraw]['default'])
                     converted_amps = UnitConverter.convert_amplitude(
                         amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
                     self.plots[module_id_iter_redraw]['amp_curve'].setData(freqs, converted_amps)
@@ -613,16 +614,22 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self._update_legends_for_unit_mode()              
     
     def _extract_data_from_tuple(self, amp_key, data_tuple):
-        """Extract amplitude and data from a data tuple."""
-        if len(data_tuple) == 5:
-            freqs, amps, phases, iq_data, amplitude = data_tuple
-        else:
-            freqs, amps, phases, iq_data = data_tuple
+        """Extract amplitude and data arrays from a (freqs, iq_counts[, amplitude]) tuple.
+
+        Returns (amplitude, freqs, amps_raw, phases_deg, iq_counts) for backward
+        compatibility with all display and export callers.
+        """
+        if len(data_tuple) == 3:
+            freqs, iq_counts, amplitude = data_tuple
+        else:  # 2-tuple (default / single sweep)
+            freqs, iq_counts = data_tuple
             try:
                 amplitude = float(amp_key.split('_')[-1])
             except (ValueError, IndexError):
                 amplitude = DEFAULT_AMPLITUDE
-        return amplitude, freqs, amps, phases, iq_data
+        amps_raw = np.abs(iq_counts)
+        phases_deg = np.degrees(np.angle(iq_counts))
+        return amplitude, freqs, amps_raw, phases_deg, iq_counts
 
     # ── Find Resonances Settings ──────────────────────────────────────────────
 
@@ -709,14 +716,14 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             return
 
         data_tuple = module_sweeps[target_sweep_key]
-        
-        if len(data_tuple) == 5: 
-            frequencies, _, _, iq_complex, _ = data_tuple
-        elif len(data_tuple) == 4: 
-            frequencies, _, _, iq_complex = data_tuple
+
+        if len(data_tuple) == 3:
+            frequencies, iq_complex, _ = data_tuple
+        elif len(data_tuple) == 2:
+            frequencies, iq_complex = data_tuple
         else:
             QtWidgets.QMessageBox.critical(self, "Data Error", "Unexpected data format for the selected sweep.")
-            self._update_multisweep_button_state(active_module) 
+            self._update_multisweep_button_state(active_module)
             return
 
         if len(frequencies) == 0 or len(iq_complex) == 0:
@@ -777,11 +784,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self._update_multisweep_button_state(active_module)
         
         # Emit data_ready signal for session auto-export after finding resonances
-        # Include filename override if this panel has exported before (to update existing file)
-        export_data = self.build_export_dict()  # Use inherited method from mixin
-        if self._last_export_filename:
-            export_data['_filename_override'] = self._last_export_filename
-        self.data_ready.emit(export_data)
+        export_data = self._prepare_export_data()
+        self.data_ready.emit("netanal", f"module{active_module}", export_data)
         
     def _use_loaded_resonances(self, active_module: int, load_resonance_freqs: list):
         if active_module in self.plots:
@@ -991,24 +995,25 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             self.plots[module]['amp_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
             self.plots[module]['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
     
-    def update_data_with_amp(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray, amplitude: float):
+    def update_data_with_amp(self, module: int, freqs: np.ndarray, iq_counts: np.ndarray, amplitude: float):
         """Update the plot data for a specific module and amplitude."""
-        iq_data = amps * np.exp(1j * np.radians(phases))  
         key = f"{module}_{amplitude}"
-        
+
         if module not in self.raw_data: self.raw_data[module] = {}
         if module not in self.data: self.data[module] = {}
-        
-        self.raw_data[module][key] = (freqs, amps, phases, iq_data, amplitude)
-        self.data[module][key] = (freqs, amps, phases)
-        
+
+        self.raw_data[module][key] = (freqs, iq_counts, amplitude)
+        self.data[module][key] = True  # existence marker for export check
+
         if module in self.plots:
             if len(self.plots[module]['amp_curves']) == 0:
                 self.plots[module]['amp_curve'].setData([], [])
                 self.plots[module]['phase_curve'].setData([], [])
-            
+
+            amps_raw = np.abs(iq_counts)
+            phases_deg = np.degrees(np.angle(iq_counts))
             converted_amps = UnitConverter.convert_amplitude(
-                amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
+                amps_raw, iq_counts, self.unit_mode, normalize=self.normalize_magnitudes)
             
             amps_list = self.original_params.get('amps', [amplitude])
             if amplitude in amps_list:
@@ -1047,31 +1052,28 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                     pen=pg.mkPen(color, width=LINE_WIDTH), name=f"Amp: {amplitude}")
             
             self.plots[module]['amp_curves'][amplitude].setData(freqs, converted_amps)
-            self.plots[module]['phase_curves'][amplitude].setData(freqs, phases)
-            
-            if is_new_curve: self._update_legends_for_unit_mode()
-        self._update_multisweep_button_state(module) 
+            self.plots[module]['phase_curves'][amplitude].setData(freqs, phases_deg)
 
-    def update_data(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
+            if is_new_curve: self._update_legends_for_unit_mode()
+        self._update_multisweep_button_state(module)
+
+    def update_data(self, module: int, freqs: np.ndarray, iq_counts: np.ndarray):
         """Update the plot data for a specific module."""
-        iq_data = amps * np.exp(1j * np.radians(phases))  
-        
         if module not in self.raw_data: self.raw_data[module] = {}
         if module not in self.data: self.data[module] = {}
-        
-        self.raw_data[module]['default'] = (freqs, amps, phases, iq_data)
-        self.data[module]['default'] = (freqs, amps, phases)
-        
+
+        self.raw_data[module]['default'] = (freqs, iq_counts)
+        self.data[module]['default'] = True  # existence marker for export check
+
         if module in self.plots:
             if len(self.plots[module]['amp_curves']) == 0:
+                amps_raw = np.abs(iq_counts)
+                phases_deg = np.degrees(np.angle(iq_counts))
                 converted_amps = UnitConverter.convert_amplitude(
-                    amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
-                
-                freq_ghz = freqs # Keep as freqs, units are handled by axis label
-                
-                self.plots[module]['amp_curve'].setData(freq_ghz, converted_amps)
-                self.plots[module]['phase_curve'].setData(freq_ghz, phases)
-        self._update_multisweep_button_state(module) 
+                    amps_raw, iq_counts, self.unit_mode, normalize=self.normalize_magnitudes)
+                self.plots[module]['amp_curve'].setData(freqs, converted_amps)
+                self.plots[module]['phase_curve'].setData(freqs, phases_deg)
+        self._update_multisweep_button_state(module)
     
     def update_progress(self, module: int, progress: float):
         """Update the progress bar for a specific module."""
@@ -1086,8 +1088,12 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             
         # Emit data_ready signal for session auto-export
         if self._all_modules_complete():
-            export_data = self.build_export_dict()  # Use inherited method from mixin
-            self.data_ready.emit(export_data)
+            export_data = self._prepare_export_data()
+            self.data_ready.emit(
+                "netanal",
+                f"module{self.modules[0]}" if self.modules else "module0",
+                export_data,
+            )
     
     def _all_modules_complete(self) -> bool:
         """Check if all modules have completed analysis."""

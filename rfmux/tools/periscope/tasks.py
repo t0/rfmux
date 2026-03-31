@@ -240,8 +240,8 @@ class CRSInitializeSignals(QObject):
 
 class NetworkAnalysisSignals(QObject):
     progress = pyqtSignal(int, float)
-    data_update = pyqtSignal(int, np.ndarray, np.ndarray, np.ndarray)
-    data_update_with_amp = pyqtSignal(int, np.ndarray, np.ndarray, np.ndarray, float)
+    data_update = pyqtSignal(int, np.ndarray, np.ndarray)          # (module, freqs, iq_counts)
+    data_update_with_amp = pyqtSignal(int, np.ndarray, np.ndarray, float)  # (module, freqs, iq_counts, amplitude)
     completed = pyqtSignal(int); error = pyqtSignal(str)
 
 class DACScaleFetcher(QtCore.QThread):
@@ -331,9 +331,7 @@ class NetworkAnalysisTask(QtCore.QThread):
                 # Process results if available and task wasn't interrupted
                 if not self.isInterruptionRequested() and result:
                     fs_sorted, iq_sorted = result['frequencies'], result['iq_counts']
-                    phase_sorted, amp_sorted = result['phase_degrees'], np.abs(iq_sorted)
-                    self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
-                    self.signals.data_update_with_amp.emit(self.module, fs_sorted, amp_sorted, phase_sorted, self.amplitude)
+                    self.signals.data_update_with_amp.emit(self.module, fs_sorted, iq_sorted, self.amplitude)
                     self.signals.completed.emit(self.module)
             
         except asyncio.CancelledError:
@@ -359,15 +357,14 @@ class NetworkAnalysisTask(QtCore.QThread):
         return lambda module_idx, prog: self.signals.progress.emit(module_idx, prog) if self._running else None # Renamed module, progress
         
     def _create_data_callback(self):
-        def data_cb(module_idx, freqs_raw, amps_raw, phases_raw): # Renamed module
+        def data_cb(module_idx, freqs_raw, iq_raw):
             if self._running:
                 sort_idx = np.argsort(freqs_raw)
-                freqs, amps, phases = freqs_raw[sort_idx], amps_raw[sort_idx], phases_raw[sort_idx]
+                freqs, iq = freqs_raw[sort_idx], iq_raw[sort_idx]
                 current_time = time.time()
                 if current_time - self._last_update_time >= self._update_interval:
-                    self._last_update_time = current_time                    
-                self.signals.data_update.emit(module_idx, freqs, amps, phases)
-                self.signals.data_update_with_amp.emit(module_idx, freqs, amps, phases, self.amplitude)
+                    self._last_update_time = current_time
+                self.signals.data_update_with_amp.emit(module_idx, freqs, iq, self.amplitude)
         return data_cb
     
     def _extract_parameters(self):

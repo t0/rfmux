@@ -141,81 +141,69 @@ class NetworkAnalysisExportMixin:
                 f"Error exporting data: {str(e)}"
             )
     
-    def build_export_dict(self) -> dict:
+    def _prepare_export_data(self) -> dict:
         """
-        Build the export data dictionary with comprehensive metadata.
-        
-        This method creates a hierarchical dictionary structure containing all measurement
-        data, parameters, and module information. Can be used for both file export and
-        session auto-export.
-        
+        Build the export data dictionary using the new harmonised schema.
+
+        Top-level keys: 'timestamp', 'initial_parameters', 'dac_scales_used',
+        'target_module', 'results', 'resonances_hz'.
+
+        Each entry in 'results' is keyed by an integer iteration index and contains:
+        'sweep_amplitude', 'frequencies', 'iq_counts', 'iq_volts', 'phase_degrees'.
+
         Returns:
-            Dictionary containing all export data
+            Dictionary containing all export data in the new schema.
         """
+        from rfmux.core.transferfunctions import convert_roc_to_volts
+
+        target_module = self.modules[0] if self.modules else None
+
         export_data = {
-            'timestamp': datetime.datetime.now().isoformat(),
-            'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
-            'dac_scales_used': self.dac_scales.copy() if hasattr(self, 'dac_scales') else {},
-            'modules': {}
+            'timestamp':           datetime.datetime.now().isoformat(),
+            'initial_parameters':  self.current_params.copy() if hasattr(self, 'current_params') else {},
+            'dac_scales_used':     self.dac_scales.copy() if hasattr(self, 'dac_scales') else {},
+            'target_module':       target_module,
+            'results':             {},
+            'resonances_hz':       self.resonance_freqs.get(target_module, []) if target_module is not None else [],
         }
-        
-        for module, data_dict in self.raw_data.items():
-            export_data['modules'][module] = {}
-            meas_idx = 0
-            
-            for key, data_tuple in data_dict.items():
-                # Extract and convert data for export
-                amplitude, freqs, amps, phases, iq_data = self._extract_data_for_export(key, data_tuple)
-                
-                # Perform unit conversions
-                counts = amps
-                volts = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="volts")
-                dbm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="dbm")
-                counts_norm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="counts", normalize=True)
-                volts_norm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="volts", normalize=True)
-                dbm_norm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="dbm", normalize=True)
-                
-                # Store converted data
-                export_data['modules'][module][meas_idx] = {
+
+        if target_module is not None and target_module in self.raw_data:
+            for iteration_idx, (key, data_tuple) in enumerate(
+                self.raw_data[target_module].items()
+            ):
+                if len(data_tuple) == 3:
+                    freqs, iq_counts, amplitude = data_tuple
+                else:
+                    freqs, iq_counts = data_tuple
+                    try:
+                        amplitude = float(key.split('_')[-1])
+                    except (ValueError, IndexError):
+                        amplitude = DEFAULT_AMPLITUDE
+
+                export_data['results'][iteration_idx] = {
                     'sweep_amplitude': amplitude,
-                    'frequency': {'values': freqs.tolist(), 'unit': 'Hz'},
-                    'magnitude': {
-                        'counts': {
-                            'raw': counts.tolist(), 
-                            'normalized': counts_norm.tolist(), 
-                            'unit': 'counts'
-                        },
-                        'volts': {
-                            'raw': volts.tolist(), 
-                            'normalized': volts_norm.tolist(), 
-                            'unit': 'V'
-                        },
-                        'dbm': {
-                            'raw': dbm.tolist(), 
-                            'normalized': dbm_norm.tolist(), 
-                            'unit': 'dBm'
-                        }
-                    },
-                    'phase': {'values': phases.tolist(), 'unit': 'degrees'},
-                    'complex': {'real': iq_data.real.tolist(), 'imag': iq_data.imag.tolist()}
+                    'frequencies':     freqs,
+                    'iq_counts':       iq_counts,
+                    'iq_volts':        convert_roc_to_volts(iq_counts),
+                    'phase_degrees':   np.degrees(np.angle(iq_counts)),
                 }
-                meas_idx += 1
-            
-            # Include resonance frequencies for the module
-            export_data['modules'][module]['resonances_hz'] = self.resonance_freqs.get(module, [])
-        
+
         return export_data
+
+    def build_export_dict(self) -> dict:
+        """Backward-compatible alias — delegates to _prepare_export_data()."""
+        return self._prepare_export_data()
     
     def _export_to_pickle(self, filename: str) -> None:
         """
         Export data to a pickle file with comprehensive metadata.
-        
-        Uses build_export_dict() to create the data structure, then saves to file.
-        
+
+        Uses _prepare_export_data() to create the data structure, then saves to file.
+
         Args:
             filename: The path to the pickle file to create
         """
-        export_data = self.build_export_dict()
+        export_data = self._prepare_export_data()
         
         # Write the data to file
         with open(filename, 'wb') as f:
@@ -292,41 +280,34 @@ class NetworkAnalysisExportMixin:
                 idx += 1
     
     def _extract_data_for_export(
-        self, 
-        key: str, 
-        data_tuple: Union[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], 
-                         Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]]
+        self,
+        key: str,
+        data_tuple,
     ) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Extract and prepare data for export from a data tuple.
-        
+        Extract and prepare data for export from a (freqs, iq_counts[, amplitude]) tuple.
+
         Args:
-            key: The key identifying the data within the raw_data dictionary
-            data_tuple: Tuple containing frequency, amplitude, phase, and IQ data,
-                       optionally with amplitude value
-        
+            key: The key identifying the data within the raw_data dictionary.
+            data_tuple: 2-tuple (freqs, iq_counts) or 3-tuple (freqs, iq_counts, amplitude).
+
         Returns:
-            Tuple containing (amplitude, frequencies, amplitudes, phases, iq_data)
+            Tuple containing (amplitude, frequencies, amps_raw, phases_deg, iq_counts).
         """
-        # Default amplitude if not available in the data
-        amplitude = DEFAULT_AMPLITUDE 
-        
-        if key != 'default':
-            # Extract data from the tuple, handling different tuple formats
-            if len(data_tuple) >= 5:
-                freqs, amps, phases, iq_data, amplitude = data_tuple
-            else:
-                freqs, amps, phases, iq_data = data_tuple
-                # Try to extract amplitude from the key
+        if len(data_tuple) == 3:
+            freqs, iq_counts, amplitude = data_tuple
+        else:  # 2-tuple
+            freqs, iq_counts = data_tuple
+            amplitude = DEFAULT_AMPLITUDE
+            if key != 'default':
                 try:
                     amplitude = float(key.split('_')[-1])
                 except (ValueError, IndexError):
                     pass
-        else:
-            # Default data format
-            freqs, amps, phases, iq_data = data_tuple
-            
-        return amplitude, freqs, amps, phases, iq_data
+
+        amps_raw = np.abs(iq_counts)
+        phases_deg = np.degrees(np.angle(iq_counts))
+        return amplitude, freqs, amps_raw, phases_deg, iq_counts
 
     #
     # 2. Cable Delay Management Methods
@@ -455,23 +436,22 @@ class NetworkAnalysisExportMixin:
 
     def _extract_freq_and_phase(self, data_tuple: Tuple) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
-        Extract frequency and phase data from a data tuple.
-        
+        Extract frequency and phase from a (freqs, iq_counts[, amplitude]) tuple.
+
         Args:
-            data_tuple: The data tuple containing measurement results
-            
+            data_tuple: 2-tuple (freqs, iq_counts) or 3-tuple (freqs, iq_counts, amplitude).
+
         Returns:
-            Tuple of (frequencies, phases) arrays or (None, None) if data format is unexpected
+            Tuple of (frequencies, phases_degrees) or (None, None) on unexpected format.
         """
-        if len(data_tuple) == 5:
-            freqs_active, _, phases_displayed_active_deg, _, _ = data_tuple
-            return freqs_active, phases_displayed_active_deg
-        elif len(data_tuple) == 4:
-            freqs_active, _, phases_displayed_active_deg, _ = data_tuple
-            return freqs_active, phases_displayed_active_deg
+        if len(data_tuple) == 3:
+            freqs_active, iq_counts, _ = data_tuple
+        elif len(data_tuple) == 2:
+            freqs_active, iq_counts = data_tuple
         else:
             QtWidgets.QMessageBox.critical(self, "Error", "Unexpected data format.")
             return None, None
+        return freqs_active, np.degrees(np.angle(iq_counts))
 
     def _calculate_cable_length(
         self, 
@@ -544,8 +524,8 @@ class NetworkAnalysisExportMixin:
         if not plot_info['phase_curves'] and 'default' in module_data_dict:
             main_curve_item = plot_info['phase_curve']
             data_tuple_main = module_data_dict['default']
-            
-            if len(data_tuple_main) == 4:
+
+            if len(data_tuple_main) >= 2:
                 self._update_individual_phase_curve(
                     data_tuple_main,
                     main_curve_item,
@@ -557,44 +537,45 @@ class NetworkAnalysisExportMixin:
         plot_info['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
 
     def _update_individual_phase_curve(
-        self, 
-        data_tuple: Tuple, 
+        self,
+        data_tuple: Tuple,
         curve_item: pg.PlotDataItem,
-        L_old_physical: float, 
-        L_new_physical: float
+        L_old_physical: float,
+        L_new_physical: float,
     ) -> None:
         """
         Update an individual phase curve with recalculated phase values.
-        
+
         Args:
-            data_tuple: The data tuple containing frequency and phase values
-            curve_item: The plot curve item to update
-            L_old_physical: The old cable length in meters
-            L_new_physical: The new cable length in meters
+            data_tuple: 2-tuple (freqs, iq_counts) or 3-tuple (freqs, iq_counts, amplitude).
+            curve_item: The plot curve item to update.
+            L_old_physical: The old cable length in meters.
+            L_new_physical: The new cable length in meters.
         """
-        if len(data_tuple) >= 4:  # Ensure we have at least 4 elements
-            if len(data_tuple) == 5:
-                freqs_curve, _, phases_deg_current_display_curve, _, _ = data_tuple
-            else:  # len == 4
-                freqs_curve, _, phases_deg_current_display_curve, _ = data_tuple
-                
+        if len(data_tuple) >= 2:
+            if len(data_tuple) == 3:
+                freqs_curve, iq_counts, _ = data_tuple
+            else:  # len == 2
+                freqs_curve, iq_counts = data_tuple
+            phases_deg_current_display_curve = np.degrees(np.angle(iq_counts))
+
             if len(freqs_curve) > 0:
                 # Recalculate phase with new cable length
                 new_phases_deg_for_curve = recalculate_displayed_phase(
-                    freqs_curve, 
-                    phases_deg_current_display_curve, 
-                    L_old_physical, 
-                    L_new_physical
+                    freqs_curve,
+                    phases_deg_current_display_curve,
+                    L_old_physical,
+                    L_new_physical,
                 )
-                
+
                 if len(new_phases_deg_for_curve) > 0:
-                    # Normalize the phase to start from zero
+                    # Normalise the phase to start from zero
                     first_point_phase = new_phases_deg_for_curve[0]
                     new_phases_deg_for_curve = new_phases_deg_for_curve - first_point_phase
-                
+
                 # Wrap phase to [-180, 180] range
                 new_phases_deg_for_curve = ((new_phases_deg_for_curve + 180) % 360) - 180
-                
+
                 # Update the curve
                 curve_item.setData(freqs_curve, new_phases_deg_for_curve)
 

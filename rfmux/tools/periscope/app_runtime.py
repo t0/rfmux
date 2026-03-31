@@ -1903,6 +1903,29 @@ class PeriscopeRuntime:
         self.notebook_dock.show()
         self.notebook_dock.raise_()
 
+    def _show_jupyter_notebook_settings(self):
+        """
+        Show the Jupyter Notebook Settings dialog.
+
+        Allows the user to view and change the saved notebook library path at
+        any time.  The dialog is always opened in 'settings' mode (not
+        first-time mode), so the "change later" note is omitted.
+        """
+        try:
+            from .notebook_panel import JupyterNotebookSettingsDialog
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Import Error",
+                f"Failed to import JupyterNotebookSettingsDialog:\n{e}"
+            )
+            return
+
+        dialog = JupyterNotebookSettingsDialog(self, is_first_time=False)
+        dialog.exec()
+        # The dialog saves the path to QSettings internally on OK, so no
+        # additional action is needed here.  The new path will be used the
+        # next time a Jupyter server is started.
+
     def _update_console_style(self, dark_mode_enabled: bool):
         """
         Update the style of the embedded iPython console based on the theme.

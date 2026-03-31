@@ -2256,6 +2256,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         notebook_action.setToolTip("Open an embedded Jupyter notebook for interactive analysis")
         notebook_action.triggered.connect(lambda: self._toggle_notebook_panel())
         jupyter_menu.addAction(notebook_action)
+
+        jupyter_menu.addSeparator()
+
+        # Jupyter Notebook Settings
+        notebook_settings_action = QtGui.QAction("⚙️  Jupyter Notebook &Settings…", self)
+        notebook_settings_action.setToolTip(
+            "Configure Jupyter notebook settings (e.g., user notebook library path)"
+        )
+        notebook_settings_action.triggered.connect(self._show_jupyter_notebook_settings)
+        jupyter_menu.addAction(notebook_settings_action)
         
 
     def _create_window_menu(self):

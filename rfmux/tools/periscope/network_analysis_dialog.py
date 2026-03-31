@@ -258,10 +258,20 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         amps = params.get("amps") or ([params["amp"]] if "amp" in params else None)
         if amps:
             try:
-                amp_text = ", ".join(f"{float(amp):g}" for amp in amps)
+                float_amps = [float(a) for a in amps]
             except (TypeError, ValueError):
-                amp_text = ", ".join(str(amp) for amp in amps)
-            self.amp_edit.setText(amp_text)
+                float_amps = None
+            if float_amps:
+                if len(float_amps) == 1:
+                    # Single amplitude — use single mode
+                    self.single_amp_radio.setChecked(True)
+                    self.amp_edit.setText(f"{float_amps[0]:g}")
+                else:
+                    # Multiple amplitudes — switch to sweep mode with first/last/count
+                    self.sweep_amp_radio.setChecked(True)
+                    self.start_amp_edit.setText(f"{float_amps[0]:g}")
+                    self.stop_amp_edit.setText(f"{float_amps[-1]:g}")
+                    self.num_steps_edit.setText(str(len(float_amps)))
     
         def set_if_present(key, widget, formatter):
             if key in params and params[key] is not None:
@@ -282,7 +292,6 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             self.clear_channels_cb.setChecked(bool(params["clear_channels"]))
     
         self._update_dac_scale_info()
-        self._update_dbm_from_normalized()
 
 
     @QtCore.pyqtSlot()
@@ -308,17 +317,16 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
                     parsed_modules = self._get_selected_modules()
                     if parsed_modules:
                         selected_module_param = parsed_modules
-                
-                amp_text = self.amp_edit.text().strip()
-                # Use parsed amplitude values, or default if input is empty
-                amps_list = self._parse_amplitude_values(amp_text) or [DEFAULT_AMPLITUDE]
-                
+
+                # Build amplitude list from the selected mode (single or sweep)
+                amps_list = self._get_amplitude_list()
+                if amps_list is None:
+                    return None  # validation error already shown by _get_amplitude_list
+
                 # Construct parameters dictionary
-                # Using eval for frequency and span allows expressions, but ensure inputs are numbers.
-                # Consider replacing eval with direct float conversion if expressions aren't strictly needed.
                 params_dict = {
                     'amps': amps_list,
-                    'module': selected_module_param, # Can be None (interpreted as all by backend) or list of modules
+                    'module': selected_module_param,
                     'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
                     'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
                     'cable_length': float(self.cable_length_edit.text()),
@@ -326,8 +334,19 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
                     'nsamps': int(self.samples_edit.text()),
                     'max_chans': int(self.max_chans_edit.text()),
                     'max_span': float(eval(self.max_span_edit.text())) * 1e6, # Convert MHz to Hz
-                    'clear_channels': self.clear_channels_cb.isChecked()
+                    'clear_channels': self.clear_channels_cb.isChecked(),
+                    # Persist amplitude mode metadata for next session
+                    'amplitude_mode': 'sweep' if self.sweep_amp_radio.isChecked() else 'single',
                 }
+
+                if self.sweep_amp_radio.isChecked():
+                    try:
+                        params_dict['amp_sweep_start'] = float(eval(self.start_amp_edit.text()))
+                        params_dict['amp_sweep_stop'] = float(eval(self.stop_amp_edit.text()))
+                        params_dict['amp_sweep_steps'] = int(self.num_steps_edit.text())
+                    except Exception:
+                        pass  # non-critical — amps_list already built
+
                 # Basic validation for frequency range
                 if params_dict['fmin'] >= params_dict['fmax']:
                     QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
@@ -337,12 +356,11 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
                 try:
                     settings.set_network_analysis_defaults(params_dict)
                 except Exception as save_err:
-                    # Don't fail the dialog if settings save fails
                     print(f"Warning: Could not save network analysis defaults: {save_err}")
 
                 return params_dict
         except Exception as e:
-            traceback.print_exc() # Log the full traceback for debugging
+            traceback.print_exc()
             QtWidgets.QMessageBox.critical(self, "Error Parsing Parameters", f"Invalid parameter input: {str(e)}")
             return None
 
@@ -473,22 +491,34 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
             Shows an error message on invalid input.
         """
         try:
-            amp_text = self.amp_edit.text().strip()
-            amps_list = self._parse_amplitude_values(amp_text) or [self.params.get('amp', DEFAULT_AMPLITUDE)]
-            
+            # Build amplitude list from the selected mode (single or sweep)
+            amps_list = self._get_amplitude_list()
+            if amps_list is None:
+                return None  # validation error already shown by _get_amplitude_list
+
             # Start with a copy of existing params and update with UI values
-            params_dict = self.params.copy() 
+            params_dict = self.params.copy()
             params_dict.update({
                 'amps': amps_list,
-                'amp': amps_list[0] if amps_list else DEFAULT_AMPLITUDE, # Update single 'amp' for compatibility
+                'amp': amps_list[0] if amps_list else DEFAULT_AMPLITUDE,  # compat key
                 'fmin': float(eval(self.fmin_edit.text())) * 1e6,
                 'fmax': float(eval(self.fmax_edit.text())) * 1e6,
                 'npoints': int(self.points_edit.text()),
                 'nsamps': int(self.samples_edit.text()),
                 'max_chans': int(self.max_chans_edit.text()),
                 'max_span': float(eval(self.max_span_edit.text())) * 1e6,
-                'clear_channels': self.clear_channels_cb.isChecked()
+                'clear_channels': self.clear_channels_cb.isChecked(),
+                'amplitude_mode': 'sweep' if self.sweep_amp_radio.isChecked() else 'single',
             })
+
+            if self.sweep_amp_radio.isChecked():
+                try:
+                    params_dict['amp_sweep_start'] = float(eval(self.start_amp_edit.text()))
+                    params_dict['amp_sweep_stop'] = float(eval(self.stop_amp_edit.text()))
+                    params_dict['amp_sweep_steps'] = int(self.num_steps_edit.text())
+                except Exception:
+                    pass
+
             # Basic validation for frequency range
             if params_dict['fmin'] >= params_dict['fmax']:
                 QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
@@ -496,3 +526,4 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
             return params_dict
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error Parsing Parameters", f"Invalid parameter input: {str(e)}")
+            return None

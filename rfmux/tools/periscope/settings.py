@@ -475,6 +475,10 @@ def get_network_analysis_defaults() -> dict:
         dict: Saved network analysis parameters, or empty dict if none saved.
               Expected keys:
               - amps: List of normalized amplitude values
+              - amplitude_mode: 'single' or 'sweep'
+              - amp_sweep_start: Start amplitude for sweep mode
+              - amp_sweep_stop: Stop amplitude for sweep mode
+              - amp_sweep_steps: Number of steps for sweep mode
               - fmin: Minimum frequency in Hz
               - fmax: Maximum frequency in Hz
               - cable_length: Cable length in metres
@@ -509,6 +513,10 @@ def set_network_analysis_defaults(params: dict) -> None:
 
     persist_keys = {
         'amps',
+        'amplitude_mode',
+        'amp_sweep_start',
+        'amp_sweep_stop',
+        'amp_sweep_steps',
         'fmin',
         'fmax',
         'cable_length',

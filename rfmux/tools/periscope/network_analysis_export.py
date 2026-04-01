@@ -680,9 +680,11 @@ class NetworkAnalysisExportMixin:
                 self.take_multisweep_btn.setEnabled(False)
                 return
         
-        # Enable button if module has resonances
-        has_resonances = bool(self.resonance_freqs.get(module_id))
-        self.take_multisweep_btn.setEnabled(has_resonances)
+        # Enable button whenever sweep data is available for this module so the
+        # user can run a multisweep even without first running Find Resonances
+        # (in that case the dialog will offer "Custom" only).
+        has_data = bool(getattr(self, 'raw_data', {}).get(module_id))
+        self.take_multisweep_btn.setEnabled(has_data)
 
     #
     # 4. Multisweep Dialog Management
@@ -702,16 +704,10 @@ class NetworkAnalysisExportMixin:
         if active_module is None:
             return
             
-        # Check if the module has resonances
+        # Resonances (if Find Resonances has been run) — may be empty, which is fine:
+        # the dialog will show "Custom" only when the list is empty.
         resonances = self.resonance_freqs.get(active_module, [])
-        if not resonances:
-            QtWidgets.QMessageBox.information(
-                self, 
-                "No Resonances", 
-                f"No resonances for Module {active_module}. Run 'Find Resonances'."
-            )
-            return
-        
+
         # Walk up parent hierarchy to find Periscope instance
         # (panel may be wrapped in QDockWidget, so parent() might not be Periscope directly)
         periscope_parent = find_parent_with_attr(self, 'dac_scales')
@@ -723,12 +719,15 @@ class NetworkAnalysisExportMixin:
         elif hasattr(self, 'dac_scales'):
             dac_scales_for_dialog = self.dac_scales
         
-        # Create and show the dialog
+        # Create and show the dialog in netanal mode so the frequency field is
+        # editable and the user can choose between "Approx locations from Find
+        # Resonances" (pre-filled) and "Custom" (blank, type your own).
         dialog = MultisweepDialog(
-            parent=self, 
-            section_center_frequencies=resonances, 
-            dac_scales=dac_scales_for_dialog, 
-            current_module=active_module
+            parent=self,
+            section_center_frequencies=resonances,
+            dac_scales=dac_scales_for_dialog,
+            current_module=active_module,
+            netanal_mode=True,
         )
         
         # Process dialog result

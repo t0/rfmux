@@ -75,7 +75,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                  dac_scales: dict[int, float] = None, 
                  current_module: int | None = None, 
                  initial_params: dict | None = None, load_multisweep = False, fit_frequencies: list[float] = None,
-                 bias_frequencies: list[float] | None = None):
+                 bias_frequencies: list[float] | None = None,
+                 netanal_mode: bool = False):
         """
         Initializes the Multisweep configuration dialog.
 
@@ -104,6 +105,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.load_multisweep = load_multisweep
         self.fit_frequencies = fit_frequencies
         self.bias_frequencies = bias_frequencies or []
+        self.netanal_mode = netanal_mode
 
         self.use_data_from_file = False
         self._load_data = {}
@@ -170,14 +172,21 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
 
     def _update_section_count(self, text):
-        """Update label with section count based on QLineEdit content."""
+        """Update label with section count based on QLineEdit content.
+
+        Guards against being called before ``start_btn`` / ``load_btn`` are
+        created (can happen in netanal_mode if the signal fires during setup).
+        """
         text = text.strip()
         if not text:
             self.sections_info_label.setText("No data. Enter manually if desired.")
-            self.start_btn.setEnabled(False)
-            self.load_btn.setEnabled(False)
+            if hasattr(self, 'start_btn'):
+                self.start_btn.setEnabled(False)
+            if hasattr(self, 'load_btn'):
+                self.load_btn.setEnabled(False)
             return
-        self.start_btn.setEnabled(True)
+        if hasattr(self, 'start_btn'):
+            self.start_btn.setEnabled(True)
         # Split on commas, ignore empty pieces
         parts = [p.strip() for p in text.split(",") if p.strip()]
         self.section_count = len(parts)
@@ -299,7 +308,52 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.section_freq_combo.currentIndexChanged.connect(self._scroll_rerun_section)
             layout.addWidget(section_info_group)
             
+        elif self.netanal_mode:
+            # ── netanal mode: editable field with optional Find Resonances source ──
+            section_info_group = QtWidgets.QGroupBox("Sweep sections")
+            section_info_layout = QtWidgets.QVBoxLayout(section_info_group)
+
+            section_label_layout = QtWidgets.QHBoxLayout()
+            self.sections_info_label = QtWidgets.QLabel("Central frequencies")
+            self.sections_info_label.setWordWrap(True)
+            section_label_layout.addWidget(self.sections_info_label, stretch=1)
+
+            self.section_freq_combo = QtWidgets.QComboBox()
+            if self.section_center_frequencies:
+                self.section_freq_combo.addItem("Approx locations from Find Resonances")
+            self.section_freq_combo.addItem("Custom")
+            self.section_freq_combo.setToolTip(
+                "Select what to use as the central frequency of each sweep section.\n"
+                "'Approx locations from Find Resonances' pre-fills with the resonances\n"
+                "found by the Find Resonances algorithm (editable).\n"
+                "'Custom' lets you type a comma-separated list of frequencies in MHz."
+            )
+            # Default to first item (Find Resonances if available, else Custom)
+            self.section_freq_combo.blockSignals(True)
+            self.section_freq_combo.setCurrentIndex(0)
+            self.section_freq_combo.blockSignals(False)
+            section_label_layout.addWidget(self.section_freq_combo)
+
+            section_info_layout.addLayout(section_label_layout)
+
+            # Editable frequency field.  Pre-populated when Find Resonances has run.
+            # setText is called BEFORE connecting textChanged so _update_section_count
+            # doesn't fire before start_btn / load_btn are created.
+            self.sections_edit = QtWidgets.QLineEdit()
+            self.sections_edit.setPlaceholderText("Enter sweep central frequencies (MHz, comma separated)")
+            if self.section_center_frequencies:
+                section_freq_str = ", ".join([f"{f / 1e6:.6f}" for f in self.section_center_frequencies])
+                self.sections_edit.setText(section_freq_str)
+            section_info_layout.addWidget(self.sections_edit)
+
+            # Connect signals AFTER setText so they only fire on user edits
+            self.sections_edit.textChanged.connect(self._update_section_count)
+            self.section_freq_combo.currentIndexChanged.connect(self._scroll_netanal_section)
+
+            layout.addWidget(section_info_group)
+
         else:
+            # ── Legacy / fallback: static label (non-editable) ──────────────────
             section_info_group = QtWidgets.QGroupBox("Sweep sections")
             section_info_layout = QtWidgets.QVBoxLayout(section_info_group)
             num_sections = len(self.section_center_frequencies)
@@ -310,8 +364,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 if num_sections > 5:
                     section_freq_mhz_str += ", ..."  # Indicate more frequencies exist
                 section_label_text += f"\nFrequencies (MHz): {section_freq_mhz_str}"
-    
-            
+
             self.sections_info_label = QtWidgets.QLabel(section_label_text)
             self.sections_info_label.setWordWrap(True)
             section_info_layout.addWidget(self.sections_info_label)
@@ -531,6 +584,10 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             btn_layout = QtWidgets.QHBoxLayout()
             self.start_btn = QtWidgets.QPushButton("Start Multisweep")
             self.start_btn.setDefault(True)  # Make this the default button (highlighted, triggered by Enter)
+            # In netanal_mode with no pre-populated frequencies (Find Resonances not run),
+            # disable the button until the user types in some custom frequencies.
+            if self.netanal_mode and not self.section_center_frequencies:
+                self.start_btn.setEnabled(False)
             self.load_btn = QtWidgets.QPushButton("Load Multisweep")
             self.load_btn.hide()
             self.cancel_btn = QtWidgets.QPushButton("Cancel")
@@ -679,6 +736,29 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.sections_edit.setText(", ".join([f"{f/1e6:.6f}" for f in freqs]))
         n = len(freqs)
         self.sections_info_label.setText(f"{n} section(s) selected.")
+
+    def _scroll_netanal_section(self):
+        """Handle frequency source combo changes in netanal mode.
+
+        When the user selects "Approx locations from Find Resonances" the editable
+        field is pre-populated with the resonance frequencies found during the
+        network analysis.  Selecting "Custom" clears the field so the user can
+        type their own comma-separated MHz values.
+        """
+        selected = self.section_freq_combo.currentText()
+        if "Find Resonances" in selected:
+            # Restore the Find Resonances frequencies
+            if self.section_center_frequencies:
+                section_freq_str = ", ".join([f"{f / 1e6:.6f}" for f in self.section_center_frequencies])
+                self.sections_edit.setText(section_freq_str)
+                n = len(self.section_center_frequencies)
+                self.sections_info_label.setText(f"{n} section(s) from Find Resonances.")
+            else:
+                self.sections_edit.clear()
+                self.sections_info_label.setText("No Find Resonances data available.")
+        else:  # "Custom"
+            self.sections_edit.clear()
+            self.sections_info_label.setText("Enter frequencies manually (MHz, comma separated).")
         
     
     def _import_file(self):
@@ -904,13 +984,14 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             params_dict['nsamps'] = int(self.nsamps_edit.text())
             
             # Get center frequencies
-            if self.load_multisweep:
+            if self.load_multisweep or self.netanal_mode:
+                # Parse from the editable text field (comma-separated MHz values)
                 params_dict['sweep_center_frequencies'] = []
-                freqs = self.sections_edit.text().split(',')
-                for f in freqs:
-                    params_dict['sweep_center_frequencies'].append(np.float64(f) * 1e6)
+                for f in self.sections_edit.text().split(','):
+                    f = f.strip()
+                    if f:
+                        params_dict['sweep_center_frequencies'].append(np.float64(f) * 1e6)
             else:
-
                 params_dict['sweep_center_frequencies'] = self.section_center_frequencies
             
             num_sections = len(params_dict['sweep_center_frequencies'])

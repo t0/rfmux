@@ -13,7 +13,8 @@ can be dismissed without disrupting ongoing work.
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QGroupBox,
-    QDoubleSpinBox, QSpinBox, QCheckBox, QPushButton, QHBoxLayout, QLabel,
+    QDoubleSpinBox, QSpinBox, QPushButton, QHBoxLayout, QLabel,
+    QRadioButton, QButtonGroup,
 )
 from PyQt6.QtCore import Qt
 
@@ -31,6 +32,10 @@ class FindResonancesSettingsPanel(QWidget):
     Call :meth:`get_settings` to retrieve the current parameter dict, which
     can be passed directly to ``fitting.find_resonances()`` as keyword
     arguments.
+
+    Call :meth:`update_amplitude_count` whenever the loaded network analysis
+    data changes so that the index spinbox range is clamped to the actual
+    number of amplitude iterations available.
     """
 
     def __init__(self, parent=None):
@@ -51,6 +56,57 @@ class FindResonancesSettingsPanel(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
+
+        # ── Amplitude iteration to search: (TOP) ──────────────────────────────
+        amp_group = QGroupBox("Amplitude iteration to search:")
+        amp_layout = QVBoxLayout()
+        amp_layout.setSpacing(4)
+
+        self._amp_mode_btn_group = QButtonGroup(self)
+
+        # Option 1: Last amplitude (default — preserves existing behaviour)
+        self.amp_last_rb = QRadioButton("Last amplitude")
+        self.amp_last_rb.setChecked(True)
+        self.amp_last_rb.setToolTip(
+            "Use the last (highest-index) amplitude iteration from the\n"
+            "network analysis file.  This is the default behaviour."
+        )
+        self._amp_mode_btn_group.addButton(self.amp_last_rb, 0)
+        amp_layout.addWidget(self.amp_last_rb)
+
+        # Option 2: By sorted index
+        index_row = QWidget()
+        index_row_layout = QHBoxLayout(index_row)
+        index_row_layout.setContentsMargins(0, 0, 0, 0)
+        index_row_layout.setSpacing(4)
+
+        self.amp_index_rb = QRadioButton("Amplitude index:")
+        self.amp_index_rb.setToolTip(
+            "Use the amplitude iteration at the given 0-based position when\n"
+            "amplitudes are sorted from lowest to highest.\n"
+            "Index 0 = lowest amplitude, 1 = next lowest, etc.\n"
+            "The maximum is constrained to the iterations present in the\n"
+            "loaded network analysis file."
+        )
+        self._amp_mode_btn_group.addButton(self.amp_index_rb, 1)
+        index_row_layout.addWidget(self.amp_index_rb)
+
+        self.amp_index_spin = QSpinBox()
+        self.amp_index_spin.setRange(0, 0)  # max updated via update_amplitude_count()
+        self.amp_index_spin.setValue(0)
+        self.amp_index_spin.setSuffix("  (0 = lowest)")
+        self.amp_index_spin.setToolTip(
+            "0-based index into the sorted amplitude list (0 = lowest amplitude).\n"
+            "The maximum is updated to match the number of iterations in the\n"
+            "loaded file each time the settings panel is opened."
+        )
+        self.amp_index_spin.setEnabled(False)  # only active when its radio button is checked
+        index_row_layout.addWidget(self.amp_index_spin)
+        index_row_layout.addStretch(1)
+        amp_layout.addWidget(index_row)
+
+        amp_group.setLayout(amp_layout)
+        layout.addWidget(amp_group)
 
         # ── Detection criteria ────────────────────────────────────────────────
         detect_group = QGroupBox("Detection Criteria")
@@ -152,6 +208,9 @@ class FindResonancesSettingsPanel(QWidget):
         layout.addWidget(algo_group)
 
         # ── Auto-save on change ───────────────────────────────────────────────
+        self.amp_last_rb.toggled.connect(self._on_amp_mode_changed)
+        self.amp_index_rb.toggled.connect(self._on_amp_mode_changed)
+        self.amp_index_spin.valueChanged.connect(self._save_settings)
         self.expected_resonances_spin.valueChanged.connect(self._save_settings)
         self.min_dip_depth_spin.valueChanged.connect(self._save_settings)
         self.min_separation_spin.valueChanged.connect(self._save_settings)
@@ -173,6 +232,11 @@ class FindResonancesSettingsPanel(QWidget):
 
     # ── Event handling ────────────────────────────────────────────────────────
 
+    def _on_amp_mode_changed(self):
+        """Enable/disable the index spinbox based on the active radio button."""
+        self.amp_index_spin.setEnabled(self.amp_index_rb.isChecked())
+        self._save_settings()
+
     def keyPressEvent(self, event):
         """Close the panel when Enter or Return is pressed."""
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -182,10 +246,38 @@ class FindResonancesSettingsPanel(QWidget):
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def update_amplitude_count(self, n: int) -> None:
+        """
+        Update the index spinbox so the user can only select valid indices.
+
+        Should be called by :class:`NetworkAnalysisPanel` every time the
+        settings panel is shown, passing the number of amplitude iterations
+        that are actually present in the loaded network analysis file for the
+        currently active module.
+
+        Args:
+            n: Number of available amplitude iterations (≥ 0).  When 0 or 1
+               the spinbox maximum is set to 0 so only index 0 is selectable.
+        """
+        max_index = max(0, n - 1)
+        # Block signals so we don't fire _save_settings mid-update
+        self.amp_index_spin.blockSignals(True)
+        self.amp_index_spin.setMaximum(max_index)
+        # Update suffix to show the valid range
+        if n > 1:
+            self.amp_index_spin.setSuffix(f"  (0–{max_index}; 0 = lowest)")
+        else:
+            self.amp_index_spin.setSuffix("  (0 = lowest)")
+        # Clamp the stored value into the valid range
+        if self.amp_index_spin.value() > max_index:
+            self.amp_index_spin.setValue(max_index)
+        self.amp_index_spin.blockSignals(False)
+
     def get_settings(self) -> dict:
         """
         Return the current settings as a dict suitable for passing to
-        ``fitting.find_resonances()`` as keyword arguments.
+        ``fitting.find_resonances()`` as keyword arguments (plus amplitude
+        iteration control keys consumed by the panel caller before forwarding).
 
         Keys:
 
@@ -195,15 +287,21 @@ class FindResonancesSettingsPanel(QWidget):
         * ``max_Q`` (float)
         * ``min_resonance_separation_hz`` (float) — converted from the kHz spinbox
         * ``data_exponent`` (float)
+        * ``find_resonances_amplitude_mode`` (str) — ``'last'`` or ``'index'``
+        * ``find_resonances_amplitude_index`` (int) — 0-based sorted index
+          (only relevant when mode is ``'index'``)
         """
         expected = self.expected_resonances_spin.value()
+        mode = 'index' if self.amp_index_rb.isChecked() else 'last'
         return {
-            'expected_resonances':          expected if expected > 0 else None,
-            'min_dip_depth_db':             self.min_dip_depth_spin.value(),
-            'min_Q':                        self.min_q_spin.value(),
-            'max_Q':                        self.max_q_spin.value(),
-            'min_resonance_separation_hz':  self.min_separation_spin.value() * 1e3,
-            'data_exponent':                self.data_exponent_spin.value(),
+            'expected_resonances':               expected if expected > 0 else None,
+            'min_dip_depth_db':                  self.min_dip_depth_spin.value(),
+            'min_Q':                             self.min_q_spin.value(),
+            'max_Q':                             self.max_q_spin.value(),
+            'min_resonance_separation_hz':       self.min_separation_spin.value() * 1e3,
+            'data_exponent':                     self.data_exponent_spin.value(),
+            'find_resonances_amplitude_mode':    mode,
+            'find_resonances_amplitude_index':   self.amp_index_spin.value(),
         }
 
     # Alias so that any generic parameter extractor can find get_parameters.
@@ -216,15 +314,18 @@ class FindResonancesSettingsPanel(QWidget):
         saved = periscope_settings.get_find_resonances_defaults()
 
         # Block signals while restoring values to avoid triggering _save_settings
-        for spin in (
+        for widget in (
             self.expected_resonances_spin,
             self.min_dip_depth_spin,
             self.min_separation_spin,
             self.min_q_spin,
             self.max_q_spin,
             self.data_exponent_spin,
+            self.amp_last_rb,
+            self.amp_index_rb,
+            self.amp_index_spin,
         ):
-            spin.blockSignals(True)
+            widget.blockSignals(True)
 
         # expected_resonances: None → 0 (special "Auto" value)
         expected = saved.get('expected_resonances')
@@ -240,15 +341,29 @@ class FindResonancesSettingsPanel(QWidget):
         self.max_q_spin.setValue(saved.get('max_Q', 1e7))
         self.data_exponent_spin.setValue(saved.get('data_exponent', 2.0))
 
-        for spin in (
+        # Amplitude iteration mode
+        amp_mode = saved.get('find_resonances_amplitude_mode', 'last')
+        if amp_mode == 'index':
+            self.amp_index_rb.setChecked(True)
+        else:
+            self.amp_last_rb.setChecked(True)
+        # Note: setMaximum is NOT restored from settings here — it is updated
+        # dynamically by update_amplitude_count() when the panel is shown.
+        self.amp_index_spin.setValue(int(saved.get('find_resonances_amplitude_index', 0)))
+        self.amp_index_spin.setEnabled(amp_mode == 'index')
+
+        for widget in (
             self.expected_resonances_spin,
             self.min_dip_depth_spin,
             self.min_separation_spin,
             self.min_q_spin,
             self.max_q_spin,
             self.data_exponent_spin,
+            self.amp_last_rb,
+            self.amp_index_rb,
+            self.amp_index_spin,
         ):
-            spin.blockSignals(False)
+            widget.blockSignals(False)
 
     def _save_settings(self):
         """Persist current settings to QSettings (called on every control change)."""
@@ -257,6 +372,20 @@ class FindResonancesSettingsPanel(QWidget):
     def _reset_defaults(self):
         """Restore all controls to their default values and persist."""
         defaults = periscope_settings._FIND_RESONANCES_DEFAULTS
+
+        # Block signals during reset to avoid multiple intermediate saves
+        for widget in (
+            self.expected_resonances_spin,
+            self.min_dip_depth_spin,
+            self.min_separation_spin,
+            self.min_q_spin,
+            self.max_q_spin,
+            self.data_exponent_spin,
+            self.amp_last_rb,
+            self.amp_index_rb,
+            self.amp_index_spin,
+        ):
+            widget.blockSignals(True)
 
         self.expected_resonances_spin.setValue(
             defaults.get('expected_resonances') or 0
@@ -268,6 +397,24 @@ class FindResonancesSettingsPanel(QWidget):
         self.min_q_spin.setValue(defaults.get('min_Q', 1e4))
         self.max_q_spin.setValue(defaults.get('max_Q', 1e7))
         self.data_exponent_spin.setValue(defaults.get('data_exponent', 2.0))
-        # _save_settings fires automatically via valueChanged signals above.
-        # Call explicitly in case no value actually changed.
+
+        # Amplitude iteration: default to 'last' / index 0
+        self.amp_last_rb.setChecked(True)
+        self.amp_index_spin.setValue(0)
+        self.amp_index_spin.setEnabled(False)
+
+        for widget in (
+            self.expected_resonances_spin,
+            self.min_dip_depth_spin,
+            self.min_separation_spin,
+            self.min_q_spin,
+            self.max_q_spin,
+            self.data_exponent_spin,
+            self.amp_last_rb,
+            self.amp_index_rb,
+            self.amp_index_spin,
+        ):
+            widget.blockSignals(False)
+
+        # One explicit save after all controls have been reset
         self._save_settings()

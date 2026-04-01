@@ -608,12 +608,14 @@ def set_fit_defaults(params: dict) -> None:
 # ─────────────────────────────────────────────────────────────────
 
 _FIND_RESONANCES_DEFAULTS = {
-    'expected_resonances':         1024,   # Default upper limit; lower to restrict results
-    'min_dip_depth_db':            2.0,
-    'min_Q':                       1e4,
-    'max_Q':                       1e7,
-    'min_resonance_separation_hz': 1e4,    # 10 kHz
-    'data_exponent':               2.0,
+    'expected_resonances':                1024,   # Default upper limit; lower to restrict results
+    'min_dip_depth_db':                   2.0,
+    'min_Q':                              1e4,
+    'max_Q':                              1e7,
+    'min_resonance_separation_hz':        1e4,    # 10 kHz
+    'data_exponent':                      2.0,
+    'find_resonances_amplitude_mode':     'last', # 'last' or 'index'
+    'find_resonances_amplitude_index':    0,       # 0-based sorted index
 }
 
 
@@ -656,6 +658,8 @@ def set_find_resonances_defaults(params: dict) -> None:
         'max_Q',
         'min_resonance_separation_hz',
         'data_exponent',
+        'find_resonances_amplitude_mode',
+        'find_resonances_amplitude_index',
     }
     filtered = {k: v for k, v in params.items() if k in persist_keys}
     qs = _get_settings()

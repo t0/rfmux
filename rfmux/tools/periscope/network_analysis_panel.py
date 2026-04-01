@@ -46,8 +46,6 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.resonance_freqs = {}  # Store resonance frequencies per module
         self.add_subtract_mode = False
         self.module_cable_lengths = {} # For Requirement 2
-        self.faux_resonance_legend_items_mag = {} # For Req 3
-        self.faux_resonance_legend_items_phase = {} # For Req 3
         self.dark_mode = dark_mode  # Store dark mode setting
         self.is_loaded_data = is_loaded_data  # Track if this is from loaded data
         
@@ -397,6 +395,21 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             plot_info['amp_curve'].setData([], [])
             plot_info['phase_curve'].setData([], [])
 
+            # Remove resonance InfiniteLine items from both plots so that red
+            # lines from a previous Find Resonances run do not persist when the
+            # panel is re-used for a new sweep (e.g. via "Re-run analysis").
+            amp_plot_item = amp_plot.getPlotItem()
+            phase_plot_item = phase_plot.getPlotItem()
+            for line in plot_info.get('resonance_lines_mag', []):
+                if amp_plot_item:
+                    amp_plot_item.removeItem(line)
+            plot_info['resonance_lines_mag'] = []
+            for line in plot_info.get('resonance_lines_phase', []):
+                if phase_plot_item:
+                    phase_plot_item.removeItem(line)
+            plot_info['resonance_lines_phase'] = []
+            self.resonance_freqs[module_id_iter] = []
+
             self._remove_faux_resonance_legend_entry(module_id_iter)
             self._update_multisweep_button_state(module_id_iter) 
 
@@ -634,13 +647,52 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
     # ── Find Resonances Settings ──────────────────────────────────────────────
 
     def _show_find_resonances_settings(self):
-        """Show (or create) the persistent FindResonancesSettingsPanel window."""
+        """Show (or create) the persistent FindResonancesSettingsPanel window.
+
+        Also updates the amplitude index spinbox range to match the number of
+        amplitude iterations actually present in the loaded data for the
+        currently active module.
+        """
         from .find_resonances_settings_panel import FindResonancesSettingsPanel
         if self.find_resonances_settings_panel is None:
             self.find_resonances_settings_panel = FindResonancesSettingsPanel(parent=None)
+        # Refresh the allowed index range every time the panel is opened so it
+        # always reflects the current data even if data changed since last open.
+        self.find_resonances_settings_panel.update_amplitude_count(
+            self._get_active_module_amplitude_count()
+        )
         self.find_resonances_settings_panel.show()
         self.find_resonances_settings_panel.raise_()
         self.find_resonances_settings_panel.activateWindow()
+
+    def _get_active_module_amplitude_count(self) -> int:
+        """Return the number of amplitude iterations available for the active module.
+
+        Used to constrain the amplitude-index spinbox in the settings panel.
+        Returns 0 when no data is loaded, 1 for a single-amplitude (default)
+        sweep, or the actual count when a multi-amplitude sweep was run.
+        """
+        current_tab_index = self.tabs.currentIndex()
+        if current_tab_index < 0:
+            return 0
+        try:
+            active_module = int(self.tabs.tabText(current_tab_index).split(" ")[1])
+        except (IndexError, ValueError):
+            return 0
+
+        module_sweeps = self.raw_data.get(active_module, {})
+        if not module_sweeps:
+            return 0
+
+        ordered_amplitudes_run = self.original_params.get('amps', [])
+        if not ordered_amplitudes_run:
+            # Single "default" sweep
+            return 1 if 'default' in module_sweeps else 0
+
+        return sum(
+            1 for amp in ordered_amplitudes_run
+            if f"{active_module}_{amp}" in module_sweeps
+        )
 
     # ── Find Resonances ───────────────────────────────────────────────────────
 
@@ -693,15 +745,41 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             self._update_multisweep_button_state(active_module) 
             return
 
+        # Extract amplitude-selection settings — consumed here, not forwarded to
+        # fitting.find_resonances(), which does not accept these keys.
+        amplitude_mode = find_resonances_params.pop('find_resonances_amplitude_mode', 'last')
+        amplitude_index = int(find_resonances_params.pop('find_resonances_amplitude_index', 0))
+
         target_sweep_key = None
         ordered_amplitudes_run = self.original_params.get('amps', [])
         if ordered_amplitudes_run:
-            for amp_setting in reversed(ordered_amplitudes_run):
-                sweep_key = f"{active_module}_{amp_setting}"
-                if sweep_key in module_sweeps:
-                    target_sweep_key = sweep_key
-                    break
-        
+            # Build the list of (amplitude_value, sweep_key) pairs that actually
+            # have data, sorted by amplitude value (ascending) so that index 0
+            # always means the lowest amplitude regardless of run order.
+            available = sorted(
+                [
+                    (amp, f"{active_module}_{amp}")
+                    for amp in ordered_amplitudes_run
+                    if f"{active_module}_{amp}" in module_sweeps
+                ],
+                key=lambda x: x[0],
+            )
+
+            if available:
+                if amplitude_mode == 'index':
+                    # Clamp the requested index to the valid range
+                    clamped = min(amplitude_index, len(available) - 1)
+                    _, target_sweep_key = available[clamped]
+                else:  # 'last' — use the last entry in the original params order
+                    # Walk the original (unsorted) list in reverse to find the
+                    # last amp that has a recorded sweep, preserving the
+                    # previous default behaviour.
+                    for amp_setting in reversed(ordered_amplitudes_run):
+                        sweep_key = f"{active_module}_{amp_setting}"
+                        if sweep_key in module_sweeps:
+                            target_sweep_key = sweep_key
+                            break
+
         if target_sweep_key is None and 'default' in module_sweeps:
             target_sweep_key = 'default'
 
@@ -822,49 +900,39 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self._update_multisweep_button_state(active_module)
         
     def _remove_faux_resonance_legend_entry(self, module_id: int):
-        """Removes the faux resonance legend entry for a module."""
-        if module_id in self.plots:
-            plot_info = self.plots[module_id]
-            amp_legend = plot_info['amp_legend']
-            phase_legend = plot_info['phase_legend']
-
-            if module_id in self.faux_resonance_legend_items_mag:
-                try:
-                    amp_legend.removeItem(self.faux_resonance_legend_items_mag[module_id])
-                except Exception: 
-                    pass 
-                del self.faux_resonance_legend_items_mag[module_id]
-            
-            if module_id in self.faux_resonance_legend_items_phase:
-                try:
-                    phase_legend.removeItem(self.faux_resonance_legend_items_phase[module_id])
-                except Exception:
-                    pass
-                del self.faux_resonance_legend_items_phase[module_id]
+        """Reset plot titles to their base text (removing any resonance count suffix)."""
+        if module_id not in self.plots:
+            return
+        pen_color = "w" if self.dark_mode else "k"
+        plot_info = self.plots[module_id]
+        amp_plot_item = plot_info['amp_plot'].getPlotItem()
+        phase_plot_item = plot_info['phase_plot'].getPlotItem()
+        if amp_plot_item:
+            amp_plot_item.setTitle(f"Module {module_id} - Magnitude", color=pen_color)
+        if phase_plot_item:
+            phase_plot_item.setTitle(f"Module {module_id} - Phase", color=pen_color)
 
     def _update_resonance_legend_entry(self, module_id: int):
-        """Adds or updates the faux legend entry for resonance count."""
+        """Update plot titles to show resonance count, or reset them when hidden/zero."""
         if module_id not in self.plots:
             return
 
-        self._remove_faux_resonance_legend_entry(module_id) 
-
+        pen_color = "w" if self.dark_mode else "k"
         plot_info = self.plots[module_id]
-        amp_legend = plot_info['amp_legend']
-        phase_legend = plot_info['phase_legend']
-        
+        amp_plot_item = plot_info['amp_plot'].getPlotItem()
+        phase_plot_item = plot_info['phase_plot'].getPlotItem()
+
         count = len(self.resonance_freqs.get(module_id, []))
 
         if self.show_resonances_cb.isChecked() and count > 0:
-            dummy_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
-            
-            legend_sample_item_mag = pg.PlotDataItem(pen=dummy_pen)
-            amp_legend.addItem(legend_sample_item_mag, f"{count} resonances")
-            self.faux_resonance_legend_items_mag[module_id] = legend_sample_item_mag 
+            suffix = f" (Found {count} resonances)"
+        else:
+            suffix = ""
 
-            legend_sample_item_phase = pg.PlotDataItem(pen=dummy_pen)
-            phase_legend.addItem(legend_sample_item_phase, f"{count} resonances")
-            self.faux_resonance_legend_items_phase[module_id] = legend_sample_item_phase
+        if amp_plot_item:
+            amp_plot_item.setTitle(f"Module {module_id} - Magnitude{suffix}", color=pen_color)
+        if phase_plot_item:
+            phase_plot_item.setTitle(f"Module {module_id} - Phase{suffix}", color=pen_color)
 
 
     def _get_periscope_parent(self):

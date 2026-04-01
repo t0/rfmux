@@ -9,6 +9,7 @@ from .utils import (
     UnitConverter, traceback
 )
 from .tasks import DACScaleFetcher
+import datetime
 import numpy as np  # For linspace
 
 class NetworkAnalysisDialogBase(QtWidgets.QDialog):
@@ -572,3 +573,31 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
                 pass
         finally:
             self.currently_updating = False
+
+    # ── Measurement name helpers (shared by all subclass dialogs) ──────
+
+    def _update_name_preview(self):
+        """Update the live filename preview label from the two name fields."""
+        base = self.base_name_edit.text().strip()
+        suffix = self.custom_suffix_edit.text().strip()
+        if base:
+            full = f"{base}_{suffix}.pkl" if suffix else f"{base}.pkl"
+        else:
+            full = f"{suffix}.pkl" if suffix else "(no name)"
+        self._name_preview_label.setText(full)
+
+    def _get_measurement_name(self) -> str:
+        """Return the combined measurement name from the two dialog fields.
+
+        Combines base name and optional custom suffix with an underscore
+        separator.  Strips both values and falls back to a fresh timestamp
+        if the base field is empty.
+
+        Returns:
+            The measurement name string (without .pkl extension).
+        """
+        base = self.base_name_edit.text().strip()
+        suffix = self.custom_suffix_edit.text().strip()
+        if not base:
+            base = datetime.datetime.now().strftime("netanal_%H%M%S")
+        return f"{base}_{suffix}" if suffix else base

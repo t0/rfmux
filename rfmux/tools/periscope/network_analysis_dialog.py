@@ -339,32 +339,6 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         """Handle the event when the file dialog is closed without selection."""
         pass
 
-    def _update_name_preview(self):
-        """Update the live filename preview label from the two name fields."""
-        base = self.base_name_edit.text().strip()
-        suffix = self.custom_suffix_edit.text().strip()
-        if base:
-            full = f"{base}_{suffix}.pkl" if suffix else f"{base}.pkl"
-        else:
-            full = f"{suffix}.pkl" if suffix else "(no name)"
-        self._name_preview_label.setText(full)
-
-    def _get_measurement_name(self) -> str:
-        """Return the combined measurement name from the two dialog fields.
-
-        Combines base name and optional custom suffix with an underscore
-        separator.  Strips both values and falls back to a fresh timestamp
-        if the base field is empty.
-
-        Returns:
-            The measurement name string (without .pkl extension).
-        """
-        base = self.base_name_edit.text().strip()
-        suffix = self.custom_suffix_edit.text().strip()
-        if not base:
-            base = datetime.datetime.now().strftime("netanal_%H%M%S")
-        return f"{base}_{suffix}" if suffix else base
-
     def get_parameters(self) -> dict | None:
         """
         Retrieves and validates the network analysis parameters from the UI fields.
@@ -489,6 +463,42 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
     def _setup_ui(self):
         """Sets up the user interface elements for the dialog."""
         layout = QtWidgets.QVBoxLayout(self)
+
+        # ── Measurement Name ──────────────────────────────────────────────────
+        name_group = QtWidgets.QGroupBox("Measurement Name")
+        name_form = QtWidgets.QFormLayout(name_group)
+
+        # Pre-populate with the existing measurement name (if any), else a fresh timestamp
+        existing_name = self.params.get('measurement_name', '')
+        default_base = existing_name if existing_name else datetime.datetime.now().strftime("netanal_%H%M%S")
+        self.base_name_edit = QtWidgets.QLineEdit(default_base)
+        self.base_name_edit.setToolTip(
+            "Base filename — pre-filled with the previous measurement name.\n"
+            "You may edit it freely.  The .pkl extension is added automatically."
+        )
+        name_form.addRow("Base name:", self.base_name_edit)
+
+        # Optional user suffix, blank by default
+        self.custom_suffix_edit = QtWidgets.QLineEdit()
+        self.custom_suffix_edit.setPlaceholderText("e.g. cold_dark, tile3, run2")
+        self.custom_suffix_edit.setToolTip(
+            "Optional suffix appended after the base name with an underscore separator.\n"
+            "Leave blank to use the base name only."
+        )
+        name_form.addRow("Custom suffix:", self.custom_suffix_edit)
+
+        # Live preview label
+        self._name_preview_label = QtWidgets.QLabel()
+        self._name_preview_label.setStyleSheet("font-style: italic; color: #555;")
+        name_form.addRow("→  filename:", self._name_preview_label)
+
+        # Connect both fields to update the preview
+        self.base_name_edit.textChanged.connect(self._update_name_preview)
+        self.custom_suffix_edit.textChanged.connect(self._update_name_preview)
+        self._update_name_preview()  # populate on open
+
+        layout.addWidget(name_group)
+
         form = QtWidgets.QFormLayout()
         
         # Populate fields with existing parameters or defaults
@@ -535,7 +545,11 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
         # or if _fetch_dac_scales is not called (e.g., no CRS object).
         self._update_dac_scale_info() # Call this first to set up dac_scale_info label correctly
         self._update_dbm_from_normalized() 
-        self.setMinimumSize(500, 600)
+        self.setMinimumSize(500, 680)
+
+        # Place focus in the custom suffix field so the user can annotate the
+        # re-run immediately without having to click past the base name.
+        self.custom_suffix_edit.setFocus()
 
     def _get_selected_modules(self) -> list[int]:
         """
@@ -580,6 +594,7 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
                 'max_span': float(eval(self.max_span_edit.text())) * 1e6,
                 'clear_channels': self.clear_channels_cb.isChecked(),
                 'amplitude_mode': 'sweep' if self.sweep_amp_radio.isChecked() else 'single',
+                'measurement_name': self._get_measurement_name(),
             })
 
             if self.sweep_amp_radio.isChecked():

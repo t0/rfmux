@@ -1293,10 +1293,14 @@ class PeriscopeRuntime:
                 else:
                     print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
-            # Load data into panel - handle both old (iteration) and new (detector) formats
-            if 'results_by_detector' in load_params:
-                # New format: load directly into panel
-                panel.results_by_detector = load_params['results_by_detector']
+            # Load data into panel - handle new and legacy formats.
+            # Priority: 'results' (new key) → 'results_by_detector' (old key) → 'results_by_iteration' (legacy)
+            _results_key = 'results' if 'results' in load_params else (
+                'results_by_detector' if 'results_by_detector' in load_params else None
+            )
+            if _results_key is not None:
+                # Detector-based format: load directly into panel
+                panel.results_by_detector = load_params[_results_key]
                 # Restore the resonator registry so Find Bias can run on loaded data
                 if load_params.get('res_info_dict'):
                     panel.res_info_dict = load_params['res_info_dict']
@@ -1575,6 +1579,7 @@ class PeriscopeRuntime:
     def _export_channel_noise_data(self):
         
         return {
+            'measurement_type': 'channel_noise',
             'timestamp': datetime.datetime.now().isoformat(),
             'target_module': self.module,
             'dac_scales_used': self.dac_scales,

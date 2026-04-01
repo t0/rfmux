@@ -1684,12 +1684,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 export_initial_params['section_amplitudes'] = section_amps
             
         return {
+            'measurement_type': 'multisweep',
             'timestamp': datetime.datetime.now().isoformat(),
             'target_module': self.target_module,
             'initial_parameters': export_initial_params,
             'dac_scales_used': self.dac_scales,
             'res_info_dict': self.res_info_dict,        # Lightweight resonator registry
-            'results_by_detector': self._results_by_detector_with_iq_volts(),
+            'results': self._results_by_detector_with_iq_volts(),
             'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
             'nco_frequency_hz': self.nco_frequency_hz,  # NCO frequency used for biasing
             'noise_data': spectrum_data
@@ -2221,6 +2222,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 
                 # Emit data_ready signal for session auto-export
                 export_data = self._prepare_export_data()
+                export_data['measurement_type'] = 'noise'
                 identifier = f"module{module}_noise"
                 self.data_ready.emit("noise", identifier, export_data)
                 
@@ -2882,6 +2884,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Emit for session auto-export
         export_data = self._prepare_export_data()
+        export_data['measurement_type'] = 'bias'
         self.data_ready.emit("bias", f"module{module}", export_data)
 
         # Re-enable buttons

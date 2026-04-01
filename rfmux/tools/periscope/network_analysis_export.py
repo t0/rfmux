@@ -159,6 +159,7 @@ class NetworkAnalysisExportMixin:
         target_module = self.modules[0] if self.modules else None
 
         export_data = {
+            'measurement_type':    'netanal',
             'timestamp':           datetime.datetime.now().isoformat(),
             'initial_parameters':  self.current_params.copy() if hasattr(self, 'current_params') else {},
             'dac_scales_used':     self.dac_scales.copy() if hasattr(self, 'dac_scales') else {},

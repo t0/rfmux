@@ -600,17 +600,25 @@ class SessionManager(QtCore.QObject):
         if data is None or not isinstance(data, dict):
             return None
         
-        # 1. Check for session export metadata (most reliable)
+        # 1. Top-level 'measurement_type' key — most reliable, present in all new files
+        if 'measurement_type' in data:
+            return data['measurement_type']
+
+        # 2. Check for session export metadata (files saved before measurement_type was added)
         if '_session_export' in data:
             metadata = data['_session_export']
             if isinstance(metadata, dict) and 'data_type' in metadata:
                 return metadata['data_type']
         
-        # 2. Fall back to structure-based detection for older files
-        # Priority order matters: bias and noise are subsets of multisweep
+        # 3. Structure-based fallback for older files without either of the above keys.
+        #    Priority order matters: bias and noise are subsets of multisweep.
         
-        # Check for multisweep data (either old or new format)
-        has_multisweep = 'results_by_detector' in data or 'results_by_iteration' in data
+        # Check for multisweep data (new 'results' key, old 'results_by_detector', or legacy 'results_by_iteration')
+        has_multisweep = (
+            'results' in data
+            or 'results_by_detector' in data
+            or 'results_by_iteration' in data
+        )
 
         # Bias files: have both bias_kids_output AND multisweep data
         if 'bias_kids_output' in data and has_multisweep:

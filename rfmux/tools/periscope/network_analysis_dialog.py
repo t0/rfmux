@@ -382,6 +382,8 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
                     'amplitude_mode': 'sweep' if self.sweep_amp_radio.isChecked() else 'single',
                     # Capture the user-specified measurement name (not persisted as a default)
                     'measurement_name': self._get_measurement_name(),
+                    # Store the raw suffix separately so the re-run dialog can restore it
+                    'measurement_custom_suffix': self.custom_suffix_edit.text().strip(),
                 }
 
                 if self.sweep_amp_radio.isChecked():
@@ -468,18 +470,18 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
         name_group = QtWidgets.QGroupBox("Measurement Name")
         name_form = QtWidgets.QFormLayout(name_group)
 
-        # Pre-populate with the existing measurement name (if any), else a fresh timestamp
-        existing_name = self.params.get('measurement_name', '')
-        default_base = existing_name if existing_name else datetime.datetime.now().strftime("netanal_%H%M%S")
+        # Fresh timestamp base name, just like the first-run dialog
+        default_base = datetime.datetime.now().strftime("netanal_%H%M%S")
         self.base_name_edit = QtWidgets.QLineEdit(default_base)
         self.base_name_edit.setToolTip(
-            "Base filename — pre-filled with the previous measurement name.\n"
+            "Base filename — pre-filled with a timestamp.\n"
             "You may edit it freely.  The .pkl extension is added automatically."
         )
         name_form.addRow("Base name:", self.base_name_edit)
 
-        # Optional user suffix, blank by default
-        self.custom_suffix_edit = QtWidgets.QLineEdit()
+        # Pre-populate the suffix with the custom annotation from the previous run
+        # (stored separately so the timestamp prefix is never included).
+        self.custom_suffix_edit = QtWidgets.QLineEdit(self.params.get('measurement_custom_suffix', ''))
         self.custom_suffix_edit.setPlaceholderText("e.g. cold_dark, tile3, run2")
         self.custom_suffix_edit.setToolTip(
             "Optional suffix appended after the base name with an underscore separator.\n"
@@ -595,6 +597,8 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
                 'clear_channels': self.clear_channels_cb.isChecked(),
                 'amplitude_mode': 'sweep' if self.sweep_amp_radio.isChecked() else 'single',
                 'measurement_name': self._get_measurement_name(),
+                # Store the raw suffix separately so the next re-run dialog can restore it
+                'measurement_custom_suffix': self.custom_suffix_edit.text().strip(),
             })
 
             if self.sweep_amp_radio.isChecked():

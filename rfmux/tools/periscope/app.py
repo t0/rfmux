@@ -1486,7 +1486,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if dialog.exec():
             params = dialog.get_parameters()
             if params:
-                if "results_by_detector" in params.keys() or "results_by_iteration" in params.keys():
+                if "results" in params or "results_by_detector" in params or "results_by_iteration" in params:
                     self._load_multisweep_analysis(params)
                 else:
                     if self.crs is None:
@@ -2894,7 +2894,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     
     def _load_multisweep_from_session(self, data: dict, file_path: str):
         """Load multisweep data from session file into a new panel."""
-        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
+        if 'results' not in data and 'results_by_detector' not in data and 'results_by_iteration' not in data:
             QtWidgets.QMessageBox.information(
                 self,
                 "Multisweep Loaded",
@@ -2916,7 +2916,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         - Set bias (apply to hardware only)
         - Set + Plot bias (apply to hardware and create visualization panel)
         """
-        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
+        if 'results' not in data and 'results_by_detector' not in data and 'results_by_iteration' not in data:
             QtWidgets.QMessageBox.warning(
                 self,
                 "Invalid Bias File",
@@ -2947,7 +2947,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Creates a MultisweepPanel, opens the DetectorDigestPanel (fit), and 
         opens a separate NoiseSpectrumPanel for the noise visualization.
         """
-        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
+        if 'results' not in data and 'results_by_detector' not in data and 'results_by_iteration' not in data:
             QtWidgets.QMessageBox.warning(
                 self,
                 "Invalid Noise File",

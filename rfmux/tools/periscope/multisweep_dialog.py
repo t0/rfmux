@@ -209,8 +209,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         )
         name_form.addRow("Base name:", self.base_name_edit)
 
-        # Box 2: optional user suffix, blank by default
-        self.custom_suffix_edit = QtWidgets.QLineEdit()
+        # Box 2: optional user suffix — pre-populated from the previous run if available
+        self.custom_suffix_edit = QtWidgets.QLineEdit(self.params.get('measurement_custom_suffix', ''))
         self.custom_suffix_edit.setPlaceholderText("e.g. cold_dark, tile3, run2")
         self.custom_suffix_edit.setToolTip(
             "Optional suffix appended after the base name with an underscore separator.\n"
@@ -1179,6 +1179,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             
             # Capture the user-specified measurement name (not persisted as a default)
             params_dict['measurement_name'] = self._get_measurement_name()
+            # Store the raw suffix separately so the re-run dialog can restore it
+            params_dict['measurement_custom_suffix'] = self.custom_suffix_edit.text().strip()
 
             # Save these parameters as defaults for future sessions
             # (only if not loading from file)

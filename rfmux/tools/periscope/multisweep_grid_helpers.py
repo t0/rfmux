@@ -62,9 +62,13 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
     if not batch_detectors:
         return
 
-    # Calculate grid dimensions — use ceil(sqrt(n)) for a balanced grid
+    # Calculate grid dimensions.
+    # Use a minimum of 4 columns (or fewer if there are fewer plots available)
+    # to avoid tall/narrow grids for small batches.  For larger batches the
+    # ceil(sqrt) rule produces a balanced near-square grid as before.
     num_plots = len(batch_detectors)
-    ncols = max(1, int(np.ceil(np.sqrt(num_plots))))
+    MIN_COLS = 4
+    ncols = max(min(MIN_COLS, num_plots), int(np.ceil(np.sqrt(num_plots))))
     nrows = int(np.ceil(num_plots / ncols))
 
     # Theme colors
@@ -547,7 +551,8 @@ def update_derivative_grid(
         return
 
     num_plots = len(batch_detectors)
-    ncols = max(1, int(np.ceil(np.sqrt(num_plots))))
+    MIN_COLS = 4
+    ncols = max(min(MIN_COLS, num_plots), int(np.ceil(np.sqrt(num_plots))))
     nrows = int(np.ceil(num_plots / ncols))
 
     bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
@@ -859,7 +864,8 @@ def update_fit_results_grid(
         return
 
     num_plots = len(batch_detectors)
-    ncols = max(1, int(np.ceil(np.sqrt(num_plots))))
+    MIN_COLS = 4
+    ncols = max(min(MIN_COLS, num_plots), int(np.ceil(np.sqrt(num_plots))))
     nrows = int(np.ceil(num_plots / ncols))
 
     bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")

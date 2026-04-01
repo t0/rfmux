@@ -392,11 +392,21 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.nsamps_edit.setValidator(QIntValidator(1, 10000, self)) # Min 1 sample
         param_form_layout.addRow("Samples to average per point (nsamps):", self.nsamps_edit)
 
-        # --- NEW AMPLITUDE UI ---
-        # Box 1: Base Amplitude Parameters
-        base_amp_group = QtWidgets.QGroupBox("Base Amplitude Parameters")
-        base_amp_layout = QtWidgets.QFormLayout(base_amp_group)
-        
+        # Amplitude Iteration Options (single group — base amp fields live inside)
+        iteration_group = QtWidgets.QGroupBox("Amplitude Settings")
+        iteration_layout = QtWidgets.QVBoxLayout(iteration_group)
+
+        # Radio buttons for iteration mode
+        self.single_iteration_radio = QtWidgets.QRadioButton("Single iteration (no sweep)")
+        self.single_iteration_radio.setChecked(True)
+        self.single_iteration_radio.setToolTip("Perform one measurement at a fixed amplitude")
+        iteration_layout.addWidget(self.single_iteration_radio)
+
+        # ── Base amplitude controls (shown only for Single iteration) ────────
+        self.single_amp_controls = QtWidgets.QWidget()
+        single_amp_layout = QtWidgets.QFormLayout(self.single_amp_controls)
+        single_amp_layout.setContentsMargins(20, 0, 0, 0)  # Indent
+
         self.global_amp_edit = QtWidgets.QLineEdit()
         self.global_amp_edit.setPlaceholderText("e.g., 0.1")
         self.global_amp_edit.setValidator(QDoubleValidator(0.0001, 10.0, 4, self))
@@ -404,8 +414,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             "Single amplitude value applied to all frequency sections.\n"
             "Provide EITHER this OR the amplitude array below (not both)."
         )
-        base_amp_layout.addRow("Global amplitude:", self.global_amp_edit)
-        
+        single_amp_layout.addRow("Global amplitude:", self.global_amp_edit)
+
         self.amp_array_edit = QtWidgets.QLineEdit()
         self.amp_array_edit.setPlaceholderText("e.g., 0.1, 0.15, 0.12 (comma-separated)")
         self.amp_array_edit.setToolTip(
@@ -413,26 +423,17 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             "Must match the number of sweep sections.\n"
             "Provide EITHER this OR the global amplitude above (not both)."
         )
-        base_amp_layout.addRow("Amplitude array:", self.amp_array_edit)
-        
-        base_amp_note = QtWidgets.QLabel(
-            "Note: You must provide exactly ONE of the above fields (not both, not neither)."
+        single_amp_layout.addRow("Amplitude array:", self.amp_array_edit)
+
+        _single_amp_note = QtWidgets.QLabel(
+            "Provide exactly ONE of the above fields (not both, not neither)."
         )
-        base_amp_note.setWordWrap(True)
-        base_amp_note.setStyleSheet("font-style: italic; color: #666;")
-        base_amp_layout.addRow(base_amp_note)
-        
-        param_form_layout.addRow(base_amp_group)
-        
-        # Box 2: Amplitude Iteration Options
-        iteration_group = QtWidgets.QGroupBox("Amplitude Iteration Options")
-        iteration_layout = QtWidgets.QVBoxLayout(iteration_group)
-        
-        # Radio buttons for iteration mode
-        self.single_iteration_radio = QtWidgets.QRadioButton("Single iteration (no sweep)")
-        self.single_iteration_radio.setChecked(True)
-        self.single_iteration_radio.setToolTip("Perform one measurement with the base amplitude")
-        iteration_layout.addWidget(self.single_iteration_radio)
+        _single_amp_note.setWordWrap(True)
+        _single_amp_note.setStyleSheet("font-style: italic; color: #666;")
+        single_amp_layout.addRow(_single_amp_note)
+
+        self.single_amp_controls.setVisible(True)  # visible by default (single is checked)
+        iteration_layout.addWidget(self.single_amp_controls)
         
         self.uniform_sweep_radio = QtWidgets.QRadioButton("Uniform amplitude sweep")
         self.uniform_sweep_radio.setToolTip(
@@ -461,8 +462,11 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         
         self.scaling_radio = QtWidgets.QRadioButton("Multiplicative scaling")
         self.scaling_radio.setToolTip(
-            "Scale the base amplitude array by factors from start to stop.\n"
-            "Preserves relative structure of amplitude array."
+            "Scale each resonator's probe amplitude by factors from start to stop.\n"
+            "The per-resonator bias_amplitude stored in the resonator registry\n"
+            "(res_info_dict) is always used as the base — no manual amplitude\n"
+            "entry is required.  A registry is built automatically after the\n"
+            "first single-amplitude sweep."
         )
         iteration_layout.addWidget(self.scaling_radio)
         
@@ -483,7 +487,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         
         self.scaling_controls.setVisible(False)
         iteration_layout.addWidget(self.scaling_controls)
-        
+
         param_form_layout.addRow(iteration_group)
         
         # Connect radio buttons to show/hide controls
@@ -912,11 +916,14 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     def _on_iteration_mode_changed(self):
         """Handle changes to iteration mode radio buttons.
 
-        When Single iteration is selected the Number of steps field is fixed at 1
-        and made read-only.  When switching to a sweep mode the field is restored
-        to the last user-entered value (saved in ``_saved_num_steps``).
+        - Single iteration: amplitude input fields are shown; steps locked to 1.
+        - Uniform sweep: start/stop amplitude fields shown; steps editable.
+        - Multiplicative scaling: factor fields + info label shown; steps editable.
+          The per-resonator ``bias_amplitude`` from ``res_info_dict`` is always
+          used as the base (no manual amplitude entry needed).
         """
         is_single = self.single_iteration_radio.isChecked()
+        is_scaling = self.scaling_radio.isChecked()
 
         if is_single:
             # Save the current value only if it is a real user value (not "1" forced
@@ -931,8 +938,12 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             # Restore saved value when switching to a sweep mode
             self.num_steps_edit.setText(self._saved_num_steps)
 
+        # Amplitude input fields only visible for single iteration
+        if hasattr(self, 'single_amp_controls'):
+            self.single_amp_controls.setVisible(is_single)
+
         self.uniform_controls.setVisible(self.uniform_sweep_radio.isChecked())
-        self.scaling_controls.setVisible(self.scaling_radio.isChecked())
+        self.scaling_controls.setVisible(is_scaling)
     
     @QtCore.pyqtSlot()
     def _on_file_dialog_closed(self):
@@ -995,62 +1006,65 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 params_dict['sweep_center_frequencies'] = self.section_center_frequencies
             
             num_sections = len(params_dict['sweep_center_frequencies'])
-            
-            # STEP 1: Parse base amplitude
-            global_amp_text = self.global_amp_edit.text().strip()
-            amp_array_text = self.amp_array_edit.text().strip()
-            
-            if global_amp_text and amp_array_text:
-                QtWidgets.QMessageBox.warning(
-                    self, 
-                    "Validation Error", 
-                    "Provide either global amplitude OR amplitude array, not both."
-                )
-                return None
-            elif not global_amp_text and not amp_array_text:
-                QtWidgets.QMessageBox.warning(
-                    self, 
-                    "Validation Error", 
-                    "Must provide either global amplitude or amplitude array."
-                )
-                return None
-            
-            if global_amp_text:
-                base_amp = float(global_amp_text)
-                if base_amp <= 0:
+
+            # STEP 1: Parse base amplitude.
+            # Only required for single iteration and uniform sweep modes.
+            # Multiplicative scaling always derives its base from res_info_dict —
+            # no user amplitude input is needed (or accepted) for that mode.
+            if not self.scaling_radio.isChecked():
+                global_amp_text = self.global_amp_edit.text().strip()
+                amp_array_text = self.amp_array_edit.text().strip()
+
+                if global_amp_text and amp_array_text:
                     QtWidgets.QMessageBox.warning(
                         self,
                         "Validation Error",
-                        "Global amplitude must be positive."
+                        "Provide either global amplitude OR amplitude array, not both."
                     )
                     return None
-                base_amp_array = [base_amp] * num_sections
-                # Store metadata about how base amplitude was specified
-                params_dict['base_amplitude_mode'] = 'global'
-                params_dict['base_amplitude_values'] = base_amp
-            else:
-                # Parse amplitude array
-                base_amp_array = [float(x.strip()) for x in amp_array_text.split(',')]
-                if len(base_amp_array) != num_sections:
+                elif not global_amp_text and not amp_array_text:
                     QtWidgets.QMessageBox.warning(
-                        self, 
-                        "Validation Error", 
-                        f"Amplitude array length ({len(base_amp_array)}) must match "
-                        f"number of sweep sections ({num_sections})."
+                        self,
+                        "Validation Error",
+                        "Must provide either global amplitude or amplitude array."
                     )
                     return None
-                # Validate all amplitudes are positive
-                for i, amp in enumerate(base_amp_array):
-                    if amp <= 0:
+
+                if global_amp_text:
+                    base_amp = float(global_amp_text)
+                    if base_amp <= 0:
                         QtWidgets.QMessageBox.warning(
-                            self, 
-                            "Validation Error", 
-                            f"All amplitudes must be positive (section {i+1} has {amp})."
+                            self,
+                            "Validation Error",
+                            "Global amplitude must be positive."
                         )
                         return None
-                # Store metadata about how base amplitude was specified
-                params_dict['base_amplitude_mode'] = 'array'
-                params_dict['base_amplitude_values'] = base_amp_array.copy()
+                    base_amp_array = [base_amp] * num_sections
+                    params_dict['base_amplitude_mode'] = 'global'
+                    params_dict['base_amplitude_values'] = base_amp
+                else:
+                    base_amp_array = [float(x.strip()) for x in amp_array_text.split(',')]
+                    if len(base_amp_array) != num_sections:
+                        QtWidgets.QMessageBox.warning(
+                            self,
+                            "Validation Error",
+                            f"Amplitude array length ({len(base_amp_array)}) must match "
+                            f"number of sweep sections ({num_sections})."
+                        )
+                        return None
+                    for i, amp in enumerate(base_amp_array):
+                        if amp <= 0:
+                            QtWidgets.QMessageBox.warning(
+                                self,
+                                "Validation Error",
+                                f"All amplitudes must be positive (section {i+1} has {amp})."
+                            )
+                            return None
+                    params_dict['base_amplitude_mode'] = 'array'
+                    params_dict['base_amplitude_values'] = base_amp_array.copy()
+            else:
+                # Scaling mode: base_amp_array is read from res_info_dict below
+                base_amp_array = None
             
             # STEP 2: Handle iterations
             num_steps = int(self.num_steps_edit.text())
@@ -1104,33 +1118,68 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 # Multiplicative scaling mode
                 start_factor_text = self.scale_start_edit.text().strip()
                 stop_factor_text = self.scale_stop_edit.text().strip()
-                
+
                 if not start_factor_text or not stop_factor_text:
                     QtWidgets.QMessageBox.warning(
-                        self, 
-                        "Validation Error", 
+                        self,
+                        "Validation Error",
                         "Must provide both start and stop factors for multiplicative scaling."
                     )
                     return None
-                
+
                 start_factor = float(start_factor_text)
                 stop_factor = float(stop_factor_text)
-                
+
                 if start_factor <= 0 or stop_factor <= 0:
                     QtWidgets.QMessageBox.warning(
-                        self, 
-                        "Validation Error", 
+                        self,
+                        "Validation Error",
                         "Start and stop factors must be positive."
                     )
                     return None
-                
-                # Generate scale factors
+
+                # Derive per-resonator base amplitudes from the resonator registry
+                # (in key order, which matches the amp ordering used by
+                # MultisweepTask / crs.multisweep Option B).
+                res_info = self.params.get('res_info_dict')
+                if not res_info:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Validation Error",
+                        "Multiplicative scaling requires a resonator registry (res_info_dict).\n"
+                        "Please run a single-amplitude sweep first to build one."
+                    )
+                    return None
+                try:
+                    base_amp_array = [
+                        float(info['bias_amplitude'])
+                        for info in res_info.values()
+                    ]
+                except (KeyError, TypeError, ValueError) as exc:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Validation Error",
+                        f"Could not read bias_amplitude from the resonator registry: {exc}"
+                    )
+                    return None
+                if any(a <= 0 for a in base_amp_array):
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Validation Error",
+                        "One or more bias_amplitude values in the resonator registry "
+                        "are non-positive.  Please check res_info_dict."
+                    )
+                    return None
+                params_dict['base_amplitude_mode'] = 'res_info_dict'
+                params_dict['base_amplitude_values'] = list(base_amp_array)
+
+                # Generate scale factors and produce per-iteration amplitude arrays
                 factors = np.linspace(start_factor, stop_factor, num_steps)
                 params_dict['amp_arrays'] = [
-                    [amp * factor for amp in base_amp_array] 
+                    [amp * factor for amp in base_amp_array]
                     for factor in factors
                 ]
-                
+
                 # Store iteration metadata
                 params_dict['iteration_mode'] = 'scaling'
                 params_dict['scale_start_factor'] = start_factor

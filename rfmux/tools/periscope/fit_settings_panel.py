@@ -9,14 +9,10 @@ a small floating window and can be dismissed without disrupting ongoing work.
 ``get_settings()`` returns a dict that can be passed directly to
 ``RunFitsTask`` as *fit_settings*.
 
-New in this version
--------------------
-* **"Fit Results Tab"** group: checkbox to enable the optional Tab 6 that
-  overlays the fitted model curves on the measured sweep data.
-* **"Amplitude to Fit"** group: choose which amplitude iterations
-  ``RunFitsTask`` should actually fit — all amplitudes (default), a
-  specific amplitude by sorted index, or the bias amplitude found by
-  Find Bias.
+**"Amplitude to Fit"** group: choose which amplitude iterations
+``RunFitsTask`` should actually fit — all amplitudes (default), a
+specific amplitude by sorted index, or the bias amplitude found by
+Find Bias.
 """
 
 from PyQt6.QtWidgets import (
@@ -40,13 +36,6 @@ class FitSettingsPanel(QWidget):
     Call :meth:`get_settings` to retrieve the current parameter dict, which
     can be passed directly to :class:`~rfmux.tools.periscope.tasks.RunFitsTask`
     as *fit_settings*.
-
-    Public signals (accessible for external connections)
-    ----------------------------------------------------
-    ``show_fit_results_tab_cb.toggled`` — emitted when the "Show Fit Results
-    Tab" checkbox is toggled.  ``MultisweepPanel._show_fit_settings`` connects
-    this to ``_update_fit_results_tab_visibility`` so the tab appears/
-    disappears immediately without needing to re-open the settings panel.
     """
 
     def __init__(self, parent=None):
@@ -93,25 +82,6 @@ class FitSettingsPanel(QWidget):
 
         fits_group.setLayout(fits_layout)
         layout.addWidget(fits_group)
-
-        # ── Fit Results Tab ───────────────────────────────────────────────────
-        tab_group = QGroupBox("Fit Results Tab")
-        tab_layout = QFormLayout()
-        tab_layout.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
-        )
-
-        self.show_fit_results_tab_cb = QCheckBox("Show Fit Results Tab")
-        self.show_fit_results_tab_cb.setChecked(False)
-        self.show_fit_results_tab_cb.setToolTip(
-            "Enable Tab 6 (Fit Results) which shows the fitted model curves\n"
-            "overlaid on the measured sweep data for each resonator.\n"
-            "The tab is only shown when fit data is present."
-        )
-        tab_layout.addRow(self.show_fit_results_tab_cb)
-
-        tab_group.setLayout(tab_layout)
-        layout.addWidget(tab_group)
 
         # ── Amplitude to Fit ──────────────────────────────────────────────────
         amp_group = QGroupBox("Amplitude to Fit")
@@ -174,7 +144,6 @@ class FitSettingsPanel(QWidget):
         # ── Auto-save on change ───────────────────────────────────────────────
         self.skewed_fit_cb.toggled.connect(self._save_settings)
         self.nonlinear_fit_cb.toggled.connect(self._save_settings)
-        self.show_fit_results_tab_cb.toggled.connect(self._save_settings)
         self.amp_all_rb.toggled.connect(self._on_amp_mode_changed)
         self.amp_index_rb.toggled.connect(self._on_amp_mode_changed)
         self.amp_bias_rb.toggled.connect(self._on_amp_mode_changed)
@@ -217,7 +186,6 @@ class FitSettingsPanel(QWidget):
         ----
         * ``apply_skewed_fit`` (bool)
         * ``apply_nonlinear_fit`` (bool)
-        * ``show_fit_results_tab`` (bool)
         * ``fit_run_amplitude_mode`` (str): ``'all'``, ``'index'``, or ``'bias'``
         * ``fit_run_amplitude_index`` (int): 0-based index (only relevant when
           ``fit_run_amplitude_mode == 'index'``)
@@ -230,10 +198,9 @@ class FitSettingsPanel(QWidget):
             mode = 'all'
 
         return {
-            'apply_skewed_fit':       self.skewed_fit_cb.isChecked(),
-            'apply_nonlinear_fit':    self.nonlinear_fit_cb.isChecked(),
-            'show_fit_results_tab':   self.show_fit_results_tab_cb.isChecked(),
-            'fit_run_amplitude_mode': mode,
+            'apply_skewed_fit':        self.skewed_fit_cb.isChecked(),
+            'apply_nonlinear_fit':     self.nonlinear_fit_cb.isChecked(),
+            'fit_run_amplitude_mode':  mode,
             'fit_run_amplitude_index': self.amp_index_spin.value(),
         }
 
@@ -248,7 +215,7 @@ class FitSettingsPanel(QWidget):
 
         # Block all signals while we restore values to avoid triggering _save_settings
         for widget in (
-            self.skewed_fit_cb, self.nonlinear_fit_cb, self.show_fit_results_tab_cb,
+            self.skewed_fit_cb, self.nonlinear_fit_cb,
             self.amp_all_rb, self.amp_index_rb, self.amp_bias_rb,
             self.amp_index_spin,
         ):
@@ -256,7 +223,6 @@ class FitSettingsPanel(QWidget):
 
         self.skewed_fit_cb.setChecked(saved.get('apply_skewed_fit', True))
         self.nonlinear_fit_cb.setChecked(saved.get('apply_nonlinear_fit', True))
-        self.show_fit_results_tab_cb.setChecked(saved.get('show_fit_results_tab', False))
 
         mode = saved.get('fit_run_amplitude_mode', 'all')
         if mode == 'index':
@@ -270,7 +236,7 @@ class FitSettingsPanel(QWidget):
         self.amp_index_spin.setEnabled(mode == 'index')
 
         for widget in (
-            self.skewed_fit_cb, self.nonlinear_fit_cb, self.show_fit_results_tab_cb,
+            self.skewed_fit_cb, self.nonlinear_fit_cb,
             self.amp_all_rb, self.amp_index_rb, self.amp_bias_rb,
             self.amp_index_spin,
         ):
@@ -284,7 +250,7 @@ class FitSettingsPanel(QWidget):
         """Restore all controls to their default values and persist."""
         # Block signals during reset to avoid multiple intermediate saves
         for widget in (
-            self.skewed_fit_cb, self.nonlinear_fit_cb, self.show_fit_results_tab_cb,
+            self.skewed_fit_cb, self.nonlinear_fit_cb,
             self.amp_all_rb, self.amp_index_rb, self.amp_bias_rb,
             self.amp_index_spin,
         ):
@@ -292,13 +258,12 @@ class FitSettingsPanel(QWidget):
 
         self.skewed_fit_cb.setChecked(True)
         self.nonlinear_fit_cb.setChecked(True)
-        self.show_fit_results_tab_cb.setChecked(False)
         self.amp_all_rb.setChecked(True)
         self.amp_index_spin.setValue(0)
         self.amp_index_spin.setEnabled(False)
 
         for widget in (
-            self.skewed_fit_cb, self.nonlinear_fit_cb, self.show_fit_results_tab_cb,
+            self.skewed_fit_cb, self.nonlinear_fit_cb,
             self.amp_all_rb, self.amp_index_rb, self.amp_bias_rb,
             self.amp_index_spin,
         ):

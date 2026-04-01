@@ -541,7 +541,6 @@ def set_network_analysis_defaults(params: dict) -> None:
 _FIT_DEFAULTS = {
     'apply_skewed_fit': True,
     'apply_nonlinear_fit': True,
-    'show_fit_results_tab': False,
     'fit_run_amplitude_mode': 'all',   # 'all', 'index', or 'bias'
     'fit_run_amplitude_index': 0,       # 0-based amplitude index (for 'index' mode)
 }
@@ -575,14 +574,12 @@ def set_fit_defaults(params: dict) -> None:
     Args:
         params: Dict with any subset of the keys in ``_FIT_DEFAULTS``:
                 ``apply_skewed_fit``, ``apply_nonlinear_fit``,
-                ``show_fit_results_tab``, ``fit_run_amplitude_mode``,
-                ``fit_run_amplitude_index``.
+                ``fit_run_amplitude_mode``, ``fit_run_amplitude_index``.
     """
     import json
     persist_keys = {
         'apply_skewed_fit',
         'apply_nonlinear_fit',
-        'show_fit_results_tab',
         'fit_run_amplitude_mode',
         'fit_run_amplitude_index',
     }
@@ -591,7 +588,7 @@ def set_fit_defaults(params: dict) -> None:
         if k not in persist_keys:
             continue
         # Boolean keys
-        if k in ('apply_skewed_fit', 'apply_nonlinear_fit', 'show_fit_results_tab'):
+        if k in ('apply_skewed_fit', 'apply_nonlinear_fit'):
             filtered[k] = bool(v)
         # Integer key
         elif k == 'fit_run_amplitude_index':

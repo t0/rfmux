@@ -445,10 +445,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.derivative_tab, self.derivative_grid = self._create_derivative_tab()
         self.plot_tabs.addTab(self.derivative_tab, "IQ Derivatives")
 
-        # Tab 6: Fit Results (optional, enabled via Fit Settings; hidden by default)
+        # Tab 6: Fit Results (always visible; shows placeholder until fits have been run)
         self.fit_results_tab, self.fit_results_grid = self._create_fit_results_tab()
         self.plot_tabs.addTab(self.fit_results_tab, "Fit Results")
-        self.plot_tabs.setTabVisible(6, False)  # hidden until enabled + fit data present
 
         # Set default tab to Magnitude Sweeps
         self.plot_tabs.setCurrentIndex(0)
@@ -565,7 +564,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         tab_layout.setContentsMargins(0, 0, 0, 0)
         
         # Create a placeholder - we'll create the actual panel when data is available
-        placeholder = QtWidgets.QLabel("Histogram plots will appear here when multisweep data is available.")
+        placeholder = QtWidgets.QLabel("Histograms will appear once fits have been run on the selected multisweep file.")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         placeholder.setStyleSheet("color: gray; font-style: italic;")
         tab_layout.addWidget(placeholder)
@@ -688,6 +687,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._fit_show_skewed_cb.toggled.connect(self._on_fit_results_controls_changed)
         self._fit_show_nonlinear_cb.toggled.connect(self._on_fit_results_controls_changed)
 
+        # ── Placeholder shown before any fits have been run ───────────────────
+        self._fit_results_placeholder = QtWidgets.QLabel(
+            "Plots will appear here once fits have been run on the selected multisweep file."
+        )
+        self._fit_results_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._fit_results_placeholder.setStyleSheet("color: gray; font-style: italic;")
+        tab_layout.addWidget(self._fit_results_placeholder)
+
         # ── Scroll area + grid ────────────────────────────────────────────────
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
@@ -695,6 +702,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         grid = QtWidgets.QGridLayout(container)
         grid.setSpacing(10)
         scroll.setWidget(container)
+
+        # Hidden until fit data is available
+        scroll.hide()
+        self._fit_results_scroll = scroll
         tab_layout.addWidget(scroll)
 
         return tab, grid
@@ -3035,7 +3046,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         Reads the tab's display controls and calls
         :func:`multisweep_grid_helpers.update_fit_results_grid` to render
-        per-detector magnitude sweeps with fitted model overlays.
+        per-detector magnitude sweeps with fitted model overlays.  Shows a
+        placeholder when no fit data is present yet.
         """
         from .multisweep_grid_helpers import update_fit_results_grid
 
@@ -3043,6 +3055,26 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             return
         if self._fit_display_mode_rb_index is None:
             return  # Tab not yet created
+
+        # Check whether any fit data is present; if not, show the placeholder.
+        has_fit_data = any(
+            entry.get('skewed_fit_success') or entry.get('nonlinear_fit_success')
+            for iter_dict in self.results_by_detector.values()
+            for entry in iter_dict.values()
+        )
+
+        if not has_fit_data:
+            if hasattr(self, '_fit_results_placeholder'):
+                self._fit_results_placeholder.show()
+            if hasattr(self, '_fit_results_scroll'):
+                self._fit_results_scroll.hide()
+            return
+
+        # Fit data is present — hide placeholder, show scroll area
+        if hasattr(self, '_fit_results_placeholder'):
+            self._fit_results_placeholder.hide()
+        if hasattr(self, '_fit_results_scroll'):
+            self._fit_results_scroll.show()
 
         # Read controls
         display_mode = (
@@ -3085,39 +3117,24 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 vb.setMouseMode(mode)
 
     def _update_fit_results_tab_visibility(self):
-        """Show or hide Tab 6 based on settings + whether fit data is present.
+        """Refresh Tab 6 state after fits may have been added or removed.
 
-        The tab is visible only when **both** conditions are true:
-          1. The "Show Fit Results Tab" checkbox in Fit Settings is enabled.
-          2. At least one entry in ``results_by_detector`` has a successful fit
-             (``skewed_fit_success`` or ``nonlinear_fit_success``).
-
-        Also triggers a redraw if the tab is currently active and becomes
-        visible.
+        The Fit Results tab is always visible.  This method populates the
+        amplitude index dropdown when fit data is present and triggers a
+        redraw if Tab 6 is currently active.
         """
-        # Read the setting from the open panel or fall back to saved defaults
-        if self.fit_settings_panel is not None:
-            settings_dict = self.fit_settings_panel.get_settings()
-        else:
-            from . import settings as periscope_settings
-            settings_dict = periscope_settings.get_fit_defaults()
-
-        user_wants_tab = settings_dict.get('show_fit_results_tab', False)
-
         has_fit_data = any(
             entry.get('skewed_fit_success') or entry.get('nonlinear_fit_success')
             for iter_dict in self.results_by_detector.values()
             for entry in iter_dict.values()
         ) if self.results_by_detector else False
 
-        show = user_wants_tab and has_fit_data
+        if has_fit_data:
+            # Populate the amplitude index dropdown now that fit data is available
+            self._populate_fit_amplitude_combo()
 
         if hasattr(self, 'plot_tabs') and self.plot_tabs is not None:
-            self.plot_tabs.setTabVisible(6, show)
-            if show:
-                # Populate the amplitude index dropdown now that fit data is available
-                self._populate_fit_amplitude_combo()
-            if show and self.plot_tabs.currentIndex() == 6:
+            if self.plot_tabs.currentIndex() == 6:
                 self._redraw_fit_results_grid()
 
     # ── Fit Settings ─────────────────────────────────────────────────────────
@@ -3130,18 +3147,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.fit_settings_panel.show()
         self.fit_settings_panel.raise_()
         self.fit_settings_panel.activateWindow()
-
-        # Connect show_fit_results_tab_cb.toggled → _update_fit_results_tab_visibility
-        # (safe to call multiple times — Qt deduplicates identical connections)
-        try:
-            self.fit_settings_panel.show_fit_results_tab_cb.toggled.disconnect(
-                self._update_fit_results_tab_visibility
-            )
-        except (TypeError, RuntimeError):
-            pass
-        self.fit_settings_panel.show_fit_results_tab_cb.toggled.connect(
-            self._update_fit_results_tab_visibility
-        )
 
     # ── Run Fit ───────────────────────────────────────────────────────────────
 

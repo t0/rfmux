@@ -524,6 +524,31 @@ def mode_title(mode: str) -> str:
     }
     return mode_titles.get(mode, mode)
 
+
+def make_tab_title(name: str, max_chars: int = 30) -> str:
+    """Return *name* truncated to *max_chars* characters with an ellipsis if needed.
+
+    Used to keep dock / tab labels compact while still conveying the actual
+    measurement filename.
+
+    Args:
+        name:      The full title string (e.g. a measurement name or filename stem).
+        max_chars: Maximum number of characters before truncation (default 30).
+
+    Returns:
+        The original string if it fits within *max_chars*, or a truncated
+        version ending in ``'…'`` otherwise.
+
+    Examples:
+        >>> make_tab_title("netanal_120000_cold_dark")
+        'netanal_120000_cold_dark'
+        >>> make_tab_title("netanal_120000_very_long_suffix_that_is_too_wide")
+        'netanal_120000_very_long_su…'
+    """
+    if len(name) <= max_chars:
+        return name
+    return name[: max_chars - 1] + "…"
+
 # ───────────────────────── Unit Conversion ─────────────────────────
 
 def mag_axis_label(unit_mode: str, normalize: bool) -> tuple[str, str]:

@@ -14,6 +14,7 @@ from .tasks import DACScaleFetcher # Import DACScaleFetcher from tasks.py
 from . import settings  # Import settings module for persistence
 import pickle
 import numpy as np
+import datetime
 from PyQt6.QtCore import Qt
 
 def load_multisweep_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
@@ -185,6 +186,40 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     def _setup_ui(self):
         """Sets up the user interface elements for the Multisweep dialog."""
         layout = QtWidgets.QVBoxLayout(self)
+
+        # ── Measurement Name ──────────────────────────────────────────────────
+        name_group = QtWidgets.QGroupBox("Measurement Name")
+        name_form = QtWidgets.QFormLayout(name_group)
+
+        # Box 1: pre-populated base name (timestamp + meas type), editable
+        default_base = datetime.datetime.now().strftime("multisweep_%H%M%S")
+        self.base_name_edit = QtWidgets.QLineEdit(default_base)
+        self.base_name_edit.setToolTip(
+            "Base filename — pre-filled with a timestamp and measurement type.\n"
+            "You may edit it freely.  The .pkl extension is added automatically."
+        )
+        name_form.addRow("Base name:", self.base_name_edit)
+
+        # Box 2: optional user suffix, blank by default
+        self.custom_suffix_edit = QtWidgets.QLineEdit()
+        self.custom_suffix_edit.setPlaceholderText("e.g. cold_dark, tile3, run2")
+        self.custom_suffix_edit.setToolTip(
+            "Optional suffix appended after the base name with an underscore separator.\n"
+            "Leave blank to use the base name only."
+        )
+        name_form.addRow("Custom suffix:", self.custom_suffix_edit)
+
+        # Live preview label
+        self._name_preview_label = QtWidgets.QLabel()
+        self._name_preview_label.setStyleSheet("font-style: italic; color: #555;")
+        name_form.addRow("→  filename:", self._name_preview_label)
+
+        # Connect both fields to update the preview
+        self.base_name_edit.textChanged.connect(self._update_name_preview)
+        self.custom_suffix_edit.textChanged.connect(self._update_name_preview)
+        self._update_name_preview()  # populate on open
+
+        layout.addWidget(name_group)
 
         # Display information about target resonances
         if self.load_multisweep:
@@ -523,8 +558,12 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         
         self.setMinimumWidth(500) # Ensure dialog is wide enough
-        self.resize(500, 780)     # Ensure dialog is tall enough for sweep controls
-        
+        self.resize(500, 870)     # Ensure dialog is tall enough for name group + sweep controls
+
+        # Place focus in the custom suffix field so the user is encouraged to type
+        # their annotation immediately without having to click past the base name.
+        self.custom_suffix_edit.setFocus()
+
         # Populate amplitude fields from stored parameters (if available)
         self._populate_amplitude_fields_from_params()
 
@@ -820,7 +859,32 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         """Handle closure of the file dialog without file selection."""
         pass  # Optional: keep or clear dialog
 
-    
+    def _update_name_preview(self):
+        """Update the live filename preview label from the two name fields."""
+        base = self.base_name_edit.text().strip()
+        suffix = self.custom_suffix_edit.text().strip()
+        if base:
+            full = f"{base}_{suffix}.pkl" if suffix else f"{base}.pkl"
+        else:
+            full = f"{suffix}.pkl" if suffix else "(no name)"
+        self._name_preview_label.setText(full)
+
+    def _get_measurement_name(self) -> str:
+        """Return the combined measurement name from the two dialog fields.
+
+        Combines base name and optional custom suffix with an underscore
+        separator.  Strips both values and falls back to a fresh timestamp
+        if the base field is empty.
+
+        Returns:
+            The measurement name string (without .pkl extension).
+        """
+        base = self.base_name_edit.text().strip()
+        suffix = self.custom_suffix_edit.text().strip()
+        if not base:
+            base = datetime.datetime.now().strftime("multisweep_%H%M%S")
+        return f"{base}_{suffix}" if suffix else base
+
     def get_parameters(self) -> dict | None:
         """
         Retrieves and validates the parameters for the multisweep operation.
@@ -1032,6 +1096,9 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 QtWidgets.QMessageBox.warning(self, "Configuration Error", "No target sweep sections specified for multisweep.")
                 return None
             
+            # Capture the user-specified measurement name (not persisted as a default)
+            params_dict['measurement_name'] = self._get_measurement_name()
+
             # Save these parameters as defaults for future sessions
             # (only if not loading from file)
             if not self.use_data_from_file:

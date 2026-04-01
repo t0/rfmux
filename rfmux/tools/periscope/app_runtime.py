@@ -1093,8 +1093,9 @@ class PeriscopeRuntime:
             panel = MultisweepPanel(parent=self, target_module=target_module, initial_params=params.copy(), 
                                    dac_scales=dac_scales_for_panel, dark_mode=self.dark_mode)
             
-            # Wrap in dock
-            dock_title = f"Multisweep #{self.multisweep_window_count}"
+            # Wrap in dock — prefer the user-specified measurement name
+            _mname = params.get('measurement_name') or f"Multisweep #{self.multisweep_window_count}"
+            dock_title = make_tab_title(_mname)
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
             
             # Store panel reference
@@ -1243,11 +1244,14 @@ class PeriscopeRuntime:
                 panel.spectrum_noise_data = load_params['noise_data']
                 panel.noise_spectrum_btn.setEnabled(True)
             
-            # MultisweepPanel dock is always named "Multisweep" regardless of source type
-            # The source_type affects panel behavior, not the dock title
-            dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
-            
-            # Wrap in dock
+            # Wrap in dock — prefer embedded measurement name or filename stem
+            _mname = params.get('measurement_name')
+            if not _mname and file_path:
+                from pathlib import Path as _Path
+                _mname = _Path(file_path).stem
+            if not _mname:
+                _mname = f"Multisweep #{self.multisweep_window_count} (Loaded)"
+            dock_title = make_tab_title(_mname)
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
             
             self.multisweep_windows[window_id] = {'window': panel, 'dock': dock, 'params': params.copy()}
@@ -1621,7 +1625,8 @@ class PeriscopeRuntime:
         # Increment counter and use for tab name
         self.channel_noise_panel_count += 1
         loaded_suffix = " (Loaded)" if self.loaded_channel_noise else ""
-        dock_title = f"Channel Noise Spectrum #{self.channel_noise_panel_count}{loaded_suffix}"
+        _cname = f"Channel Noise #{self.channel_noise_panel_count}{loaded_suffix}"
+        dock_title = make_tab_title(_cname)
         dock_id = f"noise_{self.channel_noise_panel_count}_{int(time.time())}"
         
         # Create dock

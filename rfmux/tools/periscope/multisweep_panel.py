@@ -13,7 +13,7 @@ import time
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
     TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
-    ScreenshotMixin, mag_axis_label
+    ScreenshotMixin, mag_axis_label, make_tab_title,
 )
 from .detector_digest_panel import DetectorDigestPanel
 from .noise_spectrum_panel import NoiseSpectrumPanel
@@ -1507,6 +1507,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if module == self.target_module:
             self.progress_bar.setValue(100) # Mark as 100% for this specific amplitude
 
+    def _get_filename_override(self) -> str | None:
+        """Return a ``_filename_override`` value derived from the measurement name.
+
+        Reads ``measurement_name`` from ``initial_params`` (set when the
+        MultisweepDialog is accepted).  Returns ``None`` when no custom name
+        was specified so the session manager falls back to its own filename
+        generation / de-duplication logic.
+        """
+        name = self.initial_params.get('measurement_name')
+        return f"{name}.pkl" if name else None
+
     def all_sweeps_completed(self):
         """
         Slot called when all amplitudes in the multisweep have been processed.
@@ -1522,6 +1533,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.results_by_detector:
             identifier = f"module{self.target_module}"
             export_data = self._prepare_export_data()
+            filename_override = self._get_filename_override()
+            if filename_override:
+                export_data['_filename_override'] = filename_override
             self.data_ready.emit("multisweep", identifier, export_data)
         
         # Generate histogram plots once when all data is complete
@@ -2274,10 +2288,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Store direct reference to this MultisweepPanel (if needed)
         panel.multisweep_panel_ref = self
         
-        # Increment counter and use for tab name
+        # Increment counter and use for tab name — prefix with parent measurement name if available
         self.noise_panel_count += 1
         loaded_suffix = " (Loaded)" if self.is_loaded_data else ""
-        dock_title = f"Noise Spectrum #{self.noise_panel_count}{loaded_suffix}"
+        parent_mname = self.initial_params.get('measurement_name', '')
+        if parent_mname:
+            _nname = f"Noise: {parent_mname}{loaded_suffix}"
+        else:
+            _nname = f"Noise Spectrum #{self.noise_panel_count}{loaded_suffix}"
+        dock_title = make_tab_title(_nname)
         dock_id = f"noise_{self.noise_panel_count}_{int(time.time())}"
         
         # Create dock

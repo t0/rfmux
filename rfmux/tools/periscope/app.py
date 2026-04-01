@@ -1061,8 +1061,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             panel = NetworkAnalysisPanel(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode)
             panel.set_params(params)
             
-            # Wrap panel in dock
-            dock_title = f"Network Analysis #{self.netanal_window_count}"
+            # Wrap panel in dock — prefer the user-specified measurement name
+            _mname = params.get('measurement_name') or f"Network Analysis #{self.netanal_window_count}"
+            dock_title = make_tab_title(_mname)
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
             
             # Store panel reference
@@ -1116,7 +1117,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             raise
 
 
-    def _load_network_analysis(self, params: dict):
+    def _load_network_analysis(self, params: dict, file_path: str = None):
         """
         Load network analysis data from file and display in a docked panel.
 
@@ -1125,6 +1126,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         Args:
             params (dict): Loaded network analysis data dictionary.
+            file_path (str, optional): Path to the source file, used to derive
+                the tab title when no measurement_name is embedded in the data.
         """
         try:
             # Allow loading without CRS in offline mode
@@ -1168,8 +1171,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             panel._hide_progress_bars()
             panel.set_params(initial_params)
 
-            # Wrap panel in dock
-            dock_title = f"Network Analysis #{self.netanal_window_count} (Loaded)"
+            # Wrap panel in dock — prefer embedded measurement name or filename stem
+            _mname = initial_params.get('measurement_name')
+            if not _mname and file_path:
+                from pathlib import Path as _Path
+                _mname = _Path(file_path).stem
+            if not _mname:
+                _mname = f"Network Analysis #{self.netanal_window_count} (Loaded)"
+            dock_title = make_tab_title(_mname)
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
 
             # Store panel reference
@@ -2880,8 +2889,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             return
 
-        # Use existing load mechanism
-        self._load_network_analysis(data)
+        # Use existing load mechanism, passing file_path for a better tab title
+        self._load_network_analysis(data, file_path=file_path)
     
     def _load_multisweep_from_session(self, data: dict, file_path: str):
         """Load multisweep data from session file into a new panel."""

@@ -863,6 +863,9 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         
         # Emit data_ready signal for session auto-export after finding resonances
         export_data = self._prepare_export_data()
+        filename_override = self._get_filename_override()
+        if filename_override:
+            export_data['_filename_override'] = filename_override
         self.data_ready.emit("netanal", f"module{active_module}", export_data)
         
     def _use_loaded_resonances(self, active_module: int, load_resonance_freqs: list):
@@ -1148,6 +1151,17 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         if module in self.progress_bars:
             self.progress_bars[module].setValue(int(progress))
     
+    def _get_filename_override(self) -> str | None:
+        """Return a ``_filename_override`` value derived from the measurement name.
+
+        Reads ``measurement_name`` from ``original_params`` (set when the
+        NetworkAnalysisDialog is accepted).  Returns ``None`` when no custom
+        name was specified so the session manager falls back to its own
+        filename generation / de-duplication logic.
+        """
+        name = self.original_params.get('measurement_name')
+        return f"{name}.pkl" if name else None
+
     def complete_analysis(self, module: int):
         """Mark analysis as complete for a module and emit data_ready signal."""
         if module in self.progress_bars:
@@ -1157,6 +1171,9 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # Emit data_ready signal for session auto-export
         if self._all_modules_complete():
             export_data = self._prepare_export_data()
+            filename_override = self._get_filename_override()
+            if filename_override:
+                export_data['_filename_override'] = filename_override
             self.data_ready.emit(
                 "netanal",
                 f"module{self.modules[0]}" if self.modules else "module0",

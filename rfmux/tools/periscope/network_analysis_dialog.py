@@ -8,6 +8,7 @@ from .utils import (
     UnitConverter, traceback
 )
 import pickle
+import datetime
 from .tasks import DACScaleFetcher
 from .network_analysis_base import NetworkAnalysisDialogBase
 from . import settings
@@ -85,6 +86,40 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         """Sets up the user interface elements for the dialog."""
         layout = QtWidgets.QVBoxLayout(self)
 
+        # ── Measurement Name ──────────────────────────────────────────────────
+        name_group = QtWidgets.QGroupBox("Measurement Name")
+        name_form = QtWidgets.QFormLayout(name_group)
+
+        # Box 1: pre-populated base name (timestamp + meas type), editable
+        default_base = datetime.datetime.now().strftime("netanal_%H%M%S")
+        self.base_name_edit = QtWidgets.QLineEdit(default_base)
+        self.base_name_edit.setToolTip(
+            "Base filename — pre-filled with a timestamp and measurement type.\n"
+            "You may edit it freely.  The .pkl extension is added automatically."
+        )
+        name_form.addRow("Base name:", self.base_name_edit)
+
+        # Box 2: optional user suffix, blank by default
+        self.custom_suffix_edit = QtWidgets.QLineEdit()
+        self.custom_suffix_edit.setPlaceholderText("e.g. cold_dark, tile3, run2")
+        self.custom_suffix_edit.setToolTip(
+            "Optional suffix appended after the base name with an underscore separator.\n"
+            "Leave blank to use the base name only."
+        )
+        name_form.addRow("Custom suffix:", self.custom_suffix_edit)
+
+        # Live preview label
+        self._name_preview_label = QtWidgets.QLabel()
+        self._name_preview_label.setStyleSheet("font-style: italic; color: #555;")
+        name_form.addRow("→  filename:", self._name_preview_label)
+
+        # Connect both fields to update the preview
+        self.base_name_edit.textChanged.connect(self._update_name_preview)
+        self.custom_suffix_edit.textChanged.connect(self._update_name_preview)
+        self._update_name_preview()  # populate on open
+
+        layout.addWidget(name_group)
+
         self.import_button = QtWidgets.QPushButton("Import Data")
         self.import_button.clicked.connect(self._load_netanal_data)
         layout.addWidget(self.import_button, alignment=QtCore.Qt.AlignLeft)
@@ -161,7 +196,12 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         self.numpad_enter_shortcut.activated.connect(self.accept)
         
         self._update_dbm_from_normalized() # Initial update of dBm field based on default amplitude
-        self.setMinimumSize(500, 600) # Set a reasonable minimum size
+        self.setMinimumSize(500, 680)  # Taller minimum to accommodate the Measurement Name group
+        self.resize(500, 700)
+
+        # Place focus in the custom suffix field so the user is encouraged to type
+        # their annotation immediately without having to click past the base name.
+        self.custom_suffix_edit.setFocus()
         
     def _get_selected_modules(self) -> list[int]:
         """
@@ -298,7 +338,33 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
     def _on_file_dialog_closed(self):
         """Handle the event when the file dialog is closed without selection."""
         pass
-        
+
+    def _update_name_preview(self):
+        """Update the live filename preview label from the two name fields."""
+        base = self.base_name_edit.text().strip()
+        suffix = self.custom_suffix_edit.text().strip()
+        if base:
+            full = f"{base}_{suffix}.pkl" if suffix else f"{base}.pkl"
+        else:
+            full = f"{suffix}.pkl" if suffix else "(no name)"
+        self._name_preview_label.setText(full)
+
+    def _get_measurement_name(self) -> str:
+        """Return the combined measurement name from the two dialog fields.
+
+        Combines base name and optional custom suffix with an underscore
+        separator.  Strips both values and falls back to a fresh timestamp
+        if the base field is empty.
+
+        Returns:
+            The measurement name string (without .pkl extension).
+        """
+        base = self.base_name_edit.text().strip()
+        suffix = self.custom_suffix_edit.text().strip()
+        if not base:
+            base = datetime.datetime.now().strftime("netanal_%H%M%S")
+        return f"{base}_{suffix}" if suffix else base
+
     def get_parameters(self) -> dict | None:
         """
         Retrieves and validates the network analysis parameters from the UI fields.
@@ -309,7 +375,10 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         """
         try:
             if self.load_data_available:
-                return self._load_data
+                # Inject the user-specified name even for loaded data
+                result = dict(self._load_data)
+                result['measurement_name'] = self._get_measurement_name()
+                return result
             else:
                 module_text = self.module_entry.text().strip()
                 selected_module_param = None # Parameter for 'module' key
@@ -337,6 +406,8 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
                     'clear_channels': self.clear_channels_cb.isChecked(),
                     # Persist amplitude mode metadata for next session
                     'amplitude_mode': 'sweep' if self.sweep_amp_radio.isChecked() else 'single',
+                    # Capture the user-specified measurement name (not persisted as a default)
+                    'measurement_name': self._get_measurement_name(),
                 }
 
                 if self.sweep_amp_radio.isChecked():

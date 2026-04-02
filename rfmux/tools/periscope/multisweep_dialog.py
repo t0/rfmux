@@ -174,23 +174,32 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     def _update_section_count(self, text):
         """Update label with section count based on QLineEdit content.
 
-        Guards against being called before ``start_btn`` / ``load_btn`` are
-        created (can happen in netanal_mode if the signal fires during setup).
+        The Start button enable/disable is delegated entirely to
+        ``_validate_amplitude_live`` so that both the section count *and*
+        the amplitude configuration are considered together.  Only the Load
+        button is managed here (it requires a file to have been loaded and is
+        unaffected by the amplitude settings).
         """
         text = text.strip()
         if not text:
             self.sections_info_label.setText("No data. Enter manually if desired.")
-            if hasattr(self, 'start_btn'):
-                self.start_btn.setEnabled(False)
             if hasattr(self, 'load_btn'):
                 self.load_btn.setEnabled(False)
-            return
-        if hasattr(self, 'start_btn'):
-            self.start_btn.setEnabled(True)
-        # Split on commas, ignore empty pieces
-        parts = [p.strip() for p in text.split(",") if p.strip()]
-        self.section_count = len(parts)
-        self.sections_info_label.setText(f"Loaded {self.section_count} section(s).")
+            self.section_count = 0
+        else:
+            # Split on commas, ignore empty pieces
+            parts = [p.strip() for p in text.split(",") if p.strip()]
+            self.section_count = len(parts)
+            self.sections_info_label.setText(f"Loaded {self.section_count} section(s).")
+
+        # Re-run live amplitude validation so it can update the Start button
+        # state to reflect the new section count (e.g. for array-length checks).
+        # Guard against being called before the amplitude UI is fully set up.
+        if hasattr(self, '_amp_status_label'):
+            self._validate_amplitude_live()
+        elif hasattr(self, 'start_btn'):
+            # Fallback during early construction: basic enable/disable
+            self.start_btn.setEnabled(self.section_count > 0)
     
     def _setup_ui(self):
         """Sets up the user interface elements for the Multisweep dialog."""
@@ -425,12 +434,6 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         )
         single_amp_layout.addRow("Amplitude array:", self.amp_array_edit)
 
-        _single_amp_note = QtWidgets.QLabel(
-            "Provide exactly ONE of the above fields (not both, not neither)."
-        )
-        _single_amp_note.setWordWrap(True)
-        _single_amp_note.setStyleSheet("font-style: italic; color: #666;")
-        single_amp_layout.addRow(_single_amp_note)
 
         self.single_amp_controls.setVisible(True)  # visible by default (single is checked)
         iteration_layout.addWidget(self.single_amp_controls)
@@ -507,6 +510,24 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         # Tracks the last user-entered number of steps so it can be restored
         # when the user switches away from Single iteration back to a sweep mode.
         self._saved_num_steps = "5"
+
+        # ── Amplitude validation status label ─────────────────────────────────
+        # Shown at the bottom of the Amplitude Settings group; updated in real-
+        # time by _validate_amplitude_live() whenever any relevant field changes.
+        self._amp_status_label = QtWidgets.QLabel("")
+        self._amp_status_label.setWordWrap(True)
+        self._amp_status_label.setMinimumHeight(40)
+        iteration_layout.addWidget(self._amp_status_label)
+
+        # Connect all amplitude input fields so the live validator fires on
+        # every keystroke (textChanged) regardless of which mode is active.
+        for _field in (
+            self.global_amp_edit, self.amp_array_edit,
+            self.uniform_start_edit, self.uniform_stop_edit,
+            self.scale_start_edit, self.scale_stop_edit,
+            self.num_steps_edit,
+        ):
+            _field.textChanged.connect(self._validate_amplitude_live)
 
         # Apply initial state (single iteration is checked by default)
         self._on_iteration_mode_changed()
@@ -944,7 +965,159 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         self.uniform_controls.setVisible(self.uniform_sweep_radio.isChecked())
         self.scaling_controls.setVisible(is_scaling)
-    
+        # Re-run live validation so the status label and Start button reflect
+        # the newly selected mode immediately (even before the user types).
+        self._validate_amplitude_live()
+
+    def _validate_amplitude_live(self):
+        """Update the amplitude status label and Start button state in real-time
+        as the user edits amplitude fields or switches iteration modes.
+
+        Covers all three iteration modes:
+
+        * **Single iteration** — requires exactly one of *Global amplitude* or
+          *Amplitude array* to be filled.
+        * **Uniform sweep** — requires both *Start amplitude* and *Stop amplitude*.
+        * **Multiplicative scaling** — requires both scale factors **and** a
+          pre-existing resonator registry (``res_info_dict`` in ``self.params``).
+
+        The method is a no-op until ``_amp_status_label`` exists (i.e. it
+        returns immediately if called before the full UI has been built).
+        """
+        if not hasattr(self, '_amp_status_label'):
+            return
+
+        # ── Determine the current number of sweep sections ────────────────
+        if hasattr(self, 'sections_edit'):
+            parts = [p.strip() for p in self.sections_edit.text().split(',') if p.strip()]
+            num_sections = len(parts)
+            sections_ok = num_sections > 0
+        else:
+            num_sections = len(self.section_center_frequencies)
+            sections_ok = True  # sections fixed at construction time
+
+        # Number of steps (used in the ✓ informational message)
+        try:
+            num_steps = int(self.num_steps_edit.text())
+        except (ValueError, AttributeError):
+            num_steps = 1
+
+        # ── Per-mode validation ───────────────────────────────────────────
+        amp_ok = False
+        msg    = ""
+
+        if self.single_iteration_radio.isChecked():
+            global_text = self.global_amp_edit.text().strip()
+            array_text  = self.amp_array_edit.text().strip()
+
+            if global_text and array_text:
+                msg = ("✗ Fill in only one field — either Global amplitude"
+                       " or Amplitude array, not both.")
+
+            elif not global_text and not array_text:
+                msg = ("⚠ An amplitude is required — enter a value in"
+                       " Global amplitude (one value for all sections)"
+                       " or Amplitude array (one value per section, comma-separated).")
+
+            elif global_text:
+                try:
+                    val = float(global_text)
+                    if val <= 0:
+                        msg = "✗ Global amplitude must be a positive number."
+                    else:
+                        msg = f"✓ Using global amplitude {val:g} for all sections."
+                        amp_ok = True
+                except ValueError:
+                    msg = "✗ Global amplitude must be a valid number."
+
+            else:  # array_text only
+                try:
+                    vals = [float(x.strip()) for x in array_text.split(',') if x.strip()]
+                    if any(v <= 0 for v in vals):
+                        msg = "✗ All amplitude values must be positive."
+                    elif num_sections > 0 and len(vals) != num_sections:
+                        msg = (f"⚠ Amplitude array has {len(vals)} value(s)"
+                               f" but there are {num_sections} sweep section(s).")
+                    else:
+                        msg = f"✓ Using per-section amplitude array ({len(vals)} value(s))."
+                        amp_ok = True
+                except ValueError:
+                    msg = "✗ Amplitude array must contain valid numbers, comma-separated."
+
+        elif self.uniform_sweep_radio.isChecked():
+            start_text = self.uniform_start_edit.text().strip()
+            stop_text  = self.uniform_stop_edit.text().strip()
+
+            if not start_text and not stop_text:
+                msg = "⚠ Enter a start and stop amplitude for the uniform sweep."
+            elif not start_text:
+                msg = "⚠ Start amplitude is required."
+            elif not stop_text:
+                msg = "⚠ Stop amplitude is required."
+            else:
+                try:
+                    start_val = float(start_text)
+                    stop_val  = float(stop_text)
+                    if start_val <= 0 or stop_val <= 0:
+                        msg = "✗ Start and stop amplitudes must be positive."
+                    else:
+                        msg = (f"✓ Sweeping {start_val:g} → {stop_val:g}"
+                               f" over {num_steps} step(s).")
+                        amp_ok = True
+                except ValueError:
+                    msg = "✗ Start and stop amplitudes must be valid numbers."
+
+        elif self.scaling_radio.isChecked():
+            res_info   = self.params.get('res_info_dict')
+            start_text = self.scale_start_edit.text().strip()
+            stop_text  = self.scale_stop_edit.text().strip()
+
+            if not res_info:
+                msg = ("⚠ No resonator registry found. Run a single-amplitude"
+                       " sweep first to build one, then re-open this dialog.")
+            elif not start_text and not stop_text:
+                msg = "⚠ Enter a start and stop scale factor."
+            elif not start_text:
+                msg = "⚠ Start factor is required."
+            elif not stop_text:
+                msg = "⚠ Stop factor is required."
+            else:
+                try:
+                    start_val = float(start_text)
+                    stop_val  = float(stop_text)
+                    if start_val <= 0 or stop_val <= 0:
+                        msg = "✗ Scale factors must be positive."
+                    else:
+                        msg = (f"✓ Scaling bias amplitudes by {start_val:g}×"
+                               f" → {stop_val:g}× over {num_steps} step(s).")
+                        amp_ok = True
+                except ValueError:
+                    msg = "✗ Scale factors must be valid numbers."
+
+        # ── Update status label ───────────────────────────────────────────
+        self._amp_status_label.setText(msg)
+        if amp_ok:
+            self._amp_status_label.setStyleSheet("color: #155724; font-weight: bold;")
+        elif msg.startswith("✗"):
+            self._amp_status_label.setStyleSheet("color: #721c24; font-weight: bold;")
+        else:
+            self._amp_status_label.setStyleSheet("color: #856404; font-weight: bold;")
+
+        # ── Update Start button ───────────────────────────────────────────
+        if hasattr(self, 'start_btn'):
+            can_start = amp_ok and sections_ok
+            self.start_btn.setEnabled(can_start)
+            if not can_start:
+                tip_parts = []
+                if not amp_ok and msg:
+                    # Strip the leading symbol for the tooltip
+                    tip_parts.append(msg.lstrip("⚠✗ "))
+                if not sections_ok:
+                    tip_parts.append("No sweep sections specified.")
+                self.start_btn.setToolTip("\n".join(tip_parts))
+            else:
+                self.start_btn.setToolTip("")
+
     @QtCore.pyqtSlot()
     def _on_file_dialog_closed(self):
         """Handle closure of the file dialog without file selection."""
@@ -1007,26 +1180,32 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             
             num_sections = len(params_dict['sweep_center_frequencies'])
 
-            # STEP 1: Parse base amplitude.
-            # Only required for single iteration and uniform sweep modes.
-            # Multiplicative scaling always derives its base from res_info_dict —
-            # no user amplitude input is needed (or accepted) for that mode.
-            if not self.scaling_radio.isChecked():
+            # STEP 1: Parse base amplitude (single-iteration mode only).
+            # For uniform sweep, amp_arrays are built entirely from the start/stop
+            # fields in Step 2 — global_amp / amp_array are hidden and not used.
+            # For multiplicative scaling, the base always comes from res_info_dict
+            # (also handled in Step 2), so neither field is consulted here.
+            if self.single_iteration_radio.isChecked():
                 global_amp_text = self.global_amp_edit.text().strip()
                 amp_array_text = self.amp_array_edit.text().strip()
 
                 if global_amp_text and amp_array_text:
                     QtWidgets.QMessageBox.warning(
                         self,
-                        "Validation Error",
-                        "Provide either global amplitude OR amplitude array, not both."
+                        "Amplitude Error",
+                        "Both amplitude fields are filled.\n\n"
+                        "Clear one: use 'Global amplitude' for a single value across all "
+                        "sections, or 'Amplitude array' for per-section values."
                     )
                     return None
                 elif not global_amp_text and not amp_array_text:
                     QtWidgets.QMessageBox.warning(
                         self,
-                        "Validation Error",
-                        "Must provide either global amplitude or amplitude array."
+                        "Amplitude Error",
+                        "No amplitude specified.\n\n"
+                        "Enter a value in 'Global amplitude' (one value applied to all "
+                        "sections) or 'Amplitude array' (one value per section, "
+                        "comma-separated)."
                     )
                     return None
 
@@ -1035,8 +1214,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                     if base_amp <= 0:
                         QtWidgets.QMessageBox.warning(
                             self,
-                            "Validation Error",
-                            "Global amplitude must be positive."
+                            "Amplitude Error",
+                            "Global amplitude must be a positive number."
                         )
                         return None
                     base_amp_array = [base_amp] * num_sections
@@ -1047,23 +1226,25 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                     if len(base_amp_array) != num_sections:
                         QtWidgets.QMessageBox.warning(
                             self,
-                            "Validation Error",
-                            f"Amplitude array length ({len(base_amp_array)}) must match "
-                            f"number of sweep sections ({num_sections})."
+                            "Amplitude Error",
+                            f"Amplitude array has {len(base_amp_array)} value(s) but there "
+                            f"are {num_sections} sweep section(s).\n\n"
+                            "Provide exactly one amplitude value per section."
                         )
                         return None
                     for i, amp in enumerate(base_amp_array):
                         if amp <= 0:
                             QtWidgets.QMessageBox.warning(
                                 self,
-                                "Validation Error",
-                                f"All amplitudes must be positive (section {i+1} has {amp})."
+                                "Amplitude Error",
+                                f"All amplitude values must be positive "
+                                f"(section {i+1} has value {amp})."
                             )
                             return None
                     params_dict['base_amplitude_mode'] = 'array'
                     params_dict['base_amplitude_values'] = base_amp_array.copy()
             else:
-                # Scaling mode: base_amp_array is read from res_info_dict below
+                # Uniform sweep and scaling: base_amp_array is derived in Step 2
                 base_amp_array = None
             
             # STEP 2: Handle iterations

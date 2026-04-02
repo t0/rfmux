@@ -101,7 +101,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
 
         # Box 2: optional user suffix, blank by default
         self.custom_suffix_edit = QtWidgets.QLineEdit()
-        self.custom_suffix_edit.setPlaceholderText("e.g. cold_dark, tile3, run2")
+        self.custom_suffix_edit.setPlaceholderText("e.g., cold_dark")
         self.custom_suffix_edit.setToolTip(
             "Optional suffix appended after the base name with an underscore separator.\n"
             "Leave blank to use the base name only."
@@ -482,7 +482,7 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
         # Pre-populate the suffix with the custom annotation from the previous run
         # (stored separately so the timestamp prefix is never included).
         self.custom_suffix_edit = QtWidgets.QLineEdit(self.params.get('measurement_custom_suffix', ''))
-        self.custom_suffix_edit.setPlaceholderText("e.g. cold_dark, tile3, run2")
+        self.custom_suffix_edit.setPlaceholderText("e.g., cold_dark")
         self.custom_suffix_edit.setToolTip(
             "Optional suffix appended after the base name with an underscore separator.\n"
             "Leave blank to use the base name only."

@@ -220,7 +220,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         # Box 2: optional user suffix — pre-populated from the previous run if available
         self.custom_suffix_edit = QtWidgets.QLineEdit(self.params.get('measurement_custom_suffix', ''))
-        self.custom_suffix_edit.setPlaceholderText("e.g. cold_dark, tile3, run2")
+        self.custom_suffix_edit.setPlaceholderText("e.g., cold_dark")
         self.custom_suffix_edit.setToolTip(
             "Optional suffix appended after the base name with an underscore separator.\n"
             "Leave blank to use the base name only."
@@ -417,7 +417,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         single_amp_layout.setContentsMargins(20, 0, 0, 0)  # Indent
 
         self.global_amp_edit = QtWidgets.QLineEdit()
-        self.global_amp_edit.setPlaceholderText("e.g., 0.1")
+        self.global_amp_edit.setPlaceholderText("e.g., 0.005")
         self.global_amp_edit.setValidator(QDoubleValidator(0.0001, 10.0, 4, self))
         self.global_amp_edit.setToolTip(
             "Single amplitude value applied to all frequency sections.\n"
@@ -426,7 +426,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         single_amp_layout.addRow("Global amplitude:", self.global_amp_edit)
 
         self.amp_array_edit = QtWidgets.QLineEdit()
-        self.amp_array_edit.setPlaceholderText("e.g., 0.1, 0.15, 0.12 (comma-separated)")
+        self.amp_array_edit.setPlaceholderText("e.g., 0.005, 0.001, 0.002 (comma-separated)")
         self.amp_array_edit.setToolTip(
             "Comma-separated amplitude values, one per frequency section.\n"
             "Must match the number of sweep sections.\n"
@@ -451,15 +451,40 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         uniform_layout.setContentsMargins(20, 0, 0, 0)  # Indent
         
         self.uniform_start_edit = QtWidgets.QLineEdit()
-        self.uniform_start_edit.setPlaceholderText("e.g., 0.05")
+        self.uniform_start_edit.setPlaceholderText("e.g., 0.005")
         self.uniform_start_edit.setValidator(QDoubleValidator(0.0001, 10.0, 4, self))
         uniform_layout.addRow("Start amplitude:", self.uniform_start_edit)
         
         self.uniform_stop_edit = QtWidgets.QLineEdit()
-        self.uniform_stop_edit.setPlaceholderText("e.g., 0.2")
+        self.uniform_stop_edit.setPlaceholderText("e.g., 0.01")
         self.uniform_stop_edit.setValidator(QDoubleValidator(0.0001, 10.0, 4, self))
         uniform_layout.addRow("Stop amplitude:", self.uniform_stop_edit)
-        
+
+        # Spacing mode: linear or logarithmic
+        spacing_widget = QtWidgets.QWidget()
+        spacing_layout = QtWidgets.QHBoxLayout(spacing_widget)
+        spacing_layout.setContentsMargins(0, 0, 0, 0)
+        spacing_layout.setSpacing(8)
+        self.uniform_linear_radio = QtWidgets.QRadioButton("Linear")
+        self.uniform_linear_radio.setChecked(True)
+        self.uniform_linear_radio.setToolTip(
+            "Space amplitude steps evenly on a linear scale (np.linspace)."
+        )
+        self.uniform_log_radio = QtWidgets.QRadioButton("Logarithmic")
+        self.uniform_log_radio.setToolTip(
+            "Space amplitude steps evenly on a logarithmic scale (np.geomspace).\n"
+            "Useful when probing over a wide dynamic range."
+        )
+        # Group the two spacing radio buttons so they are always mutually exclusive.
+        self._spacing_group = QtWidgets.QButtonGroup(self)
+        self._spacing_group.addButton(self.uniform_linear_radio)
+        self._spacing_group.addButton(self.uniform_log_radio)
+
+        spacing_layout.addWidget(self.uniform_linear_radio)
+        spacing_layout.addWidget(self.uniform_log_radio)
+        spacing_layout.addStretch(1)
+        uniform_layout.addRow("Spacing:", spacing_widget)
+
         self.uniform_controls.setVisible(False)
         iteration_layout.addWidget(self.uniform_controls)
         
@@ -484,12 +509,19 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         scaling_layout.addRow("Start factor:", self.scale_start_edit)
         
         self.scale_stop_edit = QtWidgets.QLineEdit()
-        self.scale_stop_edit.setPlaceholderText("e.g., 2.0")
+        self.scale_stop_edit.setPlaceholderText("e.g., 2")
         self.scale_stop_edit.setValidator(QDoubleValidator(0.001, 100.0, 3, self))
         scaling_layout.addRow("Stop factor:", self.scale_stop_edit)
         
         self.scaling_controls.setVisible(False)
         iteration_layout.addWidget(self.scaling_controls)
+
+        # Group the three iteration-mode radio buttons so they are always
+        # mutually exclusive, regardless of widget hierarchy.
+        self._iteration_mode_group = QtWidgets.QButtonGroup(self)
+        self._iteration_mode_group.addButton(self.single_iteration_radio)
+        self._iteration_mode_group.addButton(self.uniform_sweep_radio)
+        self._iteration_mode_group.addButton(self.scaling_radio)
 
         param_form_layout.addRow(iteration_group)
         
@@ -528,6 +560,10 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.num_steps_edit,
         ):
             _field.textChanged.connect(self._validate_amplitude_live)
+
+        # Also re-validate when spacing mode changes (updates the status message)
+        self.uniform_linear_radio.toggled.connect(self._validate_amplitude_live)
+        self.uniform_log_radio.toggled.connect(self._validate_amplitude_live)
 
         # Apply initial state (single iteration is checked by default)
         self._on_iteration_mode_changed()
@@ -664,6 +700,9 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             if isinstance(base_amp_values, list):
                 amp_text = ", ".join(f"{amp:.4g}" for amp in base_amp_values)
                 self.amp_array_edit.setText(amp_text)
+        else:
+            # No saved amplitude preference — apply the hard-coded default
+            self.global_amp_edit.setText("0.005")
         
         # Populate iteration settings using saved metadata.
         # Seed _saved_num_steps with the loaded value so that
@@ -687,6 +726,11 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 self.uniform_start_edit.setText(f"{uniform_start:.4g}")
             if uniform_stop is not None:
                 self.uniform_stop_edit.setText(f"{uniform_stop:.4g}")
+            # Restore spacing mode (default: linear)
+            if self.params.get('uniform_spacing') == 'log':
+                self.uniform_log_radio.setChecked(True)
+            else:
+                self.uniform_linear_radio.setChecked(True)
         
         elif iteration_mode == 'scaling':
             self.scaling_radio.setChecked(True)
@@ -707,10 +751,11 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         # Reset number of steps to 1
         self.num_steps_edit.setText("1")
         
-        # Clear uniform sweep fields
+        # Clear uniform sweep fields and reset spacing to linear
         self.uniform_start_edit.clear()
         self.uniform_stop_edit.clear()
-        
+        self.uniform_linear_radio.setChecked(True)
+
         # Clear scaling fields
         self.scale_start_edit.clear()
         self.scale_stop_edit.clear()
@@ -1061,8 +1106,13 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                     if start_val <= 0 or stop_val <= 0:
                         msg = "✗ Start and stop amplitudes must be positive."
                     else:
+                        spacing_label = (
+                            "logarithmically" if hasattr(self, 'uniform_log_radio')
+                            and self.uniform_log_radio.isChecked()
+                            else "linearly"
+                        )
                         msg = (f"✓ Sweeping {start_val:g} → {stop_val:g}"
-                               f" over {num_steps} step(s).")
+                               f" over {num_steps} step(s), {spacing_label}.")
                         amp_ok = True
                 except ValueError:
                     msg = "✗ Start and stop amplitudes must be valid numbers."
@@ -1286,14 +1336,19 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                     )
                     return None
                 
-                # Generate uniform amplitude values
-                amp_values = np.linspace(start_amp, stop_amp, num_steps)
+                # Generate amplitude values — linear or logarithmic spacing
+                use_log = self.uniform_log_radio.isChecked()
+                if use_log:
+                    amp_values = np.geomspace(start_amp, stop_amp, num_steps)
+                else:
+                    amp_values = np.linspace(start_amp, stop_amp, num_steps)
                 params_dict['amp_arrays'] = [[amp] * num_sections for amp in amp_values]
-                
+
                 # Store iteration metadata
                 params_dict['iteration_mode'] = 'uniform'
                 params_dict['uniform_start_amplitude'] = start_amp
                 params_dict['uniform_stop_amplitude'] = stop_amp
+                params_dict['uniform_spacing'] = 'log' if use_log else 'linear'
             
             elif self.scaling_radio.isChecked():
                 # Multiplicative scaling mode

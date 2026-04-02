@@ -455,6 +455,14 @@ def set_multisweep_defaults(params: dict) -> None:
         'apply_skewed_fit',
         'apply_nonlinear_fit',
         'run_find_bias',
+        # Uniform amplitude sweep metadata
+        'iteration_mode',
+        'num_steps',
+        'uniform_start_amplitude',
+        'uniform_stop_amplitude',
+        'uniform_spacing',
+        'scale_start_factor',
+        'scale_stop_factor',
     }
     
     filtered_params = {k: v for k, v in params.items() if k in persist_keys}

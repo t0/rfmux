@@ -1859,12 +1859,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             dialog_seed_frequencies if (dialog_seed_frequencies and has_bias_found) else None
         )
 
+        # Pass res_info_dict to the dialog so the "Multiplicative scaling" validator
+        # can find it in self.params immediately on the very first re-run of a session.
+        # Without this, res_info_dict is only injected into self.initial_params *after*
+        # the dialog closes, so the first-ever re-run dialog never sees it.
+        dialog_params = self.initial_params.copy()
+        if self.res_info_dict:
+            dialog_params['res_info_dict'] = self.res_info_dict
+
         dialog = MultisweepDialog(
             parent=self,
             section_center_frequencies=original_sweep_centers,
             dac_scales=self.dac_scales,
             current_module=self.target_module,
-            initial_params=self.initial_params.copy(),
+            initial_params=dialog_params,
             load_multisweep=False,
             fit_frequencies=fit_freqs,
             bias_frequencies=bias_freqs_for_dialog,

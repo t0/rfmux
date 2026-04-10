@@ -73,9 +73,29 @@ class PeriscopeRuntime:
             self.buf[ch_val] = {k: Circular(self.N) for k in ("I", "Q", "M")} # Circular from .utils
             self.tbuf[ch_val] = Circular(self.N)
         
+        # Pulse capture tap callback (registered by PulseCapturePanel)
+        if not hasattr(self, '_pulse_tap'):
+            self._pulse_tap = None
+
         # Initialize simulation speed tracking for mock mode
         if self.is_mock_mode:
             self._init_sim_speed_tracking()
+
+    # ── Pulse capture tap ─────────────────────────────────────────
+
+    def register_pulse_tap(self, callback):
+        """Register a callback to receive slow stream samples for pulse capture.
+
+        The callback is invoked from the GUI timer thread for every sample
+        in every packet, so it must be fast (e.g. put into a queue).
+
+        Signature: ``callback(channel: int, i_val: float, q_val: float, timestamp: float | None)``
+        """
+        self._pulse_tap = callback
+
+    def unregister_pulse_tap(self):
+        """Remove the pulse capture tap callback."""
+        self._pulse_tap = None
 
     def _build_layout(self):
         """
@@ -645,6 +665,10 @@ class PeriscopeRuntime:
             self.buf[ch_val]["Q"].add(sample.imag)
             self.buf[ch_val]["M"].add(np.abs(sample))
             self.tbuf[ch_val].add(t_rel)
+
+            # Pulse capture tap: forward raw I/Q to registered consumer
+            if self._pulse_tap is not None:
+                self._pulse_tap(ch_val, float(sample.real), float(sample.imag), t_rel)
 
 
     def reset_histogram_channel(self, ch_val: int) -> None:

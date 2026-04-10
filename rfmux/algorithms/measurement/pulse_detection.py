@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 
 # ───────────────────────── Circular Buffer ──────────────────────────
@@ -146,6 +146,8 @@ class PulseCapture:
         margin_fraction: float = 0.1,
         min_pulse_samples: int = 0,
         enable_pileup: bool = True,
+        on_pulse: Optional[Callable[[int, int, dict], None]] = None,
+        accumulate: bool = True,
     ):
         self.channels = list(channels)
         self.buf_size = buf_size
@@ -155,6 +157,15 @@ class PulseCapture:
         self.margin_fraction = margin_fraction
         self.min_pulse_samples = min_pulse_samples
         self.enable_pileup = enable_pileup
+
+        # Callback for streaming consumers (HDF5, GUI, etc.)
+        # Signature: on_pulse(channel: int, pulse_idx: int, pulse_data: dict)
+        self.on_pulse = on_pulse
+
+        # When False, pulses are NOT accumulated in self.pulses dict.
+        # Use accumulate=False with on_pulse for streaming consumers
+        # that write to HDF5 and don't need all pulses in memory.
+        self._accumulate = accumulate
 
         # Per-channel noise stats
         self.noise_stats = noise_stats
@@ -370,15 +381,26 @@ class PulseCapture:
         Q_win = self._window(self.buf[channel]["Q"], start, end)
         ts_win = self._window(self.buf[channel]["ts"], start, end)
 
-        ch_key = f"Channel {channel}"
-        self.pulse_count[ch_key] += 1
-        k = self.pulse_count[ch_key]
-        self.pulses[ch_key][k] = {
+        pulse_data = {
             "Amp_I": np.array(I_win),
             "Amp_Q": np.array(Q_win),
             "Time": np.array(ts_win),
             "pileup": pileup,
         }
+
+        ch_key = f"Channel {channel}"
+        self.pulse_count[ch_key] += 1
+        k = self.pulse_count[ch_key]
+
+        # Notify streaming consumers (HDF5 writer, GUI, histograms, etc.)
+        if self.on_pulse is not None:
+            self.on_pulse(channel, k, pulse_data)
+
+        # Accumulate in memory (for backward compat with trigger_capture macro).
+        # Streaming consumers should set accumulate=False to avoid unbounded
+        # memory growth during long captures.
+        if self._accumulate:
+            self.pulses[ch_key][k] = pulse_data
 
         self._reset(channel)
 

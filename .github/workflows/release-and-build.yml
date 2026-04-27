@@ -32,7 +32,7 @@ jobs:
     steps:
       - name: Run Release Please
         id: rp
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@v5
         with:
           release-type: python
           package-name: rfmux

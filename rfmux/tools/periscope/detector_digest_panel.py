@@ -702,8 +702,9 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                 self.plot2_iq_plane.plot(s21_i_volts, s21_q_volts, pen=None, symbol='o', symbolBrush=SCATTER_COLORS["DEFAULT"], symbolPen=SCATTER_COLORS["DEFAULT"], symbolSize=5, name="Sweep IQ (Raw)")
 
                 # Skewed Fit Overlay (magnitude only)
-                if self.active_sweep_data.get('skewed_fit_success'):
-                    skewed_model_mag = self.active_sweep_data.get('skewed_model_mag')
+                _skewed_sub = self.active_sweep_data.get('fits', {}).get('skewed', {})
+                if _skewed_sub.get('skewed_fit_success'):
+                    skewed_model_mag = _skewed_sub.get('skewed_model_mag')
                     if skewed_model_mag is not None and len(skewed_model_mag) == len(x_axis_hz_offset):
                         # The skewed model is normalized, we need to denormalize it
                         # The normalization factor used in fitting is abs(s21_iq[-1])
@@ -725,12 +726,13 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                         # No IQ plane plot for skewed fit since it's magnitude-only
                 
                 # Nonlinear Fit Overlay
-                if self.active_sweep_data.get('nonlinear_fit_success'):
-                    nl_model_iq = self.active_sweep_data.get('nonlinear_model_iq') 
+                _nonlinear_sub = self.active_sweep_data.get('fits', {}).get('nonlinear', {})
+                if _nonlinear_sub.get('nonlinear_fit_success'):
+                    nl_model_iq = _nonlinear_sub.get('nonlinear_model_iq')
                     if nl_model_iq is not None and len(nl_model_iq) == len(x_axis_hz_offset):
                         # The model is generated for gain-corrected data, so we need to re-apply the gain
                         # to match the physical reference frame of the displayed data
-                        gain_complex = self.active_sweep_data.get('gain_complex')
+                        gain_complex = _nonlinear_sub.get('gain_complex')
                         if gain_complex is not None:
                             # Apply the complex gain (both magnitude and phase)
                             nl_model_iq_physical = nl_model_iq * gain_complex
@@ -886,9 +888,10 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         # Skewed Fit - Update table rows
-        skewed_applied = self.active_sweep_data.get('skewed_fit_applied', False)
-        skewed_success = self.active_sweep_data.get('skewed_fit_success', False)
-        fit_params = self.active_sweep_data.get('fit_params', {})
+        _sf = self.active_sweep_data.get('fits', {}).get('skewed', {})
+        skewed_applied = _sf.get('skewed_fit_applied', False)
+        skewed_success = _sf.get('skewed_fit_success', False)
+        fit_params = _sf.get('fit_params') or {}
 
         # Row indices for skewed table
         SKEWED_STATUS_ROW = 0
@@ -919,9 +922,10 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.skewed_table.item(SKEWED_BIFURCATION_ROW, 1).setText("Yes" if is_bifurcated else "No")
 
         # Nonlinear Fit - Update table rows
-        nl_applied = self.active_sweep_data.get('nonlinear_fit_applied', False)
-        nl_success = self.active_sweep_data.get('nonlinear_fit_success', False)
-        nl_params_dict = self.active_sweep_data.get('nonlinear_fit_params', self.active_sweep_data)
+        _nf = self.active_sweep_data.get('fits', {}).get('nonlinear', {})
+        nl_applied = _nf.get('nonlinear_fit_applied', False)
+        nl_success = _nf.get('nonlinear_fit_success', False)
+        nl_params_dict = _nf.get('nonlinear_fit_params') or {}
 
         # Row indices for nonlinear table
         NL_STATUS_ROW = 0

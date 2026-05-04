@@ -607,9 +607,10 @@ def fit_skewed_multisweep(
             warnings.warn(f"fit_skewed_multisweep: 'frequencies' or 'iq_counts' missing for resonator {res_key!r}. Skipping.")
             continue
 
-        # Initialize new result keys (don't overwrite existing data)
-        resonance_data['fit_params'] = None
-        resonance_data['iq_centered'] = None
+        # All skewed-fit products go into the nested 'fits' → 'skewed' subdict.
+        skewed_sub = resonance_data.setdefault('fits', {}).setdefault('skewed', {})
+        skewed_sub['fit_params'] = None
+        skewed_sub['iq_centered'] = None
 
         if fit_resonances:
             try:
@@ -627,21 +628,21 @@ def fit_skewed_multisweep(
                     normalize=normalize_fit,
                     fr_lim=auto_fr_lim
                 )
-                resonance_data['fit_params'] = fit_params_result
+                skewed_sub['fit_params'] = fit_params_result
 
             except Exception as e:
                 warnings.warn(f"Fitting failed for resonator {res_key!r} at {bias_freq*1e-6:.3f} MHz during post-processing: {e}")
-                # resonance_data['fit_params'] remains None
+                # skewed_sub['fit_params'] remains None
 
         if center_iq_circle:
             try:
                 # Always center the current iq_counts data
                 iq_centered_result = center_resonance_iq_circle(iq_counts)
-                resonance_data['iq_centered'] = iq_centered_result
+                skewed_sub['iq_centered'] = iq_centered_result
 
             except Exception as e:
                 warnings.warn(f"IQ centering failed for resonator {res_key!r} at {bias_freq*1e-6:.3f} MHz during post-processing: {e}")
-                # resonance_data['iq_centered'] remains None
+                # skewed_sub['iq_centered'] remains None
                 
     return multisweep_data
 

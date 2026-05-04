@@ -742,7 +742,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         has_fit_data = False
         for amp_dir_dict in self.results_by_detector.values():
             for det_data in amp_dir_dict.values():
-                if 'fit_params' in det_data or 'nonlinear_fit_params' in det_data:
+                if det_data.get('fits'):
                     has_fit_data = True
                     break
             if has_fit_data:
@@ -1196,8 +1196,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                             det_entry.get('original_center_frequency')
                             or det_entry.get('sweep_center_frequency')
                         ),
-                        'nonlinear_fit_success': det_entry.get('nonlinear_fit_success', False),
-                        'nonlinear_fit_params': det_entry.get('nonlinear_fit_params'),
+                        'nonlinear_fit_success': det_entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_success', False),
+                        'nonlinear_fit_params': det_entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_params'),
                     }
         
         if not detector_data:
@@ -1699,7 +1699,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             'timestamp': datetime.datetime.now().isoformat(),
             'target_module': self.target_module,
             'initial_parameters': export_initial_params,
-            'dac_scales_used': self.dac_scales,
+            # Only store the DAC scale for the module that actually ran the measurement.
+            'dac_scales_used': self.dac_scales.get(self.target_module),
             'res_info_dict': self.res_info_dict,        # Lightweight resonator registry
             'results': self._results_by_detector_with_iq_volts(),
             'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
@@ -1708,26 +1709,48 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         }
     
     def _results_by_detector_with_iq_volts(self) -> dict:
-        """Return a shallow copy of results_by_detector with 'iq_volts' injected.
+        """Return a shallow copy of results_by_detector with export-friendly keys.
 
         For each detector entry that contains 'iq_counts', computes
         ``iq_volts = convert_roc_to_volts(iq_counts)`` and stores it in a
         per-entry copy.  The live ``results_by_detector`` dict is not mutated.
         Only executed at export time (not during live sweeps).
+
+        Additional export transformations applied to the copy:
+        - ``sweep_amplitude`` → renamed to ``sweep_amplitude_normalized``
+          (makes it explicit that the value is a 0–1 normalized amplitude).
+        - ``sweep_power_dbm`` is added, computed from ``sweep_amplitude_normalized``
+          and the module's DAC scale.  Set to ``None`` when the DAC scale is
+          unknown.
         """
         from rfmux.core.transferfunctions import convert_roc_to_volts
+
+        dac_scale = self.dac_scales.get(self.target_module)
 
         result = {}
         for code, iter_dict in self.results_by_detector.items():
             result[code] = {}
             for iter_idx, entry in iter_dict.items():
                 export_entry = dict(entry)  # shallow copy
+
+                # Inject iq_volts
                 iq = entry.get('iq_counts')
                 if iq is not None and hasattr(iq, '__len__') and len(iq) > 0:
                     try:
                         export_entry['iq_volts'] = convert_roc_to_volts(iq)
                     except Exception:
                         pass  # silently skip if conversion fails
+
+                # Rename sweep_amplitude → sweep_amplitude_normalized and add sweep_power_dbm.
+                # The live results_by_detector still uses 'sweep_amplitude' for all internal
+                # display/sorting logic; only the exported copy gets the new key names.
+                norm_amp = export_entry.pop('sweep_amplitude', None)
+                export_entry['sweep_amplitude_normalized'] = norm_amp
+                if norm_amp is not None and dac_scale is not None:
+                    export_entry['sweep_power_dbm'] = UnitConverter.normalize_to_dbm(norm_amp, dac_scale)
+                else:
+                    export_entry['sweep_power_dbm'] = None
+
                 result[code][iter_idx] = export_entry
         return result
 
@@ -1766,7 +1789,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # First pass: check whether any detector has real fit results
         has_any_fit = any(
-            entry.get('fit_params') or entry.get('nonlinear_fit_params')
+            entry.get('fits', {}).get('skewed', {}).get('fit_params')
+            or entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_params')
             for iter_dict in self.results_by_detector.values()
             if iter_dict
             for entry in [next(iter(iter_dict.values()))]
@@ -1789,10 +1813,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 ref_freqs.append(fallback)
                 continue
             first_entry = next(iter(iter_dict.values()))
-            if first_entry.get('skewed_fit_success') and first_entry.get('fit_params'):
-                ref_freqs.append(first_entry['fit_params']['fr'])
-            elif first_entry.get('nonlinear_fit_success') and first_entry.get('nonlinear_fit_params'):
-                ref_freqs.append(first_entry['nonlinear_fit_params']['fr'])
+            _skewed = first_entry.get('fits', {}).get('skewed', {})
+            _nl     = first_entry.get('fits', {}).get('nonlinear', {})
+            if _skewed.get('skewed_fit_success') and _skewed.get('fit_params'):
+                ref_freqs.append(_skewed['fit_params']['fr'])
+            elif _nl.get('nonlinear_fit_success') and _nl.get('nonlinear_fit_params'):
+                ref_freqs.append(_nl['nonlinear_fit_params']['fr'])
             else:
                 ref_freqs.append(first_entry.get('bias_frequency', fallback))
         return ref_freqs
@@ -3016,7 +3042,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 key=lambda kv: kv[1].get('sweep_amplitude', 0.0),
             )
             for pos, (_iter_idx, entry) in enumerate(sorted_items):
-                if entry.get('skewed_fit_success') or entry.get('nonlinear_fit_success'):
+                if (entry.get('fits', {}).get('skewed', {}).get('skewed_fit_success')
+                        or entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_success')):
                     valid_indices.add(pos)
 
         if not valid_indices:
@@ -3066,7 +3093,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Check whether any fit data is present; if not, show the placeholder.
         has_fit_data = any(
-            entry.get('skewed_fit_success') or entry.get('nonlinear_fit_success')
+            entry.get('fits', {}).get('skewed', {}).get('skewed_fit_success')
+            or entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_success')
             for iter_dict in self.results_by_detector.values()
             for entry in iter_dict.values()
         )
@@ -3132,7 +3160,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         redraw if Tab 6 is currently active.
         """
         has_fit_data = any(
-            entry.get('skewed_fit_success') or entry.get('nonlinear_fit_success')
+            entry.get('fits', {}).get('skewed', {}).get('skewed_fit_success')
+            or entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_success')
             for iter_dict in self.results_by_detector.values()
             for entry in iter_dict.values()
         ) if self.results_by_detector else False

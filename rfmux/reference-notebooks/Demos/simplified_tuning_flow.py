@@ -260,8 +260,8 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
         )
         
         # Count successful fits
-        successful_fits = sum(1 for res_data in multisweep_results.values() 
-                            if res_data.get('fit_params', {}).get('fr') != 'nan')
+        successful_fits = sum(1 for res_data in multisweep_results.values()
+                            if res_data.get('fits', {}).get('skewed', {}).get('fit_params', {}).get('fr') != 'nan')
         print(f"   ✓ Skewed fitting complete: {successful_fits}/{len(multisweep_results)} successful")
     
     # Apply nonlinear fitting (optional)
@@ -275,15 +275,15 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
         )
         
         # Count successful nonlinear fits
-        nl_successful = sum(1 for res_data in multisweep_results.values() 
-                          if res_data.get('nonlinear_fit_success', False))
+        nl_successful = sum(1 for res_data in multisweep_results.values()
+                          if res_data.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_success', False))
         print(f"   ✓ Nonlinear fitting complete: {nl_successful}/{len(multisweep_results)} successful")
     
     # Display fit results
     print("\n   Fit results summary:")
     for idx, res_data in multisweep_results.items():
         if isinstance(idx, str):
-            fit_params = res_data.get('fit_params', {})
+            fit_params = res_data.get('fits', {}).get('skewed', {}).get('fit_params') or {}
             if fit_params.get('fr') != 'nan':
                 print(f"     Resonance {idx}: fr={fit_params['fr']/1e6:.3f} MHz, "
                       f"Qr={fit_params['Qr']:.0f}, Qc={fit_params['Qc']:.0f}")

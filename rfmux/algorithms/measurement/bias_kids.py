@@ -497,8 +497,8 @@ def find_bias_points(
             ref_freq = res_info_dict[code].get('bias_frequency')
 
         elif reference_freq_source == "fit_fr":
-            fp = selected_entry.get('fit_params') or {}
-            nlp = selected_entry.get('nonlinear_fit_params') or {}
+            fp  = selected_entry.get('fits', {}).get('skewed', {}).get('fit_params') or {}
+            nlp = selected_entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_params') or {}
             ref_freq = fp.get('fr') or nlp.get('fr')
             # Treat the string 'nan' (from old skewed fitter) as missing
             if isinstance(ref_freq, str):

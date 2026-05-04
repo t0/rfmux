@@ -744,10 +744,12 @@ class MultisweepTask(QtCore.QThread):
         if not apply_skewed and not apply_nonlinear:
             # If no fitting is requested, add flags indicating this
             for res_idx in enhanced_results:
-                enhanced_results[res_idx]['skewed_fit_applied'] = False
-                enhanced_results[res_idx]['skewed_fit_success'] = False
-                enhanced_results[res_idx]['nonlinear_fit_applied'] = False
-                enhanced_results[res_idx]['nonlinear_fit_success'] = False
+                enhanced_results[res_idx].setdefault('fits', {}).setdefault('skewed', {}).update(
+                    {'skewed_fit_applied': False, 'skewed_fit_success': False}
+                )
+                enhanced_results[res_idx]['fits'].setdefault('nonlinear', {}).update(
+                    {'nonlinear_fit_applied': False, 'nonlinear_fit_success': False}
+                )
             return enhanced_results
         
         try:
@@ -757,8 +759,8 @@ class MultisweepTask(QtCore.QThread):
                     self.signals.fitting_progress.emit(module_idx, 
                         "Fitting in progress: Applying skewed fits")
                 
-                # Perform skewed fitting
-                skewed_results = fitting_module_direct.fit_skewed_multisweep(
+                # Perform skewed fitting (mutates enhanced_results[*]['fits']['skewed'] in place)
+                fitting_module_direct.fit_skewed_multisweep(
                     enhanced_results,
                     approx_Q_for_fit=1e4,
                     fit_resonances=True,
@@ -766,38 +768,33 @@ class MultisweepTask(QtCore.QThread):
                     normalize_fit=True
                 )
                 
-                # Update results
+                # Set status flags and generate model curve inside fits.skewed
                 for res_idx in enhanced_results:
-                    if res_idx in skewed_results:
-                        enhanced_results[res_idx].update(skewed_results[res_idx])
-                        enhanced_results[res_idx]['skewed_fit_applied'] = True
-                        fit_p = enhanced_results[res_idx].get('fit_params', {})
-                        enhanced_results[res_idx]['skewed_fit_success'] = fit_p.get('fr') is not None and fit_p.get('fr') != 'nan'
-                        
-                        # Generate skewed model magnitude if fit was successful
-                        if enhanced_results[res_idx]['skewed_fit_success'] and fit_p:
-                            frequencies = enhanced_results[res_idx].get('frequencies')
-                            if frequencies is not None:
-                                try:
-                                    # Generate magnitude model using fitted parameters
-                                    skewed_model_mag = fitting_module_direct.s21_skewed(
-                                        frequencies, 
-                                        fit_p['fr'], 
-                                        fit_p['Qr'], 
-                                        fit_p['Qcre'], 
-                                        fit_p['Qcim'], 
-                                        fit_p['A']
-                                    )
-                                    enhanced_results[res_idx]['skewed_model_mag'] = skewed_model_mag
-                                except Exception as e:
-                                    print(f"Warning: Failed to generate skewed model for resonance {res_idx}: {e}", file=sys.stderr)
-                    else:
-                        enhanced_results[res_idx]['skewed_fit_applied'] = True
-                        enhanced_results[res_idx]['skewed_fit_success'] = False
+                    skewed_sub = enhanced_results[res_idx].setdefault('fits', {}).setdefault('skewed', {})
+                    skewed_sub['skewed_fit_applied'] = True
+                    fit_p = skewed_sub.get('fit_params') or {}
+                    skewed_sub['skewed_fit_success'] = (
+                        fit_p.get('fr') is not None and fit_p.get('fr') != 'nan'
+                    )
+                    
+                    # Generate skewed model magnitude if fit was successful
+                    if skewed_sub['skewed_fit_success'] and fit_p:
+                        frequencies = enhanced_results[res_idx].get('frequencies')
+                        if frequencies is not None:
+                            try:
+                                skewed_sub['skewed_model_mag'] = fitting_module_direct.s21_skewed(
+                                    frequencies,
+                                    fit_p['fr'], fit_p['Qr'],
+                                    fit_p['Qcre'], fit_p['Qcim'],
+                                    fit_p['A']
+                                )
+                            except Exception as e:
+                                print(f"Warning: Failed to generate skewed model for resonance {res_idx}: {e}", file=sys.stderr)
             else:
                 for res_idx in enhanced_results:
-                    enhanced_results[res_idx]['skewed_fit_applied'] = False
-                    enhanced_results[res_idx]['skewed_fit_success'] = False
+                    enhanced_results[res_idx].setdefault('fits', {}).setdefault('skewed', {}).update(
+                        {'skewed_fit_applied': False, 'skewed_fit_success': False}
+                    )
             
             if apply_nonlinear:
                 # Emit progress signal
@@ -805,8 +802,7 @@ class MultisweepTask(QtCore.QThread):
                     self.signals.fitting_progress.emit(module_idx, 
                         "Fitting in progress: Applying non-linear fits")
                 
-                # Perform nonlinear fitting
-                # Disable parallel processing since we're already in a thread
+                # Perform nonlinear fitting on a copy (returns copy with fits.nonlinear populated)
                 nonlinear_results = fitting_nonlinear.fit_nonlinear_iq_multisweep(
                     enhanced_results.copy(),
                     fit_nonlinearity=True,
@@ -815,41 +811,39 @@ class MultisweepTask(QtCore.QThread):
                     parallel=False  # Avoid nested thread pools
                 )
                 
-                # Update results
+                # Deep-merge fits.nonlinear back and set status flags
                 for res_idx in enhanced_results:
                     if res_idx in nonlinear_results:
-                        enhanced_results[res_idx].update(nonlinear_results[res_idx])
-                        enhanced_results[res_idx]['nonlinear_fit_applied'] = True
-                        if 'nonlinear_fit_success' not in enhanced_results[res_idx]:
-                            enhanced_results[res_idx]['nonlinear_fit_success'] = False
+                        nl_sub_src = nonlinear_results[res_idx].get('fits', {}).get('nonlinear', {})
+                        nl_sub = enhanced_results[res_idx].setdefault('fits', {}).setdefault('nonlinear', {})
+                        nl_sub.update(nl_sub_src)
+                        nl_sub['nonlinear_fit_applied'] = True
+                        nl_sub.setdefault('nonlinear_fit_success', False)
                         
                         # Generate nonlinear model IQ if fit was successful
-                        if enhanced_results[res_idx].get('nonlinear_fit_success', False):
-                            nl_params = enhanced_results[res_idx].get('nonlinear_fit_params', {})
+                        if nl_sub.get('nonlinear_fit_success', False):
+                            nl_params = nl_sub.get('nonlinear_fit_params') or {}
                             frequencies = enhanced_results[res_idx].get('frequencies')
                             if nl_params and frequencies is not None:
                                 try:
-                                    # Generate complex IQ model using fitted parameters
-                                    nonlinear_model_iq = fitting_nonlinear.nonlinear_iq(
+                                    nl_sub['nonlinear_model_iq'] = fitting_nonlinear.nonlinear_iq(
                                         frequencies,
-                                        nl_params['fr'],
-                                        nl_params['Qr'],
-                                        nl_params['amp'],
-                                        nl_params['phi'],
+                                        nl_params['fr'], nl_params['Qr'],
+                                        nl_params['amp'], nl_params['phi'],
                                         nl_params['a'],
-                                        nl_params['i0'],
-                                        nl_params['q0']
+                                        nl_params['i0'], nl_params['q0']
                                     )
-                                    enhanced_results[res_idx]['nonlinear_model_iq'] = nonlinear_model_iq
                                 except Exception as e:
                                     print(f"Warning: Failed to generate nonlinear model for resonance {res_idx}: {e}", file=sys.stderr)
                     else:
-                        enhanced_results[res_idx]['nonlinear_fit_applied'] = True
-                        enhanced_results[res_idx]['nonlinear_fit_success'] = False
+                        enhanced_results[res_idx].setdefault('fits', {}).setdefault('nonlinear', {}).update(
+                            {'nonlinear_fit_applied': True, 'nonlinear_fit_success': False}
+                        )
             else:
                 for res_idx in enhanced_results:
-                    enhanced_results[res_idx]['nonlinear_fit_applied'] = False
-                    enhanced_results[res_idx]['nonlinear_fit_success'] = False
+                    enhanced_results[res_idx].setdefault('fits', {}).setdefault('nonlinear', {}).update(
+                        {'nonlinear_fit_applied': False, 'nonlinear_fit_success': False}
+                    )
             
             # Emit completion
             if module_idx is not None and self._running:
@@ -1058,15 +1052,8 @@ class RunFitsTask(QtCore.QThread):
     No hardware I/O is performed; this is purely CPU-bound computation.
     """
 
-    # Keys that carry fit results and should be merged back into the panel's
-    # results_by_detector after a successful run.
-    _FIT_KEYS = frozenset({
-        'fit_params', 'skewed_fit_success', 'skewed_fit_applied', 'skewed_model_mag',
-        'iq_centered',
-        'nonlinear_fit_params', 'nonlinear_fit_errors', 'nonlinear_fit_residual',
-        'nonlinear_fit_success', 'nonlinear_fit_applied', 'nonlinear_model_iq',
-        'gain_complex', 'iq_gain_corrected',
-    })
+    # Key that carries all fit results; nested under 'fits' → {'skewed': …, 'nonlinear': …}.
+    _FIT_KEYS = frozenset({'fits'})
 
     def __init__(
         self,
@@ -1213,14 +1200,15 @@ class RunFitsTask(QtCore.QThread):
                         traceback.print_exc(file=sys.stderr)
                         fitted_iter_data = per_iteration[iter_idx]  # keep original
 
-                    # ── Step 3: write fit keys back into the deep copy ────────
+                    # ── Step 3: deep-merge the 'fits' subdict back ────────────
                     for code, fitted_entry in fitted_iter_data.items():
                         if code in self.results_by_detector:
                             if iter_idx in self.results_by_detector[code]:
                                 target = self.results_by_detector[code][iter_idx]
-                                for key in self._FIT_KEYS:
-                                    if key in fitted_entry:
-                                        target[key] = fitted_entry[key]
+                                if 'fits' in fitted_entry:
+                                    # Merge fitter subdicts individually so running
+                                    # one fitter never clobbers the other's results.
+                                    target.setdefault('fits', {}).update(fitted_entry['fits'])
 
                     done += 1
                     pct = 100.0 * done / total
@@ -1255,7 +1243,8 @@ class RunFitsTask(QtCore.QThread):
 
         if apply_skewed:
             try:
-                skewed_results = fitting_module_direct.fit_skewed_multisweep(
+                # fit_skewed_multisweep mutates working[*]['fits']['skewed'] in place
+                fitting_module_direct.fit_skewed_multisweep(
                     working,
                     approx_Q_for_fit=1e4,
                     fit_resonances=True,
@@ -1263,46 +1252,44 @@ class RunFitsTask(QtCore.QThread):
                     normalize_fit=True,
                 )
                 for code in working:
-                    if code in skewed_results:
-                        working[code].update(skewed_results[code])
-                        working[code]['skewed_fit_applied'] = True
-                        fit_p = working[code].get('fit_params') or {}
-                        success = (
-                            isinstance(fit_p, dict)
-                            and fit_p.get('fr') is not None
-                            and fit_p.get('fr') != 'nan'
-                        )
-                        working[code]['skewed_fit_success'] = success
+                    skewed_sub = working[code].setdefault('fits', {}).setdefault('skewed', {})
+                    skewed_sub['skewed_fit_applied'] = True
+                    fit_p = skewed_sub.get('fit_params') or {}
+                    success = (
+                        isinstance(fit_p, dict)
+                        and fit_p.get('fr') is not None
+                        and fit_p.get('fr') != 'nan'
+                    )
+                    skewed_sub['skewed_fit_success'] = success
 
-                        if success:
-                            freqs = working[code].get('frequencies')
-                            if freqs is not None:
-                                try:
-                                    working[code]['skewed_model_mag'] = (
-                                        fitting_module_direct.s21_skewed(
-                                            freqs,
-                                            fit_p['fr'], fit_p['Qr'],
-                                            fit_p['Qcre'], fit_p['Qcim'],
-                                            fit_p['A'],
-                                        )
+                    if success:
+                        freqs = working[code].get('frequencies')
+                        if freqs is not None:
+                            try:
+                                skewed_sub['skewed_model_mag'] = (
+                                    fitting_module_direct.s21_skewed(
+                                        freqs,
+                                        fit_p['fr'], fit_p['Qr'],
+                                        fit_p['Qcre'], fit_p['Qcim'],
+                                        fit_p['A'],
                                     )
-                                except Exception as e:
-                                    print(
-                                        f"[RunFitsTask] skewed model failed for {code!r}: {e}",
-                                        file=sys.stderr,
-                                    )
-                    else:
-                        working[code]['skewed_fit_applied'] = True
-                        working[code]['skewed_fit_success'] = False
+                                )
+                            except Exception as e:
+                                print(
+                                    f"[RunFitsTask] skewed model failed for {code!r}: {e}",
+                                    file=sys.stderr,
+                                )
             except Exception as exc:
                 print(f"[RunFitsTask] skewed fit error iter {iter_idx}: {exc}", file=sys.stderr)
                 for code in working:
-                    working[code]['skewed_fit_applied'] = True
-                    working[code]['skewed_fit_success'] = False
+                    working[code].setdefault('fits', {}).setdefault('skewed', {}).update(
+                        {'skewed_fit_applied': True, 'skewed_fit_success': False}
+                    )
         else:
             for code in working:
-                working[code]['skewed_fit_applied'] = False
-                working[code]['skewed_fit_success'] = False
+                working[code].setdefault('fits', {}).setdefault('skewed', {}).update(
+                    {'skewed_fit_applied': False, 'skewed_fit_success': False}
+                )
 
         if apply_nonlinear:
             try:
@@ -1315,16 +1302,18 @@ class RunFitsTask(QtCore.QThread):
                 )
                 for code in working:
                     if code in nonlinear_results:
-                        working[code].update(nonlinear_results[code])
-                        working[code]['nonlinear_fit_applied'] = True
-                        working[code].setdefault('nonlinear_fit_success', False)
+                        nl_sub_src = nonlinear_results[code].get('fits', {}).get('nonlinear', {})
+                        nl_sub = working[code].setdefault('fits', {}).setdefault('nonlinear', {})
+                        nl_sub.update(nl_sub_src)
+                        nl_sub['nonlinear_fit_applied'] = True
+                        nl_sub.setdefault('nonlinear_fit_success', False)
 
-                        if working[code].get('nonlinear_fit_success', False):
-                            nl_params = working[code].get('nonlinear_fit_params') or {}
+                        if nl_sub.get('nonlinear_fit_success', False):
+                            nl_params = nl_sub.get('nonlinear_fit_params') or {}
                             freqs = working[code].get('frequencies')
                             if nl_params and freqs is not None:
                                 try:
-                                    working[code]['nonlinear_model_iq'] = (
+                                    nl_sub['nonlinear_model_iq'] = (
                                         fitting_nonlinear.nonlinear_iq(
                                             freqs,
                                             nl_params['fr'], nl_params['Qr'],
@@ -1339,16 +1328,19 @@ class RunFitsTask(QtCore.QThread):
                                         file=sys.stderr,
                                     )
                     else:
-                        working[code]['nonlinear_fit_applied'] = True
-                        working[code]['nonlinear_fit_success'] = False
+                        working[code].setdefault('fits', {}).setdefault('nonlinear', {}).update(
+                            {'nonlinear_fit_applied': True, 'nonlinear_fit_success': False}
+                        )
             except Exception as exc:
                 print(f"[RunFitsTask] nonlinear fit error iter {iter_idx}: {exc}", file=sys.stderr)
                 for code in working:
-                    working[code]['nonlinear_fit_applied'] = True
-                    working[code]['nonlinear_fit_success'] = False
+                    working[code].setdefault('fits', {}).setdefault('nonlinear', {}).update(
+                        {'nonlinear_fit_applied': True, 'nonlinear_fit_success': False}
+                    )
         else:
             for code in working:
-                working[code]['nonlinear_fit_applied'] = False
-                working[code]['nonlinear_fit_success'] = False
+                working[code].setdefault('fits', {}).setdefault('nonlinear', {}).update(
+                    {'nonlinear_fit_applied': False, 'nonlinear_fit_success': False}
+                )
 
         return working

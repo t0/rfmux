@@ -130,12 +130,14 @@ def _group_by_detector(results_by_iteration: Dict[int, Dict]) -> Tuple[Dict[int,
             # Extract fit parameters (prefer nonlinear if available)
             fit_params = {}
             
-            # Check for nonlinear fit parameters first
-            if 'nonlinear_fit_params' in det_data and det_data['nonlinear_fit_params']:
-                fit_params = dict(det_data['nonlinear_fit_params'])
+            # Check for nonlinear fit parameters first (new nested fits structure)
+            _nl = det_data.get('fits', {}).get('nonlinear', {})
+            _sk = det_data.get('fits', {}).get('skewed', {})
+            if _nl.get('nonlinear_fit_params'):
+                fit_params = dict(_nl['nonlinear_fit_params'])
             # Fall back to skewed fit parameters
-            elif 'fit_params' in det_data and det_data['fit_params']:
-                fit_params = dict(det_data['fit_params'])
+            elif _sk.get('fit_params'):
+                fit_params = dict(_sk['fit_params'])
             
             # Store fit parameters
             fit_params_dict[detector_id][amp_idx] = fit_params

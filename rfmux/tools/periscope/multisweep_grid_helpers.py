@@ -1064,13 +1064,15 @@ def _plot_fit_result(plot_item, entry, show_skewed, show_nonlinear, pen_color, d
         name='Measured',
     )
 
-    skewed_ok = entry.get('skewed_fit_success', False)
-    nonlinear_ok = entry.get('nonlinear_fit_success', False)
+    _skewed_fits    = entry.get('fits', {}).get('skewed', {})
+    _nonlinear_fits = entry.get('fits', {}).get('nonlinear', {})
+    skewed_ok    = bool(_skewed_fits.get('skewed_fit_success', False))
+    nonlinear_ok = bool(_nonlinear_fits.get('nonlinear_fit_success', False))
 
     # ── Skewed Lorentzian overlay ─────────────────────────────────────────────
     if show_skewed and skewed_ok:
-        skewed_mag = entry.get('skewed_model_mag')
-        fit_p = entry.get('fit_params') or {}
+        skewed_mag = _skewed_fits.get('skewed_model_mag')
+        fit_p = _skewed_fits.get('fit_params') or {}
         fr_skew = fit_p.get('fr')
 
         if skewed_mag is not None and fr_skew is not None:
@@ -1104,8 +1106,8 @@ def _plot_fit_result(plot_item, entry, show_skewed, show_nonlinear, pen_color, d
 
     # ── Nonlinear IQ overlay ──────────────────────────────────────────────────
     if show_nonlinear and nonlinear_ok:
-        nl_iq = entry.get('nonlinear_model_iq')
-        nl_p = entry.get('nonlinear_fit_params') or {}
+        nl_iq = _nonlinear_fits.get('nonlinear_model_iq')
+        nl_p  = _nonlinear_fits.get('nonlinear_fit_params') or {}
         fr_nl = nl_p.get('fr')
 
         if nl_iq is not None and fr_nl is not None:

@@ -149,7 +149,8 @@ class NetworkAnalysisExportMixin:
         'target_module', 'results', 'resonances_hz'.
 
         Each entry in 'results' is keyed by an integer iteration index and contains:
-        'sweep_amplitude', 'frequencies', 'iq_counts', 'iq_volts', 'phase_degrees'.
+        'sweep_amplitude_normalized', 'sweep_power_dbm', 'frequencies', 'iq_counts',
+        'iq_volts', 'phase_degrees'.
 
         Returns:
             Dictionary containing all export data in the new schema.
@@ -158,11 +159,18 @@ class NetworkAnalysisExportMixin:
 
         target_module = self.modules[0] if self.modules else None
 
+        # Only store the DAC scale for the module that actually ran the measurement.
+        dac_scale_for_module = (
+            self.dac_scales.get(target_module)
+            if hasattr(self, 'dac_scales') and target_module is not None
+            else None
+        )
+
         export_data = {
             'measurement_type':    'netanal',
             'timestamp':           datetime.datetime.now().isoformat(),
             'initial_parameters':  self.current_params.copy() if hasattr(self, 'current_params') else {},
-            'dac_scales_used':     self.dac_scales.copy() if hasattr(self, 'dac_scales') else {},
+            'dac_scales_used':     dac_scale_for_module,
             'target_module':       target_module,
             'results':             {},
             'resonances_hz':       self.resonance_freqs.get(target_module, []) if target_module is not None else [],
@@ -181,12 +189,19 @@ class NetworkAnalysisExportMixin:
                     except (ValueError, IndexError):
                         amplitude = DEFAULT_AMPLITUDE
 
+                # Compute the per-tone power in dBm if the DAC scale is known.
+                if dac_scale_for_module is not None:
+                    sweep_power_dbm = UnitConverter.normalize_to_dbm(amplitude, dac_scale_for_module)
+                else:
+                    sweep_power_dbm = None
+
                 export_data['results'][iteration_idx] = {
-                    'sweep_amplitude': amplitude,
-                    'frequencies':     freqs,
-                    'iq_counts':       iq_counts,
-                    'iq_volts':        convert_roc_to_volts(iq_counts),
-                    'phase_degrees':   np.degrees(np.angle(iq_counts)),
+                    'sweep_amplitude_normalized': amplitude,
+                    'sweep_power_dbm':            sweep_power_dbm,
+                    'frequencies':                freqs,
+                    'iq_counts':                  iq_counts,
+                    'iq_volts':                   convert_roc_to_volts(iq_counts),
+                    'phase_degrees':              np.degrees(np.angle(iq_counts)),
                 }
 
         return export_data

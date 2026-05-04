@@ -1301,6 +1301,9 @@ class PeriscopeRuntime:
             if _results_key is not None:
                 # Detector-based format: load directly into panel
                 panel.results_by_detector = load_params[_results_key]
+                # Migrate any old flat fit-key format to the new nested 'fits' subdict
+                # structure (no-op for files already saved in the new format).
+                migrate_results_by_detector(panel.results_by_detector)
                 # Restore the resonator registry so Find Bias can run on loaded data
                 if load_params.get('res_info_dict'):
                     panel.res_info_dict = load_params['res_info_dict']

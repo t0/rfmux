@@ -921,3 +921,105 @@ class ScreenshotMixin:
         
         pixmap.save(filepath, "PNG")
         print(f"[Screenshot] Saved: {filepath}")
+
+
+# ───────────────────────── Fit-subdict helpers ─────────────────────────
+
+def get_skewed_fits(entry: dict) -> dict:
+    """Return the ``fits['skewed']`` subdict from a resonator entry, or ``{}``.
+
+    Safe to call even when the entry has no ``'fits'`` key (e.g. old data or
+    entries where fitting was never run).
+    """
+    if not isinstance(entry, dict):
+        return {}
+    return entry.get('fits', {}).get('skewed', {})
+
+
+def get_nonlinear_fits(entry: dict) -> dict:
+    """Return the ``fits['nonlinear']`` subdict from a resonator entry, or ``{}``.
+
+    Safe to call even when the entry has no ``'fits'`` key.
+    """
+    if not isinstance(entry, dict):
+        return {}
+    return entry.get('fits', {}).get('nonlinear', {})
+
+
+def migrate_flat_fit_keys(entry: dict) -> dict:
+    """Migrate an old-format resonator entry (flat fit keys) to the new nested
+    ``fits`` subdict structure.
+
+    This is called when loading pickle files that were saved before the nested
+    structure was introduced.  If the entry already uses the new format (i.e.
+    already has a ``'fits'`` key), it is returned unchanged.
+
+    The following flat keys are migrated:
+
+    * Skewed fitter  → ``fits.skewed``:
+      ``fit_params``, ``iq_centered``,
+      ``skewed_fit_applied``, ``skewed_fit_success``, ``skewed_model_mag``
+
+    * Nonlinear fitter  → ``fits.nonlinear``:
+      ``nonlinear_fit_params``, ``nonlinear_fit_errors``,
+      ``nonlinear_fit_residual``, ``nonlinear_fit_success``,
+      ``nonlinear_fit_applied``, ``nonlinear_model_iq``,
+      ``gain_complex``, ``iq_gain_corrected``
+    """
+    if not isinstance(entry, dict):
+        return entry
+
+    # Already migrated — don't touch it
+    if 'fits' in entry:
+        return entry
+
+    _SKEWED_KEYS = {
+        'fit_params', 'iq_centered',
+        'skewed_fit_applied', 'skewed_fit_success', 'skewed_model_mag',
+    }
+    _NONLINEAR_KEYS = {
+        'nonlinear_fit_params', 'nonlinear_fit_errors',
+        'nonlinear_fit_residual', 'nonlinear_fit_success',
+        'nonlinear_fit_applied', 'nonlinear_model_iq',
+        'gain_complex', 'iq_gain_corrected',
+    }
+
+    # Only migrate if any old flat key is present
+    has_old_keys = any(k in entry for k in _SKEWED_KEYS | _NONLINEAR_KEYS)
+    if not has_old_keys:
+        return entry
+
+    skewed_sub: dict = {}
+    nonlinear_sub: dict = {}
+
+    for k in _SKEWED_KEYS:
+        if k in entry:
+            skewed_sub[k] = entry.pop(k)
+
+    for k in _NONLINEAR_KEYS:
+        if k in entry:
+            nonlinear_sub[k] = entry.pop(k)
+
+    fits: dict = {}
+    if skewed_sub:
+        fits['skewed'] = skewed_sub
+    if nonlinear_sub:
+        fits['nonlinear'] = nonlinear_sub
+    if fits:
+        entry['fits'] = fits
+
+    return entry
+
+
+def migrate_results_by_detector(results_by_detector: dict) -> dict:
+    """Apply :func:`migrate_flat_fit_keys` to every entry in
+    ``results_by_detector``.
+
+    Mutates the dict in place and also returns it for convenience.
+    """
+    for _code, iter_dict in results_by_detector.items():
+        if isinstance(iter_dict, dict):
+            for _iter_idx, entry in iter_dict.items():
+                if isinstance(entry, dict):
+                    migrate_flat_fit_keys(entry)
+    return results_by_detector

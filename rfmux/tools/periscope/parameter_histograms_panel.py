@@ -213,7 +213,8 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
                 direction = entry.get('sweep_direction', 'upward')
                 if amp is not None:
                     sweep_keys_set.add((amp, direction))
-                if entry.get('fit_params') or entry.get('nonlinear_fit_params'):
+                if entry.get('fits', {}).get('skewed', {}).get('fit_params') or \
+                   entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_params'):
                     has_fit_data = True
         
         if not has_fit_data:
@@ -314,10 +315,12 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
                 continue
             # Prefer nonlinear fit params, fall back to skewed
             fit_params = None
-            if entry.get('nonlinear_fit_params'):
-                fit_params = dict(entry['nonlinear_fit_params'])
-            elif entry.get('fit_params'):
-                fit_params = dict(entry['fit_params'])
+            _nl = entry.get('fits', {}).get('nonlinear', {})
+            _sk = entry.get('fits', {}).get('skewed', {})
+            if _nl.get('nonlinear_fit_params'):
+                fit_params = dict(_nl['nonlinear_fit_params'])
+            elif _sk.get('fit_params'):
+                fit_params = dict(_sk['fit_params'])
             if fit_params:
                 params_by_detector[detector_id] = fit_params
         

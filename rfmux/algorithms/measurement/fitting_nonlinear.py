@@ -484,13 +484,17 @@ def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) 
               or resonance_data.get('sweep_center_frequency'))
     
     if frequencies is None or iq_counts is None:
-        # Mark as failed
-        updated_data['nonlinear_fit_params'] = None
-        updated_data['nonlinear_fit_errors'] = None
-        updated_data['nonlinear_fit_residual'] = np.inf
-        updated_data['nonlinear_fit_success'] = False
+        # Mark as failed inside the nested subdict
+        nl_sub = updated_data.setdefault('fits', {}).setdefault('nonlinear', {})
+        nl_sub['nonlinear_fit_params'] = None
+        nl_sub['nonlinear_fit_errors'] = None
+        nl_sub['nonlinear_fit_residual'] = np.inf
+        nl_sub['nonlinear_fit_success'] = False
         return res_key, updated_data
     
+    # All nonlinear-fit products go into the nested 'fits' → 'nonlinear' subdict.
+    nl_sub = updated_data.setdefault('fits', {}).setdefault('nonlinear', {})
+
     try:
         # Step 1: Estimate and remove gain
         iq_corrected, gain_mag, gain_phase = estimate_and_remove_gain(
@@ -498,8 +502,8 @@ def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) 
         )
         
         # Store gain info
-        updated_data['gain_complex'] = gain_mag * np.exp(1j * gain_phase)
-        updated_data['iq_gain_corrected'] = iq_corrected
+        nl_sub['gain_complex'] = gain_mag * np.exp(1j * gain_phase)
+        nl_sub['iq_gain_corrected'] = iq_corrected
         
         # Step 2: Fit nonlinear model
         p0, popt, perr, residual = fit_nonlinear_iq(
@@ -510,16 +514,16 @@ def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) 
         # Step 3: Store results
         param_names = ['fr', 'Qr', 'amp', 'phi', 'a', 'i0', 'q0']
         
-        updated_data['nonlinear_fit_params'] = {
+        nl_sub['nonlinear_fit_params'] = {
             name: value for name, value in zip(param_names, popt)
         }
         
-        updated_data['nonlinear_fit_errors'] = {
+        nl_sub['nonlinear_fit_errors'] = {
             name: error for name, error in zip(param_names, perr)
         }
         
-        updated_data['nonlinear_fit_residual'] = residual
-        updated_data['nonlinear_fit_success'] = residual < 0.1
+        nl_sub['nonlinear_fit_residual'] = residual
+        nl_sub['nonlinear_fit_success'] = residual < 0.1
         
         # Calculate derived parameters
         Qr = popt[1]
@@ -527,17 +531,17 @@ def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) 
         if amp < 1:
             Qc = Qr / amp
             Qi = 1 / (1/Qr - 1/Qc)
-            updated_data['nonlinear_fit_params']['Qc'] = Qc
-            updated_data['nonlinear_fit_params']['Qi'] = Qi
+            nl_sub['nonlinear_fit_params']['Qc'] = Qc
+            nl_sub['nonlinear_fit_params']['Qi'] = Qi
             
     except Exception as e:
         msg = (f"Nonlinear fitting failed for {ref_cf*1e-6:.3f} MHz: {e}"
                if ref_cf else f"Nonlinear fitting failed for resonator {res_key!r}: {e}")
         warnings.warn(msg)
-        updated_data['nonlinear_fit_params'] = None
-        updated_data['nonlinear_fit_errors'] = None
-        updated_data['nonlinear_fit_residual'] = np.inf
-        updated_data['nonlinear_fit_success'] = False
+        nl_sub['nonlinear_fit_params'] = None
+        nl_sub['nonlinear_fit_errors'] = None
+        nl_sub['nonlinear_fit_residual'] = np.inf
+        nl_sub['nonlinear_fit_success'] = False
     
     return res_key, updated_data
 

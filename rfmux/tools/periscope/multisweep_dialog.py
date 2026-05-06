@@ -413,27 +413,67 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         # ── Base amplitude controls (shown only for Single iteration) ────────
         self.single_amp_controls = QtWidgets.QWidget()
-        single_amp_layout = QtWidgets.QFormLayout(self.single_amp_controls)
+        single_amp_layout = QtWidgets.QVBoxLayout(self.single_amp_controls)
         single_amp_layout.setContentsMargins(20, 0, 0, 0)  # Indent
+        single_amp_layout.setSpacing(4)
 
+        # --- Row: Global amplitude radio + field ---
+        _global_row = QtWidgets.QWidget()
+        _global_row_layout = QtWidgets.QHBoxLayout(_global_row)
+        _global_row_layout.setContentsMargins(0, 0, 0, 0)
+        self._single_global_radio = QtWidgets.QRadioButton("Global amplitude:")
+        self._single_global_radio.setChecked(True)
+        self._single_global_radio.setToolTip(
+            "Single amplitude value applied to all frequency sections."
+        )
         self.global_amp_edit = QtWidgets.QLineEdit()
         self.global_amp_edit.setPlaceholderText("e.g., 0.005")
         self.global_amp_edit.setValidator(QDoubleValidator(0.0001, 10.0, 4, self))
         self.global_amp_edit.setToolTip(
-            "Single amplitude value applied to all frequency sections.\n"
-            "Provide EITHER this OR the amplitude array below (not both)."
+            "Single amplitude value applied to all frequency sections."
         )
-        single_amp_layout.addRow("Global amplitude:", self.global_amp_edit)
+        _global_row_layout.addWidget(self._single_global_radio)
+        _global_row_layout.addWidget(self.global_amp_edit, 1)
+        single_amp_layout.addWidget(_global_row)
 
+        # --- Row: Amplitude array radio + field ---
+        _array_row = QtWidgets.QWidget()
+        _array_row_layout = QtWidgets.QHBoxLayout(_array_row)
+        _array_row_layout.setContentsMargins(0, 0, 0, 0)
+        self._single_array_radio = QtWidgets.QRadioButton("Amplitude array:")
+        self._single_array_radio.setToolTip(
+            "Comma-separated amplitude values, one per frequency section.\n"
+            "Must match the number of sweep sections."
+        )
         self.amp_array_edit = QtWidgets.QLineEdit()
         self.amp_array_edit.setPlaceholderText("e.g., 0.005, 0.001, 0.002 (comma-separated)")
+        self.amp_array_edit.setEnabled(False)  # enabled only when array radio is selected
         self.amp_array_edit.setToolTip(
             "Comma-separated amplitude values, one per frequency section.\n"
-            "Must match the number of sweep sections.\n"
-            "Provide EITHER this OR the global amplitude above (not both)."
+            "Must match the number of sweep sections."
         )
-        single_amp_layout.addRow("Amplitude array:", self.amp_array_edit)
+        _array_row_layout.addWidget(self._single_array_radio)
+        _array_row_layout.addWidget(self.amp_array_edit, 1)
+        single_amp_layout.addWidget(_array_row)
 
+        # --- Button: Load bias amplitudes into the amplitude array field ---
+        _res_info_for_bias = self.params.get('res_info_dict', {})
+        _has_bias_found = any(
+            info.get('bias_found', False) for info in _res_info_for_bias.values()
+        )
+        self._load_bias_amp_btn = QtWidgets.QPushButton("Load bias amplitudes")
+        self._load_bias_amp_btn.setToolTip(
+            "Populate the Amplitude array field with the bias amplitudes found\n"
+            "by Find Bias (from res_info_dict). You can then edit them manually."
+        )
+        self._load_bias_amp_btn.setEnabled(_has_bias_found)
+        self._load_bias_amp_btn.clicked.connect(self._on_load_bias_amplitudes)
+        single_amp_layout.addWidget(self._load_bias_amp_btn)
+
+        # Group the two source radios so they are mutually exclusive
+        self._single_amp_source_group = QtWidgets.QButtonGroup(self)
+        self._single_amp_source_group.addButton(self._single_global_radio)
+        self._single_amp_source_group.addButton(self._single_array_radio)
 
         self.single_amp_controls.setVisible(True)  # visible by default (single is checked)
         iteration_layout.addWidget(self.single_amp_controls)
@@ -565,7 +605,13 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.uniform_linear_radio.toggled.connect(self._validate_amplitude_live)
         self.uniform_log_radio.toggled.connect(self._validate_amplitude_live)
 
+        # Connect single-iteration sub-radio buttons: enable/disable line edits and
+        # re-validate whenever the amplitude source selection changes.
+        for _radio in (self._single_global_radio, self._single_array_radio):
+            _radio.toggled.connect(self._on_single_amp_source_changed)
+
         # Apply initial state (single iteration is checked by default)
+        self._on_single_amp_source_changed()
         self._on_iteration_mode_changed()
         
         # Add Clear button for amplitude settings
@@ -695,14 +741,19 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         base_amp_values = self.params.get('base_amplitude_values')
         
         if base_amp_mode == 'global' and base_amp_values is not None:
+            self._single_global_radio.setChecked(True)
             self.global_amp_edit.setText(f"{base_amp_values:.4g}")
         elif base_amp_mode == 'array' and base_amp_values is not None:
             if isinstance(base_amp_values, list):
+                self._single_array_radio.setChecked(True)
                 amp_text = ", ".join(f"{amp:.4g}" for amp in base_amp_values)
                 self.amp_array_edit.setText(amp_text)
         else:
             # No saved amplitude preference — apply the hard-coded default
+            self._single_global_radio.setChecked(True)
             self.global_amp_edit.setText("0.005")
+        # Sync line-edit enabled state with the selected sub-radio
+        self._on_single_amp_source_changed()
         
         # Populate iteration settings using saved metadata.
         # Seed _saved_num_steps with the loaded value so that
@@ -744,13 +795,16 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     
     def _clear_amplitude_fields(self):
         """Clear all amplitude-related fields to their default empty/initial state."""
-        # Clear base amplitude fields
+        # Clear base amplitude fields and reset amplitude source sub-radio to global
         self.global_amp_edit.clear()
         self.amp_array_edit.clear()
-        
+        if hasattr(self, '_single_global_radio'):
+            self._single_global_radio.setChecked(True)
+            self._on_single_amp_source_changed()  # re-enable global field, disable array field
+
         # Reset number of steps to 1
         self.num_steps_edit.setText("1")
-        
+
         # Clear uniform sweep fields and reset spacing to linear
         self.uniform_start_edit.clear()
         self.uniform_stop_edit.clear()
@@ -759,7 +813,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         # Clear scaling fields
         self.scale_start_edit.clear()
         self.scale_stop_edit.clear()
-        
+
         # Reset to single iteration mode
         self.single_iteration_radio.setChecked(True)
 
@@ -1016,6 +1070,44 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         # the newly selected mode immediately (even before the user types).
         self._validate_amplitude_live()
 
+    def _on_single_amp_source_changed(self):
+        """Enable/disable the amplitude line-edit fields based on the selected
+        amplitude source radio button within the Single iteration sub-group.
+
+        - Global amplitude radio selected  → global_amp_edit enabled, amp_array_edit disabled.
+        - Amplitude array radio selected   → global_amp_edit disabled, amp_array_edit enabled.
+
+        Also triggers live amplitude validation so the status label and Start
+        button are refreshed immediately whenever the source changes.
+        """
+        if not hasattr(self, '_single_global_radio'):
+            return  # called before UI is fully built
+        use_global = self._single_global_radio.isChecked()
+        use_array  = self._single_array_radio.isChecked()
+        self.global_amp_edit.setEnabled(use_global)
+        self.amp_array_edit.setEnabled(use_array)
+        self._validate_amplitude_live()
+
+    def _on_load_bias_amplitudes(self):
+        """Load bias amplitudes from res_info_dict into the Amplitude array field.
+
+        Reads the ``bias_amplitude`` value for every resonator that has
+        ``bias_found=True`` in ``res_info_dict`` (sorted by ``channel_number``),
+        formats them as a comma-separated string, selects the 'Amplitude array'
+        sub-radio so the field becomes editable, and populates ``amp_array_edit``.
+        The user can then adjust the values manually before starting the sweep.
+        """
+        res_info = self.params.get('res_info_dict', {})
+        sorted_infos = sorted(
+            (info for info in res_info.values() if info.get('bias_found')),
+            key=lambda i: i.get('channel_number', 0)
+        )
+        if not sorted_infos:
+            return  # button should already be disabled; guard anyway
+        amp_text = ", ".join(f"{float(info['bias_amplitude']):.4g}" for info in sorted_infos)
+        self._single_array_radio.setChecked(True)  # switch source → array (enables amp_array_edit)
+        self.amp_array_edit.setText(amp_text)       # populate the field
+
     def _validate_amplitude_live(self):
         """Update the amplitude status label and Start button state in real-time
         as the user edits amplitude fields or switches iteration modes.
@@ -1054,42 +1146,42 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         msg    = ""
 
         if self.single_iteration_radio.isChecked():
-            global_text = self.global_amp_edit.text().strip()
-            array_text  = self.amp_array_edit.text().strip()
+            # Determine which amplitude source sub-radio is active
+            use_array = hasattr(self, '_single_array_radio') and self._single_array_radio.isChecked()
 
-            if global_text and array_text:
-                msg = ("✗ Fill in only one field — either Global amplitude"
-                       " or Amplitude array, not both.")
+            if use_array:
+                array_text = self.amp_array_edit.text().strip()
+                if not array_text:
+                    msg = ("⚠ An amplitude is required — enter values in"
+                           " Amplitude array (one per section, comma-separated).")
+                else:
+                    try:
+                        vals = [float(x.strip()) for x in array_text.split(',') if x.strip()]
+                        if any(v <= 0 for v in vals):
+                            msg = "✗ All amplitude values must be positive."
+                        elif num_sections > 0 and len(vals) != num_sections:
+                            msg = (f"⚠ Amplitude array has {len(vals)} value(s)"
+                                   f" but there are {num_sections} sweep section(s).")
+                        else:
+                            msg = f"✓ Using per-section amplitude array ({len(vals)} value(s))."
+                            amp_ok = True
+                    except ValueError:
+                        msg = "✗ Amplitude array must contain valid numbers, comma-separated."
 
-            elif not global_text and not array_text:
-                msg = ("⚠ An amplitude is required — enter a value in"
-                       " Global amplitude (one value for all sections)"
-                       " or Amplitude array (one value per section, comma-separated).")
-
-            elif global_text:
-                try:
-                    val = float(global_text)
-                    if val <= 0:
-                        msg = "✗ Global amplitude must be a positive number."
-                    else:
-                        msg = f"✓ Using global amplitude {val:g} for all sections."
-                        amp_ok = True
-                except ValueError:
-                    msg = "✗ Global amplitude must be a valid number."
-
-            else:  # array_text only
-                try:
-                    vals = [float(x.strip()) for x in array_text.split(',') if x.strip()]
-                    if any(v <= 0 for v in vals):
-                        msg = "✗ All amplitude values must be positive."
-                    elif num_sections > 0 and len(vals) != num_sections:
-                        msg = (f"⚠ Amplitude array has {len(vals)} value(s)"
-                               f" but there are {num_sections} sweep section(s).")
-                    else:
-                        msg = f"✓ Using per-section amplitude array ({len(vals)} value(s))."
-                        amp_ok = True
-                except ValueError:
-                    msg = "✗ Amplitude array must contain valid numbers, comma-separated."
+            else:  # global (default)
+                global_text = self.global_amp_edit.text().strip()
+                if not global_text:
+                    msg = "⚠ An amplitude is required — enter a value in Global amplitude."
+                else:
+                    try:
+                        val = float(global_text)
+                        if val <= 0:
+                            msg = "✗ Global amplitude must be a positive number."
+                        else:
+                            msg = f"✓ Using global amplitude {val:g} for all sections."
+                            amp_ok = True
+                    except ValueError:
+                        msg = "✗ Global amplitude must be a valid number."
 
         elif self.uniform_sweep_radio.isChecked():
             start_text = self.uniform_start_edit.text().strip()
@@ -1238,43 +1330,19 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             # For multiplicative scaling, the base always comes from res_info_dict
             # (also handled in Step 2), so neither field is consulted here.
             if self.single_iteration_radio.isChecked():
-                global_amp_text = self.global_amp_edit.text().strip()
-                amp_array_text = self.amp_array_edit.text().strip()
+                use_array = self._single_array_radio.isChecked()
 
-                if global_amp_text and amp_array_text:
-                    QtWidgets.QMessageBox.warning(
-                        self,
-                        "Amplitude Error",
-                        "Both amplitude fields are filled.\n\n"
-                        "Clear one: use 'Global amplitude' for a single value across all "
-                        "sections, or 'Amplitude array' for per-section values."
-                    )
-                    return None
-                elif not global_amp_text and not amp_array_text:
-                    QtWidgets.QMessageBox.warning(
-                        self,
-                        "Amplitude Error",
-                        "No amplitude specified.\n\n"
-                        "Enter a value in 'Global amplitude' (one value applied to all "
-                        "sections) or 'Amplitude array' (one value per section, "
-                        "comma-separated)."
-                    )
-                    return None
-
-                if global_amp_text:
-                    base_amp = float(global_amp_text)
-                    if base_amp <= 0:
+                if use_array:
+                    amp_array_text = self.amp_array_edit.text().strip()
+                    if not amp_array_text:
                         QtWidgets.QMessageBox.warning(
                             self,
                             "Amplitude Error",
-                            "Global amplitude must be a positive number."
+                            "No amplitude specified.\n\n"
+                            "Enter values in 'Amplitude array' (one value per section, comma-separated)."
                         )
                         return None
-                    base_amp_array = [base_amp] * num_sections
-                    params_dict['base_amplitude_mode'] = 'global'
-                    params_dict['base_amplitude_values'] = base_amp
-                else:
-                    base_amp_array = [float(x.strip()) for x in amp_array_text.split(',')]
+                    base_amp_array = [float(x.strip()) for x in amp_array_text.split(',') if x.strip()]
                     if len(base_amp_array) != num_sections:
                         QtWidgets.QMessageBox.warning(
                             self,
@@ -1295,6 +1363,28 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                             return None
                     params_dict['base_amplitude_mode'] = 'array'
                     params_dict['base_amplitude_values'] = base_amp_array.copy()
+
+                else:  # global (default)
+                    global_amp_text = self.global_amp_edit.text().strip()
+                    if not global_amp_text:
+                        QtWidgets.QMessageBox.warning(
+                            self,
+                            "Amplitude Error",
+                            "No amplitude specified.\n\n"
+                            "Enter a value in 'Global amplitude' (one value applied to all sections)."
+                        )
+                        return None
+                    base_amp = float(global_amp_text)
+                    if base_amp <= 0:
+                        QtWidgets.QMessageBox.warning(
+                            self,
+                            "Amplitude Error",
+                            "Global amplitude must be a positive number."
+                        )
+                        return None
+                    base_amp_array = [base_amp] * num_sections
+                    params_dict['base_amplitude_mode'] = 'global'
+                    params_dict['base_amplitude_values'] = base_amp
             else:
                 # Uniform sweep and scaling: base_amp_array is derived in Step 2
                 base_amp_array = None

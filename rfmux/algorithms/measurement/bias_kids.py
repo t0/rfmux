@@ -368,7 +368,7 @@ def find_bias_points(
         ``{code: {iteration_index: entry_dict}}`` as stored in
         ``MultisweepPanel.results_by_detector``.  Each *entry_dict* should
         contain ``frequencies``, ``iq_counts``, ``iq_volts``, and
-        ``sweep_amplitude``.
+        ``sweep_amplitude_normalized``.
     res_info_dict : dict
         Resonator registry ``{code: {bias_frequency, bias_amplitude,
         channel_number}}``.  **Updated in-place** and also returned.
@@ -429,7 +429,7 @@ def find_bias_points(
         entries = list(iter_dict.values())
         entries_sorted = sorted(
             entries,
-            key=lambda e: (e.get('sweep_amplitude') or 0.0),
+            key=lambda e: (e.get('sweep_amplitude_normalized') or 0.0),
         )
 
         bifurcated_at = None
@@ -439,7 +439,7 @@ def find_bias_points(
 
         # --- Amplitude selection ---
         for i, entry in enumerate(entries_sorted):
-            amp = entry.get('sweep_amplitude')
+            amp = entry.get('sweep_amplitude_normalized')
             if amp is None:
                 continue
 
@@ -461,9 +461,9 @@ def find_bias_points(
                 if i > 0:
                     # Use the entry one step below the bifurcated one
                     prev = entries_sorted[i - 1]
-                    if prev.get('sweep_amplitude') is not None:
+                    if prev.get('sweep_amplitude_normalized') is not None:
                         selected_entry = prev
-                        selected_amplitude = prev['sweep_amplitude']
+                        selected_amplitude = prev['sweep_amplitude_normalized']
                         selected_is_bifurcated = False
                     else:
                         # Previous entry has no amplitude — use current
@@ -480,9 +480,9 @@ def find_bias_points(
         if selected_entry is None:
             # No bifurcation found — always fall back to the highest amplitude
             for entry in reversed(entries_sorted):
-                if entry.get('sweep_amplitude') is not None:
+                if entry.get('sweep_amplitude_normalized') is not None:
                     selected_entry = entry
-                    selected_amplitude = entry['sweep_amplitude']
+                    selected_amplitude = entry['sweep_amplitude_normalized']
                     selected_is_bifurcated = False
                     break
             if selected_entry is None:

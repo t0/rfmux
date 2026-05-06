@@ -12,6 +12,19 @@ from .utils import (
 )
 from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm
 
+def _safe_amp_key(k: str) -> float:
+    """Return the float amplitude part of an ``'amp:direction'`` key.
+
+    Falls back to 0.0 when the amplitude portion cannot be converted to a
+    float (e.g. when it is the string ``'None'``), so sorting never raises
+    a ``ValueError``.
+    """
+    try:
+        return float(k.split(":")[0])
+    except (ValueError, IndexError):
+        return 0.0
+
+
 class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
     """
     A dockable panel that displays a detailed "digest" of a single detector resonance,
@@ -92,7 +105,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             try:
                 sorted_keys = sorted(
                     self.resonance_data_for_digest.keys(),
-                    key=lambda k: float(k.split(":")[0]) 
+                    key=_safe_amp_key
                 )
                 if sorted_keys:
                     self.active_amplitude_raw_key = sorted_keys[0]
@@ -474,7 +487,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Get sorted list of amplitude keys
         sorted_keys = sorted(
             self.resonance_data_for_digest.keys(),
-            key=lambda k: float(k.split(":")[0])
+            key=_safe_amp_key
         )
         
         # Find current index
@@ -496,7 +509,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Get sorted list of amplitude keys
         sorted_keys = sorted(
             self.resonance_data_for_digest.keys(),
-            key=lambda k: float(k.split(":")[0])
+            key=_safe_amp_key
         )
         
         # Find current index
@@ -524,7 +537,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         if hasattr(self, 'trace_hint_label'):
             sorted_keys = sorted(
                 self.resonance_data_for_digest.keys(),
-                key=lambda k: float(k.split(":")[0])
+                key=_safe_amp_key
             )
             try:
                 current_idx = sorted_keys.index(amplitude_key)
@@ -575,7 +588,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             try:
                 sorted_keys = sorted(
                     self.resonance_data_for_digest.keys(),
-                    key=lambda k: float(k.split(":")[0])
+                    key=_safe_amp_key
                 )
                 if sorted_keys:
                     self.active_amplitude_raw_key = sorted_keys[0]
@@ -986,7 +999,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Sorting by the float value of the amplitude part of the key
         sorted_keys = sorted(
             self.resonance_data_for_digest.keys(),
-            key=lambda k: float(k.split(":")[0]) # Sort by amplitude part
+            key=_safe_amp_key
         )
 
         for amp_key in sorted_keys: 

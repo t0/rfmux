@@ -1154,8 +1154,17 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
             modules_to_run = [target_module]
 
-            # Restore DAC scales
-            self.dac_scales = params.get('dac_scales_used', {})
+            # Restore DAC scales (guard against saved files storing a plain float).
+            # Both network-analysis and multisweep exports save dac_scales_used as a
+            # per-module float (self.dac_scales.get(module)), so wrap it back into a
+            # {module: float} dict so downstream code can subscript it normally.
+            _dac_scales_raw = params.get('dac_scales_used')
+            if isinstance(_dac_scales_raw, dict):
+                self.dac_scales = _dac_scales_raw
+            elif _dac_scales_raw is not None:
+                self.dac_scales = {target_module: _dac_scales_raw}
+            else:
+                self.dac_scales = {}
 
             # Create unique ID for this analysis
             window_id = f"netanal_{self.netanal_window_count}"
@@ -1200,7 +1209,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     entry = results[iter_idx]
                     freqs = np.asarray(entry['frequencies'])
                     iq_counts = np.asarray(entry['iq_counts'])
-                    amplitude = entry.get('sweep_amplitude', DEFAULT_AMPLITUDE)
+                    amplitude = entry.get('sweep_amplitude_normalized', DEFAULT_AMPLITUDE)
                     panel.update_data_with_amp(target_module, freqs, iq_counts, amplitude)
                 r_freq = params.get('resonances_hz', [])
                 panel._use_loaded_resonances(target_module, r_freq)
@@ -1631,7 +1640,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 channels.append(channel)
                 bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
                 bias_freqs.append(bias_freq)
-                amplitude = det_data.get("sweep_amplitude")
+                amplitude = det_data.get("sweep_amplitude_normalized")
                 amplitudes.append(amplitude)
                 phase = det_data.get("optimal_phase_degrees", 0)
                 phases.append(phase)

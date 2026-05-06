@@ -1221,7 +1221,11 @@ class PeriscopeRuntime:
                 QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
                 return
 
-            dac_scale_for_mod = load_params['dac_scales_used'][target_module]
+            _dac_scales_raw = load_params.get('dac_scales_used')
+            if isinstance(_dac_scales_raw, dict):
+                dac_scale_for_mod = _dac_scales_raw.get(target_module)
+            else:
+                dac_scale_for_mod = _dac_scales_raw  # already the per-module float
             dac_scale_for_board = dac_scales_for_panel[target_module]
 
             if dac_scale_for_mod != dac_scale_for_board:

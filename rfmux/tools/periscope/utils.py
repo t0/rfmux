@@ -1015,6 +1015,12 @@ def migrate_results_by_detector(results_by_detector: dict) -> dict:
     """Apply :func:`migrate_flat_fit_keys` to every entry in
     ``results_by_detector``.
 
+    Also migrates the legacy ``sweep_amplitude`` key to the canonical
+    ``sweep_amplitude_normalized`` name introduced when the two were unified.
+    Files saved before this rename will have ``sweep_amplitude`` without the
+    ``_normalized`` suffix; files saved after export will already have
+    ``sweep_amplitude_normalized``.
+
     Mutates the dict in place and also returns it for convenience.
     """
     for _code, iter_dict in results_by_detector.items():
@@ -1022,4 +1028,9 @@ def migrate_results_by_detector(results_by_detector: dict) -> dict:
             for _iter_idx, entry in iter_dict.items():
                 if isinstance(entry, dict):
                     migrate_flat_fit_keys(entry)
+                    # Rename old key → new canonical key when only the old one
+                    # is present (files saved before the rename).
+                    if ('sweep_amplitude' in entry
+                            and 'sweep_amplitude_normalized' not in entry):
+                        entry['sweep_amplitude_normalized'] = entry.pop('sweep_amplitude')
     return results_by_detector

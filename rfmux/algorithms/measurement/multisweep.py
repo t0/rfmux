@@ -150,7 +150,7 @@ async def multisweep(
                   "channel_number":         int,
                   # Actual values used for this sweep call
                   "sweep_center_frequency": float,   # = bias_frequency by default
-                  "sweep_amplitude":        float,   # may differ from bias_amplitude
+                  "sweep_amplitude_normalized": float,  # may differ from bias_amplitude
                   # Sweep data
                   "sweep_direction":        str,
                   "frequencies":            np.ndarray,   # Hz
@@ -444,8 +444,8 @@ async def multisweep(
             "bias_amplitude":         res_info_dict[code]["bias_amplitude"],
             "channel_number":         res_info_dict[code]["channel_number"],
             # --- Actual values used for this sweep call ---
-            "sweep_center_frequency": code_to_cf[code],   # = bias_frequency by default
-            "sweep_amplitude":        code_to_amp[code],  # may differ from bias_amplitude
+            "sweep_center_frequency":     code_to_cf[code],   # = bias_frequency by default
+            "sweep_amplitude_normalized": code_to_amp[code],  # may differ from bias_amplitude
             # --- Sweep data ---
             "sweep_direction":        sweep_direction,
             "frequencies":            resonance_data[code]["frequencies"],

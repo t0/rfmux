@@ -1308,6 +1308,27 @@ class PeriscopeRuntime:
                 # Migrate any old flat fit-key format to the new nested 'fits' subdict
                 # structure (no-op for files already saved in the new format).
                 migrate_results_by_detector(panel.results_by_detector)
+                # Backfill iq_volts and sweep_power_dbm for files saved before these
+                # fields were stored in the live dict (no-op for up-to-date files).
+                from rfmux.core.transferfunctions import convert_roc_to_volts
+                from rfmux.tools.periscope.utils import UnitConverter as _UC
+                _dac_scale_for_backfill = dac_scales_for_panel.get(target_module)
+                for _code, _iter_dict in panel.results_by_detector.items():
+                    for _iter_idx, _entry in _iter_dict.items():
+                        if 'iq_volts' not in _entry:
+                            _iq = _entry.get('iq_counts')
+                            if _iq is not None:
+                                try:
+                                    _entry['iq_volts'] = convert_roc_to_volts(_iq)
+                                except Exception:
+                                    pass
+                        if 'sweep_power_dbm' not in _entry:
+                            _norm_amp = _entry.get('sweep_amplitude_normalized')
+                            _entry['sweep_power_dbm'] = (
+                                _UC.normalize_to_dbm(_norm_amp, _dac_scale_for_backfill)
+                                if _norm_amp is not None and _dac_scale_for_backfill is not None
+                                else None
+                            )
                 # Restore the resonator registry so Find Bias can run on loaded data
                 if load_params.get('res_info_dict'):
                     panel.res_info_dict = load_params['res_info_dict']

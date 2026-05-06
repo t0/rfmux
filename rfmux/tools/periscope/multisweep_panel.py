@@ -1061,11 +1061,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # The amplitude and direction are stored inside each entry so that all
         # detectors share the same iteration indices regardless of per-section amplitudes.
         if multisweep_data_dict:
+            dac_scale = self.dac_scales.get(self.target_module)
             for detector_id, det_data in multisweep_data_dict.items():
                 if detector_id not in self.results_by_detector:
                     self.results_by_detector[detector_id] = {}
                 entry = dict(det_data)
                 entry['iteration'] = iteration
+                # Inject sweep_power_dbm so the live dict is self-contained.
+                # iq_volts is already present (returned by the multisweep algorithm).
+                norm_amp = entry.get('sweep_amplitude_normalized')
+                entry['sweep_power_dbm'] = (
+                    UnitConverter.normalize_to_dbm(norm_amp, dac_scale)
+                    if norm_amp is not None and dac_scale is not None
+                    else None
+                )
                 self.results_by_detector[detector_id][iteration] = entry
 
         # --- Update the live resonator registry ---
@@ -1702,56 +1711,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # Only store the DAC scale for the module that actually ran the measurement.
             'dac_scales_used': self.dac_scales.get(self.target_module),
             'res_info_dict': self.res_info_dict,        # Lightweight resonator registry
-            'results': self._results_by_detector_with_iq_volts(),
+            'results': self.results_by_detector,
             'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
             'nco_frequency_hz': self.nco_frequency_hz,  # NCO frequency used for biasing
             'noise_data': spectrum_data
         }
     
-    def _results_by_detector_with_iq_volts(self) -> dict:
-        """Return a shallow copy of results_by_detector with export-friendly keys.
-
-        For each detector entry that contains 'iq_counts', computes
-        ``iq_volts = convert_roc_to_volts(iq_counts)`` and stores it in a
-        per-entry copy.  The live ``results_by_detector`` dict is not mutated.
-        Only executed at export time (not during live sweeps).
-
-        Additional export transformations applied to the copy:
-        - ``sweep_amplitude`` → renamed to ``sweep_amplitude_normalized``
-          (makes it explicit that the value is a 0–1 normalized amplitude).
-        - ``sweep_power_dbm`` is added, computed from ``sweep_amplitude_normalized``
-          and the module's DAC scale.  Set to ``None`` when the DAC scale is
-          unknown.
-        """
-        from rfmux.core.transferfunctions import convert_roc_to_volts
-
-        dac_scale = self.dac_scales.get(self.target_module)
-
-        result = {}
-        for code, iter_dict in self.results_by_detector.items():
-            result[code] = {}
-            for iter_idx, entry in iter_dict.items():
-                export_entry = dict(entry)  # shallow copy
-
-                # Inject iq_volts
-                iq = entry.get('iq_counts')
-                if iq is not None and hasattr(iq, '__len__') and len(iq) > 0:
-                    try:
-                        export_entry['iq_volts'] = convert_roc_to_volts(iq)
-                    except Exception:
-                        pass  # silently skip if conversion fails
-
-                # sweep_amplitude_normalized is the standard key used throughout.
-                # Add sweep_power_dbm for convenience in exported files.
-                norm_amp = export_entry.get('sweep_amplitude_normalized')
-                if norm_amp is not None and dac_scale is not None:
-                    export_entry['sweep_power_dbm'] = UnitConverter.normalize_to_dbm(norm_amp, dac_scale)
-                else:
-                    export_entry['sweep_power_dbm'] = None
-
-                result[code][iter_idx] = export_entry
-        return result
-
     def _handle_export_file_selected(self, filename):
         """Handle the file selection from the non-blocking dialog."""
         if not filename:

@@ -711,8 +711,8 @@ def find_bias_points(
 
 # ── Section D: Hardware programming ──────────────────────────────────────────
 
-# PFB frequency bin spacing in Hz (= 625 MHz / 2^21)
-_PFB_BIN_HZ: float = 298.0232238769531
+# Base frequency in Hz (= 625 MHz / 2^21): the quantum to which bias frequencies are rounded.
+_BASE_FREQ_HZ: float = 298.0232238769531
 
 
 async def apply_bias(
@@ -728,9 +728,11 @@ async def apply_bias(
     are programmed.  All tone settings (frequency, amplitude, phase=0) are
     committed in a single ``tuber_context`` batch for efficiency.
 
-    The bias frequency is quantised to the nearest PFB frequency bin before
+    The bias frequency is quantised to the nearest base frequency before
     programming, and the channel frequency is computed relative to the current
-    NCO frequency.
+    NCO frequency.  The quantised value is written back to
+    ``res_info_dict[code]["bias_frequency"]`` so downstream consumers always
+    see the frequency that was actually programmed.
 
     Parameters
     ----------
@@ -750,8 +752,8 @@ async def apply_bias(
 
         * ``apply_successful`` (bool)
         * ``channel_number`` (int)
-        * ``bias_frequency`` (float) — the (unquantised) refined bias frequency
-        * ``quantized_bias_frequency`` (float) — the frequency actually programmed
+        * ``bias_frequency`` (float) — the bias frequency quantised to the
+          nearest base frequency (i.e. the frequency actually programmed)
         * ``channel_frequency`` (float) — frequency relative to NCO
         * ``bias_amplitude`` (float)
     """
@@ -775,9 +777,13 @@ async def apply_bias(
             bias_freq = float(info['bias_frequency'])
             amplitude = float(info['bias_amplitude'])
 
-            # Quantise to nearest PFB bin
-            quantized_freq = round(bias_freq / _PFB_BIN_HZ) * _PFB_BIN_HZ
-            channel_freq = quantized_freq - nco_freq
+            # Quantise to nearest base frequency
+            bias_freq = round(bias_freq / _BASE_FREQ_HZ) * _BASE_FREQ_HZ
+            channel_freq = bias_freq - nco_freq
+
+            # Write the quantised frequency back so res_info_dict stays consistent
+            # with what was actually programmed into hardware.
+            res_info_dict[code]['bias_frequency'] = bias_freq
 
             ctx.set_frequency(channel_freq, channel=channel, module=module)
             ctx.set_amplitude(amplitude, channel=channel, module=module)
@@ -790,12 +796,11 @@ async def apply_bias(
             )
 
             apply_report[code] = {
-                'apply_successful':         True,
-                'channel_number':           channel,
-                'bias_frequency':           bias_freq,
-                'quantized_bias_frequency': quantized_freq,
-                'channel_frequency':        channel_freq,
-                'bias_amplitude':           amplitude,
+                'apply_successful':  True,
+                'channel_number':    channel,
+                'bias_frequency':    bias_freq,
+                'channel_frequency': channel_freq,
+                'bias_amplitude':    amplitude,
             }
 
         await ctx()

@@ -2890,10 +2890,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if df_calibrations:
             self.df_calibration_ready.emit(module, df_calibrations)
 
-        # Emit for session auto-export
+        # Emit for session auto-export — update the existing multisweep pickle in-place
+        # rather than creating a separate bias_HHMMSS.pkl.  The session manager's
+        # overwrite-tracking mechanism handles the in-place update automatically.
         export_data = self._prepare_export_data()
-        export_data['measurement_type'] = 'bias'
-        self.data_ready.emit("bias", f"module{module}", export_data)
+        self.data_ready.emit("multisweep", f"module{self.target_module}", export_data)
 
         # Re-enable buttons
         self.apply_bias_btn.setEnabled(True)

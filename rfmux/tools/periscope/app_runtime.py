@@ -1234,8 +1234,17 @@ class PeriscopeRuntime:
             # Check if noise data exists in the loaded file
             has_noise_data = 'noise_data' in load_params and load_params['noise_data'] is not None
             
-            # For bias source type, also check for bias_kids_output
-            has_bias_data = 'bias_kids_output' in load_params and load_params['bias_kids_output'] is not None
+            # Check for bias data in two places:
+            # - Old format: top-level 'bias_kids_output' key (legacy bias pkl files)
+            # - New format: df_calibration values inside res_info_dict (since bias pickle
+            #   elimination: Apply Bias now updates the multisweep file in-place)
+            has_bias_data_old = 'bias_kids_output' in load_params and load_params['bias_kids_output'] is not None
+            _res_info_for_check = load_params.get('res_info_dict', {}) or {}
+            has_bias_data_new = any(
+                isinstance(v, dict) and v.get('df_calibration') is not None
+                for v in _res_info_for_check.values()
+            )
+            has_bias_data = has_bias_data_old or has_bias_data_new
             loaded_bias_flag = has_noise_data or (source_type == "bias" and has_bias_data)
                 
             # Create panel
@@ -1365,14 +1374,33 @@ class PeriscopeRuntime:
             # is only triggered for live sweeps and never called when loading a file.
             panel._update_fit_results_tab_visibility()
             
-            # Extract and load df_calibrations if bias_kids_output exists
+            # Extract and load df_calibrations from either old or new format.
+            # Old format: top-level 'bias_kids_output' dict keyed by detector index.
+            # New format (bias pickle elimination): df_calibration values stored
+            #   inside res_info_dict[code]['df_calibration'], keyed by channel_number.
             if has_bias_data:
-                bias_output = load_params['bias_kids_output']
                 df_calibrations = {}
-                for det_idx, det_data in bias_output.items():
-                    if 'df_calibration' in det_data:
-                        df_calibrations[det_idx] = det_data['df_calibration']
-                
+                bias_output = load_params.get('bias_kids_output')
+                if bias_output:
+                    # Old format
+                    for det_idx, det_data in bias_output.items():
+                        if 'df_calibration' in det_data:
+                            df_calibrations[det_idx] = det_data['df_calibration']
+                else:
+                    # New format: read df_calibration from res_info_dict
+                    import cmath as _cmath
+                    for code, info in _res_info_for_check.items():
+                        if not isinstance(info, dict):
+                            continue
+                        cal = info.get('df_calibration')
+                        ch = info.get('channel_number')
+                        if cal is not None and ch is not None:
+                            try:
+                                if not _cmath.isnan(cal):
+                                    df_calibrations[ch] = cal
+                            except TypeError:
+                                pass  # cal is a non-complex type; skip isnan check
+
                 # Load calibrations into main window
                 if df_calibrations and hasattr(self, '_handle_df_calibration_ready'):
                     self._handle_df_calibration_ready(target_module, df_calibrations)

@@ -1546,7 +1546,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if dialog.exec():
             params = dialog.get_load_param()
             if params:
-                if "bias_kids_output" in params.keys():
+                # File-loaded payloads (both old bias_kids_output format and new
+                # res_info_dict format) always contain 'initial_parameters'.
+                # Manually-entered data (from the Tones/Amplitude text fields) does not.
+                if "initial_parameters" in params:
                     self._set_and_plot_bias(params)
                 else:
                     self._set_bias(params)
@@ -1623,12 +1626,39 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for Bias.")
                 return
 
-            # Extract bias data for hardware application BEFORE creating panel
+            # Extract bias data for hardware application BEFORE creating panel.
+            # Old format: top-level 'bias_kids_output' dict keyed by detector index.
+            # New format (bias pickle elimination): bias data lives inside res_info_dict.
             bias_output = load_params.get('bias_kids_output')
             if not bias_output:
-                QtWidgets.QMessageBox.critical(self, "Error", "No bias_kids_output in loaded file.")
-                return
-            
+                # New format: synthesise an equivalent dict from res_info_dict.
+                res_info = load_params.get('res_info_dict', {}) or {}
+                if not res_info:
+                    QtWidgets.QMessageBox.critical(
+                        self, "Error",
+                        "No bias data found in loaded file "
+                        "(neither 'bias_kids_output' nor 'res_info_dict' is present)."
+                    )
+                    return
+                # Build bias_output keyed by string code (same as res_info_dict).
+                bias_output = {}
+                for code, info in res_info.items():
+                    if isinstance(info, dict) and info.get('channel_number') is not None:
+                        bias_output[code] = {
+                            'bias_channel': info.get('channel_number'),
+                            'bias_frequency': info.get('bias_frequency'),
+                            'sweep_amplitude_normalized': (
+                                info.get('bias_amplitude') or info.get('sweep_amplitude')
+                            ),
+                            'optimal_phase_degrees': info.get('optimal_phase_degrees', 0),
+                        }
+                if not bias_output:
+                    QtWidgets.QMessageBox.critical(
+                        self, "Error",
+                        "res_info_dict present but contains no usable bias data."
+                    )
+                    return
+
             bias_freqs = []
             amplitudes = []
             phases = []
@@ -1636,7 +1666,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             data_rod = {}
             
             for det_idx, det_data in bias_output.items():
-                channel = int(det_data.get("bias_channel", det_idx))
+                channel = int(det_data.get("bias_channel") or det_idx)
                 channels.append(channel)
                 bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
                 bias_freqs.append(bias_freq)

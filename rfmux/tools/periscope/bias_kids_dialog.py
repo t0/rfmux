@@ -335,12 +335,17 @@ def load_bias_payload(parent, file_path=None):
                              f"Could not read '{file_path}':\n{exc}")
         return None
 
-    if (
-        isinstance(payload, dict)
-        and isinstance(payload.get("initial_parameters"), dict)
-        and payload.get("bias_kids_output") is not None
-    ):
-        return payload
+    if isinstance(payload, dict) and isinstance(payload.get("initial_parameters"), dict):
+        # Old format: top-level bias_kids_output key
+        if payload.get("bias_kids_output") is not None:
+            return payload
+        # New format (bias pickle elimination): bias_frequency stored inside res_info_dict
+        res_info = payload.get("res_info_dict", {}) or {}
+        if any(
+            isinstance(v, dict) and v.get("bias_frequency") is not None
+            for v in res_info.values()
+        ):
+            return payload
 
     from PyQt6.QtWidgets import QMessageBox
     QMessageBox.warning(parent, "Invalid File",
@@ -410,13 +415,26 @@ class LoadBiasDialog(QDialog):
             self.use_load_file = True
 
     def _populate_fields_from_data(self, payload):
-        params = payload.get('initial_parameters', {})
-        bias_output = payload.get('bias_kids_output', {})
+        bias_output = payload.get('bias_kids_output')
         bias_freqs, amplitudes = [], []
-        for det_data in bias_output.values():
-            bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
-            bias_freqs.append(bias_freq)
-            amplitudes.append(det_data.get("sweep_amplitude"))
+        if bias_output:
+            # Old format: read directly from bias_kids_output
+            for det_data in bias_output.values():
+                bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
+                bias_freqs.append(bias_freq)
+                amplitudes.append(det_data.get("sweep_amplitude"))
+        else:
+            # New format (bias pickle elimination): read from res_info_dict,
+            # sorted by channel_number so the field order is deterministic.
+            res_info = payload.get('res_info_dict', {}) or {}
+            sorted_infos = sorted(
+                (v for v in res_info.values() if isinstance(v, dict)),
+                key=lambda v: v.get('channel_number', 0),
+            )
+            for info in sorted_infos:
+                bias_freq = info.get("bias_frequency") or info.get("sweep_center_frequency")
+                bias_freqs.append(bias_freq)
+                amplitudes.append(info.get("bias_amplitude") or info.get("sweep_amplitude"))
         self.tones_edit.setText(",".join([f"{f/1e6:.6f}" for f in bias_freqs if f]))
         self.amp_edit.setText(",".join([f"{a:.3f}" for a in amplitudes if a is not None]))
 

@@ -49,11 +49,13 @@ def load_multisweep_payload(parent: QtWidgets.QWidget, file_path: str | None = N
         )
         return None
 
-    if (
-        isinstance(payload, dict)
-        and isinstance(payload.get("initial_parameters"), dict)
-        and (isinstance(payload.get("results_by_detector"), dict) or isinstance(payload.get("results_by_iteration"), dict))
-    ):
+    # 1. Explicit type tag — present in all current files
+    if payload.get("measurement_type") == "multisweep":
+        return payload
+
+    # 2. Session export wrapper — files saved before measurement_type was added
+    _session_meta = payload.get("_session_export")
+    if isinstance(_session_meta, dict) and _session_meta.get("data_type") == "multisweep":
         return payload
 
     QtWidgets.QMessageBox.warning(

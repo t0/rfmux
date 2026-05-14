@@ -369,8 +369,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 self.btn_netanal.setEnabled(False)
                 self.btn_netanal.setToolTip("CRS object not available - network analysis disabled.")
 
-        self.btn_load_multi = QtWidgets.QPushButton("Load Multisweep")
-        self.btn_load_multi.setToolTip("Load Multisweep directly from main window.")
+        self.btn_load_multi = QtWidgets.QPushButton("Run / Load Multisweep")
+        self.btn_load_multi.setToolTip("Run a new Multisweep or load a previously saved one.")
         self.btn_load_multi.clicked.connect(self._load_multisweep_dialog)
         if self.crs is None and self.host != "OFFLINE":
             self.btn_load_multi.setEnabled(False)

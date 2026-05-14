@@ -1185,7 +1185,7 @@ class PeriscopeRuntime:
         Create and display a MultisweepPanel from loaded data.
         
         This unified helper method is used by both _load_multisweep_analysis and 
-        _set_and_plot_bias to eliminate code duplication.
+        handle_bias_kids / _do_bias_kids to eliminate code duplication.
         
         Args:
             load_params: Loaded data dictionary containing 'initial_parameters', 

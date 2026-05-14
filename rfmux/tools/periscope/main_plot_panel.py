@@ -88,7 +88,7 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
         action_buttons_layout.addWidget(self.periscope.btn_init_crs)
         action_buttons_layout.addWidget(self.periscope.btn_netanal)
         action_buttons_layout.addWidget(self.periscope.btn_load_multi)
-        action_buttons_layout.addWidget(self.periscope.btn_load_bias)
+        action_buttons_layout.addWidget(self.periscope.btn_bias_kids)
         action_buttons_layout.addWidget(self.periscope.btn_noise_spec)
         action_buttons_layout.addWidget(self.periscope.btn_toggle_cfg)
         

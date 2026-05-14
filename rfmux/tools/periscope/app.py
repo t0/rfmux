@@ -376,12 +376,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.btn_load_multi.setEnabled(False)
             self.btn_load_multi.setToolTip("CRS object not available - load multisweep disabled.")
 
-        self.btn_load_bias = QtWidgets.QPushButton("Load Bias")
-        self.btn_load_bias.setToolTip("Bias KIDS directly from the main window.")
-        self.btn_load_bias.clicked.connect(self.handle_bias_from_file)
+        self.btn_bias_kids = QtWidgets.QPushButton("Bias KIDs")
+        self.btn_bias_kids.setToolTip("Bias KIDs directly from the main window.")
+        self.btn_bias_kids.clicked.connect(self.handle_bias_kids)
         if self.crs is None and self.host != "OFFLINE":
-            self.btn_load_bias.setEnabled(False)
-            self.btn_load_bias.setToolTip("CRS object not available - load Bias disabled.")
+            self.btn_bias_kids.setEnabled(False)
+            self.btn_bias_kids.setToolTip("CRS object not available - Bias KIDs disabled.")
 
         self.btn_noise_spec = QtWidgets.QPushButton("Noise Spectrum")
         self.btn_noise_spec.setToolTip("Get Noise Spectrum for a Channel")
@@ -1525,59 +1525,99 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self._collect_channel_noise(params)
 
     
-    def handle_bias_from_file(self) -> None:
-        """Slot for the 'Load Bias…' button in the main application window."""
+    def handle_bias_kids(self) -> None:
+        """Slot for the 'Bias KIDs' button in the main application window."""
         if self.crs is None and self.host != "OFFLINE":
-            QtWidgets.QMessageBox.warning(self, "CRS Not Available", "Connect to a CRS before loading bias data.")
+            QtWidgets.QMessageBox.warning(
+                self, "CRS Not Available",
+                "Connect to a CRS before biasing KIDs."
+            )
             return
 
-        default_dac_scales = {m: -0.5 for m in range(1, 9)}
-        netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
-        netanal_dialog.module_entry.setText(str(self.module))
-        
-        # Fetch DAC scales if CRS is available
-        self._fetch_dac_scales_for_dialog(netanal_dialog)
-        if self.crs is None:
-            self.dac_scales = default_dac_scales.copy()
-        
-        from .bias_kids_dialog import LoadBiasDialog
-        dialog = LoadBiasDialog(self, self.module)
+        from .bias_kids_dialog import BiasKIDsDialog
+        dialog = BiasKIDsDialog(self, active_module=self.module)
 
-        if dialog.exec():
-            params = dialog.get_load_param()
-            if params:
-                # File-loaded payloads (both old bias_kids_output format and new
-                # res_info_dict format) always contain 'initial_parameters'.
-                # Manually-entered data (from the Tones/Amplitude text fields) does not.
-                if "initial_parameters" in params:
-                    self._set_and_plot_bias(params)
-                else:
-                    self._set_bias(params)
-
-    def _set_bias(self, params):
-
-        # span_hz = params.get("span_hz")
-        bias_freqs = params.get("bias_frequencies")
-        amplitudes = params.get("amplitudes")
-        phases = params.get("phases")
-        module = params.get("module")
-
-        channels = np.arange(1, len(bias_freqs)+1).tolist()
-
-        if module is None:
-            QtWidgets.QMessageBox.critical(self, "Missing Module", "The file does not specify which module was biased.")
+        if not dialog.exec():
             return
 
-        if bias_freqs and self.crs is not None:
-            # nco_freq = ((min(bias_freqs) - span_hz / 2 + (max(bias_freqs) + span_hz / 2)) / 2
-            nco_freq = (min(bias_freqs)  + max(bias_freqs)) / 2
-            crs = self.crs
-            asyncio.run(crs.set_nco_frequency(nco_freq, module=module)) #### Setting up the nco frequency ######
-    
+        result = dialog.get_result()
+        if result is None:
+            return
+
+        self._do_bias_kids(result, use_plot=dialog.use_plot)
+
+    def _do_bias_kids(self, result: dict, use_plot: bool = False, target_module: int | None = None):
+        """
+        Apply bias parameters to hardware and optionally open a MultisweepPanel.
+
+        Parameters
+        ----------
+        result :
+            Dict from :meth:`~bias_kids_dialog.BiasKIDsDialog.get_result`:
+            ``{'frequencies_hz': list, 'amplitudes': list, 'load_params': dict|None}``
+        use_plot :
+            When ``True`` and ``result['load_params']`` is not ``None``, create a
+            :class:`~multisweep_panel.MultisweepPanel` from the loaded sweep data.
+        target_module :
+            Override module number; defaults to ``self.module``.
+        """
+        if target_module is None:
+            target_module = self.module
+
+        if target_module is None:
+            QtWidgets.QMessageBox.critical(self, "Missing Module", "No module selected.")
+            return
+
+        frequencies_hz = result['frequencies_hz']
+        amplitudes     = result['amplitudes']
+        load_params    = result.get('load_params')
+
+        # Determine hardware channel numbers.
+        # When loaded from a multisweep pkl, use the channel_number values from
+        # res_info_dict (sorted by channel_number, matching the field order used
+        # to populate the dialog).  Otherwise assign channels 1, 2, 3, … in order.
+        channels = list(range(1, len(frequencies_hz) + 1))
+        if load_params is not None:
+            res_info = load_params.get('res_info_dict', {}) or {}
+            biased = sorted(
+                (
+                    (code, info) for code, info in res_info.items()
+                    if isinstance(info, dict) and info.get('bias_found') is True
+                ),
+                key=lambda ci: ci[1].get('channel_number', 0),
+            )
+            if biased:
+                channels = [int(info.get('channel_number', i + 1))
+                            for i, (_, info) in enumerate(biased)]
+
+        phases = [0.0] * len(frequencies_hz)
+
+        # Apply to hardware
         if self.crs is not None:
-            asyncio.run(self.apply_bias_output(self.crs, module, amplitudes, bias_freqs, channels, phases))
+            if frequencies_hz:
+                nco_freq = (min(frequencies_hz) + max(frequencies_hz)) / 2
+                asyncio.run(self.crs.set_nco_frequency(nco_freq, module=target_module))
+            asyncio.run(
+                self.apply_bias_output(
+                    self.crs, target_module, amplitudes, frequencies_hz, channels, phases
+                )
+            )
         else:
             print("[Offline] Skipping hardware bias application")
+
+        # Optionally open a MultisweepPanel from the loaded sweep data
+        if use_plot and load_params is not None:
+            try:
+                panel, dock, window_id, _ = self._create_multisweep_panel_from_loaded_data(
+                    load_params, source_type="bias"
+                )
+                if panel is not None and load_params.get('noise_data') is not None:
+                    panel._get_spectrum(load_params['noise_data'], use_loaded_noise=True)
+            except Exception as exc:
+                error_msg = f"Error displaying results: {type(exc).__name__}: {exc}"
+                print(error_msg, file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                QtWidgets.QMessageBox.critical(self, "Plot Error", error_msg)
         
     async def apply_bias_output(self, crs, module: int, amplitudes: list, bias_freqs : list,
                                 channels : list, phases : list) -> None:
@@ -1602,118 +1642,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     
 
 
-    def _set_and_plot_bias(self, load_params):
-        """
-        Load bias data from file, apply bias to hardware, and display in a docked panel.
-        
-        Uses the unified _create_multisweep_panel_from_loaded_data helper for panel creation.
-        """
-        active_module = self.module 
-
-        try:
-            # Check if module in file matches active module
-            params = load_params['initial_parameters']
-            target_module = params.get('module')
-
-            if active_module != target_module:
-                QtWidgets.QMessageBox.warning(self, "Module Mismatch", 
-                    "The module in file doesn't match the active module. The value will be changed.")
-                # Update the module in params to use the active module
-                load_params['initial_parameters']['module'] = active_module
-                target_module = active_module
-
-            if target_module is None: 
-                QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for Bias.")
-                return
-
-            # Extract bias data for hardware application BEFORE creating panel.
-            # Old format: top-level 'bias_kids_output' dict keyed by detector index.
-            # New format (bias pickle elimination): bias data lives inside res_info_dict.
-            bias_output = load_params.get('bias_kids_output')
-            if not bias_output:
-                # New format: synthesise an equivalent dict from res_info_dict.
-                res_info = load_params.get('res_info_dict', {}) or {}
-                if not res_info:
-                    QtWidgets.QMessageBox.critical(
-                        self, "Error",
-                        "No bias data found in loaded file "
-                        "(neither 'bias_kids_output' nor 'res_info_dict' is present)."
-                    )
-                    return
-                # Build bias_output keyed by string code (same as res_info_dict).
-                bias_output = {}
-                for code, info in res_info.items():
-                    if isinstance(info, dict) and info.get('channel_number') is not None:
-                        bias_output[code] = {
-                            'bias_channel': info.get('channel_number'),
-                            'bias_frequency': info.get('bias_frequency'),
-                            'sweep_amplitude_normalized': (
-                                info.get('bias_amplitude') or info.get('sweep_amplitude')
-                            ),
-                            'optimal_phase_degrees': info.get('optimal_phase_degrees', 0),
-                        }
-                if not bias_output:
-                    QtWidgets.QMessageBox.critical(
-                        self, "Error",
-                        "res_info_dict present but contains no usable bias data."
-                    )
-                    return
-
-            bias_freqs = []
-            amplitudes = []
-            phases = []
-            channels = []
-            data_rod = {}
-            
-            for det_idx, det_data in bias_output.items():
-                channel = int(det_data.get("bias_channel") or det_idx)
-                channels.append(channel)
-                bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
-                bias_freqs.append(bias_freq)
-                amplitude = det_data.get("sweep_amplitude_normalized")
-                amplitudes.append(amplitude)
-                phase = det_data.get("optimal_phase_degrees", 0)
-                phases.append(phase)
-                if "rotation_tod" in det_data:
-                    data_rod[channel] = det_data["rotation_tod"]
-
-            # Apply bias to hardware if CRS is available
-            if self.crs is not None:
-                # Set NCO frequency to center of bias frequency range before applying bias
-                if bias_freqs:
-                    nco_freq = (min(bias_freqs) + max(bias_freqs)) / 2
-                    asyncio.run(self.crs.set_nco_frequency(nco_freq, module=target_module))
-                
-                asyncio.run(self.apply_bias_output(self.crs, target_module, amplitudes, bias_freqs, channels, phases))
-                    
-                if data_rod:
-                    asyncio.run(self.adjust_phase(target_module, channels, data_rod))
-                    #print(f"[Bias] Refining the rotation")
-                    self.noise_count = self.noise_count + 1
-                    asyncio.run(self.adjust_phase(target_module, channels, data_rod, True))
-            else:
-                print("[Offline] Skipping hardware bias application and phase adjustment")
-
-            # Use the unified helper method to create the panel and dock
-            panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
-                load_params, source_type="bias"
-            )
-            
-            if panel is None:
-                return  # Error already displayed by helper
-
-            # Load noise data if present
-            if load_params.get('noise_data') is not None:
-                noise_data = load_params['noise_data']
-                panel._get_spectrum(noise_data, use_loaded_noise=True)
-            else:
-                print("[Bias] There is no noise data in the file")
-            
-        except Exception as e:
-            error_msg = f"Error displaying results: {type(e).__name__}: {str(e)}"
-            print(error_msg, file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            QtWidgets.QMessageBox.critical(self, "Bias Error", error_msg)
 
 
 
@@ -2949,13 +2877,15 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     
     def _load_bias_from_session(self, data: dict, file_path: str):
         """
-        Load bias data from session file - show dialog with options.
-        
-        When double-clicking a bias file, the user gets to choose whether to:
-        - Set bias (apply to hardware only)
-        - Set + Plot bias (apply to hardware and create visualization panel)
+        Load bias data from a session file and show the Bias KIDs dialog.
+
+        When double-clicking a bias file in the session browser, the user can
+        choose to apply the bias to hardware (Apply Bias) or apply and visualise
+        the sweep data (Apply + Plot).
         """
-        if 'results' not in data and 'results_by_detector' not in data and 'results_by_iteration' not in data:
+        if ('results' not in data
+                and 'results_by_detector' not in data
+                and 'results_by_iteration' not in data):
             QtWidgets.QMessageBox.warning(
                 self,
                 "Invalid Bias File",
@@ -2964,19 +2894,17 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             return
 
-        # Show the same dialog that the "Load Bias" button shows
-        from .bias_kids_dialog import LoadBiasDialog
-        dialog = LoadBiasDialog(self, self.module, loaded_data=data)
-        
-        if dialog.exec():
-            params = dialog.get_load_param()
-            if params:
-                if "bias_kids_output" in params:
-                    # User chose "Set + Plot Bias"
-                    self._set_and_plot_bias(params)
-                else:
-                    # User chose "Set Bias" (hardware only)
-                    self._set_bias(params)
+        from .bias_kids_dialog import BiasKIDsDialog
+        dialog = BiasKIDsDialog(self, active_module=self.module)
+        # Pre-populate fields from the already-loaded payload
+        dialog._load_from_multisweep_payload(data)
+
+        if not dialog.exec():
+            return
+
+        result = dialog.get_result()
+        if result is not None:
+            self._do_bias_kids(result, use_plot=dialog.use_plot)
     
     def _load_noise_from_session(self, data: dict, file_path: str):
         """

@@ -296,201 +296,329 @@ class BiasSettingsPanel(QWidget):
         self.fit_selected_cb.setChecked(True)
 
 
-# ── Load Bias Dialog (legacy "Load Bias from file" feature) ───────────────────
+# ── Bias KIDs Dialog ──────────────────────────────────────────────────────────
 
+import csv
+import os
 import pickle
 
-from PyQt6.QtWidgets import QDialog, QDialogButtonBox
+from PyQt6.QtWidgets import QDialog
 
 
-def load_bias_payload(parent, file_path=None):
+class BiasKIDsDialog(QDialog):
     """
-    Load a bias payload dict from a pickle file.
+    Dialog for biasing KIDs directly from the main Periscope window.
 
-    If *file_path* is None, opens a file chooser dialog.
-    Returns the payload dict on success, or None on failure/cancel.
-    """
-    from PyQt6.QtWidgets import QFileDialog, QMessageBox
+    Three ways to specify bias parameters:
 
-    if file_path is None:
-        options = QFileDialog.Options()
-        options |= QFileDialog.Option.DontUseNativeDialog
-        file_path, _ = QFileDialog.getOpenFileName(
-            parent,
-            "Load Bias Parameters",
-            "",
-            "Pickle Files (*.pkl *.pickle);;All Files (*)",
-            options=options,
-        )
+    1. **Load from multisweep file** — reads ``res_info_dict`` entries where
+       ``bias_found = True`` (i.e. Find Bias has been run on the file).
+    2. **Load from CSV** — two-column file: ``frequency_mhz``, ``amplitude``.
+       Header rows (any row whose first column can't be parsed as a float)
+       are silently skipped.
+    3. **Manual entry** — type comma-separated values directly into the fields.
 
-    if not file_path:
-        return None
-
-    try:
-        with open(file_path, "rb") as fh:
-            payload = pickle.load(fh)
-    except Exception as exc:
-        from PyQt6.QtWidgets import QMessageBox
-        QMessageBox.critical(parent, "Load Failed",
-                             f"Could not read '{file_path}':\n{exc}")
-        return None
-
-    if isinstance(payload, dict) and isinstance(payload.get("initial_parameters"), dict):
-        # Old format: top-level bias_kids_output key
-        if payload.get("bias_kids_output") is not None:
-            return payload
-        # New format (bias pickle elimination): bias_frequency stored inside res_info_dict
-        res_info = payload.get("res_info_dict", {}) or {}
-        if any(
-            isinstance(v, dict) and v.get("bias_frequency") is not None
-            for v in res_info.values()
-        ):
-            return payload
-
-    from PyQt6.QtWidgets import QMessageBox
-    QMessageBox.warning(parent, "Invalid File",
-                        "The selected file does not contain Bias parameters.")
-    return None
-
-
-class LoadBiasDialog(QDialog):
-    """
-    Dialog for loading a previously saved bias configuration from a pickle file
-    and applying it directly to the hardware, bypassing the Find/Apply Bias workflow.
-
-    This is a legacy "Load Bias" feature accessible from the main Periscope window.
+    "Apply + Plot" is enabled only when a multisweep pickle was loaded, because
+    it requires the full sweep data to construct a :class:`MultisweepPanel`.
     """
 
-    def __init__(self, parent=None, active_module=None, loaded_data=None):
+    def __init__(self, parent=None, active_module=None):
         super().__init__(parent)
-        self.setWindowTitle("Load Bias")
+        self.setWindowTitle("Bias KIDs")
         self.setModal(True)
-        self.setMinimumWidth(500)
-        self._load_data = loaded_data or {}
-        self.use_load_file = False
+        self.setMinimumWidth(520)
         self.current_module = active_module
+        self._load_params = None   # Full pkl payload (set after loading a multisweep file)
+        self.use_plot = False      # True when user clicked "Apply + Plot"
         self._setup_ui()
+
+    # ── UI construction ────────────────────────────────────────────────────────
 
     def _setup_ui(self):
         from PyQt6.QtWidgets import (
             QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+            QGroupBox,
         )
-        from PyQt6.QtCore import Qt, QTimer
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
 
-        self.import_button = QPushButton("Import File")
-        self.import_button.clicked.connect(self._import_file)
-        layout.addWidget(self.import_button, alignment=Qt.AlignmentFlag.AlignTop)
+        # ── File loading ───────────────────────────────────────────────────────
+        file_group = QGroupBox("Load from file")
+        file_layout = QVBoxLayout(file_group)
 
-        tones_layout = QHBoxLayout()
-        tones_layout.addWidget(QLabel("Tones (MHz):"))
-        self.tones_edit = QLineEdit()
-        tones_layout.addWidget(self.tones_edit)
-        layout.addLayout(tones_layout)
+        btn_row = QHBoxLayout()
+        self._load_pkl_btn = QPushButton("Load Multisweep file…")
+        self._load_pkl_btn.setToolTip(
+            "Load bias parameters from a multisweep pickle file.\n"
+            "Requires that Find Bias has already been run on the file."
+        )
+        self._load_pkl_btn.clicked.connect(self._on_load_pkl)
+        btn_row.addWidget(self._load_pkl_btn)
 
-        amp_layout = QHBoxLayout()
-        amp_layout.addWidget(QLabel("Sweep Amplitude (normalized):"))
-        self.amp_edit = QLineEdit()
-        amp_layout.addWidget(self.amp_edit)
-        layout.addLayout(amp_layout)
+        self._load_csv_btn = QPushButton("Load CSV…")
+        self._load_csv_btn.setToolTip(
+            "Load bias parameters from a CSV file.\n"
+            "Expected columns: frequency_mhz, amplitude"
+        )
+        self._load_csv_btn.clicked.connect(self._on_load_csv)
+        btn_row.addWidget(self._load_csv_btn)
+        btn_row.addStretch(1)
+        file_layout.addLayout(btn_row)
 
-        bias_layout = QHBoxLayout()
-        self.set_bias_btn = QPushButton("Set Bias")
-        self.plot_bias_btn = QPushButton("Set + Plot Bias")
-        self.plot_bias_btn.setEnabled(False)
-        self.cancel_btn = QPushButton("Cancel")
-        bias_layout.addWidget(self.set_bias_btn, alignment=Qt.AlignmentFlag.AlignLeft)
-        bias_layout.addWidget(self.plot_bias_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        bias_layout.addWidget(self.cancel_btn, alignment=Qt.AlignmentFlag.AlignRight)
-        layout.addLayout(bias_layout)
+        self._file_status_label = QLabel("No file loaded")
+        self._file_status_label.setStyleSheet("color: gray; font-style: italic;")
+        file_layout.addWidget(self._file_status_label)
 
-        self.set_bias_btn.clicked.connect(self.accept)
-        self.plot_bias_btn.clicked.connect(self._on_set_and_plot_bias)
-        self.cancel_btn.clicked.connect(self.reject)
+        layout.addWidget(file_group)
 
-        if self._load_data:
-            self._populate_fields_from_data(self._load_data)
-            self.plot_bias_btn.setEnabled(True)
-            self.use_load_file = True
+        # ── Manual / populated entry ───────────────────────────────────────────
+        entry_group = QGroupBox("Bias parameters")
+        entry_layout = QVBoxLayout(entry_group)
 
-    def _populate_fields_from_data(self, payload):
-        bias_output = payload.get('bias_kids_output')
-        bias_freqs, amplitudes = [], []
-        if bias_output:
-            # Old format: read directly from bias_kids_output
-            for det_data in bias_output.values():
-                bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
-                bias_freqs.append(bias_freq)
-                amplitudes.append(det_data.get("sweep_amplitude"))
-        else:
-            # New format (bias pickle elimination): read from res_info_dict,
-            # sorted by channel_number so the field order is deterministic.
-            res_info = payload.get('res_info_dict', {}) or {}
-            sorted_infos = sorted(
-                (v for v in res_info.values() if isinstance(v, dict)),
-                key=lambda v: v.get('channel_number', 0),
+        entry_layout.addWidget(QLabel("Frequencies (MHz), comma-separated:"))
+        self._freq_edit = QLineEdit()
+        self._freq_edit.setPlaceholderText("e.g. 500.123, 501.456, 502.789")
+        entry_layout.addWidget(self._freq_edit)
+
+        entry_layout.addWidget(QLabel("Amplitudes (normalized), comma-separated:"))
+        self._amp_edit = QLineEdit()
+        self._amp_edit.setPlaceholderText("e.g. 0.5, 0.5, 0.5")
+        entry_layout.addWidget(self._amp_edit)
+
+        layout.addWidget(entry_group)
+
+        # ── Action buttons ─────────────────────────────────────────────────────
+        btn_layout = QHBoxLayout()
+
+        self._apply_btn = QPushButton("Apply Bias")
+        self._apply_btn.setDefault(True)
+        self._apply_btn.setToolTip("Apply the bias parameters to hardware.")
+        self._apply_btn.clicked.connect(self._on_apply)
+        btn_layout.addWidget(self._apply_btn)
+
+        self._apply_plot_btn = QPushButton("Apply + Plot")
+        self._apply_plot_btn.setEnabled(False)
+        self._apply_plot_btn.setToolTip(
+            "Apply bias and open a MultisweepPanel showing the sweep data.\n"
+            "Only available when a multisweep file has been loaded."
+        )
+        self._apply_plot_btn.clicked.connect(self._on_apply_and_plot)
+        btn_layout.addWidget(self._apply_plot_btn)
+
+        btn_layout.addStretch(1)
+
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self._cancel_btn)
+
+        layout.addLayout(btn_layout)
+
+    # ── File loading helpers ───────────────────────────────────────────────────
+
+    def _on_load_pkl(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Multisweep File", "",
+            "Pickle Files (*.pkl *.pickle);;All Files (*)",
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
+        if path:
+            self._load_from_multisweep(path)
+
+    def _load_from_multisweep(self, path: str):
+        """Populate the frequency/amplitude fields from a multisweep pickle file."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        try:
+            with open(path, "rb") as fh:
+                payload = pickle.load(fh)
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Failed", f"Could not read '{path}':\n{exc}")
+            return
+
+        self._load_from_multisweep_payload(payload, label=os.path.basename(path))
+
+    def _load_from_multisweep_payload(self, payload: dict, label: str = "session file"):
+        """
+        Populate the frequency/amplitude fields from an already-loaded payload dict.
+
+        This is the internal counterpart to :meth:`_load_from_multisweep` for
+        cases where the pickle has already been deserialized by the caller
+        (e.g. the session browser pre-loads the data before opening this dialog).
+
+        Parameters
+        ----------
+        payload :
+            The deserialized pickle dict.
+        label :
+            Short human-readable name to show in the status line (e.g. filename).
+        """
+        from PyQt6.QtWidgets import QMessageBox
+
+        if not isinstance(payload, dict) or 'initial_parameters' not in payload:
+            QMessageBox.warning(
+                self, "Invalid File",
+                "This does not appear to be a multisweep file\n"
+                "(missing 'initial_parameters' key)."
             )
-            for info in sorted_infos:
-                bias_freq = info.get("bias_frequency") or info.get("sweep_center_frequency")
-                bias_freqs.append(bias_freq)
-                amplitudes.append(info.get("bias_amplitude") or info.get("sweep_amplitude"))
-        self.tones_edit.setText(",".join([f"{f/1e6:.6f}" for f in bias_freqs if f]))
-        self.amp_edit.setText(",".join([f"{a:.3f}" for a in amplitudes if a is not None]))
+            return
 
-    def _on_set_and_plot_bias(self):
-        self.use_load_file = True
+        res_info = payload.get('res_info_dict', {}) or {}
+        biased = sorted(
+            (
+                (code, info) for code, info in res_info.items()
+                if isinstance(info, dict) and info.get('bias_found') is True
+            ),
+            key=lambda ci: ci[1].get('channel_number', 0),
+        )
+
+        if not biased:
+            QMessageBox.warning(
+                self, "No Bias Data",
+                "This file does not contain bias results.\n"
+                "Please run Find Bias on this sweep first."
+            )
+            return
+
+        freq_strs = [
+            f"{info.get('bias_frequency', 0.0) / 1e6:.6f}"
+            for _, info in biased
+        ]
+        amp_strs = [
+            f"{info.get('bias_amplitude', 0.0):.4f}"
+            for _, info in biased
+        ]
+
+        self._freq_edit.setText(", ".join(freq_strs))
+        self._amp_edit.setText(", ".join(amp_strs))
+        self._load_params = payload
+        self._apply_plot_btn.setEnabled(True)
+
+        self._file_status_label.setText(f"Loaded: {label} ({len(biased)} channels)")
+        self._file_status_label.setStyleSheet("color: #2a8a2a;")
+
+    def _on_load_csv(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load CSV File", "",
+            "CSV Files (*.csv *.txt);;All Files (*)",
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
+        if path:
+            self._load_from_csv(path)
+
+    def _load_from_csv(self, path: str):
+        """Populate the frequency/amplitude fields from a two-column CSV file."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        freq_strs: list[str] = []
+        amp_strs:  list[str] = []
+
+        try:
+            with open(path, newline='') as fh:
+                reader = csv.reader(fh)
+                for row in reader:
+                    if len(row) < 2:
+                        continue
+                    try:
+                        f = float(row[0].strip())
+                        a = float(row[1].strip())
+                        freq_strs.append(f"{f:.6f}")
+                        amp_strs.append(f"{a:.4f}")
+                    except ValueError:
+                        # Skip header rows or unparseable lines silently
+                        continue
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Load Failed", f"Could not read CSV '{path}':\n{exc}"
+            )
+            return
+
+        if not freq_strs:
+            QMessageBox.warning(
+                self, "Empty File",
+                "No valid data rows found in the CSV file.\n"
+                "Expected two columns: frequency_mhz, amplitude"
+            )
+            return
+
+        self._freq_edit.setText(", ".join(freq_strs))
+        self._amp_edit.setText(", ".join(amp_strs))
+        # CSV does not carry sweep data — "Apply + Plot" is not available
+        self._load_params = None
+        self._apply_plot_btn.setEnabled(False)
+
+        self._file_status_label.setText(
+            f"Loaded CSV: {os.path.basename(path)} ({len(freq_strs)} channels)"
+        )
+        self._file_status_label.setStyleSheet("color: #2a8a2a;")
+
+    # ── Button handlers ────────────────────────────────────────────────────────
+
+    def _on_apply(self):
+        self.use_plot = False
         self.accept()
 
-    def _import_file(self):
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(0, self._open_file_dialog_async)
+    def _on_apply_and_plot(self):
+        self.use_plot = True
+        self.accept()
 
-    def _open_file_dialog_async(self):
-        from PyQt6.QtWidgets import QFileDialog
-        from PyQt6.QtCore import Qt
-        if not hasattr(self, "_file_dialog") or self._file_dialog is None:
-            self._file_dialog = QFileDialog(self, "Load Bias Parameters")
-            self._file_dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
-            self._file_dialog.setNameFilters(["Pickle Files (*.pkl *.pickle)", "All Files (*)"])
-            self._file_dialog.setOptions(
-                QFileDialog.Option.DontUseNativeDialog | QFileDialog.Option.ReadOnly
-            )
-            self._file_dialog.setModal(False)
-            self._file_dialog.fileSelected.connect(self._on_file_selected)
-        self._file_dialog.open()
+    # ── Public API ─────────────────────────────────────────────────────────────
 
-    def _on_file_selected(self, path):
-        payload = load_bias_payload(self, file_path=path)
-        if payload is None:
-            return
-        self.plot_bias_btn.setEnabled(True)
-        self._load_data = payload.copy()
-        self._populate_fields_from_data(payload)
+    def get_result(self):
+        """
+        Return validated bias parameters entered or loaded by the user.
 
-    def get_load_param(self):
-        """Return the loaded payload dict or manually entered parameters."""
-        if self.use_load_file:
-            return self._load_data
-        try:
-            amp_text = [x.strip() for x in self.amp_edit.text().split(',')]
-            tone_text = [t.strip() for t in self.tones_edit.text().split(',')]
-            params = {
-                'module': self.current_module,
-                'phases': [0.0] * len(amp_text),
-                'amplitudes': [float(a) for a in amp_text],
-                'bias_frequencies': [float(t) * 1e6 for t in tone_text],
-            }
-            from PyQt6.QtWidgets import QMessageBox
-            if params['module'] is None:
-                QMessageBox.warning(self, "Validation Error", "No module identified.")
-                return None
-            if len(params['amplitudes']) != len(params['bias_frequencies']):
-                QMessageBox.warning(self, "Validation Error",
-                                    "Number of amplitudes and frequencies must match.")
-                return None
-            return params
-        except (ValueError, Exception) as exc:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, "Input Error", f"Invalid input: {exc}")
+        Returns
+        -------
+        dict or None
+            On success::
+
+                {
+                    'frequencies_hz': list[float],
+                    'amplitudes':     list[float],
+                    'load_params':    dict | None,
+                }
+
+            ``load_params`` is the full pickle payload when a multisweep file
+            was loaded, or ``None`` otherwise (CSV / manual entry).
+
+            Returns ``None`` when validation fails; an error message is shown
+            to the user before returning.
+        """
+        from PyQt6.QtWidgets import QMessageBox
+
+        freq_texts = [t.strip() for t in self._freq_edit.text().split(',') if t.strip()]
+        amp_texts  = [t.strip() for t in self._amp_edit.text().split(',') if t.strip()]
+
+        if not freq_texts:
+            QMessageBox.warning(self, "Validation Error",
+                                "Please enter at least one frequency.")
             return None
+
+        if len(freq_texts) != len(amp_texts):
+            QMessageBox.warning(
+                self, "Validation Error",
+                f"Number of frequencies ({len(freq_texts)}) and "
+                f"amplitudes ({len(amp_texts)}) must match."
+            )
+            return None
+
+        try:
+            frequencies_hz = [float(f) * 1e6 for f in freq_texts]
+        except ValueError as exc:
+            QMessageBox.critical(self, "Input Error", f"Invalid frequency value: {exc}")
+            return None
+
+        try:
+            amplitudes = [float(a) for a in amp_texts]
+        except ValueError as exc:
+            QMessageBox.critical(self, "Input Error", f"Invalid amplitude value: {exc}")
+            return None
+
+        return {
+            'frequencies_hz': frequencies_hz,
+            'amplitudes':     amplitudes,
+            'load_params':    self._load_params,
+        }

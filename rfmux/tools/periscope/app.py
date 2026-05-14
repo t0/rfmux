@@ -59,7 +59,6 @@ from .main_plot_panel import MainPlotPanel
 from .session_manager import SessionManager
 from .session_browser_panel import SessionBrowserPanel
 from .session_startup_dialog import UnifiedStartupDialog
-from rfmux.core.transferfunctions import convert_roc_to_volts
 from rfmux.mock import config as mc
 import datetime
 
@@ -172,10 +171,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.show_m: bool = True                # Visibility of 'Magnitude' component traces
         self.zoom_box_mode: bool = True         # Default mouse mode for plots (zoom vs pan)
 
-
-        self.test_noise_samples = {}           ##### debugging purposes 
-        self.noise_count = 0                   ##### debugging purposes 
-        self.phase_shifts = []                 ##### debugging purposes 
 
         self.channel_noise_data = {}
         self.channel_noise_panel_count = 0
@@ -1590,8 +1585,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 channels = [int(info.get('channel_number', i + 1))
                             for i, (_, info) in enumerate(biased)]
 
-        phases = [0.0] * len(frequencies_hz)
-
         # Apply to hardware
         if self.crs is not None:
             if frequencies_hz:
@@ -1599,7 +1592,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 asyncio.run(self.crs.set_nco_frequency(nco_freq, module=target_module))
             asyncio.run(
                 self.apply_bias_output(
-                    self.crs, target_module, amplitudes, frequencies_hz, channels, phases
+                    self.crs, target_module, amplitudes, frequencies_hz, channels
                 )
             )
         else:
@@ -1619,97 +1612,20 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 traceback.print_exc(file=sys.stderr)
                 QtWidgets.QMessageBox.critical(self, "Plot Error", error_msg)
         
-    async def apply_bias_output(self, crs, module: int, amplitudes: list, bias_freqs : list,
-                                channels : list, phases : list) -> None:
-    
-        BASE_BAND_STEP_HZ = 298.0232238769531 #### Taken from bias_kids.py
+    async def apply_bias_output(self, crs, module: int, amplitudes: list, bias_freqs: list,
+                                channels: list) -> None:
+        """Set tone frequencies and amplitudes exactly as given, without any modification."""
         if not bias_freqs:
             return
         nco_freq = await crs.get_nco_frequency(module=module)
         async with crs.tuber_context() as ctx:
             for i in range(len(amplitudes)):
-
-                quantized_bias = round(bias_freqs[i] / BASE_BAND_STEP_HZ) * BASE_BAND_STEP_HZ
-
-                ctx.set_frequency(quantized_bias - nco_freq, channel=channels[i], module=module)
-                
+                ctx.set_frequency(bias_freqs[i] - nco_freq, channel=channels[i], module=module)
                 ctx.set_amplitude(float(amplitudes[i]), channel=channels[i], module=module)
-                
-                ctx.set_phase(float(phases[i]), units=crs.UNITS.DEGREES, target=crs.TARGET.ADC, channel=channels[i], module=module)
             await ctx()
-
         print(f"[Bias] Bias applied for {len(bias_freqs)} frequencies")
-    
 
 
-
-
-
-    async def adjust_phase(self, module, channels, data_rod, refine=False):
-        if self.crs is None: 
-            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for Bias.") 
-            return
-        else:
-            crs = self.crs
-
-        for channel in channels:
-            samples = await self.collecting_samples_chan(crs, module, channel)
-            
-            phase_shift = self.calculate_shift(data_rod[channel], samples.i, samples.q, refine)
-            
-            self.phase_shifts.append(phase_shift)
-            
-            init_phase = await crs.get_phase(crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
-            
-            mod_phase = phase_shift + init_phase 
-            
-            await crs.set_phase(mod_phase, crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
-            
-            phase_after_change = await crs.get_phase(crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
-            
-            print(f"[Bias] Phase shift implemented of {phase_after_change} degrees for channel {channel}")            
-            
-    def calculate_shift(self, file_samples, noise_i, noise_q, refine):
-        i_val_file = convert_roc_to_volts(file_samples.real)
-        q_val_file = convert_roc_to_volts(file_samples.imag)
-        phase_file = np.degrees(np.median(np.arctan(q_val_file/i_val_file)))
-
-        
-        i_val_noise = convert_roc_to_volts(np.array(noise_i))
-        q_val_noise = convert_roc_to_volts(np.array(noise_q))
-        phase_noise = np.degrees(np.median(np.arctan(q_val_noise/i_val_noise)))
-
-        phase_shift =  phase_noise - phase_file
-
-        q_noise_m = np.median(q_val_noise)
-        i_noise_m = np.median(i_val_noise)
-
-        q_file_m = np.median(q_val_file)
-        i_file_m = np.median(i_val_file)
-
-
-        if ((q_noise_m/q_file_m) < 0) and ((i_noise_m/i_file_m) < 0): ### incase there are in opposite quadrants
-            print(f"[Bias] Opposite quadrant shifting by 180")
-            phase_shift = phase_shift + 180
-
-        return phase_shift
-        
-    async def collecting_samples_chan(self, crs, module, channel, total=100):
-        samples = await crs.get_samples(total, average=False, channel=channel, module=module)
-
-        if channel not in self.test_noise_samples:
-            self.test_noise_samples[channel] = {}
-
-        self.test_noise_samples[channel][self.noise_count] = np.array(samples.i) + np.array(samples.q) * 1j
-        return samples
-
-    def get_test_noise(self):
-        return self.test_noise_samples
-
-    def get_phase_shift(self):
-        return self.phase_shifts
-            
-    
     def _netanal_error(self, error_msg: str):
         """Slot for network analysis error signals. Displays a critical message box."""
         QtWidgets.QMessageBox.critical(self, "Network Analysis Error", error_msg)

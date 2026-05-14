@@ -936,8 +936,6 @@ def test_fit_skewed_multisweep():
             'original_center_frequency': fr,
             'recalculation_method_applied': 'none',
             'key_frequency_is_recalculated': False,
-            'rotation_tod': None,
-            'applied_rotation_degrees': 0.0,
             'sweep_direction': 'upward'
         }
     

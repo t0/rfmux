@@ -409,7 +409,6 @@ def get_multisweep_defaults() -> dict:
               - nsamps: Samples to average per point
               - amp_arrays: List of amplitude arrays for iterations
               - bias_frequency_method: Method for recalculating center frequencies
-              - rotate_saved_data: Whether to rotate saved data
               - sweep_direction: Direction of frequency sweep
               - apply_skewed_fit: Whether to apply skewed fit
               - apply_nonlinear_fit: Whether to apply nonlinear fit
@@ -430,7 +429,7 @@ def set_multisweep_defaults(params: dict) -> None:
     Args:
         params: Dictionary of multisweep parameters to save.
                 Should include keys like span_hz, npoints_per_sweep, nsamps,
-                amp_arrays, bias_frequency_method, rotate_saved_data,
+                amp_arrays, bias_frequency_method,
                 sweep_direction, apply_skewed_fit, apply_nonlinear_fit.
                 
     Note:
@@ -450,7 +449,6 @@ def set_multisweep_defaults(params: dict) -> None:
         'base_amplitude_mode',
         'base_amplitude_values',
         'bias_frequency_method',
-        'rotate_saved_data',
         'sweep_direction',
         'apply_skewed_fit',
         'apply_nonlinear_fit',

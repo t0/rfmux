@@ -762,20 +762,6 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                 if auto_range:
                     self.plot1_sweep_vs_freq.autoRange()
 
-            rotation_tod_iq = self.active_sweep_data.get('rotation_tod')
-
-            if rotation_tod_iq is not None and rotation_tod_iq.size > 0:
-                tod_i_volts = convert_roc_to_volts(rotation_tod_iq.real)
-                tod_q_volts = convert_roc_to_volts(rotation_tod_iq.imag)
-
-                mean_phase_file = np.median(np.arctan(tod_q_volts/tod_i_volts))
-                mean_mag_file = np.mean(np.sqrt(tod_i_volts**2 + tod_q_volts**2))
-                # print("Median phase of the rotation data in file is", np.degrees(mean_phase_file), "degrees")
-                # print("Mean magnitude of the rotation data in file is", mean_mag_file)
-
-                noise_color = 'w' if self.dark_mode else 'k' 
-                self.plot2_iq_plane.plot(tod_i_volts, tod_q_volts, pen=None, symbol='o', symbolBrush=noise_color, symbolPen=noise_color, symbolSize=3, name="Noise at f_bias")
-                
             if self.debug:
                 test_colors = ['orange', 'y']
                 test_labels = ['Initial Noise', 'Refined Noise']

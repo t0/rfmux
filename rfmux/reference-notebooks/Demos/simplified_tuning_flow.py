@@ -73,7 +73,6 @@ async def main(serial="MOCK"):
         'nsamps': 10,
         'module': MODULE,
         'bias_frequency_method': 'max-diq',  # Method to find optimal bias frequency
-        'rotate_saved_data': False,          # Don't rotate data for df calibration consistency
         'sweep_direction': 'upward'
     }
     

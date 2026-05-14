@@ -2137,7 +2137,6 @@ class PeriscopeRuntime:
             "npoints_per_sweep": MULTISWEEP_DEFAULT_NPOINTS,
             "nsamps": MULTISWEEP_DEFAULT_NSAMPLES,
             "bias_frequency_method": None,
-            "rotate_saved_data": False,
             "sweep_direction": "upward",
             "sweep_center_frequencies": {self.module: [90e6, 91e6]},
             "module": self.module,

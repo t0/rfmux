@@ -67,6 +67,7 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
         toolbar_layout.addWidget(self.periscope.rb_counts)
         toolbar_layout.addWidget(self.periscope.rb_real_units)
         toolbar_layout.addWidget(self.periscope.rb_df_units)
+        toolbar_layout.addWidget(self.periscope.rb_rotated_iq)
         toolbar_layout.addSpacing(30)
         
         # Add plot type checkboxes

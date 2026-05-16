@@ -45,10 +45,12 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                  noise_data = None,
                  debug_noise_data = None,
                  debug_phase_data = None,
-                 debug = False): 
+                 debug = False,
+                 iq_rotation_angle = None):
         super().__init__(parent)
         self.resonance_data_for_digest = resonance_data_for_digest or {} 
         self.detector_id = detector_id
+        self.iq_rotation_angle = iq_rotation_angle   # float (radians) or None
         self.resonance_frequency_ghz_title = resonance_frequency_ghz 
         self.dac_scales = dac_scales or {}
         self.zoom_box_mode = zoom_box_mode
@@ -809,7 +811,23 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                     symbolSize=3,
                     name="Data after Bias sampling"
                 )
-            
+
+            # --- Rotated IQ overlay ---
+            # When an IQ rotation angle is available (computed after Apply Bias),
+            # show the rotated sweep IQ circle as a yellow curve so the user can
+            # see the alignment of the signal-sensitive (Q) axis.
+            if self.iq_rotation_angle is not None and iq_counts_active is not None:
+                iq_volts_active = (
+                    convert_roc_to_volts(iq_counts_active.real)
+                    + 1j * convert_roc_to_volts(iq_counts_active.imag)
+                )
+                rot_iq = iq_volts_active * np.exp(1j * float(self.iq_rotation_angle))
+                self.plot2_iq_plane.plot(
+                    rot_iq.real, rot_iq.imag,
+                    pen=pg.mkPen('y', width=LINE_WIDTH),
+                    name="IQ (Rotated)",
+                )
+
             if auto_range:
                 self.plot2_iq_plane.autoRange()
 

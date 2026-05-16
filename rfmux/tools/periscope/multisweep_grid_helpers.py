@@ -20,7 +20,8 @@ from rfmux.core.transferfunctions import convert_roc_to_volts
 def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, batch_size,
                       amplitude_to_color, dark_mode, unit_mode='dbm', normalize=False,
                       prev_btn=None, next_btn=None, batch_label=None, widget_cache=None,
-                      dac_scale=None, show_legend=True, res_info_dict=None):
+                      dac_scale=None, show_legend=True, res_info_dict=None,
+                      iq_rotation_angles=None):
     """
     Update a grid layout with per-detector sweep plots.
 
@@ -43,6 +44,10 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
             When provided, bias overlays (thickened chosen-amplitude trace,
             vertical line / IQ marker at bias frequency) are drawn for each
             detector whose ``bias_found`` flag is True.
+        iq_rotation_angles: Optional dict {detector_code: angle_radians}.  When
+            provided and ``plot_type == 'iq'``, the IQ data for each detector is
+            rotated by the corresponding angle before plotting (on-the-fly; raw
+            data is never modified).
     """
     if not data_by_detector:
         return
@@ -178,14 +183,22 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
                 plot_item.setLabel('left', lbl, units=units)
                 plot_item.setLabel('bottom', '<i>f</i> − <i>f</i><sub>central</sub> [kHz]')
             else:  # IQ
+                # Look up rotation angle for this detector (None → no rotation)
+                det_rotation_angle = (iq_rotation_angles or {}).get(detector_id)
                 _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
                                   pen_color, normalize, labels, unit_mode=unit_mode,
                                   bias_amplitude=bias_amp,
                                   bias_frequency_hz=bias_freq_hz,
-                                  dac_scale=dac_scale)
-                iq_units = 'V' if unit_mode == 'volts' else 'Counts'
-                plot_item.setLabel('left', 'Q (Imaginary)', units=iq_units)
-                plot_item.setLabel('bottom', 'I (Real)', units=iq_units)
+                                  dac_scale=dac_scale,
+                                  iq_rotation_angle=det_rotation_angle)
+                if det_rotation_angle is not None:
+                    iq_units = 'V'
+                    plot_item.setLabel('left', 'Q (rotated)', units=iq_units)
+                    plot_item.setLabel('bottom', 'I (rotated)', units=iq_units)
+                else:
+                    iq_units = 'V' if unit_mode == 'volts' else 'Counts'
+                    plot_item.setLabel('left', 'Q (Imaginary)', units=iq_units)
+                    plot_item.setLabel('bottom', 'I (Real)', units=iq_units)
                 square_axes(plot_item)
 
             plot_item.showGrid(x=True, y=True, alpha=0.3)
@@ -340,7 +353,8 @@ def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
 
 def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
                       pen_color, normalize=False, sweep_labels=None, unit_mode='counts',
-                      bias_amplitude=None, bias_frequency_hz=None, dac_scale=None):
+                      bias_amplitude=None, bias_frequency_hz=None, dac_scale=None,
+                      iq_rotation_angle=None):
     """Plot IQ circles for a single detector.
 
     Args:
@@ -362,6 +376,9 @@ def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
             this frequency on the chosen-amplitude trace.
         dac_scale: DAC full-scale in dBm (for formatting the amplitude in the
             colorbar-mode mini legend label).
+        iq_rotation_angle: Optional float (radians).  When provided the IQ
+            data is first converted to volts and then rotated by this angle
+            before plotting.  The raw ``iq_counts`` array is never modified.
     """
     sorted_keys = sorted(detector_data.keys())
     single_sweep = len(sorted_keys) == 1
@@ -412,6 +429,18 @@ def _plot_detector_iq(plot_item, detector_data, amplitude_to_color,
         if unit_mode == 'volts':
             i_vals = convert_roc_to_volts(i_vals)
             q_vals = convert_roc_to_volts(q_vals)
+
+        # Apply IQ rotation when requested.  The rotation angle was computed
+        # in volt-space, so the data is converted to volts first (if not
+        # already done above).  Raw iq_counts is never modified.
+        if iq_rotation_angle is not None:
+            if unit_mode != 'volts':
+                i_vals = convert_roc_to_volts(i_vals)
+                q_vals = convert_roc_to_volts(q_vals)
+            iq_complex = i_vals + 1j * q_vals
+            rotated = iq_complex * np.exp(1j * iq_rotation_angle)
+            i_vals = rotated.real
+            q_vals = rotated.imag
 
         if normalize:
             mag = np.abs(iq) if unit_mode != 'volts' else np.sqrt(i_vals**2 + q_vals**2)

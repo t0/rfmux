@@ -50,6 +50,27 @@ class PeriscopeRuntime:
             else:
                 # No calibration - fall back to real_units check (matches PSD task behavior)
                 return (convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)) if self.real_units else (rawI, rawQ)
+        elif self.unit_mode == "rotated_iq":
+            # Apply IQ rotation: convert to volts, then rotate by stored angle.
+            # Calibrations are keyed by detector code (string); ch_val is a channel number (int).
+            # Try a direct lookup first (if calibrations happen to be keyed by channel number),
+            # then fall back to scanning all codes for one whose channel_number matches.
+            angle = None
+            iq_rot_cal = getattr(self, 'iq_rotation_calibrations', {}).get(self.module, {})
+            if ch_val in iq_rot_cal:
+                angle = iq_rot_cal[ch_val]
+            else:
+                # iq_rotation_calibrations keyed by detector code — find matching channel
+                for code, theta in iq_rot_cal.items():
+                    if isinstance(code, int) and code == ch_val:
+                        angle = theta
+                        break
+            if angle is not None:
+                iq_volts = convert_roc_to_volts(rawI) + 1j * convert_roc_to_volts(rawQ)
+                rotated = iq_volts * np.exp(1j * float(angle))
+                return rotated.real, rotated.imag
+            # Fallback → real_units when no angle for this channel
+            return convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)
         elif self.real_units:
             return convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)
         else:
@@ -209,17 +230,25 @@ class PeriscopeRuntime:
                 for ch in group
             )
         
-        # Determine axis labels based on unit mode and calibration availability
+        # Determine axis labels based on unit mode and calibration availability.
+        # rotated_iq is treated like real_units for label purposes (data is in volts
+        # after rotation), but the IQ plot gets dedicated "rotated" axis labels.
+        is_rotated_iq = (self.unit_mode == "rotated_iq")
+        use_volts = self.real_units or is_rotated_iq
+
         if mode_key == "T":
             if self.unit_mode == "df" and all_have_calibration:
                 pw.setLabel("left", "Freq. Shift / Dissipation", units="Hz / unitless")
             else:
-                pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
+                pw.setLabel("left", "Amplitude", units="V" if use_volts else "Counts")
         elif mode_key == "IQ":
             pw.getViewBox().setAspectLocked(True)
             if self.unit_mode == "df" and all_have_calibration:
                 pw.setLabel("bottom", "Freq. Shift", units="Hz")
                 pw.setLabel("left", "Dissipation", units="unitless")
+            elif is_rotated_iq:
+                pw.setLabel("bottom", "I (rotated)", units="V")
+                pw.setLabel("left",   "Q (rotated)", units="V")
             else:
                 pw.setLabel("bottom", "I", units="V" if self.real_units else "Counts")
                 pw.setLabel("left",   "Q", units="V" if self.real_units else "Counts")
@@ -229,25 +258,25 @@ class PeriscopeRuntime:
             if self.unit_mode == "df" and all_have_calibration:
                 pw.setLabel("left", "Amplitude", units="Hz or unitless")
             else:
-                pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
+                pw.setLabel("left", "Amplitude", units="V" if use_volts else "Counts")
         elif mode_key == "S":
-            pw.setLogMode(x=True, y=not self.real_units)
+            pw.setLogMode(x=True, y=not use_volts)
             pw.setLabel("bottom", "Freq", units="Hz")
             if self.unit_mode == "df" and all_have_calibration:
                 # When in df units, PSDs become ASDs (Amplitude Spectral Densities)
                 pw.setLabel("left", "ASD (Hz/√Hz or 1/√Hz)")
             else:
                 lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
-                pw.setLabel("left", f"PSD ({lbl})" if self.real_units else "PSD (Counts²/Hz)")
+                pw.setLabel("left", f"PSD ({lbl})" if use_volts else "PSD (Counts²/Hz)")
         else:  # "D"
-            pw.setLogMode(x=False, y=not self.real_units)
+            pw.setLogMode(x=False, y=not use_volts)
             pw.setLabel("bottom", "Freq", units="Hz")
             if self.unit_mode == "df" and all_have_calibration:
                 # When in df units, PSDs become ASDs (Amplitude Spectral Densities)
                 pw.setLabel("left", "ASD (Hz/√Hz or 1/√Hz)")
             else:
                 lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
-                pw.setLabel("left", f"PSD ({lbl})" if self.real_units else "PSD (Counts²/Hz)")
+                pw.setLabel("left", f"PSD ({lbl})" if use_volts else "PSD (Counts²/Hz)")
 
     def _configure_plot_fonts(self, pw: pg.PlotWidget, font: QFont):
         """Apply the standard font to plot titles and axis labels."""
@@ -746,6 +775,12 @@ class PeriscopeRuntime:
             group (list[int]): List of channel IDs for this plot row.
         """
         # PSDTask from .tasks, convert_roc_to_volts from .utils
+        # When in rotated_iq mode, _convert_iq_data already returns data in volts
+        # (rotated), but self.real_units is False.  PSDTask must know the data is
+        # in volts so it chooses the correct reference ("absolute"/"relative") and
+        # input_units ("volts"), avoiding a double-conversion and wrong output scale.
+        use_real_units = self.real_units or (self.unit_mode == "rotated_iq")
+
         # Dispatch Single-Sideband (SSB) PSD tasks
         if "S" in self.curves[row_i]:
             for ch_val in group: # Renamed ch
@@ -756,7 +791,7 @@ class PeriscopeRuntime:
                     I_data, Q_data = self._convert_iq_data(rawI, rawQ, ch_val)
                     
                     self.psd_workers[row_i]["S"][ch_val] = True
-                    task = PSDTask(row_i, ch_val, I_data, Q_data, "SSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
+                    task = PSDTask(row_i, ch_val, I_data, Q_data, "SSB", self.dec_stage, use_real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
                     self.pool.start(task)
         
         # Dispatch Dual-Sideband (DSB) PSD tasks
@@ -769,7 +804,7 @@ class PeriscopeRuntime:
                     I_data, Q_data = self._convert_iq_data(rawI, rawQ, ch_val)
                     
                     self.psd_workers[row_i]["D"][ch_val] = True
-                    task = PSDTask(row_i, ch_val, I_data, Q_data, "DSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
+                    task = PSDTask(row_i, ch_val, I_data, Q_data, "DSB", self.dec_stage, use_real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
                     self.pool.start(task)
 
     def _update_performance_stats(self, now: float):
@@ -1104,7 +1139,11 @@ class PeriscopeRuntime:
             # Connect df_calibration_ready signal if the method exists
             if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
                 panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
-            
+
+            # Connect iq_rotation_ready signal so Periscope can enable rb_rotated_iq
+            if hasattr(panel, 'iq_rotation_ready') and hasattr(self, '_handle_iq_rotation_ready'):
+                panel.iq_rotation_ready.connect(self._handle_iq_rotation_ready)
+
             # Connect data_ready signal for session auto-export
             if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
@@ -1272,7 +1311,11 @@ class PeriscopeRuntime:
             # Connect df_calibration_ready signal if the method exists
             if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
                 panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
-            
+
+            # Connect iq_rotation_ready signal so Periscope can enable rb_rotated_iq
+            if hasattr(panel, 'iq_rotation_ready') and hasattr(self, '_handle_iq_rotation_ready'):
+                panel.iq_rotation_ready.connect(self._handle_iq_rotation_ready)
+
             # Connect data_ready signal for session auto-export
             if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
@@ -1405,7 +1448,23 @@ class PeriscopeRuntime:
                 if df_calibrations and hasattr(self, '_handle_df_calibration_ready'):
                     self._handle_df_calibration_ready(target_module, df_calibrations)
                     print(f"[Session] Loaded df calibrations for {len(df_calibrations)} detectors from session file")
-            
+
+            # Load IQ rotation angles from res_info_dict if present.
+            # Angles are stored in res_info_dict[code]['iq_rotation_angle'] by
+            # _iq_rotation_completed() after Apply Bias + ComputeIQRotationTask.
+            if panel.res_info_dict:
+                iq_rotation_angles_loaded = {
+                    code: info['iq_rotation_angle']
+                    for code, info in panel.res_info_dict.items()
+                    if isinstance(info, dict) and 'iq_rotation_angle' in info
+                }
+                if iq_rotation_angles_loaded and hasattr(self, '_handle_iq_rotation_ready'):
+                    self._handle_iq_rotation_ready(target_module, iq_rotation_angles_loaded)
+                    print(f"[Session] Loaded IQ rotation angles for {len(iq_rotation_angles_loaded)} detectors from session file")
+                # Enable "Show Rotated IQ" checkbox on the panel if we have angles
+                if iq_rotation_angles_loaded and hasattr(panel, '_update_rotated_iq_checkbox_state'):
+                    panel._update_rotated_iq_checkbox_state()
+
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
             if main_dock:

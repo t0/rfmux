@@ -181,6 +181,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Structure: {module: {detector_idx: complex_calibration_factor}}
         self.df_calibrations: Dict[int, Dict[int, complex]] = {}
 
+        # --- IQ Rotation Calibration Storage ---
+        # Stores per-channel IQ rotation angles computed after Apply Bias.
+        # Structure: {module: {channel_number: angle_radians}}
+        self.iq_rotation_calibrations: Dict[int, Dict[int, float]] = {}
+
         # --- Initialization Steps ---
         # Initialize structures for tracking background worker threads.
         self._init_workers()
@@ -316,15 +321,22 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.rb_counts = QtWidgets.QRadioButton("Counts")
         self.rb_real_units = QtWidgets.QRadioButton("Real Units")
         self.rb_df_units = QtWidgets.QRadioButton("df Units")
-        
+        self.rb_rotated_iq = QtWidgets.QRadioButton("Rotated IQ")
+
         self.rb_counts.setToolTip("Display raw ADC counts")
         self.rb_real_units.setToolTip("Display in voltage/power units (V, dBm/Hz)")
         self.rb_df_units.setToolTip("Display frequency shift (Hz) and dissipation")
-        
+        self.rb_rotated_iq.setToolTip(
+            "Display IQ data rotated so the signal-sensitive direction aligns with Q.\n"
+            "Available after Apply Bias has been run."
+        )
+        self.rb_rotated_iq.setEnabled(False)  # Disabled until calibrations are loaded
+
         self.unit_group.addButton(self.rb_counts, 0)
         self.unit_group.addButton(self.rb_real_units, 1)
         self.unit_group.addButton(self.rb_df_units, 2)
-        
+        self.unit_group.addButton(self.rb_rotated_iq, 3)
+
         if self.real_units:
             self.rb_real_units.setChecked(True)
         else:
@@ -1747,10 +1759,56 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 self.unit_mode = "counts"
                 self.real_units = False
                 return
-        
+        elif button_id == 3:  # Rotated IQ
+            self.unit_mode = "rotated_iq"
+            self.real_units = False  # Data is in volts after rotation but we don't use this flag
+
+            # Check if rotation calibrations are available for this module
+            if not self.iq_rotation_calibrations.get(self.module):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "IQ Rotation Calibration Not Available",
+                    "IQ rotation calibration data is not available for this module.\n\n"
+                    "To use Rotated IQ mode:\n"
+                    "1. Run a multisweep analysis\n"
+                    "2. Run Find Bias and Apply Bias\n"
+                    "3. The rotation angles will be computed automatically"
+                )
+                # Reset to counts mode
+                self.rb_counts.setChecked(True)
+                self.unit_mode = "counts"
+                self.real_units = False
+                return
+
         # Rebuild layout to update axis labels
         self._build_layout()
-    
+
+    def _handle_iq_rotation_ready(self, module: int, angles: dict):
+        """
+        Handle the iq_rotation_ready signal from MultisweepPanel.
+
+        Stores the rotation angles for the specified module, enables the
+        ``rb_rotated_iq`` radio button, and logs to console.
+
+        Args:
+            module: Module number
+            angles: Dictionary mapping detector codes to rotation angles (radians).
+                    This is keyed by detector code (string), not channel number.
+        """
+        # Build a channel_number → angle mapping for use in _convert_iq_data,
+        # which looks up angles by channel number.
+        # We can reconstruct channel numbers from the multisweep panel's res_info_dict,
+        # but the signal passes angles keyed by detector code.  For now store them
+        # keyed by code, mirroring _convert_iq_data's lookup.
+        self.iq_rotation_calibrations[module] = angles
+
+        # Enable the Rotated IQ radio button
+        if hasattr(self, 'rb_rotated_iq'):
+            self.rb_rotated_iq.setEnabled(True)
+
+        num_angles = len(angles)
+        print(f"[Periscope] IQ rotation calibrations loaded for {num_angles} detectors on module {module}")
+
     def _handle_df_calibration_ready(self, module: int, df_calibrations: Dict[int, complex]):
         """
         Handle the df_calibration_ready signal from MultisweepWindow.

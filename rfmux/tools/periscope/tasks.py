@@ -1344,3 +1344,101 @@ class RunFitsTask(QtCore.QThread):
                 )
 
         return working
+
+
+# ── IQ Plane Rotation ─────────────────────────────────────────────────────────
+
+class IQRotationSignals(QObject):
+    """Signals for ComputeIQRotationTask."""
+    completed = pyqtSignal(int, dict)   # module, {code: angle_radians}
+    error     = pyqtSignal(str)         # error_message
+
+
+class ComputeIQRotationTask(QtCore.QThread):
+    """Background task to capture an IQ timestream and compute optimal rotation angles.
+
+    After Apply Bias completes, this task:
+    1. Queries the current decimation stage to determine the sample rate.
+    2. Captures approximately 1 second of IQ data for all biased channels.
+    3. Calls ``mr_resonator.utils.rotate_iq_plane`` per channel to find the angle
+       that maximises variance in the Q direction.
+    4. Emits ``completed(module, {code: theta_radians})``.
+    """
+
+    def __init__(
+        self,
+        crs: "CRS",
+        module: int,
+        res_info_dict: dict,
+        signals: "IQRotationSignals",
+    ):
+        super().__init__()
+        self.crs = crs
+        self.module = module
+        self.res_info_dict = res_info_dict
+        self.signals = signals
+        self._running = True
+
+    def stop(self):
+        """Request interruption."""
+        self._running = False
+        self.requestInterruption()
+
+    def run(self):
+        """QThread entry point."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._run_async())
+        except Exception as exc:
+            err_msg = (
+                f"Error in ComputeIQRotationTask: {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
+            print(err_msg, file=sys.stderr)
+            self.signals.error.emit(str(exc))
+        finally:
+            if loop.is_running():
+                loop.stop()
+            loop.close()
+
+    async def _run_async(self):
+        from ...mr_resonator.utils import rotate_iq_plane
+
+        # Determine sample rate from current decimation stage
+        dec_stage = await self.crs.get_decimation(module=self.module)
+        fs = 625e6 / (256 * 64 * (2 ** dec_stage))
+        # Capture ~1 second; enforce a minimum of 256 samples
+        num_samples = max(int(fs), 256)
+
+        # Single call captures all channels simultaneously
+        samples = await self.crs.py_get_samples(num_samples, module=self.module)
+
+        if self.isInterruptionRequested():
+            self.signals.error.emit("IQ rotation computation was cancelled.")
+            return
+
+        # Compute rotation angle for each biased channel
+        angles: dict = {}
+        for code, info in self.res_info_dict.items():
+            if not info.get('bias_found', False):
+                continue
+            ch = info.get('channel_number')
+            if ch is None:
+                continue
+            try:
+                # samples.i / samples.q are indexed by 1-based channel number
+                i_data = np.asarray(samples.i[ch])
+                q_data = np.asarray(samples.q[ch])
+                iq = i_data + 1j * q_data
+                if len(iq) < 4:
+                    continue
+                _, theta = rotate_iq_plane(iq)
+                angles[code] = float(theta)
+            except Exception as exc:
+                print(
+                    f"[ComputeIQRotationTask] Could not compute angle for {code!r}: {exc}",
+                    file=sys.stderr,
+                )
+
+        self.signals.completed.emit(self.module, angles)

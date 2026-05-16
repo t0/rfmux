@@ -37,7 +37,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     
     # Signal emitted when bias_kids algorithm completes with df_calibration data
     df_calibration_ready = pyqtSignal(int, dict)  # module, {detector_idx: df_calibration}
-    
+
+    # Signal emitted when IQ rotation angles have been computed after Apply Bias
+    iq_rotation_ready = pyqtSignal(int, dict)   # module, {code: angle_radians}
+
     # Signal for session auto-export
     data_ready = pyqtSignal(str, str, dict)  # type, identifier, data
     def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None, dark_mode=False, loaded_bias=False, is_loaded_data=False):
@@ -135,6 +138,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.find_bias_signals = None    # FindBiasSignals instance
         self.apply_bias_task = None      # Active ApplyBiasTask, if any
         self.apply_bias_signals = None   # ApplyBiasSignals instance
+        self.iq_rotation_task = None     # Active ComputeIQRotationTask, if any
+        self.iq_rotation_signals = None  # IQRotationSignals instance
         self.bias_settings_panel = None  # Lazy-initialized BiasSettingsPanel instance
 
         # Fit task storage
@@ -302,6 +307,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._fits_status_label.hide()
         row1_layout.addWidget(self._fits_status_label)
 
+        # Transient "IQ rotation computed" status label — shown briefly after
+        # ComputeIQRotationTask completes following Apply Bias.
+        self._iq_rotation_status_label = QtWidgets.QLabel("✓ IQ rotation computed")
+        self._iq_rotation_status_label.setStyleSheet(
+            "color: #2a8a2a; font-weight: bold; padding: 2px 6px;"
+        )
+        self._iq_rotation_status_label.hide()
+        row1_layout.addWidget(self._iq_rotation_status_label)
+
         row1_layout.addStretch(1)
         toolbar_vbox.addWidget(row1)
 
@@ -373,6 +387,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         )
         self.show_bias_info_cb.toggled.connect(self._toggle_bias_info_visibility)
         row2_layout.addWidget(self.show_bias_info_cb)
+
+        # Show Rotated IQ Checkbox — disabled until IQ rotation angles are available.
+        # Only affects the IQ Circles tab (Tab 1); has no effect on other tabs.
+        self.show_rotated_iq_cb = QtWidgets.QCheckBox("Show Rotated IQ")
+        self.show_rotated_iq_cb.setChecked(False)
+        self.show_rotated_iq_cb.setEnabled(False)
+        self.show_rotated_iq_cb.setToolTip(
+            "Rotate the IQ sweep circles so that the signal-sensitive direction\n"
+            "aligns with the Q axis.  Only visible on the IQ Circles tab.\n"
+            "Available after Apply Bias has been run (or when a file with stored\n"
+            "IQ rotation angles is loaded)."
+        )
+        self.show_rotated_iq_cb.toggled.connect(self._on_show_rotated_iq_changed)
+        row2_layout.addWidget(self.show_rotated_iq_cb)
 
         self._setup_unit_controls(row2_layout)
         self._setup_zoom_box_control(row2_layout)
@@ -1273,6 +1301,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.show_bias_info_cb is not None and self.show_bias_info_cb.isChecked()
         )
 
+        # Build IQ rotation angles dict for the grid helper (IQ tab only).
+        # Only pass angles when the "Show Rotated IQ" checkbox is active.
+        iq_rotation_angles_for_grid = None
+        if (tab_idx == 1
+                and hasattr(self, 'show_rotated_iq_cb')
+                and self.show_rotated_iq_cb is not None
+                and self.show_rotated_iq_cb.isChecked()
+                and self.res_info_dict):
+            iq_rotation_angles_for_grid = {
+                code: info['iq_rotation_angle']
+                for code, info in self.res_info_dict.items()
+                if 'iq_rotation_angle' in info
+            } or None  # Return None rather than empty dict
+
         # Update the grid with widget caching
         update_sweep_grid(
             grid_layout=grid_layout,
@@ -1291,6 +1333,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             dac_scale=dac_scale,
             show_legend=use_legend,
             res_info_dict=self.res_info_dict if show_bias_info else None,
+            iq_rotation_angles=iq_rotation_angles_for_grid,
         )
         
         # Install double-click event filter on grid plot widgets
@@ -2906,12 +2949,126 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._apply_bias_status_label.show()
         QtCore.QTimer.singleShot(5000, self._apply_bias_status_label.hide)
 
+        # Kick off background IQ rotation computation immediately after bias is applied.
+        # The task runs non-blocking; completion is handled by _iq_rotation_completed.
+        periscope = self._get_periscope_parent()
+        if periscope and periscope.crs is not None and self.res_info_dict:
+            from .tasks import ComputeIQRotationTask, IQRotationSignals
+            self.iq_rotation_signals = IQRotationSignals()
+            self.iq_rotation_signals.completed.connect(self._iq_rotation_completed)
+            self.iq_rotation_signals.error.connect(self._iq_rotation_error)
+            self.iq_rotation_task = ComputeIQRotationTask(
+                crs=periscope.crs,
+                module=module,
+                res_info_dict=self.res_info_dict,
+                signals=self.iq_rotation_signals,
+            )
+            self.iq_rotation_task.start()
+
     def _apply_bias_error(self, error_msg: str):
         """Handle errors from ApplyBiasTask."""
         QtWidgets.QMessageBox.critical(self, "Apply Bias Error", error_msg)
         self.apply_bias_btn.setEnabled(True)
         self.apply_bias_btn.setText("Apply Bias")
         self.apply_bias_task = None
+
+    # ── IQ Plane Rotation ─────────────────────────────────────────────────────
+
+    def _iq_rotation_completed(self, module: int, angles: dict):
+        """Handle successful completion of ComputeIQRotationTask.
+
+        Stores per-channel rotation angles in ``res_info_dict``, emits
+        ``iq_rotation_ready`` (picked up by ``app.py`` to enable the Rotated
+        IQ radio button), re-saves the updated pickle, and shows a transient
+        status label.
+        """
+        if not angles:
+            print("[MultisweepPanel] IQ rotation: no angles computed.", flush=True)
+            if self.iq_rotation_task is not None:
+                self.iq_rotation_task.wait()
+            self.iq_rotation_task = None
+            return
+
+        # Store angle in res_info_dict for each code that was computed
+        for code, theta in angles.items():
+            if code in self.res_info_dict:
+                self.res_info_dict[code]['iq_rotation_angle'] = float(theta)
+
+        # Emit so app.py can store calibrations and enable rb_rotated_iq
+        self.iq_rotation_ready.emit(module, angles)
+
+        # Re-save pickle so angles survive session reload
+        export_data = self._prepare_export_data()
+        self.data_ready.emit("multisweep", f"module{self.target_module}", export_data)
+
+        # Wait for the thread to fully finish before dropping the reference
+        # (near-instantaneous — same rationale as FindBiasTask)
+        if self.iq_rotation_task is not None:
+            self.iq_rotation_task.wait()
+        self.iq_rotation_task = None
+
+        # Show transient "✓ IQ rotation computed" label
+        self._iq_rotation_status_label.show()
+        QtCore.QTimer.singleShot(5000, self._iq_rotation_status_label.hide)
+
+        # Enable and auto-check the "Show Rotated IQ" checkbox so the IQ tab
+        # immediately shows the rotated circles when the user switches to it.
+        self._update_rotated_iq_checkbox_state()
+
+    def _on_show_rotated_iq_changed(self, checked: bool):
+        """Slot for the 'Show Rotated IQ' checkbox.
+
+        Triggers a redraw of the IQ Circles tab (Tab 1) so the rotation is
+        applied or removed.  Has no effect when a different tab is active —
+        the next visit to Tab 1 will pick up the new state automatically.
+
+        Args:
+            checked (bool): New checked state of the checkbox.
+        """
+        # Only redraw if the IQ Circles tab is currently active; otherwise the
+        # next tab switch will trigger a redraw naturally.
+        if hasattr(self, 'plot_tabs') and self.plot_tabs.currentIndex() == 1:
+            self._redraw_sweep_grid(1)
+
+    def _update_rotated_iq_checkbox_state(self):
+        """Enable/disable and auto-check the 'Show Rotated IQ' checkbox.
+
+        Should be called whenever ``res_info_dict`` may have gained
+        ``iq_rotation_angle`` entries (i.e. after
+        :meth:`_iq_rotation_completed` is called, or after loading a session
+        file that contains pre-computed rotation angles).
+
+        Behaviour:
+          - If at least one detector has an ``iq_rotation_angle``:
+              enable the checkbox and check it.
+          - Otherwise: uncheck and disable the checkbox.
+        """
+        if not hasattr(self, 'show_rotated_iq_cb') or self.show_rotated_iq_cb is None:
+            return
+        has_angles = any(
+            'iq_rotation_angle' in info
+            for info in self.res_info_dict.values()
+        )
+        self.show_rotated_iq_cb.blockSignals(True)
+        self.show_rotated_iq_cb.setEnabled(has_angles)
+        if has_angles:
+            self.show_rotated_iq_cb.setChecked(True)
+        else:
+            self.show_rotated_iq_cb.setChecked(False)
+        self.show_rotated_iq_cb.blockSignals(False)
+
+    def _iq_rotation_error(self, error_msg: str):
+        """Handle errors from ComputeIQRotationTask.
+
+        Non-fatal — the IQ rotation is an enhancement on top of Apply Bias.
+        Log the error but do not show a modal dialog.
+        """
+        import sys
+        print(f"[MultisweepPanel] IQ rotation error (non-fatal): {error_msg}",
+              file=sys.stderr, flush=True)
+        if self.iq_rotation_task is not None:
+            self.iq_rotation_task.wait()
+        self.iq_rotation_task = None
 
     # ── IQ Derivatives tab ────────────────────────────────────────────────────
 

@@ -28,7 +28,7 @@ from rfmux.core.crs import CRS
 from rfmux.core.transferfunctions import fit_cable_delay, calculate_new_cable_length
 from rfmux.algorithms.measurement.fitting import find_resonances, fit_skewed_multisweep
 from rfmux.algorithms.measurement.fitting_nonlinear import fit_nonlinear_iq_multisweep
-from rfmux.algorithms.measurement.bias_kids import bias_kids
+from rfmux.algorithms.measurement.bias_kids import find_bias_points, apply_bias
 
 # Import mock mode support
 from rfmux.mock.helpers import create_mock_crs
@@ -67,12 +67,11 @@ async def main(serial="MOCK"):
     
     # Multisweep parameters
     MULTISWEEP_PARAMS = {
-        'span_hz': 500e3,             # 5 MHz span around each resonance
+        'span_hz': 500e3,             # 500 kHz span around each resonance
         'npoints_per_sweep': 50,
         'amp': 0.001,
         'nsamps': 10,
         'module': MODULE,
-        'bias_frequency_method': 'max-diq',  # Method to find optimal bias frequency
         'sweep_direction': 'upward'
     }
     
@@ -240,7 +239,14 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     
     MULTISWEEP_PARAMS['progress_callback'] = progress_callback
     
-    multisweep_results = await crs.multisweep(**MULTISWEEP_PARAMS)
+    # multisweep now returns a 2-tuple: (res_info_dict, multisweep_data_dict)
+    #   res_info_dict      - lightweight resonator registry keyed by 4-letter code
+    #                        (e.g. "AXQR"); holds bias_frequency, bias_amplitude,
+    #                        and channel_number for each resonator.  Updated in-place
+    #                        by downstream algorithms (find_bias_points, apply_bias).
+    #   multisweep_results - heavy sweep data keyed by the same codes; contains
+    #                        frequencies, iq_counts, iq_volts, phase_degrees, etc.
+    res_info_dict, multisweep_results = await crs.multisweep(**MULTISWEEP_PARAMS)
     
     print(f"\n   ✓ Multisweep complete for {len(multisweep_results)} resonances")
     
@@ -280,38 +286,55 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     
     # Display fit results
     print("\n   Fit results summary:")
-    for idx, res_data in multisweep_results.items():
-        if isinstance(idx, str):
-            fit_params = res_data.get('fits', {}).get('skewed', {}).get('fit_params') or {}
-            if fit_params.get('fr') != 'nan':
-                print(f"     Resonance {idx}: fr={fit_params['fr']/1e6:.3f} MHz, "
-                      f"Qr={fit_params['Qr']:.0f}, Qc={fit_params['Qc']:.0f}")
+    for code, res_data in multisweep_results.items():
+        fit_params = res_data.get('fits', {}).get('skewed', {}).get('fit_params') or {}
+        if fit_params.get('fr') not in (None, 'nan'):
+            print(f"     Resonance {code}: fr={fit_params['fr']/1e6:.3f} MHz, "
+                  f"Qr={fit_params['Qr']:.0f}, Qc={fit_params['Qc']:.0f}")
     
     # Step 7: Bias the KIDs
     print("\n7. Biasing the KIDs...")
     
-    # Progress callback for bias_kids
+    # bias_kids has been split into two separate steps:
+    #
+    #   find_bias_points  - pure analysis; inspects sweep data to find the
+    #                       optimal amplitude and frequency for each resonator,
+    #                       updating res_info_dict in-place.
+    #   apply_bias        - async hardware step; reads bias conditions from
+    #                       res_info_dict and programmes the CRS channels.
+    #
+    # find_bias_points expects results_by_detector in the format
+    #   {code: {iteration_index: entry_dict}}
+    # to support multi-amplitude sweeps.  For a single-amplitude sweep (as
+    # done here) we wrap each entry under iteration index 0.
+
+    results_by_detector = {code: {0: entry} for code, entry in multisweep_results.items()}
+    
+    find_bias_points(results_by_detector, res_info_dict)
+    
+    # Progress callback for apply_bias
     def bias_progress_callback(module, percentage):
         print(f"   Bias progress: {percentage:.1f}%", end='\r')
     
-    # Pass multisweep results directly to bias_kids
-    # Since we're doing a single amplitude sweep, we can pass the results directly
-    bias_results = await bias_kids(
+    apply_report = await apply_bias(
         crs=crs,
-        multisweep_results=multisweep_results,
         module=MODULE,
+        res_info_dict=res_info_dict,
         progress_callback=bias_progress_callback
     )
     
-    print(f"\n   ✓ Bias complete for {len(bias_results)} detectors")
+    print(f"\n   ✓ Bias complete for {len(apply_report)} detectors")
     
     # Display bias results
+    # bias_frequency and df_calibration come from res_info_dict (updated by
+    # find_bias_points); apply_report only confirms what was programmed to hardware.
     print("\n   Bias results summary:")
-    for det_idx, det_data in bias_results.items():
-        if 'bias_frequency' in det_data:
-            print(f"     Detector {det_idx}: bias_freq={det_data['bias_frequency']/1e6:.3f} MHz")
-            if 'df_calibration' in det_data:
-                print(f"                      df_cal={det_data['df_calibration']:.3e} Hz/rad")
+    for code in apply_report:
+        info = res_info_dict[code]
+        print(f"     Detector {code}: bias_freq={info['bias_frequency']/1e6:.3f} MHz")
+        df_cal = info.get('df_calibration')
+        if df_cal is not None and np.isfinite(abs(df_cal)):
+            print(f"                      df_cal={abs(df_cal):.3e} Hz/V (|df/dIQ|)")
     
     
     ### Step 8. Slow Noise spectrum 
@@ -319,7 +342,7 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
 
     slow_data = await crs.py_get_samples(**SAMPLE_PARAMS)
 
-    num_res = len(bias_results)
+    num_res = len(apply_report)
 
     print(f"\nSlow Noise data collected for the {num_res} biased channels")
 

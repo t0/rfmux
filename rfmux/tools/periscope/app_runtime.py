@@ -2168,6 +2168,12 @@ class PeriscopeRuntime:
             "max_chans": DEFAULT_MAX_CHANNELS,
             "max_span": DEFAULT_MAX_SPAN,
             "clear_channels": True,
+            "amplitude_mode": "single",
+            "measurement_name": "mock_netanal",
+            "measurement_custom_suffix": "",
+            "amp_sweep_start": DEFAULT_AMPLITUDE,
+            "amp_sweep_stop": DEFAULT_AMPLITUDE,
+            "amp_sweep_steps": 1,
         }
         _assert_param_keys(
             self.netanal_params,

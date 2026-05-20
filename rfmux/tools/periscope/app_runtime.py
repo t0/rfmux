@@ -2232,7 +2232,9 @@ class PeriscopeRuntime:
         self.bias_params = {
             "spike_prominence_factor": 2.0,
             "spike_height_factor": 3.0,
+            "max_deriv_distance_mode": "absolute",
             "max_deriv_distance_hz": 100e3,
+            "max_deriv_distance_fraction": 0.5,
             "reference_freq_source": "bias_frequency",
             "fit_selected_amplitude": True,
         }
@@ -2554,6 +2556,10 @@ class PeriscopeRuntime:
         self.is_mock_mode = getattr(self, "is_mock_mode", True)
         self.mock_config = getattr(self, "mock_config", {"mock": True})
         self.qp_pulse_mode = getattr(self, "qp_pulse_mode", "none")
+        if not hasattr(self, "session_manager"):
+            self.session_manager = MagicMock()
+            self.session_manager.is_active = False
+            self.session_manager.handle_data_ready = MagicMock()
         # Mock data in detector-based format for smoke tests
         self.results_by_detector = {
             1: {
@@ -2614,7 +2620,7 @@ class PeriscopeRuntime:
                 netanal_window.raw_data = self.raw_data
                 
                 print(">>> Testing Find Resonances Dialog")
-                reso_diag = netanal_window._show_find_resonances_dialog()
+                reso_diag = netanal_window._show_find_resonances_settings()
 
                 netanal_window.resonance_freqs = self.resonance_freqs
                 print(">>> Testing Multisweep Dialog")

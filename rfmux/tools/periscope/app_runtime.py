@@ -2196,17 +2196,32 @@ class PeriscopeRuntime:
         )
     
         self.multisweep_params = {
-            "amps": [MULTISWEEP_DEFAULT_AMPLITUDE],
-            "amp": MULTISWEEP_DEFAULT_AMPLITUDE,
+            # Core sweep parameters
             "span_hz": MULTISWEEP_DEFAULT_SPAN_HZ,
             "npoints_per_sweep": MULTISWEEP_DEFAULT_NPOINTS,
             "nsamps": MULTISWEEP_DEFAULT_NSAMPLES,
-            "bias_frequency_method": None,
             "sweep_direction": "upward",
-            "sweep_center_frequencies": {self.module: [90e6, 91e6]},
+            "sweep_center_frequencies": [90e6, 91e6],
             "module": self.module,
             "apply_skewed_fit": False,
             "apply_nonlinear_fit": False,
+            "run_find_bias": False,
+            # Amplitude / iteration metadata
+            "amp_arrays": [[MULTISWEEP_DEFAULT_AMPLITUDE, MULTISWEEP_DEFAULT_AMPLITUDE]],
+            "base_amplitude_mode": "global",
+            "base_amplitude_values": MULTISWEEP_DEFAULT_AMPLITUDE,
+            "iteration_mode": "single",
+            "num_steps": 1,
+            # Uniform-sweep fields (None when not in use)
+            "uniform_start_amplitude": None,
+            "uniform_stop_amplitude": None,
+            "uniform_spacing": "linear",
+            # Scaling fields (None when not in use)
+            "scale_start_factor": None,
+            "scale_stop_factor": None,
+            # Measurement name
+            "measurement_name": "mock_multisweep",
+            "measurement_custom_suffix": "",
         }
         _assert_param_keys(
             self.multisweep_params,

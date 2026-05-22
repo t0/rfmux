@@ -1133,10 +1133,10 @@ class RunFitsTask(QtCore.QThread):
                 for code, iter_dict in self.results_by_detector.items():
                     if not iter_dict:
                         continue
-                    # Sort iter_dict items by sweep_amplitude (ascending)
+                    # Sort iter_dict items by sweep_amplitude_normalized (ascending)
                     sorted_items = sorted(
                         iter_dict.items(),
-                        key=lambda kv: kv[1].get('sweep_amplitude', 0.0),
+                        key=lambda kv: kv[1].get('sweep_amplitude_normalized', 0.0),
                     )
                     # Clamp requested index to the available range
                     target_pos = min(amp_idx, len(sorted_items) - 1)
@@ -1144,6 +1144,21 @@ class RunFitsTask(QtCore.QThread):
                     per_iteration.setdefault(target_iter_idx, {})[code] = target_entry
 
             elif mode == 'bias':
+                # Check up-front whether any code has a bias_amplitude at all.
+                # This gives a clear, actionable error when Find Bias has not been run
+                # (or the file was saved before Find Bias results were stored).
+                codes_with_bias = {
+                    code for code in self.results_by_detector
+                    if (self.res_info_dict or {}).get(code, {}).get('bias_amplitude') is not None
+                }
+                if not codes_with_bias:
+                    self.signals.error.emit(
+                        "Fit mode is 'Bias amplitude' but no bias_amplitude was found in "
+                        "res_info_dict.  Run Find Bias on this multisweep first, or change "
+                        "Fit Settings to 'All amplitudes'."
+                    )
+                    return
+
                 for code, iter_dict in self.results_by_detector.items():
                     if not iter_dict:
                         continue
@@ -1151,9 +1166,9 @@ class RunFitsTask(QtCore.QThread):
                     bias_amp = (self.res_info_dict or {}).get(code, {}).get('bias_amplitude')
                     if bias_amp is None:
                         continue
-                    # Find the iter_idx whose sweep_amplitude matches bias_amplitude
+                    # Find the iter_idx whose sweep_amplitude_normalized matches bias_amplitude
                     for iter_idx, entry in iter_dict.items():
-                        if entry.get('sweep_amplitude') == bias_amp:
+                        if entry.get('sweep_amplitude_normalized') == bias_amp:
                             per_iteration.setdefault(iter_idx, {})[code] = entry
                             break
 
@@ -1163,7 +1178,17 @@ class RunFitsTask(QtCore.QThread):
                         per_iteration.setdefault(iter_idx, {})[code] = entry
 
             if not per_iteration:
-                self.signals.error.emit("No sweep data found in results_by_detector.")
+                if mode == 'bias':
+                    self.signals.error.emit(
+                        "Fit mode is 'Bias amplitude' but no sweep entries matched the stored "
+                        "bias_amplitude values.  Verify that Find Bias was run and the file was "
+                        "saved afterwards, then try again."
+                    )
+                else:
+                    self.signals.error.emit(
+                        "No sweep data found to fit.  The results_by_detector dict is empty or "
+                        "contains no matching entries for the selected fit mode."
+                    )
                 return
 
             # ── Step 2: fit each iteration in parallel ────────────────────────

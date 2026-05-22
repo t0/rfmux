@@ -1406,7 +1406,7 @@ class ComputeIQRotationTask(QtCore.QThread):
         from ...mr_resonator.utils import rotate_iq_plane
 
         # Determine sample rate from current decimation stage
-        dec_stage = await self.crs.get_decimation(module=self.module)
+        dec_stage = await self.crs.get_decimation()
         fs = 625e6 / (256 * 64 * (2 ** dec_stage))
         # Capture ~1 second; enforce a minimum of 256 samples
         num_samples = max(int(fs), 256)

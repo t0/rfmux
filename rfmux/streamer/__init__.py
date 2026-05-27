@@ -9,7 +9,7 @@ Unified API for CRS packet streaming, including:
 """
 
 # Import C++ packet receiver and structures, and ensure version parity
-_PY_API_VERSION = 1  # must match _SO_API_VERSION in bindings.cpp
+_PY_API_VERSION = 2  # must match _SO_API_VERSION in bindings.cpp
 try:
     from ._receiver import _SO_API_VERSION
 except ModuleNotFoundError as e:
@@ -45,6 +45,7 @@ from ._receiver import (
 	# Packet classes
 	ReadoutPacket,
 	PFBPacket,
+	ChannelStreamPacket,
 	Timestamp,
 	TimestampSource,
 	Packet,
@@ -52,6 +53,7 @@ from ._receiver import (
 	# Receivers
 	ReadoutPacketReceiver,
 	PFBPacketReceiver,
+	ChannelStreamPacketReceiver,
 	PacketReceiver,
 
 	# Queues and stats
@@ -64,18 +66,29 @@ from ._receiver import (
 
 	# Constants
 	MULTICAST_GROUP,
+	CHANNEL_STREAM_MULTICAST_GROUP,
 	READOUT_PACKET_MAGIC,
 	PFB_PACKET_MAGIC,
+	CHANNEL_STREAM_PACKET_MAGIC,
 	STREAMER_PORT,
 	PFB_STREAMER_PORT,
+	CHANNEL_STREAM_PORT,
 	PFB_PACKET_SIZE,
 	LONG_PACKET_SIZE,
 	SHORT_PACKET_SIZE,
+	MAX_CHANNEL_STREAM_PACKET_SIZE,
 	LONG_PACKET_CHANNELS,
 	SHORT_PACKET_CHANNELS,
 	LONG_PACKET_VERSION,
 	SHORT_PACKET_VERSION,
 	PFBPACKET_NSAMP_MAX,
+	CHANNEL_STREAM_NUM_PIPELINES,
+	CHANNEL_STREAM_MAX_SAMPLES_PER_PIPELINE,
+	CHANNEL_STREAM_MAX_SAMPLES_PER_PACKET,
+	CHANNEL_STREAM_PACKET_VERSION,
+	CHANNEL_STREAM_TRUNC_LOW,
+	CHANNEL_STREAM_TRUNC_MID,
+	CHANNEL_STREAM_TRUNC_HIGH,
 	SS_PER_SECOND,
 )
 
@@ -95,6 +108,7 @@ __all__ = [
 	# Packet classes
 	'ReadoutPacket',
 	'PFBPacket',
+	'ChannelStreamPacket',
 	'Timestamp',
 	'TimestampSource',
 	'Packet',
@@ -102,6 +116,7 @@ __all__ = [
 	# Receivers
 	'ReadoutPacketReceiver',
 	'PFBPacketReceiver',
+	'ChannelStreamPacketReceiver',
 	'PacketReceiver',
 
 	# Queues
@@ -116,17 +131,28 @@ __all__ = [
 
 	# Constants
 	'MULTICAST_GROUP',
+	'CHANNEL_STREAM_MULTICAST_GROUP',
 	'READOUT_PACKET_MAGIC',
 	'PFB_PACKET_MAGIC',
+	'CHANNEL_STREAM_PACKET_MAGIC',
 	'STREAMER_PORT',
 	'PFB_STREAMER_PORT',
+	'CHANNEL_STREAM_PORT',
 	'LONG_PACKET_SIZE',
 	'SHORT_PACKET_SIZE',
+	'MAX_CHANNEL_STREAM_PACKET_SIZE',
 	'LONG_PACKET_CHANNELS',
 	'SHORT_PACKET_CHANNELS',
 	'LONG_PACKET_VERSION',
 	'SHORT_PACKET_VERSION',
 	'PFBPACKET_NSAMP_MAX',
+	'CHANNEL_STREAM_NUM_PIPELINES',
+	'CHANNEL_STREAM_MAX_SAMPLES_PER_PIPELINE',
+	'CHANNEL_STREAM_MAX_SAMPLES_PER_PACKET',
+	'CHANNEL_STREAM_PACKET_VERSION',
+	'CHANNEL_STREAM_TRUNC_LOW',
+	'CHANNEL_STREAM_TRUNC_MID',
+	'CHANNEL_STREAM_TRUNC_HIGH',
 	'SS_PER_SECOND',
 
 	# Backwards compatibility

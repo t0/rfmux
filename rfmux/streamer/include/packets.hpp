@@ -150,6 +150,38 @@ namespace packets {
 		Timestamp timestamp_;
 	};
 
+	class ChannelStreamPacket : public channel_stream_packet_header {
+	public:
+		using Header = channel_stream_packet_header;
+
+		ChannelStreamPacket() = default;
+
+		static ChannelStreamPacket from_bytes(const void* data, size_t len);
+		py::bytes to_bytes() const;
+
+		// Raw int16 I/Q pairs as stored on the wire (no widening).
+		const auto& raw_samples() const { return raw_samples_; }
+		auto& raw_samples() { return raw_samples_; }
+
+		// Timestamp lives in the base struct as a wire-format irigb_timestamp;
+		// these accessors convert to/from the higher-level Timestamp helper.
+		Timestamp timestamp() const { return Timestamp(ts); }
+		void set_timestamp(const Timestamp& t) {
+			ts.y = t.y; ts.d = t.d; ts.h = t.h; ts.m = t.m;
+			ts.s = t.s; ts.ss = t.ss; ts.c = t.c; ts.sbs = t.sbs;
+		}
+
+		int get_k() const {
+			int k = 0;
+			for (uint8_t v = pipe_snapshot; v; v &= v - 1) k++;
+			return k;
+		}
+		int get_num_samples() const { return samples_per_packet; }
+
+	private:
+		std::vector<int16_t> raw_samples_;  // interleaved I/Q pairs
+	};
+
 	class PacketType {
 	public:
 		virtual ~PacketType() = default;
@@ -263,5 +295,9 @@ namespace packets {
 
 	struct PFBPacketReceiver : PacketReceiver {
 		PFBPacketReceiver(py::object socket, size_t reorder_window = 256, size_t queue_max_size = 4096, size_t flush_threshold = 256);
+	};
+
+	struct ChannelStreamPacketReceiver : PacketReceiver {
+		ChannelStreamPacketReceiver(py::object socket, size_t reorder_window = 256, size_t queue_max_size = 4096, size_t flush_threshold = 256);
 	};
 }

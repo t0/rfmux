@@ -116,7 +116,7 @@ def _set_socket_buffer_size(sock, desired_size=16777216):
 	return actual_size
 
 
-def get_multicast_socket(crs_hostname, port=None, interface=None, buffer_size=None):
+def get_multicast_socket(crs_hostname, port=None, interface=None, buffer_size=None, multicast_group=None):
 	"""
 	Create and configure a multicast socket for receiving CRS packets.
 
@@ -125,6 +125,10 @@ def get_multicast_socket(crs_hostname, port=None, interface=None, buffer_size=No
 		port (int, optional): Port number. If None, uses STREAMER_PORT from constants
 		interface (str, optional): Local interface IP address. If None, auto-detects from hostname
 		buffer_size (int, optional): Socket receive buffer size in bytes. If None, uses default (16MB)
+		multicast_group (str, optional): Multicast group to join. If None, uses
+			MULTICAST_GROUP (239.192.0.2, the readout/PFB group). Pass
+			CHANNEL_STREAM_MULTICAST_GROUP (239.192.0.3) for the 100 GbE
+			channel-stream path.
 
 	Returns:
 		socket.socket: Configured multicast socket
@@ -135,6 +139,8 @@ def get_multicast_socket(crs_hostname, port=None, interface=None, buffer_size=No
 
 	if port is None:
 		port = STREAMER_PORT
+	if multicast_group is None:
+		multicast_group = MULTICAST_GROUP
 
 	# Extract just the hostname part for source address resolution
 	hostname_only = None
@@ -173,7 +179,7 @@ def get_multicast_socket(crs_hostname, port=None, interface=None, buffer_size=No
 
 		# Join the multicast group specifically on loopback interface
 		import struct
-		mreq_lo = struct.pack("4s4s", socket.inet_aton(MULTICAST_GROUP), socket.inet_aton("127.0.0.1"))
+		mreq_lo = struct.pack("4s4s", socket.inet_aton(multicast_group), socket.inet_aton("127.0.0.1"))
 		sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq_lo)
 
 		return sock
@@ -212,7 +218,7 @@ def get_multicast_socket(crs_hostname, port=None, interface=None, buffer_size=No
 	if hostname_only:
 		# Source-specific multicast (SSM) - only receive from this source
 		mreq = ip_mreq_source(
-			multiaddr=MULTICAST_GROUP,
+			multiaddr=multicast_group,
 			sourceaddr=socket.gethostbyname(hostname_only),
 			interface=multicast_interface_ip
 		)
@@ -220,7 +226,7 @@ def get_multicast_socket(crs_hostname, port=None, interface=None, buffer_size=No
 	else:
 		# Regular multicast - receive from all sources
 		import struct
-		mreq = struct.pack("4s4s", socket.inet_aton(MULTICAST_GROUP), socket.inet_aton(multicast_interface_ip))
+		mreq = struct.pack("4s4s", socket.inet_aton(multicast_group), socket.inet_aton(multicast_interface_ip))
 		sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
 	return sock

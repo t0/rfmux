@@ -432,6 +432,198 @@ PYBIND11_MODULE(_receiver, m) {
 					pkt.serial, pkt.module, pkt.seq, pkt.num_samples);
 		});
 
+	/* Helper: convert interleaved raw int16 I/Q to complex<double>/256.
+	 * The /256 scale matches the existing convention in raw_to_complex
+	 * for int32 samples; channel-stream truncates 24b -> 16b at firmware,
+	 * so the absolute scale also depends on sample_trunc (LOW/MID/HIGH).
+	 * Callers that care about that correction should read sample_trunc
+	 * and rescale. */
+	auto raw16_to_complex = [](const int16_t* raw, py::ssize_t num_samples) {
+		py::array_t<std::complex<double>> result(num_samples);
+		auto out = result.mutable_unchecked<1>();
+		for (py::ssize_t i = 0; i < num_samples; i++)
+			out(i) = std::complex<double>(raw[2*i], raw[2*i+1]) / 256.;
+		return result;
+	};
+
+	py::class_<ChannelStreamPacket>(m, "ChannelStreamPacket")
+		.def(py::init<>())
+		.def(py::init([](py::bytes data) {
+			char* buffer;
+			Py_ssize_t length;
+			if (PYBIND11_BYTES_AS_STRING_AND_SIZE(data.ptr(), &buffer, &length)) {
+				throw std::runtime_error("Unable to extract bytes contents");
+			}
+			return ChannelStreamPacket::from_bytes(buffer, length);
+		}), "data"_a, "Deserialize packet from bytes")
+		.def(py::init([](uint32_t magic, uint32_t seq, uint8_t pipe_snapshot,
+		                 uint8_t sample_trunc, uint8_t module, uint8_t version,
+		                 uint16_t tag, uint16_t serial,
+		                 uint16_t samples_per_packet) {
+			ChannelStreamPacket pkt;
+			pkt.magic = magic;
+			pkt.seq = seq;
+			pkt.pipe_snapshot = pipe_snapshot;
+			pkt.sample_trunc = sample_trunc;
+			pkt.module = module;
+			pkt.version = version;
+			pkt.tag = tag;
+			pkt.serial = serial;
+			pkt.samples_per_packet = samples_per_packet;
+			std::memset(pkt._reserved, 0, sizeof(pkt._reserved));
+			std::memset(&pkt.ts, 0, sizeof(pkt.ts));
+			std::memset(pkt._ts_pad, 0, sizeof(pkt._ts_pad));
+			return pkt;
+		}),
+		py::kw_only(),
+		"magic"_a = CHANNEL_STREAM_PACKET_MAGIC, "seq"_a = 0,
+		"pipe_snapshot"_a, "sample_trunc"_a = CHANNEL_STREAM_TRUNC_HIGH,
+		"module"_a, "version"_a = CHANNEL_STREAM_PACKET_VERSION,
+		"tag"_a = 0, "serial"_a, "samples_per_packet"_a,
+		"Create channel-stream packet with specified scalar fields")
+		.def("__bytes__", &ChannelStreamPacket::to_bytes, "Serialize packet to bytes")
+		.def_readwrite("magic", &ChannelStreamPacket::magic)
+		.def_readwrite("seq", &ChannelStreamPacket::seq)
+		.def_readwrite("pipe_snapshot", &ChannelStreamPacket::pipe_snapshot,
+			"Bitmask of enabled pipelines (K=popcount)")
+		.def_readwrite("sample_trunc", &ChannelStreamPacket::sample_trunc,
+			"Truncation window: 0=LOW (bits 15:0), 1=MID (19:4), 2=HIGH (23:8)")
+		.def_readwrite("module", &ChannelStreamPacket::module)
+		.def_readwrite("version", &ChannelStreamPacket::version)
+		.def_readwrite("tag", &ChannelStreamPacket::tag,
+			"Configuration-epoch tag (incremented on channel_enable LUT rewrite)")
+		.def_readwrite("serial", &ChannelStreamPacket::serial)
+		.def_readwrite("samples_per_packet", &ChannelStreamPacket::samples_per_packet,
+			"Number of I/Q pairs carried in this packet's payload")
+
+		.def_property_readonly("k", &ChannelStreamPacket::get_k,
+			"Number of active pipelines (popcount of pipe_snapshot)")
+
+		// raw_samples: zero-copy view of interleaved int16 I/Q pairs
+		.def_property("raw_samples",
+			[](ChannelStreamPacket& self) {
+				auto& vec = self.raw_samples();
+				return py::array_t<int16_t>(
+					{static_cast<py::ssize_t>(vec.size())},
+					{sizeof(int16_t)},
+					vec.data(),
+					py::cast(self)
+				);
+			},
+			[](ChannelStreamPacket& self, py::array_t<int16_t> arr) {
+				auto buf = arr.request();
+				auto* ptr = static_cast<int16_t*>(buf.ptr);
+				self.raw_samples() = std::vector<int16_t>(ptr, ptr + buf.size);
+			})
+
+		.def_property("ts",
+			[](const ChannelStreamPacket& self) { return self.timestamp(); },
+			[](ChannelStreamPacket& self, const Timestamp& ts) { self.set_timestamp(ts); })
+
+		.def("__len__", &ChannelStreamPacket::get_num_samples,
+			"Number of I/Q samples in this packet (= samples_per_packet)")
+
+		// __getitem__: lazy scaled access (single index or slice)
+		.def("__getitem__", [](ChannelStreamPacket& self, py::object key) -> py::object {
+			auto& raw = self.raw_samples();
+			int num_samples = self.get_num_samples();
+
+			if (py::isinstance<py::int_>(key)) {
+				int idx = key.cast<int>();
+				if (idx < 0) idx += num_samples;
+				if (idx < 0 || idx >= num_samples)
+					throw py::index_error("sample index out of range");
+				return py::cast(
+					std::complex<double>(raw[2*idx], raw[2*idx+1]) / 256.
+				);
+			}
+
+			if (py::isinstance<py::slice>(key)) {
+				auto slice = key.cast<py::slice>();
+				py::ssize_t start, stop, step, length;
+				if (!slice.compute(num_samples, &start, &stop, &step, &length))
+					throw py::error_already_set();
+
+				py::array_t<std::complex<double>> result(length);
+				auto out = result.mutable_unchecked<1>();
+				for (py::ssize_t i = 0; i < length; i++) {
+					py::ssize_t s = start + i * step;
+					out(i) = std::complex<double>(raw[2*s], raw[2*s+1]) / 256.;
+				}
+				return result;
+			}
+
+			auto indices = py::array_t<int32_t>::ensure(key);
+			if (!indices)
+				throw py::type_error("indices must be integers, slices, or integer arrays");
+			auto idx_buf = indices.request();
+			auto* idx_ptr = static_cast<int32_t*>(idx_buf.ptr);
+			py::ssize_t n = idx_buf.size;
+
+			py::array_t<std::complex<double>> result(n);
+			auto out = result.mutable_unchecked<1>();
+			for (py::ssize_t i = 0; i < n; i++) {
+				int s = idx_ptr[i];
+				if (s < 0) s += num_samples;
+				if (s < 0 || s >= num_samples)
+					throw py::index_error("sample index out of range");
+				out(i) = std::complex<double>(raw[2*s], raw[2*s+1]) / 256.;
+			}
+			return result;
+		})
+
+		// __setitem__: write complex values (×256) into raw int16 storage
+		.def("__setitem__", [](ChannelStreamPacket& self, py::object key, py::object value) {
+			auto& raw = self.raw_samples();
+			int num_samples = self.get_num_samples();
+
+			if (py::isinstance<py::int_>(key)) {
+				int idx = key.cast<int>();
+				if (idx < 0) idx += num_samples;
+				if (idx < 0 || idx >= num_samples)
+					throw py::index_error("sample index out of range");
+				auto v = value.cast<std::complex<double>>();
+				raw[2*idx]   = static_cast<int16_t>(v.real() * 256.);
+				raw[2*idx+1] = static_cast<int16_t>(v.imag() * 256.);
+				return;
+			}
+
+			auto arr = py::array_t<std::complex<double>>::ensure(value);
+			if (!arr)
+				throw std::runtime_error("value must be array-like of complex values");
+			auto buf = arr.request();
+			auto* ptr = static_cast<std::complex<double>*>(buf.ptr);
+
+			if (py::isinstance<py::slice>(key)) {
+				auto slice = key.cast<py::slice>();
+				py::ssize_t start, stop, step, length;
+				if (!slice.compute(num_samples, &start, &stop, &step, &length))
+					throw py::error_already_set();
+				if (buf.size != length)
+					throw std::runtime_error("value length does not match slice length");
+				if (raw.empty()) raw.resize(2 * num_samples, 0);
+				for (py::ssize_t i = 0; i < length; i++) {
+					py::ssize_t s = start + i * step;
+					raw[2*s]   = static_cast<int16_t>(ptr[i].real() * 256.);
+					raw[2*s+1] = static_cast<int16_t>(ptr[i].imag() * 256.);
+				}
+				return;
+			}
+
+			throw py::type_error("index must be an integer or slice");
+		})
+
+		// __array__: numpy protocol — returns all samples as complex<double>/256
+		.def("__array__", [raw16_to_complex](ChannelStreamPacket& self, py::object /* dtype */, py::object /* copy */) {
+			auto& raw = self.raw_samples();
+			return raw16_to_complex(raw.data(), raw.size() / 2);
+		}, "dtype"_a = py::none(), "copy"_a = py::none())
+
+		.def("__repr__", [](const ChannelStreamPacket& pkt) {
+			return fmt::format("ChannelStreamPacket(serial={} module={} seq={} k={} tag={})",
+					pkt.serial, pkt.module, pkt.seq, pkt.get_k(), pkt.tag);
+		});
+
 	py::class_<Packet>(m, "Packet")
 		.def("serial", &Packet::serial)
 		.def("module", &Packet::module)
@@ -508,6 +700,15 @@ PYBIND11_MODULE(_receiver, m) {
 			 "flush_threshold"_a = 128,
 			 "Create PFB packet receiver with reorder_window (min buffer) and flush_threshold (flush every N additional packets)");
 
+	py::class_<ChannelStreamPacketReceiver, PacketReceiver>(m, "ChannelStreamPacketReceiver",
+		"Packet receiver for channel-stream packets (100 GbE high-rate path).")
+		.def(py::init<py::object, size_t, size_t, size_t>(),
+			 "socket"_a,
+			 "reorder_window"_a = 256,
+			 "queue_max_size"_a = 4096,
+			 "flush_threshold"_a = 128,
+			 "Create channel-stream packet receiver");
+
 	/* Cross-platform wrapper for IP_ADD_SOURCE_MEMBERSHIP structure.
 	 * Linux/macOS/Windows all have struct ip_mreq_source with the same fields
 	 * but in different orders - this provides a consistent constructor. */
@@ -535,20 +736,31 @@ PYBIND11_MODULE(_receiver, m) {
 		);
 
 	m.attr("MULTICAST_GROUP") = MULTICAST_GROUP;
+	m.attr("CHANNEL_STREAM_MULTICAST_GROUP") = CHANNEL_STREAM_MULTICAST_GROUP;
 	m.attr("READOUT_PACKET_MAGIC") = READOUT_PACKET_MAGIC;
 	m.attr("PFB_PACKET_MAGIC") = PFB_PACKET_MAGIC;
+	m.attr("CHANNEL_STREAM_PACKET_MAGIC") = CHANNEL_STREAM_PACKET_MAGIC;
 	m.attr("STREAMER_PORT") = STREAMER_PORT;
 	m.attr("PFB_STREAMER_PORT") = PFB_STREAMER_PORT;
+	m.attr("CHANNEL_STREAM_PORT") = CHANNEL_STREAM_PORT;
 	m.attr("LONG_PACKET_SIZE") = LONG_PACKET_SIZE;
 	m.attr("SHORT_PACKET_SIZE") = SHORT_PACKET_SIZE;
 	m.attr("PFB_PACKET_SIZE") = PFB_PACKET_SIZE(PFBPACKET_NSAMP_MAX);
+	m.attr("MAX_CHANNEL_STREAM_PACKET_SIZE") = MAX_CHANNEL_STREAM_PACKET_SIZE;
 	m.attr("LONG_PACKET_CHANNELS") = LONG_PACKET_CHANNELS;
 	m.attr("SHORT_PACKET_CHANNELS") = SHORT_PACKET_CHANNELS;
 	m.attr("LONG_PACKET_VERSION") = LONG_PACKET_VERSION;
 	m.attr("SHORT_PACKET_VERSION") = SHORT_PACKET_VERSION;
 	m.attr("PFBPACKET_NSAMP_MAX") = PFBPACKET_NSAMP_MAX;
+	m.attr("CHANNEL_STREAM_NUM_PIPELINES") = CHANNEL_STREAM_NUM_PIPELINES;
+	m.attr("CHANNEL_STREAM_MAX_SAMPLES_PER_PIPELINE") = CHANNEL_STREAM_MAX_SAMPLES_PER_PIPELINE;
+	m.attr("CHANNEL_STREAM_MAX_SAMPLES_PER_PACKET") = CHANNEL_STREAM_MAX_SAMPLES_PER_PACKET;
+	m.attr("CHANNEL_STREAM_PACKET_VERSION") = CHANNEL_STREAM_PACKET_VERSION;
+	m.attr("CHANNEL_STREAM_TRUNC_LOW") = CHANNEL_STREAM_TRUNC_LOW;
+	m.attr("CHANNEL_STREAM_TRUNC_MID") = CHANNEL_STREAM_TRUNC_MID;
+	m.attr("CHANNEL_STREAM_TRUNC_HIGH") = CHANNEL_STREAM_TRUNC_HIGH;
 	m.attr("SS_PER_SECOND") = SS_PER_SECOND;
 
 	/* Must match PY_API_VERSION in rfmux/streamer/__init__.py */
-	m.attr("_SO_API_VERSION") = 1;
+	m.attr("_SO_API_VERSION") = 2;
 }

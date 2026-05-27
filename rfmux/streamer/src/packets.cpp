@@ -321,7 +321,9 @@ namespace packets {
 		const size_t MAX_PACKET_SIZE = type_->max_size();
 		size_t packets_received = 0;
 #ifdef __linux__
-		// Linux: use recvmmsg for batch reception
+		// Linux: use recvmmsg for batch reception. Each msg's iovec points
+		// at its own pre-sized std::vector<char>; after receive, the chosen
+		// vector is std::move'd directly into the Packet (no second copy).
 		std::vector<struct mmsghdr> msgs(batch_size);
 		std::vector<struct iovec> iovecs(batch_size);
 		std::vector<std::vector<char>> buffers(batch_size);
@@ -376,13 +378,18 @@ namespace packets {
 				stats_.total_bytes_received += len;
 			}
 
-			// Copy buffer and process
-			std::vector<char> data(buffers[i].begin(), buffers[i].begin() + len);
-			process_packet(std::move(data));
+			// Hand the receive buffer directly to the Packet. Shrink to the
+			// real length first so Packet::size() and downstream parsers see
+			// the wire length, not MAX_PACKET_SIZE. resize() shrinks in place
+			// without freeing capacity.
+			buffers[i].resize(len);
+			process_packet(std::move(buffers[i]));
 		}
 #else
-		// Non-Linux: use select + recv
-		std::vector<char> buffer(MAX_PACKET_SIZE);
+		// Non-Linux: use select + recv. One vector is allocated per accepted
+		// packet (sized to the wire length, not MAX_PACKET_SIZE) and moved
+		// directly into process_packet.
+		std::vector<char> scratch(MAX_PACKET_SIZE);
 
 		for (size_t i = 0; i < batch_size; i++) {
 			// Setup select for timeout
@@ -402,7 +409,7 @@ namespace packets {
 			if (ready <= 0)
 				break;  // Timeout or error
 
-			int n = recv(sockfd_, buffer.data(), MAX_PACKET_SIZE, 0);
+			int n = recv(sockfd_, scratch.data(), MAX_PACKET_SIZE, 0);
 			if (n < 0) {
 #ifdef _WIN32
 				int err = WSAGetLastError();
@@ -422,7 +429,7 @@ namespace packets {
 			size_t len = static_cast<size_t>(n);
 
 			// Validate
-			if (!type_->validate(buffer.data(), len)) {
+			if (!type_->validate(scratch.data(), len)) {
 				std::lock_guard<std::mutex> lock(stats_mutex_);
 				stats_.invalid_packets++;
 				continue;
@@ -437,8 +444,7 @@ namespace packets {
 
 			packets_received++;
 
-			// Copy and process
-			std::vector<char> data(buffer.begin(), buffer.begin() + len);
+			std::vector<char> data(scratch.begin(), scratch.begin() + len);
 			process_packet(std::move(data));
 		}
 #endif

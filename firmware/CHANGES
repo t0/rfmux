@@ -1,5 +1,23 @@
 # Changelog
 
+# r1.6.1 - 2026-05-31
+
+- set_amplitude_limit: correct unit scaling. The previous conversion resulted
+  in all set_amplitude_limit calls clamping to 0.
+
+- set_nco_frequency / get_nco_frequency: Multi-Tile Sync (MTS) now keeps
+  the NCOs phase-locked rather than introducing a random phase rotation between
+  the DAC and ADC. This also adds deterministic phase behaviour from boot to boot.
+  The NCO frequency has been allowed to go beyond 10 GHz (this was a conservative
+  validation check we've removed) to allow experimenting with higher Nyquist zones.
+
+- An Ethernet drop-out regression has been fixed. This affects "smart" network
+  switches where repeated down/up port cycles seemed to invite the switch to stop
+  forwarding packets. It should not have affected deployments using our little
+  benchtop switches.
+
+- set_pfb_streamer no longer has a restrictive bandwidth derating (went from 0.5 to 0.8).
+
 # r1.6.0 - 2026-01-30
 
 - set_decimation / get_decimation: docstring fixup

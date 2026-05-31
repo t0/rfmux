@@ -1,6 +1,9 @@
 # Changelog
 
-# r1.6.1 - 2026-04-07
+# r1.6.1 - 2026-05-31
+
+- set_amplitude_limit: correct unit scaling. The previous conversion resulted
+  in all set_amplitude_limit calls clamping to 0.
 
 - set_nco_frequency / get_nco_frequency: Multi-Tile Sync (MTS) now keeps
   the NCOs phase-locked rather than introducing a random phase rotation between

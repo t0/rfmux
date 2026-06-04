@@ -87,6 +87,9 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         # Also handle numpad Enter
         self.numpad_enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Enter), self)
         self.numpad_enter_shortcut.activated.connect(self._validate_and_accept)
+        
+        # Ensure the dialog is sized correctly for the initial session mode
+        self.adjustSize()
     
     def _disable_enter_on_radio_buttons(self):
         """Install event filters on all radio buttons to prevent Enter key handling."""
@@ -180,9 +183,8 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
         
-        # Set reasonable size
+        # Set minimum width; height is determined dynamically by adjustSize()
         self.setMinimumWidth(600)
-        self.setMinimumHeight(600)
         
     def _create_connection_section(self) -> QtWidgets.QGroupBox:
         """Create the connection mode section."""
@@ -345,6 +347,9 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         
         self.new_session_details.setVisible(is_new)
         self.load_session_details.setVisible(is_load)
+        
+        # Resize the dialog to exactly fit the currently visible content
+        self.adjustSize()
     
     def _validate_and_accept(self):
         """Validate inputs and open file dialogs as needed before accepting."""

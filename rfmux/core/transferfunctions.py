@@ -544,6 +544,36 @@ def spectrum_from_slow_tod(
         "psd_dual_sideband": psd_dual_sideband_db,
     }
 
+def convert_dac_normalized_to_dbm(normalized_amp: float, dac_scale_dbm: float) -> float:
+    """
+    Convert a normalized DAC amplitude to power in dBm.
+
+    The DAC amplitude is expressed as a dimensionless value in the range [0, 1],
+    where 1.0 corresponds to the hardware full-scale output power ``dac_scale_dbm``.
+    The relationship between amplitude and power follows the standard
+    20 dB-per-decade rule for voltage amplitudes::
+
+        dBm = dac_scale_dbm + 20 * log10(normalized_amp)
+
+    Parameters
+    ----------
+    normalized_amp : float
+        Normalized DAC amplitude (0–1 scale, as passed to ``set_amplitude``).
+    dac_scale_dbm : float
+        Full-scale DAC output power in dBm, as returned by
+        ``crs.get_dac_scale('DBM', module=...)``.
+
+    Returns
+    -------
+    float
+        Power in dBm corresponding to ``normalized_amp``.
+        Returns ``-inf`` when ``normalized_amp <= 0``.
+    """
+    if normalized_amp <= 0:
+        return -np.inf
+    return dac_scale_dbm + 20.0 * np.log10(normalized_amp)
+
+
 def fit_cable_delay(freqs: np.ndarray, phases_deg: np.ndarray) -> float:
     """
     Fits the phase vs. frequency data to determine the residual group delay.

@@ -9,7 +9,7 @@ import numpy as np
 import scipy.signal as signal
 from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
-from rfmux.core.transferfunctions import convert_roc_to_volts
+from rfmux.core.transferfunctions import convert_roc_to_volts, convert_dac_normalized_to_dbm
 
 
 @macro(CRS, register=True)
@@ -83,6 +83,11 @@ async def take_netanal(
         - 'iq_volts': numpy.ndarray - Complex I/Q data in volts at the board input port,
           derived by applying VOLTS_PER_ROC from core.transferfunctions.
         - 'phase_degrees': numpy.ndarray - Phase in degrees corresponding to 'frequencies'.
+        - 'sweep_amplitude': float - Per-tone DAC amplitude used for the sweep, in
+          normalized units (same value as the ``amp`` parameter).
+        - 'sweep_amplitude_dbm': float or None - Per-tone DAC amplitude converted to dBm
+          at the board DAC output, using the hardware full-scale reported by
+          ``crs.get_dac_scale('DBM')``.  ``None`` if the DAC scale could not be queried.
     """
 
     # If user passed modules as a list, run in parallel across those modules
@@ -118,6 +123,17 @@ async def take_netanal(
             ))
         results = await asyncio.gather(*tasks)
         return results
+
+    # Query the hardware DAC full-scale so we can report amplitude in dBm.
+    try:
+        dac_scale_dbm = await crs.get_dac_scale('DBM', module=module)
+    except Exception:
+        dac_scale_dbm = None
+
+    sweep_amplitude_dbm = (
+        convert_dac_normalized_to_dbm(amp, dac_scale_dbm)
+        if dac_scale_dbm is not None else None
+    )
 
     # Generate a global array of frequencies across [fmin, fmax].
     freqs_global = np.linspace(fmin, fmax, npoints, endpoint=True)
@@ -271,6 +287,7 @@ async def take_netanal(
                 progress_callback(module, progress)
 
         # Rotate new NCO chunk so the overlap freq aligns with previous NCO phase.
+        # TODO - this may no longer be necessary since the NCO is phase deterministic now
         if i > 0 and prev_boundary_iq is not None:
             boundary_new = chunk_iq_full[0]
             if abs(boundary_new) > 1e-15:
@@ -307,10 +324,12 @@ async def take_netanal(
     if len(fs_all_np) == 0: # Handle empty data
         # Return arrays in the expected dictionary structure
         return {
-            'frequencies':  np.array([]),
-            'iq_counts':    np.array([]),
-            'iq_volts':     np.array([]),
-            'phase_degrees': np.array([])
+            'frequencies':       np.array([]),
+            'iq_counts':         np.array([]),
+            'iq_volts':          np.array([]),
+            'phase_degrees':     np.array([]),
+            'sweep_amplitude':     amp,
+            'sweep_amplitude_dbm': sweep_amplitude_dbm,
         }
 
     sort_indices = np.argsort(fs_all_np)
@@ -319,12 +338,14 @@ async def take_netanal(
     phase_sorted = np.degrees(np.angle(iq_sorted))
 
     result_dict = {
-        'frequencies':  fs_sorted,
-        'iq_counts':    iq_sorted,
-        'iq_volts':     convert_roc_to_volts(iq_sorted),
-        'phase_degrees': phase_sorted
+        'frequencies':       fs_sorted,
+        'iq_counts':         iq_sorted,
+        'iq_volts':          convert_roc_to_volts(iq_sorted),
+        'phase_degrees':     phase_sorted,
+        'sweep_amplitude':     amp,
+        'sweep_amplitude_dbm': sweep_amplitude_dbm,
     }
-            
+
     return result_dict
 
 def _safe_concatenate_frequencies(comb, nco_freq):

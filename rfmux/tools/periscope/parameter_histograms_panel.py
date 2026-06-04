@@ -209,7 +209,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         has_fit_data = False
         for iter_dict in results.values():
             for entry in iter_dict.values():
-                amp = entry.get('sweep_amplitude')
+                amp = entry.get('sweep_amplitude_normalized')
                 direction = entry.get('sweep_direction', 'upward')
                 if amp is not None:
                     sweep_keys_set.add((amp, direction))
@@ -308,7 +308,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             # Find entry matching this amplitude + direction
             entry = None
             for e in iter_dict.values():
-                if e.get('sweep_amplitude') == amplitude and e.get('sweep_direction') == direction:
+                if e.get('sweep_amplitude_normalized') == amplitude and e.get('sweep_direction') == direction:
                     entry = e
                     break
             if entry is None:

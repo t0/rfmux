@@ -15,6 +15,8 @@ Returns a ``(res_info_dict, multisweep_data_dict)`` tuple where:
   time together with the actual sweep data arrays.
 """
 
+# TODO the plain ms algorithm should also return sweep amplitude in real units
+
 import numpy as np
 import random
 import string
@@ -53,8 +55,8 @@ def _generate_unique_detector_ids(n: int) -> list[str]:
 @macro(CRS, register=True)
 async def multisweep(
     crs: CRS,
-    span_hz: float,
-    npoints_per_sweep: int,
+    span_hz: float = 150e3,
+    npoints_per_sweep: int = 100,
     center_frequencies: list[float] | None = None,
     amp: float | list[float] | None = None,
     detector_ids: list[str] | None = None,

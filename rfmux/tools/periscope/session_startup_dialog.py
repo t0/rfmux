@@ -257,10 +257,12 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         new_session_layout = QtWidgets.QVBoxLayout(self.new_session_details)
         new_session_layout.setContentsMargins(20, 10, 0, 10)
         
-        # Description
-        new_desc = QtWidgets.QLabel("A folder selection dialog will open when you click OK.")
-        new_desc.setStyleSheet("color: gray; font-style: italic;")
-        new_session_layout.addWidget(new_desc)
+        # Description — shows current default dir or first-run prompt
+        self.new_session_desc = QtWidgets.QLabel()
+        self.new_session_desc.setStyleSheet("color: gray; font-style: italic;")
+        self.new_session_desc.setWordWrap(True)
+        self._update_new_session_desc()
+        new_session_layout.addWidget(self.new_session_desc)
         
         # Folder name input
         folder_name_layout = QtWidgets.QHBoxLayout()
@@ -281,6 +283,7 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         
         load_desc = QtWidgets.QLabel("A folder selection dialog will open when you click OK.")
         load_desc.setStyleSheet("color: gray; font-style: italic;")
+        load_desc.setWordWrap(True)
         load_session_layout.addWidget(load_desc)
         
         layout.addWidget(self.load_session_details)
@@ -295,6 +298,26 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         
         return group
     
+    def _update_new_session_desc(self):
+        """Update the 'New Session' description label to reflect the current default directory."""
+        last_dir = settings.get_last_session_directory()
+        if last_dir and os.path.isdir(last_dir):
+            text = (
+                f"Session will be created in:\n{last_dir}\n\n"
+                "To change the default directory, use\n"
+                "Session → Set Default Session Directory…"
+            )
+        else:
+            text = (
+                "No default directory is set yet. You will be asked to choose a\n"
+                "folder when you click OK — this choice will be remembered for\n"
+                "future sessions.\n\n"
+                "You can change it later via\n"
+                "Session → Set Default Session Directory…"
+            )
+        if hasattr(self, 'new_session_desc'):
+            self.new_session_desc.setText(text)
+
     def _on_connection_mode_changed(self):
         """Handle connection mode radio button changes."""
         # Show/hide hardware details
@@ -367,29 +390,39 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
                 return
             self.session_folder_name = self.folder_name_input.text().strip()
             
-            # Open folder selection dialog for base path
-            # Start from last used directory if available
-            start_dir = last_session_dir if last_session_dir else ""
+            # Use the saved default directory if it exists; otherwise ask the user
+            # (first-run only — after that the chosen directory is remembered).
+            if last_session_dir and os.path.isdir(last_session_dir):
+                # Happy path: use the saved directory without prompting
+                base_path = last_session_dir
+            else:
+                # First run: ask the user once, then remember the choice
+                start_dir = last_session_dir if last_session_dir else ""
+                
+                # Create non-static dialog to allow Enter key handling
+                dialog = QtWidgets.QFileDialog(
+                    self,
+                    "Select Session Location (will be remembered for future sessions)",
+                    start_dir,
+                )
+                dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+                dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly)
+                dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog)
+                
+                # Install Enter key filter
+                self._install_enter_key_filter(dialog)
+                
+                # Show dialog and get result
+                if not dialog.exec():
+                    # User cancelled, stay in dialog
+                    return
+                
+                selected_files = dialog.selectedFiles()
+                if not selected_files:
+                    return
+                
+                base_path = selected_files[0]
             
-            # Create non-static dialog to allow Enter key handling
-            dialog = QtWidgets.QFileDialog(self, "Select Session Location", start_dir)
-            dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
-            dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly)
-            dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog)
-            
-            # Install Enter key filter
-            self._install_enter_key_filter(dialog)
-            
-            # Show dialog and get result
-            if not dialog.exec():
-                # User cancelled, stay in dialog
-                return
-            
-            selected_files = dialog.selectedFiles()
-            if not selected_files:
-                return
-            
-            base_path = selected_files[0]
             self.session_path = base_path
             # Save this directory for next time
             settings.set_last_session_directory(base_path)

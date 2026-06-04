@@ -2382,6 +2382,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         session_menu.addSeparator()
         
+        # Set Default Session Directory
+        set_dir_action = QtGui.QAction("Set Default Session &Directory…", self)
+        set_dir_action.setToolTip(
+            "Change the default directory where new sessions are created"
+        )
+        set_dir_action.triggered.connect(self._set_default_session_directory)
+        session_menu.addAction(set_dir_action)
+        
+        session_menu.addSeparator()
+        
         # Auto-Export Toggle
         self.auto_export_action = QtGui.QAction("&Auto-Export Enabled", self)
         self.auto_export_action.setCheckable(True)
@@ -2542,39 +2552,51 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     
     def _start_new_session(self):
         """
-        Start a new session with folder selection dialog.
+        Start a new session.
         
-        Shows a folder selection dialog, then lets the user customize
-        the session folder name before creating it.
+        Uses the saved default directory if one is set; otherwise shows a
+        folder-selection dialog (first-run behaviour). The user can always
+        change the default directory via Session → Set Default Session Directory…
         """
-        # Show folder selection dialog
-        # Use Qt dialog (not native) to prevent hanging on some systems
-        base_path = QtWidgets.QFileDialog.getExistingDirectory(
-            self,
-            "Select Session Location",
-            "",  # Start in current directory
-            QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
-        )
+        from . import settings as periscope_settings
+        import os
         
-        if not base_path:
-            return
+        last_dir = periscope_settings.get_last_session_directory()
+        
+        if last_dir and os.path.isdir(last_dir):
+            # Happy path: use the saved directory without prompting
+            base_path = last_dir
+        else:
+            # No saved directory yet — ask the user once, then remember it
+            start_dir = last_dir if last_dir else ""
+            base_path = QtWidgets.QFileDialog.getExistingDirectory(
+                self,
+                "Select Session Location (will be remembered for future sessions)",
+                start_dir,
+                QtWidgets.QFileDialog.Option.ShowDirsOnly
+                | QtWidgets.QFileDialog.Option.DontUseNativeDialog,
+            )
+            if not base_path:
+                return
+            periscope_settings.set_last_session_directory(base_path)
         
         # Generate default folder name with timestamp
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         default_name = f"session_{timestamp}"
         
-        # Let user rename
+        # Let user set the session folder name
         folder_name, ok = QtWidgets.QInputDialog.getText(
-            self, 
+            self,
             "Session Name",
-            "Enter session folder name:",
+            f"Creating session in:\n{base_path}\n\nEnter session folder name:",
             QtWidgets.QLineEdit.EchoMode.Normal,
-            default_name
+            default_name,
         )
         
         if ok and folder_name:
             try:
                 self.session_manager.start_session(base_path, folder_name)
+                periscope_settings.set_last_session_directory(base_path)
                 
                 # Show the session browser dock
                 if hasattr(self, 'session_browser_dock'):
@@ -2585,6 +2607,36 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     "Session Error",
                     f"Failed to start session:\n{str(e)}"
                 )
+    
+    def _set_default_session_directory(self):
+        """
+        Open a folder picker to change the default directory for new sessions.
+        
+        The chosen directory is saved persistently and used automatically the
+        next time the user starts a new session (no folder-picker prompt shown).
+        """
+        from . import settings as periscope_settings
+        import os
+        
+        current = periscope_settings.get_last_session_directory()
+        
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select Default Session Directory",
+            current if (current and os.path.isdir(current)) else "",
+            QtWidgets.QFileDialog.Option.ShowDirsOnly
+            | QtWidgets.QFileDialog.Option.DontUseNativeDialog,
+        )
+        
+        if path:
+            periscope_settings.set_last_session_directory(path)
+            QtWidgets.QMessageBox.information(
+                self,
+                "Default Directory Set",
+                f"New sessions will be created in:\n{path}\n\n"
+                "You can change this at any time via\n"
+                "Session → Set Default Session Directory…",
+            )
     
     def _load_session(self):
         """

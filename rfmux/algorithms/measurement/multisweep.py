@@ -15,8 +15,6 @@ Returns a ``(res_info_dict, multisweep_data_dict)`` tuple where:
   time together with the actual sweep data arrays.
 """
 
-# TODO the plain ms algorithm should also return sweep amplitude in real units
-
 import numpy as np
 import random
 import string
@@ -25,7 +23,7 @@ import warnings
 
 from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
-from rfmux.core.transferfunctions import convert_roc_to_volts
+from rfmux.core.transferfunctions import convert_roc_to_volts, convert_dac_normalized_to_dbm
 
 
 # ---------------------------------------------------------------------------
@@ -151,8 +149,11 @@ async def multisweep(
                   "bias_amplitude":         float,
                   "channel_number":         int,
                   # Actual values used for this sweep call
-                  "sweep_center_frequency": float,   # = bias_frequency by default
+                  "sweep_center_frequency":     float,  # = bias_frequency by default
                   "sweep_amplitude_normalized": float,  # may differ from bias_amplitude
+                  "sweep_amplitude_dbm":        float,  # same amplitude in dBm at the
+                                                        # DAC output; None if DAC scale
+                                                        # could not be queried
                   # Sweep data
                   "sweep_direction":        str,
                   "frequencies":            np.ndarray,   # Hz
@@ -291,6 +292,12 @@ async def multisweep(
     if not cfs:
         warnings.warn("No center frequencies provided. Returning empty results.")
         return res_info_dict, {}
+
+    # Query the hardware DAC full-scale so we can report amplitude in dBm.
+    try:
+        dac_scale_dbm = await crs.get_dac_scale('DBM', module=module)
+    except Exception:
+        dac_scale_dbm = None
 
     dec = await crs.get_decimation()
     max_channels = 128 if dec <= 3 else 1024
@@ -448,6 +455,10 @@ async def multisweep(
             # --- Actual values used for this sweep call ---
             "sweep_center_frequency":     code_to_cf[code],   # = bias_frequency by default
             "sweep_amplitude_normalized": code_to_amp[code],  # may differ from bias_amplitude
+            "sweep_amplitude_dbm": (
+                convert_dac_normalized_to_dbm(code_to_amp[code], dac_scale_dbm)
+                if dac_scale_dbm is not None else None
+            ),
             # --- Sweep data ---
             "sweep_direction":        sweep_direction,
             "frequencies":            resonance_data[code]["frequencies"],

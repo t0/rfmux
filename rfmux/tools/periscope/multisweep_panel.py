@@ -151,6 +151,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.current_batch = 0
 
         self.batch_size = 8
+
+        # Sort order for aggregate panel grids: "frequency" (default) or "name"
+        self.sort_order = "frequency"
         
         # Storage for sweep grid plots - cached to avoid recreating widgets
         self.mag_sweep_plots_cache = []        # List of plot widgets for magnitude tab
@@ -366,6 +369,22 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.batch_update_btn.setToolTip("Apply new batch size and regenerate plots")
         self.batch_update_btn.clicked.connect(self._apply_batch_size)
         row2_layout.addWidget(self.batch_update_btn)
+
+        # Sort order selector — placed next to "Subplots" controls
+        self.sort_order_label = QtWidgets.QLabel("Sort:")
+        row2_layout.addWidget(self.sort_order_label)
+
+        self.sort_order_combo = QtWidgets.QComboBox()
+        self.sort_order_combo.addItem("By Frequency", "frequency")
+        self.sort_order_combo.addItem("By Name", "name")
+        self.sort_order_combo.setCurrentIndex(0)   # Default: by frequency
+        self.sort_order_combo.setToolTip(
+            "Sort order for resonator subplots in the aggregate panel pages.\n"
+            "'By Frequency' orders subplots by ascending central frequency.\n"
+            "'By Name' uses alphabetical ordering by resonator code."
+        )
+        self.sort_order_combo.currentIndexChanged.connect(self._on_sort_order_changed)
+        row2_layout.addWidget(self.sort_order_combo)
 
         # Spacer to push view toggles to the right
         row2_layout.addStretch(1)
@@ -831,6 +850,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.batch_size_label.setVisible(is_sweep_tab)
         self.batch_size_spin.setVisible(is_sweep_tab)
         self.batch_update_btn.setVisible(is_sweep_tab)
+
+        # Sort order selector is only relevant for the aggregate grid tabs
+        self.sort_order_label.setVisible(is_sweep_tab)
+        self.sort_order_combo.setVisible(is_sweep_tab)
         
         # When switching to the Fit Results tab, refresh the amplitude index dropdown
         # so it reflects whatever fit data is currently present.
@@ -840,6 +863,54 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Redraw the active tab's plots if we have data
         if self.results_by_detector:
             self._redraw_plots()
+
+    def _on_sort_order_changed(self, index: int):
+        """Slot for the sort order combo box.
+
+        Updates ``self.sort_order``, resets to the first batch (so the
+        newly-ordered pages start from page 1), and triggers a full redraw of
+        the currently visible aggregate grid tab.
+        """
+        self.sort_order = self.sort_order_combo.currentData()
+        self.current_batch = 0  # Reset to first page after re-sorting
+        self._redraw_plots()
+
+    def _get_sorted_detector_ids(self, detector_ids_iterable, freq_lookup_func) -> list:
+        """Return detector IDs ordered according to ``self.sort_order``.
+
+        Parameters
+        ----------
+        detector_ids_iterable:
+            Iterable of detector ID keys (strings or integers).
+        freq_lookup_func:
+            Callable ``(detector_id) -> float | None`` — returns the central
+            frequency in Hz for the given detector, or ``None`` when the
+            frequency is not yet known.  Detectors with no frequency are
+            appended at the end, sorted alphabetically among themselves.
+
+        Returns
+        -------
+        list
+            Detector IDs in the chosen order.
+        """
+        ids = list(detector_ids_iterable)
+
+        if self.sort_order == "name":
+            return sorted(ids, key=lambda k: str(k))
+
+        # sort_order == "frequency": ascending by central frequency
+        with_freq = []
+        without_freq = []
+        for det_id in ids:
+            freq = freq_lookup_func(det_id)
+            if freq is not None:
+                with_freq.append((float(freq), det_id))
+            else:
+                without_freq.append(det_id)
+
+        with_freq.sort(key=lambda t: t[0])
+        without_freq.sort(key=lambda k: str(k))
+        return [det_id for _, det_id in with_freq] + without_freq
     
     def _apply_batch_size(self):
         """Apply the batch size from the spin box and regenerate plots."""
@@ -1315,6 +1386,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 if 'iq_rotation_angle' in info
             } or None  # Return None rather than empty dict
 
+        # Compute detector order according to the current sort preference.
+        # For the sweep grid the center frequency is stored inside detector_data.
+        def _sweep_center_freq(det_id):
+            det_d = detector_data.get(det_id, {})
+            if not det_d:
+                return None
+            first_entry = next(iter(det_d.values()), {})
+            return first_entry.get('original_center_frequency')
+
+        sorted_ids = self._get_sorted_detector_ids(detector_data.keys(), _sweep_center_freq)
+
         # Update the grid with widget caching
         update_sweep_grid(
             grid_layout=grid_layout,
@@ -1334,6 +1416,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             show_legend=use_legend,
             res_info_dict=self.res_info_dict if show_bias_info else None,
             iq_rotation_angles=iq_rotation_angles_for_grid,
+            sorted_detector_ids=sorted_ids,
         )
         
         # Install double-click event filter on grid plot widgets
@@ -3108,6 +3191,21 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if hasattr(self, '_derivative_scroll'):
             self._derivative_scroll.show()
 
+        # Compute detector order: use center frequency from the main sweep data.
+        def _deriv_center_freq(det_id):
+            iter_dict = self.results_by_detector.get(det_id, {})
+            if not iter_dict:
+                return None
+            first_entry = next(iter(iter_dict.values()))
+            return (
+                first_entry.get('original_center_frequency')
+                or first_entry.get('sweep_center_frequency')
+            )
+
+        sorted_ids = self._get_sorted_detector_ids(
+            bias_finding_by_detector.keys(), _deriv_center_freq
+        )
+
         update_derivative_grid(
             grid_layout=self.derivative_grid,
             bias_finding_by_detector=bias_finding_by_detector,
@@ -3120,6 +3218,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             widget_cache=self.derivative_plots_cache,
             unit_mode=self.unit_mode,
             dac_scale=self.dac_scales.get(self.active_module_for_dac),
+            sorted_detector_ids=sorted_ids,
         )
 
         # Install double-click event filter so clicking a derivative subplot
@@ -3244,6 +3343,21 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         show_nonlinear = self._fit_show_nonlinear_cb.isChecked()
         dac_scale = self.dac_scales.get(self.active_module_for_dac)
 
+        # Compute detector order for the Fit Results grid.
+        def _fit_center_freq(det_id):
+            iter_dict = self.results_by_detector.get(det_id, {})
+            if not iter_dict:
+                return None
+            first_entry = next(iter(iter_dict.values()))
+            return (
+                first_entry.get('original_center_frequency')
+                or first_entry.get('sweep_center_frequency')
+            )
+
+        sorted_ids = self._get_sorted_detector_ids(
+            self.results_by_detector.keys(), _fit_center_freq
+        )
+
         update_fit_results_grid(
             grid_layout=self.fit_results_grid,
             data_by_detector=self.results_by_detector,
@@ -3262,6 +3376,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             batch_label=self.batch_info_label,
             widget_cache=self.fit_results_plots_cache,
             dac_scale=dac_scale,
+            sorted_detector_ids=sorted_ids,
         )
 
         # Install double-click event filter and apply zoom box mode

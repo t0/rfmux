@@ -21,7 +21,7 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
                       amplitude_to_color, dark_mode, unit_mode='dbm', normalize=False,
                       prev_btn=None, next_btn=None, batch_label=None, widget_cache=None,
                       dac_scale=None, show_legend=True, res_info_dict=None,
-                      iq_rotation_angles=None):
+                      iq_rotation_angles=None, sorted_detector_ids=None):
     """
     Update a grid layout with per-detector sweep plots.
 
@@ -48,6 +48,10 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
             provided and ``plot_type == 'iq'``, the IQ data for each detector is
             rotated by the corresponding angle before plotting (on-the-fly; raw
             data is never modified).
+        sorted_detector_ids: Optional pre-sorted list of detector IDs.  When
+            provided this list is used directly instead of re-sorting the keys
+            of ``data_by_detector`` alphabetically.  Pass this to apply a
+            custom ordering such as sort-by-central-frequency.
     """
     if not data_by_detector:
         return
@@ -56,8 +60,8 @@ def update_sweep_grid(grid_layout, data_by_detector, plot_type, current_batch, b
     while grid_layout.count():
         grid_layout.takeAt(0)
 
-    # Get sorted detector IDs
-    detector_ids = sorted(data_by_detector.keys())
+    # Use caller-supplied ordering when available; fall back to alphabetical sort
+    detector_ids = sorted_detector_ids if sorted_detector_ids is not None else sorted(data_by_detector.keys())
 
     # Calculate batch range
     start_idx = current_batch * batch_size
@@ -528,6 +532,7 @@ def update_derivative_grid(
     widget_cache=None,
     unit_mode='dbm',
     dac_scale=None,
+    sorted_detector_ids=None,
 ):
     """
     Update a grid layout with per-detector IQ-derivative plots.
@@ -562,6 +567,10 @@ def update_derivative_grid(
     dac_scale : float or None
         DAC full-scale in dBm used by :func:`UnitConverter.format_probe_label`
         to convert raw counts to physical units.
+    sorted_detector_ids : list or None
+        Optional pre-sorted list of detector IDs.  When provided this list is
+        used directly instead of re-sorting the keys of
+        ``bias_finding_by_detector`` alphabetically.
     """
     if not bias_finding_by_detector:
         return
@@ -570,7 +579,7 @@ def update_derivative_grid(
     while grid_layout.count():
         grid_layout.takeAt(0)
 
-    detector_ids = sorted(bias_finding_by_detector.keys())
+    detector_ids = sorted_detector_ids if sorted_detector_ids is not None else sorted(bias_finding_by_detector.keys())
 
     start_idx = current_batch * batch_size
     end_idx = min(start_idx + batch_size, len(detector_ids))
@@ -829,6 +838,7 @@ def update_fit_results_grid(
     batch_label=None,
     widget_cache=None,
     dac_scale=None,
+    sorted_detector_ids=None,
 ):
     """
     Update a grid layout with per-detector fit-result plots.
@@ -875,6 +885,10 @@ def update_fit_results_grid(
         Reusable ``pg.PlotWidget`` instances.
     dac_scale : float or None
         DAC full-scale in dBm (for subplot title amplitude labels).
+    sorted_detector_ids : list or None
+        Optional pre-sorted list of detector IDs.  When provided this list is
+        used directly instead of re-sorting the keys of ``data_by_detector``
+        alphabetically.
     """
     if not data_by_detector:
         return
@@ -883,7 +897,7 @@ def update_fit_results_grid(
     while grid_layout.count():
         grid_layout.takeAt(0)
 
-    detector_ids = sorted(data_by_detector.keys())
+    detector_ids = sorted_detector_ids if sorted_detector_ids is not None else sorted(data_by_detector.keys())
 
     start_idx = current_batch * batch_size
     end_idx = min(start_idx + batch_size, len(detector_ids))

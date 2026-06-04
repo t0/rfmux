@@ -26,10 +26,14 @@ import numpy as np
 from rfmux.streamer import (
     ReadoutPacketReceiver,
     PFBPacketReceiver,
+    ChannelStreamPacketReceiver,
     get_multicast_socket,
     STREAMER_PORT,
     PFB_STREAMER_PORT,
+    CHANNEL_STREAM_PORT,
+    CHANNEL_STREAM_MULTICAST_GROUP,
     PFBPACKET_NSAMP_MAX,
+    CHANNEL_STREAM_MAX_SAMPLES_PER_PACKET,
     SS_PER_SECOND,
 )
 
@@ -253,6 +257,9 @@ Examples:
   # Parse PFB packets instead of readout packets
   %(prog)s -H rfmux0033.local --pfb -d ~/data/pfb.dirfile
 
+  # Parse channel-stream packets (100 GbE high-rate path)
+  %(prog)s -i ens1 --channel-stream -d ~/data/cs.dirfile
+
   # Write to dirfile using interface IP directly
   %(prog)s --interface-ip 192.168.1.100 -d ~/data/test.dirfile
 
@@ -283,10 +290,16 @@ Examples:
         help="Local interface IP address for multicast (receives from all sources)",
     )
 
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--pfb",
         action="store_true",
         help="Parse PFB packets instead of readout packets (port 9877)",
+    )
+    mode_group.add_argument(
+        "--channel-stream",
+        action="store_true",
+        help="Parse channel-stream packets (100 GbE high-rate path, port 9878)",
     )
 
     parser.add_argument(
@@ -382,6 +395,8 @@ Examples:
     # Dispatch to appropriate mode
     if args.pfb:
         return main_pfb(args, serials, modules, channels, interface_ip, board_stats)
+    elif args.channel_stream:
+        return main_channel_stream(args, serials, modules, channels, interface_ip, board_stats)
     else:
         return main_readout(args, serials, modules, channels, interface_ip, board_stats)
 
@@ -596,7 +611,6 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
 
     # Main receive loop
     chunk_size = 256
-    receiver = None
 
     # Setup packet receiver with large buffer to reduce drops
     with get_multicast_socket(
@@ -886,6 +900,242 @@ def setup_pfb_dirfile_for_module(
     )
 
     # Flush metadata so dirfile can be read immediately
+    df.metaflush()
+
+
+def main_channel_stream(args, serials, modules, channels, interface_ip, board_stats):
+    """Main loop for channel-stream packet parsing.
+
+    Channel-stream packets carry samples_per_packet int16 I/Q pairs, a
+    software-supplied per-packet sample count whose value depends on
+    pipeline_enable and the channel-enable LUT. The packet doesn't carry the
+    pipeline -> channel mapping -- that's a snapshot of firmware's
+    channel_enable_lut, identified by the per-frame `tag` field. The parser
+    records the packet bytes faithfully and emits layout fields
+    (pipe_snapshot, k, sample_trunc, tag, samples_per_packet) per frame so
+    downstream analysis code can reconstruct per-pipeline / per-channel
+    views by joining against an external LUT snapshot.
+
+    --channel filtering is ignored in this mode (the mapping is external).
+    """
+    if args.channel:
+        print(
+            "Warning: --channel is ignored in channel-stream mode "
+            "(pipeline -> channel mapping is external, keyed by tag).",
+            file=sys.stderr,
+        )
+
+    def signal_handler(signum, frame):
+        print("\n=== Receiver Statistics ===", file=sys.stderr)
+        if args.drop_stats:
+            for serial, bstats in board_stats.items():
+                for module, mstats in bstats.module_stats.items():
+                    print(
+                        f"Serial {serial} module {module+1}: "
+                        f"{mstats.packets_seen} packets seen "
+                        f"({mstats.packets_dropped} dropped)",
+                        file=sys.stderr,
+                    )
+        stats = receiver.get_stats()
+        print(
+            f"Total packets received: {stats.total_packets_received}\n"
+            f"Total bytes received: {stats.total_bytes_received}\n"
+            f"Invalid packets: {stats.invalid_packets}\n"
+            f"Wrong magic: {stats.wrong_magic}",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+
+    if args.dirfile:
+        import pygetdata as gd
+        main_dirfile = gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
+    else:
+        main_dirfile = None
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    chunk_size = 256
+
+    with get_multicast_socket(
+        crs_hostname=args.hostname,
+        port=CHANNEL_STREAM_PORT,
+        interface=interface_ip,
+        buffer_size=67108864,
+        multicast_group=CHANNEL_STREAM_MULTICAST_GROUP,
+    ) as sock:
+        receiver = ChannelStreamPacketReceiver(sock, reorder_window=args.reorder_window)
+
+        while True:
+            receiver.receive_batch(chunk_size, timeout_ms=1000)
+
+            for serial, module, queue in receiver.get_all_queues():
+                if serials and serial not in serials:
+                    continue
+                if not any(module in r for r in modules):
+                    continue
+
+                bstats = board_stats[serial]
+                mstats = bstats.module_stats[module]
+
+                # When the only thing we care about is drop-stats, skip
+                # the full to_python() materialization -- it allocates and
+                # copies all K*128*2 int16 samples per packet. packet.seq()
+                # gives us what we need without that overhead. Per-gap
+                # print() is also a per-packet syscall storm we don't want
+                # to pay during high-rate stress tests; aggregate instead.
+                stats_only = args.drop_stats and not (args.text or args.dirfile)
+
+                while packet := queue.try_pop():
+                    if stats_only:
+                        seq = packet.seq()
+                        mstats.packets_seen += 1
+                        if args.num_frames and mstats.packets_seen > args.num_frames:
+                            signal_handler(signal.SIGTERM, None)
+                        if mstats.last_seq is not None:
+                            expected_seq = (mstats.last_seq + 1) & 0xFFFFFFFF
+                            if seq != expected_seq:
+                                gap = (seq - expected_seq) & 0xFFFFFFFF
+                                mstats.packets_dropped += gap
+                        mstats.last_seq = seq
+                        continue
+
+                    pkt = packet.to_python()
+
+                    mstats.packets_seen += 1
+
+                    if args.num_frames and mstats.packets_seen > args.num_frames:
+                        signal_handler(signal.SIGTERM, None)
+
+                    if args.drop_stats and mstats.last_seq is not None:
+                        expected_seq = (mstats.last_seq + 1) & 0xFFFFFFFF
+                        if pkt.seq != expected_seq:
+                            gap = (pkt.seq - expected_seq) & 0xFFFFFFFF
+                            print(
+                                f"Dropped packet: module {module+1}, "
+                                f"seq {mstats.last_seq:08x} -> {pkt.seq:08x} "
+                                f"({gap} lost)"
+                            )
+                            mstats.packets_dropped += gap
+                    mstats.last_seq = pkt.seq
+
+                    if args.text:
+                        trunc_names = {0: "LOW", 1: "MID", 2: "HIGH"}
+                        trunc_str = trunc_names.get(pkt.sample_trunc, f"UNK({pkt.sample_trunc})")
+
+                        print(
+                            f"ChannelStreamPacket(serial={pkt.serial} module={pkt.module} "
+                            f"seq={pkt.seq} k={pkt.k} pipe_snapshot=0x{pkt.pipe_snapshot:02x} "
+                            f"trunc={trunc_str} tag=0x{pkt.tag:04x} version={pkt.version})"
+                        )
+
+                        ts = pkt.ts
+                        print(
+                            f"  Timestamp(source={ts.source} y={ts.y} d={ts.d} "
+                            f"h:m:s={ts.h}:{ts.m}:{ts.s} ss={ts.ss} "
+                            f"sbs={ts.sbs} c={ts.c & 0x1fffffff} "
+                            f"recent={'Y' if ts.recent else 'N'})"
+                        )
+
+                        # Show the first few samples in wire order.
+                        # Per-pipeline / per-channel decoding requires the
+                        # external LUT snapshot keyed by `tag`; that's not
+                        # the parser's job.
+                        for i in range(min(8, pkt.samples_per_packet)):
+                            sample = pkt[i]
+                            print(
+                                f"  [{i:4d}] i={sample.real:.3f} "
+                                f"q={sample.imag:.3f} abs={abs(sample):.3f}"
+                            )
+
+                    if args.dirfile:
+                        if bstats.dirfile is None:
+                            setup_channel_stream_dirfile_for_board(
+                                bstats, serial, main_dirfile
+                            )
+                        if mstats.dirfile_fields is None:
+                            setup_channel_stream_dirfile_for_module(
+                                bstats, mstats, module
+                            )
+
+                        df = bstats.dirfile
+                        fields = mstats.dirfile_fields
+                        frame = mstats.dirfile_frame
+
+                        ts = pkt.ts
+                        df.putdata(fields["ts_sbs"], np.array([ts.sbs], dtype=np.int32), first_frame=frame)
+                        df.putdata(fields["ts_ss"], np.array([ts.ss], dtype=np.int32), first_frame=frame)
+
+                        df.putdata(fields["pipe_snapshot"], np.array([pkt.pipe_snapshot], dtype=np.uint8), first_frame=frame)
+
+                        # Raw int16 I/Q payload: write only the samples this
+                        # packet carries (pkt.samples_per_packet * 2 int16s).
+                        # The RAW field's spf is sized to the maximum; unused
+                        # trailing positions in the frame are sparse-file
+                        # zeros (see getdata raw.c).
+                        df.putdata(fields["raw"], pkt.raw_samples, first_frame=frame)
+
+                        mstats.dirfile_frame += 1
+
+
+def setup_channel_stream_dirfile_for_board(board_stats, serial, main_dirfile):
+    """Create a subdirfile for a specific CRS board (channel-stream mode)."""
+    import pygetdata as gd
+
+    board_ns = f"serial_{serial:04d}"
+    board_path = f"{main_dirfile.name}/{board_ns}"
+
+    board_stats.dirfile = gd.dirfile(
+        board_path, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT
+    )
+
+    main_dirfile.include(f"{board_ns}/format", 0, 0, board_ns)
+    main_dirfile.metaflush()
+
+
+def setup_channel_stream_dirfile_for_module(board_stats, module_stats, module):
+    """Create dirfile fields for a specific module (channel-stream mode).
+
+    Layout: one RAW field per packet for the int16 I/Q payload (spf sized
+    to the maximum samples_per_packet; per-packet writes leave unused
+    trailing positions as sparse-file zeros), plus pipe_snapshot so
+    downstream tools know which pipelines were active.
+    """
+    import pygetdata as gd
+
+    df = board_stats.dirfile
+
+    raw_field = f"m{module+1:02d}_cs_raw16"
+    pipe_field = f"m{module+1:02d}_cs_pipe_snapshot"
+    ts_sbs_field = f"m{module+1:02d}_ts_sbs"
+    ts_ss_field = f"m{module+1:02d}_ts_ss"
+
+    module_stats.dirfile_fields = {
+        "raw": raw_field,
+        "pipe_snapshot": pipe_field,
+        "ts_sbs": ts_sbs_field,
+        "ts_ss": ts_ss_field,
+    }
+
+    df.add(gd.entry(gd.RAW_ENTRY, ts_sbs_field, 0, (gd.INT32, 1)))
+    df.add(gd.entry(gd.RAW_ENTRY, ts_ss_field, 0, (gd.INT32, 1)))
+    df.add(gd.entry(gd.RAW_ENTRY, pipe_field, 0, (gd.UINT8, 1)))
+
+    # Raw int16 payload: spf sized to the maximum samples_per_packet
+    # (CHANNEL_STREAM_MAX_SAMPLES_PER_PACKET I/Q pairs = 2*max int16s).
+    # Per-packet writes leave the tail of each frame as sparse-file zeros.
+    df.add(gd.entry(gd.RAW_ENTRY, raw_field, 0,
+                    (gd.INT16, CHANNEL_STREAM_MAX_SAMPLES_PER_PACKET * 2)))
+
+    timebase_field = f"m{module+1:02d}_timebase"
+    df.add(
+        gd.entry(
+            gd.LINCOM_ENTRY,
+            timebase_field,
+            0,
+            ((ts_sbs_field, ts_ss_field), (1.0, 1 / SS_PER_SECOND), (0, 0)),
+        )
+    )
+
     df.metaflush()
 
 

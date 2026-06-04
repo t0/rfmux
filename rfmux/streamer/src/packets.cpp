@@ -233,6 +233,63 @@ namespace packets {
 		return py::bytes(buffer.data(), buffer.size());
 	}
 
+	ChannelStreamPacket ChannelStreamPacket::from_bytes(const void* data, size_t len) {
+		if (len < sizeof(channel_stream_packet_header))
+			throw std::runtime_error("ChannelStream packet too small");
+
+		ChannelStreamPacket pkt;
+
+		// Copy header fields directly into base class (includes ts).
+		static_cast<channel_stream_packet_header&>(pkt) =
+			*static_cast<const channel_stream_packet_header*>(data);
+		if (pkt.magic != CHANNEL_STREAM_PACKET_MAGIC)
+			throw std::runtime_error("Invalid channel-stream packet magic");
+		if (pkt.version != CHANNEL_STREAM_PACKET_VERSION)
+			throw std::runtime_error("Unsupported channel-stream packet version");
+
+		int k = pkt.get_k();
+		if (k < 1 || k > CHANNEL_STREAM_NUM_PIPELINES)
+			throw std::runtime_error("ChannelStream K out of range");
+
+		// Bound samples_per_packet before any size-derived arithmetic so a
+		// hostile sender can't drive an oversized allocation or OOB read.
+		if (pkt.samples_per_packet == 0 ||
+		    pkt.samples_per_packet > CHANNEL_STREAM_MAX_SAMPLES_PER_PACKET)
+			throw std::runtime_error("ChannelStream samples_per_packet out of range");
+
+		size_t expected_size = CHANNEL_STREAM_PACKET_SIZE(pkt.samples_per_packet);
+		if (len != expected_size)
+			throw std::runtime_error("ChannelStream packet size mismatch");
+
+		// Copy raw int16 I/Q pairs directly (no widening).
+		int num_iq = pkt.samples_per_packet * 2;
+		const auto* samples_ptr = reinterpret_cast<const int16_t*>(
+			static_cast<const char*>(data) + sizeof(channel_stream_packet_header)
+		);
+		pkt.raw_samples_.assign(samples_ptr, samples_ptr + num_iq);
+
+		return pkt;
+	}
+
+	py::bytes ChannelStreamPacket::to_bytes() const {
+		size_t packet_size = CHANNEL_STREAM_PACKET_SIZE(samples_per_packet);
+		int num_iq = samples_per_packet * 2;
+
+		std::vector<char> buffer(packet_size);
+
+		// Write header (includes ts).
+		std::memcpy(buffer.data(), static_cast<const channel_stream_packet_header*>(this),
+			sizeof(channel_stream_packet_header));
+
+		// Write raw int16 samples directly
+		auto* samples_ptr = reinterpret_cast<int16_t*>(buffer.data() + sizeof(channel_stream_packet_header));
+		size_t n = (std::min)(raw_samples_.size(), static_cast<size_t>(num_iq));
+		std::memcpy(samples_ptr, raw_samples_.data(), n * sizeof(int16_t));
+		std::memset(samples_ptr + n, 0, (num_iq - n) * sizeof(int16_t));
+
+		return py::bytes(buffer.data(), buffer.size());
+	}
+
 	std::optional<Packet> PacketQueue::pop(std::optional<int> timeout_ms) {
 		std::unique_lock<std::mutex> lock(mutex_);
 
@@ -321,7 +378,9 @@ namespace packets {
 		const size_t MAX_PACKET_SIZE = type_->max_size();
 		size_t packets_received = 0;
 #ifdef __linux__
-		// Linux: use recvmmsg for batch reception
+		// Linux: use recvmmsg for batch reception. Each msg's iovec points
+		// at its own pre-sized std::vector<char>; after receive, the chosen
+		// vector is std::move'd directly into the Packet (no second copy).
 		std::vector<struct mmsghdr> msgs(batch_size);
 		std::vector<struct iovec> iovecs(batch_size);
 		std::vector<std::vector<char>> buffers(batch_size);
@@ -376,13 +435,18 @@ namespace packets {
 				stats_.total_bytes_received += len;
 			}
 
-			// Copy buffer and process
-			std::vector<char> data(buffers[i].begin(), buffers[i].begin() + len);
-			process_packet(std::move(data));
+			// Hand the receive buffer directly to the Packet. Shrink to the
+			// real length first so Packet::size() and downstream parsers see
+			// the wire length, not MAX_PACKET_SIZE. resize() shrinks in place
+			// without freeing capacity.
+			buffers[i].resize(len);
+			process_packet(std::move(buffers[i]));
 		}
 #else
-		// Non-Linux: use select + recv
-		std::vector<char> buffer(MAX_PACKET_SIZE);
+		// Non-Linux: use select + recv. One vector is allocated per accepted
+		// packet (sized to the wire length, not MAX_PACKET_SIZE) and moved
+		// directly into process_packet.
+		std::vector<char> scratch(MAX_PACKET_SIZE);
 
 		for (size_t i = 0; i < batch_size; i++) {
 			// Setup select for timeout
@@ -402,7 +466,7 @@ namespace packets {
 			if (ready <= 0)
 				break;  // Timeout or error
 
-			int n = recv(sockfd_, buffer.data(), MAX_PACKET_SIZE, 0);
+			int n = recv(sockfd_, scratch.data(), MAX_PACKET_SIZE, 0);
 			if (n < 0) {
 #ifdef _WIN32
 				int err = WSAGetLastError();
@@ -422,7 +486,7 @@ namespace packets {
 			size_t len = static_cast<size_t>(n);
 
 			// Validate
-			if (!type_->validate(buffer.data(), len)) {
+			if (!type_->validate(scratch.data(), len)) {
 				std::lock_guard<std::mutex> lock(stats_mutex_);
 				stats_.invalid_packets++;
 				continue;
@@ -437,8 +501,7 @@ namespace packets {
 
 			packets_received++;
 
-			// Copy and process
-			std::vector<char> data(buffer.begin(), buffer.begin() + len);
+			std::vector<char> data(scratch.begin(), scratch.begin() + len);
 			process_packet(std::move(data));
 		}
 #endif
@@ -678,4 +741,68 @@ namespace packets {
 
 	PFBPacketReceiver::PFBPacketReceiver(py::object socket, size_t reorder_window, size_t queue_max_size, size_t flush_threshold)
 		: PacketReceiver(std::make_shared<PFBPacketTypeImpl>(), socket, reorder_window, queue_max_size, flush_threshold) {}
+
+	class ChannelStreamPacketTypeImpl : public PacketType {
+	public:
+		uint32_t magic() const override { return CHANNEL_STREAM_PACKET_MAGIC; }
+		int port() const override { return CHANNEL_STREAM_PORT; }
+		size_t max_size() const override { return MAX_CHANNEL_STREAM_PACKET_SIZE; }
+
+		size_t packet_size(const void* data, size_t available) const override {
+			if (available < sizeof(channel_stream_packet_header))
+				return 0;
+
+			const auto* hdr = static_cast<const channel_stream_packet_header*>(data);
+			// Reject out-of-range samples_per_packet before deriving a size;
+			// otherwise a forged header could request a huge allocation.
+			if (hdr->samples_per_packet == 0 ||
+			    hdr->samples_per_packet > CHANNEL_STREAM_MAX_SAMPLES_PER_PACKET)
+				throw std::runtime_error("ChannelStream samples_per_packet out of range");
+			return CHANNEL_STREAM_PACKET_SIZE(hdr->samples_per_packet);
+		}
+
+		bool validate(const void* data, size_t len) const override {
+			if (len < sizeof(channel_stream_packet_header))
+				return false;
+
+			const auto* hdr = static_cast<const channel_stream_packet_header*>(data);
+			if (hdr->magic != CHANNEL_STREAM_PACKET_MAGIC)
+				return false;
+			if (hdr->version != CHANNEL_STREAM_PACKET_VERSION)
+				return false;
+
+			try {
+				if (len != packet_size(data, len))
+					return false;
+			} catch (...) {
+				return false;
+			}
+
+			return true;
+		}
+
+		uint16_t get_serial(const void* data) const override {
+			return static_cast<const channel_stream_packet_header*>(data)->serial;
+		}
+
+		uint8_t get_module(const void* data) const override {
+			return static_cast<const channel_stream_packet_header*>(data)->module;
+		}
+
+		uint32_t get_seq(const void* data) const override {
+			return static_cast<const channel_stream_packet_header*>(data)->seq;
+		}
+
+		Timestamp get_timestamp(const void* data, size_t /*len*/) const override {
+			const auto* hdr = static_cast<const channel_stream_packet_header*>(data);
+			return Timestamp(hdr->ts);
+		}
+
+		py::object to_python(const void* data, size_t len) const override {
+			return py::cast(ChannelStreamPacket::from_bytes(data, len));
+		}
+	};
+
+	ChannelStreamPacketReceiver::ChannelStreamPacketReceiver(py::object socket, size_t reorder_window, size_t queue_max_size, size_t flush_threshold)
+		: PacketReceiver(std::make_shared<ChannelStreamPacketTypeImpl>(), socket, reorder_window, queue_max_size, flush_threshold) {}
 }

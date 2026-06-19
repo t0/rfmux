@@ -194,6 +194,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self._setup_toolbar(main_layout)
         self._setup_progress_bar(main_layout)
+        self._setup_panel_title(main_layout)
         self._setup_plot_area(main_layout)
 
 
@@ -1062,6 +1063,51 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         progress_layout.addWidget(self.current_amp_label)
         
         layout.addWidget(self.progress_group)
+
+    def _make_panel_title(self) -> str:
+        """Build a panel-level title string for display above the plot tabs.
+
+        Incorporates the module number, the measurement type (Multisweep),
+        and the measurement filename when one has been set.
+
+        Returns:
+            A string such as ``"Module 2 — Multisweep [my_sweep.pkl]"`` when a
+            measurement name is available, or ``"Module 2 — Multisweep"`` when
+            no name has been set.
+        """
+        base = f"Module {self.target_module} — Multisweep"
+        name = self.initial_params.get('measurement_name')
+        if name:
+            return f"{base} [{name}.pkl]"
+        return base
+
+    def _setup_panel_title(self, layout):
+        """Add a styled title label above the plot tabs.
+
+        Creates ``self.panel_title_label`` — a bold, centred ``QLabel`` that
+        is always visible regardless of which tab is active.  The text is
+        built from :meth:`_make_panel_title` and can be refreshed later by
+        calling :meth:`_refresh_panel_title`.
+
+        Args:
+            layout: The ``QVBoxLayout`` to append the label to.
+        """
+        self.panel_title_label = QtWidgets.QLabel(self._make_panel_title())
+        self.panel_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.panel_title_label.setStyleSheet(
+            "font-weight: bold; font-size: 11pt; padding: 2px 6px;"
+        )
+        layout.addWidget(self.panel_title_label)
+
+    def _refresh_panel_title(self):
+        """Update the panel title label to reflect the current ``initial_params``.
+
+        Should be called whenever ``initial_params`` changes (e.g. after a
+        re-run with a new measurement name).  Safe to call even before the
+        label has been created.
+        """
+        if hasattr(self, 'panel_title_label') and self.panel_title_label is not None:
+            self.panel_title_label.setText(self._make_panel_title())
 
     def _hide_progress_bars(self):
         """Hide the entire Analysis Progress group."""
@@ -2034,6 +2080,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.initial_params.update(new_params)
         if self.res_info_dict:
             self.initial_params['res_info_dict'] = self.res_info_dict
+
+        # Refresh the panel title in case the measurement name changed
+        self._refresh_panel_title()
 
         # Reset window state for the new sweep.
         # Reset export-file tracking so the new sweep creates a fresh session file

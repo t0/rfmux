@@ -308,6 +308,8 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     # to support multi-amplitude sweeps.  For a single-amplitude sweep (as
     # done here) we wrap each entry under iteration index 0.
 
+    # TODO consider whether the name: {amp_indices:} is the right format for this
+    ### given how multisweep natively runs once at one amplitude
     results_by_detector = {code: {0: entry} for code, entry in multisweep_results.items()}
     
     find_bias_points(results_by_detector, res_info_dict)
@@ -348,16 +350,17 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
 
     print("\n  Noise results summary:")
 
-    for i in range(num_res):
-        psd_i = slow_data.spectrum.psd_i[i]
-        psd_q = slow_data.spectrum.psd_q[i]
-        freq_iq = slow_data.spectrum.freq_iq
-        freq_dsb = slow_data.spectrum.freq_dsb
+    freq_iq = slow_data.spectrum.freq_iq
+    freq_dsb = slow_data.spectrum.freq_dsb
+    for code in apply_report:
+        ch = res_info_dict[code]['channel_number']  # 1-based channel number
+        psd_i = slow_data.spectrum.psd_i[ch - 1]
+        psd_q = slow_data.spectrum.psd_q[ch - 1]
 
         mean_psd_i = np.mean(psd_i[2:]) ### removing DC
         mean_psd_q = np.mean(psd_q[2:])
 
-        print(f"   Channel {i+1}: Frequency Bandwidth = {max(freq_iq):.3f} Hz, Min dsb frequency = {min(freq_dsb):.3f} Hz, Max dsb frequency = {max(freq_dsb):.3f} Hz")
+        print(f"   Channel {ch} ({code}): Frequency Bandwidth = {max(freq_iq):.3f} Hz, Min dsb frequency = {min(freq_dsb):.3f} Hz, Max dsb frequency = {max(freq_dsb):.3f} Hz")
         print(f"                  Mean I spectrum power = {mean_psd_i:.3f} dBm/Hz, Mean Q spectrum power = {mean_psd_q:.3f} dBm/Hz\n")
 
     #### Step 9. PFB noise spectrum 
@@ -366,17 +369,16 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     else:
         print("\n9. Collecting 100000 PFB noise samples....")
 
-        for i in range(num_res):
+        for code in apply_report:
+            ch = res_info_dict[code]['channel_number']  # 1-based channel number
             pfb_data = await crs.py_get_pfb_samples(100_000,
-                                                    channel = i + 1,
-                                                    module = 1,
+                                                    channel = ch,
+                                                    module = MODULE,
                                                     binlim = 1e6,
-                                                    trim = False,
+                                                    trim = True,
                                                     nsegments = 5,
                                                     reference = "absolute",
                                                     reset_NCO = False)
-            
-            # print(f"Pfb data collected for channel {i+1}")
             
             pfb_psd_i = pfb_data.spectrum.psd_i
             pfb_psd_q = pfb_data.spectrum.psd_q
@@ -386,7 +388,7 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
             mean_pfb_psd_i = np.mean(pfb_psd_i[2:]) ### Removing dc bin
             mean_pfb_psd_q = np.mean(pfb_psd_q[2:])
 
-            print(f"   Channel {i+1}: Frequency Bandwidth = {max(pfb_freq_iq):.3f} Hz, Min dsb frequency = {min(pfb_freq_dsb):.3f} Hz, Max dsb frequency = {max(pfb_freq_dsb):.3f} Hz")
+            print(f"   Channel {ch} ({code}): Frequency Bandwidth = {max(pfb_freq_iq):.3f} Hz, Min dsb frequency = {min(pfb_freq_dsb):.3f} Hz, Max dsb frequency = {max(pfb_freq_dsb):.3f} Hz")
             print(f"                  Mean I spectrum power = {mean_pfb_psd_i:.3f} dBm/Hz, Mean Q spectrum power = {mean_pfb_psd_q:.3f} dBm/Hz\n")
             
     print("\n" + "="*60)

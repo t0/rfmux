@@ -443,8 +443,13 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                     if freqs is None or amps_raw is None or iq_data_raw is None:
                         continue
 
+                    dac_scale = self.dac_scales.get(module_id)
+                    probe_amp_dbm = None
+                    if self.normalize_magnitudes and self.unit_mode == 'dbm' and dac_scale is not None and amplitude_val is not None:
+                        probe_amp_dbm = UnitConverter.normalize_to_dbm(amplitude_val, dac_scale)
                     converted_amps = UnitConverter.convert_amplitude(
-                        amps_raw, iq_data_raw, self.unit_mode, normalize=self.normalize_magnitudes
+                        amps_raw, iq_data_raw, self.unit_mode, normalize=self.normalize_magnitudes,
+                        probe_amp_dbm=probe_amp_dbm
                     )
                     
                     if amp_key != 'default':
@@ -542,8 +547,13 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                         if freqs is None or amps_raw is None or iq_data_raw is None: 
                             continue
 
+                        dac_scale = self.dac_scales.get(module_id)
+                        probe_amp_dbm = None
+                        if self.normalize_magnitudes and self.unit_mode == 'dbm' and dac_scale is not None and amplitude_val is not None:
+                            probe_amp_dbm = UnitConverter.normalize_to_dbm(amplitude_val, dac_scale)
                         converted_amps = UnitConverter.convert_amplitude(
-                            amps_raw, iq_data_raw, self.unit_mode, normalize=self.normalize_magnitudes
+                            amps_raw, iq_data_raw, self.unit_mode, normalize=self.normalize_magnitudes,
+                            probe_amp_dbm=probe_amp_dbm
                         )
                         
                         if amp_key != 'default': 
@@ -584,7 +594,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         """Update plot labels based on current unit mode and normalization state."""
         if self.normalize_magnitudes:
             if self.unit_mode == "dbm":
-                plot.setLabel('left', 'Normalized Power', units='dB') 
+                plot.setLabel('left', 'S21', units='dB')
             else:
                 plot.setLabel('left', 'Normalized Magnitude', units='')
         else:
@@ -606,16 +616,27 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                         amplitude, freqs, amps, phases, iq_data = self._extract_data_from_tuple(amp_key, data_tuple)
                         
                         if amplitude in self.plots[module_id_iter_redraw]['amp_curves']:
+                            dac_scale = self.dac_scales.get(module_id_iter_redraw)
+                            probe_amp_dbm = None
+                            if self.normalize_magnitudes and self.unit_mode == 'dbm' and dac_scale is not None and amplitude is not None:
+                                probe_amp_dbm = UnitConverter.normalize_to_dbm(amplitude, dac_scale)
                             converted_amps = UnitConverter.convert_amplitude(
-                                amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
+                                amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes,
+                                probe_amp_dbm=probe_amp_dbm)
                             self.plots[module_id_iter_redraw]['amp_curves'][amplitude].setData(freqs, converted_amps)
                             self.plots[module_id_iter_redraw]['phase_curves'][amplitude].setData(freqs, phases)
                 
                 if 'default' in self.raw_data[module_id_iter_redraw] and not has_amp_curves:
                     _, freqs, amps, phases, iq_data = self._extract_data_from_tuple(
                         'default', self.raw_data[module_id_iter_redraw]['default'])
+                    dac_scale = self.dac_scales.get(module_id_iter_redraw)
+                    default_amp = self.original_params.get('amp', DEFAULT_AMPLITUDE)
+                    probe_amp_dbm = None
+                    if self.normalize_magnitudes and self.unit_mode == 'dbm' and dac_scale is not None:
+                        probe_amp_dbm = UnitConverter.normalize_to_dbm(default_amp, dac_scale)
                     converted_amps = UnitConverter.convert_amplitude(
-                        amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes)
+                        amps, iq_data, self.unit_mode, normalize=self.normalize_magnitudes,
+                        probe_amp_dbm=probe_amp_dbm)
                     self.plots[module_id_iter_redraw]['amp_curve'].setData(freqs, converted_amps)
                     self.plots[module_id_iter_redraw]['phase_curve'].setData(freqs, phases)
                 else:
@@ -902,6 +923,41 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
         self._update_multisweep_button_state(active_module)
         
+    def _make_plot_title(self, module_id: int, role: str, suffix: str = "") -> str:
+        """Build a plot title string, appending the measurement filename when available.
+
+        Args:
+            module_id: The module number.
+            role: Either ``"Magnitude"`` or ``"Phase"``.
+            suffix: Optional suffix appended after the role (e.g. resonance count).
+
+        Returns:
+            A title string such as
+            ``"Module 2 - Magnitude [my_sweep.pkl]"`` or
+            ``"Module 2 - Magnitude"`` when no measurement name is set.
+        """
+        base = f"Module {module_id} - {role}{suffix}"
+        name = self.original_params.get('measurement_name')
+        if name:
+            return f"{base} [{name}.pkl]"
+        return base
+
+    def _refresh_plot_titles(self):
+        """Re-apply plot titles for all modules (e.g. after params are updated)."""
+        pen_color = "w" if self.dark_mode else "k"
+        for module_id, plot_info in self.plots.items():
+            count = len(self.resonance_freqs.get(module_id, []))
+            if self.show_resonances_cb.isChecked() and count > 0:
+                suffix = f" (Found {count} resonances)"
+            else:
+                suffix = ""
+            amp_plot_item = plot_info['amp_plot'].getPlotItem()
+            phase_plot_item = plot_info['phase_plot'].getPlotItem()
+            if amp_plot_item:
+                amp_plot_item.setTitle(self._make_plot_title(module_id, "Magnitude", suffix), color=pen_color)
+            if phase_plot_item:
+                phase_plot_item.setTitle(self._make_plot_title(module_id, "Phase", suffix), color=pen_color)
+
     def _remove_faux_resonance_legend_entry(self, module_id: int):
         """Reset plot titles to their base text (removing any resonance count suffix)."""
         if module_id not in self.plots:
@@ -911,9 +967,9 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         amp_plot_item = plot_info['amp_plot'].getPlotItem()
         phase_plot_item = plot_info['phase_plot'].getPlotItem()
         if amp_plot_item:
-            amp_plot_item.setTitle(f"Module {module_id} - Magnitude", color=pen_color)
+            amp_plot_item.setTitle(self._make_plot_title(module_id, "Magnitude"), color=pen_color)
         if phase_plot_item:
-            phase_plot_item.setTitle(f"Module {module_id} - Phase", color=pen_color)
+            phase_plot_item.setTitle(self._make_plot_title(module_id, "Phase"), color=pen_color)
 
     def _update_resonance_legend_entry(self, module_id: int):
         """Update plot titles to show resonance count, or reset them when hidden/zero."""
@@ -933,9 +989,9 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             suffix = ""
 
         if amp_plot_item:
-            amp_plot_item.setTitle(f"Module {module_id} - Magnitude{suffix}", color=pen_color)
+            amp_plot_item.setTitle(self._make_plot_title(module_id, "Magnitude", suffix), color=pen_color)
         if phase_plot_item:
-            phase_plot_item.setTitle(f"Module {module_id} - Phase{suffix}", color=pen_color)
+            phase_plot_item.setTitle(self._make_plot_title(module_id, "Phase", suffix), color=pen_color)
 
 
     def _get_periscope_parent(self):
@@ -1065,6 +1121,9 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             self.plots[module]['phase_plot'].enableAutoRange(pg.ViewBox.XAxis, False)
             self.plots[module]['amp_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
             self.plots[module]['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
+
+        # Update plot titles to include the measurement filename if set
+        self._refresh_plot_titles()
     
     def update_data_with_amp(self, module: int, freqs: np.ndarray, iq_counts: np.ndarray, amplitude: float):
         """Update the plot data for a specific module and amplitude."""
@@ -1083,8 +1142,13 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
 
             amps_raw = np.abs(iq_counts)
             phases_deg = np.degrees(np.angle(iq_counts))
+            dac_scale = self.dac_scales.get(module)
+            probe_amp_dbm = None
+            if self.normalize_magnitudes and self.unit_mode == 'dbm' and dac_scale is not None:
+                probe_amp_dbm = UnitConverter.normalize_to_dbm(amplitude, dac_scale)
             converted_amps = UnitConverter.convert_amplitude(
-                amps_raw, iq_counts, self.unit_mode, normalize=self.normalize_magnitudes)
+                amps_raw, iq_counts, self.unit_mode, normalize=self.normalize_magnitudes,
+                probe_amp_dbm=probe_amp_dbm)
             
             amps_list = self.original_params.get('amps', [amplitude])
             if amplitude in amps_list:
@@ -1140,8 +1204,14 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             if len(self.plots[module]['amp_curves']) == 0:
                 amps_raw = np.abs(iq_counts)
                 phases_deg = np.degrees(np.angle(iq_counts))
+                dac_scale = self.dac_scales.get(module)
+                single_amp = self.original_params.get('amp', DEFAULT_AMPLITUDE)
+                probe_amp_dbm = None
+                if self.normalize_magnitudes and self.unit_mode == 'dbm' and dac_scale is not None:
+                    probe_amp_dbm = UnitConverter.normalize_to_dbm(single_amp, dac_scale)
                 converted_amps = UnitConverter.convert_amplitude(
-                    amps_raw, iq_counts, self.unit_mode, normalize=self.normalize_magnitudes)
+                    amps_raw, iq_counts, self.unit_mode, normalize=self.normalize_magnitudes,
+                    probe_amp_dbm=probe_amp_dbm)
                 self.plots[module]['amp_curve'].setData(freqs, converted_amps)
                 self.plots[module]['phase_curve'].setData(freqs, phases_deg)
         self._update_multisweep_button_state(module)

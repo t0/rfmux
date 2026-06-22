@@ -2957,25 +2957,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if panel is None:
             return  # Error already displayed by helper
         
-        # Auto-launch detector digest panel (fit panel) by simulating a double-click
-        # This is the same logic used in _load_multisweep_analysis
-        # Find first detector frequency to auto-open digest
+        # Auto-launch detector digest panel (fit panel) by simulating a double-click.
+        # Use panel.results (new {iter_idx: {code: entry}} format) — already loaded by
+        # _create_multisweep_panel_from_loaded_data, so this handles all file formats.
         click_freq = None
-        if 'results_by_detector' in data:
-            det_data = data['results_by_detector']
-            if det_data:
-                first_det_id = sorted(det_data.keys())[0]
-                first_entry = next(iter(det_data[first_det_id].values()), {})
-                click_freq = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
-        elif 'results_by_iteration' in data:
-            iteration_params = data.get('results_by_iteration', [])
-            if iteration_params and len(iteration_params) > 0:
-                first_iteration_data = iteration_params[0].get('data', {})
-                if first_iteration_data:
-                    first_detector_id = sorted(first_iteration_data.keys())[0]
-                    first_detector_data = first_iteration_data[first_detector_id]
-                    click_freq = first_detector_data.get('bias_frequency',
-                                                        first_detector_data.get('original_center_frequency'))
+        if panel.results:
+            first_iter = next(iter(panel.results.values()), {})
+            first_entry = next(iter(first_iter.values()), {})
+            click_freq = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
         if click_freq is not None:
             if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
                 # Create a fake event at the detector's frequency

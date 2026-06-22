@@ -331,7 +331,7 @@ def detect_bifurcation_derivative(
 # ── Section C: Multi-amplitude analysis ──────────────────────────────────────
 
 def find_bias_points(
-    results_by_detector: Dict[str, Dict],
+    results: Dict[int, Dict],
     res_info_dict: Dict[str, Dict],
     spike_prominence_factor: float = 2.0,
     spike_height_factor: float = 3.0,
@@ -344,7 +344,8 @@ def find_bias_points(
 
     For each resonator code the algorithm:
 
-    1. Sorts the available sweep entries by amplitude (lowest → highest).
+    1. Collects all sweep entries for the code across every iteration and sorts
+       them by amplitude (lowest → highest).
     2. Steps through amplitudes calling :func:`detect_bifurcation_derivative`.
        When bifurcation is first detected at amplitude *a*, the previous
        amplitude *a - 1* is selected as the bias amplitude.  If *a* is the
@@ -364,10 +365,10 @@ def find_bias_points(
 
     Parameters
     ----------
-    results_by_detector : dict
-        ``{code: {iteration_index: entry_dict}}`` as stored in
-        ``MultisweepPanel.results_by_detector``.  Each *entry_dict* should
-        contain ``frequencies``, ``iq_counts``, ``iq_volts``, and
+    results : dict
+        ``{iteration_index: {code: entry_dict}}`` as stored in
+        ``MultisweepPanel.results``.  Each *entry_dict* should contain
+        ``frequencies``, ``iq_counts``, ``iq_volts``, and
         ``sweep_amplitude_normalized``.
     res_info_dict : dict
         Resonator registry ``{code: {bias_frequency, bias_amplitude,
@@ -417,7 +418,13 @@ def find_bias_points(
         estimate_and_remove_gain,
     )
 
-    for code, iter_dict in results_by_detector.items():
+    # Build a per-code list of entries from the iteration-first dict
+    code_to_entries: dict = {}
+    for _iter_idx, code_dict in results.items():
+        for code, entry in code_dict.items():
+            code_to_entries.setdefault(code, []).append(entry)
+
+    for code, entries in code_to_entries.items():
 
         if code not in res_info_dict:
             warnings.warn(
@@ -426,7 +433,6 @@ def find_bias_points(
             continue
 
         # --- Collect entries and sort by amplitude (lowest first) ---
-        entries = list(iter_dict.values())
         entries_sorted = sorted(
             entries,
             key=lambda e: (e.get('sweep_amplitude_normalized') or 0.0),

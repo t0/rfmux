@@ -1349,24 +1349,36 @@ class PeriscopeRuntime:
                 else:
                     print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
-            # Load data into panel - handle new and legacy formats.
-            # Priority: 'results' (new key) → 'results_by_detector' (old key) → 'results_by_iteration' (legacy)
-            _results_key = 'results' if 'results' in load_params else (
-                'results_by_detector' if 'results_by_detector' in load_params else None
-            )
-            if _results_key is not None:
-                # Detector-based format: load directly into panel
-                panel.results_by_detector = load_params[_results_key]
-                # Migrate any old flat fit-key format to the new nested 'fits' subdict
-                # structure (no-op for files already saved in the new format).
-                migrate_results_by_detector(panel.results_by_detector)
+            # Load data into panel.
+            # Priority: 'results' (new {iter_idx: {code: entry}}) → 'results_by_detector' (old {code: {iter_idx: entry}})
+            _raw_results = None
+            if 'results' in load_params:
+                _raw_results = load_params['results']
+            elif 'results_by_detector' in load_params:
+                _raw_results = load_params['results_by_detector']
+
+            if _raw_results is not None:
+                # Detect format: new = integer outer keys (iter_idx), old = string outer keys (codes).
+                _first_key = next(iter(_raw_results), None)
+                if isinstance(_first_key, str):
+                    # Old format {code: {iter_idx: entry}} — convert to new iteration-first format.
+                    _converted: dict = {}
+                    for _old_code, _old_iter_dict in _raw_results.items():
+                        if isinstance(_old_iter_dict, dict):
+                            for _old_iter_idx, _old_entry in _old_iter_dict.items():
+                                _converted.setdefault(_old_iter_idx, {})[_old_code] = _old_entry
+                    panel.results = _converted
+                else:
+                    # New format {iter_idx: {code: entry}} — load directly.
+                    panel.results = _raw_results
+
                 # Backfill iq_volts and sweep_power_dbm for files saved before these
                 # fields were stored in the live dict (no-op for up-to-date files).
                 from rfmux.core.transferfunctions import convert_roc_to_volts
                 from rfmux.tools.periscope.utils import UnitConverter as _UC
                 _dac_scale_for_backfill = dac_scales_for_panel.get(target_module)
-                for _code, _iter_dict in panel.results_by_detector.items():
-                    for _iter_idx, _entry in _iter_dict.items():
+                for _iter_idx, _code_dict in panel.results.items():
+                    for _code, _entry in _code_dict.items():
                         if 'iq_volts' not in _entry:
                             _iq = _entry.get('iq_counts')
                             if _iq is not None:
@@ -1407,7 +1419,7 @@ class PeriscopeRuntime:
                     panel.update_data(target_module, i, amplitude, direction, data, None)
             
             # Generate histograms now that data is loaded
-            if panel.results_by_detector:
+            if panel.results:
                 panel._generate_histograms()
                 panel.histograms_generated = True
 
@@ -1452,12 +1464,15 @@ class PeriscopeRuntime:
             # Load IQ rotation angles from res_info_dict if present.
             # Angles are stored in res_info_dict[code]['iq_rotation_angle'] by
             # _iq_rotation_completed() after Apply Bias + ComputeIQRotationTask.
+            # IMPORTANT: _handle_iq_rotation_ready expects {channel_number (int): angle},
+            # NOT {code (str): angle}.  Build the dict using channel_number from res_info_dict.
             if panel.res_info_dict:
-                iq_rotation_angles_loaded = {
-                    code: info['iq_rotation_angle']
-                    for code, info in panel.res_info_dict.items()
-                    if isinstance(info, dict) and 'iq_rotation_angle' in info
-                }
+                iq_rotation_angles_loaded = {}
+                for _code, _info in panel.res_info_dict.items():
+                    if isinstance(_info, dict) and 'iq_rotation_angle' in _info:
+                        _ch = _info.get('channel_number')
+                        if _ch is not None:
+                            iq_rotation_angles_loaded[int(_ch)] = _info['iq_rotation_angle']
                 if iq_rotation_angles_loaded and hasattr(self, '_handle_iq_rotation_ready'):
                     self._handle_iq_rotation_ready(target_module, iq_rotation_angles_loaded)
                     print(f"[Session] Loaded IQ rotation angles for {len(iq_rotation_angles_loaded)} detectors from session file")
@@ -1782,9 +1797,9 @@ class PeriscopeRuntime:
         
         # Auto-launch detector digest panel - find a frequency to click on
         click_freq = None
-        if panel.results_by_detector:
-            first_det_id = sorted(panel.results_by_detector.keys())[0]
-            first_entry = next(iter(panel.results_by_detector[first_det_id].values()), {})
+        if panel.results:
+            first_iter = next(iter(panel.results.values()), {})
+            first_entry = next(iter(first_iter.values()), {})
             click_freq = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
         if click_freq is not None:
             if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
@@ -2560,13 +2575,13 @@ class PeriscopeRuntime:
             self.session_manager = MagicMock()
             self.session_manager.is_active = False
             self.session_manager.handle_data_ready = MagicMock()
-        # Mock data in detector-based format for smoke tests
-        self.results_by_detector = {
-            1: {
-                0: {
+        # Mock data in iteration-first format for smoke tests
+        self.results = {
+            0: {
+                "MOCK": {
                     "bias_frequency": 90e6,
                     "original_center_frequency": 90e6,
-                    "sweep_amplitude": 0.1,
+                    "sweep_amplitude_normalized": 0.1,
                     "sweep_direction": "upward",
                     "sweep_center_frequency": 90e6,
                     "iteration": 0,
@@ -2632,7 +2647,7 @@ class PeriscopeRuntime:
             multisweep_window = None
             if getattr(self, "multisweep_windows", None):
                 multisweep_window = next(iter(self.multisweep_windows.values())).get("window")
-                multisweep_window.results_by_detector = self.results_by_detector
+                multisweep_window.results = self.results
                 multisweep_window._get_spectrum = MagicMock()
 
             if multisweep_window:

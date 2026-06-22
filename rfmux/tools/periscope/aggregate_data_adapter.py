@@ -1,8 +1,9 @@
 """
 Data adapter for converting Periscope multisweep format to aggregate plotter format.
 
-This module transforms the iteration-based data structure used by MultisweepPanel
-into a detector-based format compatible with aggregate plotting and statistical analysis.
+This module transforms the iteration-first data structure used by MultisweepPanel
+`{iter_idx: {code: entry_dict}}` into a detector-based format compatible with
+aggregate plotting and statistical analysis.
 """
 
 import numpy as np
@@ -12,29 +13,30 @@ from typing import Dict, List, Tuple, Any, Optional
 def extract_multisweep_data(multisweep_panel) -> Dict[str, Any]:
     """
     Extract and convert multisweep data from a MultisweepPanel instance.
-    
-    Converts from Periscope's iteration-based format to a detector-based format
+
+    Converts from Periscope's iteration-first format to a detector-based format
     suitable for aggregate plotting and analysis.
-    
+
     Parameters
     ----------
     multisweep_panel : MultisweepPanel
-        The multisweep panel instance containing results_by_iteration
-        
+        The multisweep panel instance containing ``results``
+        (``{iter_idx: {code: entry_dict}}``).
+
     Returns
     -------
     dict
         Dictionary with structure:
         {
-            'data': {detector_id: {amp_idx: {'freq': [...], 'iq': [...], 'amp': float}}},
-            'fit_params': {detector_id: {amp_idx: {...fit parameters...}}},
-            'bias_info': {detector_id: {'bias_freq': float, 'bias_amplitude': float}},
+            'data': {code: {amp_idx: {'freq': [...], 'iq': [...], 'amp': float}}},
+            'fit_params': {code: {amp_idx: {...fit parameters...}}},
+            'bias_info': {code: {'bias_freq': float, 'bias_amplitude': float}},
             'module': int,
             'dac_scales': dict
         }
     """
-    results = multisweep_panel.results_by_iteration
-    
+    results = getattr(multisweep_panel, 'results', {})
+
     if not results:
         return {
             'data': {},
@@ -43,13 +45,13 @@ def extract_multisweep_data(multisweep_panel) -> Dict[str, Any]:
             'module': multisweep_panel.target_module,
             'dac_scales': getattr(multisweep_panel, 'dac_scales', {})
         }
-    
-    # Group data by detector (also extracts fit parameters)
+
+    # Group data by detector and extract fit parameters
     detector_data, fit_params = _group_by_detector(results)
-    
+
     # Extract bias information
     bias_info = _extract_bias_info(detector_data)
-    
+
     return {
         'data': detector_data,
         'fit_params': fit_params,
@@ -59,214 +61,172 @@ def extract_multisweep_data(multisweep_panel) -> Dict[str, Any]:
     }
 
 
-def _group_by_detector(results_by_iteration: Dict[int, Dict]) -> Tuple[Dict[int, Dict[int, Dict]], Dict[int, Dict[int, Dict]]]:
+def _group_by_detector(results: Dict[int, Dict]) -> Tuple[Dict, Dict]:
     """
-    Reorganize iteration-based data into detector-based structure.
-    
+    Reorganise iteration-first data into detector-based structure.
+
     Converts from:
-        {iteration: {'amplitude': X, 'data': {detector: {...}}}}
+        ``{iter_idx: {code: entry_dict}}``
     To:
-        {detector: {amp_idx: {'freq': [...], 'iq': [...], 'amp': X}}}
-        
+        ``{code: {amp_idx: {'freq': [...], 'iq': [...], 'amp': X, ...}}}``
+
+    An *amp_idx* (0-based integer) is assigned per unique
+    ``sweep_amplitude_normalized`` value, sorted ascending.
+
     Parameters
     ----------
-    results_by_iteration : dict
-        MultisweepPanel.results_by_iteration
-        
+    results : dict
+        ``MultisweepPanel.results`` — ``{iter_idx: {code: entry_dict}}``.
+
     Returns
     -------
     tuple
-        (detector_data, fit_params) - Both indexed by detector and amplitude
+        ``(detector_data, fit_params)`` — both indexed by detector code then
+        amplitude index.
     """
-    detector_dict = {}
-    fit_params_dict = {}
-    
-    # Build amplitude index mapping
-    amp_to_index = {}
-    for iter_idx in sorted(results_by_iteration.keys()):
-        iteration_data = results_by_iteration[iter_idx]
-        amp = iteration_data.get('amplitude', 0.0)
-        if amp not in amp_to_index:
-            amp_to_index[amp] = len(amp_to_index)
-    
-    print(f"[DEBUG] _group_by_detector: Processing {len(results_by_iteration)} iterations")
-    print(f"[DEBUG] Amplitude to index mapping: {amp_to_index}")
-    
-    # Reorganize by detector
-    for iter_idx in sorted(results_by_iteration.keys()):
-        iteration_data = results_by_iteration[iter_idx]
-        amp = iteration_data.get('amplitude', 0.0)
-        amp_idx = amp_to_index[amp]
-        
-        detector_data = iteration_data.get('data', {})
-        
-        # Debug: print keys for first detector in first iteration
-        if iter_idx == sorted(results_by_iteration.keys())[0] and detector_data:
-            first_det_id = list(detector_data.keys())[0]
-            print(f"[DEBUG] First iteration {iter_idx}, first detector {first_det_id}")
-            print(f"[DEBUG] Available keys in det_data: {list(detector_data[first_det_id].keys())}")
-        
-        for detector_id, det_data in detector_data.items():
-            if detector_id not in detector_dict:
-                detector_dict[detector_id] = {}
-                fit_params_dict[detector_id] = {}
-            
-            # Extract sweep data
-            freq = det_data.get('frequencies', np.array([]))
-            # Use iq_complex_volts for normalized voltage units
-            iq = det_data.get('iq_complex_volts', det_data.get('iq_counts', np.array([])))
-            bias_freq = det_data.get('bias_frequency', None)
-            
-            # Store sweep data in detector-indexed structure
-            detector_dict[detector_id][amp_idx] = {
+    # Build amplitude index mapping from all unique amplitudes across all entries
+    amp_to_index: dict = {}
+    for iter_idx, code_dict in sorted(results.items()):
+        for code, entry in code_dict.items():
+            amp = entry.get('sweep_amplitude_normalized', 0.0)
+            if amp not in amp_to_index:
+                amp_to_index[amp] = len(amp_to_index)
+
+    detector_dict: dict = {}
+    fit_params_dict: dict = {}
+
+    # Reorganise by detector code
+    for iter_idx, code_dict in sorted(results.items()):
+        for code, entry in code_dict.items():
+            amp = entry.get('sweep_amplitude_normalized', 0.0)
+            amp_idx = amp_to_index[amp]
+            direction = entry.get('sweep_direction', 'unknown')
+
+            if code not in detector_dict:
+                detector_dict[code] = {}
+                fit_params_dict[code] = {}
+
+            # Prefer iq_volts (already in physical units); fall back to iq_counts
+            freq = entry.get('frequencies', np.array([]))
+            iq = entry.get('iq_volts', entry.get('iq_counts', np.array([])))
+            bias_freq = entry.get('bias_frequency')
+
+            detector_dict[code][amp_idx] = {
                 'freq': np.asarray(freq),
                 'iq': np.asarray(iq),
                 'amp': amp,
                 'bias_frequency': bias_freq,
                 'iteration': iter_idx,
-                'direction': iteration_data.get('direction', 'unknown')
+                'direction': direction,
             }
-            
-            # Extract fit parameters (prefer nonlinear if available)
-            fit_params = {}
-            
-            # Check for nonlinear fit parameters first (new nested fits structure)
-            _nl = det_data.get('fits', {}).get('nonlinear', {})
-            _sk = det_data.get('fits', {}).get('skewed', {})
+
+            # Extract fit parameters — prefer nonlinear, fall back to skewed
+            _nl = entry.get('fits', {}).get('nonlinear', {})
+            _sk = entry.get('fits', {}).get('skewed', {})
+            fit_params: dict = {}
             if _nl.get('nonlinear_fit_params'):
                 fit_params = dict(_nl['nonlinear_fit_params'])
-            # Fall back to skewed fit parameters
             elif _sk.get('fit_params'):
                 fit_params = dict(_sk['fit_params'])
-            
-            # Store fit parameters
-            fit_params_dict[detector_id][amp_idx] = fit_params
-    
+
+            fit_params_dict[code][amp_idx] = fit_params
+
     return detector_dict, fit_params_dict
 
 
-def _extract_bias_info(detector_data: Dict[int, Dict[int, Dict]]) -> Dict[int, Dict]:
+def _extract_bias_info(detector_data: Dict[str, Dict[int, Dict]]) -> Dict[str, Dict]:
     """
     Extract bias frequency and amplitude information for each detector.
-    
+
     Parameters
     ----------
     detector_data : dict
-        Detector-indexed data from _group_by_detector
-        
+        Detector-indexed data from :func:`_group_by_detector`.
+
     Returns
     -------
     dict
-        Bias info indexed by detector
-        {detector_id: {'bias_freq': X, 'bias_amplitude': Y}}
+        Bias info indexed by detector code:
+        ``{code: {'bias_freq': X, 'bias_amplitude': Y}}``.
     """
     bias_info = {}
-    
-    for detector_id, amp_dict in detector_data.items():
-        # Use first available amplitude data to extract bias info
+
+    for code, amp_dict in detector_data.items():
         if amp_dict:
             first_sweep = amp_dict[min(amp_dict.keys())]
-            bias_info[detector_id] = {
-                'bias_freq': first_sweep.get('bias_frequency', None),
-                'bias_amplitude': first_sweep.get('amp', None)
+            bias_info[code] = {
+                'bias_freq': first_sweep.get('bias_frequency'),
+                'bias_amplitude': first_sweep.get('amp'),
             }
-    
+
     return bias_info
 
 
-def get_parameter_arrays(fit_params: Dict[int, Dict[int, Dict]], 
-                        param_name: str,
-                        amp_idx: Optional[int] = None) -> Tuple[List, List]:
+def get_parameter_arrays(fit_params: Dict[str, Dict[int, Dict]],
+                         param_name: str,
+                         amp_idx: Optional[int] = None) -> Tuple[List, List]:
     """
     Extract arrays of a specific parameter across all detectors.
-    
+
     Useful for histogram generation and statistical analysis.
-    
+
     Parameters
     ----------
     fit_params : dict
-        Fit parameters from extract_multisweep_data
+        Fit parameters from :func:`extract_multisweep_data`.
     param_name : str
-        Parameter to extract (e.g., 'fr', 'Qr', 'Qi', 'Qc', 'a')
+        Parameter to extract (e.g. ``'fr'``, ``'Qr'``, ``'Qi'``, ``'Qc'``, ``'a'``).
     amp_idx : int, optional
-        Specific amplitude index to extract. If None, uses first available.
-        
+        Specific amplitude index to extract. If *None*, uses the first available.
+
     Returns
     -------
     tuple
-        (values, detector_ids) - Lists of parameter values and corresponding detector IDs.
-        NaN values are filtered out.
+        ``(values, detector_codes)`` — lists of parameter values and the
+        corresponding detector codes. NaN values are filtered out.
     """
     values = []
-    detector_ids = []
-    
-    print(f"[DEBUG] get_parameter_arrays called: param_name={param_name}, amp_idx={amp_idx}")
-    print(f"[DEBUG] Total detectors in fit_params: {len(fit_params)}")
-    
-    # Debug: show available amp indices for first detector
-    if fit_params:
-        first_det_id = list(fit_params.keys())[0]
-        print(f"[DEBUG] First detector {first_det_id} has amp indices: {list(fit_params[first_det_id].keys())}")
-        if amp_idx is not None and amp_idx in fit_params[first_det_id]:
-            print(f"[DEBUG] First detector params at amp_idx {amp_idx}: {fit_params[first_det_id][amp_idx]}")
-    
-    skipped_no_amp = 0
-    skipped_no_param = 0
-    skipped_nan = 0
-    
-    for detector_id, amp_dict in fit_params.items():
-        # Select amplitude index
+    detector_codes = []
+
+    for code, amp_dict in fit_params.items():
         if amp_idx is not None:
             if amp_idx not in amp_dict:
-                skipped_no_amp += 1
                 continue
             params = amp_dict[amp_idx]
         else:
-            # Use first available amplitude
             if not amp_dict:
-                skipped_no_amp += 1
                 continue
             params = amp_dict[min(amp_dict.keys())]
-        
-        # Extract parameter
+
         if param_name in params:
             val = params[param_name]
-            # Filter out NaN and 'nan' string values
-            if val != 'nan' and not (isinstance(val, float) and np.isnan(val)):
-                values.append(float(val))
-                detector_ids.append(detector_id)
-            else:
-                skipped_nan += 1
-        else:
-            skipped_no_param += 1
-    
-    print(f"[DEBUG] Extraction complete: found {len(values)} valid values")
-    print(f"[DEBUG] Skipped: {skipped_no_amp} (no amp_idx), {skipped_no_param} (no param), {skipped_nan} (NaN)")
-    
-    return values, detector_ids
+            if val == 'nan' or (isinstance(val, float) and np.isnan(val)):
+                continue
+            values.append(float(val))
+            detector_codes.append(code)
+
+    return values, detector_codes
 
 
-def calculate_grid_size(total_count: int, 
-                       default_low: int = 5, 
-                       default_high: int = 7) -> Tuple[int, int]:
+def calculate_grid_size(total_count: int,
+                        default_low: int = 5,
+                        default_high: int = 7) -> Tuple[int, int]:
     """
     Calculate optimal grid dimensions for multi-panel plots.
-    
-    Adapted from hidfmux's get_nperrow function.
-    
+
     Parameters
     ----------
     total_count : int
-        Total number of plots to display
+        Total number of plots to display.
     default_low : int
-        Default columns for medium-sized arrays
+        Default columns for medium-sized arrays.
     default_high : int
-        Default columns for large arrays
-        
+        Default columns for large arrays.
+
     Returns
     -------
     tuple
-        (nrows, ncols) for grid layout
+        ``(nrows, ncols)`` for grid layout.
     """
     if total_count > 30:
         nperrow = default_high
@@ -274,46 +234,43 @@ def calculate_grid_size(total_count: int,
         nperrow = min(total_count, default_low)
     else:
         nperrow = default_low
-    
+
     nrows = int(np.ceil(total_count / nperrow))
     return nrows, nperrow
 
 
-def filter_failed_fits(param_dict: Dict[int, Any]) -> Dict[int, Any]:
+def filter_failed_fits(param_dict: Dict[str, Any]) -> Dict[str, Any]:
     """
     Filter out detectors with failed fits (NaN values).
-    
+
     Parameters
     ----------
     param_dict : dict
-        Dictionary indexed by detector ID
-        
+        Dictionary indexed by detector code.
+
     Returns
     -------
     dict
-        Filtered dictionary with failed fits removed
+        Filtered dictionary with failed fits removed.
     """
     filtered = {}
-    
-    for detector_id, value in param_dict.items():
-        # Check for NaN in various forms
+
+    for code, value in param_dict.items():
         is_nan = False
-        
+
         if value == 'nan':
             is_nan = True
         elif isinstance(value, (float, np.floating)):
             is_nan = np.isnan(value)
         elif isinstance(value, dict):
-            # Check if any critical parameter is NaN
-            critical_params = ['fr', 'Qr']
-            for param in critical_params:
+            for param in ('fr', 'Qr'):
                 if param in value:
-                    val = value[param]
-                    if val == 'nan' or (isinstance(val, (float, np.floating)) and np.isnan(val)):
+                    v = value[param]
+                    if v == 'nan' or (isinstance(v, (float, np.floating)) and np.isnan(v)):
                         is_nan = True
                         break
-        
+
         if not is_nan:
-            filtered[detector_id] = value
-    
+            filtered[code] = value
+
     return filtered

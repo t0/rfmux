@@ -1005,9 +1005,28 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         else:
             ref_freqs = []
     
-            # Extract fit frequencies from either new or old format
-            if 'results_by_detector' in payload:
-                # New detector-based format
+            # Extract fit frequencies from the saved results (try formats in order).
+            if 'results' in payload:
+                # New iteration-first format {iter_idx: {code: entry}}
+                _results = payload['results']
+                # Collect one representative entry per detector code (from iteration 0 or first available)
+                code_to_entry: dict = {}
+                for _iter_idx, _code_dict in sorted(_results.items()):
+                    for _code, _entry in _code_dict.items():
+                        if _code not in code_to_entry:
+                            code_to_entry[_code] = _entry
+                for _code in sorted(code_to_entry.keys()):
+                    _entry = code_to_entry[_code]
+                    _sf = _entry.get('fits', {}).get('skewed', {})
+                    _nf = _entry.get('fits', {}).get('nonlinear', {})
+                    if params.get('apply_skewed_fit') and _sf.get('skewed_fit_success') and _sf.get('fit_params'):
+                        ref_freqs.append(_sf['fit_params']['fr'])
+                    elif params.get('apply_nonlinear_fit') and _nf.get('nonlinear_fit_success') and _nf.get('nonlinear_fit_params'):
+                        ref_freqs.append(_nf['nonlinear_fit_params']['fr'])
+                    else:
+                        ref_freqs.append(_entry.get('bias_frequency', _entry.get('original_center_frequency')))
+            elif 'results_by_detector' in payload:
+                # Old detector-first format {code: {iter_idx: entry}}
                 for det_idx in sorted(payload['results_by_detector'].keys()):
                     amp_dir_dict = payload['results_by_detector'][det_idx]
                     if not amp_dir_dict:
@@ -1015,18 +1034,18 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                     entry = next(iter(amp_dir_dict.values()))
                     _sf = entry.get('fits', {}).get('skewed', {})
                     _nf = entry.get('fits', {}).get('nonlinear', {})
-                    if params['apply_skewed_fit'] and _sf.get('skewed_fit_success') and _sf.get('fit_params'):
+                    if params.get('apply_skewed_fit') and _sf.get('skewed_fit_success') and _sf.get('fit_params'):
                         ref_freqs.append(_sf['fit_params']['fr'])
-                    elif params['apply_nonlinear_fit'] and _nf.get('nonlinear_fit_success') and _nf.get('nonlinear_fit_params'):
+                    elif params.get('apply_nonlinear_fit') and _nf.get('nonlinear_fit_success') and _nf.get('nonlinear_fit_params'):
                         ref_freqs.append(_nf['nonlinear_fit_params']['fr'])
                     else:
                         ref_freqs.append(entry.get('bias_frequency', entry.get('original_center_frequency')))
             elif 'results_by_iteration' in payload:
-                # Old iteration-based format (backward compatibility)
-                if params['apply_skewed_fit']:
+                # Legacy iteration-based format (very old files, backward compatibility)
+                if params.get('apply_skewed_fit'):
                     for i in range(len(freqs)):
                         ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['fit_params']['fr'])
-                elif params['apply_nonlinear_fit']:
+                elif params.get('apply_nonlinear_fit'):
                     for i in range(len(freqs)):
                         ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['nonlinear_fit_params']['fr'])
                 else:

@@ -303,16 +303,13 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     #   apply_bias        - async hardware step; reads bias conditions from
     #                       res_info_dict and programmes the CRS channels.
     #
-    # find_bias_points expects results_by_detector in the format
-    #   {code: {iteration_index: entry_dict}}
-    # to support multi-amplitude sweeps.  For a single-amplitude sweep (as
-    # done here) we wrap each entry under iteration index 0.
+    # find_bias_points expects results in the iteration-first format:
+    #   {iteration_index: {code: entry_dict}}
+    # This matches what crs.multisweep() returns directly (multisweep_results
+    # is already {code: entry_dict} for one sweep, so wrap it under index 0).
+    results = {0: multisweep_results}
 
-    # TODO consider whether the name: {amp_indices:} is the right format for this
-    ### given how multisweep natively runs once at one amplitude
-    results_by_detector = {code: {0: entry} for code, entry in multisweep_results.items()}
-    
-    find_bias_points(results_by_detector, res_info_dict)
+    find_bias_points(results, res_info_dict)
     
     # Progress callback for apply_bias
     def bias_progress_callback(module, percentage):

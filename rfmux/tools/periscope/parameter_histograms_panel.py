@@ -196,11 +196,11 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
                 ax.setTextPen(pen_color)
                 
     def _load_and_plot_data(self):
-        """Load data directly from the multisweep panel's results_by_detector."""
+        """Load data directly from the multisweep panel's results."""
         if not self.multisweep_panel:
             return
             
-        results = getattr(self.multisweep_panel, 'results_by_detector', {})
+        results = getattr(self.multisweep_panel, 'results', {})
         if not results:
             return
         
@@ -290,40 +290,39 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         
     def _extract_params_for_sweep(self, amplitude, direction):
         """Extract fit parameters for all detectors at a given (amplitude, direction).
-        
-        Reads directly from results_by_detector, searching entry values for
-        matching amplitude and direction.
-        
+
+        Reads directly from self.multisweep_panel.results (new {iter_idx: {code: entry}}
+        format), searching all entries for matching amplitude and direction.
+
         Args:
             amplitude: The amplitude value to match
             direction: The sweep direction to match ('upward' or 'downward')
-        
+
         Returns:
             dict: {detector_id: {param_name: value, ...}} for detectors with fits.
         """
-        results = self.multisweep_panel.results_by_detector
+        results = self.multisweep_panel.results
         params_by_detector = {}
-        
-        for detector_id, iter_dict in results.items():
-            # Find entry matching this amplitude + direction
-            entry = None
-            for e in iter_dict.values():
-                if e.get('sweep_amplitude_normalized') == amplitude and e.get('sweep_direction') == direction:
-                    entry = e
-                    break
-            if entry is None:
-                continue
-            # Prefer nonlinear fit params, fall back to skewed
-            fit_params = None
-            _nl = entry.get('fits', {}).get('nonlinear', {})
-            _sk = entry.get('fits', {}).get('skewed', {})
-            if _nl.get('nonlinear_fit_params'):
-                fit_params = dict(_nl['nonlinear_fit_params'])
-            elif _sk.get('fit_params'):
-                fit_params = dict(_sk['fit_params'])
-            if fit_params:
-                params_by_detector[detector_id] = fit_params
-        
+
+        for iter_idx, code_dict in results.items():
+            for detector_id, entry in code_dict.items():
+                if (entry.get('sweep_amplitude_normalized') != amplitude
+                        or entry.get('sweep_direction') != direction):
+                    continue
+                # Skip if we already found a fit for this detector at this amplitude
+                if detector_id in params_by_detector:
+                    continue
+                # Prefer nonlinear fit params, fall back to skewed
+                _nl = entry.get('fits', {}).get('nonlinear', {})
+                _sk = entry.get('fits', {}).get('skewed', {})
+                fit_params = None
+                if _nl.get('nonlinear_fit_params'):
+                    fit_params = dict(_nl['nonlinear_fit_params'])
+                elif _sk.get('fit_params'):
+                    fit_params = dict(_sk['fit_params'])
+                if fit_params:
+                    params_by_detector[detector_id] = fit_params
+
         return params_by_detector
 
     @staticmethod
@@ -343,7 +342,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _update_plots(self):
         """Update all plots with current settings."""
-        if not self.multisweep_panel or not self.multisweep_panel.results_by_detector:
+        if not self.multisweep_panel or not self.multisweep_panel.results:
             return
         
         if self.amplitude_idx is None:
@@ -434,7 +433,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         
     def _update_plots_all_sweeps(self):
         """Update plots showing all sweeps (stacked histograms)."""
-        if not self.multisweep_panel or not self.multisweep_panel.results_by_detector:
+        if not self.multisweep_panel or not self.multisweep_panel.results:
             return
         
         # Determine colorbar vs legend based on number of unique amplitudes

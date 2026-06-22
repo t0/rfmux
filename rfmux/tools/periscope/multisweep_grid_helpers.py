@@ -852,8 +852,7 @@ def update_fit_results_grid(
     grid_layout : QGridLayout
         Layout to populate.
     data_by_detector : dict
-        ``MultisweepPanel.results_by_detector`` —
-        ``{code: {iter_idx: entry}}``.
+        ``MultisweepPanel.results`` — ``{iter_idx: {code: entry}}``.
     res_info_dict : dict or None
         Resonator registry ``{code: {bias_amplitude, ...}}``.  Required
         when *display_mode* is ``'bias'``.
@@ -897,7 +896,14 @@ def update_fit_results_grid(
     while grid_layout.count():
         grid_layout.takeAt(0)
 
-    detector_ids = sorted_detector_ids if sorted_detector_ids is not None else sorted(data_by_detector.keys())
+    # Build a per-code dict: {code: {iter_idx: entry}} from the
+    # iteration-first input format {iter_idx: {code: entry}}.
+    code_to_iter: dict = {}
+    for iter_idx, code_dict in data_by_detector.items():
+        for code, entry in code_dict.items():
+            code_to_iter.setdefault(code, {})[iter_idx] = entry
+
+    detector_ids = sorted_detector_ids if sorted_detector_ids is not None else sorted(code_to_iter.keys())
 
     start_idx = current_batch * batch_size
     end_idx = min(start_idx + batch_size, len(detector_ids))
@@ -951,7 +957,7 @@ def update_fit_results_grid(
                 plot_item.legend.scene().removeItem(plot_item.legend)
                 plot_item.legend = None
 
-            iter_dict = data_by_detector.get(detector_id, {})
+            iter_dict = code_to_iter.get(detector_id, {})
 
             # ── Amplitude selection ───────────────────────────────────────────
             entry = None
@@ -961,7 +967,7 @@ def update_fit_results_grid(
                 bias_amp = (res_info_dict or {}).get(detector_id, {}).get('bias_amplitude')
                 if bias_amp is not None:
                     for it_entry in iter_dict.values():
-                        if it_entry.get('sweep_amplitude') == bias_amp:
+                        if it_entry.get('sweep_amplitude_normalized') == bias_amp:
                             entry = it_entry
                             selected_amp = bias_amp
                             break
@@ -969,11 +975,11 @@ def update_fit_results_grid(
                 if iter_dict:
                     sorted_items = sorted(
                         iter_dict.items(),
-                        key=lambda kv: kv[1].get('sweep_amplitude', 0.0),
+                        key=lambda kv: kv[1].get('sweep_amplitude_normalized', 0.0),
                     )
                     target_pos = min(display_amplitude_index, len(sorted_items) - 1)
                     _iter_idx, entry = sorted_items[target_pos]
-                    selected_amp = entry.get('sweep_amplitude')
+                    selected_amp = entry.get('sweep_amplitude_normalized')
 
             # ── Title ─────────────────────────────────────────────────────────
             center_freq_hz = None
@@ -1069,7 +1075,7 @@ def _plot_fit_result(plot_item, entry, show_skewed, show_nonlinear, pen_color, d
     ----------
     plot_item : pg.PlotItem
     entry : dict
-        One iteration entry from ``results_by_detector[code][iter_idx]``.
+        One iteration entry from ``results[iter_idx][code]``.
     show_skewed, show_nonlinear : bool
     pen_color : str or tuple
         Fallback axis/text colour.

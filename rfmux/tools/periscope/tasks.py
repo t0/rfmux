@@ -877,7 +877,7 @@ class FindBiasTask(QtCore.QThread):
     def __init__(
         self,
         module: int,
-        results_by_detector: dict,
+        results: dict,
         res_info_dict: dict,
         signals: "FindBiasSignals",
         bias_settings: Optional[Dict[str, Any]] = None,
@@ -887,8 +887,8 @@ class FindBiasTask(QtCore.QThread):
         ----------
         module :
             Module number (used only for progress/completed signal payloads).
-        results_by_detector :
-            ``MultisweepPanel.results_by_detector`` dict.
+        results :
+            ``MultisweepPanel.results`` dict — ``{iteration_index: {code: entry_dict}}``.
         res_info_dict :
             Resonator registry to be updated in-place by ``find_bias_points``.
             A deep copy is taken so the panel's dict is not mutated until
@@ -900,7 +900,7 @@ class FindBiasTask(QtCore.QThread):
         """
         super().__init__()
         self.module = module
-        self.results_by_detector = results_by_detector
+        self.results = results
         # Work on a deep copy so the panel's dict is only updated on success
         import copy
         self.res_info_dict = copy.deepcopy(res_info_dict)
@@ -919,8 +919,8 @@ class FindBiasTask(QtCore.QThread):
             from rfmux.algorithms.measurement.bias_kids import find_bias_points
 
             kwargs = {
-                'results_by_detector': self.results_by_detector,
-                'res_info_dict':       self.res_info_dict,
+                'results':       self.results,
+                'res_info_dict': self.res_info_dict,
             }
             # Forward settings from the settings panel
             for key in (
@@ -1069,8 +1069,8 @@ class RunFitsTask(QtCore.QThread):
         module :
             Module number (used only for signal payloads).
         results_by_detector :
-            ``MultisweepPanel.results_by_detector`` — a deep copy is taken
-            so the panel's dict is only updated on success.
+            ``MultisweepPanel.results`` — ``{iteration_index: {code: entry_dict}}``.
+            A deep copy is taken so the panel's dict is only updated on success.
         fit_settings :
             Dict from ``FitSettingsPanel.get_settings()``:
             ``{'apply_skewed_fit': bool, 'apply_nonlinear_fit': bool,
@@ -1130,25 +1130,29 @@ class RunFitsTask(QtCore.QThread):
             per_iteration: dict = {}
 
             if mode == 'index':
-                for code, iter_dict in self.results_by_detector.items():
-                    if not iter_dict:
+                # Build per-code entry lists from the iteration-first dict
+                code_to_items: dict = {}
+                for iter_idx_key, code_dict in self.results_by_detector.items():
+                    for code, entry in code_dict.items():
+                        code_to_items.setdefault(code, []).append((iter_idx_key, entry))
+
+                for code, items_list in code_to_items.items():
+                    if not items_list:
                         continue
-                    # Sort iter_dict items by sweep_amplitude_normalized (ascending)
                     sorted_items = sorted(
-                        iter_dict.items(),
+                        items_list,
                         key=lambda kv: kv[1].get('sweep_amplitude_normalized', 0.0),
                     )
-                    # Clamp requested index to the available range
                     target_pos = min(amp_idx, len(sorted_items) - 1)
                     target_iter_idx, target_entry = sorted_items[target_pos]
                     per_iteration.setdefault(target_iter_idx, {})[code] = target_entry
 
             elif mode == 'bias':
-                # Check up-front whether any code has a bias_amplitude at all.
-                # This gives a clear, actionable error when Find Bias has not been run
-                # (or the file was saved before Find Bias results were stored).
+                # All codes that appear in any iteration
                 codes_with_bias = {
-                    code for code in self.results_by_detector
+                    code
+                    for code_dict in self.results_by_detector.values()
+                    for code in code_dict
                     if (self.res_info_dict or {}).get(code, {}).get('bias_amplitude') is not None
                 }
                 if not codes_with_bias:
@@ -1159,23 +1163,19 @@ class RunFitsTask(QtCore.QThread):
                     )
                     return
 
-                for code, iter_dict in self.results_by_detector.items():
-                    if not iter_dict:
-                        continue
-                    # Skip if res_info_dict is unavailable or missing bias_amplitude
-                    bias_amp = (self.res_info_dict or {}).get(code, {}).get('bias_amplitude')
-                    if bias_amp is None:
-                        continue
-                    # Find the iter_idx whose sweep_amplitude_normalized matches bias_amplitude
-                    for iter_idx, entry in iter_dict.items():
+                for iter_idx_key, code_dict in self.results_by_detector.items():
+                    for code, entry in code_dict.items():
+                        bias_amp = (self.res_info_dict or {}).get(code, {}).get('bias_amplitude')
+                        if bias_amp is None:
+                            continue
                         if entry.get('sweep_amplitude_normalized') == bias_amp:
-                            per_iteration.setdefault(iter_idx, {})[code] = entry
-                            break
+                            if code not in (per_iteration.get(iter_idx_key) or {}):
+                                per_iteration.setdefault(iter_idx_key, {})[code] = entry
 
             else:  # 'all' (default)
-                for code, iter_dict in self.results_by_detector.items():
-                    for iter_idx, entry in iter_dict.items():
-                        per_iteration.setdefault(iter_idx, {})[code] = entry
+                for iter_idx_key, code_dict in self.results_by_detector.items():
+                    for code, entry in code_dict.items():
+                        per_iteration.setdefault(iter_idx_key, {})[code] = entry
 
             if not per_iteration:
                 if mode == 'bias':
@@ -1186,7 +1186,7 @@ class RunFitsTask(QtCore.QThread):
                     )
                 else:
                     self.signals.error.emit(
-                        "No sweep data found to fit.  The results_by_detector dict is empty or "
+                        "No sweep data found to fit.  The results dict is empty or "
                         "contains no matching entries for the selected fit mode."
                     )
                 return
@@ -1227,9 +1227,9 @@ class RunFitsTask(QtCore.QThread):
 
                     # ── Step 3: deep-merge the 'fits' subdict back ────────────
                     for code, fitted_entry in fitted_iter_data.items():
-                        if code in self.results_by_detector:
-                            if iter_idx in self.results_by_detector[code]:
-                                target = self.results_by_detector[code][iter_idx]
+                        if iter_idx in self.results_by_detector:
+                            if code in self.results_by_detector[iter_idx]:
+                                target = self.results_by_detector[iter_idx][code]
                                 if 'fits' in fitted_entry:
                                     # Merge fitter subdicts individually so running
                                     # one fitter never clobbers the other's results.

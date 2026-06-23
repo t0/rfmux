@@ -1,517 +1,822 @@
 """
-bias_kids: A measurement algorithm for biasing KIDs at their optimal operating points
-based on multisweep characterization data.
+bias_kids: Bias finding and hardware programming for KIDs readout.
+
+Two independent operations are provided:
+
+1. **find_bias_points** — pure analysis; examines multi-amplitude multisweep
+   data to identify the optimal bias amplitude and frequency for each
+   resonator, then updates ``res_info_dict`` in-place.
+
+2. **apply_bias** — async hardware step; reads the bias conditions stored in
+   ``res_info_dict`` and programmes the CRS channels.
+
+Keeping the two steps separate allows the user to inspect the results of the
+bias-finding analysis (in the Periscope multisweep panel) before deciding to
+commit them to hardware.
+
+Bias-frequency refinement
+-------------------------
+Rather than using the sweep centre frequency (which may be off from the true
+resonance by up to half the sweep span), the resonance frequency is located by
+finding the point of maximum ``|dI/df + j·dQ/df|`` — the IQ arc-length speed —
+within the sweep.  This method is robust and works directly on the measured
+sweep data without requiring a successful resonance fit.
+
+Bifurcation detection
+---------------------
+Bifurcation is detected by examining the derivative of the normalised IQ
+arc-length speed with respect to frequency.  A bifurcated resonance produces a
+characteristic positive spike immediately followed by a negative spike in this
+derivative.  This approach is more reliable than nonlinearity-parameter-based
+methods because it does not require a successful nonlinear fit.
+
+df-calibration
+--------------
+The complex calibration factor ``df_cal = 1 / (dI/df + j·dQ/df)`` (in Hz/V,
+evaluated at the bias point using ``iq_volts``) is the sole source for
+Periscope's df-unit display mode.
+
+Reference
+---------
+Algorithm ported from hidfmux/analysis/find_bias.py (Maclean Rouble,
+McGill Cosmology).
 """
 
 import numpy as np
 import asyncio
 import warnings
-from typing import Union, Dict, List, Optional, Any, Tuple, Callable
-from scipy.signal import butter, filtfilt
+from typing import Dict, Optional, Any, Callable, Literal
+
+from scipy.signal import find_peaks
+from scipy.interpolate import CubicSpline
 
 
+__all__ = [
+    'compute_iq_derivative_spline',
+    'find_max_derivative_frequency',
+    'detect_bifurcation_derivative',
+    'find_bias_points',
+    'apply_bias',
+]
 
-def bandpass_filter(data: np.ndarray, fs: float, lowcut: float, highcut: float, order: int = 4) -> np.ndarray:
+
+# ── Section A: Derivative utilities ──────────────────────────────────────────
+
+def compute_iq_derivative_spline(
+    frequencies: np.ndarray,
+    iq: np.ndarray,
+) -> tuple:
     """
-    Apply a bandpass filter to the data.
-    
-    Args:
-        data: Input signal
-        fs: Sampling frequency (Hz)
-        lowcut: Low frequency cutoff (Hz)
-        highcut: High frequency cutoff (Hz)
-        order: Filter order (default: 4)
-        
-    Returns:
-        Filtered signal
+    Fit cubic splines to I(f) and Q(f) and return their derivative callables.
+
+    This is the low-level building block used by :func:`find_max_derivative_frequency`.
+    It is exposed separately so that other analysis functions can compute IQ
+    derivatives without repeating the spline fitting.
+
+    Parameters
+    ----------
+    frequencies : np.ndarray
+        Frequency array in Hz.  Need not be sorted — data are sorted internally.
+    iq : np.ndarray
+        Complex IQ data (e.g. ``iq_volts`` from a multisweep entry).
+
+    Returns
+    -------
+    dI_df : scipy.interpolate.PPoly
+        Derivative spline of the I (real) component.  Callable as
+        ``dI_df(f)`` → float or ndarray.
+    dQ_df : scipy.interpolate.PPoly
+        Derivative spline of the Q (imaginary) component.  Callable as
+        ``dQ_df(f)`` → float or ndarray.
     """
-    nyq = 0.5 * fs
-    b, a = butter(order, [lowcut / nyq, highcut / nyq], btype='band')
-    return filtfilt(b, a, data)
+    sort_idx = np.argsort(frequencies)
+    freq_sorted = frequencies[sort_idx]
+    iq_sorted = iq[sort_idx]
+
+    dI_df = CubicSpline(freq_sorted, iq_sorted.real).derivative()
+    dQ_df = CubicSpline(freq_sorted, iq_sorted.imag).derivative()
+    return dI_df, dQ_df
 
 
-async def find_optimal_phases_parallel(
-    crs,
-    bias_configs: Dict[int, Dict],
-    module: int,
-    num_samples: int = 300,
-    apply_bandpass: bool = True,
-    fs: float = 597,
-    lowcut: float = 5,
-    highcut: float = 20,
-    phase_step: int = 5
-) -> Dict[int, Tuple[float, float]]:
+def find_max_derivative_frequency(
+    frequencies: np.ndarray,
+    iq: np.ndarray,
+    reference_freq: float,
+    max_distance_hz: float = 100e3,
+) -> tuple[float, float, float]:
     """
-    Find optimal ADC phases for multiple channels in parallel.
-    
-    Args:
-        crs: CRS object
-        bias_configs: Dictionary of bias configurations {det_idx: config}
-        module: Module number
-        num_samples: Number of samples to collect at each phase
-        apply_bandpass: Whether to apply bandpass filter to Q data
-        fs: Sampling frequency (Hz) - only used if apply_bandpass is True
-        lowcut: Bandpass filter low cutoff (Hz) - only used if apply_bandpass is True
-        highcut: Bandpass filter high cutoff (Hz) - only used if apply_bandpass is True
-        phase_step: Phase step size in degrees
-        
-    Returns:
-        Dictionary of {det_idx: (best_phase_degrees, max_std_q)}
+    Find the frequency of maximum ``|dI/df + j·dQ/df|`` within the sweep.
+
+    The point of maximum IQ arc-length speed corresponds to the resonance
+    frequency for a standard resonator sweep.  A sanity check is applied: if
+    the identified point is more than *max_distance_hz* away from
+    *reference_freq* it is assumed to be a glitch or outlier, and
+    *reference_freq* is returned instead.
+
+    Parameters
+    ----------
+    frequencies : np.ndarray
+        Frequency array in Hz.
+    iq : np.ndarray
+        Complex IQ data.  Should be in volts (``iq_volts``) so that the
+        returned derivatives are in V/Hz and can be used to compute the
+        ``df_calibration`` factor.
+    reference_freq : float
+        Reference frequency (Hz) for the sanity check.  Typically the fitted
+        resonance frequency ``fr``, or the sweep centre frequency as a
+        fallback.
+    max_distance_hz : float
+        Maximum allowed distance (Hz) between the max-derivative point and
+        *reference_freq* before falling back to *reference_freq*.
+        Default: 100 kHz.
+
+    Returns
+    -------
+    bias_freq : float
+        Refined bias frequency in Hz.
+    dI_df_at_bias : float
+        dI/df evaluated at *bias_freq* in the same units as *iq* per Hz.
+    dQ_df_at_bias : float
+        dQ/df evaluated at *bias_freq* in the same units as *iq* per Hz.
     """
-    optimal_phases = {}
-    
-    # Initialize best phases and stds for each detector
-    for det_idx in bias_configs:
-        optimal_phases[det_idx] = (0.0, -np.inf)
-    
-    # Scan through phases
-    for phase in range(0, 360, phase_step):
-        # Set phase for all channels simultaneously
-        async with crs.tuber_context() as ctx:
-            for det_idx, config in bias_configs.items():
-                ctx.set_phase(phase, units=crs.UNITS.DEGREES, target=crs.TARGET.ADC, 
-                             channel=config['channel'], module=module)
-            await ctx()
-        
-        # Collect samples for all channels at once
-        samples = await crs.get_samples(num_samples, channel=None, module=module, average=False)
-        
-        # Process each detector's Q data
-        for det_idx, config in bias_configs.items():
-            channel_idx = config['channel'] - 1  # Convert to 0-based index
-            
-            # Extract Q data for this channel
-            q_data = np.array(samples.q[channel_idx])
-            
-            # Calculate standard deviation (with or without bandpass filter)
-            try:
-                if apply_bandpass:
-                    q_processed = bandpass_filter(q_data, fs, lowcut, highcut)
-                else:
-                    q_processed = q_data
-                    
-                std_q = float(np.std(q_processed))
-                
-                # Update if this is better than the current best
-                current_best_phase, current_best_std = optimal_phases[det_idx]
-                if std_q > current_best_std:
-                    optimal_phases[det_idx] = (float(phase), std_q)
-                    
-            except Exception as e:
-                if apply_bandpass:
-                    warnings.warn(f"Bandpass filter failed for detector {det_idx} at phase {phase}°: {e}")
-                else:
-                    warnings.warn(f"Failed to process Q data for detector {det_idx} at phase {phase}°: {e}")
-                continue
-    
-    # Report results
-    filter_desc = "filtered " if apply_bandpass else ""
-    for det_idx, (best_phase, best_std) in optimal_phases.items():
-        print(f"Detector {det_idx}: Optimal phase = {best_phase}°, {filter_desc}std(Q) = {best_std:.4f}")
-    
-    return optimal_phases
+    dI_df, dQ_df = compute_iq_derivative_spline(frequencies, iq)
 
+    sort_idx = np.argsort(frequencies)
+    freq_sorted = frequencies[sort_idx]
 
-def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[int, Dict[int, Dict]]], Dict]:
-    """
-    Extract detector data from the legacy GUI multisweep results format.
+    # Evaluate |dI/df + j*dQ/df| at each measured frequency point
+    deriv_mag = np.abs(dI_df(freq_sorted) + 1j * dQ_df(freq_sorted))
+    f_max_deriv = float(freq_sorted[np.argmax(deriv_mag)])
 
-    Converts the old iteration-indexed format into the canonical
-    detector-indexed format used by :func:`analyze_multiamp_data`.
-
-    Args:
-        gui_results: Dictionary with 'results_by_iteration' key.
-
-    Returns:
-        Tuple of (results_by_detector, metadata).
-        ``results_by_detector`` is ``{detector_id: {iteration_index: entry_dict}}``.
-        Returns (None, {}) if not GUI format.
-    """
-    if 'results_by_iteration' not in gui_results:
-        return None, {}
-
-    results_by_detector: Dict[int, Dict[int, Dict]] = {}
-    metadata: Dict[str, Any] = {
-        'iterations': [],
-        'amplitudes': set(),
-        'directions': set()
-    }
-
-    for iteration_data in gui_results['results_by_iteration']:
-        iteration = iteration_data.get('iteration')
-        amplitude = iteration_data.get('amplitude')
-        direction = iteration_data.get('direction', 'upward')
-        data = iteration_data.get('data', {})
-
-        metadata['iterations'].append({
-            'iteration': iteration,
-            'amplitude': amplitude,
-            'direction': direction
-        })
-        metadata['amplitudes'].add(amplitude)
-        metadata['directions'].add(direction)
-
-        for detector_id, det_data in data.items():
-            if detector_id not in results_by_detector:
-                results_by_detector[detector_id] = {}
-            # Store with iteration index as key (new canonical format)
-            # Ensure amplitude/direction are inside the entry
-            entry = dict(det_data)
-            entry['amplitude'] = amplitude
-            entry['direction'] = direction
-            entry['iteration'] = iteration
-            results_by_detector[detector_id][iteration] = entry
-
-    return results_by_detector, metadata
-
-
-async def bias_kids(
-    crs,
-    multisweep_results: Union[Dict, List[Dict]],
-    nonlinear_threshold: float = 0.77,
-    fallback_to_lowest: bool = True,
-    optimize_phase: bool = False,
-    bandpass_params: Optional[Dict[str, float]] = None,
-    num_phase_samples: int = 300,
-    phase_step: int = 5,
-    *,
-    module: Optional[Union[int, List[int]]] = None,
-    progress_callback: Optional[Callable] = None
-) -> Union[Dict[int, Dict], List[Dict[int, Dict]]]:
-    """
-    Bias KIDs at their optimal operating points based on multisweep characterization.
-    
-    This algorithm analyzes multisweep results to find the best amplitude for each
-    detector (highest amplitude that is not bifurcated and has nonlinear parameter < threshold),
-    then programs the detectors with the appropriate frequency, phase, and amplitude.
-    
-    Args:
-        crs: The CRS object to use for hardware communication.
-        multisweep_results: Can be one of:
-                           - Dict with 'results_by_detector' key: Detector-indexed multi-amplitude format
-                           - Dict with 'results_by_iteration' key: Legacy iteration-indexed format
-                           - Dict[int, Dict]: Single amplitude results
-                           - List[Dict]: Multiple modules
-        nonlinear_threshold (float): Maximum acceptable nonlinear parameter 'a'.
-                                   Defaults to 0.77.
-        fallback_to_lowest (bool): If True and no suitable amplitude found,
-                                 use the lowest available amplitude. If False,
-                                 skip the detector. Defaults to True.
-        optimize_phase (bool): If True, scan through ADC phases to find the phase that
-                             maximizes variance in bandpass-filtered Q timestream.
-                             Defaults to False.
-        bandpass_params (dict, optional): Parameters for bandpass filter used in phase optimization.
-                                        Keys: 'lowcut' (Hz), 'highcut' (Hz), 'fs' (sampling freq Hz).
-                                        Defaults: {'lowcut': 5, 'highcut': 20, 'fs': 597}.
-        num_phase_samples (int): Number of samples to collect for phase optimization.
-                               Defaults to 300.
-        phase_step (int): Phase step size in degrees for optimization scan.
-                        Defaults to 5.
-        module (int | list[int], optional): Target module(s). If None, extracted from results.
-        progress_callback (callable, optional): Function called with (module, progress_percentage).
-        
-    Returns:
-        Dictionary or list of dictionaries containing only the biased detectors' data.
-        Each entry includes the original multisweep data plus:
-        - 'bias_channel': The assigned channel number (1-based)
-        - 'bias_amplitude': The amplitude selected for biasing
-        - 'bifurcation_suspected': Whether any amplitude showed bifurcation
-        - 'bias_successful': Whether the detector was successfully biased
-        - 'optimal_phase_degrees': The optimal ADC phase found (if phase optimization enabled)
-        - 'phase_optimization_std': The bandpass-filtered Q std at optimal phase
-    """
-    
-    # Detect multi-amplitude format and find optimal bias points
-    results_by_detector = None
-
-    if isinstance(multisweep_results, dict) and 'results_by_detector' in multisweep_results:
-        # Detector-indexed format (current canonical format)
-        results_by_detector = multisweep_results['results_by_detector']
-
-    elif isinstance(multisweep_results, dict) and 'results_by_iteration' in multisweep_results:
-        # Legacy iteration-indexed format — convert to detector-indexed
-        results_by_detector, _ = _extract_data_from_gui_format(multisweep_results)
-
-    if results_by_detector is not None:
-        # Find optimal configuration for each detector
-        optimal_configs = analyze_multiamp_data(results_by_detector, nonlinear_threshold, fallback_to_lowest)
-
-        # Convert to single result set using optimal configurations
-        single_results = {}
-        for det_idx, config in optimal_configs.items():
-            single_results[det_idx] = config['selected_data'].copy()
-            single_results[det_idx]['selected_amplitude'] = config['selected_amplitude']
-            single_results[det_idx]['bifurcation_ever_seen'] = config.get('bifurcation_ever_seen', False)
-
-        # Proceed with single-amplitude logic using optimal results
-        multisweep_results = single_results
-
-    # Handle list of results (multiple modules)
-    elif isinstance(multisweep_results, list):
-        if module is None:
-            # Extract module numbers from the data if possible
-            # This would require the multisweep results to contain module info
-            # For now, assume modules are sequential starting from 1
-            module = list(range(1, len(multisweep_results) + 1))
-        elif not isinstance(module, list):
-            module = [module]
-            
-        if len(multisweep_results) != len(module):
-            raise ValueError(f"Number of result sets ({len(multisweep_results)}) "
-                           f"doesn't match number of modules ({len(module)})")
-        
-        # Process each module
-        tasks = []
-        for mod_idx, (mod_results, mod_num) in enumerate(zip(multisweep_results, module)):
-            tasks.append(
-                bias_kids(
-                    crs=crs,
-                    multisweep_results=mod_results,
-                    nonlinear_threshold=nonlinear_threshold,
-                    fallback_to_lowest=fallback_to_lowest,
-                    optimize_phase=optimize_phase,
-                    bandpass_params=bandpass_params,
-                    num_phase_samples=num_phase_samples,
-                    phase_step=phase_step,
-                    module=mod_num,
-                    progress_callback=progress_callback
-                )
-            )
-        
-        return await asyncio.gather(*tasks)
-    
-    # Single module processing
-    if module is None:
-        raise ValueError("Module must be specified for single result set")
-    
-    # Get current NCO frequency
-    nco_freq = await crs.get_nco_frequency(module=module)
-    
-    # Base frequency (Nyquist frequency) for quantization
-    base_freq = 298.0232238769531  # Hz
-    
-    # Set default bandpass parameters if not provided
-    if bandpass_params is None:
-        bandpass_params = {'lowcut': 5, 'highcut': 20, 'fs': 597}
-    
-    # Analyze each detector to find optimal bias point
-    bias_configs = {}
-    total_detectors = len(multisweep_results)
-    
-    for det_idx, det_data in multisweep_results.items():
-        # Check if this is multi-amplitude data
-        # Multi-amplitude data would need to be organized differently
-        # For now, assume single amplitude per detector
-        
-        # Extract key parameters
-        is_bifurcated = det_data.get('is_bifurcated', False)
-        nonlinear_params = det_data.get('nonlinear_fit_params', {})
-        nonlinear_a = nonlinear_params.get('a', float('inf'))
-        
-        # Check if detector meets criteria
-        suitable = not is_bifurcated and nonlinear_a < nonlinear_threshold
-        
-        if suitable or fallback_to_lowest:
-            # Prepare bias configuration
-            bias_freq = det_data.get('bias_frequency', det_data.get('original_center_frequency'))
-            sweep_amp = det_data.get('sweep_amplitude')
-            
-            if bias_freq is None or sweep_amp is None:
-                warnings.warn(f"Detector {det_idx}: Missing bias frequency or amplitude")
-                continue
-                
-            # Channel assignment: det_idx is already 1-based from multisweep
-            channel = det_idx
-            
-            # Quantize the absolute bias frequency to nearest multiple of base frequency
-            quantized_bias_freq = round(bias_freq / base_freq) * base_freq
-            
-            # Calculate channel frequency relative to NCO
-            channel_freq = quantized_bias_freq - nco_freq
-            
-            bias_configs[det_idx] = {
-                'channel': int(channel),  # Ensure it's a Python int
-                'frequency': float(channel_freq),  # Channel frequency relative to NCO
-                'original_bias_frequency': float(bias_freq),  # Store original for reference
-                'quantized_bias_frequency': float(quantized_bias_freq),  # Quantized absolute frequency
-                'amplitude': float(sweep_amp),  # Ensure it's a Python float
-                'phase': 0.0,  # No phase rotation applied anymore
-                'suitable': suitable,
-                'bifurcation_suspected': is_bifurcated,
-                'nonlinear_a': nonlinear_a
-            }
-            
-            if not suitable:
-                warnings.warn(f"Detector {det_idx}: No suitable amplitude found "
-                            f"(bifurcated={is_bifurcated}, a={nonlinear_a:.3f}). "
-                            f"Using fallback amplitude.")
-    
-    # # Clear all channels first
-    # max_channels = 1024
-    # async with crs.tuber_context() as ctx:
-    #     for ch in range(1, max_channels + 1):
-    #         ctx.set_amplitude(0, channel=ch, module=module)
-    #     await ctx()
-    
-    # Program the selected detectors
-    successfully_biased = {}
-    
-    # First, set up all tones without phase optimization
-    async with crs.tuber_context() as ctx:
-        for det_idx, config in bias_configs.items():
-            try:
-                ctx.set_frequency(config['frequency'], channel=config['channel'], module=module)
-                ctx.set_amplitude(config['amplitude'], channel=config['channel'], module=module)
-                ctx.set_phase(config['phase'], units=crs.UNITS.DEGREES, target=crs.TARGET.ADC, channel=config['channel'], module=module)
-            except Exception as e:
-                print(f"[Bias] Failed to set up detector {det_idx}: {e}")
-                continue
-        await ctx()
-    
-    # Now perform phase optimization if requested
-    if optimize_phase:
-        print(f"Optimizing phases for {len(bias_configs)} detectors in parallel...")
-        
-        # Determine if bandpass filter should be applied
-        # If bandpass_params contains 'apply_bandpass', use that value, otherwise default to True
-        apply_bandpass = True
-        if bandpass_params is not None:
-            apply_bandpass = bool(bandpass_params.get('apply_bandpass', True))
-        
-        # Find optimal phases for all detectors in parallel
-        optimal_phases = await find_optimal_phases_parallel(
-            crs=crs,
-            bias_configs=bias_configs,
-            module=module,  # type: ignore  # module is guaranteed to be int at this point
-            num_samples=num_phase_samples,
-            apply_bandpass=apply_bandpass,
-            fs=bandpass_params.get('fs', 597) if bandpass_params else 597,
-            lowcut=bandpass_params.get('lowcut', 5) if bandpass_params else 5,
-            highcut=bandpass_params.get('highcut', 20) if bandpass_params else 20,
-            phase_step=phase_step
-        )
+    # Sanity check
+    if abs(f_max_deriv - reference_freq) < max_distance_hz:
+        bias_freq = f_max_deriv
     else:
-        # No optimization - all phases are 0
-        optimal_phases = {det_idx: (0.0, None) for det_idx in bias_configs}
-    
-    # Apply the optimal phases and create result data
-    for det_idx, config in bias_configs.items():
-        try:
-            optimal_phase, phase_std = optimal_phases.get(det_idx, (0.0, None))
-            
-            # Set the optimal phase for this channel
-            if optimal_phase != 0.0:
-                await crs.set_phase(optimal_phase, crs.UNITS.DEGREES, crs.TARGET.ADC, 
-                                   channel=config['channel'], module=module)
-            
-            # Copy the original multisweep data and add bias info
-            biased_data = multisweep_results[det_idx].copy()
-            biased_data['bias_channel'] = config['channel']
-            biased_data['bifurcation_suspected'] = config['bifurcation_suspected']
-            biased_data['bias_successful'] = True
-            biased_data['optimal_phase_degrees'] = optimal_phase
-            biased_data['phase_optimization_std'] = phase_std
-            
-            # If we have df calibration and applied a phase, rotate it
-            if 'df_calibration' in biased_data and biased_data['df_calibration'] is not None and optimal_phase != 0.0:
-                # Rotate the df calibration by the applied phase
-                phase_rad = np.radians(optimal_phase)
-                rotation_factor = np.exp(1j * phase_rad)
-                biased_data['df_calibration'] *= rotation_factor
-                biased_data['df_calibration_rotated'] = True
-            
-            successfully_biased[det_idx] = biased_data
-            
-        except Exception as e:
-            warnings.warn(f"Failed to bias detector {det_idx}: {e}")
-    
-    # Progress callback
-    if progress_callback:
-        progress_callback(module, 100.0)
-    
-    # Log summary
-    print(f"Module {module}: Successfully biased {len(successfully_biased)}/{total_detectors} detectors")
-    
-    return successfully_biased
+        warnings.warn(
+            f"Max-derivative point ({f_max_deriv * 1e-6:.4f} MHz) is "
+            f"{abs(f_max_deriv - reference_freq) * 1e-3:.1f} kHz from the "
+            f"reference ({reference_freq * 1e-6:.4f} MHz) — exceeds "
+            f"max_distance_hz = {max_distance_hz * 1e-3:.0f} kHz. "
+            f"Falling back to reference frequency."
+        )
+        bias_freq = reference_freq
+
+    dI_df_at_bias = float(dI_df(bias_freq))
+    dQ_df_at_bias = float(dQ_df(bias_freq))
+
+    return bias_freq, dI_df_at_bias, dQ_df_at_bias
 
 
-def analyze_multiamp_data(
-    results_by_detector: Dict[int, Dict],
-    nonlinear_threshold: float = 0.77,
-    fallback_to_lowest: bool = True
-) -> Dict[int, Dict[str, Any]]:
+# ── Section B: Bifurcation detection ─────────────────────────────────────────
+
+def detect_bifurcation_derivative(
+    frequencies: np.ndarray,
+    iq: np.ndarray,
+    spike_prominence_factor: float = 2.0,
+    spike_height_factor: float = 3.0,
+    return_diagnostics: bool = False,
+):
     """
-    Analyze multi-amplitude multisweep results to find optimal bias points.
+    Detect bifurcation via spikes in the derivative of the IQ arc-length speed.
 
-    Args:
-        results_by_detector: Detector-indexed data keyed by iteration index:
-            ``{detector_id: {iteration_index: entry_dict}}``
-            Each entry_dict contains 'amplitude', 'direction', and sweep data.
-        nonlinear_threshold: Maximum acceptable nonlinear parameter
-        fallback_to_lowest: Whether to use lowest amplitude as fallback
+    **Method**
 
-    Returns:
-        Dictionary with detector index as key, optimal configuration as value.
+    The normalised IQ arc-length speed is::
+
+        dist = sqrt((I_speed / df)^2 + (Q_speed / df)^2)
+
+    where I and Q are each normalised by their own range.  The first derivative
+    of this (``arc_speed_gradient = diff(dist)``) exhibits a characteristic
+    positive spike immediately followed by a negative spike when the resonance
+    is bifurcated — the IQ trace "jumps" and then returns to the baseline.
+
+    Spike detection thresholds:
+
+    * Prominence: ``(dist.max() - dist.min()) / spike_prominence_factor``
+    * Height:     ``spike_height_factor * std(arc_speed_gradient)``
+
+    Parameters
+    ----------
+    frequencies : np.ndarray
+        Frequency array in Hz.
+    iq : np.ndarray
+        Complex IQ data (counts or volts — only the *shape* matters).
+    spike_prominence_factor : float
+        Larger value → less sensitive to bifurcation.  Default: 2.0.
+    spike_height_factor : float
+        Larger value → less sensitive to bifurcation.  Default: 3.0.
+    return_diagnostics : bool
+        If ``True``, return a ``(bool, dict)`` tuple where the dict contains
+        all intermediate arrays and thresholds computed during detection.
+        Default: ``False`` (returns only the boolean, preserving the original
+        API for all existing callers).
+
+    Returns
+    -------
+    bool or (bool, dict)
+        When *return_diagnostics* is ``False`` (default): ``True`` if
+        bifurcation is detected, ``False`` otherwise.
+
+        When *return_diagnostics* is ``True``: a ``(is_bifurcated, diag)``
+        tuple where *diag* is a dictionary with the following keys:
+
+        * ``I_speed`` — normalised per-step I increments, ``diff(I/I_range)``
+        * ``Q_speed`` — normalised per-step Q increments, ``diff(Q/Q_range)``
+        * ``freq_steps_hz`` — per-step frequency intervals (Hz)
+        * ``arc_length_speed`` — normalised IQ arc-length speed per Hz
+        * ``arc_speed_gradient`` — ``diff(arc_length_speed)``
+        * ``freq_arc_speed`` — frequency midpoints for *arc_length_speed*
+        * ``freq_arc_speed_gradient`` — frequency midpoints for *arc_speed_gradient*
+        * ``spike_prominence_threshold`` — computed prominence threshold
+        * ``spike_height_threshold`` — computed height threshold
+        * ``uppeaks`` — indices into *arc_speed_gradient* of positive spikes
+        * ``downpeaks`` — indices into *arc_speed_gradient* of negative spikes
+        * ``is_bifurcated`` — same as the leading boolean
     """
-    optimal_configs = {}
+    sort_idx = np.argsort(frequencies)
+    freq_sorted = np.asarray(frequencies)[sort_idx]
+    iq_sorted = np.asarray(iq)[sort_idx]
 
-    for det_idx, iter_dict in results_by_detector.items():
-        amp_analysis = []
-        bifurcation_ever_seen = False
+    iarr = iq_sorted.real
+    qarr = iq_sorted.imag
 
-        # Iterate entries sorted by amplitude (highest first) for deterministic order
-        sorted_entries = sorted(
-            iter_dict.values(),
-            key=lambda e: (-(e.get('amplitude') or 0), e.get('direction', ''))
+    irange = float(iarr.max() - iarr.min())
+    qrange = float(qarr.max() - qarr.min())
+
+    if irange == 0.0 or qrange == 0.0:
+        if return_diagnostics:
+            empty_diag = {
+                'I_speed': np.array([]), 'Q_speed': np.array([]),
+                'freq_steps_hz': np.array([]),
+                'arc_length_speed': np.array([]), 'arc_speed_gradient': np.array([]),
+                'freq_arc_speed': np.array([]), 'freq_arc_speed_gradient': np.array([]),
+                'spike_prominence_threshold': 0.0, 'spike_height_threshold': 0.0,
+                'uppeaks': np.array([], dtype=int), 'downpeaks': np.array([], dtype=int),
+                'is_bifurcated': False,
+            }
+            return False, empty_diag
+        return False  # Degenerate sweep
+
+    idiffnorm = np.diff(iarr / irange)
+    qdiffnorm = np.diff(qarr / qrange)
+    fdiff = np.diff(freq_sorted)
+
+    if np.any(fdiff == 0):
+        if return_diagnostics:
+            empty_diag = {
+                'I_speed': idiffnorm, 'Q_speed': qdiffnorm,
+                'freq_steps_hz': fdiff,
+                'arc_length_speed': np.array([]), 'arc_speed_gradient': np.array([]),
+                'freq_arc_speed': np.array([]), 'freq_arc_speed_gradient': np.array([]),
+                'spike_prominence_threshold': 0.0, 'spike_height_threshold': 0.0,
+                'uppeaks': np.array([], dtype=int), 'downpeaks': np.array([], dtype=int),
+                'is_bifurcated': False,
+            }
+            return False, empty_diag
+        return False
+
+    dist = np.sqrt(idiffnorm ** 2 + qdiffnorm ** 2) / np.abs(fdiff)
+    distdiff = np.diff(dist)
+
+    # Frequency midpoints for the step-level arrays (length N-1) and gradient (length N-2)
+    freq_arc_speed = 0.5 * (freq_sorted[:-1] + freq_sorted[1:])
+    freq_arc_speed_gradient = 0.5 * (freq_arc_speed[:-1] + freq_arc_speed[1:])
+
+    if len(distdiff) < 2:
+        if return_diagnostics:
+            diag = {
+                'I_speed': idiffnorm, 'Q_speed': qdiffnorm,
+                'freq_steps_hz': fdiff,
+                'arc_length_speed': dist, 'arc_speed_gradient': distdiff,
+                'freq_arc_speed': freq_arc_speed,
+                'freq_arc_speed_gradient': freq_arc_speed_gradient,
+                'spike_prominence_threshold': 0.0, 'spike_height_threshold': 0.0,
+                'uppeaks': np.array([], dtype=int), 'downpeaks': np.array([], dtype=int),
+                'is_bifurcated': False,
+            }
+            return False, diag
+        return False
+
+    spike_prominence = (dist.max() - dist.min()) / spike_prominence_factor
+    spike_height = spike_height_factor * float(np.std(distdiff))
+
+    uppeaks, _ = find_peaks(distdiff, prominence=spike_prominence, height=spike_height)
+    downpeaks, _ = find_peaks(-distdiff, prominence=spike_prominence, height=spike_height)
+
+    is_bifurcated = False
+    if len(uppeaks) > 0 and len(downpeaks) > 0:
+        if downpeaks[0] == uppeaks[0] + 1:
+            is_bifurcated = True
+
+    if return_diagnostics:
+        diag = {
+            'I_speed':                    idiffnorm,
+            'Q_speed':                    qdiffnorm,
+            'freq_steps_hz':              fdiff,
+            'arc_length_speed':           dist,
+            'arc_speed_gradient':         distdiff,
+            'freq_arc_speed':             freq_arc_speed,
+            'freq_arc_speed_gradient':    freq_arc_speed_gradient,
+            'spike_prominence_threshold': spike_prominence,
+            'spike_height_threshold':     spike_height,
+            'uppeaks':                    uppeaks,
+            'downpeaks':                  downpeaks,
+            'is_bifurcated':              is_bifurcated,
+        }
+        return is_bifurcated, diag
+
+    return is_bifurcated
+
+
+# ── Section C: Multi-amplitude analysis ──────────────────────────────────────
+
+def find_bias_points(
+    results: Dict[int, Dict],
+    res_info_dict: Dict[str, Dict],
+    spike_prominence_factor: float = 2.0,
+    spike_height_factor: float = 3.0,
+    max_deriv_distance_hz: float = 100e3,
+    reference_freq_source: Literal["bias_frequency", "fit_fr", "sweep_center"] = "bias_frequency",
+    fit_selected_amplitude: bool = True,
+) -> Dict[str, Dict]:
+    """
+    Analyse multi-amplitude multisweep results to find optimal bias points.
+
+    For each resonator code the algorithm:
+
+    1. Collects all sweep entries for the code across every iteration and sorts
+       them by amplitude (lowest → highest).
+    2. Steps through amplitudes calling :func:`detect_bifurcation_derivative`.
+       When bifurcation is first detected at amplitude *a*, the previous
+       amplitude *a - 1* is selected as the bias amplitude.  If *a* is the
+       lowest available amplitude, *a* itself is used.
+    3. If no bifurcation is found, the highest available amplitude is selected,
+       ensuring every resonator always receives a bias point.
+    4. On the selected entry:
+
+       * Calls :func:`find_max_derivative_frequency` on the ``iq_volts`` data
+         to obtain the refined ``bias_frequency`` and ``dI_df``, ``dQ_df``
+         in V/Hz.
+       * Computes ``df_calibration = 1 / (dI_df + j·dQ_df)``  (Hz/V).
+       * Optionally runs the nonlinear fitter as a post-selection diagnostic.
+         This is skipped when the selected entry is itself bifurcated.
+
+    5. Updates ``res_info_dict[code]`` in-place with all new fields.
+
+    Parameters
+    ----------
+    results : dict
+        ``{iteration_index: {code: entry_dict}}`` as stored in
+        ``MultisweepPanel.results``.  Each *entry_dict* should contain
+        ``frequencies``, ``iq_counts``, ``iq_volts``, and
+        ``sweep_amplitude_normalized``.
+    res_info_dict : dict
+        Resonator registry ``{code: {bias_frequency, bias_amplitude,
+        channel_number}}``.  **Updated in-place** and also returned.
+    spike_prominence_factor : float
+        Passed to :func:`detect_bifurcation_derivative`.  Default: 2.0.
+    spike_height_factor : float
+        Passed to :func:`detect_bifurcation_derivative`.  Default: 3.0.
+    max_deriv_distance_hz : float
+        Passed to :func:`find_max_derivative_frequency`.  Default: 100 kHz.
+    reference_freq_source : {"bias_frequency", "fit_fr", "sweep_center"}
+        Which frequency to use as the sanity-check reference for
+        :func:`find_max_derivative_frequency`:
+
+        * ``"bias_frequency"`` — ``res_info_dict[code]["bias_frequency"]``
+          (the sweep-centre frequency set during the multisweep run).
+        * ``"fit_fr"`` — the fitted resonance frequency from ``fit_params``
+          or ``nonlinear_fit_params`` in the selected entry; falls back to
+          ``sweep_center_frequency`` when absent.
+        * ``"sweep_center"`` — always uses ``entry["sweep_center_frequency"]``.
+
+    fit_selected_amplitude : bool
+        If ``True`` (default), run the nonlinear fitter on the selected
+        amplitude's sweep as a diagnostic.  The fit is always skipped when
+        the selected entry is itself identified as bifurcated, to avoid
+        feeding a pathological sweep to the fitter.
+
+    Returns
+    -------
+    res_info_dict : dict
+        The same dict passed in, updated in-place.  New / updated fields per
+        resonator code:
+
+        * ``bias_frequency`` (float) — refined via max-derivative method
+        * ``bias_amplitude`` (float) — selected amplitude
+        * ``dI_df`` (float) — dI/df at the bias point (V/Hz)
+        * ``dQ_df`` (float) — dQ/df at the bias point (V/Hz)
+        * ``df_calibration`` (complex) — ``1/(dI_df + j·dQ_df)``  (Hz/V)
+        * ``bifurcated_at`` (float or None) — amplitude where bifurcation
+          was first detected; ``None`` if not detected
+        * ``bias_found`` (bool)
+        * ``nonlinear_fit_params`` (dict or None) — diagnostic fit result
+        * ``nonlinear_fit_success`` (bool)
+    """
+    from rfmux.algorithms.measurement.fitting_nonlinear import (
+        fit_nonlinear_iq,
+        estimate_and_remove_gain,
+    )
+
+    # Build a per-code list of entries from the iteration-first dict
+    code_to_entries: dict = {}
+    for _iter_idx, code_dict in results.items():
+        for code, entry in code_dict.items():
+            code_to_entries.setdefault(code, []).append(entry)
+
+    for code, entries in code_to_entries.items():
+
+        if code not in res_info_dict:
+            warnings.warn(
+                f"find_bias_points: code {code!r} not found in res_info_dict — skipping."
+            )
+            continue
+
+        # --- Collect entries and sort by amplitude (lowest first) ---
+        entries_sorted = sorted(
+            entries,
+            key=lambda e: (e.get('sweep_amplitude_normalized') or 0.0),
         )
 
-        for det_data in sorted_entries:
-            amp = det_data.get('amplitude')
-            direction = det_data.get('direction', 'upward')
+        bifurcated_at = None
+        selected_entry = None
+        selected_amplitude = None
+        selected_is_bifurcated = False
+
+        # --- Amplitude selection ---
+        for i, entry in enumerate(entries_sorted):
+            amp = entry.get('sweep_amplitude_normalized')
             if amp is None:
                 continue
 
-            is_bifurcated = det_data.get('is_bifurcated', False)
-            nonlinear_params = det_data.get('nonlinear_fit_params', {})
-            nonlinear_a = nonlinear_params.get('a', float('inf'))
-            nonlinear_success = det_data.get('nonlinear_fit_success', False)
+            frequencies = np.asarray(entry.get('frequencies', []))
+            iq_counts = entry.get('iq_counts')
+
+            if len(frequencies) < 4 or iq_counts is None:
+                continue
+
+            is_bifurcated = detect_bifurcation_derivative(
+                frequencies,
+                np.asarray(iq_counts),
+                spike_prominence_factor=spike_prominence_factor,
+                spike_height_factor=spike_height_factor,
+            )
 
             if is_bifurcated:
-                bifurcation_ever_seen = True
+                bifurcated_at = amp
+                if i > 0:
+                    # Use the entry one step below the bifurcated one
+                    prev = entries_sorted[i - 1]
+                    if prev.get('sweep_amplitude_normalized') is not None:
+                        selected_entry = prev
+                        selected_amplitude = prev['sweep_amplitude_normalized']
+                        selected_is_bifurcated = False
+                    else:
+                        # Previous entry has no amplitude — use current
+                        selected_entry = entry
+                        selected_amplitude = amp
+                        selected_is_bifurcated = True
+                else:
+                    # Bifurcation at the very lowest amplitude
+                    selected_entry = entry
+                    selected_amplitude = amp
+                    selected_is_bifurcated = True
+                break
 
-            if nonlinear_success:
-                suitable = not is_bifurcated and nonlinear_a < nonlinear_threshold
-            else:
-                suitable = not is_bifurcated
+        if selected_entry is None:
+            # No bifurcation found — always fall back to the highest amplitude
+            for entry in reversed(entries_sorted):
+                if entry.get('sweep_amplitude_normalized') is not None:
+                    selected_entry = entry
+                    selected_amplitude = entry['sweep_amplitude_normalized']
+                    selected_is_bifurcated = False
+                    break
+            if selected_entry is None:
+                warnings.warn(
+                    f"find_bias_points: {code!r} — no valid sweep entries found."
+                )
+                res_info_dict[code]['bias_found'] = False
+                continue
 
-            amp_analysis.append({
-                'amplitude': amp,
-                'direction': direction,
-                'is_bifurcated': is_bifurcated,
-                'nonlinear_a': nonlinear_a,
-                'nonlinear_fit_success': nonlinear_success,
-                'suitable': suitable,
-                'data': det_data
-            })
+        # --- Determine reference frequency ---
+        if reference_freq_source == "bias_frequency":
+            ref_freq = res_info_dict[code].get('bias_frequency')
 
-        # Find the highest suitable amplitude
-        suitable_entries = [a for a in amp_analysis if a['suitable']]
+        elif reference_freq_source == "fit_fr":
+            fp  = selected_entry.get('fits', {}).get('skewed', {}).get('fit_params') or {}
+            nlp = selected_entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_params') or {}
+            ref_freq = fp.get('fr') or nlp.get('fr')
+            # Treat the string 'nan' (from old skewed fitter) as missing
+            if isinstance(ref_freq, str):
+                ref_freq = None
+            if ref_freq is None:
+                ref_freq = selected_entry.get('sweep_center_frequency')
 
-        if suitable_entries:
-            optimal = suitable_entries[0]
-        elif fallback_to_lowest and amp_analysis:
-            sorted_by_amp = sorted(amp_analysis, key=lambda x: x['amplitude'])
-            optimal = sorted_by_amp[0]
+        else:  # "sweep_center"
+            ref_freq = selected_entry.get('sweep_center_frequency')
+
+        # Ultimate fallback
+        if ref_freq is None:
+            ref_freq = (
+                selected_entry.get('bias_frequency')
+                or selected_entry.get('sweep_center_frequency')
+            )
+
+        if ref_freq is None:
+            warnings.warn(
+                f"find_bias_points: {code!r} — cannot determine reference frequency."
+            )
+            res_info_dict[code]['bias_found'] = False
+            continue
+
+        # --- Max-derivative bias frequency (using iq_volts for calibration) ---
+        frequencies = np.asarray(selected_entry['frequencies'])
+        iq_volts = selected_entry.get('iq_volts')
+
+        if iq_volts is not None:
+            iq_for_deriv = np.asarray(iq_volts)
         else:
-            optimal = None
+            warnings.warn(
+                f"find_bias_points: {code!r} — 'iq_volts' absent; "
+                f"falling back to 'iq_counts'. "
+                f"df_calibration will not be in correct voltage units."
+            )
+            iq_for_deriv = np.asarray(selected_entry['iq_counts'])
 
-        if optimal:
-            optimal_configs[det_idx] = {
-                'selected_amplitude': optimal['amplitude'],
-                'selected_direction': optimal['direction'],
-                'selected_data': optimal['data'],
-                'bifurcation_ever_seen': bifurcation_ever_seen,
-                'all_amplitudes': amp_analysis
+        # Voltage-calibrated splines (for df_calibration and bias-frequency finding)
+        dI_df_sp = dQ_df_sp = None
+        try:
+            dI_df_sp, dQ_df_sp = compute_iq_derivative_spline(frequencies, iq_for_deriv)
+        except Exception:
+            pass  # Handled below
+
+        try:
+            bias_freq, dI_df, dQ_df = find_max_derivative_frequency(
+                frequencies,
+                iq_for_deriv,
+                reference_freq=float(ref_freq),
+                max_distance_hz=max_deriv_distance_hz,
+            )
+        except Exception as exc:
+            warnings.warn(
+                f"find_bias_points: {code!r} — max-derivative computation failed "
+                f"({exc}); using reference frequency."
+            )
+            bias_freq = float(ref_freq)
+            try:
+                if dI_df_sp is None:
+                    dI_df_sp, dQ_df_sp = compute_iq_derivative_spline(frequencies, iq_for_deriv)
+                dI_df = float(dI_df_sp(bias_freq))
+                dQ_df = float(dQ_df_sp(bias_freq))
+            except Exception:
+                dI_df = float('nan')
+                dQ_df = float('nan')
+
+        # --- df_calibration ---
+        deriv_complex = dI_df + 1j * dQ_df
+        if abs(deriv_complex) > 0:
+            df_calibration = 1.0 / deriv_complex
+        else:
+            warnings.warn(
+                f"find_bias_points: {code!r} — zero IQ derivative at bias point; "
+                f"df_calibration undefined."
+            )
+            df_calibration = complex(float('nan'), float('nan'))
+
+        # --- Optional nonlinear diagnostic fit ---
+        nlfit_params = None
+        nlfit_success = False
+
+        if fit_selected_amplitude and not selected_is_bifurcated:
+            try:
+                iq_counts_arr = np.asarray(selected_entry['iq_counts'])
+                iq_corr, _, _ = estimate_and_remove_gain(frequencies, iq_counts_arr)
+                _, popt, _, residual = fit_nonlinear_iq(frequencies, iq_corr)
+                param_names = ['fr', 'Qr', 'amp', 'phi', 'a', 'i0', 'q0']
+                nlfit_params = dict(zip(param_names, popt))
+                # Derived Qc / Qi
+                Qr = popt[1]
+                amp_param = popt[2]
+                if 0 < amp_param < 1:
+                    Qc = Qr / amp_param
+                    Qi_inv = 1.0 / Qr - 1.0 / Qc
+                    if Qi_inv > 0:
+                        nlfit_params['Qc'] = Qc
+                        nlfit_params['Qi'] = 1.0 / Qi_inv
+                nlfit_success = bool(residual < 0.1)
+            except Exception as exc:
+                warnings.warn(
+                    f"find_bias_points: {code!r} — nonlinear diagnostic fit failed: {exc}"
+                )
+
+        # --- Build bias_finding sub-dict and attach to selected_entry ---
+        # Re-run detect_bifurcation_derivative on the selected entry with
+        # return_diagnostics=True to capture all intermediate arrays.
+        iq_counts_sel = selected_entry.get('iq_counts')
+        bif_diag: dict = {}
+        if iq_counts_sel is not None:
+            try:
+                _, bif_diag = detect_bifurcation_derivative(
+                    frequencies,
+                    np.asarray(iq_counts_sel),
+                    spike_prominence_factor=spike_prominence_factor,
+                    spike_height_factor=spike_height_factor,
+                    return_diagnostics=True,
+                )
+            except Exception as exc:
+                warnings.warn(
+                    f"find_bias_points: {code!r} — bifurcation diagnostics failed: {exc}"
+                )
+
+        # Normalized splines: fit CubicSpline to I/I_range and Q/Q_range so that
+        # the derivative is in units of 1/Hz — matching I_speed / Q_speed scale.
+        I_speed_sp = Q_speed_sp = None
+        sort_idx = np.argsort(frequencies)
+        freq_sorted = frequencies[sort_idx]
+        iq_sorted = iq_for_deriv[sort_idx]
+        iarr = iq_sorted.real
+        qarr = iq_sorted.imag
+        irange = float(iarr.max() - iarr.min()) if len(iarr) > 0 else 0.0
+        qrange = float(qarr.max() - qarr.min()) if len(qarr) > 0 else 0.0
+        try:
+            if irange > 0 and qrange > 0:
+                I_speed_sp = CubicSpline(freq_sorted, iarr / irange).derivative()
+                Q_speed_sp = CubicSpline(freq_sorted, qarr / qrange).derivative()
+        except Exception as exc:
+            warnings.warn(
+                f"find_bias_points: {code!r} — normalized spline fitting failed: {exc}"
+            )
+
+        selected_entry['bias_finding'] = {
+            # Sorted frequency axis (ascending, required by splines)
+            'frequencies_sorted':       freq_sorted,
+
+            # Voltage-calibrated derivative splines (V/Hz — for df_calibration physics)
+            'dI_df_spline':             dI_df_sp,
+            'dQ_df_spline':             dQ_df_sp,
+            'dI_df_at_bias':            dI_df,
+            'dQ_df_at_bias':            dQ_df,
+
+            # Normalized derivative splines (1/Hz — matching I_speed/Q_speed scale, for display)
+            'I_speed_spline':           I_speed_sp,
+            'Q_speed_spline':           Q_speed_sp,
+
+            # Discrete arrays from the bifurcation algorithm
+            'I_speed':                  bif_diag.get('I_speed', np.array([])),
+            'Q_speed':                  bif_diag.get('Q_speed', np.array([])),
+            'freq_steps_hz':            bif_diag.get('freq_steps_hz', np.array([])),
+            'arc_length_speed':         bif_diag.get('arc_length_speed', np.array([])),
+            'arc_speed_gradient':       bif_diag.get('arc_speed_gradient', np.array([])),
+            'freq_arc_speed':           bif_diag.get('freq_arc_speed', np.array([])),
+            'freq_arc_speed_gradient':  bif_diag.get('freq_arc_speed_gradient', np.array([])),
+
+            # Bias point
+            'bias_frequency':           bias_freq,
+            'bias_amplitude':           selected_amplitude,
+
+            # Nested sub-dicts
+            'diagnostics': {
+                'spike_prominence_threshold': bif_diag.get('spike_prominence_threshold', float('nan')),
+                'spike_height_threshold':     bif_diag.get('spike_height_threshold', float('nan')),
+                'uppeaks':                    bif_diag.get('uppeaks', np.array([], dtype=int)),
+                'downpeaks':                  bif_diag.get('downpeaks', np.array([], dtype=int)),
+                'is_bifurcated':              selected_is_bifurcated,
+                'bifurcated_at':              bifurcated_at,
+            },
+            'settings': {
+                'spike_prominence_factor':    spike_prominence_factor,
+                'spike_height_factor':        spike_height_factor,
+                'max_deriv_distance_hz':      max_deriv_distance_hz,
+                'reference_freq_source':      reference_freq_source,
+            },
+        }
+
+        # --- Update res_info_dict in-place ---
+        res_info_dict[code].update({
+            'bias_frequency':        bias_freq,
+            'bias_amplitude':        selected_amplitude,
+            'dI_df':                 dI_df,
+            'dQ_df':                 dQ_df,
+            'df_calibration':        df_calibration,
+            'bifurcated_at':         bifurcated_at,
+            'bias_found':            True,
+            'nonlinear_fit_params':  nlfit_params,
+            'nonlinear_fit_success': nlfit_success,
+        })
+
+        print(
+            f"[find_bias] {code}: bias_freq={bias_freq * 1e-6:.4f} MHz, "
+            f"amp={selected_amplitude:.4f}"
+            + (f", bifurcated_at={bifurcated_at:.4f}" if bifurcated_at else "")
+            + (f", nl_fit={'OK' if nlfit_success else 'failed'}"
+               if fit_selected_amplitude and not selected_is_bifurcated else "")
+        )
+
+    return res_info_dict
+
+
+# ── Section D: Hardware programming ──────────────────────────────────────────
+
+# Base frequency in Hz (= 625 MHz / 2^21): the quantum to which bias frequencies are rounded.
+_BASE_FREQ_HZ: float = 298.0232238769531
+
+
+async def apply_bias(
+    crs,
+    module: int,
+    res_info_dict: Dict[str, Dict],
+    progress_callback: Optional[Callable[[int, float], None]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Programme the CRS hardware channels with bias conditions from *res_info_dict*.
+
+    Only resonator codes where ``res_info_dict[code]["bias_found"] == True``
+    are programmed.  All tone settings (frequency, amplitude, phase=0) are
+    committed in a single ``tuber_context`` batch for efficiency.
+
+    The bias frequency is quantised to the nearest base frequency before
+    programming, and the channel frequency is computed relative to the current
+    NCO frequency.  The quantised value is written back to
+    ``res_info_dict[code]["bias_frequency"]`` so downstream consumers always
+    see the frequency that was actually programmed.
+
+    Parameters
+    ----------
+    crs :
+        The CRS hardware object.
+    module : int
+        Target module number.
+    res_info_dict : dict
+        Resonator registry as updated by :func:`find_bias_points`.
+    progress_callback : callable, optional
+        Called as ``progress_callback(module, percent)`` when complete.
+
+    Returns
+    -------
+    apply_report : dict
+        ``{code: dict}`` where each value contains:
+
+        * ``apply_successful`` (bool)
+        * ``channel_number`` (int)
+        * ``bias_frequency`` (float) — the bias frequency quantised to the
+          nearest base frequency (i.e. the frequency actually programmed)
+        * ``channel_frequency`` (float) — frequency relative to NCO
+        * ``bias_amplitude`` (float)
+    """
+    nco_freq = await crs.get_nco_frequency(module=module)
+
+    apply_report: Dict[str, Dict[str, Any]] = {}
+
+    codes_to_apply = [
+        code for code, info in res_info_dict.items()
+        if info.get('bias_found', False)
+    ]
+
+    if not codes_to_apply:
+        warnings.warn("apply_bias: no codes with bias_found=True — nothing to programme.")
+        return apply_report
+
+    async with crs.tuber_context() as ctx:
+        for code in codes_to_apply:
+            info = res_info_dict[code]
+            channel = int(info['channel_number'])
+            bias_freq = float(info['bias_frequency'])
+            amplitude = float(info['bias_amplitude'])
+
+            # Quantise to nearest base frequency
+            bias_freq = round(bias_freq / _BASE_FREQ_HZ) * _BASE_FREQ_HZ
+            channel_freq = bias_freq - nco_freq
+
+            # Write the quantised frequency back so res_info_dict stays consistent
+            # with what was actually programmed into hardware.
+            res_info_dict[code]['bias_frequency'] = bias_freq
+
+            ctx.set_frequency(channel_freq, channel=channel, module=module)
+            ctx.set_amplitude(amplitude, channel=channel, module=module)
+            ctx.set_phase(
+                0.0,
+                units=crs.UNITS.DEGREES,
+                target=crs.TARGET.ADC,
+                channel=channel,
+                module=module,
+            )
+
+            apply_report[code] = {
+                'apply_successful':  True,
+                'channel_number':    channel,
+                'bias_frequency':    bias_freq,
+                'channel_frequency': channel_freq,
+                'bias_amplitude':    amplitude,
             }
 
-    return optimal_configs
+        await ctx()
+
+    if progress_callback is not None:
+        progress_callback(module, 100.0)
+
+    print(
+        f"[apply_bias] Module {module}: programmed {len(apply_report)} / "
+        f"{len(res_info_dict)} resonators."
+    )
+
+    return apply_report

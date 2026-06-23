@@ -50,6 +50,27 @@ class PeriscopeRuntime:
             else:
                 # No calibration - fall back to real_units check (matches PSD task behavior)
                 return (convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)) if self.real_units else (rawI, rawQ)
+        elif self.unit_mode == "rotated_iq":
+            # Apply IQ rotation: convert to volts, then rotate by stored angle.
+            # Calibrations are keyed by detector code (string); ch_val is a channel number (int).
+            # Try a direct lookup first (if calibrations happen to be keyed by channel number),
+            # then fall back to scanning all codes for one whose channel_number matches.
+            angle = None
+            iq_rot_cal = getattr(self, 'iq_rotation_calibrations', {}).get(self.module, {})
+            if ch_val in iq_rot_cal:
+                angle = iq_rot_cal[ch_val]
+            else:
+                # iq_rotation_calibrations keyed by detector code — find matching channel
+                for code, theta in iq_rot_cal.items():
+                    if isinstance(code, int) and code == ch_val:
+                        angle = theta
+                        break
+            if angle is not None:
+                iq_volts = convert_roc_to_volts(rawI) + 1j * convert_roc_to_volts(rawQ)
+                rotated = iq_volts * np.exp(1j * float(angle))
+                return rotated.real, rotated.imag
+            # Fallback → real_units when no angle for this channel
+            return convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)
         elif self.real_units:
             return convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)
         else:
@@ -209,17 +230,25 @@ class PeriscopeRuntime:
                 for ch in group
             )
         
-        # Determine axis labels based on unit mode and calibration availability
+        # Determine axis labels based on unit mode and calibration availability.
+        # rotated_iq is treated like real_units for label purposes (data is in volts
+        # after rotation), but the IQ plot gets dedicated "rotated" axis labels.
+        is_rotated_iq = (self.unit_mode == "rotated_iq")
+        use_volts = self.real_units or is_rotated_iq
+
         if mode_key == "T":
             if self.unit_mode == "df" and all_have_calibration:
                 pw.setLabel("left", "Freq. Shift / Dissipation", units="Hz / unitless")
             else:
-                pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
+                pw.setLabel("left", "Amplitude", units="V" if use_volts else "Counts")
         elif mode_key == "IQ":
             pw.getViewBox().setAspectLocked(True)
             if self.unit_mode == "df" and all_have_calibration:
                 pw.setLabel("bottom", "Freq. Shift", units="Hz")
                 pw.setLabel("left", "Dissipation", units="unitless")
+            elif is_rotated_iq:
+                pw.setLabel("bottom", "I (rotated)", units="V")
+                pw.setLabel("left",   "Q (rotated)", units="V")
             else:
                 pw.setLabel("bottom", "I", units="V" if self.real_units else "Counts")
                 pw.setLabel("left",   "Q", units="V" if self.real_units else "Counts")
@@ -229,25 +258,25 @@ class PeriscopeRuntime:
             if self.unit_mode == "df" and all_have_calibration:
                 pw.setLabel("left", "Amplitude", units="Hz or unitless")
             else:
-                pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
+                pw.setLabel("left", "Amplitude", units="V" if use_volts else "Counts")
         elif mode_key == "S":
-            pw.setLogMode(x=True, y=not self.real_units)
+            pw.setLogMode(x=True, y=not use_volts)
             pw.setLabel("bottom", "Freq", units="Hz")
             if self.unit_mode == "df" and all_have_calibration:
                 # When in df units, PSDs become ASDs (Amplitude Spectral Densities)
                 pw.setLabel("left", "ASD (Hz/√Hz or 1/√Hz)")
             else:
                 lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
-                pw.setLabel("left", f"PSD ({lbl})" if self.real_units else "PSD (Counts²/Hz)")
+                pw.setLabel("left", f"PSD ({lbl})" if use_volts else "PSD (Counts²/Hz)")
         else:  # "D"
-            pw.setLogMode(x=False, y=not self.real_units)
+            pw.setLogMode(x=False, y=not use_volts)
             pw.setLabel("bottom", "Freq", units="Hz")
             if self.unit_mode == "df" and all_have_calibration:
                 # When in df units, PSDs become ASDs (Amplitude Spectral Densities)
                 pw.setLabel("left", "ASD (Hz/√Hz or 1/√Hz)")
             else:
                 lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
-                pw.setLabel("left", f"PSD ({lbl})" if self.real_units else "PSD (Counts²/Hz)")
+                pw.setLabel("left", f"PSD ({lbl})" if use_volts else "PSD (Counts²/Hz)")
 
     def _configure_plot_fonts(self, pw: pg.PlotWidget, font: QFont):
         """Apply the standard font to plot titles and axis labels."""
@@ -746,6 +775,12 @@ class PeriscopeRuntime:
             group (list[int]): List of channel IDs for this plot row.
         """
         # PSDTask from .tasks, convert_roc_to_volts from .utils
+        # When in rotated_iq mode, _convert_iq_data already returns data in volts
+        # (rotated), but self.real_units is False.  PSDTask must know the data is
+        # in volts so it chooses the correct reference ("absolute"/"relative") and
+        # input_units ("volts"), avoiding a double-conversion and wrong output scale.
+        use_real_units = self.real_units or (self.unit_mode == "rotated_iq")
+
         # Dispatch Single-Sideband (SSB) PSD tasks
         if "S" in self.curves[row_i]:
             for ch_val in group: # Renamed ch
@@ -756,7 +791,7 @@ class PeriscopeRuntime:
                     I_data, Q_data = self._convert_iq_data(rawI, rawQ, ch_val)
                     
                     self.psd_workers[row_i]["S"][ch_val] = True
-                    task = PSDTask(row_i, ch_val, I_data, Q_data, "SSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
+                    task = PSDTask(row_i, ch_val, I_data, Q_data, "SSB", self.dec_stage, use_real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
                     self.pool.start(task)
         
         # Dispatch Dual-Sideband (DSB) PSD tasks
@@ -769,7 +804,7 @@ class PeriscopeRuntime:
                     I_data, Q_data = self._convert_iq_data(rawI, rawQ, ch_val)
                     
                     self.psd_workers[row_i]["D"][ch_val] = True
-                    task = PSDTask(row_i, ch_val, I_data, Q_data, "DSB", self.dec_stage, self.real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
+                    task = PSDTask(row_i, ch_val, I_data, Q_data, "DSB", self.dec_stage, use_real_units, self.psd_absolute, self.spin_segments.value(), self.psd_signals, self.cb_exp_binning.isChecked(), self.spin_bins.value())
                     self.pool.start(task)
 
     def _update_performance_stats(self, now: float):
@@ -1093,8 +1128,9 @@ class PeriscopeRuntime:
             panel = MultisweepPanel(parent=self, target_module=target_module, initial_params=params.copy(), 
                                    dac_scales=dac_scales_for_panel, dark_mode=self.dark_mode)
             
-            # Wrap in dock
-            dock_title = f"Multisweep #{self.multisweep_window_count}"
+            # Wrap in dock — prefer the user-specified measurement name
+            _mname = params.get('measurement_name') or f"Multisweep #{self.multisweep_window_count}"
+            dock_title = make_tab_title(_mname)
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
             
             # Store panel reference
@@ -1103,7 +1139,11 @@ class PeriscopeRuntime:
             # Connect df_calibration_ready signal if the method exists
             if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
                 panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
-            
+
+            # Connect iq_rotation_ready signal so Periscope can enable rb_rotated_iq
+            if hasattr(panel, 'iq_rotation_ready') and hasattr(self, '_handle_iq_rotation_ready'):
+                panel.iq_rotation_ready.connect(self._handle_iq_rotation_ready)
+
             # Connect data_ready signal for session auto-export
             if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
@@ -1174,17 +1214,26 @@ class PeriscopeRuntime:
     
         return dac_scales    
     
-    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep") -> tuple:
+    def _create_multisweep_panel_from_loaded_data(
+        self,
+        load_params: dict,
+        source_type: str = "multisweep",
+        file_path: str | None = None,
+    ) -> tuple:
         """
         Create and display a MultisweepPanel from loaded data.
         
         This unified helper method is used by both _load_multisweep_analysis and 
-        _set_and_plot_bias to eliminate code duplication.
+        handle_bias_kids / _do_bias_kids to eliminate code duplication.
         
         Args:
             load_params: Loaded data dictionary containing 'initial_parameters', 
                         'results_by_iteration', 'dac_scales_used', etc.
-            source_type: "multisweep", "bias", or "noise" - affects naming and panel behavior
+            source_type: "multisweep", "bias", or "noise" - affects naming and panel behavior.
+            file_path: Optional path to the source ``.pkl`` file.  When provided the
+                session manager is told to overwrite *this specific file* on
+                subsequent Find Bias / Run Fit saves rather than the most-recently-
+                measured file for this module.
             
         Returns:
             tuple: (panel, dock, window_id, target_module) or (None, None, None, None) on error
@@ -1211,7 +1260,11 @@ class PeriscopeRuntime:
                 QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
                 return
 
-            dac_scale_for_mod = load_params['dac_scales_used'][target_module]
+            _dac_scales_raw = load_params.get('dac_scales_used')
+            if isinstance(_dac_scales_raw, dict):
+                dac_scale_for_mod = _dac_scales_raw.get(target_module)
+            else:
+                dac_scale_for_mod = _dac_scales_raw  # already the per-module float
             dac_scale_for_board = dac_scales_for_panel[target_module]
 
             if dac_scale_for_mod != dac_scale_for_board:
@@ -1220,8 +1273,17 @@ class PeriscopeRuntime:
             # Check if noise data exists in the loaded file
             has_noise_data = 'noise_data' in load_params and load_params['noise_data'] is not None
             
-            # For bias source type, also check for bias_kids_output
-            has_bias_data = 'bias_kids_output' in load_params and load_params['bias_kids_output'] is not None
+            # Check for bias data in two places:
+            # - Old format: top-level 'bias_kids_output' key (legacy bias pkl files)
+            # - New format: df_calibration values inside res_info_dict (since bias pickle
+            #   elimination: Apply Bias now updates the multisweep file in-place)
+            has_bias_data_old = 'bias_kids_output' in load_params and load_params['bias_kids_output'] is not None
+            _res_info_for_check = load_params.get('res_info_dict', {}) or {}
+            has_bias_data_new = any(
+                isinstance(v, dict) and v.get('df_calibration') is not None
+                for v in _res_info_for_check.values()
+            )
+            has_bias_data = has_bias_data_old or has_bias_data_new
             loaded_bias_flag = has_noise_data or (source_type == "bias" and has_bias_data)
                 
             # Create panel
@@ -1234,11 +1296,14 @@ class PeriscopeRuntime:
                 panel.spectrum_noise_data = load_params['noise_data']
                 panel.noise_spectrum_btn.setEnabled(True)
             
-            # MultisweepPanel dock is always named "Multisweep" regardless of source type
-            # The source_type affects panel behavior, not the dock title
-            dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
-            
-            # Wrap in dock
+            # Wrap in dock — prefer embedded measurement name or filename stem
+            _mname = params.get('measurement_name')
+            if not _mname and file_path:
+                from pathlib import Path as _Path
+                _mname = _Path(file_path).stem
+            if not _mname:
+                _mname = f"Multisweep #{self.multisweep_window_count} (Loaded)"
+            dock_title = make_tab_title(_mname)
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
             
             self.multisweep_windows[window_id] = {'window': panel, 'dock': dock, 'params': params.copy()}
@@ -1246,15 +1311,33 @@ class PeriscopeRuntime:
             # Connect df_calibration_ready signal if the method exists
             if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
                 panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
-            
+
+            # Connect iq_rotation_ready signal so Periscope can enable rb_rotated_iq
+            if hasattr(panel, 'iq_rotation_ready') and hasattr(self, '_handle_iq_rotation_ready'):
+                panel.iq_rotation_ready.connect(self._handle_iq_rotation_ready)
+
             # Connect data_ready signal for session auto-export
             if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
 
+            # If this panel was created from a specific on-disk file (e.g. opened
+            # from the session browser), tell the session manager to overwrite THAT
+            # file when Find Bias / Run Fit save back results.  Without this, the
+            # session manager would fall back to overwriting the most-recently-
+            # measured file for this module — which may be a different sweep.
+            if file_path and hasattr(self, 'session_manager') and self.session_manager.is_active:
+                identifier = f"module{target_module}"
+                self.session_manager.register_loaded_file("multisweep", identifier, file_path)
+                import os as _os
+                print(f"[Session] Registered loaded file for overwrite: {_os.path.basename(file_path)}")
+
             panel._hide_progress_bars()
             
-            # Set NCO frequency based on resonance frequencies
-            reso_frequencies = params.get('resonance_frequencies', [])
+            # Set NCO frequency based on sweep center frequencies
+            reso_frequencies = (
+                params.get('sweep_center_frequencies')
+                or params.get('resonance_frequencies', [])
+            )
             
             if reso_frequencies:
                 span_hz = params.get('span_hz', 0)
@@ -1266,11 +1349,64 @@ class PeriscopeRuntime:
                 else:
                     print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
-            # Load data into panel - handle both old (iteration) and new (detector) formats
-            if 'results_by_detector' in load_params:
-                # New format: load directly into panel
-                panel.results_by_detector = load_params['results_by_detector']
+            # Load data into panel.
+            # Priority: 'results' (new {iter_idx: {code: entry}}) → 'results_by_detector' (old {code: {iter_idx: entry}})
+            _raw_results = None
+            if 'results' in load_params:
+                _raw_results = load_params['results']
+            elif 'results_by_detector' in load_params:
+                _raw_results = load_params['results_by_detector']
+
+            if _raw_results is not None:
+                # Detect format: new = integer outer keys (iter_idx), old = string outer keys (codes).
+                _first_key = next(iter(_raw_results), None)
+                if isinstance(_first_key, str):
+                    # Old format {code: {iter_idx: entry}} — convert to new iteration-first format.
+                    _converted: dict = {}
+                    for _old_code, _old_iter_dict in _raw_results.items():
+                        if isinstance(_old_iter_dict, dict):
+                            for _old_iter_idx, _old_entry in _old_iter_dict.items():
+                                _converted.setdefault(_old_iter_idx, {})[_old_code] = _old_entry
+                    panel.results = _converted
+                else:
+                    # New format {iter_idx: {code: entry}} — load directly.
+                    panel.results = _raw_results
+
+                # Backfill iq_volts and sweep_power_dbm for files saved before these
+                # fields were stored in the live dict (no-op for up-to-date files).
+                from rfmux.core.transferfunctions import convert_roc_to_volts
+                from rfmux.tools.periscope.utils import UnitConverter as _UC
+                _dac_scale_for_backfill = dac_scales_for_panel.get(target_module)
+                for _iter_idx, _code_dict in panel.results.items():
+                    for _code, _entry in _code_dict.items():
+                        if 'iq_volts' not in _entry:
+                            _iq = _entry.get('iq_counts')
+                            if _iq is not None:
+                                try:
+                                    _entry['iq_volts'] = convert_roc_to_volts(_iq)
+                                except Exception:
+                                    pass
+                        if 'sweep_power_dbm' not in _entry:
+                            _norm_amp = _entry.get('sweep_amplitude_normalized')
+                            _entry['sweep_power_dbm'] = (
+                                _UC.normalize_to_dbm(_norm_amp, _dac_scale_for_backfill)
+                                if _norm_amp is not None and _dac_scale_for_backfill is not None
+                                else None
+                            )
+                # Restore the resonator registry so Find Bias can run on loaded data
+                if load_params.get('res_info_dict'):
+                    panel.res_info_dict = load_params['res_info_dict']
+                    # Re-enable Apply Bias if bias points were already found before saving
+                    num_found = sum(
+                        1 for info in panel.res_info_dict.values()
+                        if info.get('bias_found', False)
+                    )
+                    if num_found > 0:
+                        panel.apply_bias_btn.setEnabled(True)
                 panel._redraw_plots()
+                # Enable/check the "Show Bias Info" checkbox if the loaded file
+                # already contains bias results (bias_found=True in res_info_dict).
+                panel._update_bias_info_checkbox_state()
             elif 'results_by_iteration' in load_params:
                 # Old format: convert via migration helper, then feed through update_data
                 iteration_params = load_params.get('results_by_iteration', [])
@@ -1283,23 +1419,67 @@ class PeriscopeRuntime:
                     panel.update_data(target_module, i, amplitude, direction, data, None)
             
             # Generate histograms now that data is loaded
-            if panel.results_by_detector:
+            if panel.results:
                 panel._generate_histograms()
                 panel.histograms_generated = True
+
+            # Show or hide the Fit Results tab based on fit settings and whether
+            # the loaded data already contains fit results (e.g. saved after Run
+            # Fit was run).  This mirrors the call in all_sweeps_completed(), which
+            # is only triggered for live sweeps and never called when loading a file.
+            panel._update_fit_results_tab_visibility()
             
-            # Extract and load df_calibrations if bias_kids_output exists
+            # Extract and load df_calibrations from either old or new format.
+            # Old format: top-level 'bias_kids_output' dict keyed by detector index.
+            # New format (bias pickle elimination): df_calibration values stored
+            #   inside res_info_dict[code]['df_calibration'], keyed by channel_number.
             if has_bias_data:
-                bias_output = load_params['bias_kids_output']
                 df_calibrations = {}
-                for det_idx, det_data in bias_output.items():
-                    if 'df_calibration' in det_data:
-                        df_calibrations[det_idx] = det_data['df_calibration']
-                
+                bias_output = load_params.get('bias_kids_output')
+                if bias_output:
+                    # Old format
+                    for det_idx, det_data in bias_output.items():
+                        if 'df_calibration' in det_data:
+                            df_calibrations[det_idx] = det_data['df_calibration']
+                else:
+                    # New format: read df_calibration from res_info_dict
+                    import cmath as _cmath
+                    for code, info in _res_info_for_check.items():
+                        if not isinstance(info, dict):
+                            continue
+                        cal = info.get('df_calibration')
+                        ch = info.get('channel_number')
+                        if cal is not None and ch is not None:
+                            try:
+                                if not _cmath.isnan(cal):
+                                    df_calibrations[ch] = cal
+                            except TypeError:
+                                pass  # cal is a non-complex type; skip isnan check
+
                 # Load calibrations into main window
                 if df_calibrations and hasattr(self, '_handle_df_calibration_ready'):
                     self._handle_df_calibration_ready(target_module, df_calibrations)
                     print(f"[Session] Loaded df calibrations for {len(df_calibrations)} detectors from session file")
-            
+
+            # Load IQ rotation angles from res_info_dict if present.
+            # Angles are stored in res_info_dict[code]['iq_rotation_angle'] by
+            # _iq_rotation_completed() after Apply Bias + ComputeIQRotationTask.
+            # IMPORTANT: _handle_iq_rotation_ready expects {channel_number (int): angle},
+            # NOT {code (str): angle}.  Build the dict using channel_number from res_info_dict.
+            if panel.res_info_dict:
+                iq_rotation_angles_loaded = {}
+                for _code, _info in panel.res_info_dict.items():
+                    if isinstance(_info, dict) and 'iq_rotation_angle' in _info:
+                        _ch = _info.get('channel_number')
+                        if _ch is not None:
+                            iq_rotation_angles_loaded[int(_ch)] = _info['iq_rotation_angle']
+                if iq_rotation_angles_loaded and hasattr(self, '_handle_iq_rotation_ready'):
+                    self._handle_iq_rotation_ready(target_module, iq_rotation_angles_loaded)
+                    print(f"[Session] Loaded IQ rotation angles for {len(iq_rotation_angles_loaded)} detectors from session file")
+                # Enable "Show Rotated IQ" checkbox on the panel if we have angles
+                if iq_rotation_angles_loaded and hasattr(panel, '_update_rotated_iq_checkbox_state'):
+                    panel._update_rotated_iq_checkbox_state()
+
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
             if main_dock:
@@ -1529,6 +1709,7 @@ class PeriscopeRuntime:
     def _export_channel_noise_data(self):
         
         return {
+            'measurement_type': 'channel_noise',
             'timestamp': datetime.datetime.now().isoformat(),
             'target_module': self.module,
             'dac_scales_used': self.dac_scales,
@@ -1579,7 +1760,8 @@ class PeriscopeRuntime:
         # Increment counter and use for tab name
         self.channel_noise_panel_count += 1
         loaded_suffix = " (Loaded)" if self.loaded_channel_noise else ""
-        dock_title = f"Channel Noise Spectrum #{self.channel_noise_panel_count}{loaded_suffix}"
+        _cname = f"Channel Noise #{self.channel_noise_panel_count}{loaded_suffix}"
+        dock_title = make_tab_title(_cname)
         dock_id = f"noise_{self.channel_noise_panel_count}_{int(time.time())}"
         
         # Create dock
@@ -1593,16 +1775,21 @@ class PeriscopeRuntime:
         dock.show()
         dock.raise_()
         
-    def _load_multisweep_analysis(self, load_params: dict):
+    def _load_multisweep_analysis(self, load_params: dict, file_path: str | None = None):
         """
         Load multisweep analysis data from file and display in a docked panel.
 
         Args:
             load_params (dict): Loaded data dictionary from file.
+            file_path (str | None): Optional path of the source ``.pkl`` file.
+                When provided (i.e. the panel was opened from an existing session
+                file rather than a fresh measurement), the session manager is
+                told to overwrite *this specific file* on subsequent Find Bias /
+                Run Fit saves rather than the most-recently-measured file.
         """
         # Use the unified helper method
         panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
-            load_params, source_type="multisweep"
+            load_params, source_type="multisweep", file_path=file_path
         )
         
         if panel is None:
@@ -1610,9 +1797,9 @@ class PeriscopeRuntime:
         
         # Auto-launch detector digest panel - find a frequency to click on
         click_freq = None
-        if panel.results_by_detector:
-            first_det_id = sorted(panel.results_by_detector.keys())[0]
-            first_entry = next(iter(panel.results_by_detector[first_det_id].values()), {})
+        if panel.results:
+            first_iter = next(iter(panel.results.values()), {})
+            first_entry = next(iter(first_iter.values()), {})
             click_freq = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
         if click_freq is not None:
             if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
@@ -1695,8 +1882,15 @@ class PeriscopeRuntime:
         self.multisweep_signals.fitting_progress.connect(window_instance.handle_fitting_progress,
                                                         QtCore.Qt.ConnectionType.QueuedConnection)
 
-        # Connect data_ready signal for session auto-export
+        # Connect data_ready signal for session auto-export.
+        # Disconnect first to prevent a double-connection (and therefore double-file)
+        # on each re-run, since the signal was already connected when the panel was
+        # first created in _start_multisweep_analysis().
         if hasattr(window_instance, 'data_ready') and hasattr(self, 'session_manager'):
+            try:
+                window_instance.data_ready.disconnect(self.session_manager.handle_data_ready)
+            except TypeError:
+                pass  # Not yet connected — that's fine
             window_instance.data_ready.connect(self.session_manager.handle_data_ready)
         
         task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window_instance)
@@ -1849,6 +2043,29 @@ class PeriscopeRuntime:
         self.notebook_dock.show()
         self.notebook_dock.raise_()
 
+    def _show_jupyter_notebook_settings(self):
+        """
+        Show the Jupyter Notebook Settings dialog.
+
+        Allows the user to view and change the saved notebook library path at
+        any time.  The dialog is always opened in 'settings' mode (not
+        first-time mode), so the "change later" note is omitted.
+        """
+        try:
+            from .notebook_panel import JupyterNotebookSettingsDialog
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Import Error",
+                f"Failed to import JupyterNotebookSettingsDialog:\n{e}"
+            )
+            return
+
+        dialog = JupyterNotebookSettingsDialog(self, is_first_time=False)
+        dialog.exec()
+        # The dialog saves the path to QSettings internally on OK, so no
+        # additional action is needed here.  The new path will be used the
+        # next time a Jupyter server is started.
+
     def _update_console_style(self, dark_mode_enabled: bool):
         """
         Update the style of the embedded iPython console based on the theme.
@@ -1966,6 +2183,12 @@ class PeriscopeRuntime:
             "max_chans": DEFAULT_MAX_CHANNELS,
             "max_span": DEFAULT_MAX_SPAN,
             "clear_channels": True,
+            "amplitude_mode": "single",
+            "measurement_name": "mock_netanal",
+            "measurement_custom_suffix": "",
+            "amp_sweep_start": DEFAULT_AMPLITUDE,
+            "amp_sweep_stop": DEFAULT_AMPLITUDE,
+            "amp_sweep_steps": 1,
         }
         _assert_param_keys(
             self.netanal_params,
@@ -1988,18 +2211,32 @@ class PeriscopeRuntime:
         )
     
         self.multisweep_params = {
-            "amps": [MULTISWEEP_DEFAULT_AMPLITUDE],
-            "amp": MULTISWEEP_DEFAULT_AMPLITUDE,
+            # Core sweep parameters
             "span_hz": MULTISWEEP_DEFAULT_SPAN_HZ,
             "npoints_per_sweep": MULTISWEEP_DEFAULT_NPOINTS,
             "nsamps": MULTISWEEP_DEFAULT_NSAMPLES,
-            "bias_frequency_method": None,
-            "rotate_saved_data": False,
             "sweep_direction": "upward",
-            "resonance_frequencies": {self.module: [90e6, 91e6]},
+            "sweep_center_frequencies": [90e6, 91e6],
             "module": self.module,
             "apply_skewed_fit": False,
             "apply_nonlinear_fit": False,
+            "run_find_bias": False,
+            # Amplitude / iteration metadata
+            "amp_arrays": [[MULTISWEEP_DEFAULT_AMPLITUDE, MULTISWEEP_DEFAULT_AMPLITUDE]],
+            "base_amplitude_mode": "global",
+            "base_amplitude_values": MULTISWEEP_DEFAULT_AMPLITUDE,
+            "iteration_mode": "single",
+            "num_steps": 1,
+            # Uniform-sweep fields (None when not in use)
+            "uniform_start_amplitude": None,
+            "uniform_stop_amplitude": None,
+            "uniform_spacing": "linear",
+            # Scaling fields (None when not in use)
+            "scale_start_factor": None,
+            "scale_stop_factor": None,
+            # Measurement name
+            "measurement_name": "mock_multisweep",
+            "measurement_custom_suffix": "",
         }
         _assert_param_keys(
             self.multisweep_params,
@@ -2008,26 +2245,18 @@ class PeriscopeRuntime:
         )
     
         self.bias_params = {
-            "nonlinear_threshold": 0.77,
-            "fallback_to_lowest": True,
-            "optimize_phase": True,
-            "num_phase_samples": 300,
-            "phase_step": 5,
-            "bandpass_params": {
-                "apply_bandpass": True,
-                "lowcut": 5.0,
-                "highcut": 20.0,
-                "fs": 597.0,
-            },
-            "apply_bandpass": True,
-            "lowcut": 5.0,
-            "highcut": 20.0,
-            "fs": 597.0,
+            "spike_prominence_factor": 2.0,
+            "spike_height_factor": 3.0,
+            "max_deriv_distance_mode": "absolute",
+            "max_deriv_distance_hz": 100e3,
+            "max_deriv_distance_fraction": 0.5,
+            "reference_freq_source": "bias_frequency",
+            "fit_selected_amplitude": True,
         }
         _assert_param_keys(
             self.bias_params,
             "rfmux.tools.periscope.bias_kids_dialog",
-            "BiasKidsDialog",
+            "BiasSettingsPanel",
         )
     
         self.noise_params = {
@@ -2232,8 +2461,10 @@ class PeriscopeRuntime:
             ),
             patch("rfmux.tools.periscope.tasks.NetworkAnalysisTask", MockNATask, create=True),
             patch("rfmux.tools.periscope.tasks.MultisweepTask", MockMultiTask, create=True),
-            patch("rfmux.tools.periscope.tasks.BiasKidsTask", MockBiasTask, create=True),
-            patch("rfmux.tools.periscope.tasks.BiasKidsSignals", MockBiasSignals, create=True),
+            patch("rfmux.tools.periscope.tasks.FindBiasTask", MockBiasTask, create=True),
+            patch("rfmux.tools.periscope.tasks.FindBiasSignals", MockBiasSignals, create=True),
+            patch("rfmux.tools.periscope.tasks.ApplyBiasTask", MockBiasTask, create=True),
+            patch("rfmux.tools.periscope.tasks.ApplyBiasSignals", MockBiasSignals, create=True),
             patch(
                 "rfmux.tools.periscope.dock_manager.PeriscopeDockManager.create_dock",
                 MockDockCreate,
@@ -2340,16 +2571,20 @@ class PeriscopeRuntime:
         self.is_mock_mode = getattr(self, "is_mock_mode", True)
         self.mock_config = getattr(self, "mock_config", {"mock": True})
         self.qp_pulse_mode = getattr(self, "qp_pulse_mode", "none")
-        # Mock data in detector-based format for smoke tests
-        self.results_by_detector = {
-            1: {
-                (0.1, "up"): {
+        if not hasattr(self, "session_manager"):
+            self.session_manager = MagicMock()
+            self.session_manager.is_active = False
+            self.session_manager.handle_data_ready = MagicMock()
+        # Mock data in iteration-first format for smoke tests
+        self.results = {
+            0: {
+                "MOCK": {
                     "bias_frequency": 90e6,
                     "original_center_frequency": 90e6,
-                    "amplitude": 0.1,
-                    "direction": "up",
+                    "sweep_amplitude_normalized": 0.1,
+                    "sweep_direction": "upward",
+                    "sweep_center_frequency": 90e6,
                     "iteration": 0,
-                    "sweep_amplitudes": [0.1, 0.2],
                     "some_data": [1, 2, 3]
                 }
             }
@@ -2400,7 +2635,7 @@ class PeriscopeRuntime:
                 netanal_window.raw_data = self.raw_data
                 
                 print(">>> Testing Find Resonances Dialog")
-                reso_diag = netanal_window._show_find_resonances_dialog()
+                reso_diag = netanal_window._show_find_resonances_settings()
 
                 netanal_window.resonance_freqs = self.resonance_freqs
                 print(">>> Testing Multisweep Dialog")
@@ -2412,12 +2647,26 @@ class PeriscopeRuntime:
             multisweep_window = None
             if getattr(self, "multisweep_windows", None):
                 multisweep_window = next(iter(self.multisweep_windows.values())).get("window")
-                multisweep_window.results_by_detector = self.results_by_detector
+                multisweep_window.results = self.results
                 multisweep_window._get_spectrum = MagicMock()
 
             if multisweep_window:
-                print(">>> Testing Bias KIDs Dialog")
-                multisweep_window._bias_kids()
+                print(">>> Testing Find Bias")
+                # Populate res_info_dict so _find_bias() doesn't bail early
+                multisweep_window.res_info_dict = {
+                    "AXQR": {
+                        "bias_frequency": 90e6,
+                        "bias_amplitude": 0.1,
+                        "channel_number": 1,
+                    }
+                }
+                multisweep_window._find_bias()
+
+                print(">>> Testing Apply Bias (simulated after Find Bias)")
+                # Simulate successful completion of Find Bias
+                multisweep_window.apply_bias_btn.setEnabled(True)
+                multisweep_window.res_info_dict["AXQR"]["bias_found"] = True
+                multisweep_window._apply_bias()
 
                 print(">>> Testing Noise Spectrum Dialog")
                 multisweep_window._open_noise_spectrum_dialog()

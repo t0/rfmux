@@ -34,6 +34,10 @@ KEY_SESSION_MODE = "session/last_mode"
 KEY_LAST_SESSION_PATH = "session/last_loaded_path"
 KEY_USER_LIBRARY_PATH = "notebook/user_library_path"
 KEY_CUSTOM_MATERIALS = "materials/custom_materials"
+KEY_MULTISWEEP_DEFAULTS = "multisweep/defaults"
+KEY_NETWORK_ANALYSIS_DEFAULTS = "network_analysis/defaults"
+KEY_FIT_DEFAULTS = "fitting/defaults"
+KEY_FIND_RESONANCES_DEFAULTS = "find_resonances/defaults"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
@@ -387,3 +391,279 @@ def get_material_properties(name: str) -> dict:
         return mat
     
     raise ValueError(f"Material '{name}' not found in built-in or custom materials")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Multisweep Settings
+# ─────────────────────────────────────────────────────────────────
+
+def get_multisweep_defaults() -> dict:
+    """
+    Get saved multisweep default parameters.
+    
+    Returns:
+        dict: Saved multisweep parameters or empty dict if none saved.
+              Expected keys:
+              - span_hz: Span per section in Hz
+              - npoints_per_sweep: Number of points per sweep
+              - nsamps: Samples to average per point
+              - amp_arrays: List of amplitude arrays for iterations
+              - bias_frequency_method: Method for recalculating center frequencies
+              - sweep_direction: Direction of frequency sweep
+              - apply_skewed_fit: Whether to apply skewed fit
+              - apply_nonlinear_fit: Whether to apply nonlinear fit
+    """
+    import json
+    settings = _get_settings()
+    json_str = settings.value(KEY_MULTISWEEP_DEFAULTS, "{}")
+    try:
+        return json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def set_multisweep_defaults(params: dict) -> None:
+    """
+    Save multisweep default parameters for future sessions.
+    
+    Args:
+        params: Dictionary of multisweep parameters to save.
+                Should include keys like span_hz, npoints_per_sweep, nsamps,
+                amp_arrays, bias_frequency_method,
+                sweep_direction, apply_skewed_fit, apply_nonlinear_fit.
+                
+    Note:
+        Only saves parameters that should persist across sessions.
+        Module-specific or session-specific data (like resonance_frequencies)
+        should not be included.
+    """
+    import json
+    
+    # Filter params to only include the fields we want to persist
+    # Exclude session-specific data like resonance_frequencies, module, etc.
+    persist_keys = {
+        'span_hz',
+        'npoints_per_sweep',
+        'nsamps',
+        'amp_arrays',
+        'base_amplitude_mode',
+        'base_amplitude_values',
+        'bias_frequency_method',
+        'sweep_direction',
+        'apply_skewed_fit',
+        'apply_nonlinear_fit',
+        'run_find_bias',
+        # Uniform amplitude sweep metadata
+        'iteration_mode',
+        'num_steps',
+        'uniform_start_amplitude',
+        'uniform_stop_amplitude',
+        'uniform_spacing',
+        'scale_start_factor',
+        'scale_stop_factor',
+    }
+    
+    filtered_params = {k: v for k, v in params.items() if k in persist_keys}
+    
+    settings = _get_settings()
+    settings.setValue(KEY_MULTISWEEP_DEFAULTS, json.dumps(filtered_params))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Network Analysis Settings
+# ─────────────────────────────────────────────────────────────────
+
+def get_network_analysis_defaults() -> dict:
+    """
+    Get saved network analysis default parameters.
+
+    Returns:
+        dict: Saved network analysis parameters, or empty dict if none saved.
+              Expected keys:
+              - amps: List of normalized amplitude values
+              - amplitude_mode: 'single' or 'sweep'
+              - amp_sweep_start: Start amplitude for sweep mode
+              - amp_sweep_stop: Stop amplitude for sweep mode
+              - amp_sweep_steps: Number of steps for sweep mode
+              - fmin: Minimum frequency in Hz
+              - fmax: Maximum frequency in Hz
+              - cable_length: Cable length in metres
+              - npoints: Number of frequency points
+              - nsamps: Samples to average per point
+              - max_chans: Maximum channels per module
+              - max_span: Maximum span in Hz
+              - clear_channels: Whether to clear all channels first
+              - module: Module selection (None / list of ints)
+    """
+    import json
+    qs = _get_settings()
+    json_str = qs.value(KEY_NETWORK_ANALYSIS_DEFAULTS, "{}")
+    try:
+        return json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def set_network_analysis_defaults(params: dict) -> None:
+    """
+    Save network analysis default parameters for future sessions.
+
+    Args:
+        params: Dictionary of network analysis parameters to save.
+
+    Note:
+        Only saves parameters that should persist across sessions.
+        Transient fields such as raw result data are excluded.
+    """
+    import json
+
+    persist_keys = {
+        'amps',
+        'amplitude_mode',
+        'amp_sweep_start',
+        'amp_sweep_stop',
+        'amp_sweep_steps',
+        'fmin',
+        'fmax',
+        'cable_length',
+        'npoints',
+        'nsamps',
+        'max_chans',
+        'max_span',
+        'clear_channels',
+        'module',
+    }
+
+    filtered_params = {k: v for k, v in params.items() if k in persist_keys}
+
+    qs = _get_settings()
+    qs.setValue(KEY_NETWORK_ANALYSIS_DEFAULTS, json.dumps(filtered_params))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Fitting Settings
+# ─────────────────────────────────────────────────────────────────
+
+_FIT_DEFAULTS = {
+    'apply_skewed_fit': True,
+    'apply_nonlinear_fit': True,
+    'fit_run_amplitude_mode': 'all',   # 'all', 'index', or 'bias'
+    'fit_run_amplitude_index': 0,       # 0-based amplitude index (for 'index' mode)
+}
+
+
+def get_fit_defaults() -> dict:
+    """
+    Get the saved fit-settings panel defaults.
+
+    Returns:
+        dict: ``{'apply_skewed_fit': bool, 'apply_nonlinear_fit': bool}``
+              Defaults to both fits enabled when no settings have been saved yet.
+    """
+    import json
+    qs = _get_settings()
+    json_str = qs.value(KEY_FIT_DEFAULTS, "{}")
+    try:
+        saved = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        saved = {}
+    # Merge over built-in defaults so new keys always have a fallback
+    result = dict(_FIT_DEFAULTS)
+    result.update(saved)
+    return result
+
+
+def set_fit_defaults(params: dict) -> None:
+    """
+    Persist fit-settings panel state across Periscope sessions.
+
+    Args:
+        params: Dict with any subset of the keys in ``_FIT_DEFAULTS``:
+                ``apply_skewed_fit``, ``apply_nonlinear_fit``,
+                ``fit_run_amplitude_mode``, ``fit_run_amplitude_index``.
+    """
+    import json
+    persist_keys = {
+        'apply_skewed_fit',
+        'apply_nonlinear_fit',
+        'fit_run_amplitude_mode',
+        'fit_run_amplitude_index',
+    }
+    filtered = {}
+    for k, v in params.items():
+        if k not in persist_keys:
+            continue
+        # Boolean keys
+        if k in ('apply_skewed_fit', 'apply_nonlinear_fit'):
+            filtered[k] = bool(v)
+        # Integer key
+        elif k == 'fit_run_amplitude_index':
+            filtered[k] = int(v)
+        # String key
+        else:
+            filtered[k] = v
+    qs = _get_settings()
+    qs.setValue(KEY_FIT_DEFAULTS, json.dumps(filtered))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Find Resonances Settings
+# ─────────────────────────────────────────────────────────────────
+
+_FIND_RESONANCES_DEFAULTS = {
+    'expected_resonances':                1024,   # Default upper limit; lower to restrict results
+    'min_dip_depth_db':                   2.0,
+    'min_Q':                              1e4,
+    'max_Q':                              1e7,
+    'min_resonance_separation_hz':        1e4,    # 10 kHz
+    'data_exponent':                      2.0,
+    'find_resonances_amplitude_mode':     'last', # 'last' or 'index'
+    'find_resonances_amplitude_index':    0,       # 0-based sorted index
+}
+
+
+def get_find_resonances_defaults() -> dict:
+    """
+    Get the saved Find Resonances settings panel defaults.
+
+    Returns:
+        dict with keys ``expected_resonances``, ``min_dip_depth_db``,
+        ``min_Q``, ``max_Q``, ``min_resonance_separation_hz``,
+        ``data_exponent``.  Built-in defaults are returned for any key that
+        has not been saved yet.
+    """
+    import json
+    qs = _get_settings()
+    json_str = qs.value(KEY_FIND_RESONANCES_DEFAULTS, "{}")
+    try:
+        saved = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        saved = {}
+    # Merge saved values over built-in defaults so new keys always have a fallback
+    result = dict(_FIND_RESONANCES_DEFAULTS)
+    result.update(saved)
+    return result
+
+
+def set_find_resonances_defaults(params: dict) -> None:
+    """
+    Persist Find Resonances settings panel state across Periscope sessions.
+
+    Args:
+        params: Dict with any subset of the keys in
+                ``_FIND_RESONANCES_DEFAULTS``.
+    """
+    import json
+    persist_keys = {
+        'expected_resonances',
+        'min_dip_depth_db',
+        'min_Q',
+        'max_Q',
+        'min_resonance_separation_hz',
+        'data_exponent',
+        'find_resonances_amplitude_mode',
+        'find_resonances_amplitude_index',
+    }
+    filtered = {k: v for k, v in params.items() if k in persist_keys}
+    qs = _get_settings()
+    qs.setValue(KEY_FIND_RESONANCES_DEFAULTS, json.dumps(filtered))

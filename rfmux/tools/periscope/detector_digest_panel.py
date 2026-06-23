@@ -12,6 +12,19 @@ from .utils import (
 )
 from rfmux.core.transferfunctions import convert_roc_to_volts, convert_roc_to_dbm
 
+def _safe_amp_key(k: str) -> float:
+    """Return the float amplitude part of an ``'amp:direction'`` key.
+
+    Falls back to 0.0 when the amplitude portion cannot be converted to a
+    float (e.g. when it is the string ``'None'``), so sorting never raises
+    a ``ValueError``.
+    """
+    try:
+        return float(k.split(":")[0])
+    except (ValueError, IndexError):
+        return 0.0
+
+
 class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
     """
     A dockable panel that displays a detailed "digest" of a single detector resonance,
@@ -32,10 +45,12 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                  noise_data = None,
                  debug_noise_data = None,
                  debug_phase_data = None,
-                 debug = False): 
+                 debug = False,
+                 iq_rotation_angle = None):
         super().__init__(parent)
         self.resonance_data_for_digest = resonance_data_for_digest or {} 
         self.detector_id = detector_id
+        self.iq_rotation_angle = iq_rotation_angle   # float (radians) or None
         self.resonance_frequency_ghz_title = resonance_frequency_ghz 
         self.dac_scales = dac_scales or {}
         self.zoom_box_mode = zoom_box_mode
@@ -76,15 +91,23 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.phase_debug = debug_phase_data
         
         if self.noise_data is not None:
-            self.noise_i_data = self.noise_data.i[self.detector_id-1]
-            self.noise_q_data = self.noise_data.q[self.detector_id-1]
+            # channel_number is 1-based; new format stores it in sweep data.
+            # Old format: detector_id itself was the 1-based channel number.
+            if isinstance(self.detector_id, (int, np.integer)):
+                _ch = int(self.detector_id)
+            elif self.active_sweep_data:
+                _ch = self.active_sweep_data.get('channel_number', 1)
+            else:
+                _ch = 1
+            self.noise_i_data = self.noise_data.i[_ch - 1]
+            self.noise_q_data = self.noise_data.q[_ch - 1]
 
 
         if self.resonance_data_for_digest:
             try:
                 sorted_keys = sorted(
                     self.resonance_data_for_digest.keys(),
-                    key=lambda k: float(k.split(":")[0]) 
+                    key=_safe_amp_key
                 )
                 if sorted_keys:
                     self.active_amplitude_raw_key = sorted_keys[0]
@@ -157,14 +180,13 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         det_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
         title_layout.addWidget(det_label)
         
-        self.detector_spinbox = QtWidgets.QSpinBox()
-        if self.detector_indices:
-            self.detector_spinbox.setRange(min(self.detector_indices), max(self.detector_indices))
-        else:
-            self.detector_spinbox.setRange(1, 9999)
-        self.detector_spinbox.setValue(self.detector_id)
-        self.detector_spinbox.setToolTip("Enter a detector number to jump directly")
-        self.detector_spinbox.valueChanged.connect(self._on_detector_spinbox_changed)
+        self.detector_spinbox = QtWidgets.QComboBox()
+        self.detector_spinbox.setEditable(True)
+        for det_id in (self.detector_indices if self.detector_indices else [self.detector_id]):
+            self.detector_spinbox.addItem(str(det_id))
+        self.detector_spinbox.setCurrentText(str(self.detector_id))
+        self.detector_spinbox.setToolTip("Select or type a detector code/number to jump directly")
+        self.detector_spinbox.currentTextChanged.connect(self._on_detector_spinbox_changed)
         title_layout.addWidget(self.detector_spinbox)
         
         self.freq_label = QtWidgets.QLabel(f"({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
@@ -346,8 +368,15 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         if hasattr(self, 'multisweep_panel_ref') and self.multisweep_panel_ref:
             self.noise_data = self.multisweep_panel_ref._take_noise_samps()
             if self.noise_data:
-                self.noise_i_data = self.noise_data.i[self.current_detector - 1]
-                self.noise_q_data = self.noise_data.q[self.current_detector - 1]
+                # channel_number is 1-based; new format stores it in sweep data.
+                if isinstance(self.current_detector, (int, np.integer)):
+                    _ch = int(self.current_detector)
+                elif self.active_sweep_data:
+                    _ch = self.active_sweep_data.get('channel_number', 1)
+                else:
+                    _ch = 1
+                self.noise_i_data = self.noise_data.i[_ch - 1]
+                self.noise_q_data = self.noise_data.q[_ch - 1]
         else:
             print("Warning: No MultisweepPanel reference available for noise sampling")
         
@@ -431,15 +460,26 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.current_detector_index_in_list = (self.current_detector_index_in_list + 1) % len(self.detector_indices)
         self._switch_to_detector(self.detector_indices[self.current_detector_index_in_list])
     
-    def _on_detector_spinbox_changed(self, value):
-        """Handle direct detector number entry via spinbox."""
-        if value in self.all_detectors_data:
-            # Update the index in the list
+    def _on_detector_spinbox_changed(self, text):
+        """Handle direct detector code/number entry via combo box."""
+        # Try exact string match first (new format: "AXQR")
+        if text in self.all_detectors_data:
+            det_id = text
+        else:
+            # Try integer conversion for backward compat (old format: "1", "2", ...)
             try:
-                self.current_detector_index_in_list = self.detector_indices.index(value)
+                int_val = int(text)
+                if int_val in self.all_detectors_data:
+                    det_id = int_val
+                else:
+                    return  # Neither string nor int match found
             except ValueError:
-                pass
-            self._switch_to_detector(value)
+                return  # Not a valid detector code or integer
+        try:
+            self.current_detector_index_in_list = self.detector_indices.index(det_id)
+        except ValueError:
+            pass
+        self._switch_to_detector(det_id)
     
     def _navigate_previous_trace(self):
         """Navigate to the previous amplitude trace."""
@@ -449,7 +489,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Get sorted list of amplitude keys
         sorted_keys = sorted(
             self.resonance_data_for_digest.keys(),
-            key=lambda k: float(k.split(":")[0])
+            key=_safe_amp_key
         )
         
         # Find current index
@@ -471,7 +511,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Get sorted list of amplitude keys
         sorted_keys = sorted(
             self.resonance_data_for_digest.keys(),
-            key=lambda k: float(k.split(":")[0])
+            key=_safe_amp_key
         )
         
         # Find current index
@@ -499,7 +539,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         if hasattr(self, 'trace_hint_label'):
             sorted_keys = sorted(
                 self.resonance_data_for_digest.keys(),
-                key=lambda k: float(k.split(":")[0])
+                key=_safe_amp_key
             )
             try:
                 current_idx = sorted_keys.index(amplitude_key)
@@ -535,15 +575,22 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         # print("For detector", self.detector_id, "the noise is", self.debug_noise)
         
         if self.noise_data is not None:
-            self.noise_i_data = self.noise_data.i[self.detector_id-1]
-            self.noise_q_data = self.noise_data.q[self.detector_id-1]
-        
+            # Use channel_number from sweep data for new format; fall back to int detector_id for old
+            if isinstance(self.detector_id, (int, np.integer)):
+                _ch = int(self.detector_id)
+            elif self.active_sweep_data:
+                _ch = self.active_sweep_data.get('channel_number', 1)
+            else:
+                _ch = 1
+            self.noise_i_data = self.noise_data.i[_ch - 1]
+            self.noise_q_data = self.noise_data.q[_ch - 1]
+
         # Select the first sweep for this detector
         if self.resonance_data_for_digest:
             try:
                 sorted_keys = sorted(
                     self.resonance_data_for_digest.keys(),
-                    key=lambda k: float(k.split(":")[0])
+                    key=_safe_amp_key
                 )
                 if sorted_keys:
                     self.active_amplitude_raw_key = sorted_keys[0]
@@ -568,7 +615,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Update UI elements
         if hasattr(self, 'detector_spinbox'):
             self.detector_spinbox.blockSignals(True)
-            self.detector_spinbox.setValue(self.detector_id)
+            self.detector_spinbox.setCurrentText(str(self.detector_id))
             self.detector_spinbox.blockSignals(False)
         if hasattr(self, 'freq_label'):
             self.freq_label.setText(f"({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
@@ -650,12 +697,12 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         if self.current_plot_offset_hz is not None:
             freqs_hz_active = self.active_sweep_data.get('frequencies')
-            iq_complex_active = self.active_sweep_data.get('iq_complex')
+            iq_counts_active = self.active_sweep_data.get('iq_counts')
 
-            if freqs_hz_active is not None and iq_complex_active is not None and len(freqs_hz_active) > 0:
-                s21_mag_volts = convert_roc_to_volts(np.abs(iq_complex_active))
-                s21_i_volts = convert_roc_to_volts(iq_complex_active.real)
-                s21_q_volts = convert_roc_to_volts(iq_complex_active.imag)
+            if freqs_hz_active is not None and iq_counts_active is not None and len(freqs_hz_active) > 0:
+                s21_mag_volts = convert_roc_to_volts(np.abs(iq_counts_active))
+                s21_i_volts = convert_roc_to_volts(iq_counts_active.real)
+                s21_q_volts = convert_roc_to_volts(iq_counts_active.imag)
                 x_axis_hz_offset = freqs_hz_active - self.current_plot_offset_hz
 
                 # Plot raw data
@@ -670,19 +717,20 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                 self.plot2_iq_plane.plot(s21_i_volts, s21_q_volts, pen=None, symbol='o', symbolBrush=SCATTER_COLORS["DEFAULT"], symbolPen=SCATTER_COLORS["DEFAULT"], symbolSize=5, name="Sweep IQ (Raw)")
 
                 # Skewed Fit Overlay (magnitude only)
-                if self.active_sweep_data.get('skewed_fit_success'):
-                    skewed_model_mag = self.active_sweep_data.get('skewed_model_mag')
+                _skewed_sub = self.active_sweep_data.get('fits', {}).get('skewed', {})
+                if _skewed_sub.get('skewed_fit_success'):
+                    skewed_model_mag = _skewed_sub.get('skewed_model_mag')
                     if skewed_model_mag is not None and len(skewed_model_mag) == len(x_axis_hz_offset):
                         # The skewed model is normalized, we need to denormalize it
                         # The normalization factor used in fitting is abs(s21_iq[-1])
                         # We can calculate this from the raw data
                         normalization_factor = 1.0
-                        if len(iq_complex_active) > 0:
+                        if len(iq_counts_active) > 0:
                             # Use the last point as the normalization reference (off-resonance baseline)
-                            normalization_factor = np.abs(iq_complex_active[-1])
+                            normalization_factor = np.abs(iq_counts_active[-1])
                             if normalization_factor < 1e-15:
                                 # Fallback if last point is too small
-                                normalization_factor = np.mean(np.abs(iq_complex_active[-10:]))
+                                normalization_factor = np.mean(np.abs(iq_counts_active[-10:]))
                         
                         # Apply the normalization factor to get back to physical scale
                         skewed_model_mag_physical = skewed_model_mag * normalization_factor
@@ -693,12 +741,13 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                         # No IQ plane plot for skewed fit since it's magnitude-only
                 
                 # Nonlinear Fit Overlay
-                if self.active_sweep_data.get('nonlinear_fit_success'):
-                    nl_model_iq = self.active_sweep_data.get('nonlinear_model_iq') 
+                _nonlinear_sub = self.active_sweep_data.get('fits', {}).get('nonlinear', {})
+                if _nonlinear_sub.get('nonlinear_fit_success'):
+                    nl_model_iq = _nonlinear_sub.get('nonlinear_model_iq')
                     if nl_model_iq is not None and len(nl_model_iq) == len(x_axis_hz_offset):
                         # The model is generated for gain-corrected data, so we need to re-apply the gain
                         # to match the physical reference frame of the displayed data
-                        gain_complex = self.active_sweep_data.get('gain_complex')
+                        gain_complex = _nonlinear_sub.get('gain_complex')
                         if gain_complex is not None:
                             # Apply the complex gain (both magnitude and phase)
                             nl_model_iq_physical = nl_model_iq * gain_complex
@@ -715,20 +764,6 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                 if auto_range:
                     self.plot1_sweep_vs_freq.autoRange()
 
-            rotation_tod_iq = self.active_sweep_data.get('rotation_tod')
-
-            if rotation_tod_iq is not None and rotation_tod_iq.size > 0:
-                tod_i_volts = convert_roc_to_volts(rotation_tod_iq.real)
-                tod_q_volts = convert_roc_to_volts(rotation_tod_iq.imag)
-
-                mean_phase_file = np.median(np.arctan(tod_q_volts/tod_i_volts))
-                mean_mag_file = np.mean(np.sqrt(tod_i_volts**2 + tod_q_volts**2))
-                # print("Median phase of the rotation data in file is", np.degrees(mean_phase_file), "degrees")
-                # print("Mean magnitude of the rotation data in file is", mean_mag_file)
-
-                noise_color = 'w' if self.dark_mode else 'k' 
-                self.plot2_iq_plane.plot(tod_i_volts, tod_q_volts, pen=None, symbol='o', symbolBrush=noise_color, symbolPen=noise_color, symbolSize=3, name="Noise at f_bias")
-                
             if self.debug:
                 test_colors = ['orange', 'y']
                 test_labels = ['Initial Noise', 'Refined Noise']
@@ -776,7 +811,23 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                     symbolSize=3,
                     name="Data after Bias sampling"
                 )
-            
+
+            # --- Rotated IQ overlay ---
+            # When an IQ rotation angle is available (computed after Apply Bias),
+            # show the rotated sweep IQ circle as a yellow curve so the user can
+            # see the alignment of the signal-sensitive (Q) axis.
+            if self.iq_rotation_angle is not None and iq_counts_active is not None:
+                iq_volts_active = (
+                    convert_roc_to_volts(iq_counts_active.real)
+                    + 1j * convert_roc_to_volts(iq_counts_active.imag)
+                )
+                rot_iq = iq_volts_active * np.exp(1j * float(self.iq_rotation_angle))
+                self.plot2_iq_plane.plot(
+                    rot_iq.real, rot_iq.imag,
+                    pen=pg.mkPen('y', width=LINE_WIDTH),
+                    name="IQ (Rotated)",
+                )
+
             if auto_range:
                 self.plot2_iq_plane.autoRange()
 
@@ -807,9 +858,9 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                 for data_entry in data_by_amplitude[amp_val_float]:
                     sweep_data = data_entry['sweep_info']['data']
                     direction = data_entry['direction']
-                    freqs_hz, iq_complex = sweep_data.get('frequencies'), sweep_data.get('iq_complex')
-                    if freqs_hz is None or iq_complex is None or len(freqs_hz) == 0: continue
-                    s21_mag_db = convert_roc_to_dbm(np.abs(iq_complex))
+                    freqs_hz, iq_counts = sweep_data.get('frequencies'), sweep_data.get('iq_counts')
+                    if freqs_hz is None or iq_counts is None or len(freqs_hz) == 0: continue
+                    s21_mag_db = convert_roc_to_dbm(np.abs(iq_counts))
                     if self.normalize_plot3 and len(s21_mag_db) > 0:
                         ref_val = s21_mag_db[0]
                         if np.isfinite(ref_val): s21_mag_db -= ref_val
@@ -854,9 +905,10 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         # Skewed Fit - Update table rows
-        skewed_applied = self.active_sweep_data.get('skewed_fit_applied', False)
-        skewed_success = self.active_sweep_data.get('skewed_fit_success', False)
-        fit_params = self.active_sweep_data.get('fit_params', {})
+        _sf = self.active_sweep_data.get('fits', {}).get('skewed', {})
+        skewed_applied = _sf.get('skewed_fit_applied', False)
+        skewed_success = _sf.get('skewed_fit_success', False)
+        fit_params = _sf.get('fit_params') or {}
 
         # Row indices for skewed table
         SKEWED_STATUS_ROW = 0
@@ -887,9 +939,10 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.skewed_table.item(SKEWED_BIFURCATION_ROW, 1).setText("Yes" if is_bifurcated else "No")
 
         # Nonlinear Fit - Update table rows
-        nl_applied = self.active_sweep_data.get('nonlinear_fit_applied', False)
-        nl_success = self.active_sweep_data.get('nonlinear_fit_success', False)
-        nl_params_dict = self.active_sweep_data.get('nonlinear_fit_params', self.active_sweep_data)
+        _nf = self.active_sweep_data.get('fits', {}).get('nonlinear', {})
+        nl_applied = _nf.get('nonlinear_fit_applied', False)
+        nl_success = _nf.get('nonlinear_fit_success', False)
+        nl_params_dict = _nf.get('nonlinear_fit_params') or {}
 
         # Row indices for nonlinear table
         NL_STATUS_ROW = 0
@@ -950,16 +1003,16 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Sorting by the float value of the amplitude part of the key
         sorted_keys = sorted(
             self.resonance_data_for_digest.keys(),
-            key=lambda k: float(k.split(":")[0]) # Sort by amplitude part
+            key=_safe_amp_key
         )
 
         for amp_key in sorted_keys: 
             sweep_info = self.resonance_data_for_digest[amp_key]
             sweep_data = sweep_info['data']
-            freqs_hz, iq_complex = sweep_data.get('frequencies'), sweep_data.get('iq_complex')
+            freqs_hz, iq_counts = sweep_data.get('frequencies'), sweep_data.get('iq_counts')
 
-            if freqs_hz is not None and iq_complex is not None and len(freqs_hz) > 0:
-                s21_mag_db_curve = convert_roc_to_dbm(np.abs(iq_complex))
+            if freqs_hz is not None and iq_counts is not None and len(freqs_hz) > 0:
+                s21_mag_db_curve = convert_roc_to_dbm(np.abs(iq_counts))
                 if self.normalize_plot3 and len(s21_mag_db_curve) > 0:
                     ref_val = s21_mag_db_curve[0]
                     if np.isfinite(ref_val): s21_mag_db_curve -= ref_val
@@ -1003,7 +1056,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.freq_label.setStyleSheet(label_style)  # type: ignore[union-attr]
         if hasattr(self, 'detector_spinbox'):
             self.detector_spinbox.setStyleSheet(
-                f"QSpinBox {{ color: {fg_color_hex}; background-color: {bg_color_hex}; }}"
+                f"QComboBox {{ color: {fg_color_hex}; background-color: {bg_color_hex}; }}"
             )
         # ----- Plots -----
         plot_widgets_legends = [

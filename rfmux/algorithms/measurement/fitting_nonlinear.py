@@ -478,26 +478,32 @@ def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) 
     updated_data = resonance_data.copy()
     
     frequencies = resonance_data.get('frequencies')
-    iq_complex = resonance_data.get('iq_complex')
-    original_cf = resonance_data.get('original_center_frequency')
+    iq_counts = resonance_data.get('iq_counts')
+    # Use bias_frequency (canonical) or sweep_center_frequency as reference for messages
+    ref_cf = (resonance_data.get('bias_frequency')
+              or resonance_data.get('sweep_center_frequency'))
     
-    if frequencies is None or iq_complex is None or original_cf is None:
-        # Mark as failed
-        updated_data['nonlinear_fit_params'] = None
-        updated_data['nonlinear_fit_errors'] = None
-        updated_data['nonlinear_fit_residual'] = np.inf
-        updated_data['nonlinear_fit_success'] = False
+    if frequencies is None or iq_counts is None:
+        # Mark as failed inside the nested subdict
+        nl_sub = updated_data.setdefault('fits', {}).setdefault('nonlinear', {})
+        nl_sub['nonlinear_fit_params'] = None
+        nl_sub['nonlinear_fit_errors'] = None
+        nl_sub['nonlinear_fit_residual'] = np.inf
+        nl_sub['nonlinear_fit_success'] = False
         return res_key, updated_data
     
+    # All nonlinear-fit products go into the nested 'fits' → 'nonlinear' subdict.
+    nl_sub = updated_data.setdefault('fits', {}).setdefault('nonlinear', {})
+
     try:
         # Step 1: Estimate and remove gain
         iq_corrected, gain_mag, gain_phase = estimate_and_remove_gain(
-            frequencies, iq_complex, n_extrema_points
+            frequencies, iq_counts, n_extrema_points
         )
         
         # Store gain info
-        updated_data['gain_complex'] = gain_mag * np.exp(1j * gain_phase)
-        updated_data['iq_gain_corrected'] = iq_corrected
+        nl_sub['gain_complex'] = gain_mag * np.exp(1j * gain_phase)
+        nl_sub['iq_gain_corrected'] = iq_corrected
         
         # Step 2: Fit nonlinear model
         p0, popt, perr, residual = fit_nonlinear_iq(
@@ -508,16 +514,16 @@ def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) 
         # Step 3: Store results
         param_names = ['fr', 'Qr', 'amp', 'phi', 'a', 'i0', 'q0']
         
-        updated_data['nonlinear_fit_params'] = {
+        nl_sub['nonlinear_fit_params'] = {
             name: value for name, value in zip(param_names, popt)
         }
         
-        updated_data['nonlinear_fit_errors'] = {
+        nl_sub['nonlinear_fit_errors'] = {
             name: error for name, error in zip(param_names, perr)
         }
         
-        updated_data['nonlinear_fit_residual'] = residual
-        updated_data['nonlinear_fit_success'] = residual < 0.1
+        nl_sub['nonlinear_fit_residual'] = residual
+        nl_sub['nonlinear_fit_success'] = residual < 0.1
         
         # Calculate derived parameters
         Qr = popt[1]
@@ -525,15 +531,17 @@ def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) 
         if amp < 1:
             Qc = Qr / amp
             Qi = 1 / (1/Qr - 1/Qc)
-            updated_data['nonlinear_fit_params']['Qc'] = Qc
-            updated_data['nonlinear_fit_params']['Qi'] = Qi
+            nl_sub['nonlinear_fit_params']['Qc'] = Qc
+            nl_sub['nonlinear_fit_params']['Qi'] = Qi
             
     except Exception as e:
-        warnings.warn(f"Nonlinear fitting failed for {original_cf*1e-6:.3f} MHz: {e}")
-        updated_data['nonlinear_fit_params'] = None
-        updated_data['nonlinear_fit_errors'] = None
-        updated_data['nonlinear_fit_residual'] = np.inf
-        updated_data['nonlinear_fit_success'] = False
+        msg = (f"Nonlinear fitting failed for {ref_cf*1e-6:.3f} MHz: {e}"
+               if ref_cf else f"Nonlinear fitting failed for resonator {res_key!r}: {e}")
+        warnings.warn(msg)
+        nl_sub['nonlinear_fit_params'] = None
+        nl_sub['nonlinear_fit_errors'] = None
+        nl_sub['nonlinear_fit_residual'] = np.inf
+        nl_sub['nonlinear_fit_success'] = False
     
     return res_key, updated_data
 
@@ -600,23 +608,22 @@ def fit_nonlinear_iq_multisweep(
         if not isinstance(resonance_data, dict):
             continue
         
-        # Expect index-based keys only
-        if not isinstance(res_key, (int, np.integer)):
+        # Expect string resonator code keys only
+        if not isinstance(res_key, str):
             if verbose:
-                print(f"Skipping non-integer key {res_key}: expected index-based keys only")
+                print(f"Skipping non-string key {res_key!r}: expected resonator code keys only")
             continue
         
         # Check required fields
-        if (resonance_data.get('frequencies') is not None and 
-            resonance_data.get('iq_complex') is not None and
-            resonance_data.get('original_center_frequency') is not None):
+        if (resonance_data.get('frequencies') is not None and
+            resonance_data.get('iq_counts') is not None):
             valid_resonances.append((res_key, resonance_data))
         elif verbose:
-            cf = resonance_data.get('original_center_frequency')
+            cf = resonance_data.get('bias_frequency') or resonance_data.get('sweep_center_frequency')
             if cf:
-                print(f"Skipping resonance at {cf*1e-6:.3f} MHz: missing data")
+                print(f"Skipping resonator {res_key!r} at {cf*1e-6:.3f} MHz: missing data")
             else:
-                print(f"Skipping resonance at index {res_key}: missing data")
+                print(f"Skipping resonator {res_key!r}: missing data")
     
     # Decide whether to use parallel processing
     if parallel and len(valid_resonances) > 1:
@@ -781,7 +788,7 @@ def test_nonlinear_fitting():
     test_data = {
         150e6: {
             'frequencies': f,
-            'iq_complex': z,
+            'iq_counts': z,
             'original_center_frequency': 150e6
         }
     }
@@ -808,7 +815,7 @@ def test_nonlinear_fitting():
     test_data = {
         200e6: {
             'frequencies': f,
-            'iq_complex': z,
+            'iq_counts': z,
             'original_center_frequency': 200e6
         }
     }
@@ -835,7 +842,7 @@ def test_nonlinear_fitting():
         )
         test_data[fr] = {
             'frequencies': f,
-            'iq_complex': z,
+            'iq_counts': z,
             'original_center_frequency': fr
         }
     

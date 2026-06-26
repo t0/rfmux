@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/t0/rfmux/compare/v1.4.1...v1.4.2) (2026-06-26)
+
+
+### Bug Fixes
+
+* **streamer:** update libfmt to avoid MacOS build regression ([0f65b6b](https://github.com/t0/rfmux/commit/0f65b6b3dad6a3b778ff1965c43ad1e2f9bfc29f))
+
 ## [1.4.1](https://github.com/t0/rfmux/compare/v1.4.0...v1.4.1) (2026-02-18)
 
 

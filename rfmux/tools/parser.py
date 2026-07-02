@@ -20,6 +20,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional
 
+import click
 import psutil
 import numpy as np
 
@@ -887,6 +888,17 @@ def setup_pfb_dirfile_for_module(
 
     # Flush metadata so dirfile can be read immediately
     df.metaflush()
+
+
+@click.command(context_settings=dict(
+    ignore_unknown_options=True,
+    allow_extra_args=True,
+    allow_interspersed_args=False,
+))
+@click.pass_context
+def cli(ctx):
+    """Run the data parser tool"""
+    sys.exit(main(*ctx.args))
 
 
 if __name__ == "__main__":

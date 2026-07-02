@@ -16,7 +16,7 @@ capabilities for RF (Radio Frequency) systems.
 # 'raise_periscope' is a function to launch the GUI programmatically.
 # 'cli_main' is the entry point for command-line interface usage.
 from .app import Periscope
-from .__main__ import raise_periscope, main as cli_main
+from .__main__ import raise_periscope, main as cli_main, cli
 
 # --- UI Components ---
 # Expose key UI components that might be used externally or by other tools
@@ -37,6 +37,7 @@ __all__ = [
     "Periscope",                # Main application class
     "raise_periscope",          # Function to launch Periscope GUI
     "cli_main",                 # Main function for CLI access
+    "cli",                      # click entry point for "rfmux periscope"
     "NetworkAnalysisDialog",    # Dialog for network analysis settings
     "InitializeCRSDialog",      # Dialog for CRS initialization
     "FindResonancesDialog",     # Dialog for finding resonances

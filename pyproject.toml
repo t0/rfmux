@@ -15,6 +15,7 @@ dependencies = [
   "PyQt6",
   "aiohttp",
   "awaitless",
+  "click>=8.0",
   "ipykernel<7",  # Pin to 6.x for qtconsole in-process kernel compatibility (ipykernel 7.x has a bug)
   "ipython",
   "jupyterlab",
@@ -45,6 +46,7 @@ requires-python = ">=3.9"
 dirfile = []
 
 [project.scripts]
+rfmux = "rfmux.tools.cli:main"
 parser = "rfmux.tools.parser:main"
 
 [project.gui-scripts]

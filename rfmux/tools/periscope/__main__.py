@@ -25,6 +25,8 @@ import sys
 import warnings
 import asyncio
 
+import click
+
 from .app import Periscope  # Core application class
 from .mock_configuration_dialog import MockConfigurationDialog
 
@@ -561,6 +563,22 @@ async def raise_periscope(
         return viewer
     else:
         return viewer, app
+
+
+@click.command(context_settings=dict(
+    ignore_unknown_options=True,
+    allow_extra_args=True,
+    allow_interspersed_args=False,
+))
+@click.pass_context
+def cli(ctx):
+    """Run the periscope GUI"""
+    original_argv = sys.argv
+    sys.argv = ['periscope'] + ctx.args
+    try:
+        sys.exit(main())
+    finally:
+        sys.argv = original_argv
 
 
 if __name__ == "__main__":

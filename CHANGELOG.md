@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.5.0](https://github.com/t0/rfmux/compare/v1.4.1...v1.5.0) (2026-07-03)
+
+
+### Features
+
+* **firmware:** release r1.6.1 ([1c48813](https://github.com/t0/rfmux/commit/1c488135e8c0d7acfef7193615dd0340fd145f12))
+* **firmware:** release r1.6.1rc1 ([217c184](https://github.com/t0/rfmux/commit/217c184e58d0467c4a25912e76c341993f192b7b))
+* **firmware:** release r1.6.1rc2 ([1e8c498](https://github.com/t0/rfmux/commit/1e8c4980ea11d0c6dad0bedb31ce8c05c2bed723))
+* **mts:** Add multi-tile sync and determinstic NCO phase relationships ([217c184](https://github.com/t0/rfmux/commit/217c184e58d0467c4a25912e76c341993f192b7b))
+
+
+### Bug Fixes
+
+* **dan:** correct set_amplitude_limit unit conversion ([1e8c498](https://github.com/t0/rfmux/commit/1e8c4980ea11d0c6dad0bedb31ce8c05c2bed723))
+* **streamer:** update libfmt to avoid MacOS build regression ([0f65b6b](https://github.com/t0/rfmux/commit/0f65b6b3dad6a3b778ff1965c43ad1e2f9bfc29f))
+
 ## [1.4.1](https://github.com/t0/rfmux/compare/v1.4.0...v1.4.1) (2026-02-18)
 
 

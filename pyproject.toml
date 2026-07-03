@@ -45,6 +45,14 @@ requires-python = ">=3.9"
 # Debian/Ubuntu: apt-get install python3-pygetdata
 dirfile = []
 
+# Dependencies for "rfmux firmware". Optional so the Yocto build (which never
+# needs them) doesn't carry extra pre-requisites.
+firmware = [
+  "pexpect",
+  "tqdm",
+  "xmodem",
+]
+
 [project.scripts]
 rfmux = "rfmux.tools.cli:main"
 parser = "rfmux.tools.parser:main"

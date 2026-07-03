@@ -1,5 +1,35 @@
 # Changelog
 
+# r1.7.0rc1 - 2026-07-03
+
+This is a major update, and REQUIRES an accompanying bootloader upgrade as well.
+You will need one of the following:
+
+- Vivado/Vitis installation (2025.01) with a working "program_flash" command, OR
+- A "Flat Mark" / "Flat Stanley" machine with the above pre-installed, which t0
+  can ship to you.
+
+New features:
+
+- "fwdiscover" upgrade flow, which should obviate the above hassle in future
+  bootloader revisions. You will be able to re-image both the non-removable
+  (bootloader) flash and the removable (filesystem/SD card) flash over the
+  network.
+
+- Major software build re-organization, using Yocto instead of Buildroot. This
+  brings us in line with most other users of the RFSoC (notable exclusions:
+  PYNQ, which grafts their source code on top of AMD/Canonical's Ubuntu
+  distribution). We love Buildroot but vendor momentum surrounding Yocto, plus
+  the larger user base, makes Yocto a better long-term option.
+
+- 100G streaming interface: it is now possible to stream up to 1024 channels
+  (on only one module!) at 2.44 Gsps, allowing real-time high-bandwidth,
+  high-channel-count streaming modes. We anticipate the software side of this
+  work (Linux-only) will also land in rfmux in the near future.
+
+We expect this release will take some time to roll out - if you are interested,
+please get in touch and we'll make sure you have the information you need.
+
 # r1.6.1 - 2026-07-03
 
 - set_amplitude_limit: correct unit scaling. The previous conversion resulted

@@ -1,6 +1,6 @@
 # Changelog
 
-# r1.6.1 - 2026-05-31
+# r1.6.1 - 2026-07-03
 
 - set_amplitude_limit: correct unit scaling. The previous conversion resulted
   in all set_amplitude_limit calls clamping to 0.

@@ -9,6 +9,8 @@ You will need one of the following:
 - A "Flat Mark" / "Flat Stanley" machine with the above pre-installed, which t0
   can ship to you.
 
+See fmrware/r1.7.0rc1/README for details.
+
 New features:
 
 - "fwdiscover" upgrade flow, which should obviate the above hassle in future

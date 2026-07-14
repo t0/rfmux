@@ -493,10 +493,9 @@ async def test_dac_scale_transfer(d, request, shelf, check):
         x["sections"][request.node.nodeid] = report
 
 
-@pytest.mark.xfail
 @pytest.mark.qc_stage2
 @pytest.mark.asyncio
-async def test_dac_mixmodes(d, results, summary_results, test_highbank):
+async def test_dac_mixmodes(d, request, shelf, check):
     """
     This test aims to verify the overall behaviour of the nyquist zones (1(NRZ) or 2(RC)) set in the firmware as well as a sanity check for the hardware response in
     the higher nquist regions.
@@ -505,8 +504,8 @@ async def test_dac_mixmodes(d, results, summary_results, test_highbank):
     """
 
     MAX_TOTAL_FREQUENCY = 2.5e9  # in Hz
-    DAC_MAX_FREQUENCY = 275e6  # in Hz (max DAC frequency)
-    BANDWIDTH = 550e6  # in Hz (275 MHz on each side of NCO)
+    DAC_MAX_FREQUENCY = 250e6  # in Hz (max DAC frequency)
+    BANDWIDTH = 500e6  # in Hz (250 MHz on each side of NCO)
     AMPLITUDE = 1
     SCALE = 1
     SAMPLES = 100
@@ -664,27 +663,70 @@ async def test_dac_mixmodes(d, results, summary_results, test_highbank):
                         "reference_magnitudes": reference_mags.tolist(),
                     }
                 )
-                if module not in summary_results["summary"]:
-                    summary_results["summary"][module] = {}
                 if mixmode == 2:
                     await d.set_nyquist_zone(1, module=module)
 
-        results["tests"].append(test_result)
+        return test_result
 
     # Run test for low bank
-    await mixmode_test_for_bank("low", False)
+    test_result = await mixmode_test_for_bank("low", False)
+
+    report = [
+        htpy.h2["DAC Mixmode Checks"],
+        render_markdown(test_dac_mixmodes.__doc__),
+    ]
+
+    for mixmode in range(1, 3):
+        fig, ax = plt.subplots(figsize=(10, 6))
+        first = True
+        for entry in test_result["mixmodes"]:
+            if entry["mixmode"] != mixmode:
+                continue
+            ax.plot(
+                np.array(entry["frequencies"]) / 1e6,
+                entry["magnitude_dbm_values"],
+                ".-",
+                label=f"Module {entry['module']}",
+            )
+            ax.plot(
+                np.array(entry["reference_frequencies"]) / 1e6,
+                entry["reference_magnitudes"],
+                "kx",
+                label="Reference data" if first else None,
+            )
+            first = False
+        ax.set_xlabel("Frequency (MHz)")
+        ax.set_ylabel("Magnitude (dBm)")
+        ax.legend()
+        ax.grid(True)
+        fig.tight_layout()
+
+        report.extend(
+            [
+                htpy.h3[f"Mixmode {mixmode}"],
+                htpy.figure[
+                    render_fig(fig),
+                    htpy.figcaption[f"DAC Mixmodes, Mixmode {mixmode}"],
+                ],
+            ]
+        )
+        plt.close(fig)
+
+    with shelf as x:
+        # Rendered report material
+        x["sections"][request.node.nodeid] = report
+
+        # Auxiliary free-form data
+        x[request.node.nodeid] = test_result
 
 
 """---------------------------------------------------------------------------------------------------------------"""
 """--------------------------------------------------ADC----------------------------------------------------------"""
 
 
-@pytest.mark.xfail
 @pytest.mark.qc_stage2
 @pytest.mark.asyncio
-async def test_adc_attenuation(
-    d, results, summary_results, test_highbank, num_runs, results_dir
-):
+async def test_adc_attenuation(d, request, shelf, check):
     AMPLITUDE = 1
     SAMPLES = 100
     FREQUENCY = 80.234562e6
@@ -694,107 +736,137 @@ async def test_adc_attenuation(
     ATTENUATION_0 = 0
     TITLE = "ADC Attenuation Test"
 
+    report = [
+        render_markdown(
+            """
+    ## ADC Attenuation Test
+
+    This test aims to determine if the attenuation factor set at the ADC
+    accurately scales the incoming signal and is consistent with the
+    predictions from the ADC transfer function. The internal mechanics of
+    this test are mirror images of the scale test above. The test repeatedly
+    calls set_adc_attenuation() with increasing factors, which changes the
+    current input to the balun. A linear relationship is expected.
+    """
+        )
+    ]
+
     test_result = {"title": TITLE, "modules": []}
 
-    for num_run in range(0, num_runs):
-        for m in d.modules:
-            module_errors = []
-            attenuation_values = []
-            magnitude_dbm_values = []
-            predicted_magnitude_dbm_values = []
+    for m in d.modules:
+        module_errors = []
+        attenuation_values = []
+        magnitude_dbm_values = []
+        predicted_magnitude_dbm_values = []
 
-            await d.clear_channels()
-            await value_setter_helper(
-                d,
-                FREQUENCY,
-                AMPLITUDE,
-                SCALE,
-                ATTENUATION_0,
-                CHANNEL,
-                m.module,
-                NCO_FREQUENCY,
+        await d.clear_channels()
+        await value_setter_helper(
+            d,
+            FREQUENCY,
+            AMPLITUDE,
+            SCALE,
+            ATTENUATION_0,
+            CHANNEL,
+            m.module,
+            NCO_FREQUENCY,
+        )
+
+        print(f"ADC_attenuation - Testing Module #{m.module}")
+
+        for attenuation in range(0, 15):
+            await d.set_adc_attenuator(attenuation, d.UNITS.DB, module=m.module)
+            raw_sampl = await d.py_get_samples(
+                SAMPLES, channel=CHANNEL, module=m.module
+            )
+            median_magnitude_dbm, predicted_magnitude_dbm = (
+                transfer_function_helper(raw_sampl, AMPLITUDE, SCALE, attenuation)
+            )
+            attenuation_values.append(attenuation)
+            magnitude_dbm_values.append(median_magnitude_dbm)
+            predicted_magnitude_dbm_values.append(predicted_magnitude_dbm)
+
+        attenuation_values = np.array(attenuation_values).reshape(-1, 1)
+        regressor = LinearRegression().fit(attenuation_values, magnitude_dbm_values)
+        linearity = r2_score(
+            magnitude_dbm_values, regressor.predict(attenuation_values)
+        )
+
+        if linearity < 0.99:
+            check.fail(f"linearity check failed")
+
+        if np.any(
+            np.abs(
+                np.array(magnitude_dbm_values)
+                - np.array(predicted_magnitude_dbm_values)
+            )
+            >= 1
+        ):
+            check.fail(
+                f"Module {m.module} is generating a power output lower than expected. Check your balun and SMA connections."
             )
 
-            print(f"ADC_attenuation - Testing Module #{m.module}")
+        module_result = {
+            "module": m.module,
+            "attenuation_values": attenuation_values.flatten().tolist(),
+            "magnitude_dbm_values": magnitude_dbm_values,
+            "predicted_magnitude_dbm_values": predicted_magnitude_dbm_values,
+        }
 
-            for attenuation in range(0, 15):
-                await d.set_adc_attenuator(attenuation, d.UNITS.DB, module=m.module)
-                raw_sampl = await d.py_get_samples(
-                    SAMPLES, channel=CHANNEL, module=m.module
-                )
-                median_magnitude_dbm, predicted_magnitude_dbm = (
-                    transfer_function_helper(raw_sampl, AMPLITUDE, SCALE, attenuation)
-                )
-                attenuation_values.append(attenuation)
-                magnitude_dbm_values.append(median_magnitude_dbm)
-                predicted_magnitude_dbm_values.append(predicted_magnitude_dbm)
+        rt = ResultTable("Attenuation (dB)", "Measured (dBm)", "Predicted (dBm)")
+        for a, measured, predicted in zip(
+            module_result["attenuation_values"],
+            magnitude_dbm_values,
+            predicted_magnitude_dbm_values,
+        ):
+            if abs(measured - predicted) < 1:
+                rt.pass_(a, measured, predicted)
+            else:
+                rt.fail(a, measured, predicted)
 
-            attenuation_values = np.array(attenuation_values).reshape(-1, 1)
-            regressor = LinearRegression().fit(attenuation_values, magnitude_dbm_values)
-            linearity = r2_score(
-                magnitude_dbm_values, regressor.predict(attenuation_values)
-            )
+        plt.figure(figsize=(10, 6))
+        plt.plot(
+            module_result["attenuation_values"],
+            module_result["magnitude_dbm_values"],
+            "-o",
+            label="measured",
+        )
+        plt.plot(
+            module_result["attenuation_values"],
+            module_result["predicted_magnitude_dbm_values"],
+            "-o",
+            label="predicted",
+        )
+        plt.xlabel("Attenuation(dBm)")
+        plt.ylabel("Magnitude (dBm)")
+        plt.legend()
+        plt.title(
+            f'Signal at ADC of module {module_result["module"]} with increasing attenuation'
+        )
+        plt.grid(True)
+        plt.tight_layout()
 
-            if linearity < 0.99:
-                check.fail(f"linearity check failed")
-
-            if np.any(
-                np.abs(
-                    np.array(magnitude_dbm_values)
-                    - np.array(predicted_magnitude_dbm_values)
-                )
-                >= 1
-            ):
-                check.fail(
-                    f"Module {m.module} is generating a power output lower than expected. Check your balun and SMA connections."
-                )
-
-            module_result = {
-                "module": m.module,
-                "attenuation_values": attenuation_values.flatten().tolist(),
-                "magnitude_dbm_values": magnitude_dbm_values,
-                "predicted_magnitude_dbm_values": predicted_magnitude_dbm_values,
-                "plot_path": "plot_path",
-            }
-
-            graph_name = TITLE + "_module_" + f"{module_result[m.module]}" + ".png"
-            plot_path = os.path.join(results_dir, "plots", graph_name)
-            module_result["plot_path"] = plot_path
-
-            plt.figure(figsize=(10, 6))
-            plt.plot(
-                module_result["attenuation_values"],
-                module_result["magnitude_dbm_values"],
-                "-o",
-                label="measured",
-            )
-            plt.plot(
-                module_result["attenuation_values"],
-                module_result["predicted_magnitude_dbm_values"],
-                "-o",
-                label="predicted",
-            )
-            plt.xlabel("Attenuation(dBm)")
-            plt.ylabel("Magnitude (dBm)")
-            plt.legend()
-            plt.title(
-                f'Signal at ADC of module {module_result["module"]} with increasing attenuation'
-            )
-            plt.grid(True)
-            plt.tight_layout()
-            os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-            plt.savefig(plot_path)
-            plt.close()
-
-            test_result["modules"].append(module_result)
-
-            if module_set not in summary_results["summary"]:
-                summary_results["summary"][module_set] = {}
-            summary_results["summary"][module_set][f"ADC Atten"] = module_result[
-                "status"
+        report.extend(
+            [
+                htpy.h3[f"Module {m.module}"],
+                rt,
+                htpy.figure[
+                    render_fig(plt.gcf()),
+                    htpy.figcaption[
+                        f"Magnitude vs attenuation at module {m.module}"
+                    ],
+                ],
             ]
+        )
+        plt.close()
 
-    results["tests"].append(test_result)
+        test_result["modules"].append(module_result)
+
+    with shelf as x:
+        # Rendered report material
+        x["sections"][request.node.nodeid] = report
+
+        # Auxiliary free-form data
+        x[request.node.nodeid] = test_result
 
 
 @pytest.mark.skip(reason="no way of currently testing this")

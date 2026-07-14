@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.0](https://github.com/t0/rfmux/compare/v1.5.0...v1.6.0) (2026-07-14)
+
+
+### Features
+
+* **cli:** add a "rfmux" command-line interface delegating to subcommands ([3d2bd7e](https://github.com/t0/rfmux/commit/3d2bd7e881c21a8effeffcf488164613945b31ff))
+* **firmware:** adds "firmware" command ([b712057](https://github.com/t0/rfmux/commit/b7120572f5b4ec8a1604160a23212e3a234d3185))
+
 ## [1.5.0](https://github.com/t0/rfmux/compare/v1.4.1...v1.5.0) (2026-07-03)
 
 

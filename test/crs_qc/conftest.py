@@ -54,7 +54,6 @@ def pytest_sessionstart(session):
 
         shelf["runs"].append(
             {
-                # TODO: it would be nice to assemble a list of what tests ran, when
                 "date": datetime.datetime.now(),
                 "args": session.config.invocation_params.args,
                 "logs": [],
@@ -93,6 +92,8 @@ def pytest_runtest_makereport(item, call):
                 {
                     "nodeid": item.nodeid,
                     "outcome": report.outcome,
+                    "start": datetime.datetime.fromtimestamp(call.start),
+                    "stop": datetime.datetime.fromtimestamp(call.stop),
                     "failures": failures,
                     "warnings": _collected_warnings.get(item.nodeid, []),
                 }

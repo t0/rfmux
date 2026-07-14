@@ -95,17 +95,22 @@ def main(directory, html_filename, pdf_filename):
                 )
 
         # Generate test results for each run
-        runs = ResultTable("Run", "Test", "Status")
+        runs = ResultTable("Run", "Test", "Status", "Start", "Duration")
         for n, run in enumerate(qc["runs"]):
             for l in run["logs"]:
+                start = l.get("start")
+                stop = l.get("stop")
+                start_str = start.strftime("%H:%M:%S") if start else ""
+                duration = (stop - start).total_seconds() if start and stop else ""
+                duration_str = f"{duration:.1f} s"
                 if l["outcome"] == "passed":
-                    runs.pass_(f"{n+1}", l["nodeid"], "Passed")
+                    runs.pass_(f"{n+1}", l["nodeid"], "Passed", start_str, duration_str)
                 elif l["outcome"] == "failed":
                     # Format failures as a list
                     failures = ul[(li[f] for f in l["failures"])]
-                    runs.fail(f"{n+1}", l["nodeid"], failures)
+                    runs.fail(f"{n+1}", l["nodeid"], failures, start_str, duration_str)
                 else:
-                    runs.row(f"{n+1}", l["nodeid"], l["outcome"])
+                    runs.row(f"{n+1}", l["nodeid"], l["outcome"], start_str, duration_str)
 
     # Render document preamble
     preamble = [

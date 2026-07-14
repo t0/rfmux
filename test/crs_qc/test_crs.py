@@ -90,7 +90,6 @@ async def test_dac_passband(d, request, shelf, check):
         )
     ]
 
-    # FIXME: Some issue with the higher range of the frequencies showing a dip
     AMPLITUDE = 0.005
     SAMPLES = 10
     NCO_FREQUENCY = 1e9 + 123
@@ -140,7 +139,7 @@ async def test_dac_passband(d, request, shelf, check):
 
             for idx in range(start_idx, end_idx):
                 channel = int(channels[idx - start_idx])
-                rchan = np.array(raw.i[channel + 1]) + 1j * np.array(raw.q[channel + 1])
+                rchan = np.array(raw.i[channel - 1]) + 1j * np.array(raw.q[channel - 1])
                 measured, predicted = transfer_function_helper(
                     rchan, AMPLITUDE, SCALE, ATTENUATION
                 )

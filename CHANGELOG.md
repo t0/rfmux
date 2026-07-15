@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.6.0](https://github.com/t0/rfmux/compare/v1.5.0...v1.6.0) (2026-07-15)
+
+
+### Features
+
+* **cli:** add a "rfmux" command-line interface delegating to subcommands ([3d2bd7e](https://github.com/t0/rfmux/commit/3d2bd7e881c21a8effeffcf488164613945b31ff))
+* **firmware:** adds "firmware" command ([b712057](https://github.com/t0/rfmux/commit/b7120572f5b4ec8a1604160a23212e3a234d3185))
+* **qc:** Add new QC framework ([f48d4ba](https://github.com/t0/rfmux/commit/f48d4badea22ad95755c2fc92a49173a1a7e892d))
+* **qc:** replace test/run_qc.py with "rfmux qc" command ([783e9f3](https://github.com/t0/rfmux/commit/783e9f3abdd9554b7062001b7563730db89c84d3))
+
+
+### Bug Fixes
+
+* **qc:** add start time and duration of each test to the QC report ([f440ace](https://github.com/t0/rfmux/commit/f440ace2fb0b8f01012c9340f845ab6f729bd58b))
+* **qc:** dip issue in test_dac_passband caused by indexing mistake ([54ae1bb](https://github.com/t0/rfmux/commit/54ae1bbe7eda793b0a1e2e407a34830aadeed246))
+* **qc:** squash BeautifulSoup deprecation warning ([db06488](https://github.com/t0/rfmux/commit/db0648855d144eb20566503e65652f43bc9312fd))
+* **qc:** update housekeeping measurements and limits to match up-to-date HW, FW ([4488d80](https://github.com/t0/rfmux/commit/4488d800443b7a074694ee48e3c2b152099be4b1))
+* **qc:** update the xfail tests to current reporting standard ([a964736](https://github.com/t0/rfmux/commit/a9647364537a2a66fae00b571c5b23de40752341))
+
 ## [1.5.0](https://github.com/t0/rfmux/compare/v1.4.1...v1.5.0) (2026-07-03)
 
 

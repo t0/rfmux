@@ -157,7 +157,7 @@ def main(directory, html_filename, pdf_filename):
         preamble,
         body[elements],
     ]
-    encoded = doc.encode()
+    encoded = str(doc)
 
     # Inject TOC by finding the placeholder, and filling it with a list of all
     # subsequent headers
@@ -209,7 +209,7 @@ def main(directory, html_filename, pdf_filename):
     # If we produced anything, append it to the table of contents.
     # (If we didn't -- well, that was a funny empty test run)
     if toc_html:
-        container.append(bs4.BeautifulSoup(toc_html.encode(), "html.parser"))
+        container.append(bs4.BeautifulSoup(str(toc_html), "html.parser"))
 
     reencoded = str(soup)
 

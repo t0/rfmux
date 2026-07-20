@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/t0/rfmux/compare/v1.6.0...v1.7.0) (2026-07-20)
+
+
+### Features
+
+* **qc:** enable QC runs in wheel installs ([cce096a](https://github.com/t0/rfmux/commit/cce096a25a57e9c69a98131b5eb5e740790ee25c))
+
 ## [1.6.0](https://github.com/t0/rfmux/compare/v1.5.0...v1.6.0) (2026-07-15)
 
 

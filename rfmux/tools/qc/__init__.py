@@ -1,9 +1,9 @@
 """
 rfmux qc - Run the CRS QC test suite.
 
-This is a CLI front-end for the QC tests in test/crs_qc/, equivalent to
-running test/crs_qc/run_qc.py directly. It accepts any arguments pytest
-understands (try "pytest --help" for details). A few useful examples:
+This is a CLI front-end for the QC tests that live alongside this module.
+It accepts any arguments pytest understands (try "pytest --help" for
+details). A few useful examples:
 
     -x: abort testing after the first failure
     -s: don't suppress stdout/stderr
@@ -15,13 +15,11 @@ It also understands a few QC-specific options:
     --view: launch a PDF viewer after completing the QC run
     --serial SERIAL: this is how you tell the QC script which CRS to use
     --directory DIRECTORY: collect outputs in DIRECTORY
-
-Because the QC tests live in test/crs_qc/ (not in the installed rfmux
-package), this command only works from a repository checkout.
 """
 
 import click
 import datetime
+import importlib.util
 import pathlib
 import pytest
 import subprocess
@@ -35,18 +33,36 @@ import sys
 ))
 @click.pass_context
 def cli(ctx):
-    """Run the CRS QC test suite (requires a repository checkout)"""
+    """Run the CRS QC test suite"""
 
-    # The QC tests aren't shipped in the rfmux wheel - locate them relative
-    # to this file, which only works when running from a repo checkout.
-    qc_path = pathlib.Path(__file__).parents[2] / "test" / "crs_qc"
-    if not qc_path.is_dir():
+    # The QC suite has dependencies beyond rfmux's own (report generation,
+    # regression fits). Fail early with a hint rather than mid-collection.
+    # find_spec (not import) checks availability without importing - actually
+    # importing pytest plugins like pytest_check here would prevent pytest
+    # from applying assertion rewriting to them later.
+    missing = [
+        module
+        for module in ("bs4", "htpy", "markdown", "markupsafe",
+                       "pytest_check", "requests", "sklearn", "weasyprint")
+        if importlib.util.find_spec(module) is None
+    ]
+    if missing:
         raise click.ClickException(
-            f"QC tests not found at {qc_path} - 'rfmux qc' requires a "
-            "repository checkout, not an installed wheel."
+            f"missing QC dependencies ({', '.join(missing)}) - "
+            "install with: pip install rfmux[qc]"
         )
 
-    base_args = [qc_path.as_posix()] + list(ctx.args)
+    qc_path = pathlib.Path(__file__).parent
+
+    # Pin pytest's configuration to the one we ship. This keeps behaviour
+    # identical whether we're run from a checkout or an installed wheel, and
+    # stops pytest from picking up an unrelated project's ini file or writing
+    # a cache into site-packages.
+    base_args = [
+        qc_path.as_posix(),
+        "-c", (qc_path / "pytest.ini").as_posix(),
+        "-p", "no:cacheprovider",
+    ] + list(ctx.args)
 
     if "--serial" not in base_args and not any(
         arg.startswith("--serial=") for arg in base_args

@@ -64,9 +64,11 @@ def main(directory, html_filename, pdf_filename):
 
             outcomes = [x["outcome"] for x in run["logs"]]
             passed = list(map(lambda x: x == "passed", outcomes))
-            failed = list(map(lambda x: x == "failed", outcomes))
+            failed = list(map(lambda x: x in ("failed", "error"), outcomes))
 
-            if all(passed):
+            # An empty run is neither a pass nor a failure - don't highlight
+            # it as green (all() is vacuously true on an empty list).
+            if outcomes and all(passed):
                 rt_runs.pass_(
                     f"{n+1}",
                     f'{run["date"].strftime("%Y-%m-%d %H:%M:%S")}',
@@ -105,7 +107,7 @@ def main(directory, html_filename, pdf_filename):
                 duration_str = f"{duration:.1f} s"
                 if l["outcome"] == "passed":
                     runs.pass_(f"{n+1}", l["nodeid"], "Passed", start_str, duration_str)
-                elif l["outcome"] == "failed":
+                elif l["outcome"] in ("failed", "error"):
                     # Format failures as a list
                     failures = ul[(li[f] for f in l["failures"])]
                     runs.fail(f"{n+1}", l["nodeid"], failures, start_str, duration_str)

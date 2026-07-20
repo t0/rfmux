@@ -46,6 +46,19 @@ requires-python = ">=3.9"
 # Debian/Ubuntu: apt-get install python3-pygetdata
 dirfile = []
 
+# Dependencies for "rfmux qc" (also requires Python 3.10+; the htpy marker
+# keeps this extra resolvable under our 3.9 floor)
+qc = [
+  "beautifulsoup4",
+  "htpy; python_version >= '3.10'",
+  "markdown",
+  "markupsafe",
+  "pytest_check",
+  "requests",
+  "scikit-learn",
+  "weasyprint",
+]
+
 # Dependencies for "rfmux firmware". Optional so the Yocto build (which never
 # needs them) doesn't carry extra pre-requisites.
 firmware = [
@@ -63,15 +76,11 @@ periscope = "rfmux.tools.periscope.__main__:main"
 
 [dependency-groups]
 dev = [
-  "bs4",
-  "htpy",
+  "rfmux[qc]",  # run the QC suite from a checkout
   "jupytext",
-  "markdown",
   "nbclient",
+  "nbformat",
   "pytest_check",
-  "requests",
-  "scikit-learn",
-  "weasyprint",
 ]
 
 # The dev group needs python 3.10+ (htpy, match syntax)
@@ -99,6 +108,9 @@ fallback_version = "0.0.0"
 exclude-newer = "3 weeks"
 
 [tool.pytest.ini_options]
+# The QC suite (rfmux/tools/qc/) is excluded here; run it via "rfmux qc".
+testpaths = ["test"]
+
 markers = [
   "offline",
   "qc_stage1",

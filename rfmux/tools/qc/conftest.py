@@ -18,6 +18,13 @@ matplotlib.use("Agg")  # for non-interactive use
 
 
 def pytest_addoption(parser):
+    # test/conftest.py also defines --serial; tolerate both conftests being
+    # loaded in a single in-repo pytest invocation.
+    try:
+        parser.addoption("--serial", action="store", default=None)
+    except ValueError:
+        pass
+
     # These options all end up determining which ReadoutModules are attached to the CRS
     parser.addoption("--module", action="store", default=None, type=int)
     parser.addoption("--modules", action="store", default=None, type=int)
@@ -85,19 +92,29 @@ def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
 
-    # We will need to strip ANSI colour codes from the failures
-    if call.when == "call":
-        with shelve.open(item.session.shelf_filename, writeback=True) as shelf:
-            shelf["runs"][-1]["logs"].append(
-                {
-                    "nodeid": item.nodeid,
-                    "outcome": report.outcome,
-                    "start": datetime.datetime.fromtimestamp(call.start),
-                    "stop": datetime.datetime.fromtimestamp(call.stop),
-                    "failures": failures,
-                    "warnings": _collected_warnings.get(item.nodeid, []),
-                }
-            )
+    if call.when == "setup" and report.outcome != "passed":
+        # A fixture failure (e.g. an unreachable board) means the test never
+        # ran at all - record it as an error rather than silently dropping it
+        # from the report.
+        outcome_label = "error" if report.outcome == "failed" else report.outcome
+        crash = getattr(report.longrepr, "reprcrash", None)
+        failures = [escape.sub("", crash.message if crash else str(report.longrepr))]
+    elif call.when == "call":
+        outcome_label = report.outcome
+    else:
+        return
+
+    with shelve.open(item.session.shelf_filename, writeback=True) as shelf:
+        shelf["runs"][-1]["logs"].append(
+            {
+                "nodeid": item.nodeid,
+                "outcome": outcome_label,
+                "start": datetime.datetime.fromtimestamp(call.start),
+                "stop": datetime.datetime.fromtimestamp(call.stop),
+                "failures": failures,
+                "warnings": _collected_warnings.get(item.nodeid, []),
+            }
+        )
 
 
 @pytest.fixture(scope="function")

@@ -87,8 +87,8 @@ async def test_metadata(d, request, shelf):
 
     report.append(rt := ResultTable("Attribute", "Value"))
     r = await d.get_firmware_release()
-    for k in r:
-        rt.row(k, getattr(r, k))
+    for k, v in vars(r).items():
+        rt.row(k, v)
 
     with shelf as x:
         x["sections"][request.node.nodeid] = report

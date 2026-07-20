@@ -15,7 +15,7 @@ import numpy as np
 from rfmux.core.transferfunctions import VOLTS_PER_ROC
 from rfmux.core.hardware_map import macro
 from rfmux.core.schema import CRS
-from rfmux.tuber.codecs import TuberResult
+from tuber.codecs import TuberResult
 from scipy.signal.windows import chebwin
 from scipy.interpolate import interp1d
 
@@ -496,18 +496,15 @@ async def py_get_pfb_samples(
     )
 
     # Return results
-    results = {
-        "i": time_i.tolist(),
-        "q": time_q.tolist(),
-        "spectrum" : TuberResult({
-            "freq_iq": freq_ssb.tolist(),
-            "psd_i": psd_i.tolist(),
-            "psd_q": psd_q.tolist(),
-            "freq_dsb": freq_dsb.tolist(),
-            "psd_dual_sideband": psd_dual_sideband.tolist()})
-    }
-
-    return TuberResult(results)
+    return TuberResult(
+        i=time_i.tolist(),
+        q=time_q.tolist(),
+        spectrum=TuberResult(
+            freq_iq=freq_ssb.tolist(),
+            psd_i=psd_i.tolist(),
+            psd_q=psd_q.tolist(),
+            freq_dsb=freq_dsb.tolist(),
+            psd_dual_sideband=psd_dual_sideband.tolist()))
 
 
 # NOTE: Statistically, log binning of spectra is not advisable, since 

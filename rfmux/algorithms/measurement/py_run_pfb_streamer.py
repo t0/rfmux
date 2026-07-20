@@ -23,7 +23,7 @@ import warnings
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...tuber.codecs import TuberResult
+from tuber.codecs import TuberResult
 from ...core.transferfunctions import VOLTS_PER_ROC
 from ... import streamer
 
@@ -234,18 +234,15 @@ async def py_run_pfb_streamer(crs : CRS,
             
     
         # Return results
-        results = {
-            "i": time_list_i,
-            "q": time_list_q,
-            "spectrum" : TuberResult({
-                "freq_iq": freq_ssb.tolist(),
-                "psd_i": psd_list_i,
-                "psd_q": psd_list_q,
-                "freq_dsb": freq_dsb.tolist(),
-                "psd_dual_sideband": psd_list_dual})
-        }
-    
-        return TuberResult(results)
+        return TuberResult(
+            i=time_list_i,
+            q=time_list_q,
+            spectrum=TuberResult(
+                freq_iq=freq_ssb.tolist(),
+                psd_i=psd_list_i,
+                psd_q=psd_list_q,
+                freq_dsb=freq_dsb.tolist(),
+                psd_dual_sideband=psd_list_dual))
 
     except Exception as e:
         if e.__class__.__name__ == "TuberRemoteError":

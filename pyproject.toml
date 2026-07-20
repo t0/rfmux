@@ -32,6 +32,7 @@ dependencies = [
   "scipy",
   "simplejson",
   "sqlalchemy",
+  "tuber-client[async]>=0.18",
   # Intel Threading Building Blocks for numba parallel execution.
   # On macOS, you need libomp instead
   "tbb; sys_platform != 'darwin'",

@@ -37,7 +37,7 @@ import warnings
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...tuber.codecs import TuberResult
+from tuber.codecs import TuberResult
 from ...core.transferfunctions import VOLTS_PER_ROC, spectrum_from_slow_tod
 from ... import streamer
 
@@ -260,20 +260,19 @@ async def py_get_samples(crs: CRS,
         std_q = np.std(samples.imag, axis=0)
 
         if channel is None:
-            results = {
-                "mean": TuberResult(dict(i=mean_i, q=mean_q)),
-                "std": TuberResult(dict(i=std_i, q=std_q)),
-            }
+            return TuberResult(
+                mean=TuberResult(i=mean_i, q=mean_q),
+                std=TuberResult(i=std_i, q=std_q),
+            )
         else:
             # single channel => pick out channel-1
-            results = {
-                "mean": TuberResult(dict(i=mean_i[channel-1], q=mean_q[channel-1])),
-                "std": TuberResult(dict(i=std_i[channel-1], q=std_q[channel-1])),
-            }
-        return TuberResult(results)
+            return TuberResult(
+                mean=TuberResult(i=mean_i[channel-1], q=mean_q[channel-1]),
+                std=TuberResult(i=std_i[channel-1], q=std_q[channel-1]),
+            )
 
     # Otherwise build the normal time-domain results
-    results = dict(ts=[TuberResult(dict(p.ts)) for p in packets])
+    results = dict(ts=[TuberResult(**dict(p.ts)) for p in packets])
 
     if _extra_metadata:
         results["seq"] = [p.seq for p in packets]
@@ -381,6 +380,6 @@ async def py_get_samples(crs: CRS,
             spec_data[f"{scaling}_dual_sideband"] = np.fft.fftshift(d["psd_dual_sideband"]).tolist()
 
         # attach spectrum data to results
-        results["spectrum"] = TuberResult(spec_data)
+        results["spectrum"] = TuberResult(**spec_data)
 
-    return TuberResult(results)
+    return TuberResult(**results)

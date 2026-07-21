@@ -2846,6 +2846,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         from .bias_kids_dialog import BiasSettingsPanel
         if self.bias_settings_panel is None:
             self.bias_settings_panel = BiasSettingsPanel(parent=None)
+            # Connect the "Apply Custom Bias to Hardware" shortcut button so that
+            # clicking it in the floating panel triggers the full populate + apply
+            # pipeline without needing the user to press two toolbar buttons.
+            self.bias_settings_panel.apply_custom_bias_requested.connect(
+                self._on_custom_bias_apply_directly
+            )
+        # Refresh the resonator-count hint each time the panel is opened so the
+        # user always sees the correct count for the current multisweep data.
+        self.bias_settings_panel.set_resonator_count(len(self.res_info_dict))
         self.bias_settings_panel.show()
         self.bias_settings_panel.raise_()
         self.bias_settings_panel.activateWindow()
@@ -2901,6 +2910,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     "but span_hz is not available in initial_params; falling back to "
                     "the absolute kHz value."
                 )
+
+        # ── Custom bias path ─────────────────────────────────────────────────
+        # When "Use Custom Bias" is enabled in BiasSettingsPanel, skip the
+        # find_bias_points algorithm entirely and directly populate res_info_dict
+        # with the user-supplied frequencies and amplitudes.
+        if bias_settings.get('custom_bias_enabled'):
+            self._apply_custom_bias_to_res_info(bias_settings)
+            return
 
         from .tasks import FindBiasTask, FindBiasSignals
 
@@ -2993,6 +3010,134 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.find_bias_btn.setText("Find Bias")
         self.run_fit_btn.setEnabled(True)
         self.find_bias_task = None
+
+    # ── Custom Bias helpers ───────────────────────────────────────────────────
+
+    def _apply_custom_bias_to_res_info(self, bias_settings: dict) -> bool:
+        """Apply user-supplied bias frequencies and amplitudes to ``res_info_dict``.
+
+        Instead of running the find_bias_points algorithm, this method assigns
+        the custom values directly to the existing resonators, preserving all
+        other fields (code, channel_number, sweep data, etc.).
+
+        The N user-supplied ``(frequency, amplitude)`` pairs are matched to the
+        N resonators in ascending frequency order (each resonator is identified
+        by its current ``bias_frequency`` or ``sweep_center_frequency``).
+
+        If the "Quantize to hardware frequency grid" checkbox is checked, each
+        frequency is rounded to the nearest hardware tone bin
+        (``_BASE_FREQ_HZ ≈ 298.023 mHz``) before being stored — exactly the
+        same rounding that :func:`~rfmux.algorithms.measurement.bias_kids.apply_bias`
+        would apply when programming the CRS.
+
+        Parameters
+        ----------
+        bias_settings :
+            Dict returned by :meth:`~.bias_kids_dialog.BiasSettingsPanel.get_settings`.
+
+        Returns
+        -------
+        bool
+            ``True`` on success; ``False`` when validation fails (an error
+            dialog is shown to the user before returning ``False``).
+        """
+        import copy
+
+        freqs_hz = bias_settings.get('custom_bias_frequencies_hz') or []
+        amps     = bias_settings.get('custom_bias_amplitudes') or []
+
+        # ── Validate inputs ───────────────────────────────────────────────────
+        if not freqs_hz:
+            QtWidgets.QMessageBox.warning(
+                self, "Custom Bias Error",
+                "No frequencies are entered in the Custom Bias section.\n"
+                "Please enter frequencies and amplitudes before clicking Find Bias."
+            )
+            return False
+
+        if not amps:
+            QtWidgets.QMessageBox.warning(
+                self, "Custom Bias Error",
+                "No amplitudes are entered in the Custom Bias section.\n"
+                "Please enter frequencies and amplitudes before clicking Find Bias."
+            )
+            return False
+
+        if len(freqs_hz) != len(amps):
+            QtWidgets.QMessageBox.warning(
+                self, "Custom Bias Error",
+                f"Number of frequencies ({len(freqs_hz)}) and "
+                f"amplitudes ({len(amps)}) must match."
+            )
+            return False
+
+        n_res = len(self.res_info_dict)
+        n_custom = len(freqs_hz)
+        if n_custom != n_res:
+            QtWidgets.QMessageBox.warning(
+                self, "Custom Bias Error",
+                f"Custom bias has {n_custom} entr{'y' if n_custom == 1 else 'ies'} "
+                f"but there {'is' if n_res == 1 else 'are'} {n_res} resonator"
+                f"{'s' if n_res != 1 else ''} in the current multisweep panel.\n\n"
+                f"Please provide exactly {n_res} frequencies and amplitudes."
+            )
+            return False
+
+        # ── Optional quantization ─────────────────────────────────────────────
+        if bias_settings.get('custom_bias_quantize', True):
+            try:
+                from rfmux.algorithms.measurement.bias_kids import _BASE_FREQ_HZ
+                freqs_hz = [
+                    round(f / _BASE_FREQ_HZ) * _BASE_FREQ_HZ
+                    for f in freqs_hz
+                ]
+            except ImportError:
+                pass   # graceful degradation if constant is unavailable
+
+        # ── Match by ascending frequency order ────────────────────────────────
+        # Sort existing res_info_dict codes by their current reference frequency
+        # (bias_frequency if already set, otherwise sweep_center_frequency).
+        sorted_codes = sorted(
+            self.res_info_dict.keys(),
+            key=lambda code: (
+                self.res_info_dict[code].get('bias_frequency')
+                or self.res_info_dict[code].get('sweep_center_frequency', 0.0)
+            ),
+        )
+
+        # Deep-copy so the panel's dict is only updated on success
+        updated = copy.deepcopy(self.res_info_dict)
+        for code, freq_hz, amp in zip(sorted_codes, freqs_hz, amps):
+            updated[code]['bias_frequency'] = float(freq_hz)
+            updated[code]['bias_amplitude'] = float(amp)
+            updated[code]['bias_found']     = True
+
+        # ── Hand off to the standard completion handler ───────────────────────
+        # _find_bias_completed merges the updated dict, enables Apply Bias,
+        # updates the "Show Bias Info" checkbox, redraws, auto-exports, etc.
+        self._find_bias_completed(self.target_module, updated)
+        return True
+
+    def _on_custom_bias_apply_directly(self):
+        """Slot for the 'Apply Custom Bias to Hardware' shortcut button.
+
+        Called when the user clicks the convenience button inside the Bias
+        Settings floating panel.  Populates ``res_info_dict`` with the custom
+        bias values (same as clicking "Find Bias" with custom bias enabled)
+        and then immediately starts the hardware apply task (same as clicking
+        "Apply Bias" in the toolbar).
+        """
+        if self.bias_settings_panel is None:
+            return
+
+        bias_settings = self.bias_settings_panel.get_settings()
+
+        # Populate res_info_dict (shows an error dialog on failure and returns False)
+        if not self._apply_custom_bias_to_res_info(bias_settings):
+            return
+
+        # Proceed to hardware apply
+        self._apply_bias()
 
     # ── Apply Bias ────────────────────────────────────────────────────────────
 

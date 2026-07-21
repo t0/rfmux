@@ -208,6 +208,146 @@ class JupyterServerManager(QtCore.QObject):
             self.url = None
 
 
+class JupyterNotebookSettingsDialog(QtWidgets.QDialog):
+    """
+    Dialog for configuring Jupyter notebook settings.
+
+    Can be shown in two modes:
+    - ``is_first_time=True``:  First-time setup, triggered automatically when no
+      library path has been saved yet.  Includes a note informing the user that
+      the path can be changed later via Jupyter → Jupyter Notebook Settings.
+    - ``is_first_time=False``: Settings mode, accessible at any time from the
+      Jupyter menu.  Lets the user view or change the saved library path.
+    """
+
+    def __init__(self, parent=None, is_first_time: bool = False):
+        super().__init__(parent)
+        self._is_first_time = is_first_time
+        self._setup_ui()
+
+    def _setup_ui(self):
+        """Build the dialog UI."""
+        if self._is_first_time:
+            self.setWindowTitle("User Notebook Library Setup")
+        else:
+            self.setWindowTitle("Jupyter Notebook Settings")
+        self.setMinimumWidth(540)
+        self.setMinimumHeight(260)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        # ── Description ──────────────────────────────────────────────
+        if self._is_first_time:
+            desc_text = (
+                "Welcome to Jupyter Notebooks in Periscope!\n\n"
+                "Choose a directory for your personal notebook library. "
+                "This library will be accessible across all Periscope sessions "
+                "as 'User Notebooks' in Jupyter Lab."
+            )
+        else:
+            desc_text = (
+                "Configure your Jupyter notebook settings below.\n\n"
+                "The User Notebook Library is a personal directory that is "
+                "linked into every Periscope session, making your notebooks "
+                "available as 'User Notebooks' in Jupyter Lab."
+            )
+
+        desc_label = QtWidgets.QLabel(desc_text)
+        desc_label.setWordWrap(True)
+        layout.addWidget(desc_label)
+
+        layout.addSpacing(4)
+
+        # ── Library path ─────────────────────────────────────────────
+        path_group = QtWidgets.QGroupBox("User Notebook Library Path")
+        path_layout = QtWidgets.QHBoxLayout(path_group)
+
+        # Pre-populate with saved path or platform default
+        saved_path = settings.get_user_library_path()
+        default_path = Path(saved_path) if saved_path else get_user_notebook_dir()
+
+        self._path_edit = QtWidgets.QLineEdit(str(default_path))
+        self._path_edit.setMinimumWidth(320)
+        self._path_edit.setToolTip("Directory used as your personal notebook library")
+        path_layout.addWidget(self._path_edit, 1)
+
+        browse_btn = QtWidgets.QPushButton("Browse…")
+        browse_btn.setToolTip("Choose a directory")
+        browse_btn.clicked.connect(self._browse)
+        path_layout.addWidget(browse_btn)
+
+        reset_btn = QtWidgets.QPushButton("Reset to Default")
+        reset_btn.setToolTip("Reset to the platform default location")
+        reset_btn.clicked.connect(
+            lambda: self._path_edit.setText(str(get_user_notebook_dir()))
+        )
+        path_layout.addWidget(reset_btn)
+
+        layout.addWidget(path_group)
+
+        # ── First-time note ───────────────────────────────────────────
+        if self._is_first_time:
+            note_label = QtWidgets.QLabel(
+                "ℹ️  This path can be changed later via "
+                "<b>Jupyter → Jupyter Notebook Settings…</b>"
+            )
+            note_label.setWordWrap(True)
+            note_label.setStyleSheet("color: gray; font-size: 11px;")
+            layout.addWidget(note_label)
+
+        layout.addSpacing(4)
+
+        # ── Buttons ───────────────────────────────────────────────────
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self._on_accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    # ── Slots ─────────────────────────────────────────────────────────
+
+    def _browse(self):
+        """Open a directory picker and update the path field."""
+        current = self._path_edit.text().strip() or str(Path.home())
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select Notebook Library Directory",
+            current,
+            QtWidgets.QFileDialog.Option.ShowDirsOnly |
+            QtWidgets.QFileDialog.Option.DontUseNativeDialog,
+        )
+        if directory:
+            self._path_edit.setText(directory)
+
+    def _on_accept(self):
+        """Validate, save the chosen path, and close the dialog."""
+        raw = self._path_edit.text().strip()
+        if not raw:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Path Required",
+                "Please enter a valid directory path for the notebook library.",
+            )
+            return
+        # Persist to settings
+        settings.set_user_library_path(raw)
+        self.accept()
+
+    # ── Public helpers ────────────────────────────────────────────────
+
+    def get_library_path(self) -> Path | None:
+        """
+        Return the library path that was confirmed in the dialog.
+
+        Call this *after* ``exec()`` returns ``Accepted``.
+        """
+        raw = self._path_edit.text().strip()
+        return Path(raw) if raw else None
+
+
 class NotebookPanel(QtWidgets.QWidget):
     """
     Jupyter notebook control panel.
@@ -335,83 +475,20 @@ class NotebookPanel(QtWidgets.QWidget):
         self.server.server_ready.connect(self._on_server_ready)
         self.server.server_error.connect(self._on_server_error)
     
-    def _prompt_for_user_library(self) -> Path | None:
+    def _prompt_for_user_library_first_time(self) -> Path | None:
         """
-        Prompt user for their notebook library directory.
-        
-        Uses saved path from previous sessions if available, otherwise uses platform default.
-        
+        Show the first-time setup dialog for the user notebook library directory.
+
+        Only called when no library path has been saved in settings yet.
+        Includes a note informing the user that this can be changed later
+        via the Jupyter menu → Jupyter Notebook Settings.
+
         Returns:
             Path to user library, or None if cancelled
         """
-        # Get saved path from settings, or fall back to platform default
-        saved_path = settings.get_user_library_path()
-        if saved_path:
-            default_path = Path(saved_path)
-        else:
-            default_path = get_user_notebook_dir()
-        
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("User Notebook Library")
-        dialog.setMinimumWidth(500)
-        
-        layout = QtWidgets.QVBoxLayout(dialog)
-        
-        # Description
-        desc_label = QtWidgets.QLabel(
-            "Choose a directory for your personal notebook library.\n\n"
-            "This library will be accessible across all Periscope sessions "
-            "as 'User Notebooks' in Jupyter Lab."
-        )
-        desc_label.setWordWrap(True)
-        layout.addWidget(desc_label)
-        
-        layout.addSpacing(10)
-        
-        # Path input - pre-populated with saved or default path
-        path_layout = QtWidgets.QHBoxLayout()
-        path_label = QtWidgets.QLabel("Library Path:")
-        path_layout.addWidget(path_label)
-        
-        path_edit = QtWidgets.QLineEdit(str(default_path))
-        path_edit.setMinimumWidth(300)
-        path_layout.addWidget(path_edit, 1)
-        
-        browse_btn = QtWidgets.QPushButton("Browse...")
-        browse_btn.clicked.connect(
-            lambda: self._browse_for_directory(path_edit)
-        )
-        path_layout.addWidget(browse_btn)
-        
-        # Add "Reset to Default" button
-        reset_btn = QtWidgets.QPushButton("Reset to Default")
-        reset_btn.setToolTip("Reset to platform default location")
-        reset_btn.clicked.connect(
-            lambda: path_edit.setText(str(get_user_notebook_dir()))
-        )
-        path_layout.addWidget(reset_btn)
-        
-        layout.addLayout(path_layout)
-        
-        layout.addSpacing(10)
-        
-        # Buttons
-        button_box = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok |
-            QtWidgets.QDialogButtonBox.StandardButton.Cancel
-        )
-        button_box.accepted.connect(dialog.accept)
-        button_box.rejected.connect(dialog.reject)
-        layout.addWidget(button_box)
-        
-        # Show dialog
+        dialog = JupyterNotebookSettingsDialog(self, is_first_time=True)
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            chosen_path = Path(path_edit.text().strip())
-            if chosen_path:
-                # Save the chosen path for next time
-                settings.set_user_library_path(str(chosen_path))
-                return chosen_path
-        
+            return dialog.get_library_path()
         return None
     
     def _browse_for_directory(self, line_edit: QtWidgets.QLineEdit):
@@ -432,14 +509,23 @@ class NotebookPanel(QtWidgets.QWidget):
             line_edit.setText(directory)
     
     def start(self):
-        """Start the Jupyter Lab server."""
-        # Prompt for user notebook library directory
-        user_lib_path = self._prompt_for_user_library()
-        if user_lib_path:
-            self.user_library_path = user_lib_path
+        """Start the Jupyter Lab server.
+
+        Determines the user notebook library path:
+        - If a path is already saved in settings, use it silently.
+        - If no path has been saved yet (first time), show the first-time setup
+          dialog so the user can choose a location.  The dialog also tells them
+          where to change the setting later (Jupyter → Jupyter Notebook Settings).
+        """
+        saved_path = settings.get_user_library_path()
+        if saved_path:
+            # Library path already configured — use it without showing any dialog
+            self.user_library_path = Path(saved_path)
         else:
-            self.user_library_path = None
-        
+            # First time: prompt the user to choose a library path
+            user_lib_path = self._prompt_for_user_library_first_time()
+            self.user_library_path = user_lib_path  # May be None if the user cancelled
+
         self.server.start(self.notebook_dir)
     
     def _get_parent_app_info(self) -> tuple[str | None, bool]:

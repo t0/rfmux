@@ -502,7 +502,7 @@ class ServerMockCRS:
         self._short_packets = short
         self._streamed_modules = module
 
-    async def get_decimation(self):
+    async def get_decimation(self, module=None):
         return None if len(self._streamed_modules) == 0 else self._fir_stage
 
     async def set_analog_bank(self, high_bank: bool):

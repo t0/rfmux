@@ -35,9 +35,28 @@ class ParamKeyExtractor:
         return None
 
     def _find_method(self, class_node: ast.ClassDef) -> ast.FunctionDef | None:
+        # Pass 1: direct  def get_parameters(self): ...
         for node in class_node.body:
             if isinstance(node, ast.FunctionDef) and node.name == "get_parameters":
                 return node
+
+        # Pass 2: assignment alias  e.g.  get_parameters = get_settings
+        alias_target = None
+        for node in class_node.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if (
+                        isinstance(target, ast.Name)
+                        and target.id == "get_parameters"
+                        and isinstance(node.value, ast.Name)
+                    ):
+                        alias_target = node.value.id  # e.g. "get_settings"
+
+        if alias_target:
+            for node in class_node.body:
+                if isinstance(node, ast.FunctionDef) and node.name == alias_target:
+                    return node
+
         return None
 
     # ----------------------------

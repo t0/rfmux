@@ -8,8 +8,10 @@ from .utils import (
     UnitConverter, traceback
 )
 import pickle
+import datetime
 from .tasks import DACScaleFetcher
 from .network_analysis_base import NetworkAnalysisDialogBase
+from . import settings
 
 
 def load_network_analysis_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
@@ -72,7 +74,8 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             modules: List of available module numbers.
             dac_scales: Pre-fetched DAC scales for the modules.
         """
-        super().__init__(parent, params=None, modules=modules, dac_scales=dac_scales)
+        saved_params = settings.get_network_analysis_defaults()
+        super().__init__(parent, params=saved_params, modules=modules, dac_scales=dac_scales)
         self.setWindowTitle("Network Analysis Configuration")
         self.setModal(False) # Modeless dialog
         self._setup_ui()
@@ -83,6 +86,40 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         """Sets up the user interface elements for the dialog."""
         layout = QtWidgets.QVBoxLayout(self)
 
+        # ── Measurement Name ──────────────────────────────────────────────────
+        name_group = QtWidgets.QGroupBox("Measurement Name")
+        name_form = QtWidgets.QFormLayout(name_group)
+
+        # Box 1: pre-populated base name (timestamp + meas type), editable
+        default_base = datetime.datetime.now().strftime("netanal_%H%M%S")
+        self.base_name_edit = QtWidgets.QLineEdit(default_base)
+        self.base_name_edit.setToolTip(
+            "Base filename — pre-filled with a timestamp and measurement type.\n"
+            "You may edit it freely.  The .pkl extension is added automatically."
+        )
+        name_form.addRow("Base name:", self.base_name_edit)
+
+        # Box 2: optional user suffix, blank by default
+        self.custom_suffix_edit = QtWidgets.QLineEdit()
+        self.custom_suffix_edit.setPlaceholderText("e.g., cold_dark")
+        self.custom_suffix_edit.setToolTip(
+            "Optional suffix appended after the base name with an underscore separator.\n"
+            "Leave blank to use the base name only."
+        )
+        name_form.addRow("Custom suffix:", self.custom_suffix_edit)
+
+        # Live preview label
+        self._name_preview_label = QtWidgets.QLabel()
+        self._name_preview_label.setStyleSheet("font-style: italic; color: #555;")
+        name_form.addRow("→  filename:", self._name_preview_label)
+
+        # Connect both fields to update the preview
+        self.base_name_edit.textChanged.connect(self._update_name_preview)
+        self.custom_suffix_edit.textChanged.connect(self._update_name_preview)
+        self._update_name_preview()  # populate on open
+
+        layout.addWidget(name_group)
+
         self.import_button = QtWidgets.QPushButton("Import Data")
         self.import_button.clicked.connect(self._load_netanal_data)
         layout.addWidget(self.import_button, alignment=QtCore.Qt.AlignLeft)
@@ -90,35 +127,43 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         param_group = QtWidgets.QGroupBox("Analysis Parameters")
         param_layout = QtWidgets.QFormLayout(param_group)
         
-        self.module_entry = QtWidgets.QLineEdit("All")
+        # Restore module selection from saved params (None → "All", list → comma-separated)
+        saved_module = self.params.get('module')
+        if saved_module is None:
+            module_text = "All"
+        elif isinstance(saved_module, (list, tuple)):
+            module_text = ", ".join(str(m) for m in saved_module)
+        else:
+            module_text = str(saved_module)
+        self.module_entry = QtWidgets.QLineEdit(module_text)
         self.module_entry.setToolTip("Specify modules to analyze (e.g., '1,2,5', '1-4', or 'All' for modules 1-8).")
         self.module_entry.textChanged.connect(self._update_dac_scale_info) # Update DAC info when module selection changes
         param_layout.addRow("Modules:", self.module_entry)
-        
-        self.fmin_edit = QtWidgets.QLineEdit(str(DEFAULT_MIN_FREQ / 1e6)) # Default in MHz
-        self.fmax_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_FREQ / 1e6)) # Default in MHz
+
+        self.fmin_edit = QtWidgets.QLineEdit(str(self.params.get('fmin', DEFAULT_MIN_FREQ) / 1e6))
+        self.fmax_edit = QtWidgets.QLineEdit(str(self.params.get('fmax', DEFAULT_MAX_FREQ) / 1e6))
         param_layout.addRow("Min Frequency (MHz):", self.fmin_edit)
         param_layout.addRow("Max Frequency (MHz):", self.fmax_edit)
 
-        self.cable_length_edit = QtWidgets.QLineEdit(str(DEFAULT_CABLE_LENGTH)) # Default cable length
+        self.cable_length_edit = QtWidgets.QLineEdit(str(self.params.get('cable_length', DEFAULT_CABLE_LENGTH)))
         param_layout.addRow("Cable Length (m):", self.cable_length_edit)
         
         self.setup_amplitude_group(param_layout) # Add shared amplitude settings
         
-        self.points_edit = QtWidgets.QLineEdit(str(DEFAULT_NPOINTS))
+        self.points_edit = QtWidgets.QLineEdit(str(self.params.get('npoints', DEFAULT_NPOINTS)))
         param_layout.addRow("Number of Points:", self.points_edit)
         
-        self.samples_edit = QtWidgets.QLineEdit(str(DEFAULT_NSAMPLES))
+        self.samples_edit = QtWidgets.QLineEdit(str(self.params.get('nsamps', DEFAULT_NSAMPLES)))
         param_layout.addRow("Samples to Average:", self.samples_edit)
         
-        self.max_chans_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_CHANNELS))
+        self.max_chans_edit = QtWidgets.QLineEdit(str(self.params.get('max_chans', DEFAULT_MAX_CHANNELS)))
         param_layout.addRow("Max Channels:", self.max_chans_edit)
         
-        self.max_span_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_SPAN / 1e6)) # Default in MHz
+        self.max_span_edit = QtWidgets.QLineEdit(str(self.params.get('max_span', DEFAULT_MAX_SPAN) / 1e6))
         param_layout.addRow("Max Span (MHz):", self.max_span_edit)
         
         self.clear_channels_cb = QtWidgets.QCheckBox("Clear all channels first")
-        self.clear_channels_cb.setChecked(True) # Default to clearing channels
+        self.clear_channels_cb.setChecked(self.params.get('clear_channels', True))
         param_layout.addRow("", self.clear_channels_cb)
         
         layout.addWidget(param_group)
@@ -151,7 +196,12 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         self.numpad_enter_shortcut.activated.connect(self.accept)
         
         self._update_dbm_from_normalized() # Initial update of dBm field based on default amplitude
-        self.setMinimumSize(500, 600) # Set a reasonable minimum size
+        self.setMinimumSize(500, 680)  # Taller minimum to accommodate the Measurement Name group
+        self.resize(500, 700)
+
+        # Place focus in the custom suffix field so the user is encouraged to type
+        # their annotation immediately without having to click past the base name.
+        self.custom_suffix_edit.setFocus()
         
     def _get_selected_modules(self) -> list[int]:
         """
@@ -248,10 +298,20 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         amps = params.get("amps") or ([params["amp"]] if "amp" in params else None)
         if amps:
             try:
-                amp_text = ", ".join(f"{float(amp):g}" for amp in amps)
+                float_amps = [float(a) for a in amps]
             except (TypeError, ValueError):
-                amp_text = ", ".join(str(amp) for amp in amps)
-            self.amp_edit.setText(amp_text)
+                float_amps = None
+            if float_amps:
+                if len(float_amps) == 1:
+                    # Single amplitude — use single mode
+                    self.single_amp_radio.setChecked(True)
+                    self.amp_edit.setText(f"{float_amps[0]:g}")
+                else:
+                    # Multiple amplitudes — switch to sweep mode with first/last/count
+                    self.sweep_amp_radio.setChecked(True)
+                    self.start_amp_edit.setText(f"{float_amps[0]:g}")
+                    self.stop_amp_edit.setText(f"{float_amps[-1]:g}")
+                    self.num_steps_edit.setText(str(len(float_amps)))
     
         def set_if_present(key, widget, formatter):
             if key in params and params[key] is not None:
@@ -272,14 +332,13 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             self.clear_channels_cb.setChecked(bool(params["clear_channels"]))
     
         self._update_dac_scale_info()
-        self._update_dbm_from_normalized()
 
 
     @QtCore.pyqtSlot()
     def _on_file_dialog_closed(self):
         """Handle the event when the file dialog is closed without selection."""
         pass
-        
+
     def get_parameters(self) -> dict | None:
         """
         Retrieves and validates the network analysis parameters from the UI fields.
@@ -290,7 +349,10 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         """
         try:
             if self.load_data_available:
-                return self._load_data
+                # Inject the user-specified name even for loaded data
+                result = dict(self._load_data)
+                result['measurement_name'] = self._get_measurement_name()
+                return result
             else:
                 module_text = self.module_entry.text().strip()
                 selected_module_param = None # Parameter for 'module' key
@@ -298,17 +360,16 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
                     parsed_modules = self._get_selected_modules()
                     if parsed_modules:
                         selected_module_param = parsed_modules
-                
-                amp_text = self.amp_edit.text().strip()
-                # Use parsed amplitude values, or default if input is empty
-                amps_list = self._parse_amplitude_values(amp_text) or [DEFAULT_AMPLITUDE]
-                
+
+                # Build amplitude list from the selected mode (single or sweep)
+                amps_list = self._get_amplitude_list()
+                if amps_list is None:
+                    return None  # validation error already shown by _get_amplitude_list
+
                 # Construct parameters dictionary
-                # Using eval for frequency and span allows expressions, but ensure inputs are numbers.
-                # Consider replacing eval with direct float conversion if expressions aren't strictly needed.
                 params_dict = {
                     'amps': amps_list,
-                    'module': selected_module_param, # Can be None (interpreted as all by backend) or list of modules
+                    'module': selected_module_param,
                     'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
                     'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
                     'cable_length': float(self.cable_length_edit.text()),
@@ -316,15 +377,37 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
                     'nsamps': int(self.samples_edit.text()),
                     'max_chans': int(self.max_chans_edit.text()),
                     'max_span': float(eval(self.max_span_edit.text())) * 1e6, # Convert MHz to Hz
-                    'clear_channels': self.clear_channels_cb.isChecked()
+                    'clear_channels': self.clear_channels_cb.isChecked(),
+                    # Persist amplitude mode metadata for next session
+                    'amplitude_mode': 'sweep' if self.sweep_amp_radio.isChecked() else 'single',
+                    # Capture the user-specified measurement name (not persisted as a default)
+                    'measurement_name': self._get_measurement_name(),
+                    # Store the raw suffix separately so the re-run dialog can restore it
+                    'measurement_custom_suffix': self.custom_suffix_edit.text().strip(),
                 }
+
+                if self.sweep_amp_radio.isChecked():
+                    try:
+                        params_dict['amp_sweep_start'] = float(eval(self.start_amp_edit.text()))
+                        params_dict['amp_sweep_stop'] = float(eval(self.stop_amp_edit.text()))
+                        params_dict['amp_sweep_steps'] = int(self.num_steps_edit.text())
+                    except Exception:
+                        pass  # non-critical — amps_list already built
+
                 # Basic validation for frequency range
                 if params_dict['fmin'] >= params_dict['fmax']:
                     QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
                     return None
+
+                # Save these parameters as defaults for future sessions
+                try:
+                    settings.set_network_analysis_defaults(params_dict)
+                except Exception as save_err:
+                    print(f"Warning: Could not save network analysis defaults: {save_err}")
+
                 return params_dict
         except Exception as e:
-            traceback.print_exc() # Log the full traceback for debugging
+            traceback.print_exc()
             QtWidgets.QMessageBox.critical(self, "Error Parsing Parameters", f"Invalid parameter input: {str(e)}")
             return None
 
@@ -382,6 +465,42 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
     def _setup_ui(self):
         """Sets up the user interface elements for the dialog."""
         layout = QtWidgets.QVBoxLayout(self)
+
+        # ── Measurement Name ──────────────────────────────────────────────────
+        name_group = QtWidgets.QGroupBox("Measurement Name")
+        name_form = QtWidgets.QFormLayout(name_group)
+
+        # Fresh timestamp base name, just like the first-run dialog
+        default_base = datetime.datetime.now().strftime("netanal_%H%M%S")
+        self.base_name_edit = QtWidgets.QLineEdit(default_base)
+        self.base_name_edit.setToolTip(
+            "Base filename — pre-filled with a timestamp.\n"
+            "You may edit it freely.  The .pkl extension is added automatically."
+        )
+        name_form.addRow("Base name:", self.base_name_edit)
+
+        # Pre-populate the suffix with the custom annotation from the previous run
+        # (stored separately so the timestamp prefix is never included).
+        self.custom_suffix_edit = QtWidgets.QLineEdit(self.params.get('measurement_custom_suffix', ''))
+        self.custom_suffix_edit.setPlaceholderText("e.g., cold_dark")
+        self.custom_suffix_edit.setToolTip(
+            "Optional suffix appended after the base name with an underscore separator.\n"
+            "Leave blank to use the base name only."
+        )
+        name_form.addRow("Custom suffix:", self.custom_suffix_edit)
+
+        # Live preview label
+        self._name_preview_label = QtWidgets.QLabel()
+        self._name_preview_label.setStyleSheet("font-style: italic; color: #555;")
+        name_form.addRow("→  filename:", self._name_preview_label)
+
+        # Connect both fields to update the preview
+        self.base_name_edit.textChanged.connect(self._update_name_preview)
+        self.custom_suffix_edit.textChanged.connect(self._update_name_preview)
+        self._update_name_preview()  # populate on open
+
+        layout.addWidget(name_group)
+
         form = QtWidgets.QFormLayout()
         
         # Populate fields with existing parameters or defaults
@@ -428,7 +547,11 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
         # or if _fetch_dac_scales is not called (e.g., no CRS object).
         self._update_dac_scale_info() # Call this first to set up dac_scale_info label correctly
         self._update_dbm_from_normalized() 
-        self.setMinimumSize(500, 600)
+        self.setMinimumSize(500, 680)
+
+        # Place focus in the custom suffix field so the user can annotate the
+        # re-run immediately without having to click past the base name.
+        self.custom_suffix_edit.setFocus()
 
     def _get_selected_modules(self) -> list[int]:
         """
@@ -455,22 +578,37 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
             Shows an error message on invalid input.
         """
         try:
-            amp_text = self.amp_edit.text().strip()
-            amps_list = self._parse_amplitude_values(amp_text) or [self.params.get('amp', DEFAULT_AMPLITUDE)]
-            
+            # Build amplitude list from the selected mode (single or sweep)
+            amps_list = self._get_amplitude_list()
+            if amps_list is None:
+                return None  # validation error already shown by _get_amplitude_list
+
             # Start with a copy of existing params and update with UI values
-            params_dict = self.params.copy() 
+            params_dict = self.params.copy()
             params_dict.update({
                 'amps': amps_list,
-                'amp': amps_list[0] if amps_list else DEFAULT_AMPLITUDE, # Update single 'amp' for compatibility
+                'amp': amps_list[0] if amps_list else DEFAULT_AMPLITUDE,  # compat key
                 'fmin': float(eval(self.fmin_edit.text())) * 1e6,
                 'fmax': float(eval(self.fmax_edit.text())) * 1e6,
                 'npoints': int(self.points_edit.text()),
                 'nsamps': int(self.samples_edit.text()),
                 'max_chans': int(self.max_chans_edit.text()),
                 'max_span': float(eval(self.max_span_edit.text())) * 1e6,
-                'clear_channels': self.clear_channels_cb.isChecked()
+                'clear_channels': self.clear_channels_cb.isChecked(),
+                'amplitude_mode': 'sweep' if self.sweep_amp_radio.isChecked() else 'single',
+                'measurement_name': self._get_measurement_name(),
+                # Store the raw suffix separately so the next re-run dialog can restore it
+                'measurement_custom_suffix': self.custom_suffix_edit.text().strip(),
             })
+
+            if self.sweep_amp_radio.isChecked():
+                try:
+                    params_dict['amp_sweep_start'] = float(eval(self.start_amp_edit.text()))
+                    params_dict['amp_sweep_stop'] = float(eval(self.stop_amp_edit.text()))
+                    params_dict['amp_sweep_steps'] = int(self.num_steps_edit.text())
+                except Exception:
+                    pass
+
             # Basic validation for frequency range
             if params_dict['fmin'] >= params_dict['fmax']:
                 QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
@@ -478,3 +616,4 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
             return params_dict
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error Parsing Parameters", f"Invalid parameter input: {str(e)}")
+            return None

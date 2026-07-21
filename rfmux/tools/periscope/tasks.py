@@ -240,8 +240,8 @@ class CRSInitializeSignals(QObject):
 
 class NetworkAnalysisSignals(QObject):
     progress = pyqtSignal(int, float)
-    data_update = pyqtSignal(int, np.ndarray, np.ndarray, np.ndarray)
-    data_update_with_amp = pyqtSignal(int, np.ndarray, np.ndarray, np.ndarray, float)
+    data_update = pyqtSignal(int, np.ndarray, np.ndarray)          # (module, freqs, iq_counts)
+    data_update_with_amp = pyqtSignal(int, np.ndarray, np.ndarray, float)  # (module, freqs, iq_counts, amplitude)
     completed = pyqtSignal(int); error = pyqtSignal(str)
 
 class DACScaleFetcher(QtCore.QThread):
@@ -330,10 +330,8 @@ class NetworkAnalysisTask(QtCore.QThread):
                 
                 # Process results if available and task wasn't interrupted
                 if not self.isInterruptionRequested() and result:
-                    fs_sorted, iq_sorted = result['frequencies'], result['iq_complex']
-                    phase_sorted, amp_sorted = result['phase_degrees'], np.abs(iq_sorted)
-                    self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
-                    self.signals.data_update_with_amp.emit(self.module, fs_sorted, amp_sorted, phase_sorted, self.amplitude)
+                    fs_sorted, iq_sorted = result['frequencies'], result['iq_counts']
+                    self.signals.data_update_with_amp.emit(self.module, fs_sorted, iq_sorted, self.amplitude)
                     self.signals.completed.emit(self.module)
             
         except asyncio.CancelledError:
@@ -341,7 +339,7 @@ class NetworkAnalysisTask(QtCore.QThread):
             if loop.is_running():
                 loop.run_until_complete(self._cleanup_channels())
         except KeyError as ke:
-            err_msg = f"KeyError accessing results for module {self.module}: {ke}. Expected 'frequencies', 'iq_complex', 'phase_degrees'."
+            err_msg = f"KeyError accessing results for module {self.module}: {ke}. Expected 'frequencies', 'iq_counts', 'phase_degrees'."
             print(f"ERROR: {err_msg}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             self.signals.error.emit(err_msg)
@@ -359,15 +357,14 @@ class NetworkAnalysisTask(QtCore.QThread):
         return lambda module_idx, prog: self.signals.progress.emit(module_idx, prog) if self._running else None # Renamed module, progress
         
     def _create_data_callback(self):
-        def data_cb(module_idx, freqs_raw, amps_raw, phases_raw): # Renamed module
+        def data_cb(module_idx, freqs_raw, iq_raw):
             if self._running:
                 sort_idx = np.argsort(freqs_raw)
-                freqs, amps, phases = freqs_raw[sort_idx], amps_raw[sort_idx], phases_raw[sort_idx]
+                freqs, iq = freqs_raw[sort_idx], iq_raw[sort_idx]
                 current_time = time.time()
                 if current_time - self._last_update_time >= self._update_interval:
-                    self._last_update_time = current_time                    
-                self.signals.data_update.emit(module_idx, freqs, amps, phases)
-                self.signals.data_update_with_amp.emit(module_idx, freqs, amps, phases, self.amplitude)
+                    self._last_update_time = current_time
+                self.signals.data_update_with_amp.emit(module_idx, freqs, iq, self.amplitude)
         return data_cb
     
     def _extract_parameters(self):
@@ -458,13 +455,13 @@ class SetCableLengthTask(QRunnable):
 
 class MultisweepSignals(QObject):
     progress = pyqtSignal(int, float)
-    # Updated data_update to include iteration and direction:
-    # 1. results_for_plotting: {output_cf: data_dict_val} - original structure from crs.multisweep
-    # 2. results_for_history: {conceptual_idx: output_cf_key} - for easy history update
-    data_update = pyqtSignal(int, int, float, str, dict, dict) # module, iteration, amplitude, direction, results_for_plotting, results_for_history
-    completed_iteration = pyqtSignal(int, int, float, str) # module, iteration, amplitude, direction
-    starting_iteration = pyqtSignal(int, int, float, str) # module, iteration, amplitude, direction
-    fitting_progress = pyqtSignal(int, str) # module, status_message
+    # data_update emits per-iteration sweep results plus the live res_info_dict:
+    # 1. multisweep_data_dict: {code: sweep_data_dict} - output of crs.multisweep
+    # 2. res_info_dict: {code: {bias_frequency, bias_amplitude, channel_number}} - resonator registry
+    data_update = pyqtSignal(int, int, float, str, dict, dict)  # module, iteration, amplitude, direction, multisweep_data_dict, res_info_dict
+    completed_iteration = pyqtSignal(int, int, float, str)  # module, iteration, amplitude, direction
+    starting_iteration = pyqtSignal(int, int, float, str)   # module, iteration, amplitude, direction
+    fitting_progress = pyqtSignal(int, str)                  # module, status_message
     all_completed = pyqtSignal()
     error = pyqtSignal(int, float, str)
 
@@ -485,7 +482,9 @@ class MultisweepTask(QtCore.QThread):
         self.params = params 
         self.signals = signals
         self.window = window 
-        self.baseline_resonance_frequencies = list(params.get('resonance_frequencies', []))
+        self.baseline_resonance_frequencies = list(
+            params.get('sweep_center_frequencies') or params.get('resonance_frequencies', [])
+        )
         self._running = True
         self.current_amplitude = -1
         self.current_iteration = -1
@@ -517,96 +516,114 @@ class MultisweepTask(QtCore.QThread):
             return
         
         try:
-            amplitudes = self.params.get('amps', [DEFAULT_AMPLITUDE])
+            amp_arrays = self.params.get('amp_arrays')
+            if amp_arrays is None:
+                self.signals.error.emit(module_idx, -1, "No amplitude arrays specified in parameters.")
+                return
+
             sweep_direction = self.params.get('sweep_direction', 'upward')
-            conceptual_frequencies_from_window = self.window.conceptual_section_frequencies
             iteration_index = 0
 
-            for amp_val in amplitudes:
+            # res_info_dict: provided by the panel on re-run, or None on the first run.
+            # After the first crs.multisweep call it is set and reused for all subsequent calls,
+            # ensuring the same resonator codes and channel numbers across every iteration.
+            res_info_dict = self.params.get('res_info_dict', None)
+
+            for amp_array in amp_arrays:
                 if self.isInterruptionRequested():
                     self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep canceled.")
                     return
-                
-                self.current_amplitude = amp_val
-                current_sweep_cfs_for_this_amp = []
-                # conceptual_idx_to_input_cf_map = {} # Not strictly needed if results are always index-keyed
 
-                if not conceptual_frequencies_from_window:
-                    self.signals.error.emit(module_idx, amp_val, "Conceptual frequencies not available from window.")
-                    return
+                self.current_amplitude = amp_array[0] if amp_array else DEFAULT_AMPLITUDE
+                directions_to_sweep = (
+                    ["upward", "downward"] if sweep_direction == "both" else [sweep_direction]
+                )
 
-                for idx, conceptual_cf in enumerate(conceptual_frequencies_from_window):
-                    remembered_cf = self.window._get_closest_remembered_cf(idx, amp_val)
-                    chosen_input_cf = remembered_cf if remembered_cf is not None else self.baseline_resonance_frequencies[idx]
-                    current_sweep_cfs_for_this_amp.append(chosen_input_cf)
-                    # conceptual_idx_to_input_cf_map[idx] = chosen_input_cf
-                
-                directions_to_sweep = ["upward","downward"] if sweep_direction == "both" else [sweep_direction]
-                
-                for direction_val in directions_to_sweep: # Renamed 'direction' to 'direction_val' to avoid conflict
+                for direction_val in directions_to_sweep:
                     self.current_iteration = iteration_index
                     self.current_direction = direction_val
-                    
-                    self.signals.starting_iteration.emit(module_idx, iteration_index, amp_val, direction_val)
-                    
-                    multisweep_params = {
-                        'center_frequencies': current_sweep_cfs_for_this_amp,
-                        'span_hz': self.params['span_hz'],
-                        'npoints_per_sweep': self.params['npoints_per_sweep'],
-                        'amp': amp_val,
-                        'nsamps': self.params.get('nsamps', 10),
-                        'module': module_idx,
-                        'progress_callback': self._progress_callback_wrapper,
-                        'bias_frequency_method': self.params.get('bias_frequency_method', 'max-diq'),
-                        'rotate_saved_data': self.params.get('rotate_saved_data', False),
-                        'sweep_direction': direction_val
-                    }
-                    
-                    raw_results_from_crs = loop.run_until_complete(self._process_multisweep(loop, multisweep_params))
-                    
-                    if self.isInterruptionRequested():
-                        self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution.")
-                        return
-                    
-                    # Process bifurcation detection first
-                    if raw_results_from_crs:
-                        for res_key, data_dict_val in raw_results_from_crs.items():
-                            if not isinstance(res_key, (int, np.integer)): continue
-                            iq_data = data_dict_val.get('iq_complex')
-                            if iq_data is not None:
-                                try:
-                                    data_dict_val['is_bifurcated'] = fitting_module_direct.identify_bifurcation(iq_data, threshold_factor=7)
-                                except Exception as e:
-                                    print(f"Warning: Bifurcation detection failed for index {res_key}: {e}", file=sys.stderr)
-                                    data_dict_val['is_bifurcated'] = False
-                            else:
-                                data_dict_val['is_bifurcated'] = False
-                    
-                    # Now apply fitting analysis using the (potentially) bifurcation-annotated data
-                    # Use async version with ThreadPoolExecutor for better responsiveness
-                    enhanced_results = loop.run_until_complete(
-                        self._process_fitting_async(raw_results_from_crs)
+
+                    self.signals.starting_iteration.emit(
+                        module_idx, iteration_index, self.current_amplitude, direction_val
                     )
-                    results_for_plotting = enhanced_results 
-                    
-                    results_for_history = {}
-                    if enhanced_results: 
-                        for res_idx, data_dict_val in enhanced_results.items():
-                            if isinstance(res_idx, (int, np.integer)):
-                                bias_freq = data_dict_val.get('bias_frequency', data_dict_val.get('original_center_frequency'))
-                                if bias_freq is not None:
-                                    # Convert 1-based detector index to 0-based conceptual index
-                                    conceptual_idx = res_idx - 1
-                                    results_for_history[conceptual_idx] = bias_freq
-                                else: print(f"Warning: No bias frequency found for index {res_idx}", file=sys.stderr)
-                            else: print(f"Warning (MultisweepTask): Non-integer key {res_idx} in results", file=sys.stderr)
-                    
-                    if results_for_plotting is not None:
-                        self.signals.data_update.emit(module_idx, iteration_index, amp_val, direction_val, results_for_plotting, results_for_history)
-                    
-                    self.signals.completed_iteration.emit(module_idx, iteration_index, amp_val, direction_val)
+
+                    # Build multisweep params.
+                    # Option B (res_info_dict): used once res_info_dict has been set.
+                    # Option A (explicit lists): used on the very first call.
+                    if res_info_dict is not None:
+                        multisweep_params = {
+                            'span_hz':            self.params['span_hz'],
+                            'npoints_per_sweep':  self.params['npoints_per_sweep'],
+                            'res_info_dict':      res_info_dict,
+                            'amp':                amp_array,
+                            'nsamps':             self.params.get('nsamps', 10),
+                            'sweep_direction':    direction_val,
+                            'module':             module_idx,
+                            'progress_callback':  self._progress_callback_wrapper,
+                        }
+                    else:
+                        multisweep_params = {
+                            'span_hz':             self.params['span_hz'],
+                            'npoints_per_sweep':   self.params['npoints_per_sweep'],
+                            'center_frequencies':  self.baseline_resonance_frequencies,
+                            'amp':                 amp_array,
+                            'nsamps':              self.params.get('nsamps', 10),
+                            'sweep_direction':     direction_val,
+                            'module':              module_idx,
+                            'progress_callback':   self._progress_callback_wrapper,
+                        }
+
+                    res_info_dict, raw_data = loop.run_until_complete(
+                        self._process_multisweep(loop, multisweep_params)
+                    )
+
+                    if self.isInterruptionRequested():
+                        self.signals.error.emit(
+                            module_idx, self.current_amplitude, "Multisweep canceled during execution."
+                        )
+                        return
+
+                    if raw_data is None:
+                        self.signals.error.emit(
+                            module_idx, self.current_amplitude, "Multisweep returned no data."
+                        )
+                        return
+
+                    # Bifurcation detection (operates on string-keyed data)
+                    for res_key, data_dict_val in raw_data.items():
+                        iq_data = data_dict_val.get('iq_counts')
+                        if iq_data is not None:
+                            try:
+                                data_dict_val['is_bifurcated'] = (
+                                    fitting_module_direct.identify_bifurcation(
+                                        iq_data, threshold_factor=7
+                                    )
+                                )
+                            except Exception as e:
+                                print(
+                                    f"Warning: Bifurcation detection failed for {res_key!r}: {e}",
+                                    file=sys.stderr
+                                )
+                                data_dict_val['is_bifurcated'] = False
+                        else:
+                            data_dict_val['is_bifurcated'] = False
+
+                    # Fitting analysis
+                    enhanced_results = loop.run_until_complete(
+                        self._process_fitting_async(raw_data)
+                    )
+
+                    if enhanced_results is not None:
+                        self.signals.data_update.emit(
+                            module_idx, iteration_index, self.current_amplitude, direction_val,
+                            enhanced_results, res_info_dict
+                        )
+
+                    self.signals.completed_iteration.emit(
+                        module_idx, iteration_index, self.current_amplitude, direction_val
+                    )
                     iteration_index += 1
-            
+
             self.signals.all_completed.emit()
         except asyncio.CancelledError:
             self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep task canceled by user.")
@@ -619,24 +636,31 @@ class MultisweepTask(QtCore.QThread):
             loop.close()
 
     async def _process_multisweep(self, loop, multisweep_params):
+        """Call crs.multisweep and return (res_info_dict, multisweep_data_dict)."""
         self._task_completed.clear()
         multisweep_coro = self.crs.multisweep(**multisweep_params)
         task = loop.create_task(multisweep_coro)
-        
+
         while not task.done():
             if self.isInterruptionRequested():
                 task.cancel()
-                await asyncio.sleep(0.01) 
-                return None
-            await asyncio.sleep(0.1) 
-        
+                await asyncio.sleep(0.01)
+                return None, None
+            await asyncio.sleep(0.1)
+
         if not task.cancelled():
             try:
-                return await task
+                result = await task
+                # multisweep now always returns (res_info_dict, multisweep_data_dict)
+                if isinstance(result, tuple) and len(result) == 2:
+                    return result  # (res_info_dict, data_dict)
+                else:
+                    # Unexpected format — graceful degradation
+                    return None, result
             except Exception as e:
                 print(f"Error in _process_multisweep: {e}", file=sys.stderr)
                 raise
-        return None
+        return None, None
     
     async def _process_fitting_async(self, raw_results):
         """Process fitting analysis asynchronously using ThreadPoolExecutor."""
@@ -720,10 +744,12 @@ class MultisweepTask(QtCore.QThread):
         if not apply_skewed and not apply_nonlinear:
             # If no fitting is requested, add flags indicating this
             for res_idx in enhanced_results:
-                enhanced_results[res_idx]['skewed_fit_applied'] = False
-                enhanced_results[res_idx]['skewed_fit_success'] = False
-                enhanced_results[res_idx]['nonlinear_fit_applied'] = False
-                enhanced_results[res_idx]['nonlinear_fit_success'] = False
+                enhanced_results[res_idx].setdefault('fits', {}).setdefault('skewed', {}).update(
+                    {'skewed_fit_applied': False, 'skewed_fit_success': False}
+                )
+                enhanced_results[res_idx]['fits'].setdefault('nonlinear', {}).update(
+                    {'nonlinear_fit_applied': False, 'nonlinear_fit_success': False}
+                )
             return enhanced_results
         
         try:
@@ -733,8 +759,8 @@ class MultisweepTask(QtCore.QThread):
                     self.signals.fitting_progress.emit(module_idx, 
                         "Fitting in progress: Applying skewed fits")
                 
-                # Perform skewed fitting
-                skewed_results = fitting_module_direct.fit_skewed_multisweep(
+                # Perform skewed fitting (mutates enhanced_results[*]['fits']['skewed'] in place)
+                fitting_module_direct.fit_skewed_multisweep(
                     enhanced_results,
                     approx_Q_for_fit=1e4,
                     fit_resonances=True,
@@ -742,38 +768,33 @@ class MultisweepTask(QtCore.QThread):
                     normalize_fit=True
                 )
                 
-                # Update results
+                # Set status flags and generate model curve inside fits.skewed
                 for res_idx in enhanced_results:
-                    if res_idx in skewed_results:
-                        enhanced_results[res_idx].update(skewed_results[res_idx])
-                        enhanced_results[res_idx]['skewed_fit_applied'] = True
-                        fit_p = enhanced_results[res_idx].get('fit_params', {})
-                        enhanced_results[res_idx]['skewed_fit_success'] = fit_p.get('fr') is not None and fit_p.get('fr') != 'nan'
-                        
-                        # Generate skewed model magnitude if fit was successful
-                        if enhanced_results[res_idx]['skewed_fit_success'] and fit_p:
-                            frequencies = enhanced_results[res_idx].get('frequencies')
-                            if frequencies is not None:
-                                try:
-                                    # Generate magnitude model using fitted parameters
-                                    skewed_model_mag = fitting_module_direct.s21_skewed(
-                                        frequencies, 
-                                        fit_p['fr'], 
-                                        fit_p['Qr'], 
-                                        fit_p['Qcre'], 
-                                        fit_p['Qcim'], 
-                                        fit_p['A']
-                                    )
-                                    enhanced_results[res_idx]['skewed_model_mag'] = skewed_model_mag
-                                except Exception as e:
-                                    print(f"Warning: Failed to generate skewed model for resonance {res_idx}: {e}", file=sys.stderr)
-                    else:
-                        enhanced_results[res_idx]['skewed_fit_applied'] = True
-                        enhanced_results[res_idx]['skewed_fit_success'] = False
+                    skewed_sub = enhanced_results[res_idx].setdefault('fits', {}).setdefault('skewed', {})
+                    skewed_sub['skewed_fit_applied'] = True
+                    fit_p = skewed_sub.get('fit_params') or {}
+                    skewed_sub['skewed_fit_success'] = (
+                        fit_p.get('fr') is not None and fit_p.get('fr') != 'nan'
+                    )
+                    
+                    # Generate skewed model magnitude if fit was successful
+                    if skewed_sub['skewed_fit_success'] and fit_p:
+                        frequencies = enhanced_results[res_idx].get('frequencies')
+                        if frequencies is not None:
+                            try:
+                                skewed_sub['skewed_model_mag'] = fitting_module_direct.s21_skewed(
+                                    frequencies,
+                                    fit_p['fr'], fit_p['Qr'],
+                                    fit_p['Qcre'], fit_p['Qcim'],
+                                    fit_p['A']
+                                )
+                            except Exception as e:
+                                print(f"Warning: Failed to generate skewed model for resonance {res_idx}: {e}", file=sys.stderr)
             else:
                 for res_idx in enhanced_results:
-                    enhanced_results[res_idx]['skewed_fit_applied'] = False
-                    enhanced_results[res_idx]['skewed_fit_success'] = False
+                    enhanced_results[res_idx].setdefault('fits', {}).setdefault('skewed', {}).update(
+                        {'skewed_fit_applied': False, 'skewed_fit_success': False}
+                    )
             
             if apply_nonlinear:
                 # Emit progress signal
@@ -781,8 +802,7 @@ class MultisweepTask(QtCore.QThread):
                     self.signals.fitting_progress.emit(module_idx, 
                         "Fitting in progress: Applying non-linear fits")
                 
-                # Perform nonlinear fitting
-                # Disable parallel processing since we're already in a thread
+                # Perform nonlinear fitting on a copy (returns copy with fits.nonlinear populated)
                 nonlinear_results = fitting_nonlinear.fit_nonlinear_iq_multisweep(
                     enhanced_results.copy(),
                     fit_nonlinearity=True,
@@ -791,41 +811,39 @@ class MultisweepTask(QtCore.QThread):
                     parallel=False  # Avoid nested thread pools
                 )
                 
-                # Update results
+                # Deep-merge fits.nonlinear back and set status flags
                 for res_idx in enhanced_results:
                     if res_idx in nonlinear_results:
-                        enhanced_results[res_idx].update(nonlinear_results[res_idx])
-                        enhanced_results[res_idx]['nonlinear_fit_applied'] = True
-                        if 'nonlinear_fit_success' not in enhanced_results[res_idx]:
-                            enhanced_results[res_idx]['nonlinear_fit_success'] = False
+                        nl_sub_src = nonlinear_results[res_idx].get('fits', {}).get('nonlinear', {})
+                        nl_sub = enhanced_results[res_idx].setdefault('fits', {}).setdefault('nonlinear', {})
+                        nl_sub.update(nl_sub_src)
+                        nl_sub['nonlinear_fit_applied'] = True
+                        nl_sub.setdefault('nonlinear_fit_success', False)
                         
                         # Generate nonlinear model IQ if fit was successful
-                        if enhanced_results[res_idx].get('nonlinear_fit_success', False):
-                            nl_params = enhanced_results[res_idx].get('nonlinear_fit_params', {})
+                        if nl_sub.get('nonlinear_fit_success', False):
+                            nl_params = nl_sub.get('nonlinear_fit_params') or {}
                             frequencies = enhanced_results[res_idx].get('frequencies')
                             if nl_params and frequencies is not None:
                                 try:
-                                    # Generate complex IQ model using fitted parameters
-                                    nonlinear_model_iq = fitting_nonlinear.nonlinear_iq(
+                                    nl_sub['nonlinear_model_iq'] = fitting_nonlinear.nonlinear_iq(
                                         frequencies,
-                                        nl_params['fr'],
-                                        nl_params['Qr'],
-                                        nl_params['amp'],
-                                        nl_params['phi'],
+                                        nl_params['fr'], nl_params['Qr'],
+                                        nl_params['amp'], nl_params['phi'],
                                         nl_params['a'],
-                                        nl_params['i0'],
-                                        nl_params['q0']
+                                        nl_params['i0'], nl_params['q0']
                                     )
-                                    enhanced_results[res_idx]['nonlinear_model_iq'] = nonlinear_model_iq
                                 except Exception as e:
                                     print(f"Warning: Failed to generate nonlinear model for resonance {res_idx}: {e}", file=sys.stderr)
                     else:
-                        enhanced_results[res_idx]['nonlinear_fit_applied'] = True
-                        enhanced_results[res_idx]['nonlinear_fit_success'] = False
+                        enhanced_results[res_idx].setdefault('fits', {}).setdefault('nonlinear', {}).update(
+                            {'nonlinear_fit_applied': True, 'nonlinear_fit_success': False}
+                        )
             else:
                 for res_idx in enhanced_results:
-                    enhanced_results[res_idx]['nonlinear_fit_applied'] = False
-                    enhanced_results[res_idx]['nonlinear_fit_success'] = False
+                    enhanced_results[res_idx].setdefault('fits', {}).setdefault('nonlinear', {}).update(
+                        {'nonlinear_fit_applied': False, 'nonlinear_fit_success': False}
+                    )
             
             # Emit completion
             if module_idx is not None and self._running:
@@ -842,122 +860,611 @@ class MultisweepTask(QtCore.QThread):
             return enhanced_results
 
 
-class BiasKidsSignals(QObject):
-    """Signals for BiasKidsTask."""
-    progress = pyqtSignal(int, float)  # module, progress_percentage
-    completed = pyqtSignal(int, dict, dict, float)  # module, biased_results, df_calibrations, nco_frequency_hz
-    error = pyqtSignal(str)  # error_message
+class FindBiasSignals(QObject):
+    """Signals for FindBiasTask."""
+    progress = pyqtSignal(int, float)   # module, progress_percentage (reserved for future use)
+    completed = pyqtSignal(int, dict)   # module, updated_res_info_dict
+    error = pyqtSignal(str)             # error_message
 
 
-class BiasKidsTask(QtCore.QThread):
-    """QThread subclass for running the bias_kids algorithm without blocking the GUI."""
-    
-    def __init__(self, crs: "CRS", module: int, multisweep_results: dict, signals: BiasKidsSignals, bias_params: Optional[Dict[str, Any]] = None):
+class FindBiasTask(QtCore.QThread):
+    """QThread subclass for running find_bias_points without blocking the GUI.
+
+    ``find_bias_points`` is CPU-bound (spline fitting + optional nonlinear fit)
+    so it is run in a worker thread.  No hardware I/O is performed here.
+    """
+
+    def __init__(
+        self,
+        module: int,
+        results_by_detector: dict,
+        res_info_dict: dict,
+        signals: "FindBiasSignals",
+        bias_settings: Optional[Dict[str, Any]] = None,
+    ):
         """
-        Initialize the BiasKidsTask.
-        
-        Args:
-            crs: Control and Readout System object
-            module: Module number to bias
-            multisweep_results: Multisweep results in GUI format
-            signals: Signal object for communication with GUI
-            bias_params: Optional dictionary of bias parameters from dialog
+        Parameters
+        ----------
+        module :
+            Module number (used only for progress/completed signal payloads).
+        results_by_detector :
+            ``MultisweepPanel.results_by_detector`` dict.
+        res_info_dict :
+            Resonator registry to be updated in-place by ``find_bias_points``.
+            A deep copy is taken so the panel's dict is not mutated until
+            ``completed`` is emitted.
+        signals :
+            ``FindBiasSignals`` instance.
+        bias_settings :
+            Dict of settings from ``BiasSettingsPanel.get_settings()``.
+        """
+        super().__init__()
+        self.module = module
+        self.results_by_detector = results_by_detector
+        # Work on a deep copy so the panel's dict is only updated on success
+        import copy
+        self.res_info_dict = copy.deepcopy(res_info_dict)
+        self.signals = signals
+        self.bias_settings = bias_settings or {}
+        self._running = True
+
+    def stop(self):
+        """Request interruption (respected between per-resonator steps)."""
+        self._running = False
+        self.requestInterruption()
+
+    def run(self):
+        """QThread entry point."""
+        try:
+            from rfmux.algorithms.measurement.bias_kids import find_bias_points
+
+            kwargs = {
+                'results_by_detector': self.results_by_detector,
+                'res_info_dict':       self.res_info_dict,
+            }
+            # Forward settings from the settings panel
+            for key in (
+                'spike_prominence_factor',
+                'spike_height_factor',
+                'max_deriv_distance_hz',
+                'reference_freq_source',
+                'fit_selected_amplitude',
+                'bias_freq_method',
+            ):
+                if key in self.bias_settings:
+                    kwargs[key] = self.bias_settings[key]
+
+            updated = find_bias_points(**kwargs)
+
+            if self.isInterruptionRequested():
+                self.signals.error.emit("Find Bias was cancelled.")
+                return
+
+            self.signals.completed.emit(self.module, updated)
+
+        except Exception as exc:
+            error_msg = (
+                f"Error in FindBiasTask: {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
+            print(error_msg, file=sys.stderr)
+            self.signals.error.emit(str(exc))
+
+
+class ApplyBiasSignals(QObject):
+    """Signals for ApplyBiasTask."""
+    progress = pyqtSignal(int, float)   # module, progress_percentage
+    completed = pyqtSignal(int, dict)   # module, apply_report dict
+    error = pyqtSignal(str)             # error_message
+
+
+class ApplyBiasTask(QtCore.QThread):
+    """QThread subclass for running apply_bias (async hardware I/O) without blocking the GUI."""
+
+    def __init__(
+        self,
+        crs: "CRS",
+        module: int,
+        res_info_dict: dict,
+        signals: "ApplyBiasSignals",
+    ):
+        """
+        Parameters
+        ----------
+        crs :
+            CRS hardware object.
+        module :
+            Target module number.
+        res_info_dict :
+            Resonator registry updated by ``find_bias_points``.
+        signals :
+            ``ApplyBiasSignals`` instance.
         """
         super().__init__()
         self.crs = crs
         self.module = module
-        self.multisweep_results = multisweep_results
+        self.res_info_dict = res_info_dict
         self.signals = signals
-        self.bias_params = bias_params or {}
         self._running = True
-        
+
     def stop(self):
-        """Stop the task."""
+        """Request interruption."""
         self._running = False
         self.requestInterruption()
-        
+
     def run(self):
-        """QThread entry point - runs in a separate thread."""
+        """QThread entry point — creates an asyncio event loop and runs apply_bias."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+
         try:
-            # Progress callback
-            def progress_cb(module, progress):
+            from rfmux.algorithms.measurement.bias_kids import apply_bias
+
+            def progress_cb(module, pct):
                 if self._running:
-                    self.signals.progress.emit(module, progress)
-            
-            # Run the bias_kids algorithm
-            result = loop.run_until_complete(self._run_bias_kids(progress_cb))
-            
+                    self.signals.progress.emit(module, pct)
+
+            apply_report = loop.run_until_complete(
+                apply_bias(
+                    crs=self.crs,
+                    module=self.module,
+                    res_info_dict=self.res_info_dict,
+                    progress_callback=progress_cb,
+                )
+            )
+
             if self.isInterruptionRequested():
-                self.signals.error.emit("Bias KIDs operation was cancelled.")
+                self.signals.error.emit("Apply Bias was cancelled.")
                 return
-                
-            if result:
-                # Handle both dict and list return types from bias_kids
-                if isinstance(result, list):
-                    # For list results (multiple modules), we're only processing one module here
-                    # so this shouldn't happen, but handle it gracefully
-                    if len(result) > 0:
-                        result = result[0]  # Take the first module's results
-                    else:
-                        self.signals.error.emit("Bias KIDs operation returned empty list.")
-                        return
-                
-                # Extract df_calibration values (result is now guaranteed to be a dict)
-                df_calibrations = {}
-                for det_idx, det_data in result.items():
-                    if 'df_calibration' in det_data:
-                        df_calibrations[det_idx] = det_data['df_calibration']
-                
-                # Read the NCO frequency that was used during biasing
-                nco_frequency_hz = loop.run_until_complete(self.crs.get_nco_frequency(module=self.module))
-                
-                # Emit completion with results and NCO frequency
-                self.signals.completed.emit(self.module, result, df_calibrations, float(nco_frequency_hz))
-            else:
-                self.signals.error.emit("Bias KIDs operation returned no results.")
-                
+
+            self.signals.completed.emit(self.module, apply_report)
+
         except asyncio.CancelledError:
-            self.signals.error.emit("Bias KIDs operation was cancelled.")
-        except Exception as e:
-            import traceback
-            error_msg = f"Error in BiasKidsTask: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-            print(error_msg)  # Print detailed message to Console
-            self.signals.error.emit(str(e))
+            self.signals.error.emit("Apply Bias was cancelled.")
+        except Exception as exc:
+            error_msg = (
+                f"Error in ApplyBiasTask: {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
+            print(error_msg, file=sys.stderr)
+            self.signals.error.emit(str(exc))
         finally:
             if loop.is_running():
                 loop.stop()
             loop.close()
-            
-    async def _run_bias_kids(self, progress_callback):
-        """Run the bias_kids algorithm asynchronously."""
-        # Import bias_kids as a regular function
-        from rfmux.algorithms.measurement.bias_kids import bias_kids
-        
-        # Extract parameters from bias_params
-        kwargs = {
-            'crs': self.crs,
-            'multisweep_results': self.multisweep_results,
-            'module': self.module,
-            'progress_callback': progress_callback
-        }
-        
-        # Add optional parameters from dialog
-        if 'nonlinear_threshold' in self.bias_params:
-            kwargs['nonlinear_threshold'] = self.bias_params['nonlinear_threshold']
-        if 'fallback_to_lowest' in self.bias_params:
-            kwargs['fallback_to_lowest'] = self.bias_params['fallback_to_lowest']
-        if 'optimize_phase' in self.bias_params:
-            kwargs['optimize_phase'] = self.bias_params['optimize_phase']
-        if 'bandpass_params' in self.bias_params:
-            kwargs['bandpass_params'] = self.bias_params['bandpass_params']
-        if 'num_phase_samples' in self.bias_params:
-            kwargs['num_phase_samples'] = self.bias_params['num_phase_samples']
-        if 'phase_step' in self.bias_params:
-            kwargs['phase_step'] = self.bias_params['phase_step']
-        
-        # Call bias_kids with all parameters
-        result = await bias_kids(**kwargs)
-        return result
+
+
+class RunFitsSignals(QObject):
+    """Signals for RunFitsTask."""
+    progress  = pyqtSignal(int, float)   # module, progress_percentage (reserved)
+    completed = pyqtSignal(int, dict)    # module, updated_results_by_detector
+    error     = pyqtSignal(str)          # error_message
+
+
+class RunFitsTask(QtCore.QThread):
+    """QThread subclass for running resonator fits on existing multisweep data.
+
+    Mirrors the ``FindBiasTask`` pattern: operates on a deep copy of
+    ``MultisweepPanel.results_by_detector``, applies the requested fitting
+    algorithms in a background thread, and emits the updated dict on success
+    so the panel can merge the results back without mutating its own state
+    on failure.
+
+    No hardware I/O is performed; this is purely CPU-bound computation.
+    """
+
+    # Key that carries all fit results; nested under 'fits' → {'skewed': …, 'nonlinear': …}.
+    _FIT_KEYS = frozenset({'fits'})
+
+    def __init__(
+        self,
+        module: int,
+        results_by_detector: dict,
+        fit_settings: Optional[Dict[str, Any]],
+        signals: "RunFitsSignals",
+        res_info_dict: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        Parameters
+        ----------
+        module :
+            Module number (used only for signal payloads).
+        results_by_detector :
+            ``MultisweepPanel.results_by_detector`` — a deep copy is taken
+            so the panel's dict is only updated on success.
+        fit_settings :
+            Dict from ``FitSettingsPanel.get_settings()``:
+            ``{'apply_skewed_fit': bool, 'apply_nonlinear_fit': bool,
+               'fit_run_amplitude_mode': str, 'fit_run_amplitude_index': int}``.
+        signals :
+            ``RunFitsSignals`` instance.
+        res_info_dict :
+            Optional resonator registry ``{code: {bias_amplitude, ...}}``.
+            Required when ``fit_run_amplitude_mode == 'bias'`` so the task
+            can look up each resonator's chosen bias amplitude.
+        """
+        super().__init__()
+        self.module = module
+        import copy
+        self.results_by_detector = copy.deepcopy(results_by_detector)
+        self.fit_settings = fit_settings or {}
+        self.res_info_dict = res_info_dict  # may be None
+        self.signals = signals
+        self._running = True
+        self._max_workers = max(1, min(4, (os.cpu_count() or 1) - 1))
+
+    def stop(self):
+        """Request interruption."""
+        self._running = False
+        self.requestInterruption()
+
+    # ── QThread entry point ───────────────────────────────────────────────────
+
+    def run(self):
+        """Rebuild per-iteration dicts, apply fitting, emit completed dict."""
+        apply_skewed    = bool(self.fit_settings.get('apply_skewed_fit',    True))
+        apply_nonlinear = bool(self.fit_settings.get('apply_nonlinear_fit', True))
+
+        if not apply_skewed and not apply_nonlinear:
+            self.signals.error.emit(
+                "No fits selected.  Enable at least one fit type in Fit Settings."
+            )
+            return
+
+        try:
+            # ── Step 1: determine which (code, iter_idx) pairs to fit ─────────
+            #
+            # mode = 'all'   → fit every iteration for every resonator
+            # mode = 'index' → for each resonator, fit only the iteration whose
+            #                   sweep_amplitude is at sorted position N
+            # mode = 'bias'  → for each resonator, fit only the iteration whose
+            #                   sweep_amplitude matches res_info_dict[code]['bias_amplitude']
+            #
+            # The deep copy taken in __init__ already carries existing fit data for
+            # ALL iterations, so non-fitted iterations keep whatever fit results
+            # they had before — no data is lost.
+
+            mode = self.fit_settings.get('fit_run_amplitude_mode', 'all')
+            amp_idx = int(self.fit_settings.get('fit_run_amplitude_index', 0))
+
+            # per_iteration: {iter_idx: {code: data_dict}} — only filtered pairs
+            per_iteration: dict = {}
+
+            if mode == 'index':
+                for code, iter_dict in self.results_by_detector.items():
+                    if not iter_dict:
+                        continue
+                    # Sort iter_dict items by sweep_amplitude_normalized (ascending)
+                    sorted_items = sorted(
+                        iter_dict.items(),
+                        key=lambda kv: kv[1].get('sweep_amplitude_normalized', 0.0),
+                    )
+                    # Clamp requested index to the available range
+                    target_pos = min(amp_idx, len(sorted_items) - 1)
+                    target_iter_idx, target_entry = sorted_items[target_pos]
+                    per_iteration.setdefault(target_iter_idx, {})[code] = target_entry
+
+            elif mode == 'bias':
+                # Check up-front whether any code has a bias_amplitude at all.
+                # This gives a clear, actionable error when Find Bias has not been run
+                # (or the file was saved before Find Bias results were stored).
+                codes_with_bias = {
+                    code for code in self.results_by_detector
+                    if (self.res_info_dict or {}).get(code, {}).get('bias_amplitude') is not None
+                }
+                if not codes_with_bias:
+                    self.signals.error.emit(
+                        "Fit mode is 'Bias amplitude' but no bias_amplitude was found in "
+                        "res_info_dict.  Run Find Bias on this multisweep first, or change "
+                        "Fit Settings to 'All amplitudes'."
+                    )
+                    return
+
+                for code, iter_dict in self.results_by_detector.items():
+                    if not iter_dict:
+                        continue
+                    # Skip if res_info_dict is unavailable or missing bias_amplitude
+                    bias_amp = (self.res_info_dict or {}).get(code, {}).get('bias_amplitude')
+                    if bias_amp is None:
+                        continue
+                    # Find the iter_idx whose sweep_amplitude_normalized matches bias_amplitude
+                    for iter_idx, entry in iter_dict.items():
+                        if entry.get('sweep_amplitude_normalized') == bias_amp:
+                            per_iteration.setdefault(iter_idx, {})[code] = entry
+                            break
+
+            else:  # 'all' (default)
+                for code, iter_dict in self.results_by_detector.items():
+                    for iter_idx, entry in iter_dict.items():
+                        per_iteration.setdefault(iter_idx, {})[code] = entry
+
+            if not per_iteration:
+                if mode == 'bias':
+                    self.signals.error.emit(
+                        "Fit mode is 'Bias amplitude' but no sweep entries matched the stored "
+                        "bias_amplitude values.  Verify that Find Bias was run and the file was "
+                        "saved afterwards, then try again."
+                    )
+                else:
+                    self.signals.error.emit(
+                        "No sweep data found to fit.  The results_by_detector dict is empty or "
+                        "contains no matching entries for the selected fit mode."
+                    )
+                return
+
+            # ── Step 2: fit each iteration in parallel ────────────────────────
+            total = len(per_iteration)
+            done  = 0
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._max_workers
+            ) as executor:
+                future_to_iter = {
+                    executor.submit(
+                        self._fit_iteration,
+                        iter_idx,
+                        iter_data,
+                        apply_skewed,
+                        apply_nonlinear,
+                    ): iter_idx
+                    for iter_idx, iter_data in per_iteration.items()
+                }
+
+                for future in concurrent.futures.as_completed(future_to_iter):
+                    if self.isInterruptionRequested():
+                        self.signals.error.emit("Run Fit was cancelled.")
+                        return
+
+                    iter_idx = future_to_iter[future]
+                    try:
+                        fitted_iter_data = future.result()
+                    except Exception as exc:
+                        print(
+                            f"[RunFitsTask] Error fitting iteration {iter_idx}: {exc}",
+                            file=sys.stderr,
+                        )
+                        traceback.print_exc(file=sys.stderr)
+                        fitted_iter_data = per_iteration[iter_idx]  # keep original
+
+                    # ── Step 3: deep-merge the 'fits' subdict back ────────────
+                    for code, fitted_entry in fitted_iter_data.items():
+                        if code in self.results_by_detector:
+                            if iter_idx in self.results_by_detector[code]:
+                                target = self.results_by_detector[code][iter_idx]
+                                if 'fits' in fitted_entry:
+                                    # Merge fitter subdicts individually so running
+                                    # one fitter never clobbers the other's results.
+                                    target.setdefault('fits', {}).update(fitted_entry['fits'])
+
+                    done += 1
+                    pct = 100.0 * done / total
+                    self.signals.progress.emit(self.module, pct)
+
+            self.signals.completed.emit(self.module, self.results_by_detector)
+
+        except Exception as exc:
+            error_msg = (
+                f"Error in RunFitsTask: {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
+            print(error_msg, file=sys.stderr)
+            self.signals.error.emit(str(exc))
+
+    # ── Worker ────────────────────────────────────────────────────────────────
+
+    def _fit_iteration(
+        self,
+        iter_idx: int,
+        iter_data: dict,
+        apply_skewed: bool,
+        apply_nonlinear: bool,
+    ) -> dict:
+        """Fit one iteration's worth of data (all detectors at one amplitude/direction).
+
+        Runs in a worker thread.  Returns an updated copy of *iter_data*.
+        """
+        # Work on shallow copies of each entry so we don't mutate the deep-copied
+        # results_by_detector while other threads may be reading it.
+        working = {code: dict(entry) for code, entry in iter_data.items()}
+
+        if apply_skewed:
+            try:
+                # fit_skewed_multisweep mutates working[*]['fits']['skewed'] in place
+                fitting_module_direct.fit_skewed_multisweep(
+                    working,
+                    approx_Q_for_fit=1e4,
+                    fit_resonances=True,
+                    center_iq_circle=True,
+                    normalize_fit=True,
+                )
+                for code in working:
+                    skewed_sub = working[code].setdefault('fits', {}).setdefault('skewed', {})
+                    skewed_sub['skewed_fit_applied'] = True
+                    fit_p = skewed_sub.get('fit_params') or {}
+                    success = (
+                        isinstance(fit_p, dict)
+                        and fit_p.get('fr') is not None
+                        and fit_p.get('fr') != 'nan'
+                    )
+                    skewed_sub['skewed_fit_success'] = success
+
+                    if success:
+                        freqs = working[code].get('frequencies')
+                        if freqs is not None:
+                            try:
+                                skewed_sub['skewed_model_mag'] = (
+                                    fitting_module_direct.s21_skewed(
+                                        freqs,
+                                        fit_p['fr'], fit_p['Qr'],
+                                        fit_p['Qcre'], fit_p['Qcim'],
+                                        fit_p['A'],
+                                    )
+                                )
+                            except Exception as e:
+                                print(
+                                    f"[RunFitsTask] skewed model failed for {code!r}: {e}",
+                                    file=sys.stderr,
+                                )
+            except Exception as exc:
+                print(f"[RunFitsTask] skewed fit error iter {iter_idx}: {exc}", file=sys.stderr)
+                for code in working:
+                    working[code].setdefault('fits', {}).setdefault('skewed', {}).update(
+                        {'skewed_fit_applied': True, 'skewed_fit_success': False}
+                    )
+        else:
+            for code in working:
+                working[code].setdefault('fits', {}).setdefault('skewed', {}).update(
+                    {'skewed_fit_applied': False, 'skewed_fit_success': False}
+                )
+
+        if apply_nonlinear:
+            try:
+                nonlinear_results = fitting_nonlinear.fit_nonlinear_iq_multisweep(
+                    {k: dict(v) for k, v in working.items()},
+                    fit_nonlinearity=True,
+                    n_extrema_points=5,
+                    verbose=False,
+                    parallel=False,   # already inside a ThreadPoolExecutor
+                )
+                for code in working:
+                    if code in nonlinear_results:
+                        nl_sub_src = nonlinear_results[code].get('fits', {}).get('nonlinear', {})
+                        nl_sub = working[code].setdefault('fits', {}).setdefault('nonlinear', {})
+                        nl_sub.update(nl_sub_src)
+                        nl_sub['nonlinear_fit_applied'] = True
+                        nl_sub.setdefault('nonlinear_fit_success', False)
+
+                        if nl_sub.get('nonlinear_fit_success', False):
+                            nl_params = nl_sub.get('nonlinear_fit_params') or {}
+                            freqs = working[code].get('frequencies')
+                            if nl_params and freqs is not None:
+                                try:
+                                    nl_sub['nonlinear_model_iq'] = (
+                                        fitting_nonlinear.nonlinear_iq(
+                                            freqs,
+                                            nl_params['fr'], nl_params['Qr'],
+                                            nl_params['amp'], nl_params['phi'],
+                                            nl_params['a'],
+                                            nl_params['i0'], nl_params['q0'],
+                                        )
+                                    )
+                                except Exception as e:
+                                    print(
+                                        f"[RunFitsTask] nonlinear model failed for {code!r}: {e}",
+                                        file=sys.stderr,
+                                    )
+                    else:
+                        working[code].setdefault('fits', {}).setdefault('nonlinear', {}).update(
+                            {'nonlinear_fit_applied': True, 'nonlinear_fit_success': False}
+                        )
+            except Exception as exc:
+                print(f"[RunFitsTask] nonlinear fit error iter {iter_idx}: {exc}", file=sys.stderr)
+                for code in working:
+                    working[code].setdefault('fits', {}).setdefault('nonlinear', {}).update(
+                        {'nonlinear_fit_applied': True, 'nonlinear_fit_success': False}
+                    )
+        else:
+            for code in working:
+                working[code].setdefault('fits', {}).setdefault('nonlinear', {}).update(
+                    {'nonlinear_fit_applied': False, 'nonlinear_fit_success': False}
+                )
+
+        return working
+
+
+# ── IQ Plane Rotation ─────────────────────────────────────────────────────────
+
+class IQRotationSignals(QObject):
+    """Signals for ComputeIQRotationTask."""
+    completed = pyqtSignal(int, dict)   # module, {code: angle_radians}
+    error     = pyqtSignal(str)         # error_message
+
+
+class ComputeIQRotationTask(QtCore.QThread):
+    """Background task to capture an IQ timestream and compute optimal rotation angles.
+
+    After Apply Bias completes, this task:
+    1. Queries the current decimation stage to determine the sample rate.
+    2. Captures approximately 1 second of IQ data for all biased channels.
+    3. Calls ``mr_resonator.utils.rotate_iq_plane`` per channel to find the angle
+       that maximises variance in the Q direction.
+    4. Emits ``completed(module, {code: theta_radians})``.
+    """
+
+    def __init__(
+        self,
+        crs: "CRS",
+        module: int,
+        res_info_dict: dict,
+        signals: "IQRotationSignals",
+    ):
+        super().__init__()
+        self.crs = crs
+        self.module = module
+        self.res_info_dict = res_info_dict
+        self.signals = signals
+        self._running = True
+
+    def stop(self):
+        """Request interruption."""
+        self._running = False
+        self.requestInterruption()
+
+    def run(self):
+        """QThread entry point."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._run_async())
+        except Exception as exc:
+            err_msg = (
+                f"Error in ComputeIQRotationTask: {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
+            print(err_msg, file=sys.stderr)
+            self.signals.error.emit(str(exc))
+        finally:
+            if loop.is_running():
+                loop.stop()
+            loop.close()
+
+    async def _run_async(self):
+        from ...mr_resonator.utils import rotate_iq_plane
+
+        # Determine sample rate from current decimation stage
+        dec_stage = await self.crs.get_decimation()
+        fs = 625e6 / (256 * 64 * (2 ** dec_stage))
+        # Capture ~1 second; enforce a minimum of 256 samples
+        num_samples = max(int(fs), 256)
+
+        # Single call captures all channels simultaneously
+        samples = await self.crs.py_get_samples(num_samples, module=self.module)
+
+        if self.isInterruptionRequested():
+            self.signals.error.emit("IQ rotation computation was cancelled.")
+            return
+
+        # Compute rotation angle for each biased channel
+        angles: dict = {}
+        for code, info in self.res_info_dict.items():
+            if not info.get('bias_found', False):
+                continue
+            ch = info.get('channel_number')
+            if ch is None:
+                continue
+            try:
+                # samples.i / samples.q are indexed by 1-based channel number
+                i_data = np.asarray(samples.i[ch])
+                q_data = np.asarray(samples.q[ch])
+                iq = i_data + 1j * q_data
+                if len(iq) < 4:
+                    continue
+                _, theta = rotate_iq_plane(iq)
+                angles[code] = float(theta)
+            except Exception as exc:
+                print(
+                    f"[ComputeIQRotationTask] Could not compute angle for {code!r}: {exc}",
+                    file=sys.stderr,
+                )
+
+        self.signals.completed.emit(self.module, angles)

@@ -102,7 +102,7 @@ MULTISWEEP_DEFAULT_NPOINTS = 101  # Points per sweep
 MULTISWEEP_DEFAULT_NSAMPLES = DEFAULT_NSAMPLES  # Samples to average (10)
 
 # Find Resonances defaults
-DEFAULT_EXPECTED_RESONANCES = None  # Optional
+DEFAULT_EXPECTED_RESONANCES = 1024  # Default upper limit; lower to restrict results
 DEFAULT_MIN_DIP_DEPTH_DB = 2.0  # dB
 DEFAULT_MIN_Q = 1e4
 DEFAULT_MAX_Q = 1e7
@@ -324,6 +324,139 @@ def find_parent_with_attr(widget: QtWidgets.QWidget, attr_name: str) -> Optional
     return parent
 
 
+class SquareGridLayout(QtWidgets.QLayout):
+    """
+    A custom grid layout that maintains square aspect ratios for its items.
+    
+    This layout arranges widgets in a grid pattern where each cell is forced
+    to be square, ensuring that IQ circle plots maintain their circular shape.
+    """
+    
+    def __init__(self, parent=None, spacing=10):
+        super().__init__(parent)
+        self._items = []
+        self._spacing = spacing
+        self._ncols = 1
+        
+    def addItem(self, item):
+        """Add an item to the layout."""
+        self._items.append(item)
+        
+    def addWidget(self, widget, row, col):
+        """Add a widget at a specific grid position."""
+        # For simplicity, we'll just append items and calculate grid positions
+        # based on the order they were added
+        self.addItem(QtWidgets.QWidgetItem(widget))
+        
+    def count(self):
+        """Return the number of items in the layout."""
+        return len(self._items)
+    
+    def itemAt(self, index):
+        """Return the item at the given index."""
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+    
+    def takeAt(self, index):
+        """Remove and return the item at the given index."""
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+    
+    def setGeometry(self, rect):
+        """Set the geometry of the layout and arrange items."""
+        super().setGeometry(rect)
+        
+        if not self._items:
+            return
+        
+        # Calculate grid dimensions
+        num_items = len(self._items)
+        ncols = int(np.ceil(np.sqrt(num_items)))
+        nrows = int(np.ceil(num_items / ncols))
+        self._ncols = ncols
+        
+        # Calculate available space
+        available_width = rect.width() - (ncols + 1) * self._spacing
+        available_height = rect.height() - (nrows + 1) * self._spacing
+        
+        # Calculate cell size (make it square - use the smaller dimension)
+        cell_width = available_width / ncols
+        cell_height = available_height / nrows
+        cell_size = int(min(cell_width, cell_height))
+        
+        # Make sure we have a reasonable minimum size
+        cell_size = max(cell_size, 100)
+        
+        # Calculate starting positions to center the grid
+        total_grid_width = ncols * cell_size + (ncols - 1) * self._spacing
+        total_grid_height = nrows * cell_size + (nrows - 1) * self._spacing
+        start_x = rect.x() + (rect.width() - total_grid_width) // 2
+        start_y = rect.y() + (rect.height() - total_grid_height) // 2
+        
+        # Position each item
+        for idx, item in enumerate(self._items):
+            row = idx // ncols
+            col = idx % ncols
+            
+            x = start_x + col * (cell_size + self._spacing)
+            y = start_y + row * (cell_size + self._spacing)
+            
+            item.setGeometry(QtCore.QRect(x, y, cell_size, cell_size))
+    
+    def sizeHint(self):
+        """Return the preferred size of the layout."""
+        if not self._items:
+            return QtCore.QSize(100, 100)
+        
+        num_items = len(self._items)
+        ncols = int(np.ceil(np.sqrt(num_items)))
+        nrows = int(np.ceil(num_items / ncols))
+        
+        # Assume 300x300 per cell
+        cell_size = 300
+        width = ncols * cell_size + (ncols + 1) * self._spacing
+        height = nrows * cell_size + (nrows + 1) * self._spacing
+        
+        return QtCore.QSize(width, height)
+    
+    def minimumSize(self):
+        """Return the minimum size of the layout."""
+        if not self._items:
+            return QtCore.QSize(100, 100)
+        
+        num_items = len(self._items)
+        ncols = int(np.ceil(np.sqrt(num_items)))
+        nrows = int(np.ceil(num_items / ncols))
+        
+        # Minimum 200x200 per cell
+        cell_size = 200
+        width = ncols * cell_size + (ncols + 1) * self._spacing
+        height = nrows * cell_size + (nrows + 1) * self._spacing
+        
+        return QtCore.QSize(width, height)
+
+
+class SquarePlotWidget(pg.PlotWidget):
+    """
+    A PlotWidget that works well with SquareGridLayout.
+    Useful for IQ circle plots where preserving the circular shape is important.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set size policy to expanding
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding
+        )
+        # Set minimum size
+        self.setMinimumSize(200, 200)
+    
+    def sizeHint(self) -> QtCore.QSize:
+        """Provide a default square size hint."""
+        return QtCore.QSize(300, 300)
 # ───────────────────────── Theme Constants ─────────────────────────
 # Common theme-dependent colors used across multiple panels.
 LEGEND_TEXT_DARK = '#CCCCCC'   # Legend text colour for dark mode
@@ -391,7 +524,62 @@ def mode_title(mode: str) -> str:
     }
     return mode_titles.get(mode, mode)
 
+
+def make_tab_title(name: str, max_chars: int = 30) -> str:
+    """Return *name* truncated to *max_chars* characters with an ellipsis if needed.
+
+    Used to keep dock / tab labels compact while still conveying the actual
+    measurement filename.
+
+    Args:
+        name:      The full title string (e.g. a measurement name or filename stem).
+        max_chars: Maximum number of characters before truncation (default 30).
+
+    Returns:
+        The original string if it fits within *max_chars*, or a truncated
+        version ending in ``'…'`` otherwise.
+
+    Examples:
+        >>> make_tab_title("netanal_120000_cold_dark")
+        'netanal_120000_cold_dark'
+        >>> make_tab_title("netanal_120000_very_long_suffix_that_is_too_wide")
+        'netanal_120000_very_long_su…'
+    """
+    if len(name) <= max_chars:
+        return name
+    return name[: max_chars - 1] + "…"
+
 # ───────────────────────── Unit Conversion ─────────────────────────
+
+def mag_axis_label(unit_mode: str, normalize: bool) -> tuple[str, str]:
+    """Return ``(label_text, units_str)`` for a magnitude Y-axis.
+
+    Centralises the label mapping that was previously duplicated between
+    ``MultisweepPanel._update_mag_plot_label`` and
+    ``multisweep_grid_helpers.update_sweep_grid``.
+
+    Args:
+        unit_mode: One of ``"counts"``, ``"dbm"``, or ``"volts"``.
+        normalize: Whether the trace is being normalised.
+
+    Returns:
+        A ``(label_text, units_str)`` tuple suitable for
+        ``PlotItem.setLabel('left', label_text, units=units_str)``.
+    """
+    if normalize:
+        if unit_mode == "dbm":
+            return "S21", "dB"
+        else:  # counts or volts
+            return "Normalized Magnitude", ""
+    if unit_mode == "counts":
+        return "Magnitude", "Counts"
+    if unit_mode == "dbm":
+        return "Power", "dBm"
+    if unit_mode == "volts":
+        return "Magnitude", "V"
+    return "Magnitude", ""  # fallback for any unexpected mode
+
+
 class UnitConverter:
     """
     Utility class for converting between different units.
@@ -423,19 +611,50 @@ class UnitConverter:
 
     @staticmethod
     def convert_amplitude(amps: np.ndarray, iq_data: np.ndarray, unit_mode: str = None, 
-                          current_mode: str = "counts", normalize: bool = False) -> np.ndarray:
-        mode_to_use = unit_mode if unit_mode is not None else current_mode # Renamed mode
-        if mode_to_use == "counts": result = amps.copy()
-        elif mode_to_use == "volts": result = convert_roc_to_volts(amps) # from rfmux.core.transferfunctions
-        elif mode_to_use == "dbm": result = convert_roc_to_dbm(amps)   # from rfmux.core.transferfunctions
-        else: result = amps.copy()
+                          current_mode: str = "counts", normalize: bool = False,
+                          probe_amp_dbm: float | None = None) -> np.ndarray:
+        """Convert magnitude amplitudes between different unit representations.
+
+        Args:
+            amps: Raw magnitude values (typically from np.abs(iq)).
+            iq_data: Complex IQ data (unused but kept for signature compatibility).
+            unit_mode: Target unit mode — ``'counts'``, ``'volts'``, or ``'dbm'``.
+            current_mode: Fallback mode if *unit_mode* is None.
+            normalize: Whether to normalize the result.
+            probe_amp_dbm: Probe tone power in dBm at the DAC output (used when
+                ``normalize=True`` and ``unit_mode='dbm'``).  If not provided,
+                normalization falls back to subtracting the last bin value.
+
+        Returns:
+            Converted (and optionally normalized) magnitude array.
+
+        Normalization behavior:
+            - counts/volts: divide by the last bin value (rightmost frequency point)
+            - dBm with probe_amp_dbm: subtract probe_amp_dbm (displays system gain S21)
+            - dBm without probe_amp_dbm: subtract last bin value (graceful degradation)
+        """
+        mode_to_use = unit_mode if unit_mode is not None else current_mode
+        if mode_to_use == "counts":
+            result = amps.copy()
+        elif mode_to_use == "volts":
+            result = convert_roc_to_volts(amps)
+        elif mode_to_use == "dbm":
+            result = convert_roc_to_dbm(amps)
+        else:
+            result = amps.copy()
             
         if normalize and len(result) > 0:
-            ref_val = result[0]
+            ref_val = result[-1]  # Rightmost frequency bin
             if mode_to_use == "dbm":
-                if np.isfinite(ref_val): result = result - ref_val
-            else:
-                if ref_val != 0 and np.isfinite(ref_val): result = result / ref_val
+                if probe_amp_dbm is not None:
+                    # Subtract probe tone power → displays true system gain (S21)
+                    result = result - probe_amp_dbm
+                elif np.isfinite(ref_val):
+                    # Fallback: subtract last bin value
+                    result = result - ref_val
+            else:  # counts or volts
+                if ref_val != 0 and np.isfinite(ref_val):
+                    result = result / ref_val
         return result
 
     @staticmethod
@@ -461,7 +680,7 @@ class UnitConverter:
             if dac_scale is not None:
                 dbm_val = UnitConverter.normalize_to_dbm(amp_value, dac_scale)
                 return f"{dbm_val:.1f} dBm"
-            return f"{amp_value:.2e} (Norm)"
+            return f"{f'{amp_value:.5f}'.rstrip('0').rstrip('.')} (Norm)"
 
         if unit_mode == "volts":
             if dac_scale is not None:
@@ -470,10 +689,10 @@ class UnitConverter:
                 voltage_rms = np.sqrt(power_watts * 50.0)
                 voltage_peak = voltage_rms * np.sqrt(2)
                 return UnitConverter._format_si_volts(voltage_peak) + "pk"
-            return f"{amp_value:.2e} (Norm)"
+            return f"{f'{amp_value:.5f}'.rstrip('0').rstrip('.')} (Norm)"
 
         # counts or anything else
-        return f"{amp_value:.2e} Norm"
+        return f"{f'{amp_value:.5f}'.rstrip('0').rstrip('.')} Norm"
 
     @staticmethod
     def _format_si_volts(volts: float) -> str:
@@ -702,3 +921,116 @@ class ScreenshotMixin:
         
         pixmap.save(filepath, "PNG")
         print(f"[Screenshot] Saved: {filepath}")
+
+
+# ───────────────────────── Fit-subdict helpers ─────────────────────────
+
+def get_skewed_fits(entry: dict) -> dict:
+    """Return the ``fits['skewed']`` subdict from a resonator entry, or ``{}``.
+
+    Safe to call even when the entry has no ``'fits'`` key (e.g. old data or
+    entries where fitting was never run).
+    """
+    if not isinstance(entry, dict):
+        return {}
+    return entry.get('fits', {}).get('skewed', {})
+
+
+def get_nonlinear_fits(entry: dict) -> dict:
+    """Return the ``fits['nonlinear']`` subdict from a resonator entry, or ``{}``.
+
+    Safe to call even when the entry has no ``'fits'`` key.
+    """
+    if not isinstance(entry, dict):
+        return {}
+    return entry.get('fits', {}).get('nonlinear', {})
+
+
+def migrate_flat_fit_keys(entry: dict) -> dict:
+    """Migrate an old-format resonator entry (flat fit keys) to the new nested
+    ``fits`` subdict structure.
+
+    This is called when loading pickle files that were saved before the nested
+    structure was introduced.  If the entry already uses the new format (i.e.
+    already has a ``'fits'`` key), it is returned unchanged.
+
+    The following flat keys are migrated:
+
+    * Skewed fitter  → ``fits.skewed``:
+      ``fit_params``, ``iq_centered``,
+      ``skewed_fit_applied``, ``skewed_fit_success``, ``skewed_model_mag``
+
+    * Nonlinear fitter  → ``fits.nonlinear``:
+      ``nonlinear_fit_params``, ``nonlinear_fit_errors``,
+      ``nonlinear_fit_residual``, ``nonlinear_fit_success``,
+      ``nonlinear_fit_applied``, ``nonlinear_model_iq``,
+      ``gain_complex``, ``iq_gain_corrected``
+    """
+    if not isinstance(entry, dict):
+        return entry
+
+    # Already migrated — don't touch it
+    if 'fits' in entry:
+        return entry
+
+    _SKEWED_KEYS = {
+        'fit_params', 'iq_centered',
+        'skewed_fit_applied', 'skewed_fit_success', 'skewed_model_mag',
+    }
+    _NONLINEAR_KEYS = {
+        'nonlinear_fit_params', 'nonlinear_fit_errors',
+        'nonlinear_fit_residual', 'nonlinear_fit_success',
+        'nonlinear_fit_applied', 'nonlinear_model_iq',
+        'gain_complex', 'iq_gain_corrected',
+    }
+
+    # Only migrate if any old flat key is present
+    has_old_keys = any(k in entry for k in _SKEWED_KEYS | _NONLINEAR_KEYS)
+    if not has_old_keys:
+        return entry
+
+    skewed_sub: dict = {}
+    nonlinear_sub: dict = {}
+
+    for k in _SKEWED_KEYS:
+        if k in entry:
+            skewed_sub[k] = entry.pop(k)
+
+    for k in _NONLINEAR_KEYS:
+        if k in entry:
+            nonlinear_sub[k] = entry.pop(k)
+
+    fits: dict = {}
+    if skewed_sub:
+        fits['skewed'] = skewed_sub
+    if nonlinear_sub:
+        fits['nonlinear'] = nonlinear_sub
+    if fits:
+        entry['fits'] = fits
+
+    return entry
+
+
+def migrate_results_by_detector(results_by_detector: dict) -> dict:
+    """Apply :func:`migrate_flat_fit_keys` to every entry in
+    ``results_by_detector``.
+
+    Also migrates the legacy ``sweep_amplitude`` key to the canonical
+    ``sweep_amplitude_normalized`` name introduced when the two were unified.
+    Files saved before this rename will have ``sweep_amplitude`` without the
+    ``_normalized`` suffix; files saved after export will already have
+    ``sweep_amplitude_normalized``.
+
+    Mutates the dict in place and also returns it for convenience.
+    """
+    for _code, iter_dict in results_by_detector.items():
+        if isinstance(iter_dict, dict):
+            for _iter_idx, entry in iter_dict.items():
+                if isinstance(entry, dict):
+                    migrate_flat_fit_keys(entry)
+                    # Rename old key → new canonical key when only the old one
+                    # is present (files saved before the rename).
+                    if ('sweep_amplitude' in entry
+                            and 'sweep_amplitude_normalized' not in entry):
+                        entry['sweep_amplitude_normalized'] = entry.pop('sweep_amplitude')
+    return results_by_detector

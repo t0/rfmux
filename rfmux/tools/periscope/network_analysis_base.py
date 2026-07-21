@@ -9,6 +9,7 @@ from .utils import (
     UnitConverter, traceback
 )
 from .tasks import DACScaleFetcher
+import datetime
 import numpy as np  # For linspace
 
 class NetworkAnalysisDialogBase(QtWidgets.QDialog):
@@ -37,11 +38,13 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         
     def setup_amplitude_group(self, layout: QtWidgets.QFormLayout) -> QtWidgets.QGroupBox:
         """
-        Sets up the QGroupBox for amplitude settings (Normalized and dBm).
+        Sets up the QGroupBox for amplitude settings.
 
-        This includes input fields for normalized amplitude and power in dBm,
-        and a display for DAC scale information. Connections are made to
-        synchronize and validate these fields.
+        Presents two modes via radio buttons:
+          • Single amplitude — one normalized field plus a paired dBm field
+            with live bidirectional conversion.
+          • Amplitude sweep (min → max) — start/stop normalized + dBm pairs
+            with live bidirectional conversion, plus a step count.
 
         Args:
             layout: The QFormLayout to add the amplitude group to.
@@ -49,127 +52,238 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         Returns:
             The created QGroupBox containing amplitude settings.
         """
-        amp_group = QtWidgets.QGroupBox("Amplitude Settings") # Group box title
-        amp_layout = QtWidgets.QFormLayout(amp_group)
-        
-        # Determine initial amplitude: use 'amps' list if available, else 'amp', else default.
+        amp_group = QtWidgets.QGroupBox("Amplitude Settings")
+        amp_outer_layout = QtWidgets.QVBoxLayout(amp_group)
+
+        # ── Radio buttons ──────────────────────────────────────────────
+        self.single_amp_radio = QtWidgets.QRadioButton("Single amplitude")
+        self.single_amp_radio.setChecked(True)
+        self.sweep_amp_radio = QtWidgets.QRadioButton("Amplitude sweep")
+        amp_outer_layout.addWidget(self.single_amp_radio)
+
+        # ── Single amplitude sub-widget ────────────────────────────────
+        self.single_amp_controls = QtWidgets.QWidget()
+        single_form = QtWidgets.QFormLayout(self.single_amp_controls)
+        single_form.setContentsMargins(20, 0, 0, 0)
+
+        # Determine initial amplitude from saved params
         amps_list = self.params.get('amps', [self.params.get('amp', DEFAULT_AMPLITUDE)])
-        amp_str = ','.join(map(str, amps_list)) if amps_list else str(DEFAULT_AMPLITUDE)
-        
+        amp_str = str(amps_list[0]) if amps_list else str(DEFAULT_AMPLITUDE)
+
         self.amp_edit = QtWidgets.QLineEdit(amp_str)
-        self.amp_edit.setToolTip("Enter a single value or comma-separated list of normalized amplitudes (e.g., 0.001,0.01,0.1). Expressions like '1/1000' are allowed.")
-        amp_layout.addRow("Normalized Amplitude:", self.amp_edit)
-        
+        self.amp_edit.setToolTip(
+            "Normalized amplitude (0–1). "
+            "Expressions like '1/1000' are allowed."
+        )
+        single_form.addRow("Amplitude (norm.):", self.amp_edit)
+
         self.dbm_edit = QtWidgets.QLineEdit()
-        self.dbm_edit.setToolTip("Enter a single value or comma-separated list of power in dBm (e.g., -30,-20,-10). Expressions are allowed.")
-        amp_layout.addRow("Power (dBm):", self.dbm_edit)
-        
-        self.dac_scale_info = QtWidgets.QLabel("Fetching DAC scales...")
-        self.dac_scale_info.setWordWrap(True)
-        amp_layout.addRow("DAC Scale (dBm):", self.dac_scale_info)
-        
-        # Connect signals for live updates (without validation) and validation on edit finish
-        self.amp_edit.textChanged.connect(lambda: self._update_dbm_from_normalized(validate=False)) # Live update dBm field
-        self.dbm_edit.textChanged.connect(lambda: self._update_normalized_from_dbm(validate=False)) # Live update normalized amp field
-        self.amp_edit.editingFinished.connect(self._validate_normalized_values) # Validate on finishing edit
-        self.dbm_edit.editingFinished.connect(self._validate_dbm_values)       # Validate on finishing edit
+        self.dbm_edit.setToolTip(
+            "Equivalent power in dBm. "
+            "Edit here to update the normalized field above."
+        )
+        single_form.addRow("Power (dBm):", self.dbm_edit)
 
-        # Linspace generator UI
-        linspace_group = QtWidgets.QGroupBox("Generate Amplitude List")
-        linspace_layout = QtWidgets.QFormLayout(linspace_group)
+        amp_outer_layout.addWidget(self.single_amp_controls)
 
-        self.start_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_START}")
-        self.start_amp_edit.setValidator(QDoubleValidator(self))
-        self.start_amp_edit.setToolTip("Start value for linspace generation.")
-        linspace_layout.addRow("Start:", self.start_amp_edit)
+        # ── Sweep radio + sub-widget ───────────────────────────────────
+        amp_outer_layout.addWidget(self.sweep_amp_radio)
 
-        self.stop_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_STOP}")
-        self.stop_amp_edit.setValidator(QDoubleValidator(self))
-        self.stop_amp_edit.setToolTip("Stop value for linspace generation.")
-        linspace_layout.addRow("Stop:", self.stop_amp_edit)
+        self.sweep_amp_controls = QtWidgets.QWidget()
+        sweep_form = QtWidgets.QFormLayout(self.sweep_amp_controls)
+        sweep_form.setContentsMargins(20, 0, 0, 0)
 
-        self.iterations_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_ITERATIONS}")
-        self.iterations_amp_edit.setValidator(QIntValidator(2, 1000, self)) # Min 2 points for linspace
-        self.iterations_amp_edit.setToolTip("Number of points for linspace generation (min 2).")
-        linspace_layout.addRow("Iterations:", self.iterations_amp_edit)
-        
-        button_layout = QtWidgets.QHBoxLayout()
-        self.fill_amp_button = QtWidgets.QPushButton("Fill Normalized Amplitude")
-        self.fill_amp_button.setAutoDefault(False)  # Prevent this button from capturing Enter key
-        self.fill_amp_button.clicked.connect(self._on_fill_amplitude_clicked)
-        button_layout.addWidget(self.fill_amp_button)
+        # Start row: normalized + dBm side-by-side
+        self.start_amp_edit = QtWidgets.QLineEdit()
+        self.start_amp_edit.setPlaceholderText("e.g., 0.001")
+        self.start_amp_edit.setToolTip("Start normalized amplitude.")
 
-        self.fill_dbm_button = QtWidgets.QPushButton("Fill Power (dBm)")
-        self.fill_dbm_button.setAutoDefault(False)  # Prevent this button from capturing Enter key
-        self.fill_dbm_button.clicked.connect(self._on_fill_dbm_clicked)
-        button_layout.addWidget(self.fill_dbm_button)
-        
-        linspace_layout.addRow(button_layout)
-        amp_layout.addRow(linspace_group) # Add this subgroup to the main amplitude layout
-        
+        self.start_dbm_edit = QtWidgets.QLineEdit()
+        self.start_dbm_edit.setPlaceholderText("dBm")
+        self.start_dbm_edit.setToolTip(
+            "Start power in dBm. "
+            "Edit here to update the normalized field to the left."
+        )
+
+        start_row_widget = QtWidgets.QWidget()
+        start_row = QtWidgets.QHBoxLayout(start_row_widget)
+        start_row.setContentsMargins(0, 0, 0, 0)
+        start_row.addWidget(QtWidgets.QLabel("norm:"))
+        start_row.addWidget(self.start_amp_edit)
+        start_row.addWidget(QtWidgets.QLabel("dBm:"))
+        start_row.addWidget(self.start_dbm_edit)
+        sweep_form.addRow("Start amplitude:", start_row_widget)
+
+        # Stop row: normalized + dBm side-by-side
+        self.stop_amp_edit = QtWidgets.QLineEdit()
+        self.stop_amp_edit.setPlaceholderText("e.g., 0.1")
+        self.stop_amp_edit.setToolTip("Stop normalized amplitude.")
+
+        self.stop_dbm_edit = QtWidgets.QLineEdit()
+        self.stop_dbm_edit.setPlaceholderText("dBm")
+        self.stop_dbm_edit.setToolTip(
+            "Stop power in dBm. "
+            "Edit here to update the normalized field to the left."
+        )
+
+        stop_row_widget = QtWidgets.QWidget()
+        stop_row = QtWidgets.QHBoxLayout(stop_row_widget)
+        stop_row.setContentsMargins(0, 0, 0, 0)
+        stop_row.addWidget(QtWidgets.QLabel("norm:"))
+        stop_row.addWidget(self.stop_amp_edit)
+        stop_row.addWidget(QtWidgets.QLabel("dBm:"))
+        stop_row.addWidget(self.stop_dbm_edit)
+        sweep_form.addRow("Stop amplitude:", stop_row_widget)
+
+        # Steps
+        self.num_steps_edit = QtWidgets.QLineEdit(
+            str(self.params.get('amp_sweep_steps', 3))
+        )
+        self.num_steps_edit.setValidator(QIntValidator(2, 1000, self))
+        self.num_steps_edit.setToolTip("Number of amplitude steps (minimum 2).")
+        sweep_form.addRow("Number of steps:", self.num_steps_edit)
+
+        self.sweep_amp_controls.setVisible(False)
+        amp_outer_layout.addWidget(self.sweep_amp_controls)
+
+        # ── Sweep tab order: norm fields chain together, dBm fields chain together
+        QtWidgets.QWidget.setTabOrder(self.start_amp_edit, self.stop_amp_edit)
+        QtWidgets.QWidget.setTabOrder(self.stop_amp_edit,  self.num_steps_edit)
+        QtWidgets.QWidget.setTabOrder(self.num_steps_edit, self.start_dbm_edit)
+        QtWidgets.QWidget.setTabOrder(self.start_dbm_edit, self.stop_dbm_edit)
+
+        # ── Connections ────────────────────────────────────────────────
+        self.single_amp_radio.toggled.connect(self._on_amplitude_mode_changed)
+        self.sweep_amp_radio.toggled.connect(self._on_amplitude_mode_changed)
+
+        # Single mode — bidirectional live sync
+        self.amp_edit.textChanged.connect(
+            lambda: self._update_dbm_from_normalized(validate=False)
+        )
+        self.dbm_edit.textChanged.connect(
+            lambda: self._update_normalized_from_dbm(validate=False)
+        )
+        self.amp_edit.editingFinished.connect(self._validate_normalized_values)
+        self.dbm_edit.editingFinished.connect(self._validate_dbm_values)
+
+        # Sweep start — bidirectional live sync
+        self.start_amp_edit.textChanged.connect(
+            lambda: self._update_start_dbm_from_normalized(validate=False)
+        )
+        self.start_dbm_edit.textChanged.connect(
+            lambda: self._update_start_normalized_from_dbm(validate=False)
+        )
+
+        # Sweep stop — bidirectional live sync
+        self.stop_amp_edit.textChanged.connect(
+            lambda: self._update_stop_dbm_from_normalized(validate=False)
+        )
+        self.stop_dbm_edit.textChanged.connect(
+            lambda: self._update_stop_normalized_from_dbm(validate=False)
+        )
+
         layout.addRow("Amplitude Settings:", amp_group)
+
+        # Restore saved amplitude mode if available
+        saved_mode = self.params.get('amplitude_mode', 'single')
+        if saved_mode == 'sweep':
+            self.sweep_amp_radio.setChecked(True)
+            saved_start = self.params.get('amp_sweep_start')
+            saved_stop = self.params.get('amp_sweep_stop')
+            if saved_start is not None:
+                self.start_amp_edit.setText(f"{saved_start:.6g}")
+            if saved_stop is not None:
+                self.stop_amp_edit.setText(f"{saved_stop:.6g}")
+
         return amp_group
 
-    def _on_fill_amplitude_clicked(self):
-        """Handles the 'Fill Amplitude' button click."""
-        try:
-            start = float(self.start_amp_edit.text())
-            stop = float(self.stop_amp_edit.text())
-            iterations = int(self.iterations_amp_edit.text())
+    # ── Mode switching ─────────────────────────────────────────────────
 
-            if iterations < 2:
-                QtWidgets.QMessageBox.warning(self, "Input Error", "Iterations must be at least 2.")
-                return
+    def _on_amplitude_mode_changed(self):
+        """Show/hide the appropriate sub-widget when the radio selection changes."""
+        is_single = self.single_amp_radio.isChecked()
+        self.single_amp_controls.setVisible(is_single)
+        self.sweep_amp_controls.setVisible(not is_single)
 
-            values = np.linspace(start, stop, iterations)
-            # Use a general format, good for typical normalized amplitudes
-            self.amp_edit.setText(", ".join([f"{v:.6g}" for v in values])) 
-        except ValueError:
-            QtWidgets.QMessageBox.warning(self, "Input Error", "Invalid input for Start, Stop, or Iterations.")
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Error", f"Could not generate amplitude list: {str(e)}")
+    # ── Public helper used by subclass get_parameters() ────────────────
 
-    def _on_fill_dbm_clicked(self):
-        """Handles the 'Fill dBm' button click."""
-        try:
-            start = float(self.start_amp_edit.text())
-            stop = float(self.stop_amp_edit.text())
-            iterations = int(self.iterations_amp_edit.text())
+    def _get_amplitude_list(self) -> list[float] | None:
+        """
+        Build and return the final amplitude list based on the selected mode.
 
-            if iterations < 2:
-                QtWidgets.QMessageBox.warning(self, "Input Error", "Iterations must be at least 2.")
-                return
+        Single mode  → ``[amp]``
+        Sweep mode   → ``np.linspace(start, stop, steps).tolist()``
 
-            values = np.linspace(start, stop, iterations)
-            # Use a format suitable for dBm values
-            self.dbm_edit.setText(", ".join([f"{v:.2f}" for v in values]))
-        except ValueError:
-            QtWidgets.QMessageBox.warning(self, "Input Error", "Invalid input for Start, Stop, or Iterations.")
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Error", f"Could not generate dBm list: {str(e)}")
-        
+        Returns None and shows a warning dialog on invalid input.
+        """
+        if self.single_amp_radio.isChecked():
+            amp_text = self.amp_edit.text().strip()
+            values = self._parse_amplitude_values(amp_text)
+            if not values:
+                QtWidgets.QMessageBox.warning(
+                    self, "Validation Error",
+                    "Please enter a valid amplitude value."
+                )
+                return None
+            return values  # may be a single-element list or multi-value legacy list
 
+        else:
+            # Sweep mode
+            start_text = self.start_amp_edit.text().strip()
+            stop_text = self.stop_amp_edit.text().strip()
+            steps_text = self.num_steps_edit.text().strip()
+
+            if not start_text or not stop_text:
+                QtWidgets.QMessageBox.warning(
+                    self, "Validation Error",
+                    "Please enter both a start and stop amplitude for the sweep."
+                )
+                return None
+
+            try:
+                start_val = float(eval(start_text))
+                stop_val = float(eval(stop_text))
+                steps_val = int(steps_text) if steps_text else 2
+            except Exception:
+                QtWidgets.QMessageBox.warning(
+                    self, "Validation Error",
+                    "Invalid numerical input in amplitude sweep fields."
+                )
+                return None
+
+            if start_val <= 0 or stop_val <= 0:
+                QtWidgets.QMessageBox.warning(
+                    self, "Validation Error",
+                    "Start and stop amplitudes must be positive."
+                )
+                return None
+
+            if steps_val < 2:
+                QtWidgets.QMessageBox.warning(
+                    self, "Validation Error",
+                    "Number of steps must be at least 2."
+                )
+                return None
+
+            return np.linspace(start_val, stop_val, steps_val).tolist()
+
+    # ── Validation helpers ─────────────────────────────────────────────
 
     def _validate_normalized_values(self):
         """
         Validates the entered normalized amplitude values after editing is finished.
-        Shows a warning dialog if values are outside typical ranges (e.g., > 1.0 or < 1e-4).
+        Shows a warning dialog if values are outside typical ranges.
         """
         amp_text = self.amp_edit.text().strip()
         if not amp_text:
             return
-
-        # DAC scale is not strictly needed for validating normalized amplitude against 0-1 range,
-        # but good to have for consistency if other checks were dac_scale dependent.
-        # dac_scale = self._get_selected_dac_scale()
-        # if dac_scale is None: return # Or proceed with partial validation
 
         warnings_list = []
         normalized_values = self._parse_amplitude_values(amp_text)
         for norm_val in normalized_values:
             if norm_val > 1.0:
                 warnings_list.append(f"Warning: Normalized amplitude {norm_val:.6f} > 1.0 (maximum)")
-            elif norm_val < 1e-4: # Arbitrary small value warning threshold
+            elif norm_val < 1e-4:
                 warnings_list.append(f"Warning: Normalized amplitude {norm_val:.6f} < 1e-4 (minimum recommended)")
         
         if warnings_list:
@@ -178,8 +292,7 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
     def _validate_dbm_values(self):
         """
         Validates the entered dBm values after editing is finished.
-        Shows a warning dialog if values exceed DAC scale or result in problematic
-        normalized amplitudes.
+        Shows a warning dialog if values exceed DAC scale or are out of range.
         """
         dbm_text = self.dbm_edit.text().strip()
         if not dbm_text:
@@ -187,8 +300,10 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
 
         dac_scale = self._get_selected_dac_scale()
         if dac_scale is None:
-            # Cannot validate dBm against DAC scale if unknown
-            self._show_warning_dialog("DAC Scale Unknown", ["Cannot validate dBm values without a known DAC scale."])
+            self._show_warning_dialog(
+                "DAC Scale Unknown",
+                ["Cannot validate dBm values without a known DAC scale."]
+            )
             return
 
         warnings_list = []
@@ -196,13 +311,15 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         for dbm_val in dbm_values:
             if dbm_val > dac_scale:
                 warnings_list.append(f"Warning: {dbm_val:.2f} dBm > {dac_scale:+.2f} dBm (DAC maximum)")
-            
-            # Check corresponding normalized amplitude
             norm_val = UnitConverter.dbm_to_normalize(dbm_val, dac_scale)
             if norm_val > 1.0:
-                warnings_list.append(f"Warning: {dbm_val:.2f} dBm results in normalized amplitude > 1.0 ({norm_val:.6f})")
-            elif norm_val < 1e-4: # Arbitrary small value warning threshold
-                warnings_list.append(f"Warning: {dbm_val:.2f} dBm results in normalized amplitude < 1e-4 ({norm_val:.6f})")
+                warnings_list.append(
+                    f"Warning: {dbm_val:.2f} dBm results in normalized amplitude > 1.0 ({norm_val:.6f})"
+                )
+            elif norm_val < 1e-4:
+                warnings_list.append(
+                    f"Warning: {dbm_val:.2f} dBm results in normalized amplitude < 1e-4 ({norm_val:.6f})"
+                )
         
         if warnings_list:
             self._show_warning_dialog("dBm Amplitude Warning", warnings_list)
@@ -210,110 +327,82 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
     def _show_warning_dialog(self, title: str, warnings_list: list[str]):
         """Displays a warning message box with a list of warnings."""
         QtWidgets.QMessageBox.warning(self, title, "\n".join(warnings_list))
-            
+
+    # ── Parsing helpers ────────────────────────────────────────────────
+
     def _parse_numeric_values(self, text: str) -> list[float]:
         """
         Parses a comma-separated string of numeric values.
-        Each part can be an expression evaluatable by `eval()`.
+        Each part can be an expression evaluatable by ``eval()``.
         Invalid parts are silently skipped.
-
-        Args:
-            text: The string containing numeric values (amplitude or dBm).
-
-        Returns:
-            A list of parsed float values.
         """
         values = []
         for part in text.split(','):
             part = part.strip()
             if part:
                 try:
-                    # Using eval allows for simple expressions like "1/1000".
-                    # Caution: eval can execute arbitrary code if input is not controlled.
-                    # In this GUI context, user inputs values for their own use.
                     values.append(float(eval(part)))
                 except (ValueError, SyntaxError, NameError, TypeError):
-                    # Silently skip parts that cannot be evaluated to a float
                     continue
         return values
     
     def _parse_amplitude_values(self, amp_text: str) -> list[float]:
-        """Parse comma-separated amplitude values (delegates to _parse_numeric_values)."""
+        """Parse comma-separated amplitude values."""
         return self._parse_numeric_values(amp_text)
         
     def _parse_dbm_values(self, dbm_text: str) -> list[float]:
-        """Parse comma-separated dBm values (delegates to _parse_numeric_values)."""
+        """Parse comma-separated dBm values."""
         return self._parse_numeric_values(dbm_text)
+
+    # ── DAC scale / module helpers ─────────────────────────────────────
 
     def _update_dac_scale_info(self):
         """
-        Updates the DAC scale information label based on selected modules
-        and their known DAC scales. Also enables/disables the dBm input field
-        accordingly and triggers an update of dBm from normalized amplitude.
+        Enables or disables all dBm input fields based on whether a DAC scale
+        is known for any selected module.  Also refreshes the dBm display for
+        all currently visible fields.
+
+        The DAC scale is used internally for unit conversion; it is not shown
+        in the UI.
         """
         selected_modules = self._get_selected_modules()
-        has_known_scale = False
-        scales_text_list = []
+        has_known_scale = any(
+            self.dac_scales.get(m) is not None for m in selected_modules
+        )
 
-        for module_idx in selected_modules:
-            dac_scale = self.dac_scales.get(module_idx)
-            if dac_scale is not None:
-                has_known_scale = True
-                scales_text_list.append(f"Module {module_idx}: {dac_scale:+.2f} dBm")
-            else:
-                scales_text_list.append(f"Module {module_idx}: Unknown")
-        
-        text_to_display = "\n".join(scales_text_list) if selected_modules else "Unknown (no modules selected)"
-        self.dac_scale_info.setText(text_to_display)
-        
+        # Enable/disable all dBm fields
+        for field in (self.dbm_edit, self.start_dbm_edit, self.stop_dbm_edit):
+            field.setEnabled(has_known_scale)
+            if not has_known_scale:
+                field.clear()
+
         if has_known_scale:
-            self.dbm_edit.setEnabled(True)
-            self.dbm_edit.setToolTip("Enter dBm values (e.g., -30,-20,-10). Expressions are allowed.")
-            self._update_dbm_from_normalized() # Update dBm field now that scale might be known/changed
-        else:
-            self.dbm_edit.setEnabled(False)
-            self.dbm_edit.setToolTip("DAC scale unknown for selected module(s) - dBm input disabled.")
-            self.dbm_edit.clear()
+            self._update_dbm_from_normalized()
+            self._update_start_dbm_from_normalized()
+            self._update_stop_dbm_from_normalized()
     
     def _get_selected_modules(self) -> list[int]:
         """
-        Placeholder method to get the list of currently selected modules.
-        Subclasses must override this to provide actual module selection logic.
-
-        Returns:
-            An empty list. Subclasses should return a list of integer module IDs.
+        Placeholder — subclasses must override this to return the currently
+        selected module IDs.
         """
-        # This method must be implemented by subclasses
-        return [] 
+        return []
         
     def _get_selected_dac_scale(self) -> float | None:
         """
-        Retrieves the DAC scale for the currently selected module(s).
-        If multiple modules are selected, it returns the DAC scale of the first
-        module in the selection that has a known DAC scale.
-
-        Returns:
-            The DAC scale in dBm as a float, or None if no scale is known
-            for any selected module or if no modules are selected.
+        Returns the DAC scale (dBm) for the first selected module that has a
+        known scale, or None.
         """
-        selected_modules = self._get_selected_modules()
-        if not selected_modules:
-            return None
-        
-        for module_idx in selected_modules:
+        for module_idx in self._get_selected_modules():
             dac_scale = self.dac_scales.get(module_idx)
             if dac_scale is not None:
-                return dac_scale # Return the first known DAC scale
-        return None # No known DAC scale for any of the selected modules
-    
+                return dac_scale
+        return None
+
+    # ── Single-amplitude bidirectional sync ───────────────────────────
+
     def _update_dbm_from_normalized(self, validate: bool = True):
-        """
-        Updates the dBm field based on the normalized amplitude field.
-        
-        Args:
-            validate: If True, validate values and show warnings (if field doesn't have focus).
-                      If False, perform conversion without validation (for live updates).
-        """
+        """Update the single-amplitude dBm field from the normalized field."""
         if self.currently_updating or not self.dbm_edit.isEnabled():
             return
         self.currently_updating = True
@@ -326,7 +415,6 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
             dac_scale = self._get_selected_dac_scale()
             if dac_scale is None:
                 self.dbm_edit.setEnabled(False)
-                self.dbm_edit.setToolTip("Unable to query DAC scale for conversion.")
                 self.dbm_edit.clear()
                 return
 
@@ -335,7 +423,6 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
             warnings_list = []
             
             for norm_val in normalized_values:
-                # Collect validation warnings only if validate=True
                 if validate:
                     if norm_val > 1.0:
                         warnings_list.append(f"Warning: Normalized amplitude {norm_val:.6f} > 1.0 (maximum)")
@@ -345,20 +432,13 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
             
             self.dbm_edit.setText(", ".join(dbm_values))
             
-            # Show warnings only if validate=True and field doesn't have focus
             if validate and warnings_list and not self.amp_edit.hasFocus():
                 self._show_warning_dialog("Normalized Amplitude Warning", warnings_list)
         finally:
             self.currently_updating = False
     
     def _update_normalized_from_dbm(self, validate: bool = True):
-        """
-        Updates the normalized amplitude field based on the dBm field.
-        
-        Args:
-            validate: If True, validate values and show warnings (if field doesn't have focus).
-                      If False, perform conversion without validation (for live updates).
-        """
+        """Update the single-amplitude normalized field from the dBm field."""
         if self.currently_updating or not self.dbm_edit.isEnabled():
             return
         self.currently_updating = True
@@ -370,10 +450,6 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
 
             dac_scale = self._get_selected_dac_scale()
             if dac_scale is None:
-                # This state should ideally be prevented by disabling dbm_edit.
-                # If somehow reached, cannot convert.
-                self.amp_edit.setToolTip("Unable to query DAC scale for conversion.")
-                # self.amp_edit.clear() # Avoid clearing if user is typing in dBm field
                 return
 
             dbm_values = self._parse_dbm_values(dbm_text)
@@ -381,25 +457,147 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
             warnings_list = []
             
             for dbm_val in dbm_values:
-                # Collect validation warnings only if validate=True
-                if validate:
-                    if dbm_val > dac_scale:
-                        warnings_list.append(f"Warning: {dbm_val:.2f} dBm > {dac_scale:+.2f} dBm (DAC maximum)")
-                
+                if validate and dbm_val > dac_scale:
+                    warnings_list.append(f"Warning: {dbm_val:.2f} dBm > {dac_scale:+.2f} dBm (DAC maximum)")
                 norm_val = UnitConverter.dbm_to_normalize(dbm_val, dac_scale)
-                
-                # Validate resulting normalized amplitude only if validate=True
                 if validate:
                     if norm_val > 1.0:
-                        warnings_list.append(f"Warning: {dbm_val:.2f} dBm results in normalized amplitude > 1.0 ({norm_val:.6f})")
+                        warnings_list.append(
+                            f"Warning: {dbm_val:.2f} dBm results in normalized amplitude > 1.0 ({norm_val:.6f})"
+                        )
                     elif norm_val < 1e-4:
-                        warnings_list.append(f"Warning: {dbm_val:.2f} dBm results in normalized amplitude < 1e-4 ({norm_val:.6f})")
+                        warnings_list.append(
+                            f"Warning: {dbm_val:.2f} dBm results in normalized amplitude < 1e-4 ({norm_val:.6f})"
+                        )
                 normalized_values.append(f"{norm_val:.6f}")
             
             self.amp_edit.setText(", ".join(normalized_values))
 
-            # Show warnings only if validate=True and field doesn't have focus
             if validate and warnings_list and not self.dbm_edit.hasFocus():
                 self._show_warning_dialog("dBm Amplitude Warning", warnings_list)
         finally:
             self.currently_updating = False
+
+    # ── Sweep start bidirectional sync ────────────────────────────────
+
+    def _update_start_dbm_from_normalized(self, validate: bool = True):
+        """Update the sweep start dBm field from the normalized field."""
+        if self.currently_updating or not self.start_dbm_edit.isEnabled():
+            return
+        self.currently_updating = True
+        try:
+            text = self.start_amp_edit.text().strip()
+            if not text:
+                self.start_dbm_edit.setText("")
+                return
+            dac_scale = self._get_selected_dac_scale()
+            if dac_scale is None:
+                self.start_dbm_edit.clear()
+                return
+            try:
+                norm_val = float(eval(text))
+                self.start_dbm_edit.setText(
+                    f"{UnitConverter.normalize_to_dbm(norm_val, dac_scale):.2f}"
+                )
+            except Exception:
+                pass
+        finally:
+            self.currently_updating = False
+
+    def _update_start_normalized_from_dbm(self, validate: bool = True):
+        """Update the sweep start normalized field from the dBm field."""
+        if self.currently_updating or not self.start_dbm_edit.isEnabled():
+            return
+        self.currently_updating = True
+        try:
+            text = self.start_dbm_edit.text().strip()
+            if not text:
+                self.start_amp_edit.setText("")
+                return
+            dac_scale = self._get_selected_dac_scale()
+            if dac_scale is None:
+                return
+            try:
+                dbm_val = float(eval(text))
+                norm_val = UnitConverter.dbm_to_normalize(dbm_val, dac_scale)
+                self.start_amp_edit.setText(f"{norm_val:.6f}")
+            except Exception:
+                pass
+        finally:
+            self.currently_updating = False
+
+    # ── Sweep stop bidirectional sync ─────────────────────────────────
+
+    def _update_stop_dbm_from_normalized(self, validate: bool = True):
+        """Update the sweep stop dBm field from the normalized field."""
+        if self.currently_updating or not self.stop_dbm_edit.isEnabled():
+            return
+        self.currently_updating = True
+        try:
+            text = self.stop_amp_edit.text().strip()
+            if not text:
+                self.stop_dbm_edit.setText("")
+                return
+            dac_scale = self._get_selected_dac_scale()
+            if dac_scale is None:
+                self.stop_dbm_edit.clear()
+                return
+            try:
+                norm_val = float(eval(text))
+                self.stop_dbm_edit.setText(
+                    f"{UnitConverter.normalize_to_dbm(norm_val, dac_scale):.2f}"
+                )
+            except Exception:
+                pass
+        finally:
+            self.currently_updating = False
+
+    def _update_stop_normalized_from_dbm(self, validate: bool = True):
+        """Update the sweep stop normalized field from the dBm field."""
+        if self.currently_updating or not self.stop_dbm_edit.isEnabled():
+            return
+        self.currently_updating = True
+        try:
+            text = self.stop_dbm_edit.text().strip()
+            if not text:
+                self.stop_amp_edit.setText("")
+                return
+            dac_scale = self._get_selected_dac_scale()
+            if dac_scale is None:
+                return
+            try:
+                dbm_val = float(eval(text))
+                norm_val = UnitConverter.dbm_to_normalize(dbm_val, dac_scale)
+                self.stop_amp_edit.setText(f"{norm_val:.6f}")
+            except Exception:
+                pass
+        finally:
+            self.currently_updating = False
+
+    # ── Measurement name helpers (shared by all subclass dialogs) ──────
+
+    def _update_name_preview(self):
+        """Update the live filename preview label from the two name fields."""
+        base = self.base_name_edit.text().strip()
+        suffix = self.custom_suffix_edit.text().strip()
+        if base:
+            full = f"{base}_{suffix}.pkl" if suffix else f"{base}.pkl"
+        else:
+            full = f"{suffix}.pkl" if suffix else "(no name)"
+        self._name_preview_label.setText(full)
+
+    def _get_measurement_name(self) -> str:
+        """Return the combined measurement name from the two dialog fields.
+
+        Combines base name and optional custom suffix with an underscore
+        separator.  Strips both values and falls back to a fresh timestamp
+        if the base field is empty.
+
+        Returns:
+            The measurement name string (without .pkl extension).
+        """
+        base = self.base_name_edit.text().strip()
+        suffix = self.custom_suffix_edit.text().strip()
+        if not base:
+            base = datetime.datetime.now().strftime("netanal_%H%M%S")
+        return f"{base}_{suffix}" if suffix else base

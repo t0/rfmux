@@ -78,7 +78,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                  current_module: int | None = None, 
                  initial_params: dict | None = None, load_multisweep = False, fit_frequencies: list[float] = None,
                  bias_frequencies: list[float] | None = None,
-                 netanal_mode: bool = False):
+                 netanal_mode: bool = False,
+                 rerun_mode: bool = False):
         """
         Initializes the Multisweep configuration dialog.
 
@@ -108,8 +109,10 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.fit_frequencies = fit_frequencies
         self.bias_frequencies = bias_frequencies or []
         self.netanal_mode = netanal_mode
+        self.rerun_mode = rerun_mode
 
         self.use_data_from_file = False
+        self._custom_freq_mode = False
         self._load_data = {}
         self.section_count = 0
 
@@ -258,7 +261,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             
             self.section_freq_combo = QtWidgets.QComboBox()
             self.section_freq_combo.setEnabled(False)
-            self.section_freq_combo.addItems(["Use multisweep central frequency", "Use resonance fit frequency"])
+            self.section_freq_combo.addItems(["Use multisweep central frequency", "Use resonance fit frequency", "Custom"])
             self.section_freq_combo.setToolTip("Select which frequency type to use.")
             self.section_freq_combo.currentIndexChanged.connect(self._scroll_section)
             section_label_layout.addWidget(self.section_freq_combo)
@@ -272,7 +275,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             section_info_layout.addWidget(self.sections_edit)
             layout.addWidget(section_info_group)
 
-        elif self.fit_frequencies is not None:
+        elif self.rerun_mode:
             section_info_group = QtWidgets.QGroupBox("Sweep sections")
             section_info_layout = QtWidgets.QVBoxLayout(section_info_group)
             
@@ -294,12 +297,16 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             # Add "Bias frequencies" option if bias frequencies are available
             if self.bias_frequencies:
                 self.section_freq_combo.addItem("Use bias frequencies")
+            # Always offer a fully manual "Custom" entry
+            self.section_freq_combo.addItem("Custom")
             self.section_freq_combo.setToolTip("Select what to use as the central frequency of this sweep")
             # Block signals during setup so the slot doesn't fire before sections_edit exists
             self.section_freq_combo.blockSignals(True)
             # Default to "Bias frequencies" if they exist, otherwise "previous multisweep central frequencies"
             if self.bias_frequencies:
-                self.section_freq_combo.setCurrentIndex(self.section_freq_combo.count() - 1)
+                bias_idx = self.section_freq_combo.findText("Use bias frequencies")
+                if bias_idx >= 0:
+                    self.section_freq_combo.setCurrentIndex(bias_idx)
                 self.section_center_frequencies = list(self.bias_frequencies)
             else:
                 self.section_freq_combo.setCurrentIndex(0)
@@ -825,9 +832,18 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.accept()
 
     def _scroll_section(self):
-        """Handle section selection changes and update displayed frequencies accordingly. Choice between fit or sweep frequencies"""
+        """Handle section selection changes and update displayed frequencies accordingly. Choice between fit, sweep, or custom frequencies."""
         selected = self.section_freq_combo.currentText().lower()
         self.sections_edit.clear()
+
+        if "custom" in selected:
+            # Let the user type frequencies manually; disable Load (no file data needed)
+            self.load_btn.setEnabled(False)
+            self.sections_edit.setPlaceholderText(
+                "Enter sweep central frequencies (MHz, comma separated)"
+            )
+            self.sections_info_label.setText("Enter custom frequencies.")
+            return
 
         if "fit" in selected:
             self.load_btn.setEnabled(False)
@@ -846,6 +862,19 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         changes the frequency source combo in re-run mode."""
         selected = self.section_freq_combo.currentText().lower()
         self.sections_edit.clear()
+
+        if "custom" in selected:
+            # Switch to fully manual entry; get_parameters() will parse sections_edit.text()
+            self._custom_freq_mode = True
+            self.section_center_frequencies = []
+            self.sections_edit.setPlaceholderText(
+                "Enter sweep central frequencies (MHz, comma separated)"
+            )
+            self.sections_info_label.setText("Enter custom frequencies.")
+            return
+
+        # Any non-custom selection clears the custom flag
+        self._custom_freq_mode = False
 
         if "fit" in selected:
             freqs = self.fit_frequencies or []
@@ -1314,8 +1343,9 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             params_dict['nsamps'] = int(self.nsamps_edit.text())
             
             # Get center frequencies
-            if self.load_multisweep or self.netanal_mode:
-                # Parse from the editable text field (comma-separated MHz values)
+            if self.load_multisweep or self.netanal_mode or self._custom_freq_mode:
+                # Parse from the editable text field (comma-separated MHz values).
+                # This covers: load-from-file mode, netanal mode, and re-run "Custom" mode.
                 params_dict['sweep_center_frequencies'] = []
                 for f in self.sections_edit.text().split(','):
                     f = f.strip()

@@ -2034,6 +2034,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             dac_scales=self.dac_scales,
             current_module=self.target_module,
             initial_params=dialog_params,
+            rerun_mode=True,
             load_multisweep=False,
             fit_frequencies=fit_freqs,
             bias_frequencies=bias_freqs_for_dialog,
@@ -2076,10 +2077,18 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Apply Bias is no longer valid until Find Bias is re-run on the new data.
         self.apply_bias_btn.setEnabled(False)
 
-        # Apply parameters and inject res_info_dict so MultisweepTask re-uses existing codes
+        # Apply parameters and inject res_info_dict so MultisweepTask re-uses existing codes,
+        # BUT only when the user has NOT switched to custom frequencies.  When custom
+        # frequencies are chosen the sweep centers no longer correspond to the existing
+        # resonator registry, so we must use Option A (explicit center_frequencies) and
+        # let MultisweepTask build a fresh res_info_dict.
+        is_custom_freq = getattr(dialog, '_custom_freq_mode', False)
         self.initial_params.update(new_params)
-        if self.res_info_dict:
+        if self.res_info_dict and not is_custom_freq:
             self.initial_params['res_info_dict'] = self.res_info_dict
+        else:
+            # Custom frequencies: drop the stale registry so the task uses Option A
+            self.initial_params.pop('res_info_dict', None)
 
         # Refresh the panel title in case the measurement name changed
         self._refresh_panel_title()

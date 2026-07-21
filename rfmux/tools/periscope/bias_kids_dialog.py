@@ -188,6 +188,41 @@ class BiasSettingsPanel(QWidget):
         freq_group.setLayout(freq_layout)
         layout.addWidget(freq_group)
 
+        # ── Bias Frequency Method ─────────────────────────────────────────────
+        method_group = QGroupBox("Bias Frequency Method")
+        method_layout = QVBoxLayout()
+        method_layout.setSpacing(4)
+
+        self._bias_method_group = QButtonGroup(self)
+
+        self.rb_iq_derivative = QRadioButton("IQ arc-length speed  |dI/df + j·dQ/df|")
+        self.rb_iq_derivative.setChecked(True)
+        self.rb_iq_derivative.setToolTip(
+            "Find the bias frequency by maximising the IQ arc-length speed\n"
+            "|dI/df + j·dQ/df|.  This is the classic method: the peak\n"
+            "of the arc-length speed corresponds to the resonance frequency\n"
+            "for a standard resonator sweep."
+        )
+        self._bias_method_group.addButton(self.rb_iq_derivative)
+        method_layout.addWidget(self.rb_iq_derivative)
+
+        self.rb_log_iq_derivative = QRadioButton("Log-mag of derivative  log(|dI/df + j·dQ/df|)")
+        self.rb_log_iq_derivative.setToolTip(
+            "Find the bias frequency by maximising the log-magnitude of the\n"
+            "IQ arc-length speed: log(|dI/df + j·dQ/df|).\n\n"
+            "Taking the logarithm compresses the dynamic range of the\n"
+            "resonance feature so that the true peak stands out more clearly\n"
+            "in noisy data.  The IQ derivatives used for df_calibration are\n"
+            "always computed from the standard (non-log) splines.\n\n"
+            "The IQ Derivatives tab shows the log-mag curve when this\n"
+            "method is active."
+        )
+        self._bias_method_group.addButton(self.rb_log_iq_derivative)
+        method_layout.addWidget(self.rb_log_iq_derivative)
+
+        method_group.setLayout(method_layout)
+        layout.addWidget(method_group)
+
         # ── Diagnostic fit ────────────────────────────────────────────────────
         fit_group = QGroupBox("Diagnostic Nonlinear Fit")
         fit_layout = QFormLayout()
@@ -246,6 +281,8 @@ class BiasSettingsPanel(QWidget):
         * ``reference_freq_source`` (str) — one of
           ``"bias_frequency"``, ``"fit_fr"``, ``"sweep_center"``
         * ``fit_selected_amplitude`` (bool)
+        * ``bias_freq_method`` (str) — one of
+          ``"iq_derivative"`` (default), ``"log_iq_derivative"``
         """
         if self.rb_fit_fr.isChecked():
             ref_source = "fit_fr"
@@ -263,6 +300,11 @@ class BiasSettingsPanel(QWidget):
             deriv_hz = self.max_deriv_dist_spin.value() * 1e3
             deriv_fraction = self.max_deriv_frac_spin.value()   # stored but not used in abs mode
 
+        bias_method = (
+            "log_iq_derivative" if self.rb_log_iq_derivative.isChecked()
+            else "iq_derivative"
+        )
+
         return {
             'spike_prominence_factor':    self.spike_prominence_spin.value(),
             'spike_height_factor':        self.spike_height_spin.value(),
@@ -271,6 +313,7 @@ class BiasSettingsPanel(QWidget):
             'max_deriv_distance_fraction': deriv_fraction,
             'reference_freq_source':      ref_source,
             'fit_selected_amplitude':     self.fit_selected_cb.isChecked(),
+            'bias_freq_method':           bias_method,
         }
 
     # Alias so that ParamKeyExtractor (which looks for get_parameters) can
@@ -293,6 +336,7 @@ class BiasSettingsPanel(QWidget):
         self.max_deriv_dist_spin.setValue(100.0)
         self.max_deriv_frac_spin.setValue(0.5)
         self.rb_bias_freq.setChecked(True)
+        self.rb_iq_derivative.setChecked(True)    # resets method → classic IQ derivative
         self.fit_selected_cb.setChecked(True)
 
 

@@ -668,7 +668,12 @@ def update_derivative_grid(
             _plot_detector_derivatives(plot_item, bf, pen_color)
 
             plot_item.setLabel('bottom', '<i>f</i> − <i>f</i><sub>center</sub> [kHz]')
-            plot_item.setLabel('left', 'Normalised IQ speed  [1/Hz]')
+            # Y-axis label depends on which method was used for peak-finding
+            _method = bf.get('settings', {}).get('bias_freq_method', 'iq_derivative')
+            if _method == 'log_iq_derivative':
+                plot_item.setLabel('left', 'log(IQ arc-length speed)')
+            else:
+                plot_item.setLabel('left', 'Normalised IQ speed  [1/Hz]')
             plot_item.showGrid(x=True, y=True, alpha=0.3)
 
         plot_widget._detector_id = detector_id
@@ -688,14 +693,26 @@ def _plot_detector_derivatives(plot_item, bias_finding, pen_color):
     """
     Plot IQ-derivative data for a single detector using its ``bias_finding`` dict.
 
-    Three quantities are plotted on a shared kHz-offset x-axis:
+    The curves shown depend on which bias-frequency method was used when
+    ``find_bias_points`` was called (stored in ``bias_finding['settings']['bias_freq_method']``):
 
-    * **I_speed** — normalised per-step I increments ``diff(I/I_range)``
-      (discrete points, color A), with the normalised cubic-spline derivative
-      ``I_speed_spline`` overlaid as a smooth curve (same color A).
-    * **Q_speed** — same treatment in color B.
-    * **arc_length_speed** — overall IQ arc-length speed per Hz (color C).
-    * A thin dashed red vertical line at the refined ``bias_frequency``.
+    **``"iq_derivative"`` (default)**
+        Three quantities on a shared kHz-offset x-axis:
+
+        * **I_speed** — normalised per-step I increments, with the normalised
+          cubic-spline derivative overlaid (color A).
+        * **Q_speed** — same treatment (color B).
+        * **Arc-length speed** — ``sqrt(I_speed² + Q_speed²)`` from the
+          spline derivatives (color C).
+
+    **``"log_iq_derivative"``**
+        A single quantity:
+
+        * **log(Arc-length speed)** — natural log of the arc-length speed,
+          shown as a smooth spline curve (color C).  This is the quantity that
+          was maximised to locate the bias frequency.
+
+    In both cases a thin dashed red vertical line marks the refined ``bias_frequency``.
 
     Parameters
     ----------
@@ -708,46 +725,19 @@ def _plot_detector_derivatives(plot_item, bias_finding, pen_color):
         Fallback axis/text color (``'w'`` dark mode, ``'k'`` light mode).
     """
     freq_sorted = bias_finding.get('frequencies_sorted')
-    freq_arc_speed = bias_finding.get('freq_arc_speed')
-    I_speed = bias_finding.get('I_speed')
-    Q_speed = bias_finding.get('Q_speed')
-    arc_length_speed = bias_finding.get('arc_length_speed')
-    I_speed_sp = bias_finding.get('I_speed_spline')
-    Q_speed_sp = bias_finding.get('Q_speed_spline')
     bias_freq = bias_finding.get('bias_frequency')
+    method = bias_finding.get('settings', {}).get('bias_freq_method', 'iq_derivative')
 
-    # All arrays must be present and non-empty for a meaningful plot
-    if (freq_sorted is None or freq_arc_speed is None
-            or I_speed is None or Q_speed is None
-            or len(freq_sorted) < 2 or len(freq_arc_speed) == 0):
+    if freq_sorted is None or len(freq_sorted) < 2:
         return
 
     freq_sorted = np.asarray(freq_sorted)
-    freq_arc_speed = np.asarray(freq_arc_speed)
-    I_speed = np.asarray(I_speed)
-    Q_speed = np.asarray(Q_speed)
-
-    # I_speed and Q_speed from detect_bifurcation_derivative are dimensionless
-    # differences (diff(I/I_range)), not per-Hz quantities.  Divide by the
-    # per-step frequency interval so that all three curves share the same
-    # 1/Hz units as arc_length_speed and the spline derivatives.
-    freq_steps_hz = bias_finding.get('freq_steps_hz')
-    if freq_steps_hz is not None and len(freq_steps_hz) == len(I_speed):
-        _df = np.abs(np.asarray(freq_steps_hz))
-        # Guard against zero-length steps (shouldn't happen but be safe)
-        _df = np.where(_df > 0, _df, np.nan)
-        I_speed = I_speed / _df
-        Q_speed = Q_speed / _df
-
-    # Reference frequency for kHz offset (mean of the full sorted array)
     freq_ref = float(np.mean(freq_sorted))
 
     def to_khz(f):
         return 1e-3 * (np.asarray(f) - freq_ref)
 
-    freq_arc_khz = to_khz(freq_arc_speed)
-
-    # Colors: A = blue (I), B = orange (Q), C = green (arc_length_speed)
+    # Colors: A = blue (I), B = orange (Q), C = green (arc / log-arc)
     color_I   = TABLEAU10_COLORS[0]
     color_Q   = TABLEAU10_COLORS[1]
     color_arc = TABLEAU10_COLORS[2]
@@ -757,62 +747,113 @@ def _plot_detector_derivatives(plot_item, bias_finding, pen_color):
     def make_rgba(color, alpha):
         """Convert color spec to (R, G, B, alpha) tuple."""
         if isinstance(color, str):
-            # Named colors like 'b', 'r' etc.
             c = pg.mkColor(color)
             return (c.red(), c.green(), c.blue(), alpha)
         if isinstance(color, (list, tuple)) and len(color) >= 3:
             return (int(color[0]), int(color[1]), int(color[2]), alpha)
         return color
 
-    # ── I_speed discrete points ('.-': line + circle symbols) ───────────────
-    pen_I_disc = pg.mkPen(make_rgba(color_I, alpha_discrete), width=LINE_WIDTH)
-    plot_item.plot(
-        freq_arc_khz, I_speed,
-        pen=pen_I_disc,
-        symbol='o', symbolSize=4,
-        symbolPen=pg.mkPen(make_rgba(color_I, alpha_discrete)),
-        symbolBrush=pg.mkBrush(make_rgba(color_I, alpha_discrete)),
-        name='I speed',
-    )
+    if method == 'log_iq_derivative':
+        # ── Log arc-length speed: discrete sample points ──────────────────────
+        # We deliberately plot the raw discrete values rather than the smooth
+        # CubicSpline stored in log_arc_speed_spline.  The bias frequency was
+        # found from argmax(log_arc_speed) over these discrete points, so the
+        # f_bias vertical line is guaranteed to coincide with the highest
+        # visible data point.  A smooth spline fitted to noisy discrete data
+        # can have its peak at a different frequency (Runge-like oscillations),
+        # which would mislead the user about where the algorithm placed the
+        # bias point.
+        log_arc_speed = bias_finding.get('log_arc_speed')
 
-    # ── Q_speed discrete points ('.-': line + circle symbols) ───────────────
-    pen_Q_disc = pg.mkPen(make_rgba(color_Q, alpha_discrete), width=LINE_WIDTH)
-    plot_item.plot(
-        freq_arc_khz, Q_speed,
-        pen=pen_Q_disc,
-        symbol='o', symbolSize=4,
-        symbolPen=pg.mkPen(make_rgba(color_Q, alpha_discrete)),
-        symbolBrush=pg.mkBrush(make_rgba(color_Q, alpha_discrete)),
-        name='Q speed',
-    )
+        pen_log = pg.mkPen(color_arc, width=LINE_WIDTH)
 
-    # ── arc_length_speed: smooth curve derived from stored I/Q splines ───────
-    # Use the normalised I and Q derivative splines (already stored in
-    # bias_finding) to compute |dI/df + j·dQ/df| over a fine frequency grid.
-    # This is identical to what the bias-finding algorithm used, so the curve
-    # faithfully represents the quantity that was maximised to locate the bias
-    # frequency.  Fall back to the raw discrete points if the splines are absent.
-    pen_arc = pg.mkPen(color_arc, width=LINE_WIDTH)
-    if I_speed_sp is not None and Q_speed_sp is not None:
-        try:
-            f_fine = np.linspace(float(freq_sorted[0]), float(freq_sorted[-1]), 500)
-            arc_sp_vals = np.sqrt(I_speed_sp(f_fine) ** 2 + Q_speed_sp(f_fine) ** 2)
-            plot_item.plot(to_khz(f_fine), arc_sp_vals, pen=pen_arc, name='Arc length speed')
-        except Exception:
-            if arc_length_speed is not None and len(arc_length_speed) == len(freq_arc_speed):
+        if log_arc_speed is not None:
+            valid = np.isfinite(np.asarray(log_arc_speed))
+            if np.any(valid):
+                log_arr = np.asarray(log_arc_speed)
+                plot_item.plot(
+                    to_khz(freq_sorted[valid]),
+                    log_arr[valid],
+                    pen=pen_log,
+                    symbol='o', symbolSize=4,
+                    symbolPen=pg.mkPen(make_rgba(color_arc, alpha_discrete)),
+                    symbolBrush=pg.mkBrush(make_rgba(color_arc, alpha_discrete)),
+                    name='log(Arc-length speed)',
+                )
+
+    else:
+        # ── Standard IQ arc-length speed (three curves) ──────────────────────
+        freq_arc_speed   = bias_finding.get('freq_arc_speed')
+        I_speed          = bias_finding.get('I_speed')
+        Q_speed          = bias_finding.get('Q_speed')
+        arc_length_speed = bias_finding.get('arc_length_speed')
+        I_speed_sp       = bias_finding.get('I_speed_spline')
+        Q_speed_sp       = bias_finding.get('Q_speed_spline')
+
+        if (freq_arc_speed is None or I_speed is None or Q_speed is None
+                or len(freq_arc_speed) == 0):
+            # Not enough data for this sub-method — bail gracefully
+            pass
+        else:
+            freq_arc_speed = np.asarray(freq_arc_speed)
+            I_speed = np.asarray(I_speed)
+            Q_speed = np.asarray(Q_speed)
+
+            # Convert dimensionless diff values → 1/Hz by dividing by step width
+            freq_steps_hz = bias_finding.get('freq_steps_hz')
+            if freq_steps_hz is not None and len(freq_steps_hz) == len(I_speed):
+                _df = np.abs(np.asarray(freq_steps_hz))
+                _df = np.where(_df > 0, _df, np.nan)
+                I_speed = I_speed / _df
+                Q_speed = Q_speed / _df
+
+            freq_arc_khz = to_khz(freq_arc_speed)
+
+            # I_speed
+            pen_I_disc = pg.mkPen(make_rgba(color_I, alpha_discrete), width=LINE_WIDTH)
+            plot_item.plot(
+                freq_arc_khz, I_speed,
+                pen=pen_I_disc,
+                symbol='o', symbolSize=4,
+                symbolPen=pg.mkPen(make_rgba(color_I, alpha_discrete)),
+                symbolBrush=pg.mkBrush(make_rgba(color_I, alpha_discrete)),
+                name='I speed',
+            )
+
+            # Q_speed
+            pen_Q_disc = pg.mkPen(make_rgba(color_Q, alpha_discrete), width=LINE_WIDTH)
+            plot_item.plot(
+                freq_arc_khz, Q_speed,
+                pen=pen_Q_disc,
+                symbol='o', symbolSize=4,
+                symbolPen=pg.mkPen(make_rgba(color_Q, alpha_discrete)),
+                symbolBrush=pg.mkBrush(make_rgba(color_Q, alpha_discrete)),
+                name='Q speed',
+            )
+
+            # Arc-length speed: smooth spline curve or fallback to raw discrete
+            pen_arc = pg.mkPen(color_arc, width=LINE_WIDTH)
+            if I_speed_sp is not None and Q_speed_sp is not None:
+                try:
+                    f_fine = np.linspace(float(freq_sorted[0]), float(freq_sorted[-1]), 500)
+                    arc_sp_vals = np.sqrt(I_speed_sp(f_fine) ** 2 + Q_speed_sp(f_fine) ** 2)
+                    plot_item.plot(to_khz(f_fine), arc_sp_vals,
+                                   pen=pen_arc, name='Arc-length speed')
+                except Exception:
+                    if arc_length_speed is not None and len(arc_length_speed) == len(freq_arc_speed):
+                        plot_item.plot(freq_arc_khz, np.asarray(arc_length_speed),
+                                       pen=pen_arc, name='Arc-length speed')
+            elif arc_length_speed is not None and len(arc_length_speed) == len(freq_arc_speed):
                 plot_item.plot(freq_arc_khz, np.asarray(arc_length_speed),
-                               pen=pen_arc, name='Arc length speed')
-    elif arc_length_speed is not None and len(arc_length_speed) == len(freq_arc_speed):
-        plot_item.plot(freq_arc_khz, np.asarray(arc_length_speed),
-                       pen=pen_arc, name='Arc length speed')
+                               pen=pen_arc, name='Arc-length speed')
 
-    # ── Bias frequency vertical line ─────────────────────────────────────────
+    # ── Bias frequency vertical line (both methods) ───────────────────────────
     if bias_freq is not None:
         bias_khz = 1e-3 * (float(bias_freq) - freq_ref)
         vline_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine, width=1)
         plot_item.addItem(pg.InfiniteLine(
             pos=bias_khz, angle=90, pen=vline_pen, movable=False,
-            label=f'f_bias', labelOpts={'color': 'r', 'position': 0.92},
+            label='f_bias', labelOpts={'color': 'r', 'position': 0.92},
         ))
 
 

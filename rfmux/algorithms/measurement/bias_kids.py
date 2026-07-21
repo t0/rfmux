@@ -53,6 +53,7 @@ from scipy.interpolate import CubicSpline
 
 __all__ = [
     'compute_iq_derivative_spline',
+    'compute_logmag_derivative_spline',
     'find_max_derivative_frequency',
     'detect_bifurcation_derivative',
     'find_bias_points',
@@ -98,20 +99,93 @@ def compute_iq_derivative_spline(
     return dI_df, dQ_df
 
 
+def compute_logmag_derivative_spline(
+    frequencies: np.ndarray,
+    iq: np.ndarray,
+) -> "scipy.interpolate.PPoly":
+    """
+    Fit a cubic spline to ``log|IQ|(f)`` and return its derivative callable.
+
+    This is the low-level building block for the ``"log_iq_derivative"`` bias
+    frequency method.  Taking the logarithm of the IQ arc-length speed before
+    peak-finding compresses the dynamic range of the resonance feature: the
+    noise floor far from resonance is suppressed relative to the true peak,
+    making the resonance more distinctive and the spline interpolation smoother.
+
+    The natural logarithm is used (equivalent to dB up to a constant factor of
+    ``20/ln(10) ≈ 8.686``), so the returned spline derivative has units of
+    ``1/Hz``.
+
+    Parameters
+    ----------
+    frequencies : np.ndarray
+        Frequency array in Hz.  Need not be sorted — data are sorted internally.
+    iq : np.ndarray
+        Complex IQ data (e.g. ``iq_volts`` from a multisweep entry).  The
+        magnitude ``|iq|`` must be strictly positive; any zero or negative
+        values will raise a ``ValueError``.
+
+    Returns
+    -------
+    d_logmag_df : scipy.interpolate.PPoly
+        Derivative spline of ``log|IQ|(f)``.  Callable as
+        ``d_logmag_df(f)`` → float or ndarray.
+
+    Raises
+    ------
+    ValueError
+        If any element of ``|iq|`` is zero or negative (log is undefined).
+    """
+    sort_idx = np.argsort(frequencies)
+    freq_sorted = frequencies[sort_idx]
+    iq_sorted = iq[sort_idx]
+
+    mag = np.abs(iq_sorted)
+    if np.any(mag <= 0):
+        raise ValueError(
+            "compute_logmag_derivative_spline: |IQ| must be strictly positive "
+            "(found zero or negative values)."
+        )
+
+    log_mag = np.log(mag)
+    d_logmag_df = CubicSpline(freq_sorted, log_mag).derivative()
+    return d_logmag_df
+
+
 def find_max_derivative_frequency(
     frequencies: np.ndarray,
     iq: np.ndarray,
     reference_freq: float,
     max_distance_hz: float = 100e3,
-) -> tuple[float, float, float]:
+    method: Literal["iq_derivative", "log_iq_derivative"] = "iq_derivative",
+    return_arrays: bool = False,
+) -> tuple:
     """
-    Find the frequency of maximum ``|dI/df + j·dQ/df|`` within the sweep.
+    Find the frequency of peak IQ derivative within the sweep.
 
-    The point of maximum IQ arc-length speed corresponds to the resonance
-    frequency for a standard resonator sweep.  A sanity check is applied: if
-    the identified point is more than *max_distance_hz* away from
-    *reference_freq* it is assumed to be a glitch or outlier, and
-    *reference_freq* is returned instead.
+    Two methods are supported, selected via *method*:
+
+    ``"iq_derivative"`` (default)
+        Finds the frequency of maximum ``|dI/df + j·dQ/df|`` — the IQ
+        arc-length speed.  The maximum of the arc-length speed corresponds to
+        the resonance frequency for a standard resonator sweep.
+
+    ``"log_iq_derivative"``
+        Finds the frequency of maximum ``log(|dI/df + j·dQ/df|)`` — the
+        log-magnitude of the IQ arc-length speed.  Taking the logarithm
+        compresses the dynamic range of the resonance feature: the noise floor
+        far from resonance is strongly suppressed relative to the true peak,
+        making the resonance more distinctive in noisy data and improving the
+        stability of the spline interpolation.  The returned bias frequency is
+        determined by evaluating the log-arc-speed on the measured frequency
+        grid and selecting the peak; the IQ derivative components
+        ``dI_df_at_bias`` and ``dQ_df_at_bias`` are still computed from the
+        standard IQ derivative splines so that ``df_calibration`` remains
+        physically correct.
+
+    A sanity check is applied for both methods: if the identified point is
+    more than *max_distance_hz* away from *reference_freq* it is assumed to be
+    a glitch or outlier, and *reference_freq* is returned instead.
 
     Parameters
     ----------
@@ -126,34 +200,78 @@ def find_max_derivative_frequency(
         resonance frequency ``fr``, or the sweep centre frequency as a
         fallback.
     max_distance_hz : float
-        Maximum allowed distance (Hz) between the max-derivative point and
+        Maximum allowed distance (Hz) between the identified point and
         *reference_freq* before falling back to *reference_freq*.
         Default: 100 kHz.
+    method : {"iq_derivative", "log_iq_derivative"}
+        Peak-finding method.  Default: ``"iq_derivative"`` (existing
+        behaviour, no breaking change).
+    return_arrays : bool
+        When ``True``, return the intermediate frequency-grid arrays that were
+        used for peak-finding alongside the scalar outputs.  This allows
+        callers (e.g. :func:`find_bias_points`) to store the exact arrays in
+        the ``bias_finding`` dict for display and offline analysis, without any
+        re-computation.  Default: ``False`` (preserves the original 3-tuple
+        return value for all existing callers).
 
     Returns
     -------
-    bias_freq : float
-        Refined bias frequency in Hz.
-    dI_df_at_bias : float
-        dI/df evaluated at *bias_freq* in the same units as *iq* per Hz.
-    dQ_df_at_bias : float
-        dQ/df evaluated at *bias_freq* in the same units as *iq* per Hz.
+    When *return_arrays* is ``False`` (default):
+        ``(bias_freq, dI_df_at_bias, dQ_df_at_bias)``
+
+    When *return_arrays* is ``True``:
+        ``(bias_freq, dI_df_at_bias, dQ_df_at_bias,
+           freq_sorted, arc_speed, log_speed)``
+
+        * ``freq_sorted`` (np.ndarray) — frequency grid in Hz (ascending),
+          the x-axis for *arc_speed* and *log_speed*.
+        * ``arc_speed`` (np.ndarray) — ``|dI/df + j·dQ/df|`` evaluated at
+          *freq_sorted* in the same units as *iq* per Hz.  This is the
+          quantity maximised by the ``"iq_derivative"`` method.
+        * ``log_speed`` (np.ndarray or None) — ``log(arc_speed)`` evaluated
+          at *freq_sorted*; only set when *method* is
+          ``"log_iq_derivative"``, ``None`` otherwise.  This is the quantity
+          maximised by the ``"log_iq_derivative"`` method.  Values at sweep
+          edges where ``arc_speed == 0`` are ``nan``.
     """
     dI_df, dQ_df = compute_iq_derivative_spline(frequencies, iq)
 
     sort_idx = np.argsort(frequencies)
     freq_sorted = frequencies[sort_idx]
 
-    # Evaluate |dI/df + j*dQ/df| at each measured frequency point
-    deriv_mag = np.abs(dI_df(freq_sorted) + 1j * dQ_df(freq_sorted))
-    f_max_deriv = float(freq_sorted[np.argmax(deriv_mag)])
+    # Evaluate the arc-length speed at each measured frequency point
+    arc_speed = np.abs(dI_df(freq_sorted) + 1j * dQ_df(freq_sorted))
+
+    log_speed: np.ndarray | None = None
+
+    if method == "log_iq_derivative":
+        # Guard against zeros before taking log (can occur at sweep edges)
+        safe_speed = np.where(arc_speed > 0, arc_speed, np.nan)
+        log_speed = np.log(safe_speed)
+        # Ignore NaN entries when finding the peak
+        valid = np.isfinite(log_speed)
+        if not np.any(valid):
+            # All values are invalid — fall back to linear method
+            warnings.warn(
+                "find_max_derivative_frequency: log_iq_derivative — all arc-speed "
+                "values are zero or negative; falling back to iq_derivative method."
+            )
+            peak_idx = int(np.argmax(arc_speed))
+        else:
+            peak_idx = int(np.nanargmax(log_speed))
+    else:
+        # Default: linear arc-length speed
+        peak_idx = int(np.argmax(arc_speed))
+
+    f_max_deriv = float(freq_sorted[peak_idx])
 
     # Sanity check
     if abs(f_max_deriv - reference_freq) < max_distance_hz:
         bias_freq = f_max_deriv
     else:
+        method_label = "Log-max-derivative" if method == "log_iq_derivative" else "Max-derivative"
         warnings.warn(
-            f"Max-derivative point ({f_max_deriv * 1e-6:.4f} MHz) is "
+            f"{method_label} point ({f_max_deriv * 1e-6:.4f} MHz) is "
             f"{abs(f_max_deriv - reference_freq) * 1e-3:.1f} kHz from the "
             f"reference ({reference_freq * 1e-6:.4f} MHz) — exceeds "
             f"max_distance_hz = {max_distance_hz * 1e-3:.0f} kHz. "
@@ -164,6 +282,8 @@ def find_max_derivative_frequency(
     dI_df_at_bias = float(dI_df(bias_freq))
     dQ_df_at_bias = float(dQ_df(bias_freq))
 
+    if return_arrays:
+        return bias_freq, dI_df_at_bias, dQ_df_at_bias, freq_sorted, arc_speed, log_speed
     return bias_freq, dI_df_at_bias, dQ_df_at_bias
 
 
@@ -338,6 +458,7 @@ def find_bias_points(
     max_deriv_distance_hz: float = 100e3,
     reference_freq_source: Literal["bias_frequency", "fit_fr", "sweep_center"] = "bias_frequency",
     fit_selected_amplitude: bool = True,
+    bias_freq_method: Literal["iq_derivative", "log_iq_derivative"] = "iq_derivative",
 ) -> Dict[str, Dict]:
     """
     Analyse multi-amplitude multisweep results to find optimal bias points.
@@ -394,6 +515,21 @@ def find_bias_points(
         amplitude's sweep as a diagnostic.  The fit is always skipped when
         the selected entry is itself identified as bifurcated, to avoid
         feeding a pathological sweep to the fitter.
+    bias_freq_method : {"iq_derivative", "log_iq_derivative"}
+        Method used to locate the bias frequency within the selected sweep.
+        Passed directly to :func:`find_max_derivative_frequency`:
+
+        * ``"iq_derivative"`` (default) — maximise the IQ arc-length speed
+          ``|dI/df + j·dQ/df|``.  Classic method; robust for clean data.
+        * ``"log_iq_derivative"`` — maximise ``log(|dI/df + j·dQ/df|)``.
+          The logarithm compresses the dynamic range of the resonance feature
+          so that the true peak stands out more clearly when the arc-length
+          speed is noisy or has a high dynamic range.  The IQ derivative
+          components used for ``df_calibration`` are always computed from the
+          standard (non-log) splines.
+
+        The IQ Derivatives tab in Periscope shows whichever quantity was used
+        for peak-finding, making it easy to assess the quality of the result.
 
     Returns
     -------
@@ -401,7 +537,7 @@ def find_bias_points(
         The same dict passed in, updated in-place.  New / updated fields per
         resonator code:
 
-        * ``bias_frequency`` (float) — refined via max-derivative method
+        * ``bias_frequency`` (float) — refined via the chosen method
         * ``bias_amplitude`` (float) — selected amplitude
         * ``dI_df`` (float) — dI/df at the bias point (V/Hz)
         * ``dQ_df`` (float) — dQ/df at the bias point (V/Hz)
@@ -544,12 +680,22 @@ def find_bias_points(
         except Exception:
             pass  # Handled below
 
+        # bf_freq_sorted, bf_arc_speed, bf_log_speed are the exact intermediate
+        # arrays used for peak-finding — stored directly in bias_finding so that
+        # the display curve and the bias-frequency line are guaranteed to agree.
+        bf_freq_sorted: np.ndarray | None = None
+        bf_arc_speed:   np.ndarray | None = None
+        bf_log_speed:   np.ndarray | None = None
+
         try:
-            bias_freq, dI_df, dQ_df = find_max_derivative_frequency(
+            (bias_freq, dI_df, dQ_df,
+             bf_freq_sorted, bf_arc_speed, bf_log_speed) = find_max_derivative_frequency(
                 frequencies,
                 iq_for_deriv,
                 reference_freq=float(ref_freq),
                 max_distance_hz=max_deriv_distance_hz,
+                method=bias_freq_method,
+                return_arrays=True,
             )
         except Exception as exc:
             warnings.warn(
@@ -641,6 +787,31 @@ def find_bias_points(
                 f"find_bias_points: {code!r} — normalized spline fitting failed: {exc}"
             )
 
+        # Log arc-length speed for display: use the EXACT arrays returned by
+        # find_max_derivative_frequency (bf_log_speed, bf_freq_sorted) so that
+        # the displayed curve is the same quantity that was maximised to find the
+        # bias frequency.  This guarantees the bias-frequency vertical line aligns
+        # with the peak of the displayed curve.
+        #
+        # Additionally, build a CubicSpline over the finite log-speed values so the
+        # display can render a smooth interpolated curve over a fine frequency grid.
+        # This spline is for display only; the actual bias frequency was found from
+        # the discrete argmax of bf_log_speed.
+        log_arc_speed_sp = None
+        log_arc_speed = bf_log_speed   # None when method != "log_iq_derivative"
+
+        if log_arc_speed is not None and bf_freq_sorted is not None:
+            try:
+                valid_mask = np.isfinite(log_arc_speed)
+                if np.sum(valid_mask) >= 4:
+                    log_arc_speed_sp = CubicSpline(
+                        bf_freq_sorted[valid_mask], log_arc_speed[valid_mask]
+                    )
+            except Exception as exc:
+                warnings.warn(
+                    f"find_bias_points: {code!r} — log arc-speed spline fitting failed: {exc}"
+                )
+
         selected_entry['bias_finding'] = {
             # Sorted frequency axis (ascending, required by splines)
             'frequencies_sorted':       freq_sorted,
@@ -664,6 +835,12 @@ def find_bias_points(
             'freq_arc_speed':           bif_diag.get('freq_arc_speed', np.array([])),
             'freq_arc_speed_gradient':  bif_diag.get('freq_arc_speed_gradient', np.array([])),
 
+            # Log arc-length speed (populated only when bias_freq_method == "log_iq_derivative")
+            # log_arc_speed         — natural log of arc-length speed at freq_sorted points
+            # log_arc_speed_spline  — CubicSpline fitted to the log values (for smooth overlay)
+            'log_arc_speed':            log_arc_speed,
+            'log_arc_speed_spline':     log_arc_speed_sp,
+
             # Bias point
             'bias_frequency':           bias_freq,
             'bias_amplitude':           selected_amplitude,
@@ -682,6 +859,7 @@ def find_bias_points(
                 'spike_height_factor':        spike_height_factor,
                 'max_deriv_distance_hz':      max_deriv_distance_hz,
                 'reference_freq_source':      reference_freq_source,
+                'bias_freq_method':           bias_freq_method,
             },
         }
 

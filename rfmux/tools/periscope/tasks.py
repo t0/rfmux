@@ -929,6 +929,7 @@ class FindBiasTask(QtCore.QThread):
                 'max_deriv_distance_hz',
                 'reference_freq_source',
                 'fit_selected_amplitude',
+                'bias_freq_method',
             ):
                 if key in self.bias_settings:
                     kwargs[key] = self.bias_settings[key]

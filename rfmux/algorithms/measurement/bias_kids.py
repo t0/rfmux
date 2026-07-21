@@ -768,65 +768,24 @@ def find_bias_points(
                     f"find_bias_points: {code!r} — bifurcation diagnostics failed: {exc}"
                 )
 
-        # Normalized splines: fit CubicSpline to I/I_range and Q/Q_range so that
-        # the derivative is in units of 1/Hz — matching I_speed / Q_speed scale.
-        I_speed_sp = Q_speed_sp = None
+        # Sorted frequency axis stored in bias_finding for display alignment.
         sort_idx = np.argsort(frequencies)
         freq_sorted = frequencies[sort_idx]
-        iq_sorted = iq_for_deriv[sort_idx]
-        iarr = iq_sorted.real
-        qarr = iq_sorted.imag
-        irange = float(iarr.max() - iarr.min()) if len(iarr) > 0 else 0.0
-        qrange = float(qarr.max() - qarr.min()) if len(qarr) > 0 else 0.0
-        try:
-            if irange > 0 and qrange > 0:
-                I_speed_sp = CubicSpline(freq_sorted, iarr / irange).derivative()
-                Q_speed_sp = CubicSpline(freq_sorted, qarr / qrange).derivative()
-        except Exception as exc:
-            warnings.warn(
-                f"find_bias_points: {code!r} — normalized spline fitting failed: {exc}"
-            )
 
-        # Log arc-length speed for display: use the EXACT arrays returned by
-        # find_max_derivative_frequency (bf_log_speed, bf_freq_sorted) so that
-        # the displayed curve is the same quantity that was maximised to find the
-        # bias frequency.  This guarantees the bias-frequency vertical line aligns
-        # with the peak of the displayed curve.
-        #
-        # Additionally, build a CubicSpline over the finite log-speed values so the
-        # display can render a smooth interpolated curve over a fine frequency grid.
-        # This spline is for display only; the actual bias frequency was found from
-        # the discrete argmax of bf_log_speed.
-        log_arc_speed_sp = None
+        # Log arc-length speed (populated only when method == "log_iq_derivative").
+        # The display deliberately uses these discrete points — no spline needed.
         log_arc_speed = bf_log_speed   # None when method != "log_iq_derivative"
 
-        if log_arc_speed is not None and bf_freq_sorted is not None:
-            try:
-                valid_mask = np.isfinite(log_arc_speed)
-                if np.sum(valid_mask) >= 4:
-                    log_arc_speed_sp = CubicSpline(
-                        bf_freq_sorted[valid_mask], log_arc_speed[valid_mask]
-                    )
-            except Exception as exc:
-                warnings.warn(
-                    f"find_bias_points: {code!r} — log arc-speed spline fitting failed: {exc}"
-                )
-
         selected_entry['bias_finding'] = {
-            # Sorted frequency axis (ascending, required by splines)
+            # Sorted frequency axis (ascending)
             'frequencies_sorted':       freq_sorted,
 
-            # Voltage-calibrated derivative splines (V/Hz — for df_calibration physics)
-            'dI_df_spline':             dI_df_sp,
-            'dQ_df_spline':             dQ_df_sp,
+            # IQ derivative values at the bias point (float, V/Hz)
             'dI_df_at_bias':            dI_df,
             'dQ_df_at_bias':            dQ_df,
 
-            # Normalized derivative splines (1/Hz — matching I_speed/Q_speed scale, for display)
-            'I_speed_spline':           I_speed_sp,
-            'Q_speed_spline':           Q_speed_sp,
-
             # Discrete arrays from the bifurcation algorithm
+            # (these are the actual algorithm outputs used for display)
             'I_speed':                  bif_diag.get('I_speed', np.array([])),
             'Q_speed':                  bif_diag.get('Q_speed', np.array([])),
             'freq_steps_hz':            bif_diag.get('freq_steps_hz', np.array([])),
@@ -835,11 +794,9 @@ def find_bias_points(
             'freq_arc_speed':           bif_diag.get('freq_arc_speed', np.array([])),
             'freq_arc_speed_gradient':  bif_diag.get('freq_arc_speed_gradient', np.array([])),
 
-            # Log arc-length speed (populated only when bias_freq_method == "log_iq_derivative")
-            # log_arc_speed         — natural log of arc-length speed at freq_sorted points
-            # log_arc_speed_spline  — CubicSpline fitted to the log values (for smooth overlay)
+            # Log arc-length speed discrete points (only when method == "log_iq_derivative")
+            # These are the exact values used by argmax to locate the bias frequency.
             'log_arc_speed':            log_arc_speed,
-            'log_arc_speed_spline':     log_arc_speed_sp,
 
             # Bias point
             'bias_frequency':           bias_freq,

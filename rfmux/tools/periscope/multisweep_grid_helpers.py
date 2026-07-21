@@ -755,14 +755,10 @@ def _plot_detector_derivatives(plot_item, bias_finding, pen_color):
 
     if method == 'log_iq_derivative':
         # ── Log arc-length speed: discrete sample points ──────────────────────
-        # We deliberately plot the raw discrete values rather than the smooth
-        # CubicSpline stored in log_arc_speed_spline.  The bias frequency was
-        # found from argmax(log_arc_speed) over these discrete points, so the
-        # f_bias vertical line is guaranteed to coincide with the highest
-        # visible data point.  A smooth spline fitted to noisy discrete data
-        # can have its peak at a different frequency (Runge-like oscillations),
-        # which would mislead the user about where the algorithm placed the
-        # bias point.
+        # We plot the raw discrete values so that the f_bias vertical line is
+        # guaranteed to coincide with the highest visible data point.  The bias
+        # frequency was found from argmax(log_arc_speed) over these exact
+        # discrete points — no spline is stored or used here.
         log_arc_speed = bias_finding.get('log_arc_speed')
 
         pen_log = pg.mkPen(color_arc, width=LINE_WIDTH)
@@ -787,9 +783,6 @@ def _plot_detector_derivatives(plot_item, bias_finding, pen_color):
         I_speed          = bias_finding.get('I_speed')
         Q_speed          = bias_finding.get('Q_speed')
         arc_length_speed = bias_finding.get('arc_length_speed')
-        I_speed_sp       = bias_finding.get('I_speed_spline')
-        Q_speed_sp       = bias_finding.get('Q_speed_spline')
-
         if (freq_arc_speed is None or I_speed is None or Q_speed is None
                 or len(freq_arc_speed) == 0):
             # Not enough data for this sub-method — bail gracefully
@@ -831,19 +824,9 @@ def _plot_detector_derivatives(plot_item, bias_finding, pen_color):
                 name='Q speed',
             )
 
-            # Arc-length speed: smooth spline curve or fallback to raw discrete
+            # Arc-length speed: discrete algorithm output
             pen_arc = pg.mkPen(color_arc, width=LINE_WIDTH)
-            if I_speed_sp is not None and Q_speed_sp is not None:
-                try:
-                    f_fine = np.linspace(float(freq_sorted[0]), float(freq_sorted[-1]), 500)
-                    arc_sp_vals = np.sqrt(I_speed_sp(f_fine) ** 2 + Q_speed_sp(f_fine) ** 2)
-                    plot_item.plot(to_khz(f_fine), arc_sp_vals,
-                                   pen=pen_arc, name='Arc-length speed')
-                except Exception:
-                    if arc_length_speed is not None and len(arc_length_speed) == len(freq_arc_speed):
-                        plot_item.plot(freq_arc_khz, np.asarray(arc_length_speed),
-                                       pen=pen_arc, name='Arc-length speed')
-            elif arc_length_speed is not None and len(arc_length_speed) == len(freq_arc_speed):
+            if arc_length_speed is not None and len(arc_length_speed) == len(freq_arc_speed):
                 plot_item.plot(freq_arc_khz, np.asarray(arc_length_speed),
                                pen=pen_arc, name='Arc-length speed')
 

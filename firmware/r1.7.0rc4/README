@@ -1,0 +1,27 @@
+Firmware r1.7.0
+===============
+
+Upgrading from (firmware < 1.7.0) to (firmware >= 1.7.0) requires an upgrade to
+the SPI-flash bootloader. This is (hopefully) only a hassle once -- in future,
+it will be possible to do this step automatically via a Python script. However,
+if you are crossing the 1.7.0 boundary for the first time, you'll have to take
+extra steps.
+
+If you have Vivado 2025.1 installed, here is the necessary step:
+
+1. Ensure firmware files are actually present (and not just git-lfs placeholders)
+
+	$ git lfs pull --exclude= .
+
+2. Set up the Vivado execution environment:
+
+	$ source /opt/xilinx/2025.1/Vivado/settings64.sh
+
+3. With the board powered up and the SD card removed, run:
+
+	$ program_flash -f boot.bin -fsbl fsbl.elf -flash_type qspi-x8-dual_parallel
+
+Please contact us (gsmecher@t0.technology) with questions. We have prepared two
+portable computers ("Flat Mark" and "Flat Stanley") with the necessary software
+pre-installed; it's our intention to ship these to sites where people are
+unfamiliar with Vivado.

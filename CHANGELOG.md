@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.7.0](https://github.com/t0/rfmux/compare/v1.6.0...v1.7.0) (2026-07-22)
+
+
+### Features
+
+* **qc:** enable QC runs in wheel installs ([cce096a](https://github.com/t0/rfmux/commit/cce096a25a57e9c69a98131b5eb5e740790ee25c))
+
+
+### Bug Fixes
+
+* **qc:** ship missing pytest.ini needed for "rfmux qc" invocation ([22b1d47](https://github.com/t0/rfmux/commit/22b1d47d0f7b262bb93f3adf620c2939b7466a16))
+
 ## [1.6.0](https://github.com/t0/rfmux/compare/v1.5.0...v1.6.0) (2026-07-15)
 
 

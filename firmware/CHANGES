@@ -1,6 +1,6 @@
 # Changelog
 
-# r1.7.0rc1 - 2026-07-03
+# r1.7.0rc4 - 2026-07-22
 
 This is a major update, and REQUIRES an accompanying bootloader upgrade as well.
 You will need one of the following:
@@ -9,7 +9,7 @@ You will need one of the following:
 - A "Flat Mark" / "Flat Stanley" machine with the above pre-installed, which t0
   can ship to you.
 
-See fmrware/r1.7.0rc1/README for details.
+See firmware/r1.7.0rc1/README for details.
 
 New features:
 

@@ -120,14 +120,12 @@ class BoardStats:
     module_stats: dict[int, ModuleStats] = field(
         default_factory=lambda: defaultdict(ModuleStats)
     )
-    packets_indexed: int = 0
 
 
 def setup_dirfile_for_board(
     board_stats: BoardStats,
     serial: int,
     main_dirfile: gd.dirfile,
-    channels: list[range],
 ):
     """Create a subdirfile for a specific CRS board"""
     import pygetdata as gd
@@ -138,13 +136,6 @@ def setup_dirfile_for_board(
     board_stats.dirfile = gd.dirfile(
         board_path, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT
     )
-
-    num_channels = sum(len(r) for r in channels)
-
-    # Add index field for multiplexing
-    e = gd.entry(gd.RAW_ENTRY, "mplex_idx", 0, (gd.UINT16, 2 * num_channels))
-    board_stats.dirfile.add(e)
-    board_stats.dirfile.hide("mplex_idx")
     board_stats.dirfile.metaflush()
 
     # Link from main dirfile
@@ -184,41 +175,33 @@ def setup_dirfile_for_module(
     df.hide(raw_field)
 
     # Create demultiplexed I/Q fields for each channel
-    # Build a flat list of channels with their offsets
     ch_offset = 0
     for r in channels:
         for ch in r:
             i_field = f"m{module+1:02d}_c{ch+1:04d}_i"
             q_field = f"m{module+1:02d}_c{ch+1:04d}_q"
+            i_phase = i_field + "_ph"
+            q_phase = q_field + "_ph"
 
-            # MPLEX entry: (in_field, count_field, value, max)
-            df.add(
-                gd.entry(
-                    gd.MPLEX_ENTRY,
-                    i_field,
-                    0,
-                    (raw_field, "mplex_idx", 2 * ch_offset, 2 * num_channels),
-                )
-            )
+            # PHASE entry: (in_field, shift)
+            df.add(gd.entry(gd.PHASE_ENTRY, i_phase, 0, (raw_field, 2 * ch_offset)))
+            df.add(gd.entry(gd.PHASE_ENTRY, q_phase, 0, (raw_field, 2 * ch_offset + 1)))
+            df.hide(i_phase)
+            df.hide(q_phase)
 
-            df.add(
-                gd.entry(
-                    gd.MPLEX_ENTRY,
-                    q_field,
-                    0,
-                    (raw_field, "mplex_idx", 2 * ch_offset + 1, 2 * num_channels),
-                )
-            )
-
-            # Add combined IQ field (scaled)
-            iq_field = f"m{module+1:02d}_c{ch+1:04d}"
-            # LINCOM entry: (in_fields, m, b)
+            # Form complex channel data. INDEX anchors the output at spf 1; its
+            # coefficient is zero so only the raw fields contribute. This seems
+            # crazy (we're forming a field by adding 0*INDEX to some other
+            # field) but combined with the PHASE definitions above, it does the
+            # sampling-rate conversion (decimation) in exactly the way we want.
             df.add(
                 gd.entry(
                     gd.LINCOM_ENTRY,
-                    iq_field,
+                    f"m{module+1:02d}_c{ch+1:04d}",
                     0,
-                    ((i_field, q_field), (1 / 256.0 + 0j, 1j / 256.0), (0, 0)),
+                    (("INDEX", i_phase, q_phase),
+                     (0, 1/256, 1j/256), # gains
+                     (0, 0, 0)),         # offsets
                 )
             )
 
@@ -413,8 +396,6 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
 
     # Main receive loop
     chunk_size = 256
-    num_channels = sum(len(r) for r in channels)
-    index = np.arange(2 * num_channels, dtype=np.uint16)
 
     # Setup packet receiver with large buffer to reduce drops
     with get_multicast_socket(
@@ -510,9 +491,7 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                     if args.dirfile:
                         # Create board dirfile if needed
                         if bstats.dirfile is None:
-                            setup_dirfile_for_board(
-                                bstats, serial, main_dirfile, channels
-                            )
+                            setup_dirfile_for_board(bstats, serial, main_dirfile)
 
                         # Create module fields if needed
                         if mstats.dirfile_fields is None:
@@ -546,16 +525,6 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                                        first_frame=frame,
                                        first_sample=2*sample_offset)
                             sample_offset += len(r)
-
-                        # Extend mplex_idx to match the longest module
-                        # Write index if this module is ahead of the shared index
-                        if frame >= bstats.packets_indexed:
-                            df.putdata(
-                                "mplex_idx",
-                                index,
-                                first_frame=bstats.packets_indexed,
-                            )
-                            bstats.packets_indexed = frame + 1
 
                         # Increment per-module frame counter
                         mstats.dirfile_frame += 1

@@ -34,6 +34,9 @@ from rfmux.streamer import (
     SS_PER_SECOND,
 )
 
+TOTAL_CHANNELS = 1024
+TOTAL_MODULES = 4
+
 
 def resolve_interface(interface_name: str) -> str:
     """
@@ -99,6 +102,19 @@ def parse_ranges(spec: str, min_val: int, max_val: int, name: str) -> list[range
         ranges.append(range(start - 1, end))
 
     return ranges
+
+def parse_module_channels(specs: list[str]):
+    result = {}
+    for spec in specs:
+        mod_str, _, chan_str = spec.partition(":")
+        if not chan_str:
+            raise ValueError(f"Expected MODULE:CHANNELS, got {spec!r}")
+        module = int(mod_str)
+        if not 1 <= module <= TOTAL_MODULES:
+            raise ValueError(f"MODULE {mod_str} out of bounds [1, {TOTAL_MODULES}]")
+        channels = parse_ranges(chan_str, 1, TOTAL_CHANNELS, "channel")
+        result.setdefault(module - 1, []).extend(channels)
+    return result
 
 
 @dataclass
@@ -231,8 +247,11 @@ Examples:
   # Dump readout packets to text (by hostname)
   %(prog)s -H rfmux0033.local -t
 
-  # Write readout packets to dirfile, filter specific channels (by interface name)
-  %(prog)s -i eth0 -d ~/data/test.dirfile -c 1-10,50-100
+  # Write readout packets to dirfile, filter specific modules and channels (by interface name)
+  %(prog)s -i eth0 -d ~/data/test.dirfile -m 1-3 -c 1-10,50-100
+
+  # Filter by specific channels for different modules
+  %(prog)s -i eth0 -d ~/data/test.dirfile -c 1:1-128 -c 2:1-1024
 
   # Parse PFB packets instead of readout packets
   %(prog)s -H rfmux0033.local --pfb -d ~/data/pfb.dirfile
@@ -293,8 +312,13 @@ Examples:
     parser.add_argument(
         "-c",
         "--channel",
-        metavar="RANGE",
-        help='Filter by channel ranges (1-indexed, e.g., "1,5-10,100-200")',
+        action="append",
+        metavar="[MODULE:]RANGE",
+        help=(
+            'Filter by channel ranges (1-indexed, e.g., "1,5-10,100-200"), '
+            'or per-module with MODULE:RANGE (e.g., "-c 1:1 -c 2:1-3"). '
+            "The two forms cannot be mixed, and MODULE:RANGE excludes -m"
+        ),
     )
 
     parser.add_argument(
@@ -335,21 +359,11 @@ Examples:
     if args.num_frames is not None and args.num_frames < 0:
         parser.error("--num-frames must be non-negative")
 
-    # Parse channel and module ranges
-    TOTAL_CHANNELS = 1024
-    TOTAL_MODULES = 4
-
-    channels = (
-        parse_ranges(args.channel, 1, TOTAL_CHANNELS, "channel")
-        if args.channel
-        else [range(0, TOTAL_CHANNELS)]
-    )
-
-    modules = (
-        parse_ranges(args.module, 1, TOTAL_MODULES, "module")
-        if args.module
-        else [range(0, TOTAL_MODULES)]
-    )
+    per_module = [spec for spec in args.channel or [] if ":" in spec]
+    if per_module and len(per_module) != len(args.channel):
+        parser.error("cannot mix -c RANGE and -c MODULE:RANGE")
+    if per_module and args.module:
+        parser.error("cannot have -m since -c MODULE:RANGE already selects modules")
 
     serials = {args.serial} if args.serial else set()
 
@@ -363,14 +377,30 @@ Examples:
     # Statistics tracking
     board_stats: dict[int, BoardStats] = defaultdict(BoardStats)
 
-    # Dispatch to appropriate mode
-    if args.pfb:
-        return main_pfb(args, serials, modules, channels, interface_ip, board_stats)
+    if per_module and args.pfb:
+        parser.error("-c MODULE:RANGE is not supported with --pfb")
+
+    if per_module:
+        module_channels = parse_module_channels(per_module)
     else:
-        return main_readout(args, serials, modules, channels, interface_ip, board_stats)
+        channels = (
+            parse_ranges(",".join(args.channel), 1, TOTAL_CHANNELS, "channel")
+            if args.channel
+            else [range(0, TOTAL_CHANNELS)]
+        )
+        modules = (
+            parse_ranges(args.module, 1, TOTAL_MODULES, "module")
+            if args.module
+            else [range(0, TOTAL_MODULES)]
+        )
+        if args.pfb:
+            return main_pfb(args, serials, modules, channels, interface_ip, board_stats)
+        module_channels = {module: channels for r in modules for module in r}
+
+    return main_readout(args, serials, module_channels, interface_ip, board_stats)
 
 
-def main_readout(args, serials, modules, channels, interface_ip, board_stats):
+def main_readout(args, serials, module_channels, interface_ip, board_stats):
     """Main loop for readout packet parsing"""
     # Signal handler for clean exit
     def signal_handler(signum, frame):
@@ -417,7 +447,7 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                     continue
 
                 # Filter by module
-                if not any(module in r for r in modules):
+                if module not in module_channels:
                     continue
 
                 # Get/create statistics
@@ -450,7 +480,7 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                     # Clip channel ranges to actual packet size
                     clipped_channels = [
                         range(r.start, min(r.stop, len(pkt)))
-                        for r in channels
+                        for r in module_channels[module]
                         if r.start < len(pkt)
                     ]
 
@@ -495,7 +525,7 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
 
                         # Create module fields if needed
                         if mstats.dirfile_fields is None:
-                            setup_dirfile_for_module(bstats, mstats, module, channels)
+                            setup_dirfile_for_module(bstats, mstats, module, clipped_channels)
 
                         df = bstats.dirfile
                         fields = mstats.dirfile_fields

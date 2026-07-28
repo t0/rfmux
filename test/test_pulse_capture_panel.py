@@ -366,7 +366,8 @@ def test_waveform_fetch_after_eviction_and_stop(qt_app, tmp_path):
     panel._show_pulse(1, 1)  # triggers async fetch from the live file
     assert _spin_until(
         qt_app,
-        lambda: len(panel.pulse_plot.getPlotItem().listDataItems()) >= 2), \
+        lambda: len(panel.pulse_plot_i.getPlotItem().listDataItems()) >= 1
+        and len(panel.pulse_plot_q.getPlotItem().listDataItems()) >= 1), \
         "waveform never loaded from the live HDF5 file"
     assert "Pulse #000001" in panel.pulse_info.text()
 

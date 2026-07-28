@@ -250,12 +250,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.pulse_info)
 
-        self.pulse_plot = pg.PlotWidget()
-        self.pulse_plot.getPlotItem().addLegend(offset=(-10, 10))
-        self.pulse_plot.getPlotItem().setLabel("bottom", "time (ms)")
-        self.pulse_plot.getPlotItem().setLabel("left", "amplitude (counts)")
-        self.pulse_plot.getPlotItem().showGrid(x=True, y=True, alpha=0.3)
-        v.addWidget(self.pulse_plot, stretch=1)
+        # I and Q stacked vertically (x-linked), each with its own
+        # baseline/threshold bands in its own quadrature's sigma.
+        self.pulse_plot_i = pg.PlotWidget()
+        self.pulse_plot_q = pg.PlotWidget()
+        for plot, ylabel in ((self.pulse_plot_i, "I (counts)"),
+                             (self.pulse_plot_q, "Q (counts)")):
+            item = plot.getPlotItem()
+            item.setLabel("left", ylabel)
+            item.showGrid(x=True, y=True, alpha=0.3)
+        self.pulse_plot_q.getPlotItem().setLabel("bottom", "time (ms)")
+        self.pulse_plot_q.setXLink(self.pulse_plot_i)
+        v.addWidget(self.pulse_plot_i, stretch=1)
+        v.addWidget(self.pulse_plot_q, stretch=1)
         return w
 
     def _build_histograms_view(self) -> QtWidgets.QWidget:
@@ -606,7 +613,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
              f"{started or datetime.datetime.now().strftime('%H:%M:%S')}",
              "", ""]))
         self.pulse_tree.addTopLevelItem(meta)
-        self.pulse_plot.clear()
+        self.pulse_plot_i.clear()
+        self.pulse_plot_q.clear()
         self.pulse_info.setText("No pulse selected")
         self._render_histograms()
 
@@ -725,27 +733,29 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"Q = {ns.mean_Q:.1f} ± {ns.std_Q:.2f}\n"
             f"bands: ±{thr:g}σ trigger (dashed), ±{end:g}σ end (dotted)")
 
-        self.pulse_plot.clear()
-        self.pulse_plot.setTitle(f"Noise training — Channel {channel}")
         x = np.arange(len(arr))
-        self.pulse_plot.plot(x, arr.real, pen=pg.mkPen(
-            IQ_COLORS["I"], width=1.0), name="I")
-        self.pulse_plot.plot(x, arr.imag, pen=pg.mkPen(
-            IQ_COLORS["Q"], width=1.0), name="Q")
-        for mean, color in ((ns.mean_I, IQ_COLORS["I"]),
-                            (ns.mean_Q, IQ_COLORS["Q"])):
-            self.pulse_plot.addLine(y=mean, pen=pg.mkPen(
+        self.pulse_plot_i.clear()
+        self.pulse_plot_q.clear()
+        self.pulse_plot_i.setTitle(f"Noise training — Channel {channel}")
+        self.pulse_plot_q.setTitle(None)
+        self.pulse_plot_q.getPlotItem().setLabel("bottom", "sample")
+        for plot, data, color, mean, std in (
+                (self.pulse_plot_i, arr.real, IQ_COLORS["I"],
+                 ns.mean_I, ns.std_I),
+                (self.pulse_plot_q, arr.imag, IQ_COLORS["Q"],
+                 ns.mean_Q, ns.std_Q)):
+            plot.plot(x, data, pen=pg.mkPen(color, width=1.0))
+            plot.addLine(y=mean, pen=pg.mkPen(
                 color, width=0.8, style=QtCore.Qt.PenStyle.DotLine))
-        for sign in (+1, -1):
-            self.pulse_plot.addLine(
-                y=ns.mean_I + sign * thr * ns.std_I,
-                pen=pg.mkPen("#888888", width=0.8,
-                             style=QtCore.Qt.PenStyle.DashLine))
-            self.pulse_plot.addLine(
-                y=ns.mean_I + sign * end * ns.std_I,
-                pen=pg.mkPen("#666666", width=0.8,
-                             style=QtCore.Qt.PenStyle.DotLine))
-        self.pulse_plot.getPlotItem().setLabel("bottom", "sample")
+            for sign in (+1, -1):
+                plot.addLine(
+                    y=mean + sign * thr * std,
+                    pen=pg.mkPen("#888888", width=0.8,
+                                 style=QtCore.Qt.PenStyle.DashLine))
+                plot.addLine(
+                    y=mean + sign * end * std,
+                    pen=pg.mkPen("#666666", width=0.8,
+                                 style=QtCore.Qt.PenStyle.DotLine))
 
     def _set_status(self, text: str, color: str) -> None:
         self.status_label.setText(
@@ -815,8 +825,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"({summary.get('snr', 0):.1f}σ)\n"
             f"derived τ = {tau_str}")
 
-        self.pulse_plot.clear()
-        self.pulse_plot.getPlotItem().setLabel("bottom", "time (ms)")
+        for plot in (self.pulse_plot_i, self.pulse_plot_q):
+            plot.clear()
+            plot.setTitle(None)
+        self.pulse_plot_q.getPlotItem().setLabel("bottom", "time (ms)")
         if wf is None:
             # Evicted from the live cache — fetch it from the HDF5 file
             # via the worker thread (waveform_ready redraws on arrival).
@@ -824,12 +836,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             if self.task is not None and self._pending_fetch != key:
                 self._pending_fetch = key
                 self.task.request_waveform(channel, pulse_idx)
-                self.pulse_plot.setTitle("loading waveform from file…")
+                self.pulse_plot_i.setTitle("loading waveform from file…")
             else:
-                self.pulse_plot.setTitle("waveform not available")
+                self.pulse_plot_i.setTitle("waveform not available")
             return
         self._pending_fetch = None
-        self.pulse_plot.setTitle(None)
 
         t = np.asarray(wf["Time"], dtype=np.float64)
         finite = np.isfinite(t)
@@ -838,26 +849,26 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         amp_I = np.asarray(wf["Amp_I"], dtype=np.float64)
         amp_Q = np.asarray(wf["Amp_Q"], dtype=np.float64)
 
-        self.pulse_plot.plot(t_ms, amp_I, pen=pg.mkPen(
-            IQ_COLORS["I"], width=LINE_WIDTH), name="I")
-        self.pulse_plot.plot(t_ms, amp_Q, pen=pg.mkPen(
-            IQ_COLORS["Q"], width=LINE_WIDTH), name="Q")
-
         ns = self.noise_stats.get(channel)
-        if ns is not None:
-            thr = float(self.threshold_spin.value())
-            end = float(self.end_spin.value())
-            for mean, color in ((ns.mean_I, IQ_COLORS["I"]),
-                                (ns.mean_Q, IQ_COLORS["Q"])):
-                self.pulse_plot.addLine(y=mean, pen=pg.mkPen(
-                    color, width=0.8, style=QtCore.Qt.PenStyle.DotLine))
+        thr = float(self.threshold_spin.value())
+        end = float(self.end_spin.value())
+        for plot, data, color, mean, std in (
+                (self.pulse_plot_i, amp_I, IQ_COLORS["I"],
+                 getattr(ns, "mean_I", None), getattr(ns, "std_I", None)),
+                (self.pulse_plot_q, amp_Q, IQ_COLORS["Q"],
+                 getattr(ns, "mean_Q", None), getattr(ns, "std_Q", None))):
+            plot.plot(t_ms, data, pen=pg.mkPen(color, width=LINE_WIDTH))
+            if mean is None or std is None:
+                continue
+            plot.addLine(y=mean, pen=pg.mkPen(
+                color, width=0.8, style=QtCore.Qt.PenStyle.DotLine))
             for sign in (+1, -1):
-                self.pulse_plot.addLine(
-                    y=ns.mean_I + sign * thr * ns.std_I,
+                plot.addLine(
+                    y=mean + sign * thr * std,
                     pen=pg.mkPen("#888888", width=0.8,
                                  style=QtCore.Qt.PenStyle.DashLine))
-                self.pulse_plot.addLine(
-                    y=ns.mean_I + sign * end * ns.std_I,
+                plot.addLine(
+                    y=mean + sign * end * std,
                     pen=pg.mkPen("#666666", width=0.8,
                                  style=QtCore.Qt.PenStyle.DotLine))
 
@@ -901,7 +912,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def apply_theme(self, dark_mode: bool) -> None:
         self.dark_mode = dark_mode
         bg_color, pen_color = theme_colors(dark_mode)
-        plots = [self.pulse_plot] + list(self.hist_plots.values())
+        plots = [self.pulse_plot_i, self.pulse_plot_q] \
+            + list(self.hist_plots.values())
         for plot in plots:
             plot.setBackground(bg_color)
             item = plot.getPlotItem()

@@ -880,3 +880,49 @@ class TestPulseCaptureSession:
         session.start()
         with pytest.raises(RuntimeError):
             session.start()
+
+
+# ───────────────────────── Histogram auto-expansion ─────────────────
+
+class TestHistogramAutoExpand:
+    def test_expand_double_merges_pairs(self):
+        acc = HistogramAccumulator(np.linspace(0, 10, 11))  # 10 bins
+        acc.add(0.5)   # bin 0
+        acc.add(1.5)   # bin 1
+        acc.add(9.5)   # bin 9
+        assert acc.expand_double()
+        assert acc.bin_edges[-1] == 20
+        assert len(acc.counts) == 10
+        assert acc.counts[0] == 2      # bins 0+1 merged
+        assert acc.counts[4] == 1      # bins 8+9 merged
+        assert acc.total == 3
+
+    def test_expand_requires_zero_base_and_even_bins(self):
+        assert not HistogramAccumulator(
+            np.linspace(1, 10, 11)).expand_double()   # nonzero base
+        assert not HistogramAccumulator(
+            np.linspace(0, 10, 10)).expand_double()   # 9 bins (odd)
+
+    def test_out_of_range_snr_expands_instead_of_dropping(self):
+        """The 'SNR histogram never updates' bug: values beyond the
+        configured range now expand the bins instead of vanishing."""
+        hist = PulseHistogramSet(snr_range=(0, 50), snr_bins=100,
+                                 threshold_sigma=5.0)
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        # SNR ≈ 400 — 8x beyond the default range
+        hist.add_pulse(1, _make_decay_pulse(amp_sigma=400.0), ns)
+        acc = hist.get_channel_histograms(1)["snr"]
+        assert acc.total == 1, "pulse must be binned, not dropped"
+        assert acc.bin_edges[-1] >= 400
+
+    def test_expansion_keeps_channels_in_lockstep(self):
+        hist = PulseHistogramSet(snr_range=(0, 50), threshold_sigma=5.0)
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        hist.add_pulse(1, _make_decay_pulse(amp_sigma=20.0), ns)   # in range
+        hist.add_pulse(2, _make_decay_pulse(amp_sigma=400.0), ns)  # expands
+        e1 = hist.get_channel_histograms(1)["snr"].bin_edges
+        e2 = hist.get_channel_histograms(2)["snr"].bin_edges
+        assert np.array_equal(e1, e2), \
+            "per-channel histograms must share bin edges"
+        assert hist.get_channel_histograms(1)["snr"].total == 1
+        assert hist.get_channel_histograms(2)["snr"].total == 1

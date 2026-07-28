@@ -70,6 +70,22 @@ class HistogramAccumulator:
         """Total number of values added across all bins."""
         return int(np.sum(self.counts))
 
+    def expand_double(self) -> bool:
+        """Double the range by pairwise-merging bins (exact, O(n_bins)).
+
+        Requires a zero-based range and an even bin count; bin count is
+        unchanged (the upper half starts empty).  Returns False when the
+        accumulator is not expandable.
+        """
+        n = len(self.counts)
+        if n < 2 or n % 2 or self.bin_edges[0] != 0:
+            return False
+        merged = self.counts[0::2] + self.counts[1::2]
+        self.counts = np.zeros(n, dtype=np.int64)
+        self.counts[: n // 2] = merged
+        self.bin_edges = self.bin_edges * 2.0
+        return True
+
     def reset(self) -> None:
         """Zero all bin counts."""
         self.counts[:] = 0
@@ -174,13 +190,44 @@ class PulseHistogramSet:
 
         summary = pulse_summary(pulse_data, noise_stats, self.threshold_sigma)
 
-        h["amplitude"].add(summary["peak_amp"])
-        h["snr"].add(summary["snr"])
-        h["duration_ms"].add(summary["duration_ms"])
-        if np.isfinite(summary["tau_ms"]):
-            h["tau_ms"].add(summary["tau_ms"])
+        for metric, value in (("amplitude", summary["peak_amp"]),
+                              ("snr", summary["snr"]),
+                              ("duration_ms", summary["duration_ms"]),
+                              ("tau_ms", summary["tau_ms"])):
+            if metric == "tau_ms" and not np.isfinite(value):
+                continue
+            self._ensure_range(metric, value)
+            h[metric].add(value)
 
         return summary
+
+    # Template-edge attribute per metric (used when new channels appear)
+    _EDGE_ATTRS = {
+        "amplitude": "amp_edges",
+        "duration_ms": "dur_edges",
+        "snr": "snr_edges",
+        "tau_ms": "tau_edges",
+    }
+
+    def _ensure_range(self, metric: str, value: float) -> None:
+        """Auto-expand *metric*'s bins (across ALL channels, in lockstep)
+        until *value* fits.  Values beyond a fixed range would otherwise
+        be silently dropped — the classic 'histogram never updates'
+        failure when a signal is brighter than the configured range.
+        """
+        if not np.isfinite(value) or value < 0:
+            return
+        attr = self._EDGE_ATTRS[metric]
+        for _ in range(64):  # 2**64 dynamic range — effectively unbounded
+            edges = getattr(self, attr)
+            if value < edges[-1]:
+                return
+            expanded = [acc.expand_double()
+                        for acc in (ch[metric]
+                                    for ch in self.histograms.values())]
+            if expanded and not all(expanded):
+                return  # not expandable (odd bins / nonzero base)
+            setattr(self, attr, edges * 2.0)
 
     def get_channel_histograms(
         self, channel: int,

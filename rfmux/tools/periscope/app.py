@@ -2741,7 +2741,15 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if file_path.endswith('.ipynb'):
             self._open_notebook_file(file_path)
             return
-        
+
+        # HDF5 files (streamed pulse captures) never go through pickle
+        if file_path.lower().endswith(('.h5', '.hdf5')):
+            if self.session_manager.identify_file_type(file_path) == 'pulse':
+                self._load_pulse_capture_from_session(file_path)
+            else:
+                self._open_file_with_system_default(file_path)
+            return
+
         # Identify file type from filename
         file_type = self.session_manager.identify_file_type(file_path)
         
@@ -2788,6 +2796,36 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             traceback.print_exc()
     
+    def _load_pulse_capture_from_session(self, file_path: str):
+        """Open a pulse-capture HDF5 file in a review-mode panel."""
+        from pathlib import Path
+        self.pulse_capture_window_count += 1
+        n = self.pulse_capture_window_count
+        panel = PulseCapturePanel(
+            parent=self,
+            periscope=self,
+            session_manager=getattr(self, "session_manager", None),
+            dark_mode=self.dark_mode,
+        )
+        try:
+            panel.load_from_hdf5(file_path)
+        except Exception as e:
+            panel.deleteLater()
+            QtWidgets.QMessageBox.critical(
+                self, "Load Error",
+                f"Could not open pulse capture file:\n{file_path}\n\n{e}")
+            return
+        stem = Path(file_path).stem
+        dock = self.dock_manager.create_dock(
+            panel, f"Pulses: {stem}", f"pulse_review_{n}_{int(time.time())}")
+        main_dock = self.dock_manager.get_dock("main_plots")
+        if main_dock:
+            self.tabifyDockWidget(main_dock, dock)
+        dock.show()
+        dock.raise_()
+        self.pulse_capture_windows[f"pulse_review_{n}"] = {
+            "window": panel, "dock": dock}
+
     def _load_netanal_from_session(self, data: dict, file_path: str):
         """Load network analysis data from session file into a new panel."""
         # Check if data has the expected structure

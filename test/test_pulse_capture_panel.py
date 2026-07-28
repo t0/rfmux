@@ -172,3 +172,98 @@ def test_tap_exclusivity(qt_app, tmp_path, monkeypatch):
     panel1.close()
     panel2.close()
     _spin(qt_app)
+
+
+# ───────────────────────── Phase C: review mode + session ───────────
+
+from rfmux.algorithms.measurement.pulse_capture_session import (  # noqa: E402
+    PulseCaptureSession,
+)
+
+
+def _build_capture_file(tmp_path, n_pulses=3):
+    """Produce a real capture HDF5 headlessly via PulseCaptureSession."""
+    path = tmp_path / "review_source.h5"
+    session = PulseCaptureSession(
+        channels=[1], threshold_sigma=5.0, end_sigma=1.5,
+        margin_fraction=0.2, noise_samples=200, hdf5_path=path,
+        histogram_flush_every=2)
+    rng = np.random.default_rng(42)
+    session.start()
+    for _ in range(200):
+        session.feed_sample(1, float(rng.normal(0, 1.0)),
+                            float(rng.normal(0, 1.0)), None)
+    n = 3000
+    starts = [100 + 800 * i for i in range(n_pulses)]
+    signal = rng.normal(0, 1.0, n)
+    k = np.arange(n)
+    for k0 in starts:
+        m = k >= k0
+        signal[m] += 60.0 * np.exp(-(k[m] - k0) / 40.0)
+    for i in range(n):
+        session.feed_sample(1, float(signal[i]),
+                            float(rng.normal(0, 1.0)), i * DT)
+    assert session.total_pulses == n_pulses
+    session.stop()
+    return path
+
+
+def test_review_mode(qt_app, tmp_path):
+    path = _build_capture_file(tmp_path)
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+
+    # Controls restored from file metadata, then locked
+    assert panel.threshold_spin.value() == pytest.approx(5.0)
+    assert panel.end_spin.value() == pytest.approx(1.5)
+    assert not panel.btn_start.isEnabled()
+    assert not panel.channels_edit.isEnabled()
+    assert "Review Mode" in panel.status_label.text()
+
+    # Tree populated newest-first
+    ch_item = panel._channel_items[1]
+    assert ch_item.childCount() == 3
+    assert "(3)" in ch_item.text(0)
+    assert "#000003" in ch_item.child(0).text(0)
+
+    # Waveforms come from the reader (no task)
+    assert panel.task is None
+    wf = panel._get_waveform(1, 2)
+    assert wf is not None and len(wf["Amp_I"]) > 0
+    panel._show_pulse(1, 2)
+    assert "Pulse #000002" in panel.pulse_info.text()
+
+    # Histograms restored from the file
+    for metric in ("snr", "amplitude", "duration_ms", "tau_ms"):
+        assert len(panel.hist_plots[metric].getPlotItem().
+                   listDataItems()) >= 1, f"no curve in {metric}"
+
+    panel.close()
+    _spin(qt_app)
+
+
+def test_identify_and_register(qt_app, tmp_path):
+    from rfmux.tools.periscope.session_manager import SessionManager
+
+    h5 = _build_capture_file(tmp_path)
+    fake = tmp_path / "not_really.h5"
+    fake.write_text("plain text pretending to be hdf5")
+
+    sm = SessionManager()
+    session_dir = sm.start_session(str(tmp_path), "session_test")
+    assert sm.is_active
+
+    assert sm.identify_file_type(str(h5)) == "pulse"
+    assert sm.identify_file_type(str(fake)) is None
+
+    exported = []
+    sm.file_exported.connect(lambda p, t: exported.append((p, t)))
+    target = session_dir / "pulse_module1_120000.h5"
+    target.write_bytes(h5.read_bytes())
+    sm.register_external_file(str(target), "pulse", "module1")
+
+    assert exported == [(str(target), "pulse")]
+    entries = sm.session_metadata.get("exports", [])
+    assert any(e["data_type"] == "pulse"
+               and e["filename"] == target.name for e in entries)
+    sm.end_session()

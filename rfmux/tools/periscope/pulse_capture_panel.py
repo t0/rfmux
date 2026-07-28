@@ -35,6 +35,7 @@ from .utils import (
 )
 from .pulse_capture_task import PulseCaptureSignals, PulseCaptureTask
 from ...algorithms.measurement.pulse_capture_session import PulseCaptureSession
+from ...algorithms.measurement.pulse_hdf5 import PulseHDF5Reader
 
 # Channel plot colors: ch1 = I-blue, ch2 = Q-orange (HUD convention),
 # further channels from Tableau10.
@@ -75,6 +76,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self.task: Optional[PulseCaptureTask] = None
         self.signals: Optional[PulseCaptureSignals] = None
+        self.reader: Optional[PulseHDF5Reader] = None
+        self._review_mode = False
+        self._registered_export = False
         self._tap_registered = False
         self.noise_stats: Dict[int, object] = {}
         self.hdf5_path: Optional[Path] = None
@@ -379,6 +383,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.signals.finished.connect(self._on_task_finished, conn)
 
         self._reset_results(channels)
+        self._registered_export = False
         self.path_label.setText(f"HDF5: {path}")
         self._capture_start_wall = time.time()
 
@@ -421,7 +426,100 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             self.task.request_stop()
             self.task.wait(3000)
             self.task = None
+        if self.reader is not None:
+            self.reader.close()
+            self.reader = None
         super().closeEvent(event)
+
+    # ── Review mode (existing HDF5 file, no live capture) ─────────
+
+    def load_from_hdf5(self, path) -> None:
+        """Open an existing pulse-capture HDF5 for browsing."""
+        self.reader = PulseHDF5Reader(path)
+        meta = self.reader.metadata
+        channels = [int(c) for c in self.reader.channels]
+
+        # Restore capture parameters so bands/labels reflect the file
+        if "streamer_mode" in meta:
+            self.mode_combo.setCurrentText(str(meta["streamer_mode"]))
+        if "threshold_sigma" in meta:
+            self.threshold_spin.setValue(float(meta["threshold_sigma"]))
+        if "end_sigma" in meta:
+            self.end_spin.setValue(float(meta["end_sigma"]))
+        if "module" in meta:
+            self.module_spin.setValue(int(meta["module"]))
+        self.channels_edit.setText(",".join(str(c) for c in channels))
+
+        started = None
+        if "capture_start" in meta:
+            started = datetime.datetime.fromtimestamp(
+                float(meta["capture_start"])).strftime("%H:%M:%S")
+        self._reset_results(channels, started=started)
+
+        self.noise_stats = {c: self.reader.noise_stats(c) for c in channels}
+        parts = [f"Ch{c} I={ns.mean_I:.1f}±{ns.std_I:.2f}, "
+                 f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}"
+                 for c, ns in sorted(self.noise_stats.items())]
+        self.noise_label.setText("Noise:  " + "   |   ".join(parts))
+
+        # Tree from lazy per-pulse metadata (ascending insert at row 0
+        # → newest first), with fallbacks for files written before the
+        # unified snr/peak_amp/tau_s attrs existed.
+        for c in channels:
+            for m in self.reader.iter_pulse_metadata(c):
+                idx = int(m["pulse_idx"])
+                snr = float(m.get("snr") or max(
+                    m.get("peak_snr_I", 0.0), m.get("peak_snr_Q", 0.0)))
+                summary = {
+                    "n_samples": int(m.get("n_samples", 0)),
+                    "pileup": bool(m.get("pileup", False)),
+                    "peak_amp": float(m.get("peak_amp") or max(
+                        m.get("peak_I", 0.0), m.get("peak_Q", 0.0))),
+                    "snr": snr,
+                    "duration_ms": float(m.get("duration_s", 0.0)) * 1e3,
+                    "tau_ms": float(m.get("tau_s", float("nan"))) * 1e3,
+                    "timestamp": float(m.get("timestamp", 0.0)),
+                }
+                self._pulse_order.append((c, idx))
+                self._pulse_summaries[(c, idx)] = summary
+                self._counts[c] = self._counts.get(c, 0) + 1
+                parent = self._channel_items.get(c)
+                if parent is not None:
+                    label = ("⚠" if summary["pileup"] else "◆") \
+                        + f" #{idx:06d}"
+                    item = QtWidgets.QTreeWidgetItem(
+                        [label, str(summary["n_samples"]),
+                         f"{snr:.1f}σ"])
+                    item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
+                                 ("pulse", c, idx))
+                    if summary["pileup"]:
+                        for col in range(3):
+                            item.setBackground(col, QtGui.QColor(
+                                "#3a3320" if self.dark_mode else "#fff3c2"))
+                    parent.insertChild(0, item)
+                    parent.setText(0, f"▤ Channel {c} ({self._counts[c]})")
+
+        self._hist_data = self.reader.get_histograms()
+        self._render_histograms()
+
+        self._review_mode = True
+        self._set_run_state(False)
+        self.btn_start.setEnabled(False)
+        self.btn_start.setToolTip("Review mode — this panel browses an "
+                                  "existing capture file")
+        for w in (self.mode_combo, self.channels_edit, self.module_spin,
+                  self.threshold_spin, self.end_spin, self.pileup_check,
+                  self.btn_browse):
+            w.setEnabled(False)
+        self.path_label.setText(f"HDF5: {path}")
+        total = sum(self._counts.values())
+        self._set_status(
+            f"● Review Mode — {total} pulses — {Path(path).name}",
+            "#3366CC")
+
+        self.follow_check.setChecked(False)
+        if self._pulse_order:
+            self._show_pulse(*self._pulse_order[-1])
 
     def _set_run_state(self, running: bool) -> None:
         self.btn_start.setText("■ Stop" if running else "▶ Start")
@@ -437,7 +535,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if not running:
             self._set_status("● Idle", "#9A9A9A")
 
-    def _reset_results(self, channels: List[int]) -> None:
+    def _reset_results(self, channels: List[int],
+                       started: Optional[str] = None) -> None:
         self._pulse_order.clear()
         self._pulse_summaries.clear()
         self._current_view = None
@@ -459,7 +558,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             [f"σ={self.threshold_spin.value():g}  "
              f"end={self.end_spin.value():g}", "", ""]))
         meta.addChild(QtWidgets.QTreeWidgetItem(
-            [f"started {datetime.datetime.now().strftime('%H:%M:%S')}",
+            [f"started "
+             f"{started or datetime.datetime.now().strftime('%H:%M:%S')}",
              "", ""]))
         self.pulse_tree.addTopLevelItem(meta)
         self.pulse_plot.clear()
@@ -477,6 +577,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                          f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}")
         self.noise_label.setText("Noise:  " + "   |   ".join(parts))
         self._refresh_status_line()
+
+        # Register the streamed HDF5 with the session (once per capture)
+        if (not self._registered_export and self.task is not None
+                and self.session_manager is not None
+                and getattr(self.session_manager, "is_active", False)):
+            path = self.task.session.hdf5_path
+            sp = self.session_manager.session_path
+            if path is not None and sp is not None \
+                    and Path(sp) in Path(path).parents:
+                self.session_manager.register_external_file(
+                    str(path), "pulse",
+                    f"module{self.task.session.module}")
+            self._registered_export = True
 
     def _on_pulse_detected(self, channel: int, pulse_idx: int,
                            summary: dict) -> None:
@@ -559,7 +672,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _get_waveform(self, channel: int, pulse_idx: int) -> Optional[dict]:
         if self.task is not None:
-            return self.task.get_pulse(channel, pulse_idx)
+            wf = self.task.get_pulse(channel, pulse_idx)
+            if wf is not None:
+                return wf
+        if self.reader is not None:
+            return self.reader.get_pulse(channel, pulse_idx)
         return None
 
     def _show_pulse(self, channel: int, pulse_idx: int) -> None:

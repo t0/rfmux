@@ -16,7 +16,12 @@ dependencies = [
   "aiohttp",
   "awaitless",
   "click>=8.0",
-  "ipykernel<8",  # Pin to 6.x for qtconsole in-process kernel compatibility (ipykernel 7.x has a bug)
+  # Pin to 6.x for qtconsole in-process kernel compatibility: ipykernel 7.x
+  # do_execute dereferences shell_channel_thread.parent_thread, which the
+  # in-process kernel (embedded Periscope console) never creates ->
+  # AttributeError on every execute. Do NOT let dependabot relax this to <8
+  # until the in-process kernel works (see test/test_embedded_console.py).
+  "ipykernel<7",
   "ipython",
   "jupyterlab",
   "matplotlib",

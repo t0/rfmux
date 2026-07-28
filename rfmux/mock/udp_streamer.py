@@ -346,14 +346,14 @@ class MockCRSStreamer(threading.Thread):
                     else 0),
             num_modules=1,
             flags=0,
-            fir_stage=dec,
+            fir_stage=dec | (0x8 if self.mock_crs._short_packets else 0),
             module=module_num - 1,  # 0-indexed
             seq=seq,
         )
-        pkt.samples = (
+        pkt[:] = (
             np.clip(channel_samples.real, -8388608, 8388607)
             + 1j * np.clip(channel_samples.imag, -8388608, 8388607)
-        ).tolist()
+        )
         pkt.ts = ts
         self.mock_crs._last_timestamp = ts
 
@@ -435,7 +435,7 @@ class MockCRSStreamer(threading.Thread):
             np.clip(interleaved.real, -8388608, 8388607)
             + 1j * np.clip(interleaved.imag, -8388608, 8388607)
         )
-        pkt.samples = clipped
+        pkt[:] = clipped
 
         # ── Timestamp ─────────────────────────────────────────
         pkt_dt = self.start_datetime + timedelta(seconds=t_batch)

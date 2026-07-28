@@ -12,7 +12,7 @@ from typing import Union, List, Optional
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...tuber.codecs import TuberResult
+from tuber.codecs import TuberResult
 from ...core.transferfunctions import VOLTS_PER_ROC, spectrum_from_slow_tod
 from ... import streamer
 from .pulse_detection import PulseCapture, Circular, estimate_noise_levels
@@ -190,7 +190,7 @@ class _SlowStreamPulseCapture:
         st.trigger_value = None
 
     def _update_buffer_and_capture(self, pkt):
-        samples = pkt.samples / 256.0
+        samples = np.array(pkt) / 256.0
         arr_time = self._calculate_relative_timestamp(pkt)
     
         self.abs_n += 1
@@ -321,7 +321,7 @@ def get_noise_level(packets, threshs, channels, thresh_type):
               calculation (i.e., samples below that channel’s threshold).
     """
     ### Find ideal solution ####
-    samples = np.stack([p.samples for p in packets]) / 256.0
+    samples = np.stack([np.array(p) for p in packets]) / 256.0
     real_all = samples.real
     imag_all = samples.imag
 

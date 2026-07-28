@@ -1,5 +1,92 @@
 # Changelog
 
+## [1.6.0](https://github.com/t0/rfmux/compare/v1.5.0...v1.6.0) (2026-07-15)
+
+
+### Features
+
+* **cli:** add a "rfmux" command-line interface delegating to subcommands ([3d2bd7e](https://github.com/t0/rfmux/commit/3d2bd7e881c21a8effeffcf488164613945b31ff))
+* **firmware:** adds "firmware" command ([b712057](https://github.com/t0/rfmux/commit/b7120572f5b4ec8a1604160a23212e3a234d3185))
+* **qc:** Add new QC framework ([f48d4ba](https://github.com/t0/rfmux/commit/f48d4badea22ad95755c2fc92a49173a1a7e892d))
+* **qc:** replace test/run_qc.py with "rfmux qc" command ([783e9f3](https://github.com/t0/rfmux/commit/783e9f3abdd9554b7062001b7563730db89c84d3))
+
+
+### Bug Fixes
+
+* **qc:** add start time and duration of each test to the QC report ([f440ace](https://github.com/t0/rfmux/commit/f440ace2fb0b8f01012c9340f845ab6f729bd58b))
+* **qc:** dip issue in test_dac_passband caused by indexing mistake ([54ae1bb](https://github.com/t0/rfmux/commit/54ae1bbe7eda793b0a1e2e407a34830aadeed246))
+* **qc:** squash BeautifulSoup deprecation warning ([db06488](https://github.com/t0/rfmux/commit/db0648855d144eb20566503e65652f43bc9312fd))
+* **qc:** update housekeeping measurements and limits to match up-to-date HW, FW ([4488d80](https://github.com/t0/rfmux/commit/4488d800443b7a074694ee48e3c2b152099be4b1))
+* **qc:** update the xfail tests to current reporting standard ([a964736](https://github.com/t0/rfmux/commit/a9647364537a2a66fae00b571c5b23de40752341))
+
+## [1.5.0](https://github.com/t0/rfmux/compare/v1.4.1...v1.5.0) (2026-07-03)
+
+
+### Features
+
+* **firmware:** release r1.6.1 ([1c48813](https://github.com/t0/rfmux/commit/1c488135e8c0d7acfef7193615dd0340fd145f12))
+* **firmware:** release r1.6.1rc1 ([217c184](https://github.com/t0/rfmux/commit/217c184e58d0467c4a25912e76c341993f192b7b))
+* **firmware:** release r1.6.1rc2 ([1e8c498](https://github.com/t0/rfmux/commit/1e8c4980ea11d0c6dad0bedb31ce8c05c2bed723))
+* **mts:** Add multi-tile sync and determinstic NCO phase relationships ([217c184](https://github.com/t0/rfmux/commit/217c184e58d0467c4a25912e76c341993f192b7b))
+
+
+### Bug Fixes
+
+* **dan:** correct set_amplitude_limit unit conversion ([1e8c498](https://github.com/t0/rfmux/commit/1e8c4980ea11d0c6dad0bedb31ce8c05c2bed723))
+* **streamer:** update libfmt to avoid MacOS build regression ([0f65b6b](https://github.com/t0/rfmux/commit/0f65b6b3dad6a3b778ff1965c43ad1e2f9bfc29f))
+
+## [1.4.1](https://github.com/t0/rfmux/compare/v1.4.0...v1.4.1) (2026-02-18)
+
+
+### Bug Fixes
+
+* **parser:** correct _timebase field to use SS_PER_SECOND (156.25e6), not 125e6 ([0ae9131](https://github.com/t0/rfmux/commit/0ae9131b5d1cab57d9ef6bfb55d1bf0f8e1194d8))
+* **parser:** don't use 0-indexed numbers when printing channel or module ([07afa47](https://github.com/t0/rfmux/commit/07afa473ff667cd803e6dd6964105e5bbb56df04))
+
+
+### Performance Improvements
+
+* **parser, streamer:** use __array__ API instaed of pkt.samples ([fdfa295](https://github.com/t0/rfmux/commit/fdfa2956ced1ac9cce4797ce8fa6a7a141358015))
+* **parser:** when striping packets to disk, use gd.putdata repeatedly ([23257ae](https://github.com/t0/rfmux/commit/23257aee484b9b5e533e58a04de5fd651af30da0))
+
+## [1.4.0](https://github.com/t0/rfmux/compare/v1.3.2...v1.4.0) (2026-02-17)
+
+
+### Features
+
+* **Channel Noise collection:** Implemented direct collection of noise spectra for selected channels from the main window.  ([#63](https://github.com/t0/rfmux/issues/63)) ([5c5ee4c](https://github.com/t0/rfmux/commit/5c5ee4c8c71a8ae4cbb9eabbdf25ae100038aa2c))
+* **firmware:** release r1.6.0 ([81a0b26](https://github.com/t0/rfmux/commit/81a0b26ba234a2d55e5013e210644df491d575d7))
+* **firmware:** release r1.6.0rc3 ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **firmware:** replace r1.6.0rc1 with r1.6.0rc2 ([2a29b1c](https://github.com/t0/rfmux/commit/2a29b1c57eca4ececaa2c22520a09314c2f16ba8))
+* **Pfb streamer periscope:** Script to run pfb streamer using firmware v1.6.0 and beyond ([#74](https://github.com/t0/rfmux/issues/74)) ([ad27431](https://github.com/t0/rfmux/commit/ad27431537c8d2c20b13f76e2198312ebd032479))
+* **set_aux_sma_mode:** allow aux SMA to drive IRIG-B test-mode timestamps ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **timestamp:** add _set_timestamp call for test-mode IRIG-B ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **timestamp:** add "set time" functionality in test-mode IRIG-B encoder ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **timestamp:** allow timestamp input via SMA_AUX ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **wheels:** add arm64 wheels for MacOS and Linux; build wheels on PR ([1e727f6](https://github.com/t0/rfmux/commit/1e727f6143deed8a0fe2351b19449c9f027cd726))
+
+
+### Bug Fixes
+
+* **docstring:** fix set_decimation / get_decimation docstrings ([81a0b26](https://github.com/t0/rfmux/commit/81a0b26ba234a2d55e5013e210644df491d575d7))
+* **dump_housekeeping:** support rev2 and earlier CRS hardware that ([2a29b1c](https://github.com/t0/rfmux/commit/2a29b1c57eca4ececaa2c22520a09314c2f16ba8))
+* **ergonomics:** when _receiver isn't imported, emit a helpful message ([8d47bb1](https://github.com/t0/rfmux/commit/8d47bb10c56600bf289312ca7fd4ea3ceccc6a15))
+* **high banking:** high-bank modules often need -4 offsets applied when indexing into firmware ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **parser:** correct missing pygetdata import ([bdfd930](https://github.com/t0/rfmux/commit/bdfd93093e048df377da641d27bbde71f6a80bad))
+* **parser:** correct timestamp message generation (c++ churn) ([4004220](https://github.com/t0/rfmux/commit/4004220eb180aed54c7f35e29709c85ea619c31f))
+* **parser:** don't require pygetdata as a top-level dependency ([c2a94dd](https://github.com/t0/rfmux/commit/c2a94dd3c03e8ef12486f153a80c4ee0022559da))
+* **parser:** PFB mode: when reporting slot allocations, use 1-indexed channels ([e0fd263](https://github.com/t0/rfmux/commit/e0fd2638162399f51e9310a92daad0de7570e232))
+* **pfb_streamer:** fix field swap between version and mode ([2a29b1c](https://github.com/t0/rfmux/commit/2a29b1c57eca4ececaa2c22520a09314c2f16ba8))
+* **pfb_streamer:** PFB packets now contain 1000 I/Q samples, rather than ([2a29b1c](https://github.com/t0/rfmux/commit/2a29b1c57eca4ececaa2c22520a09314c2f16ba8))
+* **streamer:** bump bandwidth derating from 0.5 to 0.8 ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **streamer:** export PFB_PACKET_SIZE in rfmux.streamer and ._receiver ([7a20d29](https://github.com/t0/rfmux/commit/7a20d2996f11bb5aaf6b4b0835c86a9c6049c4c6))
+* **streamer:** release on-board GIL during get_samples and get_pfb_samples calls ([81a0b26](https://github.com/t0/rfmux/commit/81a0b26ba234a2d55e5013e210644df491d575d7))
+* **streamer:** update maximum PFB packet length to match 1.6.0rc2 firmware ([35cef8d](https://github.com/t0/rfmux/commit/35cef8dd28a6733fad5f71df87e8bf7fb277758e))
+* **streamer:** validate bandwidth derating is between 0.5 and 1.0. ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **timestamp:** teach encoder how to serialize "C" field ([fcfdb2a](https://github.com/t0/rfmux/commit/fcfdb2a4597e7b4c35877580fd5a2da87c1d8fd6))
+* **wheel:** don't install libfmt collateral in wheel files ([aadff78](https://github.com/t0/rfmux/commit/aadff781f383cf23556aaadac0d6cb8ae38b0a18))
+* **wheel:** don't use -march=native - this makes wheels less portable ([746d2f3](https://github.com/t0/rfmux/commit/746d2f33839fce862cabdfa818d526d7b46b7a8f))
+
 ## [1.3.2](https://github.com/t0/rfmux/compare/v1.3.1...v1.3.2) (2026-01-12)
 
 

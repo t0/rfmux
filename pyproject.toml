@@ -6,6 +6,7 @@ build-backend = "scikit_build_core.build"
 name = "rfmux"
 dynamic = ["version"]
 description = "Python library for t0.technology CRS board running rfmux firmware"
+readme = "README.md"
 authors = [
   {name="Graeme Smecher", email="gsmecher@t0.technology"},
   {name="Joshua Montgomery", email="joshua@t0.technology"},
@@ -13,7 +14,9 @@ authors = [
 dependencies = [
   "PyQt6",
   "aiohttp",
-  "ipykernel<7",  # Pin to 6.x for qtconsole in-process kernel compatibility (ipykernel 7.x has a bug)
+  "awaitless",
+  "click>=8.0",
+  "ipykernel<8",  # Pin to 6.x for qtconsole in-process kernel compatibility (ipykernel 7.x has a bug)
   "ipython",
   "jupyterlab",
   "matplotlib",
@@ -29,6 +32,7 @@ dependencies = [
   "scipy",
   "simplejson",
   "sqlalchemy",
+  "tuber-client[async]>=0.18",
   # Intel Threading Building Blocks for numba parallel execution.
   # On macOS, you need libomp instead
   "tbb; sys_platform != 'darwin'",
@@ -42,11 +46,46 @@ requires-python = ">=3.9"
 # Debian/Ubuntu: apt-get install python3-pygetdata
 dirfile = []
 
+# Dependencies for "rfmux qc" (also requires Python 3.10+; the htpy marker
+# keeps this extra resolvable under our 3.9 floor)
+qc = [
+  "beautifulsoup4",
+  "htpy; python_version >= '3.10'",
+  "markdown",
+  "markupsafe",
+  "pytest_check",
+  "requests",
+  "scikit-learn",
+  "weasyprint",
+]
+
+# Dependencies for "rfmux firmware". Optional so the Yocto build (which never
+# needs them) doesn't carry extra pre-requisites.
+firmware = [
+  "pexpect",
+  "tqdm",
+  "xmodem",
+]
+
 [project.scripts]
+rfmux = "rfmux.tools.cli:main"
 parser = "rfmux.tools.parser:main"
 
 [project.gui-scripts]
 periscope = "rfmux.tools.periscope.__main__:main"
+
+[dependency-groups]
+dev = [
+  "rfmux[qc]",  # run the QC suite from a checkout
+  "jupytext",
+  "nbclient",
+  "nbformat",
+  "pytest_check",
+]
+
+# The dev group needs python 3.10+ (htpy, match syntax)
+[tool.uv.dependency-groups]
+dev = { requires-python = ">=3.10" }
 
 [project.urls]
 homepage = "https://github.com/t0/rfmux"
@@ -64,3 +103,18 @@ packages = ["rfmux"]
 [tool.setuptools_scm]
 version_file = "rfmux/_version.py"
 fallback_version = "0.0.0"
+
+[tool.uv]
+exclude-newer = "3 weeks"
+
+[tool.pytest.ini_options]
+# The QC suite (rfmux/tools/qc/) is excluded here; run it via "rfmux qc".
+testpaths = ["test"]
+
+markers = [
+  "offline",
+  "qc_stage1",
+  "qc_stage2",
+]
+
+asyncio_default_fixture_loop_scope = "session"

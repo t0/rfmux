@@ -16,12 +16,11 @@ import argparse
 import signal
 import socket
 import sys
-import tempfile
 from collections import defaultdict
-from contextlib import closing
 from dataclasses import dataclass, field
 from typing import Optional
 
+import click
 import psutil
 import numpy as np
 
@@ -32,7 +31,11 @@ from rfmux.streamer import (
     STREAMER_PORT,
     PFB_STREAMER_PORT,
     PFBPACKET_NSAMP_MAX,
+    SS_PER_SECOND,
 )
+
+TOTAL_CHANNELS = 1024
+TOTAL_MODULES = 4
 
 
 def resolve_interface(interface_name: str) -> str:
@@ -100,6 +103,19 @@ def parse_ranges(spec: str, min_val: int, max_val: int, name: str) -> list[range
 
     return ranges
 
+def parse_module_channels(specs: list[str]):
+    result = {}
+    for spec in specs:
+        mod_str, _, chan_str = spec.partition(":")
+        if not chan_str:
+            raise ValueError(f"Expected MODULE:CHANNELS, got {spec!r}")
+        module = int(mod_str)
+        if not 1 <= module <= TOTAL_MODULES:
+            raise ValueError(f"MODULE {mod_str} out of bounds [1, {TOTAL_MODULES}]")
+        channels = parse_ranges(chan_str, 1, TOTAL_CHANNELS, "channel")
+        result.setdefault(module - 1, []).extend(channels)
+    return result
+
 
 @dataclass
 class ModuleStats:
@@ -120,14 +136,12 @@ class BoardStats:
     module_stats: dict[int, ModuleStats] = field(
         default_factory=lambda: defaultdict(ModuleStats)
     )
-    packets_indexed: int = 0
 
 
 def setup_dirfile_for_board(
     board_stats: BoardStats,
     serial: int,
     main_dirfile: gd.dirfile,
-    channels: list[range],
 ):
     """Create a subdirfile for a specific CRS board"""
     import pygetdata as gd
@@ -138,13 +152,6 @@ def setup_dirfile_for_board(
     board_stats.dirfile = gd.dirfile(
         board_path, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT
     )
-
-    num_channels = sum(len(r) for r in channels)
-
-    # Add index field for multiplexing
-    e = gd.entry(gd.RAW_ENTRY, "mplex_idx", 0, (gd.UINT16, 2 * num_channels))
-    board_stats.dirfile.add(e)
-    board_stats.dirfile.hide("mplex_idx")
     board_stats.dirfile.metaflush()
 
     # Link from main dirfile
@@ -184,41 +191,33 @@ def setup_dirfile_for_module(
     df.hide(raw_field)
 
     # Create demultiplexed I/Q fields for each channel
-    # Build a flat list of channels with their offsets
     ch_offset = 0
     for r in channels:
         for ch in r:
             i_field = f"m{module+1:02d}_c{ch+1:04d}_i"
             q_field = f"m{module+1:02d}_c{ch+1:04d}_q"
+            i_phase = i_field + "_ph"
+            q_phase = q_field + "_ph"
 
-            # MPLEX entry: (in_field, count_field, value, max)
-            df.add(
-                gd.entry(
-                    gd.MPLEX_ENTRY,
-                    i_field,
-                    0,
-                    (raw_field, "mplex_idx", 2 * ch_offset, 2 * num_channels),
-                )
-            )
+            # PHASE entry: (in_field, shift)
+            df.add(gd.entry(gd.PHASE_ENTRY, i_phase, 0, (raw_field, 2 * ch_offset)))
+            df.add(gd.entry(gd.PHASE_ENTRY, q_phase, 0, (raw_field, 2 * ch_offset + 1)))
+            df.hide(i_phase)
+            df.hide(q_phase)
 
-            df.add(
-                gd.entry(
-                    gd.MPLEX_ENTRY,
-                    q_field,
-                    0,
-                    (raw_field, "mplex_idx", 2 * ch_offset + 1, 2 * num_channels),
-                )
-            )
-
-            # Add combined IQ field (scaled)
-            iq_field = f"m{module+1:02d}_c{ch+1:04d}"
-            # LINCOM entry: (in_fields, m, b)
+            # Form complex channel data. INDEX anchors the output at spf 1; its
+            # coefficient is zero so only the raw fields contribute. This seems
+            # crazy (we're forming a field by adding 0*INDEX to some other
+            # field) but combined with the PHASE definitions above, it does the
+            # sampling-rate conversion (decimation) in exactly the way we want.
             df.add(
                 gd.entry(
                     gd.LINCOM_ENTRY,
-                    iq_field,
+                    f"m{module+1:02d}_c{ch+1:04d}",
                     0,
-                    ((i_field, q_field), (1 / 256.0 + 0j, 1j / 256.0), (0, 0)),
+                    (("INDEX", i_phase, q_phase),
+                     (0, 1/256, 1j/256), # gains
+                     (0, 0, 0)),         # offsets
                 )
             )
 
@@ -231,7 +230,7 @@ def setup_dirfile_for_module(
             gd.LINCOM_ENTRY,
             timebase_field,
             0,
-            ((ts_sbs_field, ts_ss_field), (1.0, 1 / 125e6), (0, 0)),
+            ((ts_sbs_field, ts_ss_field), (1.0, 1 / SS_PER_SECOND), (0, 0)),
         )
     )
 
@@ -248,8 +247,11 @@ Examples:
   # Dump readout packets to text (by hostname)
   %(prog)s -H rfmux0033.local -t
 
-  # Write readout packets to dirfile, filter specific channels (by interface name)
-  %(prog)s -i eth0 -d ~/data/test.dirfile -c 1-10,50-100
+  # Write readout packets to dirfile, filter specific modules and channels (by interface name)
+  %(prog)s -i eth0 -d ~/data/test.dirfile -m 1-3 -c 1-10,50-100
+
+  # Filter by specific channels for different modules
+  %(prog)s -i eth0 -d ~/data/test.dirfile -c 1:1-128 -c 2:1-1024
 
   # Parse PFB packets instead of readout packets
   %(prog)s -H rfmux0033.local --pfb -d ~/data/pfb.dirfile
@@ -310,8 +312,13 @@ Examples:
     parser.add_argument(
         "-c",
         "--channel",
-        metavar="RANGE",
-        help='Filter by channel ranges (1-indexed, e.g., "1,5-10,100-200")',
+        action="append",
+        metavar="[MODULE:]RANGE",
+        help=(
+            'Filter by channel ranges (1-indexed, e.g., "1,5-10,100-200"), '
+            'or per-module with MODULE:RANGE (e.g., "-c 1:1 -c 2:1-3"). '
+            "The two forms cannot be mixed, and MODULE:RANGE excludes -m"
+        ),
     )
 
     parser.add_argument(
@@ -352,21 +359,11 @@ Examples:
     if args.num_frames is not None and args.num_frames < 0:
         parser.error("--num-frames must be non-negative")
 
-    # Parse channel and module ranges
-    TOTAL_CHANNELS = 1024
-    TOTAL_MODULES = 4
-
-    channels = (
-        parse_ranges(args.channel, 1, TOTAL_CHANNELS, "channel")
-        if args.channel
-        else [range(0, TOTAL_CHANNELS)]
-    )
-
-    modules = (
-        parse_ranges(args.module, 1, TOTAL_MODULES, "module")
-        if args.module
-        else [range(0, TOTAL_MODULES)]
-    )
+    per_module = [spec for spec in args.channel or [] if ":" in spec]
+    if per_module and len(per_module) != len(args.channel):
+        parser.error("cannot mix -c RANGE and -c MODULE:RANGE")
+    if per_module and args.module:
+        parser.error("cannot have -m since -c MODULE:RANGE already selects modules")
 
     serials = {args.serial} if args.serial else set()
 
@@ -380,14 +377,30 @@ Examples:
     # Statistics tracking
     board_stats: dict[int, BoardStats] = defaultdict(BoardStats)
 
-    # Dispatch to appropriate mode
-    if args.pfb:
-        return main_pfb(args, serials, modules, channels, interface_ip, board_stats)
+    if per_module and args.pfb:
+        parser.error("-c MODULE:RANGE is not supported with --pfb")
+
+    if per_module:
+        module_channels = parse_module_channels(per_module)
     else:
-        return main_readout(args, serials, modules, channels, interface_ip, board_stats)
+        channels = (
+            parse_ranges(",".join(args.channel), 1, TOTAL_CHANNELS, "channel")
+            if args.channel
+            else [range(0, TOTAL_CHANNELS)]
+        )
+        modules = (
+            parse_ranges(args.module, 1, TOTAL_MODULES, "module")
+            if args.module
+            else [range(0, TOTAL_MODULES)]
+        )
+        if args.pfb:
+            return main_pfb(args, serials, modules, channels, interface_ip, board_stats)
+        module_channels = {module: channels for r in modules for module in r}
+
+    return main_readout(args, serials, module_channels, interface_ip, board_stats)
 
 
-def main_readout(args, serials, modules, channels, interface_ip, board_stats):
+def main_readout(args, serials, module_channels, interface_ip, board_stats):
     """Main loop for readout packet parsing"""
     # Signal handler for clean exit
     def signal_handler(signum, frame):
@@ -396,7 +409,7 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
             for serial, bstats in board_stats.items():
                 for module, mstats in bstats.module_stats.items():
                     print(
-                        f"Serial {serial} module {module}: "
+                        f"Serial {serial} module {module+1}: "
                         f"{mstats.packets_seen} packets seen "
                         f"({mstats.packets_dropped} dropped)",
                         file=sys.stderr,
@@ -405,30 +418,22 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
 
     if args.dirfile:
         import pygetdata as gd
+        main_dirfile = gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
+    else:
+        main_dirfile = None
 
     signal.signal(signal.SIGINT, signal_handler)
 
     # Main receive loop
     chunk_size = 256
-    num_channels = sum(len(r) for r in channels)
-    index = np.arange(2 * num_channels, dtype=np.uint16)
 
     # Setup packet receiver with large buffer to reduce drops
-    with (
-        closing(
-            get_multicast_socket(
-                crs_hostname=args.hostname,
-                port=STREAMER_PORT,
-                interface=interface_ip,
-                buffer_size=67108864,
-            )
-        ) as sock,
-        closing(
-            gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
-            if args.dirfile
-            else tempfile.TemporaryFile()
-        ) as main_dirfile,
-    ):
+    with get_multicast_socket(
+        crs_hostname=args.hostname,
+        port=STREAMER_PORT,
+        interface=interface_ip,
+        buffer_size=67108864,
+    ) as sock:
         receiver = ReadoutPacketReceiver(sock, reorder_window=args.reorder_window)
 
         while True:
@@ -442,7 +447,7 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                     continue
 
                 # Filter by module
-                if not any(module in r for r in modules):
+                if module not in module_channels:
                     continue
 
                 # Get/create statistics
@@ -465,12 +470,19 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                         if pkt.seq != expected_seq:
                             gap = (pkt.seq - expected_seq) & 0xFFFFFFFF
                             print(
-                                f"Dropped packet: module {module}, "
+                                f"Dropped packet: module {module+1}, "
                                 f"seq {mstats.last_seq:08x} -> {pkt.seq:08x} "
                                 f"({gap} lost)"
                             )
                             mstats.packets_dropped += gap
                     mstats.last_seq = pkt.seq
+
+                    # Clip channel ranges to actual packet size
+                    clipped_channels = [
+                        range(r.start, min(r.stop, len(pkt)))
+                        for r in module_channels[module]
+                        if r.start < len(pkt)
+                    ]
 
                     # Text dump
                     if args.text:
@@ -497,14 +509,11 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                         )
 
                         # Sample channels
-                        num_pkt_channels = pkt.get_num_channels()
-                        for r in channels:
+                        for r in clipped_channels:
                             for ch in r:
-                                if ch >= num_pkt_channels:
-                                    break
-                                sample = pkt.get_channel(ch)
+                                sample = pkt[ch]
                                 print(
-                                    f"  CH({module}.{ch+1}) "
+                                    f"  CH({module+1}.{ch+1}) "
                                     f"i={sample.real:.3f} q={sample.imag:.3f} abs={abs(sample):.3f}"
                                 )
 
@@ -512,13 +521,11 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                     if args.dirfile:
                         # Create board dirfile if needed
                         if bstats.dirfile is None:
-                            setup_dirfile_for_board(
-                                bstats, serial, main_dirfile, channels
-                            )
+                            setup_dirfile_for_board(bstats, serial, main_dirfile)
 
                         # Create module fields if needed
                         if mstats.dirfile_fields is None:
-                            setup_dirfile_for_module(bstats, mstats, module, channels)
+                            setup_dirfile_for_module(bstats, mstats, module, clipped_channels)
 
                         df = bstats.dirfile
                         fields = mstats.dirfile_fields
@@ -539,38 +546,18 @@ def main_readout(args, serials, modules, channels, interface_ip, board_stats):
                             first_frame=frame,
                         )
 
-                        # Write channel data - extract selected channels and interleave I/Q
-                        samples = pkt.samples
-                        num_pkt_channels = pkt.get_num_channels()
+                        # Write channel data from raw int32 I/Q pairs.
+                        # Each pkt.raw_samples[slice] is a zero-copy view.
+                        sample_offset = 0
+                        for r in clipped_channels:
+                            df.putdata(fields["raw"],
+                                       pkt.raw_samples[2*r.start:2*r.stop],
+                                       first_frame=frame,
+                                       first_sample=2*sample_offset)
+                            sample_offset += len(r)
 
-                        # Gather selected channel data
-                        selected = []
-                        for r in channels:
-                            for ch in r:
-                                if ch < num_pkt_channels:
-                                    selected.append(samples[ch])
-
-                        # Convert to interleaved I/Q format (scaled by 256)
-                        if selected:
-                            complex_array = np.array(selected, dtype=np.complex64)
-                            raw_data = np.empty(2 * len(selected), dtype=np.int32)
-                            raw_data[0::2] = (complex_array.real * 256).astype(np.int32)
-                            raw_data[1::2] = (complex_array.imag * 256).astype(np.int32)
-
-                            df.putdata(fields["raw"], raw_data, first_frame=frame)
-
-                            # Extend mplex_idx to match the longest module
-                            # Write index if this module is ahead of the shared index
-                            if frame >= bstats.packets_indexed:
-                                df.putdata(
-                                    "mplex_idx",
-                                    index,
-                                    first_frame=bstats.packets_indexed,
-                                )
-                                bstats.packets_indexed = frame + 1
-
-                            # Increment per-module frame counter
-                            mstats.dirfile_frame += 1
+                        # Increment per-module frame counter
+                        mstats.dirfile_frame += 1
 
 
 def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
@@ -582,7 +569,7 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
             for serial, bstats in board_stats.items():
                 for module, mstats in bstats.module_stats.items():
                     print(
-                        f"Serial {serial} module {module}: "
+                        f"Serial {serial} module {module+1}: "
                         f"{mstats.packets_seen} packets seen "
                         f"({mstats.packets_dropped} dropped)",
                         file=sys.stderr,
@@ -599,6 +586,12 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
         )
         sys.exit(0)
 
+    if args.dirfile:
+        import pygetdata as gd
+        main_dirfile = gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
+    else:
+        main_dirfile = None
+
     signal.signal(signal.SIGINT, signal_handler)
 
     # Main receive loop
@@ -606,21 +599,12 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
     receiver = None
 
     # Setup packet receiver with large buffer to reduce drops
-    with (
-        closing(
-            get_multicast_socket(
-                crs_hostname=args.hostname,
-                port=PFB_STREAMER_PORT,
-                interface=interface_ip,
-                buffer_size=67108864,
-            )
-        ) as sock,
-        closing(
-            gd.dirfile(args.dirfile, gd.CREAT | gd.RDWR | gd.EXCL | gd.PRETTY_PRINT)
-            if args.dirfile
-            else tempfile.TemporaryFile()
-        ) as main_dirfile,
-    ):
+    with get_multicast_socket(
+        crs_hostname=args.hostname,
+        port=PFB_STREAMER_PORT,
+        interface=interface_ip,
+        buffer_size=67108864,
+    ) as sock:
         receiver = PFBPacketReceiver(sock, reorder_window=args.reorder_window)
 
         while True:
@@ -657,7 +641,7 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                         if pkt.seq != expected_seq:
                             gap = (pkt.seq - expected_seq) & 0xFFFFFFFF
                             print(
-                                f"Dropped packet: module {module}, "
+                                f"Dropped packet: module {module+1}, "
                                 f"seq {mstats.last_seq:08x} -> {pkt.seq:08x} "
                                 f"({gap} lost)"
                             )
@@ -692,20 +676,19 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                         slot_channels = [pkt.slot1, pkt.slot2, pkt.slot3, pkt.slot4][:num_slots]
 
                         # Sample a few interleaved values
-                        samples = pkt.samples
-                        max_display = min(8, pkt.num_samples)
+                        max_display = min(8, len(pkt))
                         for i in range(max_display):
                             # Samples are interleaved across slots
                             slot_idx = i % num_slots
                             ch = slot_channels[slot_idx]
-                            sample = samples[i]
+                            sample = pkt[i]
                             print(
                                 f"  Sample[{i}] slot{slot_idx+1}->ch{ch+1}: "
                                 f"i={sample.real:.3f} q={sample.imag:.3f} abs={abs(sample):.3f}"
                             )
 
-                        if pkt.num_samples > max_display:
-                            print(f"  ... ({pkt.num_samples - max_display} more samples)")
+                        if len(pkt) > max_display:
+                            print(f"  ... ({len(pkt) - max_display} more samples)")
 
                     # Dirfile output
                     if args.dirfile:
@@ -756,19 +739,14 @@ def main_pfb(args, serials, modules, channels, interface_ip, board_stats):
                         # For PFB4: [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, ...]
                         # Where: 0=slot1_I, 1=slot1_Q, 2=slot2_I, 3=slot2_Q, ...
                         # This repeats with period = 2 * num_slots
-                        num_samples = len(pkt.samples)
+                        n_samples = len(pkt)
                         period = 2 * num_slots
-                        slot_idx = np.tile(np.arange(period, dtype=np.uint16), (num_samples * 2 + period - 1) // period)[:2 * num_samples]
+                        slot_idx = np.tile(np.arange(period, dtype=np.uint16), (n_samples * 2 + period - 1) // period)[:2 * n_samples]
 
                         df.putdata(fields["slot_idx"], slot_idx, first_frame=frame)
 
-                        # Write samples (interleaved I/Q format, scaled by 256)
-                        samples = pkt.samples
-                        raw_data = np.empty(2 * len(samples), dtype=np.int32)
-                        raw_data[0::2] = (np.real(samples) * 256).astype(np.int32)
-                        raw_data[1::2] = (np.imag(samples) * 256).astype(np.int32)
-
-                        df.putdata(fields["raw"], raw_data, first_frame=frame)
+                        # Write raw int32 I/Q pairs directly (no scaling needed)
+                        df.putdata(fields["raw"], pkt.raw_samples[:2 * n_samples], first_frame=frame)
 
                         # Increment per-module frame counter
                         mstats.dirfile_frame += 1
@@ -903,12 +881,23 @@ def setup_pfb_dirfile_for_module(
             gd.LINCOM_ENTRY,
             timebase_field,
             0,
-            ((ts_sbs_field, ts_ss_field), (1.0, 1 / 125e6), (0, 0)),
+            ((ts_sbs_field, ts_ss_field), (1.0, 1 / SS_PER_SECOND), (0, 0)),
         )
     )
 
     # Flush metadata so dirfile can be read immediately
     df.metaflush()
+
+
+@click.command(context_settings=dict(
+    ignore_unknown_options=True,
+    allow_extra_args=True,
+    allow_interspersed_args=False,
+))
+@click.pass_context
+def cli(ctx):
+    """Run the data parser tool"""
+    sys.exit(main(*ctx.args))
 
 
 if __name__ == "__main__":

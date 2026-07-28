@@ -8,7 +8,7 @@ import sys
 import os
 
 # point to the repo root if your test lives elsewhere
-demo_path = Path(__file__).resolve().parents[1] / "home" / "Demos" / "simplified_tuning_flow.py"
+demo_path = Path(__file__).resolve().parents[1] / "rfmux" / "reference-notebooks" / "Demos" / "simplified_tuning_flow.py"
 
 spec = util.spec_from_file_location("simplified_tuning_flow", demo_path)
 simplified_tuning_flow = util.module_from_spec(spec)

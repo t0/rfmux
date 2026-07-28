@@ -23,7 +23,7 @@ import warnings
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...tuber.codecs import TuberResult
+from tuber.codecs import TuberResult
 from ...core.transferfunctions import VOLTS_PER_ROC
 from ... import streamer
 
@@ -192,9 +192,8 @@ async def py_run_pfb_streamer(crs : CRS,
                     p = streamer.PFBPacket(data)
                     packets.append(p)
                                     
-                    samples = p.samples
                     for lst, sl in zip(slot_lists, slices):
-                        lst.extend(samples[sl])
+                        lst.extend(p[sl])
 
                     # Track elapsed sample time from packet timestamps
                     ts_sec = _ts_to_seconds(p.ts)
@@ -241,7 +240,7 @@ async def py_run_pfb_streamer(crs : CRS,
                 print(f"[Pfb streaming] Sample time covered: {elapsed_sample_time:.4f}s "
                       f"(wall time: {wall_elapsed:.1f}s)")
 
-                pfb_samps = [np.asarray(lst, dtype=np.complex128) for lst in slot_lists]                
+                pfb_samps = [np.asarray(lst, dtype=np.complex128) for lst in slot_lists]
                 return sorted(packets, key=lambda p: p.seq), pfb_samps
                 
             # Allow up to 10 packet-loss retries
@@ -322,18 +321,15 @@ async def py_run_pfb_streamer(crs : CRS,
             
     
         # Return results
-        results = {
-            "i": time_list_i,
-            "q": time_list_q,
-            "spectrum" : TuberResult({
-                "freq_iq": freq_ssb.tolist(),
-                "psd_i": psd_list_i,
-                "psd_q": psd_list_q,
-                "freq_dsb": freq_dsb.tolist(),
-                "psd_dual_sideband": psd_list_dual})
-        }
-    
-        return TuberResult(results)
+        return TuberResult(
+            i=time_list_i,
+            q=time_list_q,
+            spectrum=TuberResult(
+                freq_iq=freq_ssb.tolist(),
+                psd_i=psd_list_i,
+                psd_q=psd_list_q,
+                freq_dsb=freq_dsb.tolist(),
+                psd_dual_sideband=psd_list_dual))
 
     except Exception as e:
         if e.__class__.__name__ == "TuberRemoteError":

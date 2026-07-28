@@ -103,7 +103,13 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # UDP streamer (ADC simulation)
     # -------------------------------------------------------------------------
     "udp_noise_level": 10.0,   # Additive ADC noise [counts]
-    "scale_factor": 2**21,     # Base 24-bit full-scale (~2.1e6 counts)
+    # scale_factor converts normalized S21 * amplitude to ADC readout counts.
+    # Calibrated so that counts * VOLTS_PER_ROC gives the correct physical
+    # voltage for 0 dB round-trip gain with default dac_scale = 1.0 dBm and
+    # adc reference = -1.75 dBm (the balun loss baked into VOLTS_PER_ROC).
+    # Formula: 1880796.46 * 10**((dac_scale_dbm - adc_ref_dbm) / 20)
+    #        = 1880796.46 * 10**(2.75 / 20) ≈ 2_580_128
+    "scale_factor": 1880796.4604246316 * 10**(2.75 / 20.0),
 
     # -------------------------------------------------------------------------
     # Quasiparticle pulse parameters (time-dependent nqp)

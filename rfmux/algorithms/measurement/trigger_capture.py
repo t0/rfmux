@@ -98,13 +98,13 @@ async def _collect_noise_samples(
             )
             if is_pfb:
                 pkt = streamer.PFBPacket(data)
-                raw = np.array(pkt.samples)
+                raw = np.array(pkt)
                 for slot_idx, ch in enumerate(channels):
                     ch_samples = raw[slot_idx::n_groups]
                     samples_by_ch[ch].extend(ch_samples.tolist())
             else:
                 pkt = streamer.ReadoutPacket(data)
-                raw = np.array(pkt.samples) / 256.0
+                raw = np.array(pkt) / 256.0
                 for ch in channels:
                     samples_by_ch[ch].append(complex(raw[ch - 1]))
             collected += 1
@@ -155,7 +155,7 @@ async def _wait_for_baseline(
 
             if is_pfb:
                 pkt = streamer.PFBPacket(data)
-                raw = np.array(pkt.samples)
+                raw = np.array(pkt)
                 for slot_idx, ch in enumerate(channels):
                     ch_samples = raw[slot_idx::n_groups]
                     if len(ch_samples) > 0:
@@ -174,7 +174,7 @@ async def _wait_for_baseline(
                 pkt = streamer.ReadoutPacket(data)
                 if pkt.module != module - 1:
                     continue
-                raw = np.array(pkt.samples) / 256.0
+                raw = np.array(pkt) / 256.0
                 for ch in channels:
                     s = raw[ch - 1]
                     ns = noise_stats[ch]
@@ -282,7 +282,7 @@ async def _receive_stream(
 
             if is_pfb:
                 pkt = streamer.PFBPacket(data)
-                raw = np.array(pkt.samples)
+                raw = np.array(pkt)
                 rel_time = _get_rel_time(_ts_to_seconds(pkt.ts))
 
                 time_samples = pkt.num_samples // n_groups
@@ -306,7 +306,7 @@ async def _receive_stream(
                 if pkt.module != module - 1:
                     continue
 
-                raw = np.array(pkt.samples) / 256.0
+                raw = np.array(pkt) / 256.0
                 rel_time = _get_rel_time(_ts_to_seconds(pkt.ts))
 
                 for ch in channels:
@@ -729,7 +729,7 @@ async def trigger_capture(
                         pkt = streamer.ReadoutPacket(data)
                         if pkt.module != module - 1:
                             continue
-                        raw = np.array(pkt.samples) / 256.0
+                        raw = np.array(pkt) / 256.0
                         rel = _get_rel(_ts_to_seconds(pkt.ts))
                         if pcap_slow.start_time is None and rel is not None:
                             pcap_slow.start_time = 0.0
@@ -742,7 +742,7 @@ async def trigger_capture(
 
                     elif completed is tasks.get("fast"):
                         pkt = streamer.PFBPacket(data)
-                        raw = np.array(pkt.samples)
+                        raw = np.array(pkt)
                         rel = _get_rel(_ts_to_seconds(pkt.ts))
                         if pcap_fast.start_time is None and rel is not None:
                             pcap_fast.start_time = 0.0

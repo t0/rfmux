@@ -12,7 +12,7 @@ from . import hardware_map
 from .hardware_map import Boolean, HWMResource, HWMQuery
 
 import sqlalchemy
-from .. import tuber
+import tuber
 
 
 class ArgumentFiller:
@@ -44,7 +44,7 @@ class ArgumentFiller:
         def tuber_context(self):
             obj = decorator.getobject(self)
             kwargs = {n: f(self) for (n, f) in decorator.arg_mappers.items()}
-            return Context(obj, **kwargs)
+            return tuber.client.Context(obj, **kwargs)
 
         cls.tuber_context = tuber_context
 
@@ -130,11 +130,17 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
     def __init__(self, *args, **kwargs):
         if "module" not in kwargs and "modules" not in kwargs:
             self.modules = [ReadoutModule(module=m + 1) for m in range(8)]
-        super().__init__(*args, **kwargs)
+
+        hardware_map.HWMResource.__init__(self, *args, **kwargs)
+        tuber.TuberObject.__init__(
+            self, "Dfmux", hostname=self.tuber_hostname, convert_json=True
+        )
 
     @sqlalchemy.orm.reconstructor
     def reconstruct(self):
-        tuber.TuberObject.__init__(self, "Dfmux", hostname=self.tuber_hostname)
+        tuber.TuberObject.__init__(
+            self, "Dfmux", hostname=self.tuber_hostname, convert_json=True
+        )
 
     modules = relationship(
         "ReadoutModule",

@@ -110,6 +110,16 @@ PYBIND11_MODULE(_receiver, m) {
 		.value("SMA", Timestamp::Source::SMA)
 		.value("GND", Timestamp::Source::GND);
 
+	/* Helper: convert interleaved raw int32 I/Q data to complex<double>,
+	 * applying the packetizer gain correction (/ 256). */
+	auto raw_to_complex = [](const int32_t* raw, py::ssize_t num_samples) {
+		py::array_t<std::complex<double>> result(num_samples);
+		auto out = result.mutable_unchecked<1>();
+		for (size_t i = 0; i < num_samples; i++)
+			out(i) = std::complex<double>(raw[2*i], raw[2*i+1]) / 256.;
+		return result;
+	};
+
 	py::class_<ReadoutPacket>(m, "ReadoutPacket")
 		.def(py::init<>())
 		.def(py::init([](py::bytes data) {
@@ -148,31 +158,128 @@ PYBIND11_MODULE(_receiver, m) {
 		.def_readwrite("module", &ReadoutPacket::module)
 		.def_readwrite("seq", &ReadoutPacket::seq)
 
-		.def_property("samples",
+		// raw_samples: zero-copy view of interleaved int32 I/Q pairs
+		.def_property("raw_samples",
 			[](ReadoutPacket& self) {
-				auto& vec = self.samples();
-				return py::array_t<std::complex<double>>(
-					{vec.size()},
-					{sizeof(std::complex<double>)},
+				auto& vec = self.raw_samples();
+				return py::array_t<int32_t>(
+					{static_cast<py::ssize_t>(vec.size())},
+					{sizeof(int32_t)},
 					vec.data(),
-					py::cast(self)  // Keep packet alive while array exists
+					py::cast(self)
 				);
 			},
-			[](ReadoutPacket& self, py::object obj) {
-				if (py::isinstance<py::array_t<std::complex<double>>>(obj)) {
-					auto arr = obj.cast<py::array_t<std::complex<double>>>();
-					auto buf = arr.request();
-					auto* ptr = static_cast<std::complex<double>*>(buf.ptr);
-					self.samples() = std::vector<std::complex<double>>(ptr, ptr + buf.size);
-				} else
-					self.samples() = py::cast<std::vector<std::complex<double>>>(obj);
+			[](ReadoutPacket& self, py::array_t<int32_t> arr) {
+				auto buf = arr.request();
+				auto* ptr = static_cast<int32_t*>(buf.ptr);
+				self.raw_samples() = std::vector<int32_t>(ptr, ptr + buf.size);
 			})
+
 		.def_property("ts",
 			[](const ReadoutPacket& self) { return self.timestamp(); },
 			[](ReadoutPacket& self, const Timestamp& ts) { self.timestamp() = ts; })
-		.def("get_num_channels", &ReadoutPacket::get_num_channels)
-		.def("get_channel", &ReadoutPacket::get_channel, "ch"_a)
-		.def("set_channel", &ReadoutPacket::set_channel, "ch"_a, "value"_a)
+		// __len__: number of channels
+		.def("__len__", &ReadoutPacket::get_num_channels)
+
+		// __getitem__: lazy scaled access (single index or slice)
+		.def("__getitem__", [](ReadoutPacket& self, py::object key) -> py::object {
+			auto& raw = self.raw_samples();
+			int num_channels = self.get_num_channels();
+
+			if (py::isinstance<py::int_>(key)) {
+				int idx = key.cast<int>();
+				if (idx < 0) idx += num_channels;
+				if (idx < 0 || idx >= num_channels)
+					throw py::index_error("channel index out of range");
+				return py::cast(
+					std::complex<double>(raw[2*idx], raw[2*idx+1]) / 256.
+				);
+			}
+
+			if (py::isinstance<py::slice>(key)) {
+				auto slice = key.cast<py::slice>();
+				py::ssize_t start, stop, step, length;
+				if (!slice.compute(num_channels, &start, &stop, &step, &length))
+					throw py::error_already_set();
+
+				py::array_t<std::complex<double>> result(length);
+				auto out = result.mutable_unchecked<1>();
+				for (py::ssize_t i = 0; i < length; i++) {
+					py::ssize_t ch = start + i * step;
+					out(i) = std::complex<double>(raw[2*ch], raw[2*ch+1]) / 256.;
+				}
+				return result;
+			}
+
+			// Fall back to numpy fancy indexing: convert key to index array
+			auto indices = py::array_t<int32_t>::ensure(key);
+			if (!indices)
+				throw py::type_error("indices must be integers, slices, or integer arrays");
+			auto idx_buf = indices.request();
+			auto* idx_ptr = static_cast<int32_t*>(idx_buf.ptr);
+			py::ssize_t n = idx_buf.size;
+
+			py::array_t<std::complex<double>> result(n);
+			auto out = result.mutable_unchecked<1>();
+			for (py::ssize_t i = 0; i < n; i++) {
+				int ch = idx_ptr[i];
+				if (ch < 0) ch += num_channels;
+				if (ch < 0 || ch >= num_channels)
+					throw py::index_error("channel index out of range");
+				out(i) = std::complex<double>(raw[2*ch], raw[2*ch+1]) / 256.;
+			}
+			return result;
+		})
+
+		// __setitem__: write complex values (×256) into raw int32 storage
+		.def("__setitem__", [](ReadoutPacket& self, py::object key, py::object value) {
+			auto& raw = self.raw_samples();
+			int num_channels = self.get_num_channels();
+
+			if (py::isinstance<py::int_>(key)) {
+				int idx = key.cast<int>();
+				if (idx < 0) idx += num_channels;
+				if (idx < 0 || idx >= num_channels)
+					throw py::index_error("channel index out of range");
+				auto v = value.cast<std::complex<double>>();
+				raw[2*idx] = static_cast<int32_t>(v.real() * 256.);
+				raw[2*idx+1] = static_cast<int32_t>(v.imag() * 256.);
+				return;
+			}
+
+			// Slice or full assignment — coerce value to complex array
+			auto arr = py::array_t<std::complex<double>>::ensure(value);
+			if (!arr)
+				throw std::runtime_error("value must be array-like of complex values");
+			auto buf = arr.request();
+			auto* ptr = static_cast<std::complex<double>*>(buf.ptr);
+
+			if (py::isinstance<py::slice>(key)) {
+				auto slice = key.cast<py::slice>();
+				py::ssize_t start, stop, step, length;
+				if (!slice.compute(num_channels, &start, &stop, &step, &length))
+					throw py::error_already_set();
+				if (buf.size != length)
+					throw std::runtime_error("value length does not match slice length");
+				// Resize raw storage if empty (initial assignment)
+				if (raw.empty()) raw.resize(2 * num_channels, 0);
+				for (py::ssize_t i = 0; i < length; i++) {
+					py::ssize_t ch = start + i * step;
+					raw[2*ch] = static_cast<int32_t>(ptr[i].real() * 256.);
+					raw[2*ch+1] = static_cast<int32_t>(ptr[i].imag() * 256.);
+				}
+				return;
+			}
+
+			throw py::type_error("index must be an integer or slice");
+		})
+
+		// __array__: numpy protocol — returns all channels as complex<double>/256
+		.def("__array__", [raw_to_complex](ReadoutPacket& self, py::object /* dtype */, py::object /* copy */) {
+			auto& raw = self.raw_samples();
+			return raw_to_complex(raw.data(), raw.size() / 2);
+		}, "dtype"_a = py::none(), "copy"_a = py::none())
+
 		.def("__repr__", [](const ReadoutPacket& pkt) {
 			return fmt::format("ReadoutPacket(serial={} module={} seq={})",
 					pkt.serial, pkt.module, pkt.seq);
@@ -201,31 +308,125 @@ PYBIND11_MODULE(_receiver, m) {
 		.def_readwrite("module", &PFBPacket::module)
 		.def_readwrite("seq", &PFBPacket::seq)
 
-		.def_property("samples",
+		// raw_samples: zero-copy view of interleaved int32 I/Q pairs
+		.def_property("raw_samples",
 			[](PFBPacket& self) {
-				auto& vec = self.samples();
-				return py::array_t<std::complex<double>>(
-					{vec.size()},
-					{sizeof(std::complex<double>)},
+				auto& vec = self.raw_samples();
+				return py::array_t<int32_t>(
+					{static_cast<py::ssize_t>(vec.size())},
+					{sizeof(int32_t)},
 					vec.data(),
-					py::cast(self)  // Keep packet alive while array exists
+					py::cast(self)
 				);
 			},
-			[](PFBPacket& self, py::object obj) {
-				if (py::isinstance<py::array_t<std::complex<double>>>(obj)) {
-					auto arr = obj.cast<py::array_t<std::complex<double>>>();
-					auto buf = arr.request();
-					auto* ptr = static_cast<std::complex<double>*>(buf.ptr);
-					self.samples() = std::vector<std::complex<double>>(ptr, ptr + buf.size);
-				} else
-					self.samples() = py::cast<std::vector<std::complex<double>>>(obj);
+			[](PFBPacket& self, py::array_t<int32_t> arr) {
+				auto buf = arr.request();
+				auto* ptr = static_cast<int32_t*>(buf.ptr);
+				self.raw_samples() = std::vector<int32_t>(ptr, ptr + buf.size);
 			})
+
 		.def_property("ts",
 			[](const PFBPacket& self) { return self.timestamp(); },
 			[](PFBPacket& self, const Timestamp& ts) { self.timestamp() = ts; })
-		.def("get_num_samples", &PFBPacket::get_num_samples)
-		.def("get_sample", &PFBPacket::get_sample, "idx"_a)
-		.def("set_sample", &PFBPacket::set_sample, "idx"_a, "value"_a)
+		// __len__: number of samples
+		.def("__len__", &PFBPacket::get_num_samples)
+
+		// __getitem__: lazy scaled access (single index or slice)
+		.def("__getitem__", [](PFBPacket& self, py::object key) -> py::object {
+			auto& raw = self.raw_samples();
+			int num_samples = self.get_num_samples();
+
+			if (py::isinstance<py::int_>(key)) {
+				int idx = key.cast<int>();
+				if (idx < 0) idx += num_samples;
+				if (idx < 0 || idx >= num_samples)
+					throw py::index_error("sample index out of range");
+				return py::cast(
+					std::complex<double>(raw[2*idx], raw[2*idx+1]) / 256.
+				);
+			}
+
+			if (py::isinstance<py::slice>(key)) {
+				auto slice = key.cast<py::slice>();
+				py::ssize_t start, stop, step, length;
+				if (!slice.compute(num_samples, &start, &stop, &step, &length))
+					throw py::error_already_set();
+
+				py::array_t<std::complex<double>> result(length);
+				auto out = result.mutable_unchecked<1>();
+				for (py::ssize_t i = 0; i < length; i++) {
+					py::ssize_t s = start + i * step;
+					out(i) = std::complex<double>(raw[2*s], raw[2*s+1]) / 256.;
+				}
+				return result;
+			}
+
+			auto indices = py::array_t<int32_t>::ensure(key);
+			if (!indices)
+				throw py::type_error("indices must be integers, slices, or integer arrays");
+			auto idx_buf = indices.request();
+			auto* idx_ptr = static_cast<int32_t*>(idx_buf.ptr);
+			py::ssize_t n = idx_buf.size;
+
+			py::array_t<std::complex<double>> result(n);
+			auto out = result.mutable_unchecked<1>();
+			for (py::ssize_t i = 0; i < n; i++) {
+				int s = idx_ptr[i];
+				if (s < 0) s += num_samples;
+				if (s < 0 || s >= num_samples)
+					throw py::index_error("sample index out of range");
+				out(i) = std::complex<double>(raw[2*s], raw[2*s+1]) / 256.;
+			}
+			return result;
+		})
+
+		// __setitem__: write complex values (×256) into raw int32 storage
+		.def("__setitem__", [](PFBPacket& self, py::object key, py::object value) {
+			auto& raw = self.raw_samples();
+			int num_samples = self.get_num_samples();
+
+			if (py::isinstance<py::int_>(key)) {
+				int idx = key.cast<int>();
+				if (idx < 0) idx += num_samples;
+				if (idx < 0 || idx >= num_samples)
+					throw py::index_error("sample index out of range");
+				auto v = value.cast<std::complex<double>>();
+				raw[2*idx] = static_cast<int32_t>(v.real() * 256.);
+				raw[2*idx+1] = static_cast<int32_t>(v.imag() * 256.);
+				return;
+			}
+
+			auto arr = py::array_t<std::complex<double>>::ensure(value);
+			if (!arr)
+				throw std::runtime_error("value must be array-like of complex values");
+			auto buf = arr.request();
+			auto* ptr = static_cast<std::complex<double>*>(buf.ptr);
+
+			if (py::isinstance<py::slice>(key)) {
+				auto slice = key.cast<py::slice>();
+				py::ssize_t start, stop, step, length;
+				if (!slice.compute(num_samples, &start, &stop, &step, &length))
+					throw py::error_already_set();
+				if (buf.size != length)
+					throw std::runtime_error("value length does not match slice length");
+				if (raw.empty()) raw.resize(2 * num_samples, 0);
+				for (py::ssize_t i = 0; i < length; i++) {
+					py::ssize_t s = start + i * step;
+					raw[2*s] = static_cast<int32_t>(ptr[i].real() * 256.);
+					raw[2*s+1] = static_cast<int32_t>(ptr[i].imag() * 256.);
+				}
+				return;
+			}
+
+			throw py::type_error("index must be an integer or slice");
+		})
+
+		// __array__: numpy protocol — returns all samples as complex<double>/256
+		.def("__array__", [raw_to_complex](PFBPacket& self, py::object /* dtype */, py::object /* copy */) {
+			auto& raw = self.raw_samples();
+			return raw_to_complex(raw.data(), raw.size() / 2);
+		}, "dtype"_a = py::none(), "copy"_a = py::none())
+
 		.def("__repr__", [](const PFBPacket& pkt) {
 			return fmt::format("PFBPacket(serial={} module={} seq={} samples={})",
 					pkt.serial, pkt.module, pkt.seq, pkt.num_samples);
@@ -349,5 +550,5 @@ PYBIND11_MODULE(_receiver, m) {
 	m.attr("SS_PER_SECOND") = SS_PER_SECOND;
 
 	/* Must match PY_API_VERSION in rfmux/streamer/__init__.py */
-	m.attr("_SO_API_VERSION") = 0;
+	m.attr("_SO_API_VERSION") = 1;
 }

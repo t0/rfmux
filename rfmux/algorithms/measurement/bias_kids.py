@@ -112,38 +112,37 @@ async def find_optimal_phases_parallel(
     return optimal_phases
 
 
-def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[Tuple[float, str], Dict[int, Dict]]], Dict]:
+def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[int, Dict[int, Dict]]], Dict]:
     """
-    Extract detector data from GUI multisweep results format.
-    
+    Extract detector data from the legacy GUI multisweep results format.
+
+    Converts the old iteration-indexed format into the canonical
+    detector-indexed format used by :func:`analyze_multiamp_data`.
+
     Args:
-        gui_results: Dictionary with 'results_by_iteration' key
-        
+        gui_results: Dictionary with 'results_by_iteration' key.
+
     Returns:
-        Tuple of (multiamp_data, metadata)
-        where multiamp_data is {(amplitude, direction): {detector_idx: data}}
-        Returns (None, {}) if not GUI format
+        Tuple of (results_by_detector, metadata).
+        ``results_by_detector`` is ``{detector_id: {iteration_index: entry_dict}}``.
+        Returns (None, {}) if not GUI format.
     """
     if 'results_by_iteration' not in gui_results:
-        # Not GUI format, return None to indicate not applicable
         return None, {}
-        
-    multiamp_data = {}
-    metadata = {
+
+    results_by_detector: Dict[int, Dict[int, Dict]] = {}
+    metadata: Dict[str, Any] = {
         'iterations': [],
         'amplitudes': set(),
         'directions': set()
     }
-    
+
     for iteration_data in gui_results['results_by_iteration']:
         iteration = iteration_data.get('iteration')
         amplitude = iteration_data.get('amplitude')
         direction = iteration_data.get('direction', 'upward')
         data = iteration_data.get('data', {})
-        
-        key = (amplitude, direction)
-        multiamp_data[key] = data
-        
+
         metadata['iterations'].append({
             'iteration': iteration,
             'amplitude': amplitude,
@@ -151,8 +150,19 @@ def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[Tupl
         })
         metadata['amplitudes'].add(amplitude)
         metadata['directions'].add(direction)
-    
-    return multiamp_data, metadata
+
+        for detector_id, det_data in data.items():
+            if detector_id not in results_by_detector:
+                results_by_detector[detector_id] = {}
+            # Store with iteration index as key (new canonical format)
+            # Ensure amplitude/direction are inside the entry
+            entry = dict(det_data)
+            entry['amplitude'] = amplitude
+            entry['direction'] = direction
+            entry['iteration'] = iteration
+            results_by_detector[detector_id][iteration] = entry
+
+    return results_by_detector, metadata
 
 
 async def bias_kids(
@@ -178,7 +188,8 @@ async def bias_kids(
     Args:
         crs: The CRS object to use for hardware communication.
         multisweep_results: Can be one of:
-                           - Dict with 'results_by_iteration' key: Multi-amplitude GUI format
+                           - Dict with 'results_by_detector' key: Detector-indexed multi-amplitude format
+                           - Dict with 'results_by_iteration' key: Legacy iteration-indexed format
                            - Dict[int, Dict]: Single amplitude results
                            - List[Dict]: Multiple modules
         nonlinear_threshold (float): Maximum acceptable nonlinear parameter 'a'.
@@ -210,26 +221,31 @@ async def bias_kids(
         - 'phase_optimization_std': The bandpass-filtered Q std at optimal phase
     """
     
-    # Check if this is GUI format with multiple amplitudes
-    if isinstance(multisweep_results, dict) and 'results_by_iteration' in multisweep_results:
-        # Extract multi-amplitude data from GUI format
-        multiamp_data, metadata = _extract_data_from_gui_format(multisweep_results)
-        
-        if multiamp_data is not None:
-            # Find optimal configuration for each detector
-            optimal_configs = analyze_multiamp_data(multiamp_data, nonlinear_threshold, fallback_to_lowest)
-            
-            # Convert to single result set using optimal configurations
-            single_results = {}
-            for det_idx, config in optimal_configs.items():
-                single_results[det_idx] = config['selected_data'].copy()
-                # Add metadata about amplitude selection
-                single_results[det_idx]['selected_amplitude'] = config['selected_amplitude']
-                single_results[det_idx]['bifurcation_ever_seen'] = config.get('bifurcation_ever_seen', False)
-                
-            # Proceed with single-amplitude logic using optimal results
-            multisweep_results = single_results
-        
+    # Detect multi-amplitude format and find optimal bias points
+    results_by_detector = None
+
+    if isinstance(multisweep_results, dict) and 'results_by_detector' in multisweep_results:
+        # Detector-indexed format (current canonical format)
+        results_by_detector = multisweep_results['results_by_detector']
+
+    elif isinstance(multisweep_results, dict) and 'results_by_iteration' in multisweep_results:
+        # Legacy iteration-indexed format — convert to detector-indexed
+        results_by_detector, _ = _extract_data_from_gui_format(multisweep_results)
+
+    if results_by_detector is not None:
+        # Find optimal configuration for each detector
+        optimal_configs = analyze_multiamp_data(results_by_detector, nonlinear_threshold, fallback_to_lowest)
+
+        # Convert to single result set using optimal configurations
+        single_results = {}
+        for det_idx, config in optimal_configs.items():
+            single_results[det_idx] = config['selected_data'].copy()
+            single_results[det_idx]['selected_amplitude'] = config['selected_amplitude']
+            single_results[det_idx]['bifurcation_ever_seen'] = config.get('bifurcation_ever_seen', False)
+
+        # Proceed with single-amplitude logic using optimal results
+        multisweep_results = single_results
+
     # Handle list of results (multiple modules)
     elif isinstance(multisweep_results, list):
         if module is None:
@@ -420,84 +436,75 @@ async def bias_kids(
 
 
 def analyze_multiamp_data(
-    multiamp_data: Dict[Tuple[float, str], Dict[int, Dict]],
+    results_by_detector: Dict[int, Dict],
     nonlinear_threshold: float = 0.77,
     fallback_to_lowest: bool = True
 ) -> Dict[int, Dict[str, Any]]:
     """
     Analyze multi-amplitude multisweep results to find optimal bias points.
-    
+
     Args:
-        multiamp_data: Dictionary with (amplitude, direction) tuple as key, detector data as value
+        results_by_detector: Detector-indexed data keyed by iteration index:
+            ``{detector_id: {iteration_index: entry_dict}}``
+            Each entry_dict contains 'amplitude', 'direction', and sweep data.
         nonlinear_threshold: Maximum acceptable nonlinear parameter
         fallback_to_lowest: Whether to use lowest amplitude as fallback
-        
+
     Returns:
-        Dictionary with detector index as key, optimal configuration as value
+        Dictionary with detector index as key, optimal configuration as value.
     """
     optimal_configs = {}
-    
-    # Get all unique amplitudes and sort them
-    amplitudes = sorted(set(amp for amp, _ in multiamp_data.keys()), reverse=True)
-    
-    # Get all detector indices from the first entry
-    first_data = next(iter(multiamp_data.values()))
-    detector_indices = list(first_data.keys())
-    
-    for det_idx in detector_indices:
-        # Collect data across all amplitudes for this detector
+
+    for det_idx, iter_dict in results_by_detector.items():
         amp_analysis = []
         bifurcation_ever_seen = False
-        
-        for amp in amplitudes:
-            # Check both directions if available
-            for direction in ['upward', 'downward']:
-                key = (amp, direction)
-                if key not in multiamp_data:
-                    continue
-                    
-                if det_idx not in multiamp_data[key]:
-                    continue
-                    
-                det_data = multiamp_data[key][det_idx]
-                is_bifurcated = det_data.get('is_bifurcated', False)
-                nonlinear_params = det_data.get('nonlinear_fit_params', {})
-                nonlinear_a = nonlinear_params.get('a', float('inf'))
-                nonlinear_success = det_data.get('nonlinear_fit_success', False)
-                
-                if is_bifurcated:
-                    bifurcation_ever_seen = True
-                
-                # Only consider nonlinear parameter if fit was successful
-                if nonlinear_success:
-                    suitable = not is_bifurcated and nonlinear_a < nonlinear_threshold
-                else:
-                    suitable = not is_bifurcated
-                    
-                amp_analysis.append({
-                    'amplitude': amp,
-                    'direction': direction,
-                    'is_bifurcated': is_bifurcated,
-                    'nonlinear_a': nonlinear_a,
-                    'nonlinear_fit_success': nonlinear_success,
-                    'suitable': suitable,
-                    'data': det_data
-                })
-        
+
+        # Iterate entries sorted by amplitude (highest first) for deterministic order
+        sorted_entries = sorted(
+            iter_dict.values(),
+            key=lambda e: (-(e.get('amplitude') or 0), e.get('direction', ''))
+        )
+
+        for det_data in sorted_entries:
+            amp = det_data.get('amplitude')
+            direction = det_data.get('direction', 'upward')
+            if amp is None:
+                continue
+
+            is_bifurcated = det_data.get('is_bifurcated', False)
+            nonlinear_params = det_data.get('nonlinear_fit_params', {})
+            nonlinear_a = nonlinear_params.get('a', float('inf'))
+            nonlinear_success = det_data.get('nonlinear_fit_success', False)
+
+            if is_bifurcated:
+                bifurcation_ever_seen = True
+
+            if nonlinear_success:
+                suitable = not is_bifurcated and nonlinear_a < nonlinear_threshold
+            else:
+                suitable = not is_bifurcated
+
+            amp_analysis.append({
+                'amplitude': amp,
+                'direction': direction,
+                'is_bifurcated': is_bifurcated,
+                'nonlinear_a': nonlinear_a,
+                'nonlinear_fit_success': nonlinear_success,
+                'suitable': suitable,
+                'data': det_data
+            })
+
         # Find the highest suitable amplitude
         suitable_entries = [a for a in amp_analysis if a['suitable']]
-        
+
         if suitable_entries:
-            # Use the first suitable (which is highest amplitude due to sort)
             optimal = suitable_entries[0]
         elif fallback_to_lowest and amp_analysis:
-            # No suitable amplitude found, use lowest amplitude
-            # Sort by amplitude (ascending) to get lowest
             sorted_by_amp = sorted(amp_analysis, key=lambda x: x['amplitude'])
             optimal = sorted_by_amp[0]
         else:
             optimal = None
-            
+
         if optimal:
             optimal_configs[det_idx] = {
                 'selected_amplitude': optimal['amplitude'],
@@ -506,5 +513,5 @@ def analyze_multiamp_data(
                 'bifurcation_ever_seen': bifurcation_ever_seen,
                 'all_amplitudes': amp_analysis
             }
-    
+
     return optimal_configs

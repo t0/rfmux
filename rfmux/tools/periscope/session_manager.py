@@ -168,6 +168,10 @@ class SessionManager(QtCore.QObject):
         
         # Initialize session state
         self._session_path = session_path
+        
+        # Save the full session path so it's pre-selected next time
+        from . import settings
+        settings.set_last_session_path(str(session_path))
         self._export_count = 0
         self._session_start_time = datetime.datetime.now()
         self._session_metadata = {
@@ -463,6 +467,50 @@ class SessionManager(QtCore.QObject):
         }
     
     # ─────────────────────────────────────────────────────────────────
+    # Mock Mode Configuration Methods
+    # ─────────────────────────────────────────────────────────────────
+    
+    def save_mock_config(self, config: Dict[str, Any]):
+        """
+        Save mock mode configuration to session metadata.
+        
+        This preserves the mock simulation parameters so that when the session
+        is loaded later, the same mock configuration can be restored.
+        
+        Args:
+            config: Dictionary of mock configuration parameters from MockConfigurationDialog
+        """
+        if not self.is_active or self._session_path is None:
+            return
+        
+        # Store in metadata
+        self._session_metadata['mock_mode_config'] = config
+        self._save_metadata()
+        
+        print(f"[Session] Saved mock mode configuration with {len(config)} parameters")
+    
+    def get_mock_config(self) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve mock mode configuration from session metadata.
+        
+        Returns:
+            Dictionary of mock configuration parameters, or None if not present
+        """
+        if not self.is_active:
+            return None
+        
+        return self._session_metadata.get('mock_mode_config')
+    
+    def has_mock_config(self) -> bool:
+        """
+        Check if the current session has mock mode configuration.
+        
+        Returns:
+            True if session has mock config, False otherwise
+        """
+        return self.get_mock_config() is not None
+    
+    # ─────────────────────────────────────────────────────────────────
     # File Operations
     # ─────────────────────────────────────────────────────────────────
     
@@ -533,16 +581,19 @@ class SessionManager(QtCore.QObject):
         # 2. Fall back to structure-based detection for older files
         # Priority order matters: bias and noise are subsets of multisweep
         
-        # Bias files: have both bias_kids_output AND results_by_iteration
-        if 'bias_kids_output' in data and 'results_by_iteration' in data:
+        # Check for multisweep data (either old or new format)
+        has_multisweep = 'results_by_detector' in data or 'results_by_iteration' in data
+
+        # Bias files: have both bias_kids_output AND multisweep data
+        if 'bias_kids_output' in data and has_multisweep:
             return 'bias'
-        
-        # Noise files: have noise_data AND results_by_iteration
-        if 'noise_data' in data and data['noise_data'] is not None and 'results_by_iteration' in data:
+
+        # Noise files: have noise_data AND multisweep data
+        if 'noise_data' in data and data['noise_data'] is not None and has_multisweep:
             return 'noise'
-        
-        # Multisweep files: have results_by_iteration (but not bias or noise)
-        if 'results_by_iteration' in data:
+
+        # Multisweep files: have multisweep data (but not bias or noise)
+        if has_multisweep:
             return 'multisweep'
         
         # Network analysis files: have 'parameters' and 'modules' keys

@@ -108,16 +108,11 @@ namespace packets {
 		else
 			throw std::runtime_error("Invalid readout packet version");
 
-		// Parse samples (I/Q pairs)
+		// Copy raw int32 I/Q pairs directly (no scaling)
 		const auto* samples_ptr = reinterpret_cast<const int32_t*>(
 			static_cast<const char*>(data) + sizeof(readout_packet_header)
 		);
-
-		pkt.samples_.resize(num_channels);
-		for (int i = 0; i < num_channels; i++)
-			pkt.samples_[i] = std::complex<double>(
-					samples_ptr[2*i],
-					samples_ptr[2*i+1]) / 256.;
+		pkt.raw_samples_.assign(samples_ptr, samples_ptr + 2 * num_channels);
 
 		// Parse timestamp
 		const auto* ts_ptr = reinterpret_cast<const irigb_timestamp*>(
@@ -138,13 +133,12 @@ namespace packets {
 		// Write header
 		std::memcpy(buffer.data(), static_cast<const readout_packet_header*>(this), sizeof(readout_packet_header));
 
-		// Write samples (convert double back to int32)
+		// Write raw int32 samples directly
 		auto* samples_ptr = reinterpret_cast<int32_t*>(buffer.data() + sizeof(readout_packet_header));
-		for (int i = 0; i < num_channels; i++) {
-			std::complex<double> sample = (i < (int)samples_.size()) ? samples_[i] : std::complex<double>(0, 0);
-			samples_ptr[2 * i] = static_cast<int32_t>(sample.real() * 256.);
-			samples_ptr[2 * i + 1] = static_cast<int32_t>(sample.imag() * 256.);
-		}
+		size_t n = (std::min)(raw_samples_.size(), static_cast<size_t>(2 * num_channels));
+		std::memcpy(samples_ptr, raw_samples_.data(), n * sizeof(int32_t));
+		// Zero-fill if raw_samples_ is shorter than expected
+		std::memset(samples_ptr + n, 0, (2 * num_channels - n) * sizeof(int32_t));
 
 		// Write timestamp
 		irigb_timestamp ts_out;
@@ -187,17 +181,11 @@ namespace packets {
 		if (len != expected_size)
 			throw std::runtime_error("PFB packet size mismatch");
 
-		// Parse samples (I/Q pairs)
+		// Copy raw int32 I/Q pairs directly (no scaling)
 		const auto* samples_ptr = reinterpret_cast<const int32_t*>(
 			static_cast<const char*>(data) + sizeof(pfb_packet_header)
 		);
-
-		pkt.samples_.reserve(pkt.num_samples);
-		for (int i = 0; i < pkt.num_samples; i++) {
-			double i_val = samples_ptr[2 * i] / 256.;
-			double q_val = samples_ptr[2 * i + 1] / 256.;
-			pkt.samples_.emplace_back(i_val, q_val);
-		}
+		pkt.raw_samples_.assign(samples_ptr, samples_ptr + 2 * pkt.num_samples);
 
 		// Parse timestamp
 		const auto* ts_ptr = reinterpret_cast<const irigb_timestamp*>(
@@ -219,13 +207,11 @@ namespace packets {
 		// Write header
 		std::memcpy(buffer.data(), static_cast<const pfb_packet_header*>(this), sizeof(pfb_packet_header));
 
-		// Write samples (convert double back to int32)
+		// Write raw int32 samples directly
 		auto* samples_ptr = reinterpret_cast<int32_t*>(buffer.data() + sizeof(pfb_packet_header));
-		for (int i = 0; i < num_samples; i++) {
-			std::complex<double> sample = (i < (int)samples_.size()) ? samples_[i] : std::complex<double>(0, 0);
-			samples_ptr[2 * i] = static_cast<int32_t>(sample.real() * 256.);
-			samples_ptr[2 * i + 1] = static_cast<int32_t>(sample.imag() * 256.);
-		}
+		size_t n = (std::min)(raw_samples_.size(), static_cast<size_t>(2 * num_samples));
+		std::memcpy(samples_ptr, raw_samples_.data(), n * sizeof(int32_t));
+		std::memset(samples_ptr + n, 0, (2 * num_samples - n) * sizeof(int32_t));
 
 		// Write timestamp
 		irigb_timestamp ts_out;

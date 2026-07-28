@@ -19,7 +19,7 @@ from ..core.schema import CRS as BaseCRS
 from .resonator_model import MockResonatorModel
 from .udp_streamer import MockUDPManager
 
-from ..tuber.codecs import TuberResult
+from tuber.codecs import TuberResult
 from ..streamer import LONG_PACKET_CHANNELS, SHORT_PACKET_CHANNELS, Timestamp, TimestampSource
 
 _mock_crs_instances = weakref.WeakSet()
@@ -552,8 +552,10 @@ class ServerMockCRS:
                 or not set(module) <= set(self._active_modules)):
             raise ValueError("Invalid 'module' argument to set_decimation!")
         if (stage <= 3) and (short == False):
-            print(f"[Decimation<=3] Streaming only 128 channels")
-            short = True
+            raise ValueError(
+                f"Decimation stage {stage} requires short=True (128 channels). "
+                f"Long packets (1024 channels) are only supported for decimation stages >= 4."
+            )
         self._fir_stage = stage
         self._short_packets = short
         self._streamed_modules = module

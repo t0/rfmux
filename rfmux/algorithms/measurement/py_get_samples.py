@@ -37,7 +37,7 @@ import warnings
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...tuber.codecs import TuberResult
+from tuber.codecs import TuberResult
 from ...core.transferfunctions import VOLTS_PER_ROC, spectrum_from_slow_tod
 from ... import streamer
 
@@ -240,14 +240,14 @@ async def py_get_samples(crs: CRS,
                 f"Failed to retrieve contiguous, consistent packet capture in {NUM_ATTEMPTS} attempts!"
             )
 
-    num_channels = packets[0].get_num_channels()
+    num_channels = len(packets[0])
     if channel is not None and channel > num_channels:
         raise ValueError(f"Invalid channel {channel}! Packets only contain {num_channels} channels in this readout mode.")
 
     # If average => just return time-domain averages
     if average:
         # Stack all samples into a (num_samples, num_channels) array
-        samples = np.stack([p.samples for p in packets])
+        samples = np.stack([np.array(p) for p in packets])
 
         # If reference='absolute', convert to volts
         if reference == 'absolute':
@@ -260,20 +260,19 @@ async def py_get_samples(crs: CRS,
         std_q = np.std(samples.imag, axis=0)
 
         if channel is None:
-            results = {
-                "mean": TuberResult(dict(i=mean_i, q=mean_q)),
-                "std": TuberResult(dict(i=std_i, q=std_q)),
-            }
+            return TuberResult(
+                mean=TuberResult(i=mean_i, q=mean_q),
+                std=TuberResult(i=std_i, q=std_q),
+            )
         else:
             # single channel => pick out channel-1
-            results = {
-                "mean": TuberResult(dict(i=mean_i[channel-1], q=mean_q[channel-1])),
-                "std": TuberResult(dict(i=std_i[channel-1], q=std_q[channel-1])),
-            }
-        return TuberResult(results)
+            return TuberResult(
+                mean=TuberResult(i=mean_i[channel-1], q=mean_q[channel-1]),
+                std=TuberResult(i=std_i[channel-1], q=std_q[channel-1]),
+            )
 
     # Otherwise build the normal time-domain results
-    results = dict(ts=[TuberResult(dict(p.ts)) for p in packets])
+    results = dict(ts=[TuberResult(**dict(p.ts)) for p in packets])
 
     if _extra_metadata:
         results["seq"] = [p.seq for p in packets]
@@ -281,7 +280,7 @@ async def py_get_samples(crs: CRS,
     if channel is None:
         # Return data for all channels
         # Stack all samples into a 2D array: (num_samples, num_channels)
-        samples = np.stack([p.samples for p in packets])
+        samples = np.stack([np.array(p) for p in packets])
         if reference == 'absolute':
             samples *= VOLTS_PER_ROC
 
@@ -289,7 +288,7 @@ async def py_get_samples(crs: CRS,
         results["i"] = samples.real.T.tolist()
         results["q"] = samples.imag.T.tolist()
     else:
-        samples = np.array([p.samples[channel-1] for p in packets])
+        samples = np.array([p[channel-1] for p in packets])
         if reference=='absolute':
             samples *= VOLTS_PER_ROC
 
@@ -381,6 +380,6 @@ async def py_get_samples(crs: CRS,
             spec_data[f"{scaling}_dual_sideband"] = np.fft.fftshift(d["psd_dual_sideband"]).tolist()
 
         # attach spectrum data to results
-        results["spectrum"] = TuberResult(spec_data)
+        results["spectrum"] = TuberResult(**spec_data)
 
-    return TuberResult(results)
+    return TuberResult(**results)

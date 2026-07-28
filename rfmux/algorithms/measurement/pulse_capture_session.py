@@ -134,11 +134,13 @@ class PulseCaptureSession:
         df_calibrations: Optional[Dict[int, float]] = None,
         histogram_config: Optional[Dict[str, Any]] = None,
         histogram_flush_every: int = 50,
+        progress_every: int = 100,
         on_noise: Optional[Callable] = None,
         on_pulse: Optional[Callable] = None,
         on_stats: Optional[Callable] = None,
         on_histograms: Optional[Callable] = None,
         on_error: Optional[Callable] = None,
+        on_progress: Optional[Callable] = None,
     ):
         self.channels = list(channels)
         self.module = module
@@ -160,6 +162,8 @@ class PulseCaptureSession:
         self.on_stats = on_stats
         self.on_histograms = on_histograms
         self.on_error = on_error
+        self.on_progress = on_progress
+        self.progress_every = max(1, int(progress_every))
 
         hist_kwargs = dict(histogram_config or {})
         hist_kwargs["threshold_sigma"] = threshold_sigma
@@ -167,6 +171,9 @@ class PulseCaptureSession:
 
         self.state = CaptureState.IDLE
         self.noise_stats: Dict[int, ChannelNoiseStats] = {}
+        # Raw complex noise-training arrays from the last estimation
+        # (kept for visualization: what the estimator actually saw).
+        self.noise_data: Dict[int, np.ndarray] = {}
         self.pcap: Optional[PulseCapture] = None
         self.writer = None
 
@@ -246,7 +253,15 @@ class PulseCaptureSession:
                 self._maybe_finish_estimation()
                 return
             buf.append(complex(i_val, q_val))
-            if len(buf) >= self.noise_samples:
+            n = len(buf)
+            if n % self.progress_every == 0 or n == self.noise_samples:
+                self._callback(self.on_progress, {
+                    "state": self.state.value,
+                    "collected": {c: len(self._noise_buf.get(c, []))
+                                  for c in self.channels},
+                    "target": self.noise_samples,
+                })
+            if n >= self.noise_samples:
                 self._maybe_finish_estimation()
             return
 
@@ -294,7 +309,8 @@ class PulseCaptureSession:
             c: np.asarray(self._noise_buf[c], dtype=np.complex128)
             for c in self.channels
         }
-        self.noise_stats, _ = estimate_noise_stats(samples, self.channels)
+        self.noise_stats, self.noise_data = estimate_noise_stats(
+            samples, self.channels)
         self._noise_buf = {}
 
         if self.pcap is None:

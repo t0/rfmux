@@ -37,6 +37,7 @@ class PulseCaptureSignals(QtCore.QObject):
     """Signal bundle for :class:`PulseCaptureTask` (constructed by the caller)."""
 
     noise_estimated = pyqtSignal(dict)      # {channel: ChannelNoiseStats}
+    noise_progress = pyqtSignal(dict)       # {collected: {ch: n}, target: N}
     pulse_detected = pyqtSignal(int, int, dict)  # channel, pulse_idx, summary
     stats_updated = pyqtSignal(dict)        # PulseCaptureSession.stats()
     histograms_updated = pyqtSignal(dict)   # PulseHistogramSet.get_histogram_data()
@@ -83,6 +84,7 @@ class PulseCaptureTask(QtCore.QThread):
 
         # Route session callbacks through Qt signals (called in run() thread)
         session.on_noise = lambda ns: self.signals.noise_estimated.emit(dict(ns))
+        session.on_progress = lambda p: self.signals.noise_progress.emit(p)
         session.on_pulse = self._on_pulse
         session.on_stats = lambda s: self.signals.stats_updated.emit(s)
         session.on_histograms = lambda d: self.signals.histograms_updated.emit(d)

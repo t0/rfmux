@@ -98,6 +98,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.apply_theme(dark_mode)
         self.module_spin.setValue(module)
 
+        # Default the channel list to what Periscope is actually
+        # streaming — the tap only ever sees displayed channels, so any
+        # other request would wait forever in noise estimation.
+        streamed = getattr(periscope, "all_chs", None)
+        if streamed:
+            self.channels_edit.setText(
+                ",".join(str(c) for c in sorted(set(streamed))))
+
     # ── UI construction ───────────────────────────────────────────
 
     def _setup_ui(self) -> None:
@@ -353,6 +361,21 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 "Stop it first.")
             return
 
+        # The tap only feeds channels Periscope displays — requesting
+        # any other channel would stall noise estimation forever.
+        streamed = getattr(runtime, "all_chs", None)
+        if streamed is not None:
+            missing = sorted(set(channels) - set(streamed))
+            if missing:
+                QtWidgets.QMessageBox.warning(
+                    self, "Pulse Capture",
+                    f"Channel(s) {missing} are not currently streamed in "
+                    f"Periscope (displaying: "
+                    f"{sorted(set(streamed))}).\n\nAdd them to the "
+                    "channel list in the main window, or remove them "
+                    "here.")
+                return
+
         module = int(self.module_spin.value())
         path = self._resolve_hdf5_path(module)
         try:
@@ -376,6 +399,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.task = PulseCaptureTask(session, self.signals)
         conn = QtCore.Qt.ConnectionType.QueuedConnection
         self.signals.noise_estimated.connect(self._on_noise_estimated, conn)
+        self.signals.noise_progress.connect(self._on_noise_progress, conn)
         self.signals.pulse_detected.connect(self._on_pulse_detected, conn)
         self.signals.stats_updated.connect(self._on_stats, conn)
         self.signals.histograms_updated.connect(self._on_histograms, conn)
@@ -392,6 +416,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._tap_registered = True
         self._set_run_state(True)
         self._set_status("● Estimating noise…", "#FFCC33")
+        print(f"[PulseCapture] Start — channels {channels}, module "
+              f"{module}, mode {self.mode_combo.currentText()}, "
+              f"threshold {self.threshold_spin.value():g}σ, "
+              f"end {self.end_spin.value():g}σ → {path}")
 
     def _on_stop(self) -> None:
         self._unregister_tap()
@@ -407,6 +435,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._set_run_state(False)
         n = sum(self._counts.values())
         self._set_status(f"● Stopped — {n} pulses captured", "#9A9A9A")
+        print(f"[PulseCapture] Stopped — {n} pulses captured")
 
     def _on_reestimate(self) -> None:
         if self.task is not None:
@@ -568,6 +597,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     # ── Signal handlers (GUI thread) ──────────────────────────────
 
+    def _on_noise_progress(self, progress: dict) -> None:
+        collected = progress.get("collected", {})
+        target = progress.get("target", 0)
+        parts = [f"Ch{c} {collected[c]}/{target}"
+                 for c in sorted(collected)]
+        self._set_status("● Estimating noise — " + " | ".join(parts),
+                         "#FFCC33")
+
     def _on_noise_estimated(self, noise_stats: dict) -> None:
         self.noise_stats = noise_stats
         parts = []
@@ -576,7 +613,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             parts.append(f"Ch{c} I={ns.mean_I:.1f}±{ns.std_I:.2f}, "
                          f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}")
         self.noise_label.setText("Noise:  " + "   |   ".join(parts))
+        print("[PulseCapture] Noise estimated: " + " | ".join(parts))
         self._refresh_status_line()
+        # Show what the estimator saw (until the first pulse replaces it)
+        if self.follow_check.isChecked() or self._current_view is None:
+            self._show_noise_segment()
 
         # Register the streamed HDF5 with the session (once per capture)
         if (not self._registered_export and self.task is not None
@@ -644,6 +685,52 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def _on_error(self, message: str) -> None:
         self.noise_label.setToolTip(message)
         self._set_status(f"● Error: {message}", "#E5484D")
+        print(f"[PulseCapture] ERROR: {message}")
+
+    def _show_noise_segment(self) -> None:
+        """Plot the noise-training segment with the fitted baselines and
+        trigger/end bands — visual confirmation of what the estimator saw."""
+        if self.task is None:
+            return
+        noise_data = getattr(self.task.session, "noise_data", {})
+        channel = next((c for c in sorted(self.noise_stats)
+                        if c in noise_data and len(noise_data[c])), None)
+        if channel is None:
+            return
+        arr = noise_data[channel]
+        ns = self.noise_stats[channel]
+        thr = float(self.threshold_spin.value())
+        end = float(self.end_spin.value())
+
+        self._current_view = None
+        self.pulse_info.setText(
+            f"Noise training segment — Channel {channel} "
+            f"({len(arr)} samples)\n"
+            f"I = {ns.mean_I:.1f} ± {ns.std_I:.2f}   "
+            f"Q = {ns.mean_Q:.1f} ± {ns.std_Q:.2f}\n"
+            f"bands: ±{thr:g}σ trigger (dashed), ±{end:g}σ end (dotted)")
+
+        self.pulse_plot.clear()
+        self.pulse_plot.setTitle(f"Noise training — Channel {channel}")
+        x = np.arange(len(arr))
+        self.pulse_plot.plot(x, arr.real, pen=pg.mkPen(
+            IQ_COLORS["I"], width=1.0), name="I")
+        self.pulse_plot.plot(x, arr.imag, pen=pg.mkPen(
+            IQ_COLORS["Q"], width=1.0), name="Q")
+        for mean, color in ((ns.mean_I, IQ_COLORS["I"]),
+                            (ns.mean_Q, IQ_COLORS["Q"])):
+            self.pulse_plot.addLine(y=mean, pen=pg.mkPen(
+                color, width=0.8, style=QtCore.Qt.PenStyle.DotLine))
+        for sign in (+1, -1):
+            self.pulse_plot.addLine(
+                y=ns.mean_I + sign * thr * ns.std_I,
+                pen=pg.mkPen("#888888", width=0.8,
+                             style=QtCore.Qt.PenStyle.DashLine))
+            self.pulse_plot.addLine(
+                y=ns.mean_I + sign * end * ns.std_I,
+                pen=pg.mkPen("#666666", width=0.8,
+                             style=QtCore.Qt.PenStyle.DotLine))
+        self.pulse_plot.getPlotItem().setLabel("bottom", "sample")
 
     def _set_status(self, text: str, color: str) -> None:
         self.status_label.setText(
@@ -698,6 +785,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"derived τ = {tau_str}")
 
         self.pulse_plot.clear()
+        self.pulse_plot.getPlotItem().setLabel("bottom", "time (ms)")
         if wf is None:
             self.pulse_plot.setTitle("waveform no longer cached")
             return

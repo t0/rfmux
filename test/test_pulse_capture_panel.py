@@ -101,6 +101,8 @@ def test_live_capture_end_to_end(qt_app, tmp_path):
     assert _spin_until(qt_app, lambda: panel.noise_stats), \
         "noise_estimated signal never arrived"
     assert "Noise:" in panel.noise_label.text()
+    # The Pulse View shows the noise-training segment until pulses arrive
+    assert "Noise training" in panel.pulse_info.text()
 
     # Capture stream with 3 injected pulses
     _feed_capture(runtime._pulse_tap, rng)
@@ -267,3 +269,61 @@ def test_identify_and_register(qt_app, tmp_path):
     assert any(e["data_type"] == "pulse"
                and e["filename"] == target.name for e in entries)
     sm.end_session()
+
+
+# ───────────── Noise-training feedback / channel validation ─────────
+
+
+def test_noise_progress_stall_visibility(qt_app, tmp_path):
+    """Requesting a channel the stream never delivers must be VISIBLE:
+    the status line shows per-channel progress with the starved channel
+    stuck at 0/N."""
+    runtime = _FakeRuntime()
+    panel = _make_panel(qt_app, tmp_path, runtime)
+    panel.channels_edit.setText("1,2")
+    rng = np.random.default_rng(11)
+
+    panel._on_start()
+    assert panel.task is not None
+    for _ in range(600):  # channel 1 only — channel 2 starves
+        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
+                           float(rng.normal(0, 1.0)), None)
+
+    assert _spin_until(
+        qt_app, lambda: "Ch1 600/1000" in panel.status_label.text()), \
+        f"no progress shown: {panel.status_label.text()!r}"
+    assert "Ch2 0/1000" in panel.status_label.text()
+
+    panel._on_stop()
+    assert _spin_until(qt_app, lambda: panel.task is None)
+    panel.close()
+    _spin(qt_app)
+
+
+def test_channel_validation_aborts(qt_app, tmp_path, monkeypatch):
+    """A channel Periscope isn't streaming aborts Start with a message
+    (previously: silent infinite noise estimation)."""
+    warnings = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "warning",
+        staticmethod(lambda parent, title, text: warnings.append(text)))
+
+    runtime = _FakeRuntime()
+    runtime.all_chs = [1]  # periscope displays only channel 1
+    panel = _make_panel(qt_app, tmp_path, runtime)
+    panel.channels_edit.setText("1,2")
+
+    panel._on_start()
+    assert panel.task is None, "start must abort on non-streamed channels"
+    assert warnings and "[2]" in warnings[0]
+    panel.close()
+    _spin(qt_app)
+
+
+def test_channel_default_follows_stream(qt_app, tmp_path):
+    runtime = _FakeRuntime()
+    runtime.all_chs = [3, 1]
+    panel = PulseCapturePanel(periscope=runtime, dark_mode=True)
+    assert panel.channels_edit.text() == "1,3"
+    panel.close()
+    _spin(qt_app)

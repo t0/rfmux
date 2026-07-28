@@ -534,6 +534,13 @@ class PeriscopeRuntime:
                 if panel and hasattr(panel, 'apply_theme'):
                     panel.apply_theme(self.dark_mode)
 
+        # Update Pulse Capture panels (in docks)
+        if hasattr(self, 'pulse_capture_windows'):
+            for window_data in self.pulse_capture_windows.values():
+                panel = window_data.get('window')
+                if panel and hasattr(panel, 'apply_theme'):
+                    panel.apply_theme(self.dark_mode)
+
     def _toggle_real_units(self, checked: bool):
         """
         Toggle between displaying data in raw counts or real units (V, dBm/Hz).

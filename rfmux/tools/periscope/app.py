@@ -54,6 +54,7 @@ from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, Initial
 from .app_runtime import PeriscopeRuntime
 from PyQt6 import sip  # For checking if Qt C++ objects have been deleted
 from .mock_configuration_dialog import MockConfigurationDialog
+from .pulse_capture_panel import PulseCapturePanel
 from .dock_manager import PeriscopeDockManager
 from .main_plot_panel import MainPlotPanel
 from .session_manager import SessionManager
@@ -62,6 +63,7 @@ from .session_startup_dialog import UnifiedStartupDialog
 from rfmux.core.transferfunctions import convert_roc_to_volts
 from rfmux.mock import config as mc
 import datetime
+import time
 
 
 
@@ -288,6 +290,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.multisweep_window_count: int = 0        # Counter for unique multisweep window_ids
         self.multisweep_tasks: Dict[str, MultisweepTask] = {} # Stores active Multisweep tasks
 
+        # Pulse capture panels (live pulse detection docks)
+        self.pulse_capture_windows: Dict[str, Dict] = {}
+        self.pulse_capture_window_count: int = 0
+
         # Attributes for the optional embedded iPython console.
         # QTCONSOLE_AVAILABLE is a boolean constant from .utils.
         self.kernel_manager = None      # Manages the iPython kernel
@@ -390,6 +396,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if self.crs is None and self.host != "OFFLINE":
             self.btn_noise_spec.setEnabled(False)
             self.btn_noise_spec.setToolTip("CRS object not available - noise spectrum disabled.")
+
+        self.btn_pulse_capture = QtWidgets.QPushButton("Pulse Capture")
+        self.btn_pulse_capture.setToolTip(
+            "Open a live pulse capture panel (taps the slow readout stream)")
+        self.btn_pulse_capture.clicked.connect(self._open_pulse_capture_panel)
 
         self.btn_toggle_cfg = QtWidgets.QPushButton("Show Configuration")
         self.btn_toggle_cfg.setCheckable(True)
@@ -1388,6 +1399,28 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     self._start_multisweep_analysis(params)
     
     
+    def _open_pulse_capture_panel(self) -> None:
+        """Create a Pulse Capture dock (live detection via the slow tap)."""
+        self.pulse_capture_window_count += 1
+        n = self.pulse_capture_window_count
+        panel = PulseCapturePanel(
+            parent=self,
+            periscope=self,
+            session_manager=getattr(self, "session_manager", None),
+            dark_mode=self.dark_mode,
+            df_calibrations=getattr(self, "df_calibrations", None),
+            module=getattr(self, "module", 1),
+        )
+        dock = self.dock_manager.create_dock(
+            panel, f"Pulse Capture #{n}", f"pulse_{n}_{int(time.time())}")
+        main_dock = self.dock_manager.get_dock("main_plots")
+        if main_dock:
+            self.tabifyDockWidget(main_dock, dock)
+        dock.show()
+        dock.raise_()
+        self.pulse_capture_windows[f"pulse_{n}"] = {
+            "window": panel, "dock": dock}
+
     def _get_channel_noise(self) -> None:
         ''' Open Dialog to get noise spectrum dialog '''
 

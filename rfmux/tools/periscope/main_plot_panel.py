@@ -90,6 +90,7 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
         action_buttons_layout.addWidget(self.periscope.btn_load_multi)
         action_buttons_layout.addWidget(self.periscope.btn_load_bias)
         action_buttons_layout.addWidget(self.periscope.btn_noise_spec)
+        action_buttons_layout.addWidget(self.periscope.btn_pulse_capture)
         action_buttons_layout.addWidget(self.periscope.btn_toggle_cfg)
         
         # Add mock-specific buttons if in mock mode

@@ -76,6 +76,8 @@ class PeriscopeRuntime:
         # Pulse capture tap callback (registered by PulseCapturePanel)
         if not hasattr(self, '_pulse_tap'):
             self._pulse_tap = None
+        if not hasattr(self, '_pulse_tap_channels'):
+            self._pulse_tap_channels = None
 
         # Initialize simulation speed tracking for mock mode
         if self.is_mock_mode:
@@ -83,19 +85,30 @@ class PeriscopeRuntime:
 
     # ── Pulse capture tap ─────────────────────────────────────────
 
-    def register_pulse_tap(self, callback):
+    def register_pulse_tap(self, callback, channels=None):
         """Register a callback to receive slow stream samples for pulse capture.
 
         The callback is invoked from the GUI timer thread for every sample
         in every packet, so it must be fast (e.g. put into a queue).
 
         Signature: ``callback(channel: int, i_val: float, q_val: float, timestamp: float | None)``
+
+        Parameters
+        ----------
+        channels : list[int], optional
+            Channels to forward.  The slow packet carries every streamed
+            channel (128 short / 1024 long), so any of them can be
+            captured regardless of what the main window displays.  When
+            None, falls back to the displayed channels.
         """
+        self._pulse_tap_channels = (
+            sorted(set(int(c) for c in channels)) if channels else None)
         self._pulse_tap = callback
 
     def unregister_pulse_tap(self):
         """Remove the pulse capture tap callback."""
         self._pulse_tap = None
+        self._pulse_tap_channels = None
 
     def _build_layout(self):
         """
@@ -679,9 +692,15 @@ class PeriscopeRuntime:
             self.buf[ch_val]["M"].add(np.abs(sample))
             self.tbuf[ch_val].add(t_rel)
 
-            # Pulse capture tap: forward raw I/Q to registered consumer
-            if self._pulse_tap is not None:
-                self._pulse_tap(ch_val, float(sample.real), float(sample.imag), t_rel)
+        # Pulse capture tap: forward the requested channels' raw I/Q.
+        # The packet carries every streamed channel, so capture is
+        # independent of which channels are displayed.
+        if self._pulse_tap is not None:
+            for ch_val in (self._pulse_tap_channels or self.all_chs):
+                if len(pkt) <= ch_val - 1:
+                    continue
+                s = samples[ch_val - 1]
+                self._pulse_tap(ch_val, float(s.real), float(s.imag), t_rel)
 
 
     def reset_histogram_channel(self, ch_val: int) -> None:

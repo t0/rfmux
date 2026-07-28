@@ -88,6 +88,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._pulse_order: List[Tuple[int, int]] = []
         self._pulse_summaries: Dict[Tuple[int, int], dict] = {}
         self._current_view: Optional[Tuple[int, int]] = None
+        self._pending_fetch: Optional[Tuple[int, int]] = None
         self._counts: Dict[int, int] = {}
         self._last_stats: dict = {}
         self._hist_data: dict = {}
@@ -361,20 +362,18 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 "Stop it first.")
             return
 
-        # The tap only feeds channels Periscope displays — requesting
-        # any other channel would stall noise estimation forever.
-        streamed = getattr(runtime, "all_chs", None)
-        if streamed is not None:
-            missing = sorted(set(channels) - set(streamed))
-            if missing:
-                QtWidgets.QMessageBox.warning(
-                    self, "Pulse Capture",
-                    f"Channel(s) {missing} are not currently streamed in "
-                    f"Periscope (displaying: "
-                    f"{sorted(set(streamed))}).\n\nAdd them to the "
-                    "channel list in the main window, or remove them "
-                    "here.")
-                return
+        # Any channel the packet carries can be captured (display is
+        # irrelevant) — but the packet width is a hard limit:
+        # 128 channels in short-packet mode, 1024 in long mode.
+        max_ch = 128 if getattr(runtime, "is_short_packet", False) else 1024
+        too_high = [c for c in channels if c > max_ch]
+        if too_high:
+            QtWidgets.QMessageBox.warning(
+                self, "Pulse Capture",
+                f"Channel(s) {too_high} exceed the current packet width "
+                f"({max_ch} channels"
+                f"{' — short-packet mode' if max_ch == 128 else ''}).")
+            return
 
         module = int(self.module_spin.value())
         path = self._resolve_hdf5_path(module)
@@ -403,8 +402,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.signals.pulse_detected.connect(self._on_pulse_detected, conn)
         self.signals.stats_updated.connect(self._on_stats, conn)
         self.signals.histograms_updated.connect(self._on_histograms, conn)
+        self.signals.waveform_ready.connect(self._on_waveform_ready, conn)
         self.signals.error.connect(self._on_error, conn)
         self.signals.finished.connect(self._on_task_finished, conn)
+
+        # A fresh capture replaces any file we were browsing
+        if self.reader is not None:
+            self.reader.close()
+            self.reader = None
 
         self._reset_results(channels)
         self._registered_export = False
@@ -412,7 +417,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._capture_start_wall = time.time()
 
         self.task.start()
-        runtime.register_pulse_tap(self.task.enqueue)
+        runtime.register_pulse_tap(self.task.enqueue, channels)
         self._tap_registered = True
         self._set_run_state(True)
         self._set_status("● Estimating noise…", "#FFCC33")
@@ -428,7 +433,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_start.setEnabled(False)  # until finished arrives
 
     def _on_task_finished(self) -> None:
+        finalized_path = None
         if self.task is not None:
+            finalized_path = self.task.session.hdf5_path
             self.task.wait(2000)
             self.task = None
         self.signals = None
@@ -436,6 +443,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         n = sum(self._counts.values())
         self._set_status(f"● Stopped — {n} pulses captured", "#9A9A9A")
         print(f"[PulseCapture] Stopped — {n} pulses captured")
+
+        # Reopen the finalized file so every pulse stays browsable
+        if finalized_path is not None and n > 0:
+            try:
+                self.reader = PulseHDF5Reader(finalized_path)
+            except Exception as e:
+                print(f"[PulseCapture] Could not reopen {finalized_path} "
+                      f"for browsing: {e}")
 
     def _on_reestimate(self) -> None:
         if self.task is not None:
@@ -757,6 +772,22 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         i = max(0, min(len(self._pulse_order) - 1, i))
         self._show_pulse(*self._pulse_order[i])
 
+    def _on_waveform_ready(self, channel: int, pulse_idx: int) -> None:
+        """Worker warmed the cache (or failed) — redraw if still viewing."""
+        if self._current_view == (channel, pulse_idx):
+            self._show_pulse(channel, pulse_idx)
+
+    def current_hdf5_path(self) -> Optional[str]:
+        """Resolved path of the file this panel is capturing/browsing."""
+        path = None
+        if self.task is not None:
+            path = self.task.session.hdf5_path
+        elif self.reader is not None:
+            path = self.reader.path
+        elif self.hdf5_path is not None:
+            path = self.hdf5_path
+        return str(Path(path).resolve()) if path is not None else None
+
     def _get_waveform(self, channel: int, pulse_idx: int) -> Optional[dict]:
         if self.task is not None:
             wf = self.task.get_pulse(channel, pulse_idx)
@@ -787,8 +818,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.pulse_plot.clear()
         self.pulse_plot.getPlotItem().setLabel("bottom", "time (ms)")
         if wf is None:
-            self.pulse_plot.setTitle("waveform no longer cached")
+            # Evicted from the live cache — fetch it from the HDF5 file
+            # via the worker thread (waveform_ready redraws on arrival).
+            key = (channel, pulse_idx)
+            if self.task is not None and self._pending_fetch != key:
+                self._pending_fetch = key
+                self.task.request_waveform(channel, pulse_idx)
+                self.pulse_plot.setTitle("loading waveform from file…")
+            else:
+                self.pulse_plot.setTitle("waveform not available")
             return
+        self._pending_fetch = None
         self.pulse_plot.setTitle(None)
 
         t = np.asarray(wf["Time"], dtype=np.float64)

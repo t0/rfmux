@@ -219,6 +219,22 @@ class PulseHDF5Writer:
         grp.attrs["pulse_count"] = pulse_idx
         self.f.flush()
 
+    def read_pulse(self, channel: int, pulse_idx: int) -> Optional[dict]:
+        """Read back a previously appended pulse through the open write
+        handle.
+
+        Used for live browsing while a capture is running: the file is
+        flushed after every append, and reading through the same handle
+        involves no file locking.  Must be called from the same thread
+        that writes (the h5py single-thread rule).
+        """
+        if self.f is None or not self.f.id.valid:
+            return None
+        key = f"channel_{channel}/pulse_{pulse_idx:06d}"
+        if key not in self.f:
+            return None
+        return _pulse_dict_from_group(self.f[key])
+
     def update_noise_stats(
         self, noise_stats: Dict[int, ChannelNoiseStats],
     ) -> None:
@@ -354,23 +370,7 @@ class PulseHDF5Reader:
         key = f"channel_{channel}/pulse_{pulse_idx:06d}"
         if key not in self.f:
             return None
-        grp = self.f[key]
-        return {
-            "Amp_I": np.array(grp["Amp_I"]),
-            "Amp_Q": np.array(grp["Amp_Q"]),
-            "Time": np.array(grp["Time"]),
-            "pileup": bool(grp.attrs.get("pileup", False)),
-            "peak_I": float(grp.attrs.get("peak_I", 0)),
-            "peak_Q": float(grp.attrs.get("peak_Q", 0)),
-            "peak_snr_I": float(grp.attrs.get("peak_snr_I", 0)),
-            "peak_snr_Q": float(grp.attrs.get("peak_snr_Q", 0)),
-            "n_samples": int(grp.attrs.get("n_samples", 0)),
-            "duration_s": float(grp.attrs.get("duration_s", 0)),
-            "timestamp": float(grp.attrs.get("timestamp", 0)),
-            "peak_amp": float(grp.attrs.get("peak_amp", 0)),
-            "snr": float(grp.attrs.get("snr", 0)),
-            "tau_s": float(grp.attrs.get("tau_s", float("nan"))),
-        }
+        return _pulse_dict_from_group(self.f[key])
 
     def get_pulse_metadata(
         self, channel: int, pulse_idx: int,
@@ -434,6 +434,26 @@ class PulseHDF5Reader:
 
 
 # ── Helpers ───────────────────────────────────────────────────────
+
+def _pulse_dict_from_group(grp) -> dict:
+    """Waveforms + scalar attrs for one pulse group (reader/writer shared)."""
+    return {
+        "Amp_I": np.array(grp["Amp_I"]),
+        "Amp_Q": np.array(grp["Amp_Q"]),
+        "Time": np.array(grp["Time"]),
+        "pileup": bool(grp.attrs.get("pileup", False)),
+        "peak_I": float(grp.attrs.get("peak_I", 0)),
+        "peak_Q": float(grp.attrs.get("peak_Q", 0)),
+        "peak_snr_I": float(grp.attrs.get("peak_snr_I", 0)),
+        "peak_snr_Q": float(grp.attrs.get("peak_snr_Q", 0)),
+        "n_samples": int(grp.attrs.get("n_samples", 0)),
+        "duration_s": float(grp.attrs.get("duration_s", 0)),
+        "timestamp": float(grp.attrs.get("timestamp", 0)),
+        "peak_amp": float(grp.attrs.get("peak_amp", 0)),
+        "snr": float(grp.attrs.get("snr", 0)),
+        "tau_s": float(grp.attrs.get("tau_s", float("nan"))),
+    }
+
 
 def _convert_attr(val: Any) -> Any:
     """Convert HDF5 attribute values to native Python types."""

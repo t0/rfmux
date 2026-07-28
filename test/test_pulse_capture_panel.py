@@ -32,12 +32,15 @@ class _FakeRuntime:
 
     def __init__(self):
         self._pulse_tap = None
+        self.tap_channels = None
 
-    def register_pulse_tap(self, callback):
+    def register_pulse_tap(self, callback, channels=None):
         self._pulse_tap = callback
+        self.tap_channels = channels
 
     def unregister_pulse_tap(self):
         self._pulse_tap = None
+        self.tap_channels = None
 
 
 @pytest.fixture(scope="module")
@@ -300,22 +303,83 @@ def test_noise_progress_stall_visibility(qt_app, tmp_path):
     _spin(qt_app)
 
 
-def test_channel_validation_aborts(qt_app, tmp_path, monkeypatch):
-    """A channel Periscope isn't streaming aborts Start with a message
-    (previously: silent infinite noise estimation)."""
-    warnings = []
-    monkeypatch.setattr(
-        QtWidgets.QMessageBox, "warning",
-        staticmethod(lambda parent, title, text: warnings.append(text)))
-
+def test_non_displayed_channels_start_ok(qt_app, tmp_path):
+    """Capture channels are decoupled from displayed channels: the tap
+    is registered with the requested list, display is irrelevant."""
     runtime = _FakeRuntime()
     runtime.all_chs = [1]  # periscope displays only channel 1
     panel = _make_panel(qt_app, tmp_path, runtime)
     panel.channels_edit.setText("1,2")
 
     panel._on_start()
-    assert panel.task is None, "start must abort on non-streamed channels"
-    assert warnings and "[2]" in warnings[0]
+    assert panel.task is not None, \
+        "non-displayed channels must be capturable"
+    assert runtime.tap_channels == [1, 2]
+
+    panel._on_stop()
+    assert _spin_until(qt_app, lambda: panel.task is None)
+    panel.close()
+    _spin(qt_app)
+
+
+def test_packet_width_validation(qt_app, tmp_path, monkeypatch):
+    """Channels beyond the packet width (128 short / 1024 long) abort."""
+    warnings = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "warning",
+        staticmethod(lambda parent, title, text: warnings.append(text)))
+
+    runtime = _FakeRuntime()
+    runtime.is_short_packet = True  # 128-channel packets
+    panel = _make_panel(qt_app, tmp_path, runtime)
+    panel.channels_edit.setText("1,200")
+
+    panel._on_start()
+    assert panel.task is None
+    assert warnings and "200" in warnings[0] and "128" in warnings[0]
+    panel.close()
+    _spin(qt_app)
+
+
+def test_waveform_fetch_after_eviction_and_stop(qt_app, tmp_path):
+    """Evicted waveforms load back from the live HDF5 via the worker;
+    after Stop, the finalized file keeps every pulse browsable."""
+    runtime = _FakeRuntime()
+    panel = _make_panel(qt_app, tmp_path, runtime)
+    rng = np.random.default_rng(42)
+
+    panel._on_start()
+    panel.task._cache_size = 1  # force eviction of all but the latest
+    # Disable follow-latest so no _show_pulse (and hence no automatic
+    # cache-refetch) runs while pulses arrive — keeps eviction
+    # deterministic for this test.
+    panel.follow_check.setChecked(False)
+    for _ in range(1000):
+        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
+                           float(rng.normal(0, 1.0)), None)
+    assert _spin_until(qt_app, lambda: panel.noise_stats)
+    _feed_capture(runtime._pulse_tap, rng)
+    assert _spin_until(qt_app, lambda: len(panel._pulse_order) == 3)
+
+    # Pulse 1 was evicted (cache holds only the newest)
+    assert panel.task.get_pulse(1, 1) is None
+    panel._show_pulse(1, 1)  # triggers async fetch from the live file
+    assert _spin_until(
+        qt_app,
+        lambda: len(panel.pulse_plot.getPlotItem().listDataItems()) >= 2), \
+        "waveform never loaded from the live HDF5 file"
+    assert "Pulse #000001" in panel.pulse_info.text()
+
+    # After stop: reader auto-opens, everything stays browsable
+    panel._on_stop()
+    assert _spin_until(qt_app, lambda: panel.task is None)
+    assert panel.reader is not None
+    for idx in (1, 2, 3):
+        wf = panel._get_waveform(1, idx)
+        assert wf is not None and len(wf["Amp_I"]) > 0
+    panel._show_pulse(1, 2)
+    assert "Pulse #000002" in panel.pulse_info.text()
+
     panel.close()
     _spin(qt_app)
 

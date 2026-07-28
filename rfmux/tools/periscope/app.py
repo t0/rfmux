@@ -2744,6 +2744,18 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         # HDF5 files (streamed pulse captures) never go through pickle
         if file_path.lower().endswith(('.h5', '.hdf5')):
+            # A panel already capturing to / browsing this file? Focus it
+            # (a live capture holds the file open — don't reopen it).
+            resolved = str(Path(file_path).resolve())
+            for entry in getattr(self, 'pulse_capture_windows', {}).values():
+                panel = entry.get('window')
+                dock = entry.get('dock')
+                if panel is not None and \
+                        panel.current_hdf5_path() == resolved:
+                    if dock is not None:
+                        dock.show()
+                        dock.raise_()
+                    return
             if self.session_manager.identify_file_type(file_path) == 'pulse':
                 self._load_pulse_capture_from_session(file_path)
             else:

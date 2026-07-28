@@ -41,6 +41,7 @@ class PulseCaptureSignals(QtCore.QObject):
     pulse_detected = pyqtSignal(int, int, dict)  # channel, pulse_idx, summary
     stats_updated = pyqtSignal(dict)        # PulseCaptureSession.stats()
     histograms_updated = pyqtSignal(dict)   # PulseHistogramSet.get_histogram_data()
+    waveform_ready = pyqtSignal(int, int)   # channel, pulse_idx (cache warmed)
     error = pyqtSignal(str)
     finished = pyqtSignal()
 
@@ -118,6 +119,16 @@ class PulseCaptureTask(QtCore.QThread):
         with self._cache_lock:
             return self._cache.get((channel, pulse_idx))
 
+    def request_waveform(self, channel: int, pulse_idx: int) -> None:
+        """Ask the worker to load an evicted waveform from the live HDF5
+        file (writer's own handle, writer's thread).  ``waveform_ready``
+        fires when the cache has been warmed (or the fetch failed)."""
+        try:
+            self.sample_queue.put_nowait(("__fetch__", channel, pulse_idx))
+        except queue.Full:
+            self.signals.error.emit("Sample queue full — could not "
+                                    "request waveform load")
+
     # ── Worker thread ─────────────────────────────────────────────
 
     def run(self) -> None:
@@ -131,6 +142,22 @@ class PulseCaptureTask(QtCore.QThread):
                 if item[0] == "__reestimate__":
                     if self.session.state is CaptureState.CAPTURING:
                         self.session.re_estimate_noise()
+                    continue
+                if item[0] == "__fetch__":
+                    _, ch, idx = item
+                    wf = None
+                    writer = self.session.writer
+                    if writer is not None:
+                        try:
+                            wf = writer.read_pulse(ch, idx)
+                        except Exception as e:
+                            self.signals.error.emit(
+                                f"Waveform read failed for "
+                                f"ch{ch}#{idx}: {e}")
+                    if wf is not None:
+                        with self._cache_lock:
+                            self._cache[(ch, idx)] = wf
+                    self.signals.waveform_ready.emit(ch, idx)
                     continue
                 ch, i_val, q_val, ts = item
                 self.session.feed_sample(ch, i_val, q_val, ts)

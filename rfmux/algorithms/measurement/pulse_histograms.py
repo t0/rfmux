@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
 from .pulse_detection import ChannelNoiseStats
+from .pulse_analysis import pulse_summary
 
 
 # ───────────────────────── Single Histogram ─────────────────────────
@@ -84,6 +85,8 @@ class PulseHistogramSet:
     - **amplitude**: Peak excursion from baseline (max of I and Q)
     - **duration_ms**: Pulse window duration in milliseconds
     - **snr**: Peak signal-to-noise ratio in σ units
+    - **tau_ms**: Fit-free decay constant in ms (only binned when
+      derivable — requires ``threshold_sigma``)
 
     Histograms are auto-created for each channel on the first pulse.
 
@@ -101,6 +104,13 @@ class PulseHistogramSet:
         Min/max for SNR histogram bins (in σ).
     snr_bins : int
         Number of SNR bins.
+    tau_range_ms : tuple[float, float]
+        Min/max for derived-tau histogram bins (in ms).
+    tau_bins : int
+        Number of tau bins.
+    threshold_sigma : float, optional
+        Trigger threshold used during capture.  Required for the
+        derived-tau metric; when None, tau is NaN and never binned.
     """
 
     def __init__(
@@ -111,11 +121,17 @@ class PulseHistogramSet:
         duration_bins: int = 100,
         snr_range: Tuple[float, float] = (0, 50),
         snr_bins: int = 100,
+        tau_range_ms: Tuple[float, float] = (0.0, 10.0),
+        tau_bins: int = 100,
+        threshold_sigma: Optional[float] = None,
     ):
         self.amp_edges = np.linspace(amp_range[0], amp_range[1], amp_bins + 1)
         self.dur_edges = np.linspace(
             duration_range_ms[0], duration_range_ms[1], duration_bins + 1)
         self.snr_edges = np.linspace(snr_range[0], snr_range[1], snr_bins + 1)
+        self.tau_edges = np.linspace(
+            tau_range_ms[0], tau_range_ms[1], tau_bins + 1)
+        self.threshold_sigma = threshold_sigma
 
         # Per-channel accumulators: {channel: {metric: HistogramAccumulator}}
         self.histograms: Dict[int, Dict[str, HistogramAccumulator]] = {}
@@ -127,6 +143,7 @@ class PulseHistogramSet:
                 "amplitude": HistogramAccumulator(self.amp_edges.copy()),
                 "duration_ms": HistogramAccumulator(self.dur_edges.copy()),
                 "snr": HistogramAccumulator(self.snr_edges.copy()),
+                "tau_ms": HistogramAccumulator(self.tau_edges.copy()),
             }
 
     def add_pulse(
@@ -149,40 +166,21 @@ class PulseHistogramSet:
         Returns
         -------
         dict
-            Computed metrics: ``peak_amp``, ``snr``, ``duration_ms``.
+            The full :func:`pulse_summary` dict (``peak_amp``, ``snr``,
+            ``duration_ms``, ``tau_ms``, ...).
         """
         self._ensure_channel(channel)
         h = self.histograms[channel]
 
-        amp_I = np.asarray(pulse_data["Amp_I"])
-        amp_Q = np.asarray(pulse_data["Amp_Q"])
-        time_arr = np.asarray(pulse_data["Time"], dtype=np.float64)
+        summary = pulse_summary(pulse_data, noise_stats, self.threshold_sigma)
 
-        # Peak amplitude (max of I and Q excursion from baseline)
-        if noise_stats is not None:
-            peak_I = float(np.max(np.abs(amp_I - noise_stats.mean_I)))
-            peak_Q = float(np.max(np.abs(amp_Q - noise_stats.mean_Q)))
-            peak_amp = max(peak_I, peak_Q)
-            max_std = max(noise_stats.std_I, noise_stats.std_Q, 1e-30)
-            snr = peak_amp / max_std
-        else:
-            peak_amp = float(max(np.max(np.abs(amp_I)), np.max(np.abs(amp_Q))))
-            snr = 0.0
+        h["amplitude"].add(summary["peak_amp"])
+        h["snr"].add(summary["snr"])
+        h["duration_ms"].add(summary["duration_ms"])
+        if np.isfinite(summary["tau_ms"]):
+            h["tau_ms"].add(summary["tau_ms"])
 
-        h["amplitude"].add(peak_amp)
-        h["snr"].add(snr)
-
-        # Duration from timestamps
-        valid_mask = np.isfinite(time_arr)
-        valid_times = time_arr[valid_mask]
-        if len(valid_times) > 1:
-            duration_ms = float(
-                np.max(valid_times) - np.min(valid_times)) * 1e3
-        else:
-            duration_ms = 0.0
-        h["duration_ms"].add(duration_ms)
-
-        return {"peak_amp": peak_amp, "snr": snr, "duration_ms": duration_ms}
+        return summary
 
     def get_channel_histograms(
         self, channel: int,

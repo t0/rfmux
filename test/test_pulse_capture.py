@@ -587,3 +587,296 @@ class TestIntegration:
 
         # Verify histogram set agrees
         assert histograms.total_pulses() == n_detected
+
+
+# ───────────────────────── Phase A: pulse_analysis ──────────────────
+
+from rfmux.algorithms.measurement.pulse_analysis import (
+    derive_tau,
+    pulse_peaks,
+    pulse_summary,
+)
+from rfmux.algorithms.measurement.pulse_capture_session import (
+    CaptureState,
+    PulseCaptureSession,
+)
+
+
+def _make_decay_pulse(tau_s=1.5e-3, amp_sigma=40.0, sigma=1.0,
+                      sample_rate=38147.0, n_samples=400, k0=10,
+                      quadrature="I", mean=0.0):
+    """Instant step rise at sample k0, clean exponential decay, no noise."""
+    dt = 1.0 / sample_rate
+    t = np.arange(n_samples) * dt
+    shape = np.zeros(n_samples)
+    k = np.arange(n_samples)
+    shape[k >= k0] = np.exp(-(k[k >= k0] - k0) * dt / tau_s)
+    signal = mean + amp_sigma * sigma * shape
+    flat = np.full(n_samples, mean)
+    if quadrature == "I":
+        amp_I, amp_Q = signal, flat
+    else:
+        amp_I, amp_Q = flat, signal
+    return {"Amp_I": amp_I, "Amp_Q": amp_Q, "Time": t, "pileup": False}
+
+
+class TestPulseAnalysis:
+    def test_snr_canonical_definition(self):
+        ns = _make_noise_stats(std_I=10.0, std_Q=2.0)
+        pulse = _make_pulse_data(peak_I=100.0, peak_Q=20.0)
+        peaks = pulse_peaks(pulse, ns)
+        # max(peak_I, peak_Q) / max(std_I, std_Q) — NOT per-component
+        assert peaks["peak_amp"] == pytest.approx(100.0, rel=1e-6)
+        assert peaks["snr"] == pytest.approx(10.0, rel=1e-6)
+
+    def test_summary_keys_complete(self):
+        ns = _make_noise_stats()
+        summary = pulse_summary(_make_pulse_data(), ns, threshold_sigma=5.0)
+        for key in ("n_samples", "pileup", "peak_I", "peak_Q", "peak_amp",
+                    "snr", "duration_s", "duration_ms", "timestamp",
+                    "tau_s", "tau_ms"):
+            assert key in summary
+
+    def test_derive_tau_recovers_tau(self):
+        tau_true = 1.5e-3
+        ns = ChannelNoiseStats(mean_I=0.0, std_I=1.0, mean_Q=0.0, std_Q=1.0)
+        pulse = _make_decay_pulse(tau_s=tau_true, amp_sigma=40.0)
+        tau = derive_tau(pulse, ns, threshold_sigma=5.0)
+        assert np.isfinite(tau)
+        assert tau == pytest.approx(tau_true, rel=0.05)
+
+    def test_derive_tau_dominant_quadrature(self):
+        tau_true = 1.5e-3
+        ns = ChannelNoiseStats(mean_I=0.0, std_I=1.0, mean_Q=0.0, std_Q=1.0)
+        pulse = _make_decay_pulse(tau_s=tau_true, amp_sigma=40.0,
+                                  quadrature="Q")
+        tau = derive_tau(pulse, ns, threshold_sigma=5.0)
+        assert np.isfinite(tau)
+        assert tau == pytest.approx(tau_true, rel=0.05)
+
+    def test_derive_tau_nan_low_snr(self):
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        pulse = _make_decay_pulse(amp_sigma=6.0)  # below 1.3 * 5σ margin
+        assert np.isnan(derive_tau(pulse, ns, threshold_sigma=5.0))
+
+    def test_derive_tau_nan_no_crossing(self):
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        # Window ends long before the envelope decays through threshold
+        pulse = _make_decay_pulse(tau_s=50e-3, amp_sigma=40.0, n_samples=60)
+        assert np.isnan(derive_tau(pulse, ns, threshold_sigma=5.0))
+
+    def test_derive_tau_nan_bad_times(self):
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        pulse = _make_decay_pulse(amp_sigma=40.0)
+        pulse["Time"] = np.full(len(pulse["Time"]), np.nan)
+        assert np.isnan(derive_tau(pulse, ns, threshold_sigma=5.0))
+
+    def test_derive_tau_nan_without_noise_stats(self):
+        pulse = _make_decay_pulse(amp_sigma=40.0)
+        assert np.isnan(derive_tau(pulse, None, threshold_sigma=5.0))
+
+
+# ───────────────────────── Phase A: tau histogram ───────────────────
+
+class TestTauHistogram:
+    def test_tau_binned_when_derivable(self):
+        hist = PulseHistogramSet(threshold_sigma=5.0)
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        hist.add_pulse(1, _make_decay_pulse(amp_sigma=40.0), ns)
+        assert hist.get_channel_histograms(1)["tau_ms"].total == 1
+
+    def test_tau_not_binned_without_threshold(self):
+        hist = PulseHistogramSet()  # threshold_sigma=None
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        summary = hist.add_pulse(1, _make_decay_pulse(amp_sigma=40.0), ns)
+        assert np.isnan(summary["tau_ms"])
+        assert hist.get_channel_histograms(1)["tau_ms"].total == 0
+
+    def test_backward_compat_positional_args(self):
+        hist = PulseHistogramSet((0, 1000), 50, (0, 10), 50, (0, 20), 50)
+        ns = _make_noise_stats()
+        hist.add_pulse(1, _make_pulse_data(), ns)
+        metrics = hist.get_channel_histograms(1)
+        assert set(metrics.keys()) == {
+            "amplitude", "duration_ms", "snr", "tau_ms"}
+
+    def test_add_pulse_returns_full_summary(self):
+        hist = PulseHistogramSet(threshold_sigma=5.0)
+        ns = _make_noise_stats()
+        summary = hist.add_pulse(1, _make_pulse_data(), ns)
+        for key in ("peak_amp", "snr", "duration_ms", "tau_ms", "peak_I"):
+            assert key in summary
+
+
+# ───────────────────────── Phase A: HDF5 derived attrs ──────────────
+
+@requires_h5py
+class TestHDF5DerivedAttrs:
+    def test_roundtrip_unified_attrs(self, tmp_path):
+        ns = {1: ChannelNoiseStats(std_I=1.0, std_Q=1.0)}
+        pulse = _make_decay_pulse(tau_s=1.5e-3, amp_sigma=40.0)
+        writer = PulseHDF5Writer(
+            tmp_path / "cap.h5", [1], ns,
+            {"streamer_mode": "slow", "threshold_sigma": 5.0})
+        writer.append_pulse(1, 1, pulse)
+        writer.finalize()
+
+        with PulseHDF5Reader(tmp_path / "cap.h5") as reader:
+            loaded = reader.get_pulse(1, 1)
+            assert loaded["peak_amp"] == pytest.approx(40.0, rel=1e-6)
+            assert loaded["snr"] == pytest.approx(40.0, rel=1e-6)
+            expected_tau = derive_tau(pulse, ns[1], 5.0)
+            assert loaded["tau_s"] == pytest.approx(expected_tau, rel=1e-9)
+            meta = reader.get_pulse_metadata(1, 1)
+            assert "tau_s" in meta and "snr" in meta and "peak_amp" in meta
+
+
+# ───────────────────────── Phase A: PulseCaptureSession ─────────────
+
+def _feed_noise(session, n, rng, mean=0.0, sigma=1.0, channel=1):
+    for _ in range(n):
+        session.feed_sample(channel, mean + rng.normal(0, sigma),
+                            mean + rng.normal(0, sigma), None)
+
+
+def _feed_capture_stream(session, n, pulse_starts, rng, *, tau_samples=40,
+                         amp=60.0, mean=0.0, sigma=1.0, channel=1,
+                         sample_rate=38147.0, t_offset=0.0):
+    dt = 1.0 / sample_rate
+    signal = mean + rng.normal(0, sigma, n)
+    k = np.arange(n)
+    for k0 in pulse_starts:
+        m = k >= k0
+        signal[m] += amp * sigma * np.exp(-(k[m] - k0) * dt / (tau_samples * dt))
+    for i in range(n):
+        session.feed_sample(channel, float(signal[i]),
+                            mean + float(rng.normal(0, sigma)),
+                            t_offset + i * dt)
+    return t_offset + n * dt
+
+
+@requires_h5py
+class TestPulseCaptureSession:
+    def _make_session(self, tmp_path, **overrides):
+        events = {"noise": [], "pulses": [], "stats": [], "hists": [],
+                  "errors": []}
+        kwargs = dict(
+            channels=[1],
+            threshold_sigma=5.0,
+            # 1.5σ: the leaky-bucket end condition increments when BOTH
+            # I and Q are within end_sigma.  At 1.0σ that probability is
+            # ~0.47 on Gaussian noise (negative drift — termination only
+            # by lucky random walk); at 1.5σ it is ~0.75 (prompt).
+            end_sigma=1.5,
+            margin_fraction=0.2,
+            buf_size=4000,
+            sample_rate=38147.0,
+            noise_samples=200,
+            hdf5_path=tmp_path / "session.h5",
+            histogram_flush_every=2,
+            on_noise=lambda ns: events["noise"].append(ns),
+            on_pulse=lambda ch, idx, summary, data:
+                events["pulses"].append((ch, idx, summary)),
+            on_stats=lambda s: events["stats"].append(s),
+            on_histograms=lambda d: events["hists"].append(d),
+            on_error=lambda msg: events["errors"].append(msg),
+        )
+        kwargs.update(overrides)
+        return PulseCaptureSession(**kwargs), events
+
+    def test_lifecycle_and_detection(self, tmp_path):
+        session, events = self._make_session(tmp_path)
+        rng = np.random.default_rng(42)
+
+        session.start()
+        assert session.state is CaptureState.ESTIMATING
+        _feed_noise(session, 200, rng)
+        assert session.state is CaptureState.CAPTURING
+        assert len(events["noise"]) == 1
+
+        _feed_capture_stream(session, 3000, [100, 900, 1700], rng)
+        assert session.total_pulses == 3
+        assert session.pulse_counts[1] == 3
+        assert len(events["pulses"]) == 3
+        for _, _, summary in events["pulses"]:
+            assert summary["snr"] > 5.0
+            assert np.isfinite(summary["tau_ms"])
+        assert len(events["stats"]) == 3
+        assert len(events["hists"]) >= 1  # flush_every=2
+        assert not events["errors"]
+
+        stats = session.stats()
+        assert stats["elapsed_s"] > 0
+        assert stats["rate_per_min"] > 0
+
+        session.stop()
+        assert session.state is CaptureState.STOPPED
+
+        with PulseHDF5Reader(tmp_path / "session.h5") as reader:
+            assert reader.pulse_count(1) == 3
+            assert "capture_end" in reader.metadata
+            hists = reader.get_histograms()
+            assert np.sum(hists["tau_ms_counts_ch1"]) == 3
+            pulse = reader.get_pulse(1, 1)
+            assert np.isfinite(pulse["tau_s"])
+
+    def test_invalid_timestamps_dropped(self, tmp_path):
+        session, events = self._make_session(tmp_path)
+        rng = np.random.default_rng(1)
+        session.start()
+        _feed_noise(session, 200, rng)
+        session.feed_sample(1, 0.0, 0.0, None)
+        session.feed_sample(1, 0.0, 0.0, float("nan"))
+        assert session.dropped_invalid_ts == 2
+        assert session.total_pulses == 0
+        session.stop()
+
+    def test_re_estimation_updates_noise(self, tmp_path):
+        session, events = self._make_session(tmp_path)
+        rng = np.random.default_rng(7)
+        session.start()
+        _feed_noise(session, 200, rng, mean=0.0)
+        t_end = _feed_capture_stream(session, 1000, [100], rng)
+        assert session.total_pulses == 1
+
+        session.re_estimate_noise()
+        assert session.state is CaptureState.ESTIMATING
+        _feed_noise(session, 200, rng, mean=5.0)  # shifted baseline
+        assert session.state is CaptureState.CAPTURING
+        assert len(events["noise"]) == 2
+        assert session.noise_stats[1].mean_I == pytest.approx(5.0, abs=1.0)
+
+        _feed_capture_stream(session, 1000, [100], rng, mean=5.0,
+                             t_offset=t_end)
+        assert session.total_pulses == 2
+        session.stop()
+
+        with PulseHDF5Reader(tmp_path / "session.h5") as reader:
+            assert reader.noise_stats(1).mean_I == pytest.approx(5.0, abs=1.0)
+            assert reader.pulse_count(1) == 2
+
+    def test_stop_idempotent(self, tmp_path):
+        session, _ = self._make_session(tmp_path)
+        rng = np.random.default_rng(3)
+        session.start()
+        _feed_noise(session, 200, rng)
+        session.stop()
+        session.stop()
+        assert session.state is CaptureState.STOPPED
+
+    def test_session_without_hdf5(self, tmp_path):
+        session, events = self._make_session(tmp_path, hdf5_path=None)
+        rng = np.random.default_rng(5)
+        session.start()
+        _feed_noise(session, 200, rng)
+        _feed_capture_stream(session, 1000, [100], rng)
+        assert session.total_pulses == 1
+        assert session.writer is None
+        assert not events["errors"]
+        session.stop()
+
+    def test_start_twice_raises(self, tmp_path):
+        session, _ = self._make_session(tmp_path)
+        session.start()
+        with pytest.raises(RuntimeError):
+            session.start()

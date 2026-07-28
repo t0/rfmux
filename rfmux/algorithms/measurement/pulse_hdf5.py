@@ -35,6 +35,7 @@ except ImportError:
     h5py = None  # type: ignore[assignment]
 
 from .pulse_detection import ChannelNoiseStats
+from .pulse_analysis import pulse_summary
 
 
 # ───────────────────────── Writer ───────────────────────────────────
@@ -79,6 +80,7 @@ class PulseHDF5Writer:
         self.path = Path(path)
         self._channels = list(channels)
         self._noise_stats = dict(noise_stats)
+        self._threshold_sigma = capture_params.get("threshold_sigma")
         self.f: Optional[h5py.File] = h5py.File(self.path, "w")
 
         # ── Capture metadata ──────────────────────────────────────
@@ -206,8 +208,36 @@ class PulseHDF5Writer:
             pulse_grp.attrs["duration_s"] = 0.0
             pulse_grp.attrs["timestamp"] = 0.0
 
+        # Unified derived quantities (canonical SNR + fit-free tau) —
+        # the same numbers the histograms and GUI display use.
+        summary = pulse_summary(pulse_data, noise_stats, self._threshold_sigma)
+        pulse_grp.attrs["peak_amp"] = summary["peak_amp"]
+        pulse_grp.attrs["snr"] = summary["snr"]
+        pulse_grp.attrs["tau_s"] = summary["tau_s"]
+
         # Update running pulse count
         grp.attrs["pulse_count"] = pulse_idx
+        self.f.flush()
+
+    def update_noise_stats(
+        self, noise_stats: Dict[int, ChannelNoiseStats],
+    ) -> None:
+        """Refresh per-channel noise attributes after a re-estimation.
+
+        Later pulses' derived attrs use the new statistics; the channel
+        group attrs always reflect the most recent estimate.
+        """
+        if self.f is None or not self.f.id.valid:
+            return
+        self._noise_stats.update(noise_stats)
+        for ch, ns in noise_stats.items():
+            key = f"channel_{ch}"
+            if key in self.f:
+                grp = self.f[key]
+                grp.attrs["noise_mean_I"] = ns.mean_I
+                grp.attrs["noise_std_I"] = ns.std_I
+                grp.attrs["noise_mean_Q"] = ns.mean_Q
+                grp.attrs["noise_std_Q"] = ns.std_Q
         self.f.flush()
 
     def update_histograms(self, histogram_data: Dict[str, np.ndarray]) -> None:
@@ -337,6 +367,9 @@ class PulseHDF5Reader:
             "n_samples": int(grp.attrs.get("n_samples", 0)),
             "duration_s": float(grp.attrs.get("duration_s", 0)),
             "timestamp": float(grp.attrs.get("timestamp", 0)),
+            "peak_amp": float(grp.attrs.get("peak_amp", 0)),
+            "snr": float(grp.attrs.get("snr", 0)),
+            "tau_s": float(grp.attrs.get("tau_s", float("nan"))),
         }
 
     def get_pulse_metadata(

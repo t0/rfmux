@@ -65,7 +65,12 @@ def pytest_addoption(parser):
 
 @pytest.fixture(scope="session")
 def serial(request):
-    return request.config.getoption("--serial")
+    s = request.config.getoption("--serial")
+    if s is None:
+        pytest.skip(
+            "Use the '--serial' argument to specify a running CRS board for this test."
+        )
+    return s
 
 
 @pytest.fixture(scope="session")

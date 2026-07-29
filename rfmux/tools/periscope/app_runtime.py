@@ -14,6 +14,7 @@ from PyQt6 import sip
 from PyQt6.QtCore import QUrl
 import numpy as np
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+from ... import streamer as _streamer
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
@@ -695,12 +696,20 @@ class PeriscopeRuntime:
         # Pulse capture tap: forward the requested channels' raw I/Q.
         # The packet carries every streamed channel, so capture is
         # independent of which channels are displayed.
+        # Timestamps are ABSOLUTE packet time (seconds of day) — the
+        # same clock the PFB stream uses — so both-mode cross-stream
+        # matching sees one time base (display t_rel is display-only).
         if self._pulse_tap is not None:
+            ts = pkt.ts
+            ts_abs = (ts.h * 3600 + ts.m * 60 + ts.s
+                      + ts.ss / _streamer.SS_PER_SECOND) \
+                if ts.recent else None
             for ch_val in (self._pulse_tap_channels or self.all_chs):
                 if len(pkt) <= ch_val - 1:
                     continue
                 s = samples[ch_val - 1]
-                self._pulse_tap(ch_val, float(s.real), float(s.imag), t_rel)
+                self._pulse_tap(ch_val, float(s.real), float(s.imag),
+                                ts_abs)
 
 
     def reset_histogram_channel(self, ch_val: int) -> None:

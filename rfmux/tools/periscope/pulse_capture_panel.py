@@ -905,8 +905,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._pulse_order.append(key)
         self._counts[ch] = self._counts.get(ch, 0) + 1
 
+        # A pair ALWAYS carries both streams' data when the rings allow:
+        # "matched" vs "slow-trig"/"fast-trig" is trigger provenance,
+        # not data presence.  Tint only when the complement window
+        # could NOT be recovered (ring had slid past it).
         matched = pair["slow_idx"] is not None \
             and pair["fast_idx"] is not None
+        complement_missing = False
         if matched:
             dt = pair.get("time_offset") or 0.0
             label = (f"◆ Pair #{pair_idx:04d}  "
@@ -914,10 +919,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             detail = f"Δt={dt*1e6:+.0f}µs"
         else:
             side = "slow" if pair["slow_idx"] is not None else "fast"
+            other = "fast" if side == "slow" else "slow"
             idx = pair["slow_idx"] or pair["fast_idx"]
-            label = f"◐ Pair #{pair_idx:04d}  {side} only #{idx}"
-            detail = ("+TOD" if pair.get("has_slow_tod")
-                      or pair.get("has_fast_tod") else "")
+            label = f"◆ Pair #{pair_idx:04d}  {side}-trig #{idx}"
+            if pair.get(f"has_{other}_tod"):
+                detail = f"+{other} data"
+            else:
+                detail = f"{other} n/a"
+                complement_missing = True
         summ = pair.get("slow_summary") or pair.get("fast_summary") or {}
         parent = self._channel_items.get(ch)
         if parent is not None:
@@ -925,7 +934,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 [label, detail, f"{summ.get('snr', 0):.1f}σ"])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
                          ("pair", ch, pair_idx))
-            if not matched:
+            if complement_missing:
                 for col in range(3):
                     item.setBackground(col, QtGui.QColor(
                         "#33251c" if self.dark_mode else "#ffe8d9"))
@@ -944,7 +953,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             self._set_status(
                 f"● Capturing — slow {slow_n} | fast {fast_n} pulses — "
                 f"{s['pairs_matched']} matched / "
-                f"{s['pairs_unmatched']} one-sided pairs", "#4CC38A")
+                f"{s['pairs_unmatched']} single-trigger pairs", "#4CC38A")
             return
         total = s.get("total_pulses", 0)
         rate = s.get("rate_per_min", 0.0)
@@ -1210,15 +1219,25 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         matched = meta.get("slow_idx") is not None \
             and meta.get("fast_idx") is not None
+        if matched:
+            provenance = "both triggered"
+        elif meta.get("slow_idx") is not None:
+            provenance = "slow-triggered (fast shown from ring)" \
+                if (fast_wf is not None) else \
+                "slow-triggered (fast window unavailable)"
+        else:
+            provenance = "fast-triggered (slow shown from ring)" \
+                if (slow_wf is not None) else \
+                "fast-triggered (slow window unavailable)"
         dt = meta.get("time_offset")
         summ = meta.get("slow_summary") or meta.get("fast_summary") or {}
         tau_ms = summ.get("tau_ms", float("nan"))
         self.pulse_info.setText(
             f"Pair #{pair_idx:04d} — Channel {channel}   "
-            f"[{'matched' if matched else 'one-sided'}]\n"
+            f"[{provenance}]\n"
             f"slow #{meta.get('slow_idx')} / fast #{meta.get('fast_idx')}"
             + (f"   Δt = {dt*1e6:+.0f} µs" if dt is not None else "")
-            + (f"\nslow SNR {summ.get('snr', 0):.1f}σ, "
+            + (f"\nSNR {summ.get('snr', 0):.1f}σ, "
                f"τ = {tau_ms:.2f} ms"
                if np.isfinite(tau_ms) else ""))
 

@@ -101,7 +101,7 @@ def mock_crs():
         verbose=False))
     yield loop, crs
     try:
-        loop.run_until_complete(crs.stop_udp_streamer())
+        loop.run_until_complete(crs.stop_udp_streaming())
     except Exception:
         pass
     loop.close()

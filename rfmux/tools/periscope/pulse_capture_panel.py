@@ -36,6 +36,7 @@ from .utils import (
 from .pulse_capture_task import PulseCaptureSignals, PulseCaptureTask
 from ...algorithms.measurement.pulse_capture_session import PulseCaptureSession
 from ...algorithms.measurement.pulse_hdf5 import PulseHDF5Reader
+from ...algorithms.measurement.streamer_config import PFB_SAMPLE_RATE
 
 # Channel plot colors: ch1 = I-blue, ch2 = Q-orange (HUD convention),
 # further channels from Tableau10.
@@ -134,12 +135,16 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         h.addWidget(QtWidgets.QLabel("Mode:"))
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["slow", "fast", "both"])
+        self.mode_combo.setToolTip(
+            "slow: ~kHz readout stream (taps the Periscope display "
+            "stream)\nfast: ~1.22 MHz PFB stream (max 4 channels; "
+            "configures the fast streamer automatically)")
         model = self.mode_combo.model()
-        for row in (1, 2):  # fast/both arrive with PFB support (Phase D)
-            item = model.item(row)
-            item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEnabled)
-            item.setToolTip("PFB streaming support not wired into the "
-                            "panel yet — use the trigger_capture macro")
+        item = model.item(2)  # "both" arrives with the matched viewer
+        item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEnabled)
+        item.setToolTip("Combined slow+fast capture with pulse matching "
+                        "is not wired into the panel yet — use the "
+                        "trigger_capture macro")
         h.addWidget(self.mode_combo)
 
         h.addWidget(QtWidgets.QLabel("Channels:"))
@@ -362,25 +367,45 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 self, "Pulse Capture",
                 "No running Periscope stream found to tap.")
             return
-        if getattr(runtime, "_pulse_tap", None) is not None:
-            QtWidgets.QMessageBox.warning(
-                self, "Pulse Capture",
-                "Another pulse capture is already tapping the stream. "
-                "Stop it first.")
-            return
+        mode = self.mode_combo.currentText()
+        crs = getattr(runtime, "crs", None)
+        host = None
+        if mode == "fast":
+            if len(channels) > 4:
+                QtWidgets.QMessageBox.warning(
+                    self, "Pulse Capture",
+                    "The PFB (fast) streamer supports at most 4 channels "
+                    f"— {len(channels)} requested.")
+                return
+            host = getattr(crs, "tuber_hostname", None) \
+                or getattr(runtime, "host", None)
+            if crs is None or host in (None, "OFFLINE"):
+                QtWidgets.QMessageBox.warning(
+                    self, "Pulse Capture",
+                    "Fast mode needs a CRS connection to configure the "
+                    "PFB streamer.")
+                return
+        else:
+            if getattr(runtime, "_pulse_tap", None) is not None:
+                QtWidgets.QMessageBox.warning(
+                    self, "Pulse Capture",
+                    "Another pulse capture is already tapping the stream. "
+                    "Stop it first.")
+                return
 
-        # Any channel the packet carries can be captured (display is
-        # irrelevant) — but the packet width is a hard limit:
-        # 128 channels in short-packet mode, 1024 in long mode.
-        max_ch = 128 if getattr(runtime, "is_short_packet", False) else 1024
-        too_high = [c for c in channels if c > max_ch]
-        if too_high:
-            QtWidgets.QMessageBox.warning(
-                self, "Pulse Capture",
-                f"Channel(s) {too_high} exceed the current packet width "
-                f"({max_ch} channels"
-                f"{' — short-packet mode' if max_ch == 128 else ''}).")
-            return
+            # Any channel the packet carries can be captured (display is
+            # irrelevant) — but the packet width is a hard limit:
+            # 128 channels in short-packet mode, 1024 in long mode.
+            max_ch = 128 if getattr(runtime, "is_short_packet", False) \
+                else 1024
+            too_high = [c for c in channels if c > max_ch]
+            if too_high:
+                QtWidgets.QMessageBox.warning(
+                    self, "Pulse Capture",
+                    f"Channel(s) {too_high} exceed the current packet "
+                    f"width ({max_ch} channels"
+                    f"{' — short-packet mode' if max_ch == 128 else ''}).")
+                return
 
         module = int(self.module_spin.value())
         path = self._resolve_hdf5_path(module)
@@ -394,15 +419,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         session = PulseCaptureSession(
             channels=channels,
             module=module,
-            streamer_mode=self.mode_combo.currentText(),
+            streamer_mode=mode,
             threshold_sigma=float(self.threshold_spin.value()),
             end_sigma=float(self.end_spin.value()),
             enable_pileup=self.pileup_check.isChecked(),
             hdf5_path=path,
             df_calibrations=self.df_calibrations,
+            sample_rate=PFB_SAMPLE_RATE if mode == "fast" else None,
+            buf_size=200_000 if mode == "fast" else 5000,
+            noise_samples=50_000 if mode == "fast" else 1000,
         )
         self.signals = PulseCaptureSignals()
-        self.task = PulseCaptureTask(session, self.signals)
+        self.task = PulseCaptureTask(session, self.signals, mode=mode,
+                                     crs=crs, host=host, module=module)
         conn = QtCore.Qt.ConnectionType.QueuedConnection
         self.signals.noise_estimated.connect(self._on_noise_estimated, conn)
         self.signals.noise_progress.connect(self._on_noise_progress, conn)
@@ -424,12 +453,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._capture_start_wall = time.time()
 
         self.task.start()
-        runtime.register_pulse_tap(self.task.enqueue, channels)
-        self._tap_registered = True
+        if mode == "slow":
+            runtime.register_pulse_tap(self.task.enqueue, channels)
+            self._tap_registered = True
         self._set_run_state(True)
         self._set_status("● Estimating noise…", "#FFCC33")
         print(f"[PulseCapture] Start — channels {channels}, module "
-              f"{module}, mode {self.mode_combo.currentText()}, "
+              f"{module}, mode {mode}, "
               f"threshold {self.threshold_spin.value():g}σ, "
               f"end {self.end_spin.value():g}σ → {path}")
 

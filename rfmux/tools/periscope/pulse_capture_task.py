@@ -19,6 +19,7 @@ can display events without opening the HDF5 file the writer holds.
 
 from __future__ import annotations
 
+import asyncio
 import queue
 import threading
 from collections import OrderedDict
@@ -71,10 +72,18 @@ class PulseCaptureTask(QtCore.QThread):
         queue_size: int = 100_000,
         waveform_cache: int = 200,
         parent: Optional[QtCore.QObject] = None,
+        mode: str = "slow",
+        crs=None,
+        host: Optional[str] = None,
+        module: int = 1,
     ):
         super().__init__(parent)
         self.session = session
         self.signals = signals
+        self.mode = mode
+        self.crs = crs
+        self.host = host
+        self.module = module
         self.sample_queue: "queue.Queue" = queue.Queue(maxsize=queue_size)
         self.dropped_overflow = 0
 
@@ -134,33 +143,10 @@ class PulseCaptureTask(QtCore.QThread):
     def run(self) -> None:
         try:
             self.session.start()
-            while not (self._stop_requested or self.isInterruptionRequested()):
-                try:
-                    item = self.sample_queue.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-                if item[0] == "__reestimate__":
-                    if self.session.state is CaptureState.CAPTURING:
-                        self.session.re_estimate_noise()
-                    continue
-                if item[0] == "__fetch__":
-                    _, ch, idx = item
-                    wf = None
-                    writer = self.session.writer
-                    if writer is not None:
-                        try:
-                            wf = writer.read_pulse(ch, idx)
-                        except Exception as e:
-                            self.signals.error.emit(
-                                f"Waveform read failed for "
-                                f"ch{ch}#{idx}: {e}")
-                    if wf is not None:
-                        with self._cache_lock:
-                            self._cache[(ch, idx)] = wf
-                    self.signals.waveform_ready.emit(ch, idx)
-                    continue
-                ch, i_val, q_val, ts = item
-                self.session.feed_sample(ch, i_val, q_val, ts)
+            if self.mode == "fast":
+                asyncio.run(self._run_fast())
+            else:
+                self._run_slow_loop()
         except Exception as e:
             self.signals.error.emit(f"Pulse capture worker failed: {e}")
         finally:
@@ -169,6 +155,81 @@ class PulseCaptureTask(QtCore.QThread):
             except Exception as e:
                 self.signals.error.emit(f"Session stop failed: {e}")
             self.signals.finished.emit()
+
+    def _run_slow_loop(self) -> None:
+        """Drain the tap-fed queue (slow mode)."""
+        while not (self._stop_requested or self.isInterruptionRequested()):
+            try:
+                item = self.sample_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if self._handle_control(item):
+                continue
+            ch, i_val, q_val, ts = item
+            self.session.feed_sample(ch, i_val, q_val, ts)
+
+    async def _run_fast(self) -> None:
+        """PFB capture: configure the fast streamer, run the shared
+        source, keep servicing control requests, always tear down."""
+        from ...algorithms.measurement.pulse_sources import run_pfb_source
+
+        channels = list(self.session.channels)
+        await self.crs.set_pfb_streamer(channel=channels,
+                                        module=self.module)
+        await asyncio.sleep(0.3)  # settle (trigger_capture precedent)
+        try:
+            stop = (lambda: self._stop_requested
+                    or self.isInterruptionRequested())
+            pump = asyncio.ensure_future(self._control_pump())
+            try:
+                await run_pfb_source(self.session, self.host, channels,
+                                     should_stop=stop)
+            finally:
+                pump.cancel()
+                try:
+                    await pump
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            try:
+                await self.crs.set_pfb_streamer(channel=None,
+                                                module=self.module)
+            except Exception as e:
+                self.signals.error.emit(f"PFB teardown failed: {e}")
+
+    async def _control_pump(self) -> None:
+        """Service __reestimate__/__fetch__ requests while a socket
+        source owns the sample flow (fast mode)."""
+        while True:
+            try:
+                item = self.sample_queue.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.05)
+                continue
+            self._handle_control(item)
+
+    def _handle_control(self, item) -> bool:
+        """Handle a control tuple; returns True when consumed."""
+        if item[0] == "__reestimate__":
+            if self.session.state is CaptureState.CAPTURING:
+                self.session.re_estimate_noise()
+            return True
+        if item[0] == "__fetch__":
+            _, ch, idx = item
+            wf = None
+            writer = self.session.writer
+            if writer is not None:
+                try:
+                    wf = writer.read_pulse(ch, idx)
+                except Exception as e:
+                    self.signals.error.emit(
+                        f"Waveform read failed for ch{ch}#{idx}: {e}")
+            if wf is not None:
+                with self._cache_lock:
+                    self._cache[(ch, idx)] = wf
+            self.signals.waveform_ready.emit(ch, idx)
+            return True
+        return False
 
     # ── Session callback (worker thread) ──────────────────────────
 

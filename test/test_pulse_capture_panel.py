@@ -395,3 +395,59 @@ def test_channel_default_follows_stream(qt_app, tmp_path):
     assert panel.channels_edit.text() == "1,3"
     panel.close()
     _spin(qt_app)
+
+
+def _build_dual_file(tmp_path):
+    from rfmux.algorithms.measurement.pulse_capture_dual import (
+        DualPulseCaptureSession,
+    )
+    from rfmux.algorithms.measurement.pulse_capture_session import (
+        PulseCaptureConfig,
+    )
+    path = tmp_path / "dual_review.h5"
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=200.0, noise_train_ms=10.0)
+    dual = DualPulseCaptureSession(channels=[1], slow_rate=20000.0,
+                                   fast_rate=100000.0, config=cfg,
+                                   hdf5_path=path)
+    rng = np.random.default_rng(9)
+    dual.start()
+    for feed, n in ((dual.feed_slow, dual.slow.noise_samples + 5),
+                    (dual.feed_fast, dual.fast.noise_samples + 5)):
+        for _ in range(n):
+            feed(1, float(rng.normal()), float(rng.normal()), None)
+    for feed, fs in ((dual.feed_slow, 20000.0),
+                     (dual.feed_fast, 100000.0)):
+        n = int(0.5 * fs)
+        t = 0.9 + np.arange(n) / fs
+        sig = rng.normal(0, 1.0, n)
+        mask = t >= 1.0
+        sig[mask] += 50.0 * np.exp(-(t[mask] - 1.0) / 1e-3)
+        for i in range(n):
+            feed(1, float(sig[i]), float(rng.normal()), float(t[i]))
+    dual.stop()
+    return path
+
+
+def test_dual_review_mode(qt_app, tmp_path):
+    path = _build_dual_file(tmp_path)
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+
+    assert panel._both_mode
+    assert "Review Mode" in panel.status_label.text()
+    assert not panel.btn_start.isEnabled()
+
+    ch_item = panel._channel_items[1]
+    assert ch_item.childCount() >= 1
+    assert "pairs" in ch_item.text(0)
+
+    # The matched pair renders: fast line + slow line+markers per plot
+    key = panel._pulse_order[-1]
+    panel._show_pair(*key)
+    assert "Pair #" in panel.pulse_info.text()
+    assert len(panel.pulse_plot_i.getPlotItem().listDataItems()) >= 2
+    assert len(panel.pulse_plot_q.getPlotItem().listDataItems()) >= 2
+
+    panel.close()
+    _spin(qt_app)

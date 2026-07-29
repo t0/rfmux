@@ -45,6 +45,9 @@ from ...algorithms.measurement.streamer_config import (
     slow_sample_rate,
 )
 
+# Fast/PFB stream overlay colors (darker variants, HUD convention)
+FAST_IQ_COLORS = {"I": "#24478F", "Q": "#8F4724"}
+
 # Channel plot colors: ch1 = I-blue, ch2 = Q-orange (HUD convention),
 # further channels from Tableau10.
 def _channel_color(channel: int) -> str:
@@ -97,7 +100,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._pulse_order: List[Tuple[int, int]] = []
         self._pulse_summaries: Dict[Tuple[int, int], dict] = {}
         self._current_view: Optional[Tuple[int, int]] = None
-        self._pending_fetch: Optional[Tuple[int, int]] = None
+        self._pending_fetch: Optional[Tuple] = None
+        self._both_mode = False
+        self._current_pair: Optional[Tuple[int, int]] = None
+        self._pair_meta: Dict[Tuple[int, int], dict] = {}
+        self._stream_counts: Dict[str, int] = {}
+        self._noise_by_stream: Dict[str, dict] = {}
         self._counts: Dict[int, int] = {}
         self._last_stats: dict = {}
         self._hist_data: dict = {}
@@ -146,13 +154,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.mode_combo.setToolTip(
             "slow: ~kHz readout stream (taps the Periscope display "
             "stream)\nfast: ~1.22 MHz PFB stream (max 4 channels; "
-            "configures the fast streamer automatically)")
-        model = self.mode_combo.model()
-        item = model.item(2)  # "both" arrives with the matched viewer
-        item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEnabled)
-        item.setToolTip("Combined slow+fast capture with pulse matching "
-                        "is not wired into the panel yet — use the "
-                        "trigger_capture macro")
+            "configures the fast streamer automatically)\n"
+            "both: concurrent slow+fast with live pulse matching — the "
+            "tree lists matched pairs")
         h.addWidget(self.mode_combo)
 
         h.addWidget(QtWidgets.QLabel("Channels:"))
@@ -435,7 +439,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         mode = self.mode_combo.currentText()
         crs = getattr(runtime, "crs", None)
         host = None
-        if mode == "fast":
+        if mode in ("fast", "both"):
             if len(channels) > 4:
                 QtWidgets.QMessageBox.warning(
                     self, "Pulse Capture",
@@ -447,8 +451,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             if crs is None or host in (None, "OFFLINE"):
                 QtWidgets.QMessageBox.warning(
                     self, "Pulse Capture",
-                    "Fast mode needs a CRS connection to configure the "
-                    "PFB streamer.")
+                    f"{mode} mode needs a CRS connection to configure "
+                    "the PFB streamer.")
                 return
         else:
             if getattr(runtime, "_pulse_tap", None) is not None:
@@ -492,15 +496,29 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 + "\n- ".join(config_errors))
             return
 
-        session = PulseCaptureSession(
-            channels=channels,
-            module=module,
-            streamer_mode=mode,
-            hdf5_path=path,
-            df_calibrations=self.df_calibrations,
-            sample_rate=fs,
-            **self.capture_config.session_kwargs(fs),
-        )
+        if mode == "both":
+            from ...algorithms.measurement.pulse_capture_dual import (
+                DualPulseCaptureSession,
+            )
+            session = DualPulseCaptureSession(
+                channels=channels,
+                module=module,
+                slow_rate=self._current_sample_rate("slow"),
+                fast_rate=PFB_SAMPLE_RATE,
+                config=self.capture_config,
+                hdf5_path=path,
+                df_calibrations=self.df_calibrations,
+            )
+        else:
+            session = PulseCaptureSession(
+                channels=channels,
+                module=module,
+                streamer_mode=mode,
+                hdf5_path=path,
+                df_calibrations=self.df_calibrations,
+                sample_rate=fs,
+                **self.capture_config.session_kwargs(fs),
+            )
         self.signals = PulseCaptureSignals()
         self.task = PulseCaptureTask(session, self.signals, mode=mode,
                                      crs=crs, host=host, module=module)
@@ -508,6 +526,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.signals.noise_estimated.connect(self._on_noise_estimated, conn)
         self.signals.noise_progress.connect(self._on_noise_progress, conn)
         self.signals.pulse_detected.connect(self._on_pulse_detected, conn)
+        self.signals.pair_matched.connect(self._on_pair_matched, conn)
         self.signals.stats_updated.connect(self._on_stats, conn)
         self.signals.histograms_updated.connect(self._on_histograms, conn)
         self.signals.waveform_ready.connect(self._on_waveform_ready, conn)
@@ -519,6 +538,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             self.reader.close()
             self.reader = None
 
+        self._both_mode = (mode == "both")
         self._reset_results(channels)
         self._registered_export = False
         self.path_label.setText(f"HDF5: {path}")
@@ -607,7 +627,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if "capture_start" in meta:
             started = datetime.datetime.fromtimestamp(
                 float(meta["capture_start"])).strftime("%H:%M:%S")
+        self._both_mode = self.reader.dual
         self._reset_results(channels, started=started)
+
+        if self.reader.dual:
+            self._load_dual_review(channels, path)
+            return
 
         self.noise_stats = {c: self.reader.noise_stats(c) for c in channels}
         parts = [f"Ch{c} I={ns.mean_I:.1f}±{ns.std_I:.2f}, "
@@ -655,6 +680,58 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._hist_data = self.reader.get_histograms()
         self._render_histograms()
 
+        self._enter_review_state(path, f"{sum(self._counts.values())} "
+                                       f"pulses")
+        if self._pulse_order:
+            self._show_pulse(*self._pulse_order[-1])
+
+    def _load_dual_review(self, channels: List[int], path) -> None:
+        """Populate the pair tree from a dual ('both' mode) file."""
+        self.noise_stats = {
+            c: self.reader.noise_stats(c, "slow") for c in channels}
+        parts = []
+        for stream in ("slow", "fast"):
+            stats = {c: self.reader.noise_stats(c, stream)
+                     for c in channels}
+            self._noise_by_stream[stream] = stats
+            parts.append(f"{stream}: " + " | ".join(
+                f"Ch{c} σI={ns.std_I:.2f}"
+                for c, ns in sorted(stats.items())))
+        self.noise_label.setText("Noise:  " + "   —   ".join(parts))
+
+        self.follow_check.setChecked(False)
+        for c in channels:
+            for pair in self.reader.iter_matches(c):
+                lean = {
+                    "channel": c,
+                    "pair_idx": pair["pair_idx"],
+                    "slow_idx": pair["slow_idx"],
+                    "fast_idx": pair["fast_idx"],
+                    "time_offset": (
+                        pair["time_offset"]
+                        if pair.get("time_offset") is not None
+                        and np.isfinite(pair["time_offset"]) else None),
+                    "slow_summary": (
+                        self.reader.get_pulse_metadata(
+                            c, pair["slow_idx"], "slow")
+                        if pair["slow_idx"] else None),
+                    "fast_summary": (
+                        self.reader.get_pulse_metadata(
+                            c, pair["fast_idx"], "fast")
+                        if pair["fast_idx"] else None),
+                    "has_slow_tod": "slow_tod" in pair,
+                    "has_fast_tod": "fast_tod" in pair,
+                }
+                self._on_pair_matched(lean)
+
+        self._hist_data = self.reader.get_histograms("slow")
+        self._render_histograms()
+        self._enter_review_state(
+            path, f"{sum(self._counts.values())} pairs")
+        if self._pulse_order:
+            self._show_pair(*self._pulse_order[-1])
+
+    def _enter_review_state(self, path, what: str) -> None:
         self._review_mode = True
         self._set_run_state(False)
         self.btn_start.setEnabled(False)
@@ -665,14 +742,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                   self.btn_browse):
             w.setEnabled(False)
         self.path_label.setText(f"HDF5: {path}")
-        total = sum(self._counts.values())
         self._set_status(
-            f"● Review Mode — {total} pulses — {Path(path).name}",
-            "#3366CC")
-
+            f"● Review Mode — {what} — {Path(path).name}", "#3366CC")
         self.follow_check.setChecked(False)
-        if self._pulse_order:
-            self._show_pulse(*self._pulse_order[-1])
 
     def _set_run_state(self, running: bool) -> None:
         self.btn_start.setText("■ Stop" if running else "▶ Start")
@@ -692,6 +764,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                        started: Optional[str] = None) -> None:
         self._pulse_order.clear()
         self._pulse_summaries.clear()
+        self._pair_meta.clear()
+        self._stream_counts = {"slow": 0, "fast": 0}
+        self._noise_by_stream = {}
+        self._current_pair = None
         self._current_view = None
         self._counts = {c: 0 for c in channels}
         self._hist_data = {}
@@ -725,12 +801,29 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def _on_noise_progress(self, progress: dict) -> None:
         collected = progress.get("collected", {})
         target = progress.get("target", 0)
+        prefix = (f"[{progress['stream']}] "
+                  if progress.get("stream") else "")
         parts = [f"Ch{c} {collected[c]}/{target}"
                  for c in sorted(collected)]
-        self._set_status("● Estimating noise — " + " | ".join(parts),
-                         "#FFCC33")
+        self._set_status(f"● Estimating noise — {prefix}"
+                         + " | ".join(parts), "#FFCC33")
 
     def _on_noise_estimated(self, noise_stats: dict) -> None:
+        if "stream" in noise_stats and "stats" in noise_stats:
+            stream = noise_stats["stream"]
+            stats = noise_stats["stats"]
+            self._noise_by_stream[stream] = stats
+            if stream == "slow":
+                self.noise_stats = stats
+            parts = [f"{s}: " + " | ".join(
+                f"Ch{c} σI={ns.std_I:.2f}"
+                for c, ns in sorted(st.items()))
+                for s, st in sorted(self._noise_by_stream.items())]
+            self.noise_label.setText("Noise:  " + "   —   ".join(parts))
+            print(f"[PulseCapture] Noise estimated ({stream})")
+            self._refresh_status_line()
+            return
+
         self.noise_stats = noise_stats
         parts = []
         for c in sorted(noise_stats):
@@ -759,6 +852,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _on_pulse_detected(self, channel: int, pulse_idx: int,
                            summary: dict) -> None:
+        if self._both_mode:
+            stream = summary.get("stream", "slow")
+            self._stream_counts[stream] = \
+                self._stream_counts.get(stream, 0) + 1
+            return  # both-mode tree shows matched pairs, not raw pulses
         key = (channel, pulse_idx)
         self._pulse_order.append(key)
         self._pulse_summaries[key] = summary
@@ -788,8 +886,54 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._last_stats = stats
         self._refresh_status_line()
 
+    def _on_pair_matched(self, pair: dict) -> None:
+        ch = pair["channel"]
+        pair_idx = pair["pair_idx"]
+        key = (ch, pair_idx)
+        self._pair_meta[key] = pair
+        self._pulse_order.append(key)
+        self._counts[ch] = self._counts.get(ch, 0) + 1
+
+        matched = pair["slow_idx"] is not None \
+            and pair["fast_idx"] is not None
+        if matched:
+            dt = pair.get("time_offset") or 0.0
+            label = (f"◆ Pair #{pair_idx:04d}  "
+                     f"s#{pair['slow_idx']}/f#{pair['fast_idx']}")
+            detail = f"Δt={dt*1e6:+.0f}µs"
+        else:
+            side = "slow" if pair["slow_idx"] is not None else "fast"
+            idx = pair["slow_idx"] or pair["fast_idx"]
+            label = f"◐ Pair #{pair_idx:04d}  {side} only #{idx}"
+            detail = ("+TOD" if pair.get("has_slow_tod")
+                      or pair.get("has_fast_tod") else "")
+        summ = pair.get("slow_summary") or pair.get("fast_summary") or {}
+        parent = self._channel_items.get(ch)
+        if parent is not None:
+            item = QtWidgets.QTreeWidgetItem(
+                [label, detail, f"{summ.get('snr', 0):.1f}σ"])
+            item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
+                         ("pair", ch, pair_idx))
+            if not matched:
+                for col in range(3):
+                    item.setBackground(col, QtGui.QColor(
+                        "#33251c" if self.dark_mode else "#ffe8d9"))
+            parent.insertChild(0, item)
+            parent.setText(0, f"▤ Channel {ch} ({self._counts[ch]} pairs)")
+
+        if self.follow_check.isChecked():
+            self._show_pair(ch, pair_idx)
+
     def _refresh_status_line(self) -> None:
         s = self._last_stats
+        if self._both_mode and "pairs_matched" in s:
+            slow_n = s.get("slow", {}).get("total_pulses", 0)
+            fast_n = s.get("fast", {}).get("total_pulses", 0)
+            self._set_status(
+                f"● Capturing — slow {slow_n} | fast {fast_n} pulses — "
+                f"{s['pairs_matched']} matched / "
+                f"{s['pairs_unmatched']} one-sided pairs", "#4CC38A")
+            return
         total = s.get("total_pulses", 0)
         rate = s.get("rate_per_min", 0.0)
         per_ch = s.get("per_channel", {})
@@ -804,7 +948,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"{hh:02d}:{mm:02d}:{ss:02d}{drop_str}", "#4CC38A")
 
     def _on_histograms(self, data: dict) -> None:
-        self._hist_data = data
+        if "stream" in data and "data" in data:
+            # both-mode: per-stream payloads; display the slow stream
+            if data["stream"] != "slow":
+                return
+            self._hist_data = data["data"]
+        else:
+            self._hist_data = data
         self._render_histograms()
 
     def _on_error(self, message: str) -> None:
@@ -868,25 +1018,39 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _on_tree_double_click(self, item, column) -> None:
         data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-        if data and data[0] == "pulse":
+        if not data:
+            return
+        if data[0] == "pulse":
             self.follow_check.setChecked(False)
             self.viewer_tabs.setCurrentIndex(0)
             self._show_pulse(data[1], data[2])
+        elif data[0] == "pair":
+            self.follow_check.setChecked(False)
+            self.viewer_tabs.setCurrentIndex(0)
+            self._show_pair(data[1], data[2])
 
     def _navigate(self, step: int) -> None:
         if not self._pulse_order:
             return
         self.follow_check.setChecked(False)
-        if self._current_view in self._pulse_summaries:
-            i = self._pulse_order.index(self._current_view) + step
+        current = (self._current_pair if self._both_mode
+                   else self._current_view)
+        if current in self._pulse_order:
+            i = self._pulse_order.index(current) + step
         else:
             i = len(self._pulse_order) - 1
         i = max(0, min(len(self._pulse_order) - 1, i))
-        self._show_pulse(*self._pulse_order[i])
+        if self._both_mode:
+            self._show_pair(*self._pulse_order[i])
+        else:
+            self._show_pulse(*self._pulse_order[i])
 
     def _on_waveform_ready(self, channel: int, pulse_idx: int) -> None:
         """Worker warmed the cache (or failed) — redraw if still viewing."""
-        if self._current_view == (channel, pulse_idx):
+        if self._both_mode:
+            if self._current_pair is not None:
+                self._show_pair(*self._current_pair)
+        elif self._current_view == (channel, pulse_idx):
             self._show_pulse(channel, pulse_idx)
 
     def current_hdf5_path(self) -> Optional[str]:
@@ -900,13 +1064,24 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             path = self.hdf5_path
         return str(Path(path).resolve()) if path is not None else None
 
-    def _get_waveform(self, channel: int, pulse_idx: int) -> Optional[dict]:
+    def _get_waveform(self, channel: int, pulse_idx: int,
+                      stream: Optional[str] = None) -> Optional[dict]:
         if self.task is not None:
-            wf = self.task.get_pulse(channel, pulse_idx)
+            wf = self.task.get_pulse(channel, pulse_idx, stream)
             if wf is not None:
                 return wf
         if self.reader is not None:
-            return self.reader.get_pulse(channel, pulse_idx)
+            return self.reader.get_pulse(channel, pulse_idx,
+                                         stream=stream)
+        return None
+
+    def _get_pair(self, channel: int, pair_idx: int) -> Optional[dict]:
+        if self.task is not None:
+            pair = self.task.get_pair(channel, pair_idx)
+            if pair is not None:
+                return pair
+        if self.reader is not None and self.reader.dual:
+            return self.reader.get_match(channel, pair_idx)
         return None
 
     def _show_pulse(self, channel: int, pulse_idx: int) -> None:
@@ -973,6 +1148,97 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     y=mean + sign * end * std,
                     pen=pg.mkPen("#666666", width=0.8,
                                  style=QtCore.Qt.PenStyle.DotLine))
+
+    def _show_pair(self, channel: int, pair_idx: int) -> None:
+        """Matched-pair overlay: dense fast trace under slow markers,
+        per quadrature (HUD 'both' view)."""
+        pair = self._get_pair(channel, pair_idx)
+        meta = self._pair_meta.get((channel, pair_idx)) or pair
+        if meta is None:
+            return
+        self._current_pair = (channel, pair_idx)
+        self._current_view = None
+
+        loading = False
+        slow_wf = fast_wf = None
+        if meta.get("slow_idx") is not None:
+            slow_wf = self._get_waveform(channel, meta["slow_idx"],
+                                         "slow")
+            if slow_wf is None and self.task is not None:
+                key = ("slow", channel, meta["slow_idx"])
+                if self._pending_fetch != key:
+                    self._pending_fetch = key
+                    self.task.request_waveform(channel,
+                                               meta["slow_idx"], "slow")
+                loading = True
+        elif pair is not None:
+            slow_wf = pair.get("slow_tod")
+        if meta.get("fast_idx") is not None:
+            fast_wf = self._get_waveform(channel, meta["fast_idx"],
+                                         "fast")
+            if fast_wf is None and self.task is not None:
+                key = ("fast", channel, meta["fast_idx"])
+                if self._pending_fetch != key:
+                    self._pending_fetch = key
+                    self.task.request_waveform(channel,
+                                               meta["fast_idx"], "fast")
+                loading = True
+        elif pair is not None:
+            fast_wf = pair.get("fast_tod")
+
+        matched = meta.get("slow_idx") is not None \
+            and meta.get("fast_idx") is not None
+        dt = meta.get("time_offset")
+        summ = meta.get("slow_summary") or meta.get("fast_summary") or {}
+        tau_ms = summ.get("tau_ms", float("nan"))
+        self.pulse_info.setText(
+            f"Pair #{pair_idx:04d} — Channel {channel}   "
+            f"[{'matched' if matched else 'one-sided'}]\n"
+            f"slow #{meta.get('slow_idx')} / fast #{meta.get('fast_idx')}"
+            + (f"   Δt = {dt*1e6:+.0f} µs" if dt is not None else "")
+            + (f"\nslow SNR {summ.get('snr', 0):.1f}σ, "
+               f"τ = {tau_ms:.2f} ms"
+               if np.isfinite(tau_ms) else ""))
+
+        for plot in (self.pulse_plot_i, self.pulse_plot_q):
+            plot.clear()
+            plot.setTitle(None)
+        self.pulse_plot_q.getPlotItem().setLabel("bottom", "time (ms)")
+        if loading:
+            self.pulse_plot_i.setTitle("loading waveforms from file…")
+        if slow_wf is None and fast_wf is None:
+            if not loading:
+                self.pulse_plot_i.setTitle("waveforms not available")
+            return
+
+        # Shared clock → common time origin across both streams
+        t0 = None
+        for wf in (fast_wf, slow_wf):
+            if wf is not None:
+                t = np.asarray(wf["Time"], dtype=np.float64)
+                finite = t[np.isfinite(t)]
+                if len(finite):
+                    t0 = (finite[0] if t0 is None
+                          else min(t0, finite[0]))
+        if t0 is None:
+            t0 = 0.0
+
+        for quad, plot in (("I", self.pulse_plot_i),
+                           ("Q", self.pulse_plot_q)):
+            if fast_wf is not None:
+                t_ms = (np.asarray(fast_wf["Time"], float) - t0) * 1e3
+                plot.plot(t_ms,
+                          np.asarray(fast_wf[f"Amp_{quad}"], float),
+                          pen=pg.mkPen(FAST_IQ_COLORS[quad], width=1.0))
+            if slow_wf is not None:
+                t_ms = (np.asarray(slow_wf["Time"], float) - t0) * 1e3
+                data = np.asarray(slow_wf[f"Amp_{quad}"], float)
+                plot.plot(t_ms, data, pen=pg.mkPen(
+                    IQ_COLORS[quad], width=LINE_WIDTH * 0.6))
+                plot.plot(t_ms, data, pen=None, symbol="o",
+                          symbolSize=6,
+                          symbolBrush=IQ_COLORS[quad],
+                          symbolPen=pg.mkPen("w", width=0.6))
 
     # ── Histograms ────────────────────────────────────────────────
 

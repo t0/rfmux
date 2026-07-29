@@ -252,6 +252,12 @@ class DualPulseCaptureSession:
     def feed_fast(self, ch: int, i: float, q: float, t) -> None:
         self.fast.feed_sample(ch, i, q, t)
 
+    def re_estimate_noise(self) -> None:
+        """Freeze both streams and retrain their noise statistics."""
+        for session in (self.slow, self.fast):
+            if session.state is CaptureState.CAPTURING:
+                session.re_estimate_noise()
+
     def stop(self) -> None:
         self.slow.stop()
         self.fast.stop()

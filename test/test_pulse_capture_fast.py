@@ -131,3 +131,73 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path):
         assert reader.metadata.get("streamer_mode") == "fast"
         assert reader.metadata.get("sample_rate_fast") == pytest.approx(
             PFB_SAMPLE_RATE)
+
+
+def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path):
+    """Both-mode task: dual sockets, live matching, dual file, teardown."""
+    from rfmux.algorithms.measurement.pulse_capture_dual import (
+        DualPulseCaptureSession,
+    )
+    from rfmux.algorithms.measurement.pulse_capture_session import (
+        PulseCaptureConfig,
+    )
+    from rfmux.algorithms.measurement.streamer_config import (
+        slow_sample_rate,
+    )
+
+    loop, crs = mock_crs
+    channels = [1, 2]
+    path = tmp_path / "both_capture.h5"
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=20.0, noise_train_ms=50.0)
+    dec = loop.run_until_complete(crs.get_decimation()) or 6
+    dual = DualPulseCaptureSession(
+        channels=channels, module=1,
+        slow_rate=slow_sample_rate(dec),
+        config=cfg, hdf5_path=path)
+
+    signals = PulseCaptureSignals()
+    events = {"pairs": [], "errors": [], "finished": []}
+    signals.pair_matched.connect(lambda p: events["pairs"].append(p))
+    signals.error.connect(lambda m: events["errors"].append(m))
+    signals.finished.connect(lambda: events["finished"].append(True))
+
+    task = PulseCaptureTask(dual, signals, mode="both", crs=crs,
+                            host="127.0.0.1", module=1)
+    task.start()
+
+    assert _spin_until(
+        qt_app,
+        lambda: dual.slow.state is CaptureState.CAPTURING
+        and dual.fast.state is CaptureState.CAPTURING, 60), \
+        f"states={dual.state}, errors={events['errors']}"
+
+    assert _spin_until(
+        qt_app,
+        lambda: any(p["slow_idx"] and p["fast_idx"]
+                    for p in events["pairs"]), 90), \
+        f"no matched pairs (pairs={len(events['pairs'])}, " \
+        f"stats={dual.stats()}, errors={events['errors']})"
+
+    task.request_stop()
+    assert _spin_until(qt_app, lambda: events["finished"], 30)
+    task.wait(5000)
+
+    assert loop.run_until_complete(
+        crs.get_pfb_streamer(module=1)) is None
+    matched = [p for p in events["pairs"]
+               if p["slow_idx"] and p["fast_idx"]]
+    assert matched, "expected at least one matched pair"
+
+    with PulseHDF5Reader(path) as reader:
+        assert reader.dual
+        assert sum(reader.pair_count(c) for c in channels) >= 1
+        found = False
+        for c in channels:
+            for pair in reader.iter_matches(c):
+                if pair["slow_idx"] and pair["fast_idx"]:
+                    wf = reader.get_pulse(c, pair["fast_idx"],
+                                          stream="fast")
+                    assert wf is not None
+                    found = True
+        assert found

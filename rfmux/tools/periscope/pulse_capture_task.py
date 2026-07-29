@@ -37,9 +37,12 @@ from ...algorithms.measurement.pulse_capture_session import (
 class PulseCaptureSignals(QtCore.QObject):
     """Signal bundle for :class:`PulseCaptureTask` (constructed by the caller)."""
 
-    noise_estimated = pyqtSignal(dict)      # {channel: ChannelNoiseStats}
+    noise_estimated = pyqtSignal(dict)      # {channel: ChannelNoiseStats};
+    #                                         both-mode: {stream, stats}
     noise_progress = pyqtSignal(dict)       # {collected: {ch: n}, target: N}
     pulse_detected = pyqtSignal(int, int, dict)  # channel, pulse_idx, summary
+    #                                         (both-mode summary has "stream")
+    pair_matched = pyqtSignal(dict)         # lean pair meta (both-mode)
     stats_updated = pyqtSignal(dict)        # PulseCaptureSession.stats()
     histograms_updated = pyqtSignal(dict)   # PulseHistogramSet.get_histogram_data()
     waveform_ready = pyqtSignal(int, int)   # channel, pulse_idx (cache warmed)
@@ -92,13 +95,33 @@ class PulseCaptureTask(QtCore.QThread):
         self._cache_lock = threading.Lock()
         self._stop_requested = False
 
+        self._pair_cache: "OrderedDict[Tuple[int, int], dict]" = OrderedDict()
+
         # Route session callbacks through Qt signals (called in run() thread)
-        session.on_noise = lambda ns: self.signals.noise_estimated.emit(dict(ns))
-        session.on_progress = lambda p: self.signals.noise_progress.emit(p)
-        session.on_pulse = self._on_pulse
-        session.on_stats = lambda s: self.signals.stats_updated.emit(s)
-        session.on_histograms = lambda d: self.signals.histograms_updated.emit(d)
-        session.on_error = lambda msg: self.signals.error.emit(msg)
+        if mode == "both":
+            session.on_noise = lambda stream, ns: \
+                self.signals.noise_estimated.emit(
+                    {"stream": stream, "stats": dict(ns)})
+            session.on_pulse = self._on_stream_pulse
+            session.on_pair = self._on_pair
+            session.on_stats = lambda s: self.signals.stats_updated.emit(s)
+            session.on_histograms = lambda stream, d: \
+                self.signals.histograms_updated.emit(
+                    {"stream": stream, "data": d})
+            session.on_error = lambda msg: self.signals.error.emit(msg)
+            for inner in (session.slow, session.fast):
+                inner.on_progress = lambda p, s=inner.streamer_mode: \
+                    self.signals.noise_progress.emit({**p, "stream": s})
+        else:
+            session.on_noise = lambda ns: \
+                self.signals.noise_estimated.emit(dict(ns))
+            session.on_progress = lambda p: \
+                self.signals.noise_progress.emit(p)
+            session.on_pulse = self._on_pulse
+            session.on_stats = lambda s: self.signals.stats_updated.emit(s)
+            session.on_histograms = lambda d: \
+                self.signals.histograms_updated.emit(d)
+            session.on_error = lambda msg: self.signals.error.emit(msg)
 
     # ── GUI-thread API ────────────────────────────────────────────
 
@@ -123,17 +146,25 @@ class PulseCaptureTask(QtCore.QThread):
             self.signals.error.emit("Sample queue full — could not "
                                     "request noise re-estimation")
 
-    def get_pulse(self, channel: int, pulse_idx: int) -> Optional[dict]:
+    def get_pulse(self, channel: int, pulse_idx: int,
+                  stream: Optional[str] = None) -> Optional[dict]:
         """Waveform dict for a recent pulse, or None if evicted."""
         with self._cache_lock:
-            return self._cache.get((channel, pulse_idx))
+            return self._cache.get((stream, channel, pulse_idx))
 
-    def request_waveform(self, channel: int, pulse_idx: int) -> None:
+    def get_pair(self, channel: int, pair_idx: int) -> Optional[dict]:
+        """Full pair dict (summaries + any cross-stream TODs)."""
+        with self._cache_lock:
+            return self._pair_cache.get((channel, pair_idx))
+
+    def request_waveform(self, channel: int, pulse_idx: int,
+                         stream: Optional[str] = None) -> None:
         """Ask the worker to load an evicted waveform from the live HDF5
         file (writer's own handle, writer's thread).  ``waveform_ready``
         fires when the cache has been warmed (or the fetch failed)."""
         try:
-            self.sample_queue.put_nowait(("__fetch__", channel, pulse_idx))
+            self.sample_queue.put_nowait(
+                ("__fetch__", channel, pulse_idx, stream))
         except queue.Full:
             self.signals.error.emit("Sample queue full — could not "
                                     "request waveform load")
@@ -145,6 +176,8 @@ class PulseCaptureTask(QtCore.QThread):
             self.session.start()
             if self.mode == "fast":
                 asyncio.run(self._run_fast())
+            elif self.mode == "both":
+                asyncio.run(self._run_both())
             else:
                 self._run_slow_loop()
         except Exception as e:
@@ -197,6 +230,48 @@ class PulseCaptureTask(QtCore.QThread):
             except Exception as e:
                 self.signals.error.emit(f"PFB teardown failed: {e}")
 
+    async def _run_both(self) -> None:
+        """Concurrent slow+fast capture (DualPulseCaptureSession).
+
+        Both streams are read from their own sockets via the shared
+        sources — identical to the headless pulse_capture_flow demo;
+        SO_REUSEPORT makes the extra slow listener free and keeps
+        both-mode independent of what the main window displays.
+        """
+        from ...algorithms.measurement.pulse_sources import (
+            run_pfb_source,
+            run_slow_source,
+        )
+
+        channels = list(self.session.channels)
+        await self.crs.set_pfb_streamer(channel=channels,
+                                        module=self.module)
+        await asyncio.sleep(0.3)
+        try:
+            stop = (lambda: self._stop_requested
+                    or self.isInterruptionRequested())
+            pump = asyncio.ensure_future(self._control_pump())
+            try:
+                await asyncio.gather(
+                    run_slow_source(self.session.slow, self.host,
+                                    module=self.module,
+                                    should_stop=stop),
+                    run_pfb_source(self.session.fast, self.host,
+                                   channels, should_stop=stop),
+                )
+            finally:
+                pump.cancel()
+                try:
+                    await pump
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            try:
+                await self.crs.set_pfb_streamer(channel=None,
+                                                module=self.module)
+            except Exception as e:
+                self.signals.error.emit(f"PFB teardown failed: {e}")
+
     async def _control_pump(self) -> None:
         """Service __reestimate__/__fetch__ requests while a socket
         source owns the sample flow (fast mode)."""
@@ -215,18 +290,21 @@ class PulseCaptureTask(QtCore.QThread):
                 self.session.re_estimate_noise()
             return True
         if item[0] == "__fetch__":
-            _, ch, idx = item
+            _, ch, idx, stream = (item if len(item) == 4
+                                  else (*item, None))
             wf = None
             writer = self.session.writer
             if writer is not None:
                 try:
-                    wf = writer.read_pulse(ch, idx)
+                    wf = (writer.read_pulse(stream, ch, idx)
+                          if self.mode == "both"
+                          else writer.read_pulse(ch, idx))
                 except Exception as e:
                     self.signals.error.emit(
                         f"Waveform read failed for ch{ch}#{idx}: {e}")
             if wf is not None:
                 with self._cache_lock:
-                    self._cache[(ch, idx)] = wf
+                    self._cache[(stream, ch, idx)] = wf
             self.signals.waveform_ready.emit(ch, idx)
             return True
         return False
@@ -236,7 +314,30 @@ class PulseCaptureTask(QtCore.QThread):
     def _on_pulse(self, channel: int, pulse_idx: int,
                   summary: Dict[str, Any], pulse_data: dict) -> None:
         with self._cache_lock:
-            self._cache[(channel, pulse_idx)] = pulse_data
+            self._cache[(None, channel, pulse_idx)] = pulse_data
             while len(self._cache) > self._cache_size:
                 self._cache.popitem(last=False)
         self.signals.pulse_detected.emit(channel, pulse_idx, dict(summary))
+
+    def _on_stream_pulse(self, stream: str, channel: int, pulse_idx: int,
+                         summary: Dict[str, Any],
+                         pulse_data: dict) -> None:
+        with self._cache_lock:
+            self._cache[(stream, channel, pulse_idx)] = pulse_data
+            while len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+        self.signals.pulse_detected.emit(
+            channel, pulse_idx, {**summary, "stream": stream})
+
+    def _on_pair(self, pair: dict) -> None:
+        key = (pair["channel"], pair["pair_idx"])
+        with self._cache_lock:
+            self._pair_cache[key] = pair
+            while len(self._pair_cache) > self._cache_size:
+                self._pair_cache.popitem(last=False)
+        lean = {k: pair.get(k) for k in
+                ("channel", "pair_idx", "slow_idx", "fast_idx",
+                 "time_offset", "slow_summary", "fast_summary")}
+        lean["has_slow_tod"] = pair.get("slow_tod") is not None
+        lean["has_fast_tod"] = pair.get("fast_tod") is not None
+        self.signals.pair_matched.emit(lean)

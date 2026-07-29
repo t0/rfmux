@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
+import time
 from collections import OrderedDict
 from typing import Any, Dict, Optional, Tuple
 
@@ -233,14 +234,16 @@ class PulseCaptureTask(QtCore.QThread):
     async def _run_both(self) -> None:
         """Concurrent slow+fast capture (DualPulseCaptureSession).
 
-        Both streams are read from their own sockets via the shared
-        sources — identical to the headless pulse_capture_flow demo;
-        SO_REUSEPORT makes the extra slow listener free and keeps
-        both-mode independent of what the main window displays.
+        The SLOW side must come from the Periscope tap, not a second
+        socket: the mock streamer sends UNICAST, and with SO_REUSEPORT
+        the kernel load-balances unicast datagrams to ONE socket —
+        Periscope's own receiver wins and a second listener silently
+        starves.  (Real hardware multicasts, but the tap works for
+        both and costs nothing.)  The fast/PFB side keeps its own
+        socket — nothing else listens on that port.
         """
         from ...algorithms.measurement.pulse_sources import (
             run_pfb_source,
-            run_slow_source,
         )
 
         channels = list(self.session.channels)
@@ -250,27 +253,41 @@ class PulseCaptureTask(QtCore.QThread):
         try:
             stop = (lambda: self._stop_requested
                     or self.isInterruptionRequested())
-            pump = asyncio.ensure_future(self._control_pump())
-            try:
-                await asyncio.gather(
-                    run_slow_source(self.session.slow_feed, self.host,
-                                    module=self.module,
-                                    should_stop=stop),
-                    run_pfb_source(self.session.fast_feed, self.host,
-                                   channels, should_stop=stop),
-                )
-            finally:
-                pump.cancel()
-                try:
-                    await pump
-                except asyncio.CancelledError:
-                    pass
+            await asyncio.gather(
+                self._slow_tap_pump(stop),
+                run_pfb_source(self.session.fast_feed, self.host,
+                               channels, should_stop=stop),
+            )
         finally:
             try:
                 await self.crs.set_pfb_streamer(channel=None,
                                                 module=self.module)
             except Exception as e:
                 self.signals.error.emit(f"PFB teardown failed: {e}")
+
+    async def _slow_tap_pump(self, stop) -> None:
+        """Drain tap-fed slow samples + control items into the dual
+        session.  Warns once if no slow samples arrive at all."""
+        fed = 0
+        warned = False
+        t_start = time.monotonic()
+        while not stop():
+            try:
+                item = self.sample_queue.get_nowait()
+            except queue.Empty:
+                if (not warned and fed == 0
+                        and time.monotonic() - t_start > 5.0):
+                    warned = True
+                    self.signals.error.emit(
+                        "No slow samples arriving via the tap after "
+                        "5 s — is the slow stream running?")
+                await asyncio.sleep(0.02)
+                continue
+            if self._handle_control(item):
+                continue
+            ch, i_val, q_val, ts = item
+            self.session.feed_slow(ch, i_val, q_val, ts)
+            fed += 1
 
     async def _control_pump(self) -> None:
         """Service __reestimate__/__fetch__ requests while a socket

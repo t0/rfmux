@@ -464,7 +464,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     f"{mode} mode needs a CRS connection to configure "
                     "the PFB streamer.")
                 return
-        else:
+        if mode in ("slow", "both"):
             if getattr(runtime, "_pulse_tap", None) is not None:
                 QtWidgets.QMessageBox.warning(
                     self, "Pulse Capture",
@@ -555,7 +555,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._capture_start_wall = time.time()
 
         self.task.start()
-        if mode == "slow":
+        if mode in ("slow", "both"):
             runtime.register_pulse_tap(self.task.enqueue, channels)
             self._tap_registered = True
         self._set_run_state(True)

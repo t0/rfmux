@@ -164,13 +164,43 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path):
 
     task = PulseCaptureTask(dual, signals, mode="both", crs=crs,
                             host="127.0.0.1", module=1)
-    task.start()
 
-    assert _spin_until(
-        qt_app,
-        lambda: dual.slow.state is CaptureState.CAPTURING
-        and dual.fast.state is CaptureState.CAPTURING, 60), \
-        f"states={dual.state}, errors={events['errors']}"
+    # Production topology: the slow stream reaches the task through the
+    # Periscope tap (queue), NOT a second socket — the mock's unicast
+    # would be load-balanced away from it.  Emulate the tap with a
+    # background thread pumping slow packets into task.enqueue.
+    import threading
+
+    from rfmux.algorithms.measurement.pulse_sources import (
+        run_slow_source,
+    )
+
+    class _TapShim:
+        pass
+
+    _TapShim.channels = channels
+    _TapShim.feed_sample = staticmethod(
+        lambda ch, i, q, t: task.enqueue(ch, i, q, t))
+
+    tap_stop = {"stop": False}
+    tap_thread = threading.Thread(
+        target=lambda: asyncio.run(run_slow_source(
+            _TapShim, "127.0.0.1", module=1,
+            should_stop=lambda: tap_stop["stop"])),
+        daemon=True)
+
+    task.start()
+    tap_thread.start()
+
+    try:
+        assert _spin_until(
+            qt_app,
+            lambda: dual.slow.state is CaptureState.CAPTURING
+            and dual.fast.state is CaptureState.CAPTURING, 60), \
+            f"states={dual.state}, errors={events['errors']}"
+    except AssertionError:
+        tap_stop["stop"] = True
+        raise
 
     assert _spin_until(
         qt_app,
@@ -180,8 +210,10 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path):
         f"stats={dual.stats()}, errors={events['errors']})"
 
     task.request_stop()
+    tap_stop["stop"] = True
     assert _spin_until(qt_app, lambda: events["finished"], 30)
     task.wait(5000)
+    tap_thread.join(timeout=10)
 
     assert loop.run_until_complete(
         crs.get_pfb_streamer(module=1)) is None

@@ -66,7 +66,11 @@ class TestIncrementalMatcher:
         m = IncrementalPulseMatcher(window_s=0.05, grace_s=0.25,
                                     on_pair=pairs.append)
         m.add("slow", 1, 1, _summary(1.0))
-        m.add("slow", 1, 2, _summary(2.0))  # advances time past grace
+        # Slow-stream time alone must NOT expire it — only the OTHER
+        # stream passing the moment proves it was one-sided.
+        m.add("slow", 1, 2, _summary(2.0))
+        assert pairs == []
+        m.advance_time("fast", 1.3)  # fast clock passes mid + grace
         assert len(pairs) == 1
         assert pairs[0]["slow_idx"] == 1
         assert pairs[0]["fast_idx"] is None
@@ -196,3 +200,72 @@ def test_dual_session_end_to_end(tmp_path):
                       ["amplitude_counts_ch1"]) == 3
         ns = reader.noise_stats(1, "slow")
         assert ns.std_I > 0
+
+
+class TestAdvanceTime:
+    def test_other_stream_time_drives_expiry(self):
+        pairs = []
+        m = IncrementalPulseMatcher(window_s=0.05, grace_s=0.25,
+                                    on_pair=pairs.append)
+        m.add("slow", 1, 1, _summary(1.0))
+        m.advance_time("fast", 1.2)
+        assert pairs == []          # still within grace
+        m.advance_time("fast", 1.3)
+        assert len(pairs) == 1      # expired by stream time alone
+        assert pairs[0]["fast_idx"] is None
+
+    def test_own_stream_time_never_expires_own_pulses(self):
+        """Stream skew safety: if the fast socket stalls, slow pulses
+        must stay pending rather than being declared one-sided."""
+        pairs = []
+        m = IncrementalPulseMatcher(grace_s=0.25, on_pair=pairs.append)
+        m.add("slow", 1, 1, _summary(1.0))
+        m.advance_time("slow", 100.0)
+        assert pairs == []
+        m.add("fast", 1, 1, _summary(1.01))  # late partner still matches
+        assert len(pairs) == 1
+        assert pairs[0]["fast_idx"] == 1
+
+    def test_advance_ignores_backwards_and_nan(self):
+        pairs = []
+        m = IncrementalPulseMatcher(grace_s=0.25, on_pair=pairs.append)
+        m.add("slow", 1, 1, _summary(1.0))
+        m.advance_time("fast", float("nan"))
+        m.advance_time("fast", 0.5)
+        assert pairs == []
+
+
+@requires_h5py
+def test_one_sided_emits_live_with_cross_tod(tmp_path):
+    """A one-sided pulse must surface ~grace after the event from
+    baseline stream time alone (no later pulse, no stop) — with the
+    other stream's TOD window while its ring still covers it."""
+    events = {"pairs": []}
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=200.0, noise_train_ms=10.0)
+    dual = DualPulseCaptureSession(
+        channels=[1], slow_rate=SLOW_FS, fast_rate=FAST_FS,
+        config=cfg, hdf5_path=None, match_grace_s=0.25,
+        on_pair=lambda p: events["pairs"].append(p))
+    rng = np.random.default_rng(5)
+    dual.start()
+    _feed_noise(dual.feed_slow, dual.slow.noise_samples + 10, rng)
+    _feed_noise(dual.feed_fast, dual.fast.noise_samples + 10, rng)
+
+    # Slow-only pulse at t=1.0; then BASELINE ONLY on both streams
+    _feed_span(dual.feed_slow, SLOW_FS, 0.9, 1.2, rng,
+               pulse_starts=[1.0])
+    _feed_span(dual.feed_fast, FAST_FS, 0.9, 1.2, rng)
+    assert events["pairs"] == []  # within grace so far
+
+    _feed_span(dual.feed_slow, SLOW_FS, 1.2, 1.5, rng)
+    _feed_span(dual.feed_fast, FAST_FS, 1.2, 1.5, rng)
+
+    assert len(events["pairs"]) == 1, \
+        "one-sided pair must emit from stream time, not at stop"
+    pair = events["pairs"][0]
+    assert pair["slow_idx"] == 1 and pair["fast_idx"] is None
+    assert pair.get("fast_tod") is not None, \
+        "cross-stream TOD must be captured while the ring covers it"
+    assert len(pair["fast_tod"]["Amp_I"]) > 0
+    dual.stop()

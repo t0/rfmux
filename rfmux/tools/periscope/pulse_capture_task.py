@@ -253,10 +253,10 @@ class PulseCaptureTask(QtCore.QThread):
             pump = asyncio.ensure_future(self._control_pump())
             try:
                 await asyncio.gather(
-                    run_slow_source(self.session.slow, self.host,
+                    run_slow_source(self.session.slow_feed, self.host,
                                     module=self.module,
                                     should_stop=stop),
-                    run_pfb_source(self.session.fast, self.host,
+                    run_pfb_source(self.session.fast_feed, self.host,
                                    channels, should_stop=stop),
                 )
             finally:

@@ -71,13 +71,29 @@ class IncrementalPulseMatcher:
         self._pending: Dict[str, Dict[int, List[_Pending]]] = {
             "slow": {}, "fast": {}}
         self._pair_counts: Dict[int, int] = {}
-        self._latest: Optional[float] = None
+        # Per-stream clocks: a pulse in stream S may only be declared
+        # one-sided once the OTHER stream's time has provably passed it
+        # — robust to stream skew (sequential feeding, stalled socket).
+        self._latest: Dict[str, Optional[float]] = {
+            "slow": None, "fast": None}
         self.matched = 0
         self.unmatched = 0
 
     @staticmethod
     def _other(stream: str) -> str:
         return "fast" if stream == "slow" else "slow"
+
+    def advance_time(self, stream: str, now: float) -> None:
+        """Advance *stream*'s clock from stream time (not just pulse
+        arrivals) so the OTHER stream's one-sided pulses expire
+        ~grace_s after the event — while ring buffers still cover it —
+        instead of waiting for the next pulse or capture stop."""
+        if not math.isfinite(now):
+            return
+        latest = self._latest[stream]
+        if latest is None or now > latest:
+            self._latest[stream] = now
+            self._expire()
 
     def add(self, stream: str, channel: int, pulse_idx: int,
             summary: dict) -> None:
@@ -86,8 +102,9 @@ class IncrementalPulseMatcher:
         if not math.isfinite(mid):
             return
 
-        if self._latest is None or mid > self._latest:
-            self._latest = mid
+        latest = self._latest[stream]
+        if latest is None or mid > latest:
+            self._latest[stream] = mid
 
         # Best partner in the other stream's pending list
         others = self._pending[self._other(stream)].setdefault(channel, [])
@@ -107,16 +124,23 @@ class IncrementalPulseMatcher:
             self._pending[stream].setdefault(channel, []).append(
                 _Pending(pulse_idx, mid, summary))
 
-        self._expire(self._latest - self.grace_s)
+        self._expire()
 
     def flush(self) -> None:
         """Emit every remaining pending pulse as one-sided (on stop)."""
-        self._expire(float("inf"))
+        self._expire(force=True)
 
     # ── internals ─────────────────────────────────────────────────
 
-    def _expire(self, cutoff: float) -> None:
+    def _expire(self, force: bool = False) -> None:
         for stream in ("slow", "fast"):
+            if force:
+                cutoff = float("inf")
+            else:
+                other_latest = self._latest[self._other(stream)]
+                if other_latest is None:
+                    continue  # other stream has no time yet — can't judge
+                cutoff = other_latest - self.grace_s
             for channel, pend in self._pending[stream].items():
                 keep: List[_Pending] = []
                 for p in pend:
@@ -144,6 +168,23 @@ class IncrementalPulseMatcher:
         }
         if self.on_pair is not None:
             self.on_pair(pair)
+
+
+class _StreamFeed:
+    """Source-compatible facade: run_slow_source/run_pfb_source call
+    ``feed_sample`` and read ``channels`` — this routes them through the
+    dual session so stream time drives matcher expiry."""
+
+    def __init__(self, dual: "DualPulseCaptureSession", feed):
+        self._dual = dual
+        self._feed = feed
+
+    @property
+    def channels(self):
+        return self._dual.channels
+
+    def feed_sample(self, ch: int, i: float, q: float, t) -> None:
+        self._feed(ch, i, q, t)
 
 
 # ───────────────────────── Dual session ─────────────────────────────
@@ -221,9 +262,14 @@ class DualPulseCaptureSession:
         self.matcher = IncrementalPulseMatcher(
             window_s=match_window_s, grace_s=match_grace_s,
             on_pair=self._on_matcher_pair)
+        self._last_advance: Dict[str, float] = {}
 
         self.slow = self._make_stream("slow", slow_rate)
         self.fast = self._make_stream("fast", fast_rate)
+        #: source-compatible facades (feed_sample + channels) that route
+        #: through feed_slow/feed_fast so stream time advances the matcher
+        self.slow_feed = _StreamFeed(self, self.feed_slow)
+        self.fast_feed = _StreamFeed(self, self.feed_fast)
 
     def _make_stream(self, stream: str,
                      sample_rate: float) -> PulseCaptureSession:
@@ -251,9 +297,18 @@ class DualPulseCaptureSession:
 
     def feed_slow(self, ch: int, i: float, q: float, t) -> None:
         self.slow.feed_sample(ch, i, q, t)
+        self._advance_matcher("slow", t)
 
     def feed_fast(self, ch: int, i: float, q: float, t) -> None:
         self.fast.feed_sample(ch, i, q, t)
+        self._advance_matcher("fast", t)
+
+    def _advance_matcher(self, stream: str, t) -> None:
+        # Throttled: expiry sweep at most every 20 ms of stream time
+        if t is not None and t - self._last_advance.get(stream,
+                                                        float("-inf")) > 0.02:
+            self._last_advance[stream] = t
+            self.matcher.advance_time(stream, t)
 
     def re_estimate_noise(self) -> None:
         """Freeze both streams and retrain their noise statistics."""

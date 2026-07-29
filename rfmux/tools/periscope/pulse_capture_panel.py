@@ -298,7 +298,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             item = plot.getPlotItem()
             item.setLabel("left", ylabel)
             item.showGrid(x=True, y=True, alpha=0.3)
-        self.pulse_plot_q.getPlotItem().setLabel("bottom", "time (ms)")
+        self.pulse_plot_q.getPlotItem().setLabel("bottom", "time", units="s")
         self.pulse_plot_q.setXLink(self.pulse_plot_i)
         v.addWidget(self.pulse_plot_i, stretch=1)
         v.addWidget(self.pulse_plot_q, stretch=1)
@@ -1126,7 +1126,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for plot in (self.pulse_plot_i, self.pulse_plot_q):
             plot.clear()
             plot.setTitle(None)
-        self.pulse_plot_q.getPlotItem().setLabel("bottom", "time (ms)")
+        self.pulse_plot_q.getPlotItem().setLabel("bottom", "time", units="s")
         if wf is None:
             # Evicted from the live cache — fetch it from the HDF5 file
             # via the worker thread (waveform_ready redraws on arrival).
@@ -1143,7 +1143,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         t = np.asarray(wf["Time"], dtype=np.float64)
         finite = np.isfinite(t)
         t0 = t[finite][0] if np.any(finite) else 0.0
-        t_ms = (t - t0) * 1e3
+        t_rel = t - t0
         amp_I = np.asarray(wf["Amp_I"], dtype=np.float64)
         amp_Q = np.asarray(wf["Amp_Q"], dtype=np.float64)
 
@@ -1155,7 +1155,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                  getattr(ns, "mean_I", None), getattr(ns, "std_I", None)),
                 (self.pulse_plot_q, amp_Q, IQ_COLORS["Q"],
                  getattr(ns, "mean_Q", None), getattr(ns, "std_Q", None))):
-            plot.plot(t_ms, data, pen=pg.mkPen(color, width=LINE_WIDTH))
+            plot.plot(t_rel, data, pen=pg.mkPen(color, width=LINE_WIDTH))
             if mean is None or std is None:
                 continue
             plot.addLine(y=mean, pen=pg.mkPen(
@@ -1224,7 +1224,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for plot in (self.pulse_plot_i, self.pulse_plot_q):
             plot.clear()
             plot.setTitle(None)
-        self.pulse_plot_q.getPlotItem().setLabel("bottom", "time (ms)")
+        self.pulse_plot_q.getPlotItem().setLabel("bottom", "time", units="s")
         if loading:
             self.pulse_plot_i.setTitle("loading waveforms from file…")
         if slow_wf is None and fast_wf is None:
@@ -1247,16 +1247,16 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for quad, plot in (("I", self.pulse_plot_i),
                            ("Q", self.pulse_plot_q)):
             if fast_wf is not None:
-                t_ms = (np.asarray(fast_wf["Time"], float) - t0) * 1e3
-                plot.plot(t_ms,
+                t_rel = np.asarray(fast_wf["Time"], float) - t0
+                plot.plot(t_rel,
                           np.asarray(fast_wf[f"Amp_{quad}"], float),
                           pen=pg.mkPen(FAST_IQ_COLORS[quad], width=1.0))
             if slow_wf is not None:
-                t_ms = (np.asarray(slow_wf["Time"], float) - t0) * 1e3
+                t_rel = np.asarray(slow_wf["Time"], float) - t0
                 data = np.asarray(slow_wf[f"Amp_{quad}"], float)
-                plot.plot(t_ms, data, pen=pg.mkPen(
+                plot.plot(t_rel, data, pen=pg.mkPen(
                     IQ_COLORS[quad], width=LINE_WIDTH * 0.6))
-                plot.plot(t_ms, data, pen=None, symbol="o",
+                plot.plot(t_rel, data, pen=None, symbol="o",
                           symbolSize=6,
                           symbolBrush=IQ_COLORS[quad],
                           symbolPen=pg.mkPen("w", width=0.6))

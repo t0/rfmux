@@ -25,3 +25,33 @@ Please contact us (gsmecher@t0.technology) with questions. We have prepared two
 portable computers ("Flat Mark" and "Flat Stanley") with the necessary software
 pre-installed; it's our intention to ship these to sites where people are
 unfamiliar with Vivado.
+
+If you have been sent one of "Flat Mark" or "Flat Stanley", here are the 
+necessary steps:
+
+1. Remove the MicroSD card from the CRS and turn it on.
+
+2. For the portable computer, set up a keyboard and mouse and log with the 
+   provided password.
+
+3. The rfmux repository has already been cloned with the necessary firmware 
+   unpacked. Navigate to the r1.7.0 firmware release directory with:
+
+	$ cd ~/rfmux/firmware/r1.7.0
+
+3. Set up the Vitis execution environement:
+
+	$ source /opt/xilinx/2025.2/Vitis/settings64.sh
+
+4. With the micro USB cable plugged into the CRS, run:
+
+	$ program_flash -f boot.bin -fsbl fsbl.elf -flash_type qspi-x8-dual_parallel
+
+Tip: although not strictly necessary, it can be helpful to see what the CRS is
+doing while booting. On the portable computer, open a new terminal before
+powering on the CRS and run:
+
+	$ screen /dev/ttyUSB1 115200
+
+Once you power on the CRS, you will start to see its output as it is booting.
+To exit screen, press "Ctrl-a" then "d".

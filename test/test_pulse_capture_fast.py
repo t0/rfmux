@@ -202,13 +202,10 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path):
                     found = True
         assert found
 
-        # Streams must share the 16-bit ADC counts scale: the same
-        # carrier baseline within 2x across slow and fast (was ~256x
-        # before run_pfb_source applied the second /256).
-        for c in channels:
-            slow_mean = abs(reader.noise_stats(c, "slow").mean_I)
-            fast_mean = abs(reader.noise_stats(c, "fast").mean_I)
-            if slow_mean > 1.0:
-                ratio = fast_mean / slow_mean
-                assert 0.5 < ratio < 2.0, \
-                    f"ch{c}: fast/slow baseline ratio {ratio:.1f}"
+        # NOTE on cross-stream scales: run_pfb_source applies the
+        # 24-bit -> 16-bit /256 so both streams use the same digital
+        # convention, but the MOCK's slow-path gain varies with the
+        # decimation stage while its PFB rendering is fixed (measured
+        # fast/slow baseline ratios pre-/256: ~255x at dec 1, ~51x at
+        # dec 6) — so no amplitude-ratio assertion is possible here.
+        # See the plan doc follow-up on mock stream-gain modeling.

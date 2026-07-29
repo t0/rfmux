@@ -288,14 +288,17 @@ def test_noise_progress_stall_visibility(qt_app, tmp_path):
 
     panel._on_start()
     assert panel.task is not None
-    for _ in range(600):  # channel 1 only — channel 2 starves
+    target = panel.task.session.noise_samples
+    n_fed = target // 2  # partial fill on ch1 only — channel 2 starves
+    for _ in range(n_fed):
         runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
                            float(rng.normal(0, 1.0)), None)
 
     assert _spin_until(
-        qt_app, lambda: "Ch1 600/1000" in panel.status_label.text()), \
+        qt_app,
+        lambda: f"Ch1 {n_fed}/{target}" in panel.status_label.text()), \
         f"no progress shown: {panel.status_label.text()!r}"
-    assert "Ch2 0/1000" in panel.status_label.text()
+    assert f"Ch2 0/{target}" in panel.status_label.text()
 
     panel._on_stop()
     assert _spin_until(qt_app, lambda: panel.task is None)

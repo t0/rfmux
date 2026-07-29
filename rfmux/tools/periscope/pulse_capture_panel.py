@@ -34,9 +34,16 @@ from .utils import (
     theme_colors,
 )
 from .pulse_capture_task import PulseCaptureSignals, PulseCaptureTask
-from ...algorithms.measurement.pulse_capture_session import PulseCaptureSession
+from .pulse_capture_settings_dialog import PulseCaptureSettingsDialog
+from ...algorithms.measurement.pulse_capture_session import (
+    PulseCaptureConfig,
+    PulseCaptureSession,
+)
 from ...algorithms.measurement.pulse_hdf5 import PulseHDF5Reader
-from ...algorithms.measurement.streamer_config import PFB_SAMPLE_RATE
+from ...algorithms.measurement.streamer_config import (
+    PFB_SAMPLE_RATE,
+    slow_sample_rate,
+)
 
 # Channel plot colors: ch1 = I-blue, ch2 = Q-orange (HUD convention),
 # further channels from Tableau10.
@@ -75,6 +82,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.dark_mode = dark_mode
         self.df_calibrations = df_calibrations
 
+        self.capture_config = PulseCaptureConfig()
         self.task: Optional[PulseCaptureTask] = None
         self.signals: Optional[PulseCaptureSignals] = None
         self.reader: Optional[PulseHDF5Reader] = None
@@ -181,6 +189,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.pileup_check.setToolTip("Split piled-up events on sharp "
                                      "re-triggers during the decay")
         h.addWidget(self.pileup_check)
+
+        self.btn_settings = QtWidgets.QPushButton("Settings…")
+        self.btn_settings.setToolTip(
+            "All capture parameters: margins, min/max pulse length, "
+            "noise training — with live ms → samples math")
+        self.btn_settings.clicked.connect(self._on_capture_settings)
+        h.addWidget(self.btn_settings)
 
         self.btn_streamer = QtWidgets.QPushButton("Streamer…")
         self.btn_streamer.setToolTip(
@@ -339,6 +354,39 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         base = Path(self._browse_dir) if self._browse_dir else Path.home()
         return base / name
 
+    def _sync_config_from_toolbar(self) -> None:
+        self.capture_config.threshold_sigma = float(
+            self.threshold_spin.value())
+        self.capture_config.end_sigma = float(self.end_spin.value())
+        self.capture_config.enable_pileup = self.pileup_check.isChecked()
+
+    def _sync_toolbar_from_config(self) -> None:
+        self.threshold_spin.setValue(self.capture_config.threshold_sigma)
+        self.end_spin.setValue(self.capture_config.end_sigma)
+        self.pileup_check.setChecked(self.capture_config.enable_pileup)
+
+    def _current_sample_rate(self, mode: str) -> float:
+        if mode == "fast":
+            return PFB_SAMPLE_RATE
+        runtime = self._resolve_runtime()
+        dec = getattr(runtime, "actual_dec_stage", None)
+        return slow_sample_rate(dec if dec is not None else 6)
+
+    def _on_capture_settings(self) -> None:
+        self._sync_config_from_toolbar()
+        mode = self.mode_combo.currentText()
+        channels = self._parse_channels() or [1]
+        dlg = PulseCaptureSettingsDialog(
+            self,
+            config=self.capture_config,
+            sample_rate=self._current_sample_rate(mode),
+            mode=mode,
+            n_channels=len(channels),
+        )
+        if dlg.exec():
+            self.capture_config = dlg.get_config()
+            self._sync_toolbar_from_config()
+
     def _on_streamer_config(self) -> None:
         runtime = self._resolve_runtime()
         handler = getattr(runtime, "_show_streamer_config_dialog", None)
@@ -433,18 +481,25 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 self, "Pulse Capture", f"Cannot create {path.parent}: {e}")
             return
 
+        self._sync_config_from_toolbar()
+        fs = self._current_sample_rate(mode)
+        config_errors = [m for s, m in
+                         self.capture_config.validate(fs) if s == "error"]
+        if config_errors:
+            QtWidgets.QMessageBox.warning(
+                self, "Pulse Capture",
+                "Invalid capture settings:\n- "
+                + "\n- ".join(config_errors))
+            return
+
         session = PulseCaptureSession(
             channels=channels,
             module=module,
             streamer_mode=mode,
-            threshold_sigma=float(self.threshold_spin.value()),
-            end_sigma=float(self.end_spin.value()),
-            enable_pileup=self.pileup_check.isChecked(),
             hdf5_path=path,
             df_calibrations=self.df_calibrations,
-            sample_rate=PFB_SAMPLE_RATE if mode == "fast" else None,
-            buf_size=200_000 if mode == "fast" else 5000,
-            noise_samples=50_000 if mode == "fast" else 1000,
+            sample_rate=fs,
+            **self.capture_config.session_kwargs(fs),
         )
         self.signals = PulseCaptureSignals()
         self.task = PulseCaptureTask(session, self.signals, mode=mode,
@@ -628,7 +683,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_reestimate.setEnabled(running)
         for w in (self.mode_combo, self.channels_edit, self.module_spin,
                   self.threshold_spin, self.end_spin, self.pileup_check,
-                  self.btn_browse, self.btn_streamer):
+                  self.btn_browse, self.btn_streamer, self.btn_settings):
             w.setEnabled(not running)
         if not running:
             self._set_status("● Idle", "#9A9A9A")

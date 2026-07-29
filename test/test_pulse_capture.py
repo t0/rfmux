@@ -926,3 +926,63 @@ class TestHistogramAutoExpand:
             "per-channel histograms must share bin edges"
         assert hist.get_channel_histograms(1)["snr"].total == 1
         assert hist.get_channel_histograms(2)["snr"].total == 1
+
+
+# ───────────────────────── PulseCaptureConfig ───────────────────────
+
+from rfmux.algorithms.measurement.pulse_capture_session import (
+    PulseCaptureConfig,
+)
+
+
+class TestPulseCaptureConfig:
+    def test_ms_to_samples_scales_with_rate(self):
+        cfg = PulseCaptureConfig(min_pulse_ms=1.0)
+        assert cfg.min_pulse_samples(19073.486328125) == 19
+        assert cfg.min_pulse_samples(1220703.125) == 1221
+
+    def test_buffer_autosizing_and_floor(self):
+        cfg = PulseCaptureConfig(max_pulse_ms=250.0)
+        # 0.25 s * 19073 Hz * 1.5 safety
+        assert cfg.buf_size(19073.486328125) == 7153
+        # tiny rate hits the floor
+        assert cfg.buf_size(10.0) == 1000
+
+    def test_session_kwargs_match_session_signature(self):
+        cfg = PulseCaptureConfig(min_pulse_ms=0.5, max_pulse_ms=100.0)
+        kwargs = cfg.session_kwargs(19073.486328125)
+        from rfmux.algorithms.measurement.pulse_capture_session import (
+            PulseCaptureSession,
+        )
+        session = PulseCaptureSession(channels=[1], **kwargs)
+        assert session.threshold_sigma == cfg.threshold_sigma
+        assert session.buf_size == cfg.buf_size(19073.486328125)
+
+    def test_validate_end_at_or_above_threshold_is_error(self):
+        cfg = PulseCaptureConfig(threshold_sigma=3.0, end_sigma=3.0)
+        assert any(s == "error" for s, _ in cfg.validate())
+
+    def test_validate_low_end_sigma_warns(self):
+        cfg = PulseCaptureConfig(end_sigma=1.0)
+        issues = cfg.validate()
+        assert any(s == "warning" and "random walk" in m
+                   for s, m in issues)
+        assert not any(s == "error" for s, _ in issues)
+
+    def test_validate_min_above_max_is_error(self):
+        cfg = PulseCaptureConfig(min_pulse_ms=300.0, max_pulse_ms=100.0)
+        assert any(s == "error" for s, _ in cfg.validate())
+
+    def test_validate_subsample_min_pulse_warns(self):
+        cfg = PulseCaptureConfig(min_pulse_ms=0.001)  # 1 µs
+        issues = cfg.validate(sample_rate=596.0464477539062)
+        assert any("ineffective" in m for _, m in issues)
+
+    def test_describe_fields(self):
+        d = PulseCaptureConfig().describe(19073.486328125, n_channels=2)
+        for key in ("min_pulse_samples", "buf_samples",
+                    "buf_mb_per_channel", "buf_mb_total",
+                    "max_recordable_ms", "noise_samples"):
+            assert key in d
+        assert d["buf_mb_total"] == pytest.approx(
+            2 * d["buf_mb_per_channel"])

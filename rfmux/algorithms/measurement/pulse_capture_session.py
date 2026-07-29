@@ -43,6 +43,7 @@ thread).
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -68,6 +69,128 @@ class CaptureState(Enum):
     ESTIMATING = "estimating"
     CAPTURING = "capturing"
     STOPPED = "stopped"
+
+
+@dataclass
+class PulseCaptureConfig:
+    """User-facing pulse-capture parameters, in physical units.
+
+    Time-like quantities are milliseconds; :meth:`session_kwargs`
+    converts them to samples for a given stream rate, and auto-sizes
+    the ring buffer from the longest expected pulse (the buffer is the
+    hard ceiling on recordable pulse length — a capture that outlasts
+    it silently loses its rising edge).
+    """
+
+    threshold_sigma: float = 5.0
+    end_sigma: float = 1.5
+    margin_fraction: float = 0.1
+    min_pulse_ms: float = 0.0      # 0 = no glitch rejection
+    max_pulse_ms: float = 250.0    # sizes the ring buffer
+    noise_train_ms: float = 50.0
+    enable_pileup: bool = True
+
+    #: buffer headroom over max_pulse_ms (pre-trigger margin +
+    #: end-confirmation tail both live in the same ring)
+    BUFFER_SAFETY = 1.5
+    _MIN_BUF = 1000
+    _MIN_NOISE = 200
+
+    # ── ms → samples (per stream rate) ────────────────────────────
+
+    def min_pulse_samples(self, sample_rate: float) -> int:
+        return int(round(self.min_pulse_ms * 1e-3 * sample_rate))
+
+    def buf_size(self, sample_rate: float) -> int:
+        need = self.max_pulse_ms * 1e-3 * sample_rate * self.BUFFER_SAFETY
+        return max(self._MIN_BUF, int(math.ceil(need)))
+
+    def noise_samples(self, sample_rate: float) -> int:
+        return max(self._MIN_NOISE,
+                   int(round(self.noise_train_ms * 1e-3 * sample_rate)))
+
+    def session_kwargs(self, sample_rate: float) -> Dict[str, Any]:
+        """Keyword arguments for :class:`PulseCaptureSession`."""
+        return {
+            "threshold_sigma": self.threshold_sigma,
+            "end_sigma": self.end_sigma,
+            "margin_fraction": self.margin_fraction,
+            "min_pulse_samples": self.min_pulse_samples(sample_rate),
+            "enable_pileup": self.enable_pileup,
+            "buf_size": self.buf_size(sample_rate),
+            "noise_samples": self.noise_samples(sample_rate),
+        }
+
+    def describe(self, sample_rate: float,
+                 n_channels: int = 1) -> Dict[str, Any]:
+        """Derived quantities at a given stream rate (for display)."""
+        buf = self.buf_size(sample_rate)
+        return {
+            "sample_rate_hz": sample_rate,
+            "min_pulse_samples": self.min_pulse_samples(sample_rate),
+            "noise_samples": self.noise_samples(sample_rate),
+            "noise_train_actual_ms":
+                self.noise_samples(sample_rate) / sample_rate * 1e3,
+            "buf_samples": buf,
+            "buf_mb_per_channel": buf * 3 * 8 / 1e6,
+            "buf_mb_total": buf * 3 * 8 * n_channels / 1e6,
+            "max_recordable_ms": buf / sample_rate * 1e3,
+        }
+
+    def validate(self, sample_rate: Optional[float] = None
+                 ) -> List[tuple]:
+        """[(severity, message), ...] — severities error/warning/info."""
+        issues: List[tuple] = []
+        if self.threshold_sigma <= 0:
+            issues.append(("error", "Threshold σ must be positive."))
+        if self.end_sigma <= 0:
+            issues.append(("error", "End σ must be positive."))
+        if self.end_sigma >= self.threshold_sigma:
+            issues.append(("error",
+                           "End σ must sit below the trigger threshold "
+                           f"({self.end_sigma:g} ≥ "
+                           f"{self.threshold_sigma:g})."))
+        elif self.end_sigma < 1.2:
+            issues.append((
+                "warning",
+                f"End σ {self.end_sigma:g} < 1.2: the end condition "
+                "needs BOTH I and Q inside the band (~47% per sample at "
+                "1.0σ on Gaussian noise) — pulse termination becomes a "
+                "random walk. 1.5σ recommended."))
+        if self.threshold_sigma < 3:
+            issues.append(("warning",
+                           f"Threshold {self.threshold_sigma:g}σ will "
+                           "trigger frequently on plain noise."))
+        if not 0 <= self.margin_fraction <= 1:
+            issues.append(("error",
+                           "Margin fraction must be within 0–1."))
+        if self.max_pulse_ms <= 0:
+            issues.append(("error", "Max pulse length must be positive."))
+        if self.min_pulse_ms < 0:
+            issues.append(("error", "Min pulse length cannot be negative."))
+        if self.min_pulse_ms and self.min_pulse_ms >= self.max_pulse_ms:
+            issues.append(("error",
+                           "Min pulse length must be below max pulse "
+                           "length."))
+        if self.noise_train_ms <= 0:
+            issues.append(("error",
+                           "Noise training length must be positive."))
+
+        if sample_rate:
+            if self.min_pulse_ms > 0 \
+                    and self.min_pulse_samples(sample_rate) < 2:
+                issues.append((
+                    "warning",
+                    f"Min pulse {self.min_pulse_ms:g} ms is under 2 "
+                    f"samples at {sample_rate:,.0f} Hz — the glitch "
+                    "filter will be ineffective."))
+            mb = self.describe(sample_rate)["buf_mb_per_channel"]
+            if mb > 100:
+                issues.append((
+                    "warning",
+                    f"Ring buffer is {mb:.0f} MB per channel at this "
+                    "rate — consider a shorter max pulse length."))
+        return issues
 
 
 class PulseCaptureSession:

@@ -27,6 +27,7 @@ import numpy as np
 
 import rfmux
 from rfmux.algorithms.measurement.pulse_capture_session import (
+    PulseCaptureConfig,
     PulseCaptureSession,
 )
 from rfmux.algorithms.measurement.pulse_hdf5 import PulseHDF5Reader
@@ -51,9 +52,15 @@ async def main(serial: str = "MOCK") -> int:
     # we want >= 10 samples across one tau on the slow stream.
     PULSE_TAU_S = 1e-3
 
-    CAPTURE_PARAMS = dict(
+    # All capture parameters in physical units; ms → samples conversion
+    # and ring-buffer sizing happen per stream rate via session_kwargs().
+    CAPTURE_CONFIG = PulseCaptureConfig(
         threshold_sigma=5.0,
         end_sigma=1.5,
+        margin_fraction=0.1,
+        min_pulse_ms=0.2,     # glitch filter: drop captures under 0.2 ms
+        max_pulse_ms=50.0,    # sizes the ring buffer (longest recordable)
+        noise_train_ms=50.0,
         enable_pileup=True,
     )
     SLOW_CAPTURE_S = 2.0     # sample time for the slow live capture
@@ -123,15 +130,22 @@ async def main(serial: str = "MOCK") -> int:
         # ── 3. Live slow capture → streaming HDF5 ─────────────────
         print("\n3. Live slow-stream capture "
               f"({SLOW_CAPTURE_S:.0f} s of sample time)")
+        fs_slow = slow_sample_rate(cfg.dec_stage)
+        for sev, msg in CAPTURE_CONFIG.validate(fs_slow):
+            print(f"   [{sev}] {msg}")
+        cd = CAPTURE_CONFIG.describe(fs_slow, n_channels=len(CHANNELS))
+        print(f"   min pulse = {cd['min_pulse_samples']} samples, "
+              f"buffer = {cd['buf_samples']:,} samples "
+              f"({cd['buf_mb_total']:.2f} MB), "
+              f"noise training = {cd['noise_samples']} samples")
         slow_path = "pulse_flow_slow.h5"
         session = PulseCaptureSession(
             channels=CHANNELS, module=MODULE, streamer_mode="slow",
-            sample_rate=slow_sample_rate(cfg.dec_stage),
-            noise_samples=1000, hdf5_path=slow_path,
+            sample_rate=fs_slow, hdf5_path=slow_path,
             on_pulse=lambda ch, idx, s, _wf: print(
                 f"   pulse ch{ch} #{idx}: {s['snr']:.1f}σ, "
                 f"{s['duration_ms']:.2f} ms, τ={s['tau_ms']:.2f} ms"),
-            **CAPTURE_PARAMS)
+            **CAPTURE_CONFIG.session_kwargs(fs_slow))
         session.start()
         covered = await run_slow_source(
             session, host, module=MODULE,
@@ -160,12 +174,15 @@ async def main(serial: str = "MOCK") -> int:
             cfg.dec_stage, short=cfg.short_packets, modules=[MODULE],
             pfb_channels=CHANNELS, pfb_module=MODULE)
         try:
+            from dataclasses import replace
+            fast_cfg = replace(CAPTURE_CONFIG, threshold_sigma=50.0,
+                               end_sigma=3.0, max_pulse_ms=20.0,
+                               noise_train_ms=40.0)
             fast_path = "pulse_flow_fast.h5"
             fast_session = PulseCaptureSession(
                 channels=CHANNELS, module=MODULE, streamer_mode="fast",
-                sample_rate=PFB_SAMPLE_RATE, buf_size=200_000,
-                noise_samples=50_000, hdf5_path=fast_path,
-                threshold_sigma=50.0, end_sigma=3.0)
+                sample_rate=PFB_SAMPLE_RATE, hdf5_path=fast_path,
+                **fast_cfg.session_kwargs(PFB_SAMPLE_RATE))
             fast_session.start()
             covered = await run_pfb_source(
                 fast_session, host, CHANNELS,

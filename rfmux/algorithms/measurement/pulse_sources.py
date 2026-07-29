@@ -68,7 +68,7 @@ async def run_slow_source(
     """
     loop = asyncio.get_running_loop()
     channels = list(session.channels)
-    first_ts: Optional[float] = None
+    prev_ts: Optional[float] = None
     elapsed = 0.0
 
     with streamer.get_multicast_socket(
@@ -95,9 +95,15 @@ async def run_slow_source(
                 s = raw[ch - 1]
                 session.feed_sample(ch, float(s.real), float(s.imag), ts)
             if ts is not None:
-                if first_ts is None:
-                    first_ts = ts
-                elapsed = ts - first_ts
+                # Monotone accumulation, clamped per packet: immune to
+                # timestamp discontinuities (decimation changes, clock
+                # wrap at the day boundary) that would blow up a plain
+                # last-minus-first difference.
+                if prev_ts is not None:
+                    delta = ts - prev_ts
+                    if 0.0 < delta < 5.0:
+                        elapsed += delta
+                prev_ts = ts
                 if duration_s is not None and elapsed >= duration_s:
                     break
     return elapsed
@@ -123,7 +129,6 @@ async def run_pfb_source(
     """
     loop = asyncio.get_running_loop()
     n_groups = max(1, len(channels))
-    first_ts: Optional[float] = None
     elapsed = 0.0
 
     with streamer.get_multicast_socket(
@@ -151,11 +156,9 @@ async def run_pfb_source(
                         v = raw[fi]
                         session.feed_sample(ch, float(v.real),
                                             float(v.imag), t)
-            if ts is not None:
-                last = ts + (time_samples - 1) / sample_rate
-                if first_ts is None:
-                    first_ts = ts
-                elapsed = last - first_ts
-                if duration_s is not None and elapsed >= duration_s:
-                    break
+            # Exact per-packet span — independent of timestamp
+            # discontinuities across rate changes.
+            elapsed += time_samples / sample_rate
+            if duration_s is not None and elapsed >= duration_s:
+                break
     return elapsed

@@ -163,6 +163,8 @@ class TestSources:
         loop, crs = mock_crs
         loop.run_until_complete(crs.set_decimation(6, short=False,
                                                    modules=[1]))
+        # Let in-flight packets from earlier decimation settings drain
+        loop.run_until_complete(asyncio.sleep(0.3))
         session = PulseCaptureSession(channels=[1], noise_samples=50,
                                       hdf5_path=None)
         session.start()

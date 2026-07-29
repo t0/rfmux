@@ -575,8 +575,10 @@ class SessionManager(QtCore.QObject):
             try:
                 import h5py
                 with h5py.File(file_path, 'r') as f:
-                    if 'metadata' in f and any(
-                            k.startswith('channel_') for k in f.keys()):
+                    if 'metadata' in f and (
+                            'slow' in f  # dual-layout ("both" mode)
+                            or any(k.startswith('channel_')
+                                   for k in f.keys())):
                         return 'pulse'
             except Exception:
                 pass

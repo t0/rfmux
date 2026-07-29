@@ -185,6 +185,9 @@ class DualPulseCaptureSession:
         self.channels = list(channels)
         self.module = module
         self.config = config or PulseCaptureConfig()
+        # Parity with PulseCaptureSession (panel/task read this)
+        from pathlib import Path
+        self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
         self.on_noise = on_noise
         self.on_pulse = on_pulse
         self.on_pair = on_pair

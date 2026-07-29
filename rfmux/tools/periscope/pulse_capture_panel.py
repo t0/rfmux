@@ -106,6 +106,15 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._pair_meta: Dict[Tuple[int, int], dict] = {}
         self._stream_counts: Dict[str, int] = {}
         self._noise_by_stream: Dict[str, dict] = {}
+
+        # Follow-latest coalescing: at fast-mode pulse rates the queued
+        # per-pulse redraws lag the worker and land on already-evicted
+        # waveforms ("loading…" churn).  A short single-shot timer
+        # draws only the newest item, which is always still cached.
+        self._follow_timer = QtCore.QTimer(self)
+        self._follow_timer.setSingleShot(True)
+        self._follow_timer.setInterval(100)
+        self._follow_timer.timeout.connect(self._show_latest)
         self._counts: Dict[int, int] = {}
         self._last_stats: dict = {}
         self._hist_data: dict = {}
@@ -879,8 +888,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             parent.setText(0, f"▤ Channel {channel} "
                               f"({self._counts[channel]})")
 
-        if self.follow_check.isChecked():
-            self._show_pulse(channel, pulse_idx)
+        if self.follow_check.isChecked() \
+                and not self._follow_timer.isActive():
+            self._follow_timer.start()
 
     def _on_stats(self, stats: dict) -> None:
         self._last_stats = stats
@@ -921,8 +931,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             parent.insertChild(0, item)
             parent.setText(0, f"▤ Channel {ch} ({self._counts[ch]} pairs)")
 
-        if self.follow_check.isChecked():
-            self._show_pair(ch, pair_idx)
+        if self.follow_check.isChecked() \
+                and not self._follow_timer.isActive():
+            self._follow_timer.start()
 
     def _refresh_status_line(self) -> None:
         s = self._last_stats
@@ -1015,6 +1026,16 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             if text.startswith("● ") else text)
 
     # ── Pulse view ────────────────────────────────────────────────
+
+    def _show_latest(self) -> None:
+        """Coalesced follow-latest redraw (newest pulse or pair)."""
+        if not self.follow_check.isChecked() or not self._pulse_order:
+            return
+        latest = self._pulse_order[-1]
+        if self._both_mode:
+            self._show_pair(*latest)
+        else:
+            self._show_pulse(*latest)
 
     def _on_tree_double_click(self, item, column) -> None:
         data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)

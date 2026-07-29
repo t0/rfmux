@@ -451,3 +451,53 @@ def test_dual_review_mode(qt_app, tmp_path):
 
     panel.close()
     _spin(qt_app)
+
+
+def test_dual_session_hdf5_path_parity(tmp_path):
+    """Panel/task read session.hdf5_path on finish — the dual session
+    must expose it like the single session (stop-crash regression)."""
+    from rfmux.algorithms.measurement.pulse_capture_dual import (
+        DualPulseCaptureSession,
+    )
+    path = tmp_path / "parity.h5"
+    dual = DualPulseCaptureSession(channels=[1], slow_rate=20000.0,
+                                   hdf5_path=path)
+    assert dual.hdf5_path == path
+    dual.stop()
+    no_file = DualPulseCaptureSession(channels=[1], slow_rate=20000.0)
+    assert no_file.hdf5_path is None
+    no_file.stop()
+
+
+def test_follow_latest_coalesces_bursts(qt_app, tmp_path):
+    """A burst of pulses with a tiny cache must leave the viewer on the
+    NEWEST pulse (cached), not churning on evicted intermediates."""
+    runtime = _FakeRuntime()
+    panel = _make_panel(qt_app, tmp_path, runtime)
+    rng = np.random.default_rng(21)
+
+    panel._on_start()
+    panel.task._cache_size = 2  # aggressive eviction
+    assert panel.follow_check.isChecked()
+    for _ in range(1000):
+        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
+                           float(rng.normal(0, 1.0)), None)
+    assert _spin_until(qt_app, lambda: panel.noise_stats)
+
+    _feed_capture(runtime._pulse_tap, rng, n=8000,
+                  pulse_starts=tuple(range(200, 7000, 700)))
+    n_expected = len(range(200, 7000, 700))
+    assert _spin_until(
+        qt_app, lambda: len(panel._pulse_order) == n_expected), \
+        f"saw {len(panel._pulse_order)}/{n_expected} pulses"
+    # Let the coalescing timer fire and draw the newest pulse
+    assert _spin_until(
+        qt_app,
+        lambda: f"#{n_expected:06d}" in panel.pulse_info.text()
+        and len(panel.pulse_plot_i.getPlotItem().listDataItems()) >= 1), \
+        f"viewer not on latest: {panel.pulse_info.text()!r}"
+
+    panel._on_stop()
+    assert _spin_until(qt_app, lambda: panel.task is None)
+    panel.close()
+    _spin(qt_app)

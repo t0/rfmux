@@ -278,19 +278,6 @@ class ServerMockCRS:
             for key in [k for k in store.keys() if k[1] > max_channels]:
                 store.pop(key, None)
 
-    def channels_per_module(self):
-        if self._short_packets:
-            return SHORT_PACKET_CHANNELS
-        else:
-            return LONG_PACKET_CHANNELS
-
-
-    def _prune_channels_over_limit(self):
-        max_channels = self.channels_per_module()
-        for store in (self._frequencies, self._amplitudes, self._phases):
-            for key in [k for k in store.keys() if k[1] > max_channel]:
-                store.pop(key, None)
-    
     async def generate_resonators(self, config=None):
         """Generate/regenerate resonators with current or provided parameters."""
         try:
@@ -542,8 +529,15 @@ class ServerMockCRS:
             raise ValueError(f"Invalid rail '{rail}'. Must be one of {list(self.RAIL_DICT.values())}")
         return self._rails.get(rail, {}).get("current")
 
-    async def set_decimation(self, stage: int = 6, short: bool = False, module: int | list[int] | None = None):
+    async def set_decimation(self, stage: int = 6, short: bool = False,
+                             module: int | list[int] | None = None,
+                             modules: int | list[int] | None = None):
+        # Firmware documents/tests the 'modules' spelling (see
+        # firmware/CHANGES and test_spotcheck.py); 'module' is kept as an
+        # alias for backward compatibility with existing callers.
         assert isinstance(stage, int) and 0 <= stage <= 6
+        if modules is not None:
+            module = modules
         if module is None:
             module = list(self._active_modules)
         if isinstance(module, int):
@@ -551,10 +545,12 @@ class ServerMockCRS:
         if (not isinstance(module, list) or not all(isinstance(m, int) for m in module)
                 or not set(module) <= set(self._active_modules)):
             raise ValueError("Invalid 'module' argument to set_decimation!")
-        if (stage <= 3) and (short == False):
+        # Real hardware accepts long packets from stage 3 up
+        # (test_spotcheck.py exercises short=False for stages 3-6).
+        if (stage <= 2) and (short == False):
             raise ValueError(
                 f"Decimation stage {stage} requires short=True (128 channels). "
-                f"Long packets (1024 channels) are only supported for decimation stages >= 4."
+                f"Long packets (1024 channels) are only supported for decimation stages >= 3."
             )
         self._fir_stage = stage
         self._short_packets = short

@@ -145,7 +145,12 @@ async def run_pfb_source(
             except asyncio.TimeoutError:
                 break
             pkt = streamer.PFBPacket(data)
-            raw = np.array(pkt)
+            # Match the slow stream's 16-bit ADC scale: np.array(pkt)
+            # applies the packetizer /256; the second /256 brings the
+            # 24-bit datapath down to ADC counts (same convention as
+            # the slow readout path).  Without it, fast samples sit
+            # exactly 256x above slow samples for the same signal.
+            raw = np.array(pkt) / 256.0
             ts = _ts_to_seconds(pkt.ts)
             time_samples = pkt.num_samples // n_groups
             for si in range(time_samples):

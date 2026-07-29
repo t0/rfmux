@@ -298,6 +298,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             item = plot.getPlotItem()
             item.setLabel("left", ylabel)
             item.showGrid(x=True, y=True, alpha=0.3)
+            item.addLegend(offset=(-10, 10))
         self.pulse_plot_q.getPlotItem().setLabel("bottom", "time", units="s")
         self.pulse_plot_q.setXLink(self.pulse_plot_i)
         v.addWidget(self.pulse_plot_i, stretch=1)
@@ -1250,16 +1251,18 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 t_rel = np.asarray(fast_wf["Time"], float) - t0
                 plot.plot(t_rel,
                           np.asarray(fast_wf[f"Amp_{quad}"], float),
-                          pen=pg.mkPen(FAST_IQ_COLORS[quad], width=1.0))
+                          pen=pg.mkPen(FAST_IQ_COLORS[quad], width=1.0),
+                          name="fast (PFB, 1.22 MHz)")
             if slow_wf is not None:
                 t_rel = np.asarray(slow_wf["Time"], float) - t0
                 data = np.asarray(slow_wf[f"Amp_{quad}"], float)
-                plot.plot(t_rel, data, pen=pg.mkPen(
-                    IQ_COLORS[quad], width=LINE_WIDTH * 0.6))
-                plot.plot(t_rel, data, pen=None, symbol="o",
-                          symbolSize=6,
+                plot.plot(t_rel, data,
+                          pen=pg.mkPen(IQ_COLORS[quad],
+                                       width=LINE_WIDTH * 0.6),
+                          symbol="o", symbolSize=6,
                           symbolBrush=IQ_COLORS[quad],
-                          symbolPen=pg.mkPen("w", width=0.6))
+                          symbolPen=pg.mkPen("w", width=0.6),
+                          name="slow (readout)")
 
     # ── Histograms ────────────────────────────────────────────────
 

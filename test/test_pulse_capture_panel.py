@@ -448,6 +448,11 @@ def test_dual_review_mode(qt_app, tmp_path):
     assert "Pair #" in panel.pulse_info.text()
     assert len(panel.pulse_plot_i.getPlotItem().listDataItems()) >= 2
     assert len(panel.pulse_plot_q.getPlotItem().listDataItems()) >= 2
+    # Legend distinguishes the fast line from the slow markers
+    legend = panel.pulse_plot_i.getPlotItem().legend
+    labels = [label.text for _sample, label in legend.items]
+    assert any("fast" in t for t in labels), labels
+    assert any("slow" in t for t in labels), labels
 
     panel.close()
     _spin(qt_app)

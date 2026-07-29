@@ -201,3 +201,14 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path):
                     assert wf is not None
                     found = True
         assert found
+
+        # Streams must share the 16-bit ADC counts scale: the same
+        # carrier baseline within 2x across slow and fast (was ~256x
+        # before run_pfb_source applied the second /256).
+        for c in channels:
+            slow_mean = abs(reader.noise_stats(c, "slow").mean_I)
+            fast_mean = abs(reader.noise_stats(c, "fast").mean_I)
+            if slow_mean > 1.0:
+                ratio = fast_mean / slow_mean
+                assert 0.5 < ratio < 2.0, \
+                    f"ch{c}: fast/slow baseline ratio {ratio:.1f}"

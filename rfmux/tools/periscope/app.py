@@ -55,6 +55,10 @@ from .app_runtime import PeriscopeRuntime
 from PyQt6 import sip  # For checking if Qt C++ objects have been deleted
 from .mock_configuration_dialog import MockConfigurationDialog
 from .pulse_capture_panel import PulseCapturePanel
+from .streamer_config_dialog import (
+    ApplyStreamerConfigTask,
+    StreamerConfigDialog,
+)
 from .dock_manager import PeriscopeDockManager
 from .main_plot_panel import MainPlotPanel
 from .session_manager import SessionManager
@@ -401,6 +405,17 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.btn_pulse_capture.setToolTip(
             "Open a live pulse capture panel (taps the slow readout stream)")
         self.btn_pulse_capture.clicked.connect(self._open_pulse_capture_panel)
+
+        self.btn_streamer_cfg = QtWidgets.QPushButton("Streamer Config")
+        self.btn_streamer_cfg.setToolTip(
+            "Configure the slow streamer (decimation, short/long packets, "
+            "modules) and the fast PFB streamer, with live bandwidth math")
+        self.btn_streamer_cfg.clicked.connect(
+            self._show_streamer_config_dialog)
+        if self.crs is None and self.host != "OFFLINE":
+            self.btn_streamer_cfg.setEnabled(False)
+            self.btn_streamer_cfg.setToolTip(
+                "CRS object not available - streamer configuration disabled.")
 
         self.btn_toggle_cfg = QtWidgets.QPushButton("Show Configuration")
         self.btn_toggle_cfg.setCheckable(True)
@@ -1399,6 +1414,36 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     self._start_multisweep_analysis(params)
     
     
+    def _show_streamer_config_dialog(self) -> None:
+        """Configure the slow/fast streamers (headless layer does the math)."""
+        dialog = StreamerConfigDialog(
+            self,
+            crs=self.crs,
+            current_dec=getattr(self, "actual_dec_stage", None),
+            current_short=getattr(self, "is_short_packet", None),
+            module=getattr(self, "module", 1),
+        )
+        if not dialog.exec():
+            return
+        cfg = dialog.get_config()
+        if self.crs is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Streamer Configuration",
+                "No CRS connection to apply the configuration to.")
+            return
+        task = ApplyStreamerConfigTask(self.crs, cfg, parent=self)
+        task.success.connect(
+            lambda info: print(
+                f"[Periscope] Streamer configured: dec {cfg.dec_stage}, "
+                f"{'short' if cfg.short_packets else 'long'} packets, "
+                f"{info['total_mbps']:.0f} Mbps"))
+        task.error.connect(
+            lambda msg: QtWidgets.QMessageBox.critical(
+                self, "Streamer Configuration",
+                f"Failed to apply configuration:\n{msg}"))
+        self._streamer_apply_task = task  # keep a ref while running
+        task.start()
+
     def _open_pulse_capture_panel(self) -> None:
         """Create a Pulse Capture dock (live detection via the slow tap)."""
         self.pulse_capture_window_count += 1

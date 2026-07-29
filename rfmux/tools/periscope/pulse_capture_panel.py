@@ -182,6 +182,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                                      "re-triggers during the decay")
         h.addWidget(self.pileup_check)
 
+        self.btn_streamer = QtWidgets.QPushButton("Streamer…")
+        self.btn_streamer.setToolTip(
+            "Configure decimation / packet format / PFB streaming")
+        self.btn_streamer.clicked.connect(self._on_streamer_config)
+        h.addWidget(self.btn_streamer)
+
         self.path_label = QtWidgets.QLabel("HDF5: (session)")
         self.path_label.setTextInteractionFlags(
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -332,6 +338,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return Path(sm.session_path) / name
         base = Path(self._browse_dir) if self._browse_dir else Path.home()
         return base / name
+
+    def _on_streamer_config(self) -> None:
+        runtime = self._resolve_runtime()
+        handler = getattr(runtime, "_show_streamer_config_dialog", None)
+        if handler is None:
+            QtWidgets.QMessageBox.information(
+                self, "Pulse Capture",
+                "Streamer configuration is available from the main "
+                "Periscope window.")
+            return
+        handler()
 
     def _on_browse(self) -> None:
         dlg = QtWidgets.QFileDialog(
@@ -611,7 +628,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_reestimate.setEnabled(running)
         for w in (self.mode_combo, self.channels_edit, self.module_spin,
                   self.threshold_spin, self.end_spin, self.pileup_check,
-                  self.btn_browse):
+                  self.btn_browse, self.btn_streamer):
             w.setEnabled(not running)
         if not running:
             self._set_status("● Idle", "#9A9A9A")

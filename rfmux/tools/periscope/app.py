@@ -53,6 +53,7 @@ from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, Initial
                        # (Assumes periscope_ui.py has been refactored into ui.py and exports these).
 from .app_runtime import PeriscopeRuntime
 from PyQt6 import sip  # For checking if Qt C++ objects have been deleted
+from . import settings
 from .mock_configuration_dialog import MockConfigurationDialog
 from .pulse_capture_panel import PulseCapturePanel
 from .streamer_config_dialog import (
@@ -298,6 +299,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.pulse_capture_windows: Dict[str, Dict] = {}
         self.pulse_capture_window_count: int = 0
 
+        # UI font scale (Ctrl+/Ctrl-/Ctrl+0), restored from settings
+        self.font_scale: float = settings.get_font_scale()
+
         # Attributes for the optional embedded iPython console.
         # QTCONSOLE_AVAILABLE is a boolean constant from .utils.
         self.kernel_manager = None      # Manages the iPython kernel
@@ -537,7 +541,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._create_help_menu()
 
         self.menuBar().setNativeMenuBar(False)
-        
+
+        # Re-apply the remembered UI zoom now that widgets exist
+        if abs(self.font_scale - 1.0) > 1e-6:
+            self._set_font_scale(self.font_scale)
+
         # Note: Session browser dock will be added after Main dock is created
         
         # Connect session manager to status bar
@@ -1414,6 +1422,43 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     self._start_multisweep_analysis(params)
     
     
+    def _adjust_font_scale(self, factor: float) -> None:
+        """Multiply the UI font scale (Ctrl+/Ctrl-)."""
+        self._set_font_scale(
+            getattr(self, "font_scale", settings.DEFAULT_FONT_SCALE)
+            * factor)
+
+    def _set_font_scale(self, scale: float) -> None:
+        """Apply an app-wide font scale and remember it.
+
+        Scaling the QApplication font cascades to every panel, dialog,
+        dock title, menu and pyqtgraph label, so panels need no
+        per-widget handling.
+        """
+        scale = max(settings.FONT_SCALE_MIN,
+                    min(settings.FONT_SCALE_MAX, float(scale)))
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return
+        if not hasattr(self, "_base_font_pt"):
+            # Capture the untouched application font once
+            self._base_font_pt = app.font().pointSizeF()
+        base = self._base_font_pt
+        if base <= 0:
+            base = 10.0
+        font = app.font()
+        font.setPointSizeF(base * scale)
+        app.setFont(font)
+        self.font_scale = scale
+        settings.set_font_scale(scale)
+        # Force a relayout so existing widgets pick up the metrics
+        for widget in app.allWidgets():
+            widget.setFont(widget.font())
+        try:
+            self.statusBar().showMessage(f"UI zoom: {scale*100:.0f}%", 2000)
+        except Exception:
+            pass  # status bar may not exist yet during startup
+
     def _show_streamer_config_dialog(self) -> None:
         """Configure the slow/fast streamers (headless layer does the math)."""
         dialog = StreamerConfigDialog(
@@ -2233,6 +2278,30 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.dark_mode_action.triggered.connect(self._toggle_dark_mode)
         self.dark_mode_action.triggered.connect(self._update_console_style)
         view_menu.addAction(self.dark_mode_action)
+
+        view_menu.addSeparator()
+
+        # UI font scaling (Ctrl+ / Ctrl- / Ctrl+0), app-wide
+        zoom_in = QtGui.QAction("Zoom &In", self)
+        zoom_in.setShortcuts([QtGui.QKeySequence.StandardKey.ZoomIn,
+                              QtGui.QKeySequence("Ctrl+=")])
+        zoom_in.triggered.connect(lambda: self._adjust_font_scale(1.1))
+        view_menu.addAction(zoom_in)
+
+        zoom_out = QtGui.QAction("Zoom &Out", self)
+        zoom_out.setShortcuts([QtGui.QKeySequence.StandardKey.ZoomOut])
+        zoom_out.triggered.connect(lambda: self._adjust_font_scale(1 / 1.1))
+        view_menu.addAction(zoom_out)
+
+        zoom_reset = QtGui.QAction("&Reset Zoom", self)
+        zoom_reset.setShortcut(QtGui.QKeySequence("Ctrl+0"))
+        zoom_reset.triggered.connect(lambda: self._set_font_scale(1.0))
+        view_menu.addAction(zoom_reset)
+
+        for action in (zoom_in, zoom_out, zoom_reset):
+            action.setShortcutContext(
+                QtCore.Qt.ShortcutContext.ApplicationShortcut)
+            self.addAction(action)
 
 
     def _create_jupyter_menu(self):

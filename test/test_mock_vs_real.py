@@ -74,8 +74,12 @@ def serial(request):
 
 
 @pytest.fixture(scope="session")
-def crs_mock():
-    """Load mock CRS session."""
+def crs_mock(serial):
+    """Load mock CRS session.
+
+    Depends on ``serial`` so the no-board skip fires BEFORE a MockCRS
+    server is pointlessly spawned.
+    """
     s_mock = rfmux.load_session("""
     !HardwareMap
     - !flavour "rfmux.mock"

@@ -73,9 +73,13 @@ jobs:
             libxcb-render-util0 \
             libxcb-xinerama0
 
-      - name: Run test_measurement_flow.py
+      - name: Run default test tier
         run: |
-          pytest -v -s test/test_measurement_flow.py
+          pytest -v test/
+
+      - name: Run mock e2e tier (MockCRS servers + UDP streaming)
+        run: |
+          pytest -v -s -m mock_e2e test/
 
       - name: Run test_periscope_flow.py
         run: |

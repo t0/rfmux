@@ -1,6 +1,8 @@
 from importlib import util
 from pathlib import Path
 import pytest
+
+pytestmark = pytest.mark.mock_e2e  # spawns a MockCRS server
 import asyncio
 import numpy as np
 from unittest.mock import Mock, AsyncMock, patch, MagicMock

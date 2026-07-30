@@ -19,6 +19,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
+pytestmark = pytest.mark.mock_e2e
+
 from PyQt6 import QtWidgets  # noqa: E402
 
 from rfmux.algorithms.measurement.pulse_capture_session import (  # noqa: E402

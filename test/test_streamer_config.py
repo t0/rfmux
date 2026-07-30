@@ -108,6 +108,7 @@ def mock_crs():
 
 
 class TestApplyOnMock:
+    pytestmark = pytest.mark.mock_e2e
     def test_apply_and_read(self, mock_crs):
         loop, crs = mock_crs
         info = loop.run_until_complete(apply_streamer_config(
@@ -154,6 +155,7 @@ class TestApplyOnMock:
 
 
 class TestSources:
+    pytestmark = pytest.mark.mock_e2e
     def test_slow_source_feeds_session(self, mock_crs):
         from rfmux.algorithms.measurement.pulse_capture_session import (
             CaptureState, PulseCaptureSession)

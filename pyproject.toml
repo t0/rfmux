@@ -120,6 +120,12 @@ markers = [
   "offline",
   "qc_stage1",
   "qc_stage2",
+  "integration",
+  "mock_e2e: slow tests that spawn a MockCRS server and stream real UDP",
 ]
+
+# Default runs are the fast tier (~20 s). Run the heavy mock tier with:
+#   pytest -m mock_e2e test/
+addopts = '-m "not mock_e2e"'
 
 asyncio_default_fixture_loop_scope = "session"

@@ -720,7 +720,7 @@ class ServerMockCRS:
         fs = 625e6 / 256 / 64 / (2 ** fir_stage)
         t_list = (np.arange(num_samples) / fs).tolist()
 
-        cfg = self._physics_config if hasattr(self, 'physics_config') else {}
+        cfg = getattr(self, '_physics_config', {}) or {}
         scale_factor = cfg.get('scale_factor', 2 ** 21)
         noise_level = cfg.get('udp_noise_level', 10.0)
         current_time = time.time() - self.mock_start_time

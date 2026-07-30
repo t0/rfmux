@@ -174,7 +174,7 @@ class MockResonatorModel:
         # Get configuration
         if config is None:
             # Use physics_config from MockCRS if available, otherwise use unified defaults
-            if hasattr(self.mock_crs, 'physics_config') and self.mock_crs._physics_config:
+            if getattr(self.mock_crs, '_physics_config', None):
                 config = self.mock_crs._physics_config
             else:
                 from .config import defaults
@@ -662,7 +662,7 @@ class MockResonatorModel:
             nearest_idx = 0
 
         # Get cache parameters from config
-        phys = getattr(self.mock_crs, 'physics_config', {})
+        phys = getattr(self.mock_crs, '_physics_config', {})
         if not isinstance(phys, dict):
             phys = {}
         
@@ -730,7 +730,7 @@ class MockResonatorModel:
             self.update_lekids_for_current(frequency, amplitude)
 
             # Update cache capacity from config if provided
-            phys = getattr(self.mock_crs, 'physics_config', {})
+            phys = getattr(self.mock_crs, '_physics_config', {})
             if isinstance(phys, dict):
                 max_size = phys.get('convergence_cache_max_size', self._convergence_cache_max_size)
             else:

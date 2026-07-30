@@ -312,9 +312,14 @@ class MockCRSStreamer(threading.Thread):
         channel_samples = noise_i + 1j * noise_q
 
         model = self.mock_crs._resonator_model
+        # pulse_time is explicit (same escape hatch the PFB emitter uses):
+        # update_qp_densities_for_time is a monotonic ratchet, and with
+        # PFB enabled its batches have already advanced last_update_time
+        # past t_frame — without this the slow stream would be evaluated
+        # at the PFB's time, skewing it by up to one frame.
         channel_responses = model.calculate_module_response_coupled(
             module_num, num_samples=1, sample_rate=slow_rate,
-            start_time=t_frame,
+            start_time=t_frame, pulse_time=t_frame,
         )
 
         for ch_num_1, signal_val in channel_responses.items():

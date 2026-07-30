@@ -46,6 +46,15 @@ class MockResonatorModel:
         # Noise configuration from SoT
         self.nqp_noise_enabled = default_config['nqp_noise_enabled']
         self.nqp_noise_std_factor = default_config['nqp_noise_std_factor']
+        # TLS (1/f) frequency wander — built in generate_resonators once
+        # the resonator count is known; None disables it entirely.
+        self._tls_generator = None
+        self.tls_noise_enabled = default_config.get('tls_noise_enabled',
+                                                    False)
+        self.tls_fractional_rms = default_config.get('tls_fractional_rms',
+                                                     1e-7)
+        self.tls_alpha = default_config.get('tls_alpha', 1.0)
+        self.tls_corner_hz = default_config.get('tls_corner_hz', 100.0)
         
         # Current effects (affects Lk only, applied after physics-based base params)
         self.lk_current_factors = []  # Lk_total = Lk_base * lk_current_factor
@@ -278,6 +287,12 @@ class MockResonatorModel:
         
         # Configure noise parameters from config
         # Uses defaults from mock_crs_helper.py if not specified
+        self.tls_noise_enabled = config.get('tls_noise_enabled', False)
+        self.tls_fractional_rms = config.get('tls_fractional_rms', 1e-7)
+        self.tls_alpha = config.get('tls_alpha', 1.0)
+        self.tls_corner_hz = config.get('tls_corner_hz', 100.0)
+        self._tls_generator = None  # rebuilt below once count is known
+
         self.nqp_noise_enabled = config.get('nqp_noise_enabled', True)
         self.nqp_noise_std_factor = config.get('nqp_noise_std_factor', 0.001)  # Default 0.1% noise if not in config
         
@@ -539,6 +554,25 @@ class MockResonatorModel:
         
         print(f"Created {len(self.mr_lekids)} persistent LEKID objects")
 
+        # TLS (1/f) frequency wander — one independent process per
+        # resonator, seeded from the resonator seed so mock runs stay
+        # reproducible.
+        if self.tls_noise_enabled and self.mr_lekids:
+            from .tls_noise import TLSNoiseGenerator
+            seed = config.get('resonator_random_seed')
+            self._tls_generator = TLSNoiseGenerator(
+                n_resonators=len(self.mr_lekids),
+                fractional_rms=self.tls_fractional_rms,
+                alpha=self.tls_alpha,
+                corner_hz=self.tls_corner_hz,
+                seed=(None if seed is None else int(seed) + 9973),
+            )
+            print(f"TLS 1/f noise: rms={self.tls_fractional_rms:.2e} "
+                  f"df/f, alpha={self.tls_alpha}, "
+                  f"corner={self.tls_corner_hz} Hz")
+        else:
+            self._tls_generator = None
+
         # Configure pulse events if specified in config
         pulse_mode = config.get('pulse_mode', 'none')
         if pulse_mode != 'none':
@@ -795,6 +829,17 @@ class MockResonatorModel:
             R_subset[i] = lekid.R
             Cc_subset[i] = lekid.Cc
         
+        # ── TLS (1/f) frequency wander ────────────────────────────
+        # Applied HERE, after any convergence-cache restore, because
+        # the cache quantizes QP and restores L/Lk/R verbatim on a hit —
+        # a wander injected through nqp would be quantized away.
+        # TLS is a surface-dielectric effect, so capacitance is the
+        # faithful knob: df/f = -0.5 * dC/C.
+        if self._tls_generator is not None:
+            y = self._tls_generator.value_at(t_for_pulses)
+            n = min(n_relevant, len(y))
+            C_subset[:n] = C_subset[:n] * (1.0 - 2.0 * y[:n])
+
         # Get common parameters from first LEKID (they should all be the same)
         lekid0 = self.mr_lekids[0]
         

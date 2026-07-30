@@ -111,3 +111,38 @@ class TestMemoryBound:
     def test_zero_length_query(self):
         gen = TLSNoiseGenerator(n_resonators=3, corner_hz=50.0, seed=23)
         assert gen.values_at(np.array([])).shape == (0, 3)
+
+
+def test_vectorised_step_matches_explicit_recursion():
+    """lfilter must reproduce the OU recursion exactly (same RNG draws)."""
+    gen = TLSNoiseGenerator(n_resonators=2, corner_hz=20.0, seed=31)
+    decay = np.exp(-gen.dt / gen.taus)
+    kick = np.sqrt(gen.variances * (1.0 - decay ** 2))
+
+    # Reference: explicit per-step recursion on a copy of the state,
+    # driven by the SAME random draws (per-pole blocks, as _step does).
+    state = gen._state.copy()
+    rng_ref = np.random.default_rng(31)
+    rng_ref.normal(0.0, 1.0, state.shape)     # consume the init draw
+    n = 50
+    expected = np.zeros((n, gen.n_resonators))
+    for i in range(gen.n_poles):
+        noise = rng_ref.normal(0.0, 1.0, (n, gen.n_resonators)) * kick[i]
+        x = state[i].copy()
+        for k in range(n):
+            x = decay[i] * x + noise[k]
+            expected[k] += x
+
+    got = gen._step(n)
+    assert np.allclose(got, expected, rtol=1e-9, atol=1e-18)
+
+
+def test_large_time_jump_is_fast():
+    """Bulk extension must not be a Python loop over steps."""
+    import time as _time
+
+    gen = TLSNoiseGenerator(n_resonators=4, corner_hz=20.0, seed=37)
+    t0 = _time.perf_counter()
+    gen.value_at(300.0)          # ~150k grid steps at this corner
+    elapsed = _time.perf_counter() - t0
+    assert elapsed < 2.0, f"bulk extension took {elapsed:.2f} s"

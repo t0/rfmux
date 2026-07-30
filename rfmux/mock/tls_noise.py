@@ -106,6 +106,12 @@ class TLSNoiseGenerator:
         self._t0 = 0.0
         self._values = np.sum(self._state, axis=0)[None, :]  # (1, n_res)
 
+        # One-entry memo: the physics helper queries once per TONE with
+        # the same timestamp, so consecutive identical t are the common
+        # case and re-interpolating them is pure overhead.
+        self._memo_t: float | None = None
+        self._memo_v: np.ndarray | None = None
+
     # ── Generation ────────────────────────────────────────────────
 
     @property
@@ -113,23 +119,42 @@ class TLSNoiseGenerator:
         return self._t0 + (len(self._values) - 1) * self.dt
 
     def _step(self, n_steps: int) -> np.ndarray:
-        """Advance the OU states n_steps and return the new rows."""
-        decay = np.exp(-self.dt / self.taus)[:, None]
-        kick = np.sqrt(self.variances[:, None] * (1.0 - decay ** 2))
-        out = np.empty((n_steps, self.n_resonators))
-        state = self._state
-        for k in range(n_steps):
-            state = state * decay + kick * self._rng.normal(
-                0.0, 1.0, state.shape)
-            out[k] = np.sum(state, axis=0)
-        self._state = state
+        """Advance the OU states n_steps and return the new rows.
+
+        The recursion ``x_k = a*x_{k-1} + kick*n_k`` is a first-order
+        IIR, so the whole block is one ``lfilter`` per pole rather than
+        a Python loop over steps — bulk extension (e.g. a large jump in
+        requested time) stays cheap.
+        """
+        from scipy.signal import lfilter
+
+        decay = np.exp(-self.dt / self.taus)
+        kick = np.sqrt(self.variances * (1.0 - decay ** 2))
+        out = np.zeros((n_steps, self.n_resonators))
+        new_state = np.empty_like(self._state)
+        for i in range(self.n_poles):
+            noise = self._rng.normal(
+                0.0, 1.0, (n_steps, self.n_resonators)) * kick[i]
+            # zi convention for a = [1, -decay]: zi = decay * x_{-1}
+            zi = (decay[i] * self._state[i])[None, :]
+            y, _ = lfilter([1.0], [1.0, -decay[i]], noise, axis=0, zi=zi)
+            out += y
+            new_state[i] = y[-1]
+        self._state = new_state
         return out
+
+    #: Minimum grid rows generated per extension.  ``lfilter`` costs
+    #: ~10 us per call regardless of length, so extending one row at a
+    #: time (what continuous streaming would otherwise do) dominates;
+    #: generating a chunk ahead amortises it away.
+    CHUNK = 512
 
     def _extend_to(self, t: float) -> None:
         """Grow the grid so it covers *t* (no-op if already covered)."""
         if t <= self.t_end:
             return
-        n_steps = int(np.ceil((t - self.t_end) / self.dt))
+        needed = int(np.ceil((t - self.t_end) / self.dt))
+        n_steps = max(needed, self.CHUNK)
         self._values = np.concatenate(
             (self._values, self._step(n_steps)), axis=0)
         self._trim()
@@ -150,16 +175,22 @@ class TLSNoiseGenerator:
         queries ahead of the grid extend it.  Repeated or out-of-order
         queries always return the same value.
         """
+        if self._memo_t is not None and t == self._memo_t:
+            return self._memo_v
         self._extend_to(t)
         if t <= self._t0:
-            return self._values[0].copy()
-        pos = (t - self._t0) / self.dt
-        k = int(pos)
-        if k >= len(self._values) - 1:
-            return self._values[-1].copy()
-        frac = pos - k
-        return (self._values[k] * (1.0 - frac)
-                + self._values[k + 1] * frac)
+            value = self._values[0].copy()
+        else:
+            pos = (t - self._t0) / self.dt
+            k = int(pos)
+            if k >= len(self._values) - 1:
+                value = self._values[-1].copy()
+            else:
+                frac = pos - k
+                value = (self._values[k] * (1.0 - frac)
+                         + self._values[k + 1] * frac)
+        self._memo_t, self._memo_v = t, value
+        return value
 
     def values_at(self, times: np.ndarray) -> np.ndarray:
         """Vectorised :meth:`value_at` — returns ``(len(times), n_res)``."""

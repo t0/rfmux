@@ -582,3 +582,86 @@ def test_template_tab_renders(qt_app, tmp_path):
 
     panel.close()
     _spin(qt_app)
+
+
+def test_units_toggle_scales_amplitude(qt_app, tmp_path):
+    """counts → Hz uses counts × VOLTS_PER_ROC × df_calibration."""
+    from rfmux.core.transferfunctions import VOLTS_PER_ROC
+
+    panel = PulseCapturePanel(dark_mode=False,
+                              df_calibrations={1: {1: 2.0e6}})
+    panel.module_spin.setValue(1)
+    assert panel._df_scale(1) == pytest.approx(2.0e6 * VOLTS_PER_ROC)
+    assert panel._df_scale(7) is None          # uncalibrated channel
+    assert not panel._units_are_hz()
+    panel.units_combo.setCurrentText("Hz")
+    assert panel._units_are_hz()
+
+    # No calibration at all → no scaling offered
+    plain = PulseCapturePanel(dark_mode=False)
+    assert plain._df_scale(1) is None
+    panel.close()
+    plain.close()
+    _spin(qt_app)
+
+
+def test_csv_exports(qt_app, tmp_path):
+    """Each viewer tab exports its own CSV."""
+    import csv as _csv
+
+    path = _build_capture_file(tmp_path)
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+    panel._browse_dir = str(tmp_path)
+
+    # Pulse View tab
+    panel.viewer_tabs.setCurrentIndex(0)
+    panel._show_pulse(*panel._pulse_order[-1])
+    panel._on_export()
+    # Histograms tab
+    panel.viewer_tabs.setCurrentIndex(1)
+    panel._on_export()
+    # Template tab (needs template data from the file)
+    panel._template_data = panel.reader.get_templates()
+    panel.viewer_tabs.setCurrentIndex(2)
+    panel._on_export()
+
+    written = sorted(p.name for p in tmp_path.glob("*.csv"))
+    assert any(n.startswith("pulse_ch") for n in written), written
+    assert any(n.startswith("pulse_histograms") for n in written), written
+    assert any(n.startswith("pulse_template") for n in written), written
+
+    hist_csv = next(tmp_path.glob("pulse_histograms_*.csv"))
+    with open(hist_csv) as fh:
+        rows = list(_csv.reader(fh))
+    assert rows[0] == ["metric", "channel", "bin_left", "bin_right",
+                       "count"]
+    assert len(rows) > 10
+
+    panel.close()
+    _spin(qt_app)
+
+
+def test_keyboard_navigation(qt_app, tmp_path):
+    path = _build_capture_file(tmp_path)
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+
+    panel._navigate_end(first=True)
+    first = panel._current_view
+    panel._navigate_end(first=False)
+    last = panel._current_view
+    assert first != last
+
+    panel._navigate(-1)
+    assert panel._current_view != last
+
+    start_tab = panel.viewer_tabs.currentIndex()
+    panel._cycle_tab()
+    assert panel.viewer_tabs.currentIndex() != start_tab
+    for _ in range(panel.viewer_tabs.count() - 1):
+        panel._cycle_tab()
+    assert panel.viewer_tabs.currentIndex() == start_tab
+
+    panel.close()
+    _spin(qt_app)

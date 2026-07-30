@@ -16,6 +16,7 @@ and draws.
 
 from __future__ import annotations
 
+import csv
 import datetime
 import time
 from pathlib import Path
@@ -44,6 +45,7 @@ from ...algorithms.measurement.streamer_config import (
     PFB_SAMPLE_RATE,
     slow_sample_rate,
 )
+from ...core.transferfunctions import VOLTS_PER_ROC
 
 # Fast/PFB stream overlay colors (darker variants, HUD convention)
 FAST_IQ_COLORS = {"I": "#24478F", "Q": "#8F4724"}
@@ -124,6 +126,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._capture_start_wall: Optional[float] = None
 
         self._setup_ui()
+        self._setup_shortcuts()
         self._set_run_state(False)
         self.apply_theme(dark_mode)
         self.module_spin.setValue(module)
@@ -135,6 +138,38 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if streamed:
             self.channels_edit.setText(
                 ",".join(str(c) for c in sorted(set(streamed))))
+
+    def _setup_shortcuts(self) -> None:
+        """Keyboard navigation, active while the panel has focus."""
+        def add(seq, slot):
+            action = QtGui.QAction(self)
+            action.setShortcut(QtGui.QKeySequence(seq))
+            action.setShortcutContext(
+                QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            action.triggered.connect(slot)
+            self.addAction(action)
+
+        add(QtCore.Qt.Key.Key_Left, lambda: self._navigate(-1))
+        add(QtCore.Qt.Key.Key_Right, lambda: self._navigate(+1))
+        add(QtCore.Qt.Key.Key_Space, self._cycle_tab)
+        add(QtCore.Qt.Key.Key_Home, lambda: self._navigate_end(first=True))
+        add(QtCore.Qt.Key.Key_End, lambda: self._navigate_end(first=False))
+        add("Ctrl+E", self._on_export)
+
+    def _cycle_tab(self) -> None:
+        count = self.viewer_tabs.count()
+        self.viewer_tabs.setCurrentIndex(
+            (self.viewer_tabs.currentIndex() + 1) % count)
+
+    def _navigate_end(self, first: bool) -> None:
+        if not self._pulse_order:
+            return
+        self.follow_check.setChecked(False)
+        key = self._pulse_order[0 if first else -1]
+        if self._both_mode:
+            self._show_pair(*key)
+        else:
+            self._show_pulse(*key)
 
     # ── UI construction ───────────────────────────────────────────
 
@@ -231,6 +266,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         h.addStretch(1)
 
+        self.btn_export = QtWidgets.QPushButton("Export…")
+        self.btn_export.setToolTip(
+            "Export the current pulse/pair, histograms or template to CSV")
+        self.btn_export.clicked.connect(self._on_export)
+        h.addWidget(self.btn_export)
+
         screenshot_btn = QtWidgets.QPushButton("📷")
         screenshot_btn.setToolTip("Export a screenshot of this panel")
         screenshot_btn.clicked.connect(self._export_screenshot)
@@ -326,6 +367,15 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             self._on_hist_stream_changed)
         self.hist_stream_combo.setVisible(False)  # both-mode only
         controls.addWidget(self.hist_stream_combo)
+
+        controls.addWidget(QtWidgets.QLabel("Units:"))
+        self.units_combo = QtWidgets.QComboBox()
+        self.units_combo.addItems(["counts", "Hz"])
+        self.units_combo.setToolTip(
+            "Amplitudes in raw ADC counts, or calibrated Δf (Hz) when a "
+            "df calibration is available for the channel")
+        self.units_combo.currentTextChanged.connect(self._on_units_changed)
+        controls.addWidget(self.units_combo)
         controls.addStretch(1)
         v.addLayout(controls)
 
@@ -401,6 +451,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         show_band = self.template_residual_check.isChecked()
         totals = []
+        scaled_any = False
         for ch in sorted(self._counts):
             t = data.get(f"time_s_ch{ch}")
             counts = data.get(f"counts_ch{ch}")
@@ -409,12 +460,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             n_pulses = int(np.max(np.asarray(counts))) if len(counts) else 0
             totals.append(f"Ch{ch}: {n_pulses}")
             color = _channel_color(ch)
+            scale = self._df_scale(ch) if self._units_are_hz() else None
+            if scale is not None:
+                scaled_any = True
             for quad, plot in (("I", self.template_plot_i),
                                ("Q", self.template_plot_q)):
                 mean = data.get(f"template_{quad}_ch{ch}")
                 if mean is None:
                     continue
                 mean = np.asarray(mean, dtype=np.float64)
+                if scale is not None:
+                    mean = mean * scale
                 plot.plot(np.asarray(t, float), mean,
                           pen=pg.mkPen(color, width=2.2),
                           connect="finite",
@@ -422,6 +478,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 resid = data.get(f"residual_{quad}_ch{ch}")
                 if show_band and resid is not None:
                     resid = np.asarray(resid, dtype=np.float64)
+                    if scale is not None:
+                        resid = resid * scale
                     band = QtGui.QColor(color)
                     band.setAlpha(60)
                     upper = pg.PlotDataItem(np.asarray(t, float),
@@ -433,6 +491,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     fill = pg.FillBetweenItem(upper, lower, brush=band)
                     plot.addItem(fill)
 
+        for plot, quad in ((self.template_plot_i, "I"),
+                           (self.template_plot_q, "Q")):
+            plot.getPlotItem().setLabel(
+                "left", f"{quad} (Δf)" if scaled_any else f"{quad} (counts)",
+                units="Hz" if scaled_any else None)
         self.template_info.setText(
             "Trigger-aligned stack — " + ", ".join(totals)
             if totals else "No pulses stacked yet")
@@ -489,6 +552,131 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         runtime = self._resolve_runtime()
         dec = getattr(runtime, "actual_dec_stage", None)
         return slow_sample_rate(dec if dec is not None else 6)
+
+    # ── Export ────────────────────────────────────────────────────
+
+    def _export_dir(self) -> Path:
+        sm = self.session_manager
+        if sm is not None and getattr(sm, "is_active", False) \
+                and sm.session_path is not None:
+            return Path(sm.session_path)
+        if self._browse_dir:
+            return Path(self._browse_dir)
+        return Path.home()
+
+    def _on_export(self) -> None:
+        """Export what the active tab is showing, as CSV."""
+        tab = self.viewer_tabs.currentIndex()
+        stamp = datetime.datetime.now().strftime("%H%M%S")
+        try:
+            if tab == 0:
+                rows, name = self._export_waveform_rows(stamp)
+            elif tab == 1:
+                rows, name = self._export_histogram_rows(stamp)
+            else:
+                rows, name = self._export_template_rows(stamp)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Pulse Capture", f"Nothing to export:\n{e}")
+            return
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self, "Pulse Capture", "Nothing to export from this tab.")
+            return
+
+        path = self._export_dir() / name
+        try:
+            with open(path, "w", newline="") as fh:
+                csv.writer(fh).writerows(rows)
+        except OSError as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Pulse Capture", f"Could not write {path}:\n{e}")
+            return
+        if self.session_manager is not None and \
+                getattr(self.session_manager, "is_active", False):
+            try:
+                self.session_manager.register_external_file(
+                    str(path), "pulse", "export")
+            except Exception:
+                pass
+        print(f"[PulseCapture] Exported {path}")
+        self._set_status(f"● Exported {path.name}", "#3366CC")
+
+    def _export_waveform_rows(self, stamp):
+        """Current pulse (or pair) waveform(s), one column set per stream."""
+        if self._both_mode and self._current_pair is not None:
+            ch, idx = self._current_pair
+            pair = self._get_pair(ch, idx) or {}
+            meta = self._pair_meta.get((ch, idx), {})
+            slow = pair.get("slow_tod") or (
+                self._get_waveform(ch, meta.get("slow_idx"), "slow")
+                if meta.get("slow_idx") else None)
+            fast = pair.get("fast_tod") or (
+                self._get_waveform(ch, meta.get("fast_idx"), "fast")
+                if meta.get("fast_idx") else None)
+            rows = [["stream", "time_s", "Amp_I", "Amp_Q"]]
+            for label, wf in (("slow", slow), ("fast", fast)):
+                if not wf:
+                    continue
+                for t, i, q in zip(wf["Time"], wf["Amp_I"], wf["Amp_Q"]):
+                    rows.append([label, float(t), float(i), float(q)])
+            return rows, f"pulse_pair_ch{ch}_{idx:04d}_{stamp}.csv"
+
+        if self._current_view is None:
+            return [], ""
+        ch, idx = self._current_view
+        wf = self._get_waveform(ch, idx)
+        if not wf:
+            return [], ""
+        rows = [["time_s", "Amp_I", "Amp_Q"]]
+        for t, i, q in zip(wf["Time"], wf["Amp_I"], wf["Amp_Q"]):
+            rows.append([float(t), float(i), float(q)])
+        return rows, f"pulse_ch{ch}_{idx:06d}_{stamp}.csv"
+
+    def _export_histogram_rows(self, stamp):
+        data = self._hist_data
+        if not data:
+            return [], ""
+        rows = [["metric", "channel", "bin_left", "bin_right", "count"]]
+        for metric, _title, _x in _HIST_METRICS:
+            edges = data.get(f"{metric}_edges")
+            if edges is None:
+                continue
+            edges = np.asarray(edges, dtype=np.float64)
+            for ch in sorted(self._counts):
+                counts = data.get(f"{metric}_counts_ch{ch}")
+                if counts is None:
+                    continue
+                for k, n in enumerate(np.asarray(counts)):
+                    rows.append([metric, ch, float(edges[k]),
+                                 float(edges[k + 1]), int(n)])
+        return rows, f"pulse_histograms_{stamp}.csv"
+
+    def _export_template_rows(self, stamp):
+        data = self._template_data
+        if not data:
+            return [], ""
+        rows = [["channel", "time_s", "template_I", "template_Q",
+                 "residual_I", "residual_Q", "n_stacked"]]
+        for ch in sorted(self._counts):
+            t = data.get(f"time_s_ch{ch}")
+            if t is None:
+                continue
+            ti = data.get(f"template_I_ch{ch}")
+            tq = data.get(f"template_Q_ch{ch}")
+            ri = data.get(f"residual_I_ch{ch}")
+            rq = data.get(f"residual_Q_ch{ch}")
+            counts = data.get(f"counts_ch{ch}")
+            for k in range(len(t)):
+                rows.append([
+                    ch, float(t[k]),
+                    float(ti[k]) if ti is not None else "",
+                    float(tq[k]) if tq is not None else "",
+                    float(ri[k]) if ri is not None else "",
+                    float(rq[k]) if rq is not None else "",
+                    int(counts[k]) if counts is not None else "",
+                ])
+        return rows, f"pulse_template_{stamp}.csv"
 
     def _on_capture_settings(self) -> None:
         self._sync_config_from_toolbar()
@@ -1082,6 +1270,31 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"● Capturing — {total} pulses ({rate:.1f}/min) — {ch_str} — "
             f"{hh:02d}:{mm:02d}:{ss:02d}{drop_str}", "#4CC38A")
 
+    def _df_scale(self, channel: int) -> Optional[float]:
+        """counts → Hz factor for *channel*, or None if uncalibrated.
+
+        Conversion is linear: counts × VOLTS_PER_ROC × df_calibration.
+        """
+        cal = self.df_calibrations
+        if not cal:
+            return None
+        module = int(self.module_spin.value())
+        per_module = cal.get(module) if isinstance(cal, dict) else None
+        if isinstance(per_module, dict):
+            df_cal = per_module.get(channel)
+        else:  # flat {channel: cal} mapping
+            df_cal = cal.get(channel) if isinstance(cal, dict) else None
+        if df_cal is None:
+            return None
+        return float(df_cal) * VOLTS_PER_ROC
+
+    def _units_are_hz(self) -> bool:
+        return self.units_combo.currentText() == "Hz"
+
+    def _on_units_changed(self, _text: str) -> None:
+        self._render_histograms()
+        self._render_templates()
+
     def _on_hist_stream_changed(self, stream: str) -> None:
         if stream in self._hist_data_by_stream:
             self._hist_data = self._hist_data_by_stream[stream]
@@ -1422,12 +1635,22 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             edges = self._hist_data.get(f"{metric}_edges")
             if edges is None:
                 continue
-            edges = np.asarray(edges, dtype=np.float64)
+            base_edges = np.asarray(edges, dtype=np.float64)
+            # Amplitude is the only metric with ADC-count units; SNR,
+            # duration and tau are dimensionless or times.
+            scalable = (metric == "amplitude") and self._units_are_hz()
+            any_scaled = False
             occupied_lo = occupied_hi = None
             for ch in sorted(self._counts):
                 counts = self._hist_data.get(f"{metric}_counts_ch{ch}")
                 if counts is None:
                     continue
+                edges = base_edges
+                if scalable:
+                    scale = self._df_scale(ch)
+                    if scale is not None:
+                        edges = base_edges * scale
+                        any_scaled = True
                 counts = np.asarray(counts, dtype=np.float64)
                 nz = np.nonzero(counts > 0)[0]
                 if len(nz):
@@ -1450,6 +1673,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     name=f"Ch {ch} (n={int(np.nansum(counts))})",
                     connect="finite",
                 )
+            if metric == "amplitude":
+                item.setLabel("bottom",
+                              "amplitude (Δf)" if any_scaled
+                              else "amplitude (counts)",
+                              units="Hz" if any_scaled else None)
             # Fit x to the populated bins — auto-expanded ranges
             # otherwise leave the data huddled at one edge
             if occupied_lo is not None and occupied_hi > occupied_lo:

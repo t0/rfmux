@@ -106,6 +106,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._pair_meta: Dict[Tuple[int, int], dict] = {}
         self._stream_counts: Dict[str, int] = {}
         self._noise_by_stream: Dict[str, dict] = {}
+        self._hist_data_by_stream: Dict[str, dict] = {}
 
         # Follow-latest coalescing: at fast-mode pulse rates the queued
         # per-pulse redraws lag the worker and land on already-evicted
@@ -314,6 +315,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.log_check = QtWidgets.QCheckBox("Log y")
         self.log_check.toggled.connect(self._render_histograms)
         controls.addWidget(self.log_check)
+        self.hist_stream_combo = QtWidgets.QComboBox()
+        self.hist_stream_combo.addItems(["slow", "fast"])
+        self.hist_stream_combo.setToolTip(
+            "Which stream's histograms to display (both mode)")
+        self.hist_stream_combo.currentTextChanged.connect(
+            self._on_hist_stream_changed)
+        self.hist_stream_combo.setVisible(False)  # both-mode only
+        controls.addWidget(self.hist_stream_combo)
         controls.addStretch(1)
         v.addLayout(controls)
 
@@ -734,7 +743,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 }
                 self._on_pair_matched(lean)
 
-        self._hist_data = self.reader.get_histograms("slow")
+        for stream in ("slow", "fast"):
+            self._hist_data_by_stream[stream] = \
+                self.reader.get_histograms(stream)
+        self._hist_data = self._hist_data_by_stream.get(
+            self.hist_stream_combo.currentText(), {})
         self._render_histograms()
         self._enter_review_state(
             path, f"{sum(self._counts.values())} pairs")
@@ -777,6 +790,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._pair_meta.clear()
         self._stream_counts = {"slow": 0, "fast": 0}
         self._noise_by_stream = {}
+        self._hist_data_by_stream = {}
+        self.hist_stream_combo.setVisible(self._both_mode)
         self._current_pair = None
         self._current_view = None
         self._counts = {c: 0 for c in channels}
@@ -968,15 +983,21 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"● Capturing — {total} pulses ({rate:.1f}/min) — {ch_str} — "
             f"{hh:02d}:{mm:02d}:{ss:02d}{drop_str}", "#4CC38A")
 
+    def _on_hist_stream_changed(self, stream: str) -> None:
+        if stream in self._hist_data_by_stream:
+            self._hist_data = self._hist_data_by_stream[stream]
+            self._render_histograms()
+
     def _on_histograms(self, data: dict) -> None:
         if "stream" in data and "data" in data:
-            # both-mode: per-stream payloads; display the slow stream
-            if data["stream"] != "slow":
-                return
-            self._hist_data = data["data"]
+            # both-mode: keep per-stream stores, render the selected one
+            self._hist_data_by_stream[data["stream"]] = data["data"]
+            if data["stream"] == self.hist_stream_combo.currentText():
+                self._hist_data = data["data"]
+                self._render_histograms()
         else:
             self._hist_data = data
-        self._render_histograms()
+            self._render_histograms()
 
     def _on_error(self, message: str) -> None:
         self.noise_label.setToolTip(message)
@@ -1272,17 +1293,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 t_rel = np.asarray(fast_wf["Time"], float) - t0
                 plot.plot(t_rel,
                           np.asarray(fast_wf[f"Amp_{quad}"], float),
-                          pen=pg.mkPen(FAST_IQ_COLORS[quad], width=1.0),
+                          pen=pg.mkPen(FAST_IQ_COLORS[quad], width=2.2),
                           name="fast (PFB, 1.22 MHz)")
             if slow_wf is not None:
+                # Slow stream: dots only — sparse samples, no
+                # interpolating line (Joshua's spec)
                 t_rel = np.asarray(slow_wf["Time"], float) - t0
                 data = np.asarray(slow_wf[f"Amp_{quad}"], float)
-                plot.plot(t_rel, data,
-                          pen=pg.mkPen(IQ_COLORS[quad],
-                                       width=LINE_WIDTH * 0.6),
-                          symbol="o", symbolSize=6,
+                plot.plot(t_rel, data, pen=None,
+                          symbol="o", symbolSize=8,
                           symbolBrush=IQ_COLORS[quad],
-                          symbolPen=pg.mkPen("w", width=0.6),
+                          symbolPen=pg.mkPen("w", width=0.8),
                           name="slow (readout)")
 
     # ── Histograms ────────────────────────────────────────────────
@@ -1300,11 +1321,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             if edges is None:
                 continue
             edges = np.asarray(edges, dtype=np.float64)
+            occupied_lo = occupied_hi = None
             for ch in sorted(self._counts):
                 counts = self._hist_data.get(f"{metric}_counts_ch{ch}")
                 if counts is None:
                     continue
                 counts = np.asarray(counts, dtype=np.float64)
+                nz = np.nonzero(counts > 0)[0]
+                if len(nz):
+                    lo, hi = edges[nz[0]], edges[nz[-1] + 1]
+                    occupied_lo = lo if occupied_lo is None \
+                        else min(occupied_lo, lo)
+                    occupied_hi = hi if occupied_hi is None \
+                        else max(occupied_hi, hi)
                 if log_y:
                     counts = np.where(counts > 0, counts, np.nan)
                 color = _channel_color(ch)
@@ -1319,6 +1348,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     name=f"Ch {ch} (n={int(np.nansum(counts))})",
                     connect="finite",
                 )
+            # Fit x to the populated bins — auto-expanded ranges
+            # otherwise leave the data huddled at one edge
+            if occupied_lo is not None and occupied_hi > occupied_lo:
+                plot.getPlotItem().vb.setXRange(
+                    occupied_lo, occupied_hi, padding=0.08)
 
     # ── Theme ─────────────────────────────────────────────────────
 

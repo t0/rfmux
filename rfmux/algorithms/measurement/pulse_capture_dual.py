@@ -273,6 +273,14 @@ class DualPulseCaptureSession:
 
     def _make_stream(self, stream: str,
                      sample_rate: float) -> PulseCaptureSession:
+        kwargs = self.config.session_kwargs(sample_rate)
+        # Union-window extraction happens up to grace_s after a pulse
+        # (single-trigger expiry): the ring must cover the full window
+        # PLUS the grace, or the extraction races the ring.
+        grace = self.matcher.grace_s
+        min_buf = int((self.config.max_pulse_ms / 1e3 * 1.5
+                       + grace + 0.1) * sample_rate)
+        kwargs["buf_size"] = max(kwargs["buf_size"], min_buf)
         return PulseCaptureSession(
             channels=self.channels,
             module=self.module,
@@ -286,7 +294,7 @@ class DualPulseCaptureSession:
             on_histograms=lambda data, s=stream:
                 self._on_stream_histograms(s, data),
             on_error=self._error,
-            **self.config.session_kwargs(sample_rate),
+            **kwargs,
         )
 
     # ── Lifecycle / feeding ───────────────────────────────────────
@@ -373,17 +381,24 @@ class DualPulseCaptureSession:
         self._callback(self.on_histograms, stream, data)
 
     def _on_matcher_pair(self, pair: dict) -> None:
-        # One-sided pair: pull the matching time window from the OTHER
-        # stream's ring buffer while it still covers the interval.
+        # EVERY pair carries both streams over the UNION time window
+        # (widest interval spanned by the trigger(s), plus margin),
+        # extracted from the ring buffers.  The per-stream triggered
+        # records stay untouched — metrics (SNR, tau, histograms) are
+        # computed on the physically-triggered cores only; the union
+        # windows are the pair's display/analysis data.
         try:
-            if pair["fast_idx"] is None and pair["slow_summary"]:
-                pair["fast_tod"] = self._cross_tod(
-                    self.fast, pair["channel"], pair["slow_summary"])
-            elif pair["slow_idx"] is None and pair["fast_summary"]:
-                pair["slow_tod"] = self._cross_tod(
-                    self.slow, pair["channel"], pair["fast_summary"])
+            union = self._union_window(pair)
+            if union is not None:
+                t0, t1 = union
+                for stream, session in (("slow", self.slow),
+                                        ("fast", self.fast)):
+                    if session.pcap is not None:
+                        pair[f"{stream}_tod"] = \
+                            session.pcap.get_window_by_time(
+                                pair["channel"], t0, t1)
         except Exception as e:
-            self._error(f"Cross-stream TOD extraction failed: {e}")
+            self._error(f"Union-window extraction failed: {e}")
 
         if self.writer is not None:
             try:
@@ -394,15 +409,23 @@ class DualPulseCaptureSession:
         self._emit_stats()
 
     @staticmethod
-    def _cross_tod(session: PulseCaptureSession, channel: int,
-                   summary: dict) -> Optional[dict]:
-        if session.pcap is None:
+    def _union_window(pair: dict) -> Optional[tuple]:
+        """[t0, t1] spanning every available trigger window + 10% margin."""
+        t0 = t1 = None
+        for key in ("slow_summary", "fast_summary"):
+            summ = pair.get(key)
+            if not summ:
+                continue
+            s0 = summ.get("timestamp", 0.0)
+            s1 = s0 + summ.get("duration_s", 0.0)
+            if not (math.isfinite(s0) and math.isfinite(s1)):
+                continue
+            t0 = s0 if t0 is None else min(t0, s0)
+            t1 = s1 if t1 is None else max(t1, s1)
+        if t0 is None:
             return None
-        t0 = summary.get("timestamp", 0.0)
-        dur = summary.get("duration_s", 0.0)
-        margin = max(dur * 0.25, 1e-4)
-        return session.pcap.get_window_by_time(
-            channel, t0 - margin, t0 + dur + margin)
+        margin = max((t1 - t0) * 0.1, 1e-4)
+        return (t0 - margin, t1 + margin)
 
     def _emit_stats(self) -> None:
         self._callback(self.on_stats, self.stats())

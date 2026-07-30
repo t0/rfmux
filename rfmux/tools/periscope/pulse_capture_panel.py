@@ -1190,9 +1190,15 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._current_pair = (channel, pair_idx)
         self._current_view = None
 
+        # Prefer the pair's UNION windows (both streams over the same
+        # time span, extracted from the rings at pair time); fall back
+        # to the per-stream triggered waveforms.
         loading = False
         slow_wf = fast_wf = None
-        if meta.get("slow_idx") is not None:
+        if pair is not None:
+            slow_wf = pair.get("slow_tod")
+            fast_wf = pair.get("fast_tod")
+        if slow_wf is None and meta.get("slow_idx") is not None:
             slow_wf = self._get_waveform(channel, meta["slow_idx"],
                                          "slow")
             if slow_wf is None and self.task is not None:
@@ -1202,9 +1208,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     self.task.request_waveform(channel,
                                                meta["slow_idx"], "slow")
                 loading = True
-        elif pair is not None:
-            slow_wf = pair.get("slow_tod")
-        if meta.get("fast_idx") is not None:
+        if fast_wf is None and meta.get("fast_idx") is not None:
             fast_wf = self._get_waveform(channel, meta["fast_idx"],
                                          "fast")
             if fast_wf is None and self.task is not None:
@@ -1214,8 +1218,6 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     self.task.request_waveform(channel,
                                                meta["fast_idx"], "fast")
                 loading = True
-        elif pair is not None:
-            fast_wf = pair.get("fast_tod")
 
         matched = meta.get("slow_idx") is not None \
             and meta.get("fast_idx") is not None

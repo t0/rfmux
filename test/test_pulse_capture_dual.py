@@ -169,6 +169,18 @@ def test_dual_session_end_to_end(tmp_path):
     assert len(one_sided) == 2  # t=2.0 (expired) + t=3.0 (flushed)
     assert matched[0]["time_offset"] == pytest.approx(0.0, abs=0.05)
 
+    # Union windows: BOTH streams span the widest trigger window —
+    # the fast trace must not be a clipped slice of the slow one.
+    m = matched[0]
+    assert m.get("slow_tod") is not None
+    assert m.get("fast_tod") is not None
+    slow_dur = m["slow_summary"]["duration_s"]
+    fast_t = np.asarray(m["fast_tod"]["Time"], float)
+    fast_span = float(np.max(fast_t) - np.min(fast_t))
+    assert fast_span >= 0.9 * slow_dur, \
+        f"fast union window {fast_span*1e3:.2f} ms < slow trigger " \
+        f"window {slow_dur*1e3:.2f} ms"
+
     # The expired t=2.0 pulse should carry a fast-stream TOD window
     expired = [p for p in one_sided
                if p["slow_summary"]

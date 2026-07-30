@@ -2861,14 +2861,15 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             # A panel already capturing to / browsing this file? Focus it
             # (a live capture holds the file open — don't reopen it).
             resolved = str(Path(file_path).resolve())
-            for entry in getattr(self, 'pulse_capture_windows', {}).values():
-                panel = entry.get('window')
-                dock = entry.get('dock')
-                if panel is not None and \
-                        panel.current_hdf5_path() == resolved:
-                    if dock is not None:
-                        dock.show()
-                        dock.raise_()
+            for entry in self._live_pulse_capture_windows():
+                panel, dock = entry['window'], entry['dock']
+                try:
+                    match = panel.current_hdf5_path() == resolved
+                except RuntimeError:
+                    continue  # panel deleted between prune and use
+                if match:
+                    dock.show()
+                    dock.raise_()
                     return
             if self.session_manager.identify_file_type(file_path) == 'pulse':
                 self._load_pulse_capture_from_session(file_path)
@@ -2922,6 +2923,25 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             traceback.print_exc()
     
+    def _live_pulse_capture_windows(self):
+        """Registry entries whose panel AND dock are still alive.
+
+        Closing a dock destroys the C++ object while the Python dict
+        entry survives — using such an entry raises 'wrapped C/C++
+        object has been deleted'.  Prune as we go.
+        """
+        registry = getattr(self, 'pulse_capture_windows', {})
+        live = []
+        for key in list(registry.keys()):
+            entry = registry.get(key) or {}
+            panel, dock = entry.get('window'), entry.get('dock')
+            if (panel is None or dock is None
+                    or sip.isdeleted(panel) or sip.isdeleted(dock)):
+                registry.pop(key, None)
+                continue
+            live.append(entry)
+        return live
+
     def _load_pulse_capture_from_session(self, file_path: str):
         """Open a pulse-capture HDF5 file in a review-mode panel."""
         from pathlib import Path

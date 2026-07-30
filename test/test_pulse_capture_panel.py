@@ -506,3 +506,36 @@ def test_follow_latest_coalesces_bursts(qt_app, tmp_path):
     assert _spin_until(qt_app, lambda: panel.task is None)
     panel.close()
     _spin(qt_app)
+
+
+def test_stale_dock_entries_are_pruned(qt_app, tmp_path):
+    """Closing a Pulse Capture dock must not leave a dangling entry:
+    double-clicking its .h5 afterwards previously raised
+    'wrapped C/C++ object ... has been deleted'."""
+    from types import SimpleNamespace
+
+    from PyQt6 import sip
+
+    from rfmux.tools.periscope.app import Periscope
+
+    panel_live = PulseCapturePanel(dark_mode=False)
+    dock_live = QtWidgets.QDockWidget()
+    panel_dead = PulseCapturePanel(dark_mode=False)
+    dock_dead = QtWidgets.QDockWidget()
+
+    fake = SimpleNamespace(pulse_capture_windows={
+        "live": {"window": panel_live, "dock": dock_live},
+        "dead": {"window": panel_dead, "dock": dock_dead},
+        "empty": {"window": None, "dock": None},
+    })
+
+    sip.delete(dock_dead)          # emulate a closed/destroyed dock
+    live = Periscope._live_pulse_capture_windows(fake)
+
+    assert len(live) == 1
+    assert live[0]["window"] is panel_live
+    assert set(fake.pulse_capture_windows) == {"live"}
+
+    panel_live.close()
+    panel_dead.close()
+    _spin(qt_app)

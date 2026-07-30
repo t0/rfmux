@@ -548,11 +548,16 @@ class PeriscopeRuntime:
                 if panel and hasattr(panel, 'apply_theme'):
                     panel.apply_theme(self.dark_mode)
 
-        # Update Pulse Capture panels (in docks)
+        # Update Pulse Capture panels (in docks).  Entries survive dock
+        # closure, so skip (and drop) panels whose C++ object is gone.
         if hasattr(self, 'pulse_capture_windows'):
-            for window_data in self.pulse_capture_windows.values():
+            for key in list(self.pulse_capture_windows.keys()):
+                window_data = self.pulse_capture_windows.get(key) or {}
                 panel = window_data.get('window')
-                if panel and hasattr(panel, 'apply_theme'):
+                if panel is None or sip.isdeleted(panel):
+                    self.pulse_capture_windows.pop(key, None)
+                    continue
+                if hasattr(panel, 'apply_theme'):
                     panel.apply_theme(self.dark_mode)
 
     def _toggle_real_units(self, checked: bool):

@@ -7,6 +7,7 @@ from . import pulse_detection
 from . import pulse_hdf5
 from . import pulse_histograms
 from . import pulse_analysis
+from . import pulse_templates
 from . import pulse_capture_session
 from . import pulse_capture_dual
 from . import pulse_sources

@@ -46,6 +46,7 @@ class PulseCaptureSignals(QtCore.QObject):
     pair_matched = pyqtSignal(dict)         # lean pair meta (both-mode)
     stats_updated = pyqtSignal(dict)        # PulseCaptureSession.stats()
     histograms_updated = pyqtSignal(dict)   # PulseHistogramSet.get_histogram_data()
+    templates_updated = pyqtSignal(dict)    # trigger-aligned stack arrays
     waveform_ready = pyqtSignal(int, int)   # channel, pulse_idx (cache warmed)
     error = pyqtSignal(str)
     finished = pyqtSignal()
@@ -109,6 +110,9 @@ class PulseCaptureTask(QtCore.QThread):
             session.on_histograms = lambda stream, d: \
                 self.signals.histograms_updated.emit(
                     {"stream": stream, "data": d})
+            session.on_templates = lambda stream, d: \
+                self.signals.templates_updated.emit(
+                    {"stream": stream, "data": d})
             session.on_error = lambda msg: self.signals.error.emit(msg)
             for inner in (session.slow, session.fast):
                 inner.on_progress = lambda p, s=inner.streamer_mode: \
@@ -122,6 +126,8 @@ class PulseCaptureTask(QtCore.QThread):
             session.on_stats = lambda s: self.signals.stats_updated.emit(s)
             session.on_histograms = lambda d: \
                 self.signals.histograms_updated.emit(d)
+            session.on_templates = lambda d: \
+                self.signals.templates_updated.emit(d)
             session.on_error = lambda msg: self.signals.error.emit(msg)
 
     # ── GUI-thread API ────────────────────────────────────────────

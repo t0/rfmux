@@ -221,6 +221,7 @@ class DualPulseCaptureSession:
         on_pair: Optional[Callable] = None,
         on_stats: Optional[Callable] = None,
         on_histograms: Optional[Callable] = None,
+        on_templates: Optional[Callable] = None,
         on_error: Optional[Callable] = None,
     ):
         self.channels = list(channels)
@@ -234,6 +235,7 @@ class DualPulseCaptureSession:
         self.on_pair = on_pair
         self.on_stats = on_stats
         self.on_histograms = on_histograms
+        self.on_templates = on_templates
         self.on_error = on_error
 
         self.writer = None
@@ -293,6 +295,8 @@ class DualPulseCaptureSession:
             on_stats=lambda _s, s=stream: self._emit_stats(),
             on_histograms=lambda data, s=stream:
                 self._on_stream_histograms(s, data),
+            on_templates=lambda data, s=stream:
+                self._on_stream_templates(s, data),
             on_error=self._error,
             **kwargs,
         )
@@ -379,6 +383,14 @@ class DualPulseCaptureSession:
             except Exception as e:
                 self._error(f"HDF5 histogram update failed: {e}")
         self._callback(self.on_histograms, stream, data)
+
+    def _on_stream_templates(self, stream: str, data: dict) -> None:
+        if self.writer is not None:
+            try:
+                self.writer.update_templates(stream, data)
+            except Exception as e:
+                self._error(f"HDF5 template update failed: {e}")
+        self._callback(self.on_templates, stream, data)
 
     def _on_matcher_pair(self, pair: dict) -> None:
         # EVERY pair carries both streams over the UNION time window

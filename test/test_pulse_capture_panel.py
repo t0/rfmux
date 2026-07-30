@@ -539,3 +539,46 @@ def test_stale_dock_entries_are_pruned(qt_app, tmp_path):
     panel_live.close()
     panel_dead.close()
     _spin(qt_app)
+
+
+def test_template_tab_renders(qt_app, tmp_path):
+    """Trigger-aligned stack reaches the Template tab and the HDF5."""
+    runtime = _FakeRuntime()
+    panel = _make_panel(qt_app, tmp_path, runtime)
+    rng = np.random.default_rng(4)
+
+    panel._on_start()
+    hdf5_path = panel.task.session.hdf5_path
+    for _ in range(1000):
+        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
+                           float(rng.normal(0, 1.0)), None)
+    assert _spin_until(qt_app, lambda: panel.noise_stats)
+
+    _feed_capture(runtime._pulse_tap, rng, n=8000,
+                  pulse_starts=tuple(range(200, 7000, 700)))
+    n_expected = len(range(200, 7000, 700))
+    assert _spin_until(
+        qt_app, lambda: len(panel._pulse_order) == n_expected)
+
+    # Force a flush so the template payload reaches the GUI
+    panel._on_templates(panel.task.session.templates.get_template_data())
+    assert len(panel.template_plot_i.getPlotItem().listDataItems()) >= 1
+    assert len(panel.template_plot_q.getPlotItem().listDataItems()) >= 1
+    assert "Trigger-aligned stack" in panel.template_info.text()
+
+    # Stacked template peaks AT the trigger (index pre_samples)
+    acc = panel.task.session.templates.get(1)
+    assert acc.n_pulses == n_expected
+    mean = acc.mean("I")
+    assert int(np.nanargmax(np.abs(mean))) == acc.pre_samples
+
+    panel._on_stop()
+    assert _spin_until(qt_app, lambda: panel.task is None)
+
+    with PulseHDF5Reader(hdf5_path) as reader:
+        tmpl = reader.get_templates()
+        assert "template_I_ch1" in tmpl
+        assert np.nanmax(np.abs(tmpl["template_I_ch1"])) > 0
+
+    panel.close()
+    _spin(qt_app)

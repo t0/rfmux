@@ -123,8 +123,9 @@ class PulseHDF5Writer:
             if df_calibrations and ch in df_calibrations:
                 grp.attrs["df_calibration"] = df_calibrations[ch]
 
-        # ── Histogram group (updated periodically) ────────────────
+        # ── Histogram / template groups (updated periodically) ────
         self.f.create_group("histograms")
+        self.f.create_group("templates")
         self.f.flush()
 
     # ── Public API ────────────────────────────────────────────────
@@ -220,6 +221,17 @@ class PulseHDF5Writer:
             if key in hist_grp:
                 del hist_grp[key]
             hist_grp.create_dataset(key, data=np.asarray(data))
+        self.f.flush()
+
+    def update_templates(self, template_data: Dict[str, np.ndarray]) -> None:
+        """Overwrite the trigger-aligned template datasets."""
+        if self.f is None or not self.f.id.valid:
+            return
+        grp = self.f.require_group("templates")
+        for key, data in template_data.items():
+            if key in grp:
+                del grp[key]
+            grp.create_dataset(key, data=np.asarray(data))
         self.f.flush()
 
     def finalize(self) -> None:
@@ -378,6 +390,17 @@ class DualPulseHDF5Writer:
             if key in hist_grp:
                 del hist_grp[key]
             hist_grp.create_dataset(key, data=np.asarray(data))
+        self.f.flush()
+
+    def update_templates(self, stream: str,
+                         template_data: Dict[str, np.ndarray]) -> None:
+        if self.f is None or not self.f.id.valid:
+            return
+        grp = self.f.require_group(f"templates/{stream}")
+        for key, data in template_data.items():
+            if key in grp:
+                del grp[key]
+            grp.create_dataset(key, data=np.asarray(data))
         self.f.flush()
 
     def finalize(self) -> None:
@@ -578,6 +601,19 @@ class PulseHDF5Reader:
             return {}
         return {k: np.array(hist_grp[k]) for k in hist_grp
                 if not isinstance(hist_grp[k], h5py.Group)}
+
+    def get_templates(
+            self, stream: Optional[str] = None) -> Dict[str, np.ndarray]:
+        """Read the trigger-aligned template datasets."""
+        if self.f is None:
+            return {}
+        key = (f"templates/{stream or 'slow'}" if self.dual
+               else "templates")
+        grp = self.f.get(key)
+        if grp is None:
+            return {}
+        return {k: np.array(grp[k]) for k in grp
+                if not isinstance(grp[k], h5py.Group)}
 
     # ── Lifecycle ─────────────────────────────────────────────────
 

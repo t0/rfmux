@@ -986,3 +986,100 @@ class TestPulseCaptureConfig:
             assert key in d
         assert d["buf_mb_total"] == pytest.approx(
             2 * d["buf_mb_per_channel"])
+
+
+# ───────────────────────── Template stacking ────────────────────────
+
+from rfmux.algorithms.measurement.pulse_templates import (
+    PulseTemplateAccumulator,
+    PulseTemplateSet,
+    find_trigger_index,
+)
+
+
+def _shifted_pulse(shift, amp=50.0, tau=20.0, n=200, sigma=1.0, seed=0):
+    """Pulse whose trigger sits at sample `shift` (+ noise)."""
+    rng = np.random.default_rng(seed)
+    k = np.arange(n)
+    sig = rng.normal(0, sigma, n)
+    m = k >= shift
+    sig[m] += amp * np.exp(-(k[m] - shift) / tau)
+    return {"Amp_I": sig,
+            "Amp_Q": rng.normal(0, sigma, n),
+            "Time": k / 1000.0,
+            "pileup": False}
+
+
+class TestPulseTemplates:
+    def test_trigger_index_finds_crossing(self):
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        p = _shifted_pulse(shift=40)
+        assert find_trigger_index(p, ns, 5.0) == 40
+
+    def test_trigger_index_none_when_no_crossing(self):
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        p = _shifted_pulse(shift=40, amp=1.0)  # never reaches 5σ
+        assert find_trigger_index(p, ns, 5.0) is None
+
+    def test_stack_aligns_on_trigger_not_window_start(self):
+        """Pulses with DIFFERENT trigger offsets must stack coherently:
+        the mean peak stays full amplitude instead of smearing."""
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        acc = PulseTemplateAccumulator(pre_samples=10, post_samples=100,
+                                       threshold_sigma=5.0)
+        for i, shift in enumerate([20, 45, 63, 80]):
+            assert acc.add(_shifted_pulse(shift, seed=i), ns)
+        assert acc.n_pulses == 4
+
+        mean = acc.mean("I")
+        # Trigger sits at index pre_samples; peak must be there
+        assert int(np.nanargmax(mean)) == acc.pre_samples
+        assert mean[acc.pre_samples] == pytest.approx(50.0, rel=0.15)
+        # Pre-trigger region is baseline
+        assert abs(np.nanmean(mean[:acc.pre_samples - 2])) < 2.0
+
+    def test_noise_averages_down(self):
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        acc = PulseTemplateAccumulator(pre_samples=20, post_samples=60,
+                                       threshold_sigma=5.0)
+        for i in range(50):
+            acc.add(_shifted_pulse(shift=40, seed=100 + i), ns)
+        pre = acc.mean("I")[:15]           # pre-trigger = pure noise
+        # 50 stacked pulses → sigma/sqrt(50) ≈ 0.14; allow generous margin
+        assert np.nanstd(pre) < 0.5
+
+    def test_counts_and_residual(self):
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        acc = PulseTemplateAccumulator(pre_samples=10, post_samples=50,
+                                       threshold_sigma=5.0)
+        for i in range(5):
+            acc.add(_shifted_pulse(shift=30, seed=i), ns)
+        assert acc.counts[acc.pre_samples] == 5
+        resid = acc.residual_rms("I")
+        assert np.isfinite(resid[acc.pre_samples])
+        assert resid[acc.pre_samples] >= 0
+
+    def test_time_axis_zero_at_trigger(self):
+        acc = PulseTemplateAccumulator(pre_samples=10, post_samples=20)
+        t = acc.time_axis(1000.0)
+        assert t[acc.pre_samples] == pytest.approx(0.0)
+        assert t[0] == pytest.approx(-0.01)
+
+    def test_set_per_channel_and_export(self):
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        ts = PulseTemplateSet(pre_samples=5, post_samples=30,
+                              threshold_sigma=5.0, sample_rate=1000.0)
+        ts.add_pulse(1, _shifted_pulse(shift=20), ns)
+        ts.add_pulse(2, _shifted_pulse(shift=25, seed=9), ns)
+        assert ts.total_pulses() == 2
+        assert ts.total_pulses(1) == 1
+        data = ts.get_template_data()
+        for key in ("template_I_ch1", "residual_I_ch1", "counts_ch1",
+                    "time_s_ch1", "template_I_ch2"):
+            assert key in data
+
+    def test_unalignable_pulse_is_skipped(self):
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        acc = PulseTemplateAccumulator(threshold_sigma=5.0)
+        assert not acc.add(_shifted_pulse(shift=40, amp=1.0), ns)
+        assert acc.n_pulses == 0 and acc.n_skipped == 1

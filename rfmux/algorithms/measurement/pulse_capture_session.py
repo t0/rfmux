@@ -57,6 +57,7 @@ from .pulse_detection import (
 )
 from .pulse_analysis import pulse_summary
 from .pulse_histograms import PulseHistogramSet
+from .pulse_templates import PulseTemplateSet
 
 try:
     from .pulse_hdf5 import PulseHDF5Writer
@@ -264,6 +265,7 @@ class PulseCaptureSession:
         on_histograms: Optional[Callable] = None,
         on_error: Optional[Callable] = None,
         on_progress: Optional[Callable] = None,
+        on_templates: Optional[Callable] = None,
     ):
         self.channels = list(channels)
         self.module = module
@@ -285,12 +287,20 @@ class PulseCaptureSession:
         self.on_stats = on_stats
         self.on_histograms = on_histograms
         self.on_error = on_error
+        self.on_templates = on_templates
         self.on_progress = on_progress
         self.progress_every = max(1, int(progress_every))
 
         hist_kwargs = dict(histogram_config or {})
         hist_kwargs["threshold_sigma"] = threshold_sigma
         self.histograms = PulseHistogramSet(**hist_kwargs)
+
+        # Trigger-aligned stacking: window sized from the ring so it
+        # covers the longest expected pulse without unbounded memory.
+        post = max(64, min(buf_size // 2, 20000))
+        self.templates = PulseTemplateSet(
+            pre_samples=max(8, post // 10), post_samples=post,
+            threshold_sigma=threshold_sigma, sample_rate=sample_rate)
 
         self.state = CaptureState.IDLE
         self.noise_stats: Dict[int, ChannelNoiseStats] = {}
@@ -509,6 +519,7 @@ class PulseCaptureSession:
                             f"ch{channel}#{pulse_idx}: {e}")
 
         self.histograms.add_pulse(channel, pulse_data, ns)
+        self.templates.add_pulse(channel, pulse_data, ns)
 
         self._callback(self.on_pulse, channel, pulse_idx, summary, pulse_data)
         self._callback(self.on_stats, self.stats())
@@ -527,6 +538,15 @@ class PulseCaptureSession:
             except Exception as e:
                 self._error(f"HDF5 histogram update failed: {e}")
         self._callback(self.on_histograms, data)
+
+        tmpl = self.templates.get_template_data()
+        if tmpl:
+            if self.writer is not None:
+                try:
+                    self.writer.update_templates(tmpl)
+                except Exception as e:
+                    self._error(f"HDF5 template update failed: {e}")
+            self._callback(self.on_templates, tmpl)
 
     def _callback(self, cb: Optional[Callable], *args) -> None:
         if cb is None:

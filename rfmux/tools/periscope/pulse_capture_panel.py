@@ -107,6 +107,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._stream_counts: Dict[str, int] = {}
         self._noise_by_stream: Dict[str, dict] = {}
         self._hist_data_by_stream: Dict[str, dict] = {}
+        self._template_data: dict = {}
+        self._template_data_by_stream: Dict[str, dict] = {}
 
         # Follow-latest coalescing: at fast-mode pulse rates the queued
         # per-pulse redraws lag the worker and land on already-evicted
@@ -263,6 +265,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.viewer_tabs = QtWidgets.QTabWidget()
         self.viewer_tabs.addTab(self._build_pulse_view(), "Pulse View")
         self.viewer_tabs.addTab(self._build_histograms_view(), "Histograms")
+        self.viewer_tabs.addTab(self._build_template_view(), "Template")
         splitter.addWidget(self.viewer_tabs)
         splitter.setSizes([260, 740])
         layout.addWidget(splitter, stretch=1)
@@ -341,6 +344,98 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             grid.addWidget(plot, i // 2, i % 2)
         v.addWidget(grid_holder, stretch=1)
         return w
+
+    def _build_template_view(self) -> QtWidgets.QWidget:
+        """Trigger-aligned pulse stack: mean template ± residual RMS."""
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(4, 4, 4, 4)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.template_info = QtWidgets.QLabel("No pulses stacked yet")
+        controls.addWidget(self.template_info)
+        controls.addStretch(1)
+        self.template_residual_check = QtWidgets.QCheckBox(
+            "Show residual RMS")
+        self.template_residual_check.setChecked(True)
+        self.template_residual_check.setToolTip(
+            "Shaded band: per-bin RMS spread of the stacked pulses "
+            "about the mean template")
+        self.template_residual_check.toggled.connect(
+            self._render_templates)
+        controls.addWidget(self.template_residual_check)
+        v.addLayout(controls)
+
+        self.template_plot_i = pg.PlotWidget()
+        self.template_plot_q = pg.PlotWidget()
+        for plot, ylabel in ((self.template_plot_i, "I (counts)"),
+                             (self.template_plot_q, "Q (counts)")):
+            item = plot.getPlotItem()
+            item.setLabel("left", ylabel)
+            item.showGrid(x=True, y=True, alpha=0.3)
+            item.addLegend(offset=(-10, 10))
+        self.template_plot_q.getPlotItem().setLabel(
+            "bottom", "time from trigger", units="s")
+        self.template_plot_q.setXLink(self.template_plot_i)
+        v.addWidget(self.template_plot_i, stretch=1)
+        v.addWidget(self.template_plot_q, stretch=1)
+        return w
+
+    def _on_templates(self, data: dict) -> None:
+        if "stream" in data and "data" in data:
+            self._template_data_by_stream[data["stream"]] = data["data"]
+            if data["stream"] != self.hist_stream_combo.currentText():
+                return
+            self._template_data = data["data"]
+        else:
+            self._template_data = data
+        self._render_templates()
+
+    def _render_templates(self) -> None:
+        for plot in (self.template_plot_i, self.template_plot_q):
+            plot.clear()
+        data = self._template_data
+        if not data:
+            self.template_info.setText("No pulses stacked yet")
+            return
+
+        show_band = self.template_residual_check.isChecked()
+        totals = []
+        for ch in sorted(self._counts):
+            t = data.get(f"time_s_ch{ch}")
+            counts = data.get(f"counts_ch{ch}")
+            if t is None or counts is None:
+                continue
+            n_pulses = int(np.max(np.asarray(counts))) if len(counts) else 0
+            totals.append(f"Ch{ch}: {n_pulses}")
+            color = _channel_color(ch)
+            for quad, plot in (("I", self.template_plot_i),
+                               ("Q", self.template_plot_q)):
+                mean = data.get(f"template_{quad}_ch{ch}")
+                if mean is None:
+                    continue
+                mean = np.asarray(mean, dtype=np.float64)
+                plot.plot(np.asarray(t, float), mean,
+                          pen=pg.mkPen(color, width=2.2),
+                          connect="finite",
+                          name=f"Ch {ch} (n={n_pulses})")
+                resid = data.get(f"residual_{quad}_ch{ch}")
+                if show_band and resid is not None:
+                    resid = np.asarray(resid, dtype=np.float64)
+                    band = QtGui.QColor(color)
+                    band.setAlpha(60)
+                    upper = pg.PlotDataItem(np.asarray(t, float),
+                                            mean + resid,
+                                            connect="finite")
+                    lower = pg.PlotDataItem(np.asarray(t, float),
+                                            mean - resid,
+                                            connect="finite")
+                    fill = pg.FillBetweenItem(upper, lower, brush=band)
+                    plot.addItem(fill)
+
+        self.template_info.setText(
+            "Trigger-aligned stack — " + ", ".join(totals)
+            if totals else "No pulses stacked yet")
 
     # ── Capture lifecycle ─────────────────────────────────────────
 
@@ -548,6 +643,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.signals.pair_matched.connect(self._on_pair_matched, conn)
         self.signals.stats_updated.connect(self._on_stats, conn)
         self.signals.histograms_updated.connect(self._on_histograms, conn)
+        self.signals.templates_updated.connect(self._on_templates, conn)
         self.signals.waveform_ready.connect(self._on_waveform_ready, conn)
         self.signals.error.connect(self._on_error, conn)
         self.signals.finished.connect(self._on_task_finished, conn)
@@ -791,6 +887,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._stream_counts = {"slow": 0, "fast": 0}
         self._noise_by_stream = {}
         self._hist_data_by_stream = {}
+        self._template_data = {}
+        self._template_data_by_stream = {}
         self.hist_stream_combo.setVisible(self._both_mode)
         self._current_pair = None
         self._current_view = None
@@ -820,6 +918,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.pulse_plot_q.clear()
         self.pulse_info.setText("No pulse selected")
         self._render_histograms()
+        self._render_templates()
 
     # ── Signal handlers (GUI thread) ──────────────────────────────
 
@@ -987,6 +1086,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if stream in self._hist_data_by_stream:
             self._hist_data = self._hist_data_by_stream[stream]
             self._render_histograms()
+        if stream in self._template_data_by_stream:
+            self._template_data = self._template_data_by_stream[stream]
+            self._render_templates()
 
     def _on_histograms(self, data: dict) -> None:
         if "stream" in data and "data" in data:
@@ -1359,7 +1461,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def apply_theme(self, dark_mode: bool) -> None:
         self.dark_mode = dark_mode
         bg_color, pen_color = theme_colors(dark_mode)
-        plots = [self.pulse_plot_i, self.pulse_plot_q] \
+        plots = [self.pulse_plot_i, self.pulse_plot_q,
+                 self.template_plot_i, self.template_plot_q] \
             + list(self.hist_plots.values())
         for plot in plots:
             plot.setBackground(bg_color)
@@ -1369,3 +1472,4 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 ax.setPen(pen_color)
                 ax.setTextPen(pen_color)
         self._render_histograms()
+        self._render_templates()

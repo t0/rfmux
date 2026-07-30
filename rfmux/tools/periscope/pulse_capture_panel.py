@@ -27,6 +27,7 @@ import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from .utils import (
+    ClickableViewBox,
     ScreenshotMixin,
     IQ_COLORS,
     TABLEAU10_COLORS,
@@ -336,8 +337,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # I and Q stacked vertically (x-linked), each with its own
         # baseline/threshold bands in its own quadrature's sigma.
-        self.pulse_plot_i = pg.PlotWidget()
-        self.pulse_plot_q = pg.PlotWidget()
+        self.pulse_plot_i = pg.PlotWidget(viewBox=ClickableViewBox())
+        self.pulse_plot_q = pg.PlotWidget(viewBox=ClickableViewBox())
         for plot, ylabel in ((self.pulse_plot_i, "I (counts)"),
                              (self.pulse_plot_q, "Q (counts)")):
             item = plot.getPlotItem()
@@ -384,7 +385,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         grid.setSpacing(8)
         self.hist_plots: Dict[str, pg.PlotWidget] = {}
         for i, (metric, title, xlabel) in enumerate(_HIST_METRICS):
-            plot = pg.PlotWidget()
+            plot = pg.PlotWidget(viewBox=ClickableViewBox())
             item = plot.getPlotItem()
             item.setLabel("bottom", xlabel)
             item.setLabel("left", "count")
@@ -416,8 +417,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         controls.addWidget(self.template_residual_check)
         v.addLayout(controls)
 
-        self.template_plot_i = pg.PlotWidget()
-        self.template_plot_q = pg.PlotWidget()
+        self.template_plot_i = pg.PlotWidget(viewBox=ClickableViewBox())
+        self.template_plot_q = pg.PlotWidget(viewBox=ClickableViewBox())
         for plot, ylabel in ((self.template_plot_i, "I (counts)"),
                              (self.template_plot_q, "Q (counts)")):
             item = plot.getPlotItem()
@@ -452,13 +453,25 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         show_band = self.template_residual_check.isChecked()
         totals = []
         scaled_any = False
+        # Track the data extent so the view fits the STACKED region:
+        # bins outside it are NaN/empty and would otherwise stretch the
+        # axes over the full pre/post grid.
+        x_lo = x_hi = None
+        y_lim = {"I": [None, None], "Q": [None, None]}
         for ch in sorted(self._counts):
             t = data.get(f"time_s_ch{ch}")
             counts = data.get(f"counts_ch{ch}")
             if t is None or counts is None:
                 continue
-            n_pulses = int(np.max(np.asarray(counts))) if len(counts) else 0
+            counts = np.asarray(counts)
+            n_pulses = int(np.max(counts)) if len(counts) else 0
             totals.append(f"Ch{ch}: {n_pulses}")
+            t_arr = np.asarray(t, dtype=np.float64)
+            populated = np.nonzero(counts > 0)[0]
+            if len(populated):
+                lo, hi = t_arr[populated[0]], t_arr[populated[-1]]
+                x_lo = lo if x_lo is None else min(x_lo, lo)
+                x_hi = hi if x_hi is None else max(x_hi, hi)
             color = _channel_color(ch)
             scale = self._df_scale(ch) if self._units_are_hz() else None
             if scale is not None:
@@ -475,11 +488,26 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                           pen=pg.mkPen(color, width=2.2),
                           connect="finite",
                           name=f"Ch {ch} (n={n_pulses})")
+                finite = np.isfinite(mean)
+                if np.any(finite):
+                    lo, hi = float(np.min(mean[finite])), \
+                        float(np.max(mean[finite]))
+                    cur = y_lim[quad]
+                    cur[0] = lo if cur[0] is None else min(cur[0], lo)
+                    cur[1] = hi if cur[1] is None else max(cur[1], hi)
+
                 resid = data.get(f"residual_{quad}_ch{ch}")
                 if show_band and resid is not None:
                     resid = np.asarray(resid, dtype=np.float64)
                     if scale is not None:
                         resid = resid * scale
+                    both = np.isfinite(mean) & np.isfinite(resid)
+                    if np.any(both):
+                        cur = y_lim[quad]
+                        cur[0] = min(cur[0], float(np.min(
+                            (mean - resid)[both])))
+                        cur[1] = max(cur[1], float(np.max(
+                            (mean + resid)[both])))
                     band = QtGui.QColor(color)
                     band.setAlpha(60)
                     upper = pg.PlotDataItem(np.asarray(t, float),
@@ -493,9 +521,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         for plot, quad in ((self.template_plot_i, "I"),
                            (self.template_plot_q, "Q")):
-            plot.getPlotItem().setLabel(
+            item = plot.getPlotItem()
+            item.setLabel(
                 "left", f"{quad} (Δf)" if scaled_any else f"{quad} (counts)",
                 units="Hz" if scaled_any else None)
+            # Fit to the stacked data, not the whole pre/post grid
+            if x_lo is not None and x_hi > x_lo:
+                item.vb.setXRange(x_lo, x_hi, padding=0.02)
+            lo, hi = y_lim[quad]
+            if lo is not None and hi is not None:
+                if hi > lo:
+                    item.vb.setYRange(lo, hi, padding=0.08)
+                else:  # flat trace — keep it visible, not a zero-height box
+                    item.vb.setYRange(lo - 1.0, hi + 1.0, padding=0.0)
         self.template_info.setText(
             "Trigger-aligned stack — " + ", ".join(totals)
             if totals else "No pulses stacked yet")

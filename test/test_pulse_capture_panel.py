@@ -665,3 +665,60 @@ def test_keyboard_navigation(qt_app, tmp_path):
 
     panel.close()
     _spin(qt_app)
+
+
+def test_template_view_fits_data_and_uses_zoombox(qt_app, tmp_path):
+    """Template axes track the STACKED region (not the whole pre/post
+    grid), and plots default to zoombox (RectMode) like the rest of
+    Periscope."""
+    import pyqtgraph as pg
+
+    from rfmux.algorithms.measurement.pulse_templates import (
+        PulseTemplateSet,
+    )
+    from rfmux.algorithms.measurement.pulse_detection import (
+        ChannelNoiseStats,
+    )
+
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._counts = {1: 5}
+
+    # Stack a few pulses whose data occupies only part of the grid
+    ts = PulseTemplateSet(pre_samples=50, post_samples=400,
+                          threshold_sigma=5.0, sample_rate=1000.0)
+    ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+    rng = np.random.default_rng(2)
+    for i in range(5):
+        n = 160
+        k = np.arange(n)
+        sig = rng.normal(0, 1.0, n)
+        sig[k >= 40] += 80.0 * np.exp(-(k[k >= 40] - 40) / 15.0)
+        ts.add_pulse(1, {"Amp_I": sig, "Amp_Q": rng.normal(0, 1.0, n),
+                         "Time": k / 1000.0, "pileup": False}, ns)
+
+    panel._on_templates(ts.get_template_data())
+
+    acc = ts.get(1)
+    counts = acc.counts
+    t_axis = acc.time_axis(1000.0)
+    populated = np.nonzero(counts > 0)[0]
+    data_lo, data_hi = t_axis[populated[0]], t_axis[populated[-1]]
+    grid_span = t_axis[-1] - t_axis[0]
+
+    (x0, x1), (y0, y1) = panel.template_plot_i.getPlotItem().vb.viewRange()
+    # X fits the populated region, not the full grid
+    assert x1 - x0 < 0.6 * grid_span
+    assert x0 <= data_lo + 1e-9 and x1 >= data_hi - 1e-9
+    # Y brackets the template peak with sane padding
+    peak = float(np.nanmax(np.abs(acc.mean("I"))))
+    assert y1 >= peak * 0.9
+    assert (y1 - y0) < peak * 4
+
+    for plot in (panel.template_plot_i, panel.template_plot_q,
+                 panel.pulse_plot_i, panel.pulse_plot_q,
+                 panel.hist_plots["snr"]):
+        assert plot.getPlotItem().vb.state["mouseMode"] == \
+            pg.ViewBox.RectMode
+
+    panel.close()
+    _spin(qt_app)

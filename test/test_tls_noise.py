@@ -103,7 +103,9 @@ class TestMemoryBound:
         gen = TLSNoiseGenerator(n_resonators=1, corner_hz=50.0, seed=19,
                                 max_history_s=1.0)
         gen.value_at(30.0)
-        assert len(gen._values) <= int(1.0 / gen.dt) + 2
+        # History is bounded, but extension generates CHUNK rows ahead
+        # of the query, so the retained span is history + one chunk.
+        assert len(gen._values) <= int(1.0 / gen.dt) + gen.CHUNK + 2
         # Still usable after trimming; old queries clamp rather than fail
         assert np.isfinite(gen.value_at(0.0)).all()
         assert np.isfinite(gen.value_at(30.5)).all()
@@ -146,3 +148,25 @@ def test_large_time_jump_is_fast():
     gen.value_at(300.0)          # ~150k grid steps at this corner
     elapsed = _time.perf_counter() - t0
     assert elapsed < 2.0, f"bulk extension took {elapsed:.2f} s"
+
+
+def test_wander_survives_chunked_extension_at_low_corners():
+    """Regression: extension generates a chunk AHEAD of the request, so
+    trimming against the grid's leading edge discarded the region being
+    queried and every lookup clamped to one value — a silently constant
+    'wander'.  Worst exactly where TLS matters most (low corners)."""
+    for corner in (5.0, 0.5, 0.05, 0.005):
+        gen = TLSNoiseGenerator(n_resonators=1, fractional_rms=1.0,
+                                alpha=1.0, corner_hz=corner, seed=1)
+        v = gen.values_at(np.linspace(0.0, 60.0, 2000))[:, 0]
+        assert np.std(v) > 1e-3, \
+            f"corner={corner}: wander is flat (std={np.std(v):.2e})"
+
+
+def test_history_trim_keeps_the_queried_region():
+    gen = TLSNoiseGenerator(n_resonators=1, corner_hz=0.5, seed=41,
+                            max_history_s=10.0)
+    early = gen.value_at(1.0).copy()
+    gen.value_at(5.0)
+    assert np.array_equal(gen.value_at(1.0), early), \
+        "a still-recent query was trimmed away"

@@ -112,6 +112,13 @@ class TLSNoiseGenerator:
         self._memo_t: float | None = None
         self._memo_v: np.ndarray | None = None
 
+        # Latest time anyone has asked about.  History is trimmed
+        # relative to THIS, not to the grid's leading edge: extension
+        # generates a chunk ahead, so trimming against t_end would
+        # discard the region currently being queried and make every
+        # lookup clamp to one value (a silently constant "wander").
+        self._last_query: float = 0.0
+
     # ── Generation ────────────────────────────────────────────────
 
     @property
@@ -160,9 +167,11 @@ class TLSNoiseGenerator:
         self._trim()
 
     def _trim(self) -> None:
-        keep = int(self.max_history_s / self.dt)
-        if len(self._values) > keep > 0:
-            drop = len(self._values) - keep
+        """Drop rows older than max_history_s BEFORE the last query."""
+        cutoff = self._last_query - self.max_history_s
+        drop = int((cutoff - self._t0) / self.dt)
+        if drop > 0:
+            drop = min(drop, len(self._values) - 1)
             self._values = self._values[drop:]
             self._t0 += drop * self.dt
 
@@ -177,6 +186,8 @@ class TLSNoiseGenerator:
         """
         if self._memo_t is not None and t == self._memo_t:
             return self._memo_v
+        if t > self._last_query:
+            self._last_query = t
         self._extend_to(t)
         if t <= self._t0:
             value = self._values[0].copy()
@@ -197,7 +208,10 @@ class TLSNoiseGenerator:
         times = np.asarray(times, dtype=np.float64)
         if times.size == 0:
             return np.zeros((0, self.n_resonators))
-        self._extend_to(float(np.max(times)))
+        t_max = float(np.max(times))
+        if t_max > self._last_query:
+            self._last_query = t_max
+        self._extend_to(t_max)
         grid_t = self._t0 + np.arange(len(self._values)) * self.dt
         out = np.empty((times.size, self.n_resonators))
         for i in range(self.n_resonators):

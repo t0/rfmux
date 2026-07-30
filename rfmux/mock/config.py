@@ -74,6 +74,15 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "nqp_noise_enabled": True,  # Enable noise on quasiparticle density
     "nqp_noise_std_factor": 0.001,  # Std dev as fraction of base nqp (0.1%)
 
+    # TLS (two-level system) 1/f frequency noise.  Real KIDs show
+    # fractional frequency wander with a 1/f**alpha spectrum from TLS in
+    # the surface dielectric; unlike nqp_noise above it is CORRELATED in
+    # time, so it drifts the baseline rather than adding scatter.
+    "tls_noise_enabled": False,     # Off by default (legacy behaviour)
+    "tls_fractional_rms": 1e-7,     # RMS fractional frequency wander df/f
+    "tls_alpha": 1.0,               # Spectral slope: PSD ~ 1/f**alpha
+    "tls_corner_hz": 100.0,         # Upper corner; law spans 3 decades below
+
     # -------------------------------------------------------------------------
     # Convergence parameters
     # -------------------------------------------------------------------------
@@ -186,7 +195,8 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
         "pulse_random_amp_logmean", "pulse_random_amp_logsigma",
         "pulse_random_tau_min", "pulse_random_tau_max",
         "pulse_random_tau_logmean", "pulse_random_tau_logsigma",
-        "cache_freq_step", "cache_amp_step", "cache_qp_step"
+        "cache_freq_step", "cache_amp_step", "cache_qp_step",
+        "tls_fractional_rms", "tls_alpha", "tls_corner_hz"
     ):
         if k in cfg and isinstance(cfg[k], str):
             try:
@@ -318,5 +328,29 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
         tau_logsigma = 0.0
     cfg["pulse_random_tau_logmean"] = tau_logmean
     cfg["pulse_random_tau_logsigma"] = tau_logsigma
+
+    # ── TLS 1/f frequency noise ───────────────────────────────────
+    cfg["tls_noise_enabled"] = bool(cfg.get("tls_noise_enabled", False))
+    try:
+        tls_rms = float(cfg.get("tls_fractional_rms", 1e-7))
+    except Exception:
+        tls_rms = 1e-7
+    cfg["tls_fractional_rms"] = max(0.0, tls_rms)
+
+    try:
+        tls_alpha = float(cfg.get("tls_alpha", 1.0))
+    except Exception:
+        tls_alpha = 1.0
+    # Outside ~[0, 2] the sum-of-Lorentzians construction stops
+    # approximating a power law usefully.
+    cfg["tls_alpha"] = min(2.0, max(0.0, tls_alpha))
+
+    try:
+        tls_corner = float(cfg.get("tls_corner_hz", 100.0))
+    except Exception:
+        tls_corner = 100.0
+    # The generator's grid step is set by the fastest pole, so a huge
+    # corner would make the grid impractically fine.
+    cfg["tls_corner_hz"] = min(1e5, max(1e-3, tls_corner))
 
     return cfg

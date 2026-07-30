@@ -702,6 +702,44 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.udp_noise_edit.setToolTip("Additive ADC noise level in counts")
         layout.addWidget(self.udp_noise_edit, row, 1)
 
+        # ── TLS (1/f) frequency noise ─────────────────────────────
+        # Unlike the white noise above, this is CORRELATED in time: it
+        # drifts the baseline rather than adding scatter, which is what
+        # stresses trigger thresholds and baseline tracking.
+        row += 1
+        self.tls_noise_enabled_cb = QtWidgets.QCheckBox(
+            "Enable TLS 1/f frequency noise")
+        self.tls_noise_enabled_cb.setToolTip(
+            "Two-level-system frequency wander: a 1/f^alpha drift of the\n"
+            "resonance frequency, correlated in time. Common-mode across\n"
+            "the slow and PFB streams (it is one resonator moving).")
+        layout.addWidget(self.tls_noise_enabled_cb, row, 0, 1, 2)
+
+        layout.addWidget(QtWidgets.QLabel("TLS RMS (df/f):"), row, 2)
+        self.tls_rms_edit = QtWidgets.QLineEdit()
+        self.tls_rms_edit.setValidator(ScientificDoubleValidator())
+        self.tls_rms_edit.setToolTip(
+            "RMS fractional frequency wander integrated over the band\n"
+            "(e.g. 1e-7). Compare against your detector responsivity:\n"
+            "wander comparable to the pulse height will swamp triggering.")
+        layout.addWidget(self.tls_rms_edit, row, 3)
+
+        row += 1
+        layout.addWidget(QtWidgets.QLabel("TLS slope (alpha):"), row, 0)
+        self.tls_alpha_edit = QtWidgets.QLineEdit()
+        self.tls_alpha_edit.setValidator(ScientificDoubleValidator())
+        self.tls_alpha_edit.setToolTip(
+            "PSD ~ 1/f^alpha. 1.0 = pink; TLS is often quoted near 0.5.")
+        layout.addWidget(self.tls_alpha_edit, row, 1)
+
+        layout.addWidget(QtWidgets.QLabel("TLS corner (Hz):"), row, 2)
+        self.tls_corner_edit = QtWidgets.QLineEdit()
+        self.tls_corner_edit.setValidator(ScientificDoubleValidator())
+        self.tls_corner_edit.setToolTip(
+            "Upper corner of the power law; it spans three decades below.\n"
+            "Above the corner the wander rolls off and white noise wins.")
+        layout.addWidget(self.tls_corner_edit, row, 3)
+
         return group
 
     def _create_pulse_injection_group(self) -> QtWidgets.QGroupBox:
@@ -920,6 +958,11 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         # Noise
         self.nqp_noise_enabled_cb.setChecked(bool(cfg["nqp_noise_enabled"]))
         self.nqp_noise_std_edit.setText(str(cfg["nqp_noise_std_factor"]))
+        self.tls_noise_enabled_cb.setChecked(
+            bool(cfg.get("tls_noise_enabled", False)))
+        self.tls_rms_edit.setText(str(cfg.get("tls_fractional_rms", 1e-7)))
+        self.tls_alpha_edit.setText(str(cfg.get("tls_alpha", 1.0)))
+        self.tls_corner_edit.setText(str(cfg.get("tls_corner_hz", 100.0)))
         self.udp_noise_edit.setText(str(cfg["udp_noise_level"]))
         # Physics Realism & Cache
         self.conv_tol_edit.setText(str(cfg["convergence_tolerance"]))
@@ -1020,6 +1063,11 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         # Noise
         self.nqp_noise_enabled_cb.setChecked(bool(cfg.get("nqp_noise_enabled")))
         self.nqp_noise_std_edit.setText(str(cfg.get("nqp_noise_std_factor")))
+        self.tls_noise_enabled_cb.setChecked(
+            bool(cfg.get("tls_noise_enabled", False)))
+        self.tls_rms_edit.setText(str(cfg.get("tls_fractional_rms", 1e-7)))
+        self.tls_alpha_edit.setText(str(cfg.get("tls_alpha", 1.0)))
+        self.tls_corner_edit.setText(str(cfg.get("tls_corner_hz", 100.0)))
         self.udp_noise_edit.setText(str(cfg.get("udp_noise_level")))
 
         # Physics Realism & Cache
@@ -1077,6 +1125,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             float(self.system_termination_edit.text()); float(self.ZLNA_edit.text()); float(self.GLNA_db_spin.value())
             # Noise and physics realism
             float(self.nqp_noise_std_edit.text()); float(self.udp_noise_edit.text()); float(self.conv_tol_edit.text())
+            float(self.tls_rms_edit.text()); float(self.tls_alpha_edit.text()); float(self.tls_corner_edit.text())
             float(self.cache_qp_step_edit.text())
             # QP Pulses
             float(self.pulse_period_edit.text())
@@ -1135,6 +1184,10 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             # Noise
             "nqp_noise_enabled": bool(self.nqp_noise_enabled_cb.isChecked()),
             "nqp_noise_std_factor": float(self.nqp_noise_std_edit.text()),
+            "tls_noise_enabled": bool(self.tls_noise_enabled_cb.isChecked()),
+            "tls_fractional_rms": float(self.tls_rms_edit.text()),
+            "tls_alpha": float(self.tls_alpha_edit.text()),
+            "tls_corner_hz": float(self.tls_corner_edit.text()),
             "udp_noise_level": float(self.udp_noise_edit.text()),
 
             # Physics Realism & Cache

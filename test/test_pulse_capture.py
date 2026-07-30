@@ -1083,3 +1083,121 @@ class TestPulseTemplates:
         acc = PulseTemplateAccumulator(threshold_sigma=5.0)
         assert not acc.add(_shifted_pulse(shift=40, amp=1.0), ns)
         assert acc.n_pulses == 0 and acc.n_skipped == 1
+
+
+# ───────────────────── Tracked baseline (1/f robustness) ────────────
+
+def _wandering_stream(n, amp, sigma=1.0, seed=0, cycles=3.0,
+                      pulse_at=None, pulse_amp=60.0, tau=25.0,
+                      fs=1000.0):
+    """Slow BACK-AND-FORTH baseline wander + white noise.
+
+    A monotonic ramp would leave the engine stuck mid-capture forever
+    (see test_frozen_baseline_gets_stuck); a wander crosses the
+    threshold repeatedly, which is what 1/f actually looks like and
+    what produces countable false triggers.
+    """
+    rng = np.random.default_rng(seed)
+    k = np.arange(n)
+    baseline = amp * np.sin(2 * np.pi * cycles * k / n)
+    sig = baseline + rng.normal(0, sigma, n)
+    if pulse_at is not None:
+        m = k >= pulse_at
+        sig[m] += pulse_amp * np.exp(-(k[m] - pulse_at) / tau)
+    return sig, k / fs
+
+
+def _run(track_samples, amp, seed=0, n=20000, pulse_at=None,
+         monotonic=False):
+    """Feed a drifting stream; return (pcap, noise_stats)."""
+    ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                               mean_Q=0.0, std_Q=1.0)}
+    pcap = PulseCapture(
+        buf_size=5000, channels=[1], noise_stats=ns,
+        threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1,
+        accumulate=True, baseline_track_samples=track_samples)
+    if monotonic:
+        rng = np.random.default_rng(seed)
+        k = np.arange(n)
+        sig = amp * k / n + rng.normal(0, 1.0, n)
+        t = k / 1000.0
+    else:
+        sig, t = _wandering_stream(n, amp, seed=seed, pulse_at=pulse_at)
+    rng2 = np.random.default_rng(seed + 500)
+    for i in range(n):
+        pcap.process_sample(1, float(sig[i]),
+                            float(rng2.normal(0, 1.0)), float(t[i]))
+    return pcap, ns[1]
+
+
+class TestTrackedBaseline:
+    def test_frozen_baseline_gets_stuck_on_monotonic_drift(self):
+        """The nastiest failure mode: once drift parks the signal past
+        threshold, the end condition (BOTH quadratures inside end_sigma
+        of the FROZEN mean) can never be satisfied, so the capture runs
+        forever and no pulse is ever emitted."""
+        pcap, ns = _run(track_samples=0, amp=15.0, monotonic=True)
+        assert pcap.state[1].capturing, \
+            "expected the engine to be stuck mid-capture"
+        assert pcap.pulse_count["Channel 1"] == 0
+        assert ns.mean_I == 0.0, "frozen baseline must not move"
+
+    def test_tracking_survives_monotonic_drift(self):
+        pcap, ns = _run(track_samples=500, amp=15.0, monotonic=True)
+        assert not pcap.state[1].capturing, \
+            "tracking should have kept the engine free"
+        assert ns.mean_I > 5.0, f"baseline barely moved ({ns.mean_I:.2f})"
+
+    def test_tracking_suppresses_false_triggers_on_wander(self):
+        frozen, _ = _run(track_samples=0, amp=8.0)
+        tracked, _ = _run(track_samples=500, amp=8.0)
+        n_frozen = frozen.pulse_count["Channel 1"]
+        n_tracked = tracked.pulse_count["Channel 1"]
+        assert n_frozen > 0, "wander should trigger a frozen baseline"
+        assert n_tracked < n_frozen, \
+            f"tracking did not help ({n_tracked} vs {n_frozen})"
+
+    def test_tracking_does_not_absorb_a_pulse(self):
+        """A real pulse must still be detected, and must not drag the
+        baseline toward the signal."""
+        pcap, ns = _run(track_samples=500, amp=0.0, pulse_at=8000)
+        assert pcap.pulse_count["Channel 1"] >= 1, \
+            "tracking swallowed the pulse"
+        assert abs(ns.mean_I) < 1.0, \
+            f"pulse pulled the baseline to {ns.mean_I:.2f}"
+
+    def test_disabled_by_default(self):
+        ns = {1: ChannelNoiseStats(std_I=1.0, std_Q=1.0)}
+        pcap = PulseCapture(buf_size=100, channels=[1], noise_stats=ns)
+        assert pcap.baseline_track_samples == 0
+        assert pcap._baseline_alpha == 0.0
+
+
+class TestBaselineConfig:
+    def test_ms_to_samples(self):
+        cfg = PulseCaptureConfig(baseline_track_ms=500.0)
+        assert cfg.baseline_track_samples(1000.0) == 500
+        assert PulseCaptureConfig().baseline_track_samples(1000.0) == 0
+
+    def test_session_kwargs_include_it(self):
+        cfg = PulseCaptureConfig(baseline_track_ms=250.0)
+        kwargs = cfg.session_kwargs(1000.0)
+        assert kwargs["baseline_track_samples"] == 250
+
+    def test_validate_warns_when_faster_than_pulses(self):
+        cfg = PulseCaptureConfig(max_pulse_ms=50.0,
+                                 baseline_track_ms=100.0)
+        issues = cfg.validate()
+        assert any(s == "warning" and "absorb pulse tails" in m
+                   for s, m in issues)
+
+    def test_validate_accepts_a_sane_window(self):
+        cfg = PulseCaptureConfig(max_pulse_ms=50.0,
+                                 baseline_track_ms=5000.0)
+        issues = cfg.validate()
+        assert not any(s == "error" for s, _ in issues)
+        assert any("Baseline tracked" in m for _, m in issues)
+
+    def test_negative_is_an_error(self):
+        issues = PulseCaptureConfig(baseline_track_ms=-1.0).validate()
+        assert any(s == "error" for s, _ in issues)

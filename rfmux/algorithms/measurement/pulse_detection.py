@@ -148,6 +148,7 @@ class PulseCapture:
         enable_pileup: bool = True,
         on_pulse: Optional[Callable[[int, int, dict], None]] = None,
         accumulate: bool = True,
+        baseline_track_samples: int = 0,
     ):
         self.channels = list(channels)
         self.buf_size = buf_size
@@ -169,6 +170,17 @@ class PulseCapture:
 
         # Per-channel noise stats
         self.noise_stats = noise_stats
+
+        # Baseline tracking (0 = frozen, the historical behaviour).
+        # Under 1/f noise the true baseline random-walks away from the
+        # value captured at training while sigma stays put, so triggers
+        # fire on drift and the end condition can become unsatisfiable.
+        # An EMA of the quiet samples follows the drift instead.
+        # Validity window: tau_pulse << tau_track << 1/f_drift.
+        self.baseline_track_samples = int(baseline_track_samples)
+        self._baseline_alpha = (
+            1.0 / self.baseline_track_samples
+            if self.baseline_track_samples > 0 else 0.0)
 
         # Per-channel circular buffers
         self.buf: Dict[int, Dict[str, Circular]] = {}
@@ -224,6 +236,37 @@ class PulseCapture:
         # Compute deviations in sigma units
         dev_I = abs(i_val - ns.mean_I) / max(ns.std_I, 1e-30)
         dev_Q = abs(q_val - ns.mean_Q) / max(ns.std_Q, 1e-30)
+
+        # ── Baseline tracking (clamped EMA) ───────────────────────
+        # Every sample contributes, but its influence is CLAMPED to
+        # +/- end_sigma * sigma.  Gating on "not capturing" or "quiet"
+        # instead would deadlock: drift parks the signal outside the
+        # band, the engine starts capturing and never finishes, and a
+        # gated tracker can neither update nor bootstrap out of it.
+        #
+        # Clamping gives both properties we need:
+        #  - a rare pulse shifts the baseline by at most
+        #    (duration / tau_track) * end_sigma * sigma, which is
+        #    negligible when tau_track >> pulse length;
+        #  - persistent drift, offset in the same direction on every
+        #    sample, is followed at up to end_sigma * sigma per
+        #    tau_track — enough to escape a stuck capture.
+        if self._baseline_alpha > 0.0:
+            a = self._baseline_alpha
+            clamp_I = self.end_sigma * max(ns.std_I, 1e-30)
+            clamp_Q = self.end_sigma * max(ns.std_Q, 1e-30)
+            innov_I = i_val - ns.mean_I
+            innov_Q = q_val - ns.mean_Q
+            if innov_I > clamp_I:
+                innov_I = clamp_I
+            elif innov_I < -clamp_I:
+                innov_I = -clamp_I
+            if innov_Q > clamp_Q:
+                innov_Q = clamp_Q
+            elif innov_Q < -clamp_Q:
+                innov_Q = -clamp_Q
+            ns.mean_I += a * innov_I
+            ns.mean_Q += a * innov_Q
 
         # ── Trigger: EITHER I or Q exceeds threshold_sigma ────────
         # NOTE: Baseline confirmation is handled by _wait_for_baseline()

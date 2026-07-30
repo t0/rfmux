@@ -90,6 +90,11 @@ class PulseCaptureConfig:
     max_pulse_ms: float = 250.0    # sizes the ring buffer
     noise_train_ms: float = 50.0
     enable_pileup: bool = True
+    #: EMA time constant for baseline tracking (0 = frozen baseline).
+    #: Needed under 1/f noise, where the true baseline drifts away from
+    #: the training-time mean.  Must satisfy
+    #: pulse length << baseline_track_ms << drift timescale.
+    baseline_track_ms: float = 0.0
 
     #: buffer headroom over max_pulse_ms (pre-trigger margin +
     #: end-confirmation tail both live in the same ring)
@@ -110,6 +115,12 @@ class PulseCaptureConfig:
         return max(self._MIN_NOISE,
                    int(round(self.noise_train_ms * 1e-3 * sample_rate)))
 
+    def baseline_track_samples(self, sample_rate: float) -> int:
+        if self.baseline_track_ms <= 0:
+            return 0
+        return max(1, int(round(
+            self.baseline_track_ms * 1e-3 * sample_rate)))
+
     def session_kwargs(self, sample_rate: float) -> Dict[str, Any]:
         """Keyword arguments for :class:`PulseCaptureSession`."""
         return {
@@ -120,6 +131,8 @@ class PulseCaptureConfig:
             "enable_pileup": self.enable_pileup,
             "buf_size": self.buf_size(sample_rate),
             "noise_samples": self.noise_samples(sample_rate),
+            "baseline_track_samples":
+                self.baseline_track_samples(sample_rate),
         }
 
     def describe(self, sample_rate: float,
@@ -136,6 +149,8 @@ class PulseCaptureConfig:
             "buf_mb_per_channel": buf * 3 * 8 / 1e6,
             "buf_mb_total": buf * 3 * 8 * n_channels / 1e6,
             "max_recordable_ms": buf / sample_rate * 1e3,
+            "baseline_track_samples":
+                self.baseline_track_samples(sample_rate),
         }
 
     def validate(self, sample_rate: Optional[float] = None
@@ -176,6 +191,27 @@ class PulseCaptureConfig:
         if self.noise_train_ms <= 0:
             issues.append(("error",
                            "Noise training length must be positive."))
+        if self.baseline_track_ms < 0:
+            issues.append(("error",
+                           "Baseline tracking time cannot be negative."))
+        elif self.baseline_track_ms > 0:
+            # The tracker must be far slower than a pulse or it eats the
+            # signal, and far faster than the drift or it never catches
+            # it: pulse << tau_track << drift timescale.
+            if self.baseline_track_ms < 10 * self.max_pulse_ms:
+                issues.append((
+                    "warning",
+                    f"Baseline tracking ({self.baseline_track_ms:g} ms) "
+                    f"is under 10x the max pulse length "
+                    f"({self.max_pulse_ms:g} ms) — the tracker will "
+                    "absorb pulse tails and suppress triggers. Use "
+                    f"≥ {100 * self.max_pulse_ms:g} ms where possible."))
+            else:
+                issues.append((
+                    "info",
+                    f"Baseline tracked with a {self.baseline_track_ms:g} "
+                    "ms time constant — drift slower than that is "
+                    "followed; faster drift still reaches the trigger."))
 
         if sample_rate:
             if self.min_pulse_ms > 0 \
@@ -254,6 +290,7 @@ class PulseCaptureSession:
         buf_size: int = 5000,
         sample_rate: Optional[float] = None,
         noise_samples: int = 1000,
+        baseline_track_samples: int = 0,
         hdf5_path: Optional[str | Path] = None,
         df_calibrations: Optional[Dict[int, float]] = None,
         histogram_config: Optional[Dict[str, Any]] = None,
@@ -278,6 +315,7 @@ class PulseCaptureSession:
         self.buf_size = buf_size
         self.sample_rate = sample_rate
         self.noise_samples = int(noise_samples)
+        self.baseline_track_samples = int(baseline_track_samples)
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
         self.df_calibrations = df_calibrations
         self.histogram_flush_every = int(histogram_flush_every)
@@ -469,6 +507,7 @@ class PulseCaptureSession:
             margin_fraction=self.margin_fraction,
             min_pulse_samples=self.min_pulse_samples,
             enable_pileup=self.enable_pileup,
+            baseline_track_samples=self.baseline_track_samples,
             on_pulse=self._on_engine_pulse,
             accumulate=False,
         )

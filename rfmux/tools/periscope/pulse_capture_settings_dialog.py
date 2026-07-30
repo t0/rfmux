@@ -106,6 +106,20 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "estimators tolerate pulses in the window)")
         form.addRow("Noise training (ms):", self.noise_spin)
 
+        self.baseline_spin = QtWidgets.QDoubleSpinBox()
+        self.baseline_spin.setRange(0.0, 600_000.0)
+        self.baseline_spin.setDecimals(1)
+        self.baseline_spin.setValue(config.baseline_track_ms)
+        self.baseline_spin.setToolTip(
+            "Follow baseline drift with an exponential moving average "
+            "of the quiet samples (0 = frozen baseline).\n"
+            "Needed under 1/f noise, where the true baseline wanders "
+            "away from the training-time mean while sigma stays put — "
+            "causing false triggers and, worse, an end condition that "
+            "can never be satisfied.\n"
+            "Choose pulse length << this << drift timescale.")
+        form.addRow("Baseline tracking (ms):", self.baseline_spin)
+
         self.pileup_check = QtWidgets.QCheckBox(
             "Split piled-up events (derivative re-trigger)")
         self.pileup_check.setChecked(config.enable_pileup)
@@ -128,7 +142,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
 
         for w in (self.threshold_spin, self.end_spin, self.margin_spin,
                   self.min_pulse_spin, self.max_pulse_spin,
-                  self.noise_spin):
+                  self.noise_spin, self.baseline_spin):
             w.valueChanged.connect(self._update_dependent_values)
         self.pileup_check.toggled.connect(self._update_dependent_values)
         self._update_dependent_values()
@@ -142,6 +156,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             min_pulse_ms=float(self.min_pulse_spin.value()),
             max_pulse_ms=float(self.max_pulse_spin.value()),
             noise_train_ms=float(self.noise_spin.value()),
+            baseline_track_ms=float(self.baseline_spin.value()),
             enable_pileup=self.pileup_check.isChecked(),
         )
 
@@ -159,7 +174,11 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
                 f"{d['buf_mb_total']:.2f} MB total) · "
                 f"longest recordable ≈ {d['max_recordable_ms']:,.0f} ms · "
                 f"noise training = {d['noise_samples']:,} samples "
-                f"({d['noise_train_actual_ms']:.0f} ms)")
+                f"({d['noise_train_actual_ms']:.0f} ms)"
+                + (f" · baseline EMA = "
+                   f"{d['baseline_track_samples']:,} samples"
+                   if d['baseline_track_samples'] else
+                   " · baseline frozen"))
 
             issues = cfg.validate(self.sample_rate)
             errors = [m for s, m in issues if s == "error"]

@@ -86,6 +86,9 @@ class PulseCaptureConfig:
 
     threshold_sigma: float = 5.0
     end_sigma: float = 1.5
+    #: Consecutive samples that must clear the threshold to trigger.
+    #: One sample is not evidence of a pulse — see accidental_rate_hz().
+    trigger_samples: int = 2
     margin_fraction: float = 0.1
     min_pulse_ms: float = 0.0      # 0 = no glitch rejection
     max_pulse_ms: float = 250.0    # sizes the ring buffer
@@ -128,6 +131,19 @@ class PulseCaptureConfig:
         return max(self._MIN_NOISE,
                    int(round(self.noise_train_ms * 1e-3 * sample_rate)))
 
+    def accidental_rate_hz(self, sample_rate: float) -> float:
+        """Expected triggers per second per channel on noise alone.
+
+        Gaussian tail on either quadrature, raised to the confirmation
+        length.  Real samples are correlated by the CIC/PFB response so
+        this understates the confirmed rate, but the single-sample
+        figure is exact and is the one that bites: at 5 sigma it is
+        ~1.4 Hz per channel on the PFB stream.
+        """
+        p1 = math.erfc(self.threshold_sigma / math.sqrt(2.0))
+        p = 1.0 - (1.0 - p1) ** 2          # either I or Q
+        return sample_rate * p ** max(1, self.trigger_samples)
+
     def max_pulse_samples(self, sample_rate: float) -> int:
         return max(1, int(round(self.max_pulse_ms * 1e-3 * sample_rate)))
 
@@ -159,6 +175,7 @@ class PulseCaptureConfig:
             "end_sigma": self.end_sigma,
             "margin_fraction": self.margin_fraction,
             "min_pulse_samples": self.min_pulse_samples(sample_rate),
+            "trigger_samples": self.trigger_samples,
             "enable_pileup": self.enable_pileup,
             "buf_size": self.buf_size(sample_rate),
             "noise_samples": self.noise_samples(sample_rate),
@@ -192,6 +209,12 @@ class PulseCaptureConfig:
                 self.baseline_track_min_samples(sample_rate)
                 / sample_rate * 1e3,
             "knee_measurable_ms": self.knee_measurable_ms(sample_rate),
+            "trigger_samples": self.trigger_samples,
+            "accidental_per_min":
+                60.0 * self.accidental_rate_hz(sample_rate),
+            "accidental_per_min_unconfirmed": 60.0 * sample_rate * (
+                1.0 - (1.0 - math.erfc(
+                    self.threshold_sigma / math.sqrt(2.0))) ** 2),
         }
 
     def validate(self, sample_rate: Optional[float] = None
@@ -218,6 +241,16 @@ class PulseCaptureConfig:
             issues.append(("warning",
                            f"Threshold {self.threshold_sigma:g}σ will "
                            "trigger frequently on plain noise."))
+        if self.trigger_samples < 1:
+            issues.append(("error",
+                           "Trigger confirmation must be at least 1 sample."))
+        elif self.trigger_samples == 1:
+            issues.append((
+                "warning",
+                "Single-sample triggering: one noise excursion is enough "
+                "to start a capture. Requiring 2 consecutive samples "
+                "costs a real pulse nothing and removes almost all "
+                "accidentals."))
         if not 0 <= self.margin_fraction <= 1:
             issues.append(("error",
                            "Margin fraction must be within 0–1."))
@@ -278,6 +311,18 @@ class PulseCaptureConfig:
                     "followed; faster drift still reaches the trigger."))
 
         if sample_rate:
+            acc = 60.0 * self.accidental_rate_hz(sample_rate)
+            if acc > 1.0:
+                issues.append((
+                    "warning",
+                    f"Noise alone will trigger about {acc:,.0f} times per "
+                    f"minute per channel at {self.threshold_sigma:g}σ and "
+                    f"{sample_rate:,.0f} Hz. Raise the threshold or the "
+                    "confirmation length."))
+            elif acc > 0.01:
+                issues.append((
+                    "info",
+                    f"Accidental trigger rate ≈ {acc:.2g}/min per channel."))
             if self.min_pulse_ms > 0 \
                     and self.min_pulse_samples(sample_rate) < 2:
                 issues.append((
@@ -350,6 +395,7 @@ class PulseCaptureSession:
         end_sigma: float = 1.0,
         margin_fraction: float = 0.1,
         min_pulse_samples: int = 0,
+        trigger_samples: int = 2,
         enable_pileup: bool = True,
         buf_size: int = 5000,
         sample_rate: Optional[float] = None,
@@ -377,6 +423,7 @@ class PulseCaptureSession:
         self.end_sigma = end_sigma
         self.margin_fraction = margin_fraction
         self.min_pulse_samples = min_pulse_samples
+        self.trigger_samples = max(1, int(trigger_samples))
         self.enable_pileup = enable_pileup
         self.buf_size = buf_size
         self.sample_rate = sample_rate
@@ -593,6 +640,7 @@ class PulseCaptureSession:
             sample_rate=self.sample_rate or 0.0,
             margin_fraction=self.margin_fraction,
             min_pulse_samples=self.min_pulse_samples,
+            trigger_samples=self.trigger_samples,
             enable_pileup=self.enable_pileup,
             baseline_track_samples=self.baseline_track_samples,
             on_pulse=self._on_engine_pulse,
@@ -609,6 +657,7 @@ class PulseCaptureSession:
                 "end_sigma": self.end_sigma,
                 "margin_fraction": self.margin_fraction,
                 "min_pulse_samples": self.min_pulse_samples,
+                "trigger_samples": self.trigger_samples,
                 "enable_pileup": self.enable_pileup,
                 "module": self.module,
                 "baseline_track_samples": self.baseline_track_samples,

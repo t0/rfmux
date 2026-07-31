@@ -1149,12 +1149,18 @@ class TestTrackedBaseline:
         assert ns.mean_I > 5.0, f"baseline barely moved ({ns.mean_I:.2f})"
 
     def test_tracking_suppresses_false_triggers_on_wander(self):
-        frozen, _ = _run(track_samples=0, amp=8.0)
-        tracked, _ = _run(track_samples=500, amp=8.0)
+        """A 4σ wander is the regime the tracker exists for: a frozen
+        baseline drifts past the 5σ threshold and fires repeatedly,
+        while the EMA follows it.  (Much larger wander outruns the
+        clamped EMA's slew limit of end_sigma·σ per time constant, and
+        both then trigger — that is the tracker's honest limit, not a
+        regression.)"""
+        frozen, _ = _run(track_samples=0, amp=4.0)
+        tracked, _ = _run(track_samples=500, amp=4.0)
         n_frozen = frozen.pulse_count["Channel 1"]
         n_tracked = tracked.pulse_count["Channel 1"]
-        assert n_frozen > 0, "wander should trigger a frozen baseline"
-        assert n_tracked < n_frozen, \
+        assert n_frozen >= 4, "wander should trigger a frozen baseline"
+        assert n_tracked == 0, \
             f"tracking did not help ({n_tracked} vs {n_frozen})"
 
     def test_tracking_does_not_absorb_a_pulse(self):
@@ -1391,3 +1397,102 @@ class TestAutoBaselineWiring:
         assert sess.baseline_track_samples < first
         assert (engine.baseline_track_samples
                 == sess.baseline_track_samples)
+
+
+# ────────────────────── Trigger confirmation ────────────────────────
+
+def _spike_stream(pcap, *, spike_len, amp=8.0, n=400, at=200):
+    """Quiet noise-free baseline with one excursion of *spike_len*."""
+    for k in range(n):
+        val = amp if at <= k < at + spike_len else 0.0
+        pcap.process_sample(1, val, 0.0, k / 1000.0)
+
+
+def _mk(trigger_samples, **kw):
+    ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                               mean_Q=0.0, std_Q=1.0)}
+    return PulseCapture(
+        buf_size=1000, channels=[1], noise_stats=ns,
+        threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1,
+        accumulate=True, trigger_samples=trigger_samples, **kw)
+
+
+class TestTriggerConfirmation:
+    """One sample over threshold is not evidence of a pulse.  At 5σ on
+    two quadratures the per-sample accidental probability is ~1.1e-6,
+    which is ~1.4 triggers per second per channel on the PFB stream."""
+
+    def test_single_sample_spike_is_rejected(self):
+        pcap = _mk(2)
+        _spike_stream(pcap, spike_len=1)
+        assert pcap.pulse_count["Channel 1"] == 0
+
+    def test_single_sample_spike_triggers_when_disabled(self):
+        pcap = _mk(1)
+        _spike_stream(pcap, spike_len=1)
+        assert pcap.pulse_count["Channel 1"] == 1, \
+            "trigger_samples=1 must reproduce the old behaviour"
+
+    def test_two_sample_excursion_still_triggers(self):
+        pcap = _mk(2)
+        _spike_stream(pcap, spike_len=2)
+        assert pcap.pulse_count["Channel 1"] == 1
+
+    def test_longer_confirmation_rejects_shorter_runs(self):
+        assert _run_len(3, 2) == 0
+        assert _run_len(3, 3) == 1
+
+    def test_trigger_is_dated_to_the_start_of_the_run(self):
+        """Confirmation must not eat the rising edge: the capture is
+        timestamped at the first sample over threshold, not the one
+        that confirmed it."""
+        one = _mk(1)
+        _spike_stream(one, spike_len=40, at=200)
+        many = _mk(4)
+        _spike_stream(many, spike_len=40, at=200)
+        w1 = one.pulses["Channel 1"][1]
+        w4 = many.pulses["Channel 1"][1]
+        assert w1["Time"][0] == w4["Time"][0], (
+            f"capture window slipped by the confirmation "
+            f"({w1['Time'][0]} vs {w4['Time'][0]})")
+        assert len(w1["Amp_I"]) == len(w4["Amp_I"])
+
+    def test_sustained_excursion_is_captured_once(self):
+        """A capture that ends while the signal is still above threshold
+        must not immediately re-fire — repeatedly re-capturing one long
+        excursion was how a drifting baseline produced pulse storms."""
+        pcap = _mk(2)
+        for k in range(4000):
+            pcap.process_sample(1, 8.0 if k >= 100 else 0.0, 0.0,
+                                k / 1000.0)
+        assert pcap.pulse_count["Channel 1"] <= 1
+
+    def test_accidental_rate_matches_the_gaussian_tail(self):
+        cfg = PulseCaptureConfig(threshold_sigma=5.0, trigger_samples=1)
+        # 2 * Phi(-5) per quadrature, either of two -> ~1.147e-6/sample
+        assert cfg.accidental_rate_hz(1.0) == pytest.approx(1.147e-6,
+                                                            rel=1e-2)
+        # PFB rate: the number that makes single-sample triggering
+        # unusable at 1.22 MHz.
+        assert cfg.accidental_rate_hz(1220703.125) == pytest.approx(
+            1.4, rel=0.05)
+        confirmed = PulseCaptureConfig(threshold_sigma=5.0,
+                                       trigger_samples=2)
+        assert confirmed.accidental_rate_hz(1220703.125) < 1e-5
+
+    def test_validate_warns_about_single_sample_triggering(self):
+        issues = PulseCaptureConfig(trigger_samples=1).validate()
+        assert any(s == "warning" and "Single-sample triggering" in m
+                   for s, m in issues)
+
+    def test_validate_reports_the_accidental_rate(self):
+        loud = PulseCaptureConfig(threshold_sigma=5.0, trigger_samples=1)
+        issues = loud.validate(sample_rate=1220703.125)
+        assert any(s == "warning" and "times per minute" in m
+                   for s, m in issues)
+
+
+def _run_len(trigger_samples, spike_len):
+    pcap = _mk(trigger_samples)
+    _spike_stream(pcap, spike_len=spike_len)
+    return pcap.pulse_count["Channel 1"]

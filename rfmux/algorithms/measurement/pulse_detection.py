@@ -88,6 +88,14 @@ class _ChState:
     re_trigger_ready: bool = False  # True once signal drops below threshold during capture (pileup detection)
     prev_max_dev: float = 0.0      # Previous sample's max deviation in σ units (for derivative-based pileup)
     active_duration: Optional[int] = None  # Frozen pulse duration (trigger → below threshold) for adaptive end
+    # Run of consecutive above-threshold samples, and a snapshot of its
+    # first sample — the trigger is dated to the start of the run, not
+    # to the sample that confirmed it.
+    above_run: int = 0
+    run_start_abs: int = 0
+    run_start_I: float = 0.0
+    run_start_Q: float = 0.0
+    run_start_jump: float = 0.0
 
 
 # ───────────────────────── PulseCapture ─────────────────────────────
@@ -125,6 +133,13 @@ class PulseCapture:
     min_pulse_samples : int
         Minimum pulse core duration (trigger → end) in samples.
         Pulses shorter than this are discarded as glitches.  Default 0.
+    trigger_samples : int
+        Consecutive samples that must exceed ``threshold_sigma`` before
+        a capture starts.  1 restores single-sample triggering; 2 (the
+        default) removes essentially all accidental triggers, which
+        otherwise arrive at ~1.4 Hz per channel on the PFB stream at
+        5 sigma.  The capture is still dated to the first sample of the
+        run, so nothing is lost from the rising edge.
     enable_pileup : bool
         Enable derivative-based pileup detection.  When True, a new
         pulse arriving during the tail of a previous one is split into
@@ -145,6 +160,7 @@ class PulseCapture:
         sample_rate: float = 38147.0,
         margin_fraction: float = 0.1,
         min_pulse_samples: int = 0,
+        trigger_samples: int = 2,
         enable_pileup: bool = True,
         on_pulse: Optional[Callable[[int, int, dict], None]] = None,
         accumulate: bool = True,
@@ -157,6 +173,7 @@ class PulseCapture:
         self.end_sigma = end_sigma
         self.margin_fraction = margin_fraction
         self.min_pulse_samples = min_pulse_samples
+        self.trigger_samples = max(1, int(trigger_samples))
         self.enable_pileup = enable_pileup
 
         # Callback for streaming consumers (HDF5, GUI, etc.)
@@ -244,6 +261,30 @@ class PulseCapture:
         # Compute deviations in sigma units
         dev_I = abs(i_val - ns.mean_I) / max(ns.std_I, 1e-30)
         dev_Q = abs(q_val - ns.mean_Q) / max(ns.std_Q, 1e-30)
+        max_dev = max(dev_I, dev_Q)
+        dev_jump = max_dev - st.prev_max_dev
+
+        # ── Trigger confirmation ──────────────────────────────────
+        # A threshold crossing must persist for trigger_samples
+        # consecutive samples.  A single sample is not evidence of a
+        # pulse: at 5 sigma on two quadratures the per-sample false
+        # rate is ~1.1e-6, which is one spurious trigger every ~23 s
+        # per channel on the slow stream and about 1.4 PER SECOND on
+        # the PFB stream.  Requiring two consecutive samples costs a
+        # real pulse nothing — anything above threshold for a single
+        # sample carries no measurable rise or decay anyway — while
+        # cutting the accidental rate by orders of magnitude.
+        if max_dev > self.threshold_sigma:
+            if st.above_run == 0:
+                st.run_start_abs = st.ch_sample_n
+                st.run_start_I = i_val
+                st.run_start_Q = q_val
+                st.run_start_jump = dev_jump
+            st.above_run += 1
+        else:
+            st.above_run = 0
+        # Fires once, on the sample that completes the run.
+        confirmed = st.above_run == self.trigger_samples
 
         # ── Baseline tracking (clamped EMA) ───────────────────────
         # Every sample contributes, but its influence is CLAMPED to
@@ -281,14 +322,15 @@ class PulseCapture:
         # in trigger_capture.py BEFORE the capture loop starts.  This
         # ensures the first sample fed to PulseCapture is already at a
         # known-good baseline — no warmup phase needed here.
-        if (not st.capturing
-            and not self.freeze_triggers
-            and (dev_I > self.threshold_sigma or dev_Q > self.threshold_sigma)):
+        if not st.capturing and not self.freeze_triggers and confirmed:
             st.capturing = True
             st.end_ptr_count = 0
-            st.trig_abs = st.ch_sample_n
-            st.trigger_value_I = i_val
-            st.trigger_value_Q = q_val
+            # Date the trigger to where the excursion began, so the
+            # pre-trigger margin and the stacking alignment do not
+            # slip by the confirmation length.
+            st.trig_abs = st.run_start_abs
+            st.trigger_value_I = st.run_start_I
+            st.trigger_value_Q = st.run_start_Q
 
         # ── End condition & pileup detection ──────────────────────
         #
@@ -316,8 +358,6 @@ class PulseCapture:
         # exceed 1.5σ on individual samples even during quiet inter-pulse
         # periods.
         if st.capturing:
-            max_dev = max(dev_I, dev_Q)
-
             # ── Freeze active_duration ────────────────────────────
             # Freeze the pulse's active duration once the signal starts
             # returning to baseline.  Two triggers (first one wins):
@@ -346,21 +386,23 @@ class PulseCapture:
                 st.re_trigger_ready = True
 
             # ── Pileup detection (derivative-based, optional) ─────
+            # Confirmed the same way as a fresh trigger, and judged on
+            # the jump at the *start* of the run: an unconfirmed split
+            # lets one noise sample fragment a real pulse, which is the
+            # same accidental rate as a spurious trigger.
             if self.enable_pileup:
-                dev_jump = max_dev - st.prev_max_dev
                 st.prev_max_dev = max_dev
 
                 if (st.re_trigger_ready
-                        and dev_jump > self.threshold_sigma
-                        and (dev_I > self.threshold_sigma
-                             or dev_Q > self.threshold_sigma)):
+                        and confirmed
+                        and st.run_start_jump > self.threshold_sigma):
                     self._save_pulse(channel, pileup=True)
                     if not self.freeze_triggers:
                         st.capturing = True
                         st.end_ptr_count = 0
-                        st.trig_abs = st.ch_sample_n
-                        st.trigger_value_I = i_val
-                        st.trigger_value_Q = q_val
+                        st.trig_abs = st.run_start_abs
+                        st.trigger_value_I = st.run_start_I
+                        st.trigger_value_Q = st.run_start_Q
                         st.re_trigger_ready = False
                         st.prev_max_dev = max_dev
                     return

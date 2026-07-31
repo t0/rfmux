@@ -722,3 +722,85 @@ def test_template_view_fits_data_and_uses_zoombox(qt_app, tmp_path):
 
     panel.close()
     _spin(qt_app)
+
+
+def _axis_label(plot):
+    ax = plot.getPlotItem().getAxis("bottom")
+    return ax.labelText, ax.labelUnits
+
+
+def test_stacked_plots_share_one_x_axis_label(qt_app, tmp_path):
+    """Labelling only one of an x-linked pair leaves them showing the
+    same data against differently scaled ticks: setting `units` turns on
+    pyqtgraph's SI-prefix autoscaling for that axis only."""
+    runtime = _FakeRuntime()
+    panel = _make_panel(qt_app, tmp_path, runtime)
+    assert _axis_label(panel.pulse_plot_i) == _axis_label(panel.pulse_plot_q)
+    assert _axis_label(panel.pulse_plot_i) == ("time", "s")
+    assert (_axis_label(panel.template_plot_i)
+            == _axis_label(panel.template_plot_q))
+
+    # …and it stays consistent when a view switches the axis meaning.
+    panel._set_pulse_x_axis("sample")
+    assert _axis_label(panel.pulse_plot_i) == _axis_label(panel.pulse_plot_q)
+    assert _axis_label(panel.pulse_plot_i) == ("sample", "")
+    panel.close()
+    _spin(qt_app)
+
+
+def _legend_labels(plot):
+    legend = plot.getPlotItem().legend
+    return [label.text for _sample, label in legend.items]
+
+
+def test_single_pulse_bands_are_drawn_and_named(qt_app, tmp_path):
+    """The bands used to be InfiniteLines, which are not PlotDataItems
+    and so never reached the legend."""
+    runtime = _FakeRuntime()
+    panel = _make_panel(qt_app, tmp_path, runtime)
+    rng = np.random.default_rng(7)
+    panel._on_start()
+    for _ in range(1000):
+        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
+                           float(rng.normal(0, 1.0)), None)
+    assert _spin_until(qt_app, lambda: panel.noise_stats)
+    _feed_capture(runtime._pulse_tap, rng)
+    assert _spin_until(qt_app, lambda: len(panel._pulse_order) >= 1)
+
+    panel._show_pulse(*panel._pulse_order[-1])
+    for plot in (panel.pulse_plot_i, panel.pulse_plot_q):
+        labels = _legend_labels(plot)
+        assert any("baseline" in t for t in labels), labels
+        assert any("trigger" in t and "σ" in t for t in labels), labels
+        assert any("end" in t and "σ" in t for t in labels), labels
+        # One entry per band pair, not two.
+        assert sum("trigger" in t for t in labels) == 1, labels
+
+    panel._on_stop()
+    _spin(qt_app)
+    panel.close()
+    _spin(qt_app)
+
+
+def test_both_mode_annotates_bands_per_stream(qt_app, tmp_path):
+    """In 'both' mode the two streams have different noise, so each
+    needs its own bands — a single shared set would be ambiguous about
+    which threshold an excursion had to clear."""
+    path = _build_dual_file(tmp_path)
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+    panel._show_pair(*panel._pulse_order[-1])
+
+    for plot in (panel.pulse_plot_i, panel.pulse_plot_q):
+        labels = _legend_labels(plot)
+        assert any(t.startswith("slow ") and "baseline" in t
+                   for t in labels), labels
+        assert any(t.startswith("fast ") and "baseline" in t
+                   for t in labels), labels
+        assert any(t.startswith("slow ") and "trigger" in t
+                   for t in labels), labels
+        assert any(t.startswith("fast ") and "trigger" in t
+                   for t in labels), labels
+
+    panel.close()
+    _spin(qt_app)

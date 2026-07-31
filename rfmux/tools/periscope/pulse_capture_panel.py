@@ -345,11 +345,53 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             item.setLabel("left", ylabel)
             item.showGrid(x=True, y=True, alpha=0.3)
             item.addLegend(offset=(-10, 10))
-        self.pulse_plot_q.getPlotItem().setLabel("bottom", "time", units="s")
+        self._set_pulse_x_axis("time", "s")
         self.pulse_plot_q.setXLink(self.pulse_plot_i)
         v.addWidget(self.pulse_plot_i, stretch=1)
         v.addWidget(self.pulse_plot_q, stretch=1)
         return w
+
+    def _annotate_noise_bands(self, plot, quad, ns, x0, x1, color,
+                              prefix="") -> None:
+        """Draw the baseline and the ±σ bands on *plot*.
+
+        Drawn as two-point curves rather than addLine(): an InfiniteLine
+        is not a PlotDataItem and never shows up in the legend, so the
+        bands were unlabelled wherever they did appear.
+        """
+        if ns is None:
+            return
+        mean = getattr(ns, f"mean_{quad}", None)
+        std = getattr(ns, f"std_{quad}", None)
+        if mean is None or std is None or not np.isfinite(std) or std <= 0:
+            return
+        thr = float(self.threshold_spin.value())
+        end = float(self.end_spin.value())
+        x = np.array([x0, x1], dtype=float)
+        plot.plot(x, np.full(2, mean),
+                  pen=pg.mkPen(color, width=1.0,
+                               style=QtCore.Qt.PenStyle.DotLine),
+                  name=f"{prefix}baseline")
+        for level, style, tag in (
+                (thr, QtCore.Qt.PenStyle.DashLine, f"±{thr:g}σ trigger"),
+                (end, QtCore.Qt.PenStyle.DotLine, f"±{end:g}σ end")):
+            for i, sign in enumerate((+1, -1)):
+                plot.plot(
+                    x, np.full(2, mean + sign * level * std),
+                    pen=pg.mkPen(color, width=1.0, style=style),
+                    # Name once per pair, or the legend doubles up.
+                    name=f"{prefix}{tag}" if i == 0 else None)
+
+    def _set_pulse_x_axis(self, label: str, units: str | None = None) -> None:
+        """Label BOTH stacked plots the same way.
+
+        Setting ``units`` turns on pyqtgraph's SI-prefix autoscaling for
+        that axis, so labelling only one of an x-linked pair leaves them
+        showing the same data against differently scaled ticks (µs on
+        one, raw seconds on the other).
+        """
+        for plot in (self.pulse_plot_i, self.pulse_plot_q):
+            plot.getPlotItem().setLabel("bottom", label, units=units)
 
     def _build_histograms_view(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
@@ -425,8 +467,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             item.setLabel("left", ylabel)
             item.showGrid(x=True, y=True, alpha=0.3)
             item.addLegend(offset=(-10, 10))
-        self.template_plot_q.getPlotItem().setLabel(
-            "bottom", "time from trigger", units="s")
+        for plot in (self.template_plot_i, self.template_plot_q):
+            plot.getPlotItem().setLabel("bottom", "time from trigger",
+                                        units="s")
         self.template_plot_q.setXLink(self.template_plot_i)
         v.addWidget(self.template_plot_i, stretch=1)
         v.addWidget(self.template_plot_q, stretch=1)
@@ -1415,24 +1458,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.pulse_plot_q.clear()
         self.pulse_plot_i.setTitle(f"Noise training — Channel {channel}")
         self.pulse_plot_q.setTitle(None)
-        self.pulse_plot_q.getPlotItem().setLabel("bottom", "sample")
-        for plot, data, color, mean, std in (
-                (self.pulse_plot_i, arr.real, IQ_COLORS["I"],
-                 ns.mean_I, ns.std_I),
-                (self.pulse_plot_q, arr.imag, IQ_COLORS["Q"],
-                 ns.mean_Q, ns.std_Q)):
-            plot.plot(x, data, pen=pg.mkPen(color, width=1.0))
-            plot.addLine(y=mean, pen=pg.mkPen(
-                color, width=0.8, style=QtCore.Qt.PenStyle.DotLine))
-            for sign in (+1, -1):
-                plot.addLine(
-                    y=mean + sign * thr * std,
-                    pen=pg.mkPen("#888888", width=0.8,
-                                 style=QtCore.Qt.PenStyle.DashLine))
-                plot.addLine(
-                    y=mean + sign * end * std,
-                    pen=pg.mkPen("#666666", width=0.8,
-                                 style=QtCore.Qt.PenStyle.DotLine))
+        self._set_pulse_x_axis("sample")
+        x1 = float(len(arr) - 1) if len(arr) else 1.0
+        for quad, plot, data in (("I", self.pulse_plot_i, arr.real),
+                                 ("Q", self.pulse_plot_q, arr.imag)):
+            plot.plot(x, data, pen=pg.mkPen(IQ_COLORS[quad], width=1.0),
+                      name=f"{quad} (training)")
+            self._annotate_noise_bands(plot, quad, ns, 0.0, x1, "#888888")
 
     def _set_status(self, text: str, color: str) -> None:
         self.status_label.setText(
@@ -1540,7 +1572,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for plot in (self.pulse_plot_i, self.pulse_plot_q):
             plot.clear()
             plot.setTitle(None)
-        self.pulse_plot_q.getPlotItem().setLabel("bottom", "time", units="s")
+        self._set_pulse_x_axis("time", "s")
         if wf is None:
             # Evicted from the live cache — fetch it from the HDF5 file
             # via the worker thread (waveform_ready redraws on arrival).
@@ -1562,27 +1594,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         amp_Q = np.asarray(wf["Amp_Q"], dtype=np.float64)
 
         ns = self.noise_stats.get(channel)
-        thr = float(self.threshold_spin.value())
-        end = float(self.end_spin.value())
-        for plot, data, color, mean, std in (
-                (self.pulse_plot_i, amp_I, IQ_COLORS["I"],
-                 getattr(ns, "mean_I", None), getattr(ns, "std_I", None)),
-                (self.pulse_plot_q, amp_Q, IQ_COLORS["Q"],
-                 getattr(ns, "mean_Q", None), getattr(ns, "std_Q", None))):
-            plot.plot(t_rel, data, pen=pg.mkPen(color, width=LINE_WIDTH))
-            if mean is None or std is None:
-                continue
-            plot.addLine(y=mean, pen=pg.mkPen(
-                color, width=0.8, style=QtCore.Qt.PenStyle.DotLine))
-            for sign in (+1, -1):
-                plot.addLine(
-                    y=mean + sign * thr * std,
-                    pen=pg.mkPen("#888888", width=0.8,
-                                 style=QtCore.Qt.PenStyle.DashLine))
-                plot.addLine(
-                    y=mean + sign * end * std,
-                    pen=pg.mkPen("#666666", width=0.8,
-                                 style=QtCore.Qt.PenStyle.DotLine))
+        x0 = float(t_rel[0]) if len(t_rel) else 0.0
+        x1 = float(t_rel[-1]) if len(t_rel) else 1.0
+        for quad, plot, data in (("I", self.pulse_plot_i, amp_I),
+                                 ("Q", self.pulse_plot_q, amp_Q)):
+            plot.plot(t_rel, data,
+                      pen=pg.mkPen(IQ_COLORS[quad], width=LINE_WIDTH),
+                      name=f"{quad} (pulse)")
+            self._annotate_noise_bands(plot, quad, ns, x0, x1, "#888888")
 
     def _show_pair(self, channel: int, pair_idx: int) -> None:
         """Matched-pair overlay: dense fast trace under slow markers,
@@ -1650,7 +1669,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for plot in (self.pulse_plot_i, self.pulse_plot_q):
             plot.clear()
             plot.setTitle(None)
-        self.pulse_plot_q.getPlotItem().setLabel("bottom", "time", units="s")
+        self._set_pulse_x_axis("time", "s")
         if loading:
             self.pulse_plot_i.setTitle("loading waveforms from file…")
         if slow_wf is None and fast_wf is None:
@@ -1670,6 +1689,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if t0 is None:
             t0 = 0.0
 
+        # Span of the drawn data, for the band lines below.
+        x0 = x1 = None
+        for wf in (fast_wf, slow_wf):
+            if wf is None:
+                continue
+            tt = np.asarray(wf["Time"], float) - t0
+            tt = tt[np.isfinite(tt)]
+            if len(tt):
+                x0 = tt[0] if x0 is None else min(x0, tt[0])
+                x1 = tt[-1] if x1 is None else max(x1, tt[-1])
+        if x0 is None:
+            x0, x1 = 0.0, 1.0
+
         for quad, plot in (("I", self.pulse_plot_i),
                            ("Q", self.pulse_plot_q)):
             if fast_wf is not None:
@@ -1688,6 +1720,20 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                           symbolBrush=IQ_COLORS[quad],
                           symbolPen=pg.mkPen("w", width=0.8),
                           name="slow (readout)")
+
+            # The two streams have different noise, so their bands are
+            # at different levels — draw each in its own trace's colour
+            # rather than one shared grey, or it is ambiguous which
+            # threshold a given excursion had to clear.
+            for stream, wf, tint in (
+                    ("fast", fast_wf, FAST_IQ_COLORS[quad]),
+                    ("slow", slow_wf, IQ_COLORS[quad])):
+                if wf is None:
+                    continue
+                stats = self._noise_by_stream.get(stream) or {}
+                self._annotate_noise_bands(
+                    plot, quad, stats.get(channel), x0, x1, tint,
+                    prefix=f"{stream} ")
 
     # ── Histograms ────────────────────────────────────────────────
 

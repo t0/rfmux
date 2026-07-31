@@ -1345,11 +1345,30 @@ class TestAutoBaselineWiring:
         assert kw["baseline_track_auto"] is True
         assert kw["baseline_track_min_samples"] == 200
 
-    def test_validate_flags_a_training_window_too_short_to_measure(self):
+    def test_validate_says_when_the_measurement_cannot_bind(self):
+        """A knee faster than the resolvable limit IS measurable — it
+        just gets clamped up to the floor, so it cannot change the
+        window.  The two ranges have to overlap to have any effect."""
         cfg = PulseCaptureConfig(max_pulse_ms=10.0, noise_train_ms=50.0)
         issues = cfg.validate(sample_rate=1000.0)
-        assert any(s == "warning" and "cannot be measured" in m
-                   for s, m in issues)
+        msg = next(m for s, m in issues if "floor" in m and s == "info")
+        assert "cannot change it" in msg, msg
+        assert "would open a band" in msg, msg
+
+    def test_derived_training_never_lets_a_knee_bind(self):
+        """Structural, with training derived at NOISE_TRAIN_PULSES x the
+        pulse length: the floor is BASELINE_PULSE_FACTOR x the pulse
+        length while the fit resolves only NOISE_TRAIN_PULSES/9 x it,
+        so the measurable range sits entirely under the floor."""
+        cfg = PulseCaptureConfig()
+        assert cfg.NOISE_TRAIN_PULSES / cfg._KNEE_PAIRS \
+            < cfg.BASELINE_PULSE_FACTOR, \
+            "a measured knee can now bind — update the guidance above"
+        for mp in (5.0, 20.0, 250.0):
+            c = PulseCaptureConfig(max_pulse_ms=mp)
+            for fs in (596.0464477539062, 19073.486328125):
+                assert (c.knee_measurable_ms(fs)
+                        < c.BASELINE_PULSE_FACTOR * mp)
 
     def test_session_measures_the_window_during_training(self):
         """End to end: feeding drifting noise through the session must

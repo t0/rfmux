@@ -325,29 +325,40 @@ class PulseCaptureConfig:
             issues.append(("error",
                            "Noise training override cannot be negative."))
         if self.baseline_track_auto:
-            # The knee is only visible if the training record reaches it;
-            # otherwise the fit honestly reports "no drift measured" and
-            # the fallback is used.  Say what it would take to do better.
             floor_ms = self.BASELINE_PULSE_FACTOR * self.max_pulse_ms
-            issues.append((
-                "info",
-                "Baseline window measured from the noise training data "
-                f"(the 1/f knee), floored at {floor_ms:g} ms = "
-                f"{self.BASELINE_PULSE_FACTOR}x the max pulse length."))
             if sample_rate:
                 meas = self.knee_measurable_ms(sample_rate)
                 if meas < floor_ms:
+                    # Not "the knee cannot be measured" — knees up to
+                    # meas are perfectly measurable.  The point is that
+                    # every one of them lies BELOW the floor and is
+                    # clamped up to it, so no measurable knee can change
+                    # the window.  The two ranges have to overlap for
+                    # the measurement to have any effect.
                     want = self._KNEE_PAIRS * floor_ms
                     want_s = (f"{want / 1000:,.1f} s" if want >= 1000
                               else f"{want:,.0f} ms")
                     issues.append((
-                        "warning",
-                        f"Noise training "
-                        f"({self.noise_train_span_ms():g} ms) can "
-                        f"only resolve drift faster than {meas:.3g} ms, "
-                        f"below the {floor_ms:g} ms floor — the knee "
-                        "cannot be measured and the floor will be used. "
-                        f"Train for ≥ {want_s} to measure it."))
+                        "info",
+                        f"Baseline tracking window will be {floor_ms:g} ms, "
+                        f"the floor ({self.BASELINE_PULSE_FACTOR}x the max "
+                        "pulse length). Training resolves drift only down "
+                        f"to {meas:.3g} ms, and every knee that fast is "
+                        "clamped up to the floor — so the measurement "
+                        f"cannot change it. Training ≥ {want_s} would open "
+                        "a band where a measured knee takes effect."))
+                else:
+                    issues.append((
+                        "info",
+                        "Baseline window measured from the training data "
+                        f"(the 1/f knee), between the {floor_ms:g} ms floor "
+                        f"and {meas:.3g} ms."))
+            else:
+                issues.append((
+                    "info",
+                    "Baseline window measured from the noise training data "
+                    f"(the 1/f knee), floored at {floor_ms:g} ms = "
+                    f"{self.BASELINE_PULSE_FACTOR}x the max pulse length."))
         elif self.baseline_track_ms < 0:
             issues.append(("error",
                            "Baseline tracking time cannot be negative."))

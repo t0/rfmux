@@ -106,6 +106,20 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "estimators tolerate pulses in the window)")
         form.addRow("Noise training (ms):", self.noise_spin)
 
+        self.baseline_auto_check = QtWidgets.QCheckBox(
+            "Measure from noise training")
+        self.baseline_auto_check.setChecked(config.baseline_track_auto)
+        self.baseline_auto_check.setToolTip(
+            "Take the tracking window from the training data instead of "
+            "setting it by hand.\n"
+            "The usable window tops out at the 1/f knee — below it the "
+            "average is only smoothing white noise, above it the "
+            "baseline has already moved — and the training record "
+            "measures exactly that.\n"
+            "Floored at a multiple of the max pulse length so the "
+            "tracker can never absorb a pulse tail.")
+        form.addRow("Baseline tracking:", self.baseline_auto_check)
+
         self.baseline_spin = QtWidgets.QDoubleSpinBox()
         self.baseline_spin.setRange(0.0, 600_000.0)
         self.baseline_spin.setDecimals(1)
@@ -118,7 +132,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "causing false triggers and, worse, an end condition that "
             "can never be satisfied.\n"
             "Choose pulse length << this << drift timescale.")
-        form.addRow("Baseline tracking (ms):", self.baseline_spin)
+        form.addRow("   … or fixed (ms):", self.baseline_spin)
 
         self.pileup_check = QtWidgets.QCheckBox(
             "Split piled-up events (derivative re-trigger)")
@@ -145,6 +159,8 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
                   self.noise_spin, self.baseline_spin):
             w.valueChanged.connect(self._update_dependent_values)
         self.pileup_check.toggled.connect(self._update_dependent_values)
+        self.baseline_auto_check.toggled.connect(
+            self._update_dependent_values)
         self._update_dependent_values()
         self.resize(480, 460)
 
@@ -156,6 +172,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             min_pulse_ms=float(self.min_pulse_spin.value()),
             max_pulse_ms=float(self.max_pulse_spin.value()),
             noise_train_ms=float(self.noise_spin.value()),
+            baseline_track_auto=self.baseline_auto_check.isChecked(),
             baseline_track_ms=float(self.baseline_spin.value()),
             enable_pileup=self.pileup_check.isChecked(),
         )
@@ -166,6 +183,9 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self._updating = True
         try:
             cfg = self.get_config()
+            # The fixed value is dead while auto is on; grey it out
+            # rather than leaving two live-looking controls.
+            self.baseline_spin.setEnabled(not cfg.baseline_track_auto)
             d = cfg.describe(self.sample_rate, self.n_channels)
             self.derived_label.setText(
                 f"min pulse = {d['min_pulse_samples']} samples · "
@@ -175,7 +195,11 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
                 f"longest recordable ≈ {d['max_recordable_ms']:,.0f} ms · "
                 f"noise training = {d['noise_samples']:,} samples "
                 f"({d['noise_train_actual_ms']:.0f} ms)"
-                + (f" · baseline EMA = "
+                + (f" · baseline measured at training, no faster than "
+                   f"{d['baseline_track_min_ms']:,.0f} ms "
+                   f"({d['baseline_track_min_samples']:,} samples)"
+                   if d['baseline_track_auto'] else
+                   f" · baseline EMA = "
                    f"{d['baseline_track_samples']:,} samples"
                    if d['baseline_track_samples'] else
                    " · baseline frozen"))

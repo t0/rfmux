@@ -54,6 +54,7 @@ from .pulse_detection import (
     ChannelNoiseStats,
     PulseCapture,
     estimate_noise_stats,
+    recommend_baseline_track_samples,
 )
 from .pulse_analysis import pulse_summary
 from .pulse_histograms import PulseHistogramSet
@@ -90,10 +91,15 @@ class PulseCaptureConfig:
     max_pulse_ms: float = 250.0    # sizes the ring buffer
     noise_train_ms: float = 50.0
     enable_pileup: bool = True
-    #: EMA time constant for baseline tracking (0 = frozen baseline).
-    #: Needed under 1/f noise, where the true baseline drifts away from
-    #: the training-time mean.  Must satisfy
-    #: pulse length << baseline_track_ms << drift timescale.
+    #: Measure the baseline tracking window from the noise training data
+    #: instead of taking ``baseline_track_ms``.  The upper end of the
+    #: usable window is the 1/f knee, which is a property of the
+    #: detector rather than a preference, so this is the default.
+    baseline_track_auto: bool = True
+    #: EMA time constant for baseline tracking when ``baseline_track_auto``
+    #: is off (0 = frozen baseline).  Needed under 1/f noise, where the
+    #: true baseline drifts away from the training-time mean.  Must
+    #: satisfy pulse length << baseline_track_ms << drift timescale.
     baseline_track_ms: float = 0.0
 
     #: buffer headroom over max_pulse_ms (pre-trigger margin +
@@ -101,6 +107,13 @@ class PulseCaptureConfig:
     BUFFER_SAFETY = 1.5
     _MIN_BUF = 1000
     _MIN_NOISE = 200
+    #: How many max-length pulses the tracker must span.  A clamped EMA
+    #: moves by at most (pulse / tau) * end_sigma * sigma during a
+    #: pulse, so 20x bounds that bite at a few hundredths of a sigma.
+    BASELINE_PULSE_FACTOR = 20
+    #: Independent block pairs wanted before the knee is measurable —
+    #: mirrors _MIN_ALLAN_PAIRS in the estimator.
+    _KNEE_PAIRS = 9
 
     # ── ms → samples (per stream rate) ────────────────────────────
 
@@ -115,11 +128,29 @@ class PulseCaptureConfig:
         return max(self._MIN_NOISE,
                    int(round(self.noise_train_ms * 1e-3 * sample_rate)))
 
+    def max_pulse_samples(self, sample_rate: float) -> int:
+        return max(1, int(round(self.max_pulse_ms * 1e-3 * sample_rate)))
+
     def baseline_track_samples(self, sample_rate: float) -> int:
         if self.baseline_track_ms <= 0:
             return 0
         return max(1, int(round(
             self.baseline_track_ms * 1e-3 * sample_rate)))
+
+    def baseline_track_min_samples(self, sample_rate: float) -> int:
+        """Floor for the auto-measured window: the tracker must not be
+        fast enough to absorb the tail of the longest expected pulse."""
+        return self.BASELINE_PULSE_FACTOR * self.max_pulse_samples(sample_rate)
+
+    def knee_measurable_ms(self, sample_rate: float) -> float:
+        """Longest drift timescale the training window can resolve.
+
+        The Allan fit needs several independent block pairs at its
+        longest lag, so a record of N samples says nothing about drift
+        slower than about N / 9.
+        """
+        return (self.noise_samples(sample_rate) / self._KNEE_PAIRS
+                / sample_rate * 1e3)
 
     def session_kwargs(self, sample_rate: float) -> Dict[str, Any]:
         """Keyword arguments for :class:`PulseCaptureSession`."""
@@ -131,8 +162,11 @@ class PulseCaptureConfig:
             "enable_pileup": self.enable_pileup,
             "buf_size": self.buf_size(sample_rate),
             "noise_samples": self.noise_samples(sample_rate),
+            "baseline_track_auto": self.baseline_track_auto,
             "baseline_track_samples":
                 self.baseline_track_samples(sample_rate),
+            "baseline_track_min_samples":
+                self.baseline_track_min_samples(sample_rate),
         }
 
     def describe(self, sample_rate: float,
@@ -151,6 +185,13 @@ class PulseCaptureConfig:
             "max_recordable_ms": buf / sample_rate * 1e3,
             "baseline_track_samples":
                 self.baseline_track_samples(sample_rate),
+            "baseline_track_auto": self.baseline_track_auto,
+            "baseline_track_min_samples":
+                self.baseline_track_min_samples(sample_rate),
+            "baseline_track_min_ms":
+                self.baseline_track_min_samples(sample_rate)
+                / sample_rate * 1e3,
+            "knee_measurable_ms": self.knee_measurable_ms(sample_rate),
         }
 
     def validate(self, sample_rate: Optional[float] = None
@@ -191,7 +232,30 @@ class PulseCaptureConfig:
         if self.noise_train_ms <= 0:
             issues.append(("error",
                            "Noise training length must be positive."))
-        if self.baseline_track_ms < 0:
+        if self.baseline_track_auto:
+            # The knee is only visible if the training record reaches it;
+            # otherwise the fit honestly reports "no drift measured" and
+            # the fallback is used.  Say what it would take to do better.
+            floor_ms = self.BASELINE_PULSE_FACTOR * self.max_pulse_ms
+            issues.append((
+                "info",
+                "Baseline window measured from the noise training data "
+                f"(the 1/f knee), floored at {floor_ms:g} ms = "
+                f"{self.BASELINE_PULSE_FACTOR}x the max pulse length."))
+            if sample_rate:
+                meas = self.knee_measurable_ms(sample_rate)
+                if meas < floor_ms:
+                    want = self._KNEE_PAIRS * floor_ms
+                    want_s = (f"{want / 1000:,.1f} s" if want >= 1000
+                              else f"{want:,.0f} ms")
+                    issues.append((
+                        "warning",
+                        f"Noise training ({self.noise_train_ms:g} ms) can "
+                        f"only resolve drift faster than {meas:.3g} ms, "
+                        f"below the {floor_ms:g} ms floor — the knee "
+                        "cannot be measured and the floor will be used. "
+                        f"Train for ≥ {want_s} to measure it."))
+        elif self.baseline_track_ms < 0:
             issues.append(("error",
                            "Baseline tracking time cannot be negative."))
         elif self.baseline_track_ms > 0:
@@ -290,7 +354,9 @@ class PulseCaptureSession:
         buf_size: int = 5000,
         sample_rate: Optional[float] = None,
         noise_samples: int = 1000,
+        baseline_track_auto: bool = False,
         baseline_track_samples: int = 0,
+        baseline_track_min_samples: int = 0,
         hdf5_path: Optional[str | Path] = None,
         df_calibrations: Optional[Dict[int, float]] = None,
         histogram_config: Optional[Dict[str, Any]] = None,
@@ -315,7 +381,11 @@ class PulseCaptureSession:
         self.buf_size = buf_size
         self.sample_rate = sample_rate
         self.noise_samples = int(noise_samples)
+        self.baseline_track_auto = bool(baseline_track_auto)
         self.baseline_track_samples = int(baseline_track_samples)
+        self.baseline_track_min_samples = int(baseline_track_min_samples)
+        #: Diagnostics from the last auto-measurement (None when off).
+        self.baseline_track_info: Optional[Dict[str, Any]] = None
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
         self.df_calibrations = df_calibrations
         self.histogram_flush_every = int(histogram_flush_every)
@@ -467,6 +537,13 @@ class PulseCaptureSession:
             "rate_per_min": rate_per_min,
             "dropped_invalid_ts": self.dropped_invalid_ts,
             "hdf5_path": str(self.hdf5_path) if self.hdf5_path else None,
+            "baseline_track_samples": self.baseline_track_samples,
+            "baseline_track_ms": (
+                self.baseline_track_samples / self.sample_rate * 1e3
+                if self.sample_rate else None),
+            "baseline_track_summary": (
+                self.baseline_track_info.get("summary")
+                if self.baseline_track_info else None),
         }
 
     # ── Internals ─────────────────────────────────────────────────
@@ -484,11 +561,21 @@ class PulseCaptureSession:
             samples, self.channels)
         self._noise_buf = {}
 
+        # The same record that gives the trigger threshold also carries
+        # the drift timescale, so measure the tracking window here
+        # rather than making the user guess it.
+        if self.baseline_track_auto:
+            self.baseline_track_samples, self.baseline_track_info = \
+                recommend_baseline_track_samples(
+                    samples, self.channels,
+                    min_samples=self.baseline_track_min_samples)
+
         if self.pcap is None:
             self._build_engine_and_writer()
         else:
             # Re-estimation: swap stats in place and resume triggering.
             self.pcap.noise_stats = self.noise_stats
+            self.pcap.set_baseline_track_samples(self.baseline_track_samples)
             if self.writer is not None:
                 self.writer.update_noise_stats(self.noise_stats)
             self.pcap.freeze_triggers = False
@@ -524,7 +611,12 @@ class PulseCaptureSession:
                 "min_pulse_samples": self.min_pulse_samples,
                 "enable_pileup": self.enable_pileup,
                 "module": self.module,
+                "baseline_track_samples": self.baseline_track_samples,
+                "baseline_track_auto": self.baseline_track_auto,
             }
+            if self.baseline_track_info:
+                capture_params["baseline_track_basis"] = str(
+                    self.baseline_track_info.get("summary", ""))
             if self.sample_rate:
                 key = ("sample_rate_fast" if self.streamer_mode == "fast"
                        else "sample_rate_slow")

@@ -153,6 +153,12 @@ async def main(serial: str = "MOCK") -> int:
         session.stop()
         print(f"   ✓ {session.total_pulses} pulses in {covered:.2f} s "
               f"→ {slow_path}")
+        # The baseline EMA window is measured from the same training
+        # record that sets the trigger threshold — see
+        # recommend_baseline_track_samples().
+        if session.baseline_track_info:
+            print(f"   baseline tracking: "
+                  f"{session.baseline_track_info['summary']}")
 
         with PulseHDF5Reader(slow_path) as reader:
             hist = reader.get_histograms()

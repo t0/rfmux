@@ -1184,8 +1184,12 @@ class TestBaselineConfig:
         kwargs = cfg.session_kwargs(1000.0)
         assert kwargs["baseline_track_samples"] == 250
 
+    # baseline_track_ms is the manual override, so these select it
+    # explicitly — auto is the default and ignores the field.
+
     def test_validate_warns_when_faster_than_pulses(self):
         cfg = PulseCaptureConfig(max_pulse_ms=50.0,
+                                 baseline_track_auto=False,
                                  baseline_track_ms=100.0)
         issues = cfg.validate()
         assert any(s == "warning" and "absorb pulse tails" in m
@@ -1193,11 +1197,197 @@ class TestBaselineConfig:
 
     def test_validate_accepts_a_sane_window(self):
         cfg = PulseCaptureConfig(max_pulse_ms=50.0,
+                                 baseline_track_auto=False,
                                  baseline_track_ms=5000.0)
         issues = cfg.validate()
         assert not any(s == "error" for s, _ in issues)
         assert any("Baseline tracked" in m for _, m in issues)
 
     def test_negative_is_an_error(self):
-        issues = PulseCaptureConfig(baseline_track_ms=-1.0).validate()
+        issues = PulseCaptureConfig(baseline_track_auto=False,
+                                    baseline_track_ms=-1.0).validate()
         assert any(s == "error" for s, _ in issues)
+
+
+# ────────────── Auto baseline window from noise training ────────────
+
+from rfmux.algorithms.measurement.pulse_detection import (
+    recommend_baseline_track_samples,
+)
+
+
+def _flicker(n, h, rng):
+    """1/f with a fixed spectral density (not normalised by rms, which
+    would make the level depend on record length)."""
+    f = np.fft.rfftfreq(n)
+    amp = np.zeros_like(f)
+    amp[1:] = h / np.sqrt(f[1:])
+    spec = (rng.normal(size=len(f)) + 1j * rng.normal(size=len(f))) * amp
+    return np.fft.irfft(spec, n) * np.sqrt(n)
+
+
+def _noisy(n, h, rng, sigma=1.0):
+    def one():
+        return rng.normal(0, sigma, n) + (_flicker(n, h, rng) if h else 0.0)
+    return one() + 1j * one()
+
+
+class TestAutoBaselineWindow:
+    """The tracking window is the 1/f knee, which the training record
+    already measures: below it the EMA only smooths white noise, above
+    it the baseline has already moved."""
+
+    def test_white_noise_rarely_and_harmlessly_claims_drift(self):
+        """An Allan point at a handful of pairs has ~50% scatter, so a
+        naive threshold would flag drift about half the time.  The
+        fitted floor is tested against its own uncertainty instead,
+        which leaves ~5% — and those survivors land near record/9, so
+        they are still vastly slower than any pulse."""
+        rng = np.random.default_rng(0)
+        claimed, windows = 0, []
+        for _ in range(20):
+            n, info = recommend_baseline_track_samples(
+                {1: _noisy(8192, 0.0, rng)}, [1], max_samples=10 ** 9)
+            if info["drift_detected"]:
+                claimed += 1
+                windows.append(n)
+        assert claimed <= 3, f"drift claimed in {claimed}/20 white records"
+        assert all(w > 300 for w in windows), \
+            f"a false positive produced a fast tracker: {windows}"
+
+    def test_no_drift_falls_back_to_the_training_span(self):
+        rng = np.random.default_rng(1)
+        n, info = recommend_baseline_track_samples(
+            {1: _noisy(4096, 0.0, rng)}, [1])
+        assert not info["drift_detected"]
+        assert n == 4096, "should track at the span it verified as quiet"
+
+    def test_recovers_an_injected_knee(self):
+        """Ground truth from a long record; the estimator sees a slice."""
+        rng = np.random.default_rng(2)
+        long_arr = _noisy(1 << 18, 1e-2, rng)
+        truth, _ = recommend_baseline_track_samples(
+            {1: long_arr}, [1], max_samples=10 ** 9)
+        got, info = recommend_baseline_track_samples(
+            {1: long_arr[:32768]}, [1], max_samples=10 ** 9)
+        assert info["drift_detected"]
+        assert 0.4 * truth < got < 2.5 * truth, \
+            f"knee {got} far from truth {truth}"
+
+    def test_stronger_drift_gives_a_faster_tracker(self):
+        """Record length chosen so all three knees sit inside what it
+        can resolve — detection needs roughly 30x the knee, and a knee
+        slower than that falls back to the ceiling rather than
+        ordering itself."""
+        rng = np.random.default_rng(3)
+        knees = []
+        for h in (1e-2, 3e-2, 1e-1):
+            n, info = recommend_baseline_track_samples(
+                {1: _noisy(1 << 16, h, rng)}, [1], max_samples=10 ** 9)
+            assert info["drift_detected"], f"h={h:g} drift went unseen"
+            knees.append(n)
+        assert knees[0] > knees[1] > knees[2], \
+            f"knee should shrink as drift grows: {knees}"
+
+    def test_knee_beyond_the_record_is_not_claimed(self):
+        """Drift far slower than the training window is invisible — the
+        honest answer is the fallback, not an extrapolated knee."""
+        rng = np.random.default_rng(4)
+        _, info = recommend_baseline_track_samples(
+            {1: _noisy(2048, 1e-3, rng)}, [1], max_samples=10 ** 9)
+        assert not info["drift_detected"]
+
+    def test_pulse_contamination_is_clamped_by_the_floor(self):
+        """Pulses bias the knee downward (fast tracking).  That is the
+        safe direction only because the pulse-length floor catches it."""
+        rng = np.random.default_rng(5)
+        base = _noisy(32768, 1e-2, rng)
+        dirty = base.copy()
+        for start in rng.integers(0, 32768 - 400, 20):
+            t = np.arange(300)
+            dirty[start:start + 300] += 30.0 * np.exp(-t / 40.0)
+        free, _ = recommend_baseline_track_samples(
+            {1: dirty}, [1], max_samples=10 ** 9)
+        clamped, _ = recommend_baseline_track_samples(
+            {1: dirty}, [1], min_samples=600, max_samples=10 ** 9)
+        assert free < 600, "expected contamination to pull the knee in"
+        assert clamped == 600, "floor must catch a contaminated fit"
+
+    def test_floor_above_ceiling_says_so(self):
+        rng = np.random.default_rng(6)
+        n, info = recommend_baseline_track_samples(
+            {1: _noisy(4096, 0.0, rng)}, [1],
+            min_samples=50_000, max_samples=4096)
+        assert n == 50_000
+        assert "lengthen noise training" in info["summary"]
+
+    def test_empty_input_is_survivable(self):
+        n, info = recommend_baseline_track_samples({}, [1])
+        assert n == 0 and "no usable training data" in info["summary"]
+
+
+class TestAutoBaselineWiring:
+    def test_config_floors_at_a_multiple_of_the_pulse_length(self):
+        cfg = PulseCaptureConfig(max_pulse_ms=10.0)
+        assert cfg.baseline_track_auto is True
+        assert (cfg.baseline_track_min_samples(1000.0)
+                == cfg.BASELINE_PULSE_FACTOR * 10)
+
+    def test_session_kwargs_carry_auto_and_the_floor(self):
+        cfg = PulseCaptureConfig(max_pulse_ms=10.0)
+        kw = cfg.session_kwargs(1000.0)
+        assert kw["baseline_track_auto"] is True
+        assert kw["baseline_track_min_samples"] == 200
+
+    def test_validate_flags_a_training_window_too_short_to_measure(self):
+        cfg = PulseCaptureConfig(max_pulse_ms=10.0, noise_train_ms=50.0)
+        issues = cfg.validate(sample_rate=1000.0)
+        assert any(s == "warning" and "cannot be measured" in m
+                   for s, m in issues)
+
+    def test_session_measures_the_window_during_training(self):
+        """End to end: feeding drifting noise through the session must
+        leave a measured window on the engine, not the default 0."""
+        rng = np.random.default_rng(7)
+        n = 32768
+        arr = _noisy(n, 1e-2, rng)
+        sess = PulseCaptureSession(
+            channels=[1], sample_rate=1000.0, noise_samples=n,
+            baseline_track_auto=True, baseline_track_min_samples=0,
+            threshold_sigma=50.0)
+        sess.start()
+        for k in range(n):
+            sess.feed_sample(1, float(arr[k].real), float(arr[k].imag),
+                             k / 1000.0)
+        assert sess.state is CaptureState.CAPTURING
+        assert sess.baseline_track_info["drift_detected"]
+        assert sess.baseline_track_samples > 0
+        assert (sess.pcap.baseline_track_samples
+                == sess.baseline_track_samples)
+        assert sess.pcap._baseline_alpha > 0.0
+        assert sess.stats()["baseline_track_ms"] > 0
+
+    def test_re_estimation_installs_the_new_window_in_place(self):
+        rng = np.random.default_rng(8)
+        n = 8192
+        sess = PulseCaptureSession(
+            channels=[1], sample_rate=1000.0, noise_samples=n,
+            baseline_track_auto=True, threshold_sigma=50.0)
+        sess.start()
+        arr = _noisy(n, 0.0, rng)
+        for k in range(n):
+            sess.feed_sample(1, float(arr[k].real), float(arr[k].imag),
+                             k / 1000.0)
+        engine = sess.pcap
+        first = sess.baseline_track_samples
+
+        # Re-train on strongly drifting data: same engine, new window.
+        sess.re_estimate_noise()
+        arr = _noisy(n, 3e-2, rng)
+        for k in range(n):
+            sess.feed_sample(1, float(arr[k].real), float(arr[k].imag),
+                             (n + k) / 1000.0)
+        assert sess.pcap is engine, "engine should not be rebuilt"
+        assert sess.baseline_track_samples < first
+        assert (engine.baseline_track_samples
+                == sess.baseline_track_samples)

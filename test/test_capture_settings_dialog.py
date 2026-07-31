@@ -70,3 +70,22 @@ def test_roundtrip(qt_app):
     assert cfg.margin_fraction == 0.2
     assert cfg.enable_pileup is False
     dlg.close()
+
+
+def test_auto_baseline_toggle(qt_app):
+    """Auto is the default; the fixed spinbox is only live when it is
+    off, and the derived line says which one is in force."""
+    dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
+    assert dlg.baseline_auto_check.isChecked()
+    assert not dlg.baseline_spin.isEnabled()
+    assert dlg.get_config().baseline_track_auto is True
+    assert "baseline measured at training" in dlg.derived_label.text()
+
+    dlg.baseline_auto_check.setChecked(False)
+    dlg.baseline_spin.setValue(2000.0)
+    assert dlg.baseline_spin.isEnabled()
+    cfg = dlg.get_config()
+    assert cfg.baseline_track_auto is False
+    assert cfg.baseline_track_ms == 2000.0
+    assert "baseline EMA" in dlg.derived_label.text()
+    dlg.close()

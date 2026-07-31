@@ -1158,6 +1158,32 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._set_status(f"● Estimating noise — {prefix}"
                          + " | ".join(parts), "#FFCC33")
 
+    def _baseline_summary(self) -> str:
+        """What the training data said the tracking window should be.
+
+        Read off the session rather than the signal payload: the
+        measurement happens inside the session at the end of training,
+        and the single- and dual-stream callbacks carry different
+        shapes.
+        """
+        sess = getattr(self.task, "session", None)
+        if sess is None:
+            return ""
+        inners = ([("slow", sess.slow), ("fast", sess.fast)]
+                  if hasattr(sess, "slow") and hasattr(sess, "fast")
+                  else [("", sess)])
+        parts = []
+        for name, s in inners:
+            n = getattr(s, "baseline_track_samples", 0)
+            if not getattr(s, "baseline_track_auto", False) or not n:
+                continue
+            rate = getattr(s, "sample_rate", None)
+            span = f"{n / rate * 1e3:,.0f} ms" if rate else f"{n:,} samples"
+            info = getattr(s, "baseline_track_info", None) or {}
+            how = "1/f knee" if info.get("drift_detected") else "no drift seen"
+            parts.append(f"{name + ' ' if name else ''}{span} ({how})")
+        return ("   —   baseline τ:  " + ",  ".join(parts)) if parts else ""
+
     def _on_noise_estimated(self, noise_stats: dict) -> None:
         if "stream" in noise_stats and "stats" in noise_stats:
             stream = noise_stats["stream"]
@@ -1169,8 +1195,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 f"Ch{c} σI={ns.std_I:.2f}"
                 for c, ns in sorted(st.items()))
                 for s, st in sorted(self._noise_by_stream.items())]
-            self.noise_label.setText("Noise:  " + "   —   ".join(parts))
-            print(f"[PulseCapture] Noise estimated ({stream})")
+            self.noise_label.setText("Noise:  " + "   —   ".join(parts)
+                                     + self._baseline_summary())
+            print(f"[PulseCapture] Noise estimated ({stream})"
+                  f"{self._baseline_summary()}")
             self._refresh_status_line()
             return
 
@@ -1180,8 +1208,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             ns = noise_stats[c]
             parts.append(f"Ch{c} I={ns.mean_I:.1f}±{ns.std_I:.2f}, "
                          f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}")
-        self.noise_label.setText("Noise:  " + "   |   ".join(parts))
-        print("[PulseCapture] Noise estimated: " + " | ".join(parts))
+        self.noise_label.setText("Noise:  " + "   |   ".join(parts)
+                                 + self._baseline_summary())
+        print("[PulseCapture] Noise estimated: " + " | ".join(parts)
+              + self._baseline_summary())
         self._refresh_status_line()
         # Show what the estimator saw (until the first pulse replaces it)
         if self.follow_check.isChecked() or self._current_view is None:

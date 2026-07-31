@@ -656,6 +656,17 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
     pulse_grp.attrs["pileup"] = bool(pulse_data.get("pileup", False))
     pulse_grp.attrs["n_samples"] = len(amp_I)
 
+    # Where the detector triggered and where the leaky bucket confirmed
+    # the end — kept so a saved capture can be reviewed against the
+    # decisions that produced it, not just its samples.
+    for key in ("trigger_index", "end_index", "below_threshold_index",
+                "end_confirm_samples", "end_confirm_target"):
+        if key in pulse_data:
+            pulse_grp.attrs[key] = int(pulse_data[key])
+    for key in ("trigger_time", "end_time", "below_threshold_time"):
+        if key in pulse_data:
+            pulse_grp.attrs[key] = float(pulse_data[key])
+
     if noise_stats is not None:
         peak_I = float(np.max(np.abs(amp_I - noise_stats.mean_I)))
         peak_Q = float(np.max(np.abs(amp_Q - noise_stats.mean_Q)))
@@ -688,7 +699,13 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
 
 def _pulse_dict_from_group(grp) -> dict:
     """Waveforms + scalar attrs for one pulse group (reader/writer shared)."""
+    marks = {k: _convert_attr(grp.attrs[k])
+             for k in ("trigger_index", "end_index", "below_threshold_index",
+                       "end_confirm_samples", "end_confirm_target",
+                       "trigger_time", "end_time", "below_threshold_time")
+             if k in grp.attrs}
     return {
+        **marks,
         "Amp_I": np.array(grp["Amp_I"]),
         "Amp_Q": np.array(grp["Amp_Q"]),
         "Time": np.array(grp["Time"]),

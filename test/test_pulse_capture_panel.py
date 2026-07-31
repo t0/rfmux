@@ -813,3 +813,47 @@ def test_both_mode_annotates_bands_per_stream(qt_app, tmp_path):
 
     panel.close()
     _spin(qt_app)
+
+
+def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
+    """Trigger and leaky-bucket points, so a wrong-looking capture can
+    be read against the decisions that produced it."""
+    import pyqtgraph as pg
+
+    runtime = _FakeRuntime()
+    panel = _make_panel(qt_app, tmp_path, runtime)
+    rng = np.random.default_rng(42)
+    panel._on_start()
+    for _ in range(1000):
+        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
+                           float(rng.normal(0, 1.0)), None)
+    assert _spin_until(qt_app, lambda: panel.noise_stats)
+    _feed_capture(runtime._pulse_tap, rng)
+    assert _spin_until(qt_app, lambda: len(panel._pulse_order) >= 1)
+    panel._show_pulse(*panel._pulse_order[-1])
+
+    info = panel.pulse_info.text()
+    assert "trigger @ sample" in info, info
+    assert "end confirmed @" in info, info
+    assert "bucket" in info, info
+
+    for name, plot in (("I", panel.pulse_plot_i),
+                       ("Q", panel.pulse_plot_q)):
+        lines = [it for it in plot.getPlotItem().items
+                 if isinstance(it, pg.InfiniteLine)]
+        # Vertical only — the horizontal band lines are curves now.
+        verticals = [it for it in lines if it.angle == 90]
+        assert len(verticals) == 3, f"{name}: {len(verticals)} markers"
+        labels = [getattr(it, "label", None) for it in verticals]
+        if name == "I":
+            texts = [lb.textItem.toPlainText() for lb in labels if lb]
+            assert set(texts) == {"trigger", "below threshold",
+                                  "end confirmed"}, texts
+        else:
+            # x-linked, so repeating the labels underneath is noise
+            assert all(lb is None for lb in labels)
+
+    panel._on_stop()
+    _spin(qt_app)
+    panel.close()
+    _spin(qt_app)

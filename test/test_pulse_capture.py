@@ -1527,3 +1527,81 @@ class TestTrainingWindow:
         cfg = PulseCaptureConfig(noise_train_ms=30_000.0)
         assert cfg.noise_samples(19073.486328125) == 572_205
         assert cfg.noise_samples(1220703.125) == cfg._MAX_NOISE
+
+
+# ─────────────── Where the state machine actually acted ─────────────
+
+class TestDecisionMarks:
+    """A saved capture should be reviewable against the decisions that
+    produced it, not just its samples."""
+
+    def _run(self, trigger_samples=2, start=800, tau=40.0, amp=60.0,
+             n=3000, seed=3):
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = PulseCapture(
+            buf_size=4000, channels=[1], noise_stats=ns,
+            threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1,
+            accumulate=True, trigger_samples=trigger_samples)
+        rng = np.random.default_rng(seed)
+        for k in range(n):
+            v = rng.normal(0, 1.0)
+            if k >= start:
+                v += amp * np.exp(-(k - start) / tau)
+            pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
+                                k * 1e-3)
+        return pcap.pulses["Channel 1"][1]
+
+    def test_trigger_index_lands_on_the_onset(self):
+        d = self._run(start=800)
+        t = np.asarray(d["Time"])
+        assert d["trigger_time"] == pytest.approx(0.800, abs=2e-3)
+        assert t[d["trigger_index"]] == pytest.approx(d["trigger_time"])
+        # It is the pre-trigger margin in from the window start.
+        assert d["trigger_index"] > 0
+        # …and it is where the signal is largest, not somewhere in noise.
+        assert abs(d["Amp_I"][d["trigger_index"]]) > 20
+
+    def test_end_index_is_past_the_window_by_the_trim(self):
+        """The window is deliberately trimmed back to where the signal
+        returned to baseline, so the sample that satisfied the bucket
+        sits beyond the last saved one.  A marker has to survive that."""
+        d = self._run()
+        n = len(d["Amp_I"])
+        assert d["end_index"] >= n - 1
+        # end = (L-1) - trim and n = end - start, so the confirming
+        # sample lands trim+1 past the last saved index.
+        trim = d["end_confirm_samples"] - 5
+        assert d["end_index"] == n + trim
+        assert d["end_time"] > d["Time"][-1]
+
+    def test_bucket_count_reaches_its_target(self):
+        d = self._run()
+        assert d["end_confirm_samples"] > d["end_confirm_target"]
+
+    def test_below_threshold_sits_between_trigger_and_end(self):
+        d = self._run(tau=40.0, amp=60.0)
+        below = d["below_threshold_index"]
+        assert d["trigger_index"] < below < d["end_index"]
+        # 60σ decaying with τ=40 crosses 5σ after τ·ln(12) ≈ 99 samples.
+        assert below - d["trigger_index"] == pytest.approx(99, abs=20)
+
+    def test_marks_survive_a_round_trip_through_hdf5(self):
+        import tempfile
+        from rfmux.algorithms.measurement.pulse_hdf5 import (
+            PulseHDF5Reader, PulseHDF5Writer)
+
+        d = self._run()
+        ns = ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                               mean_Q=0.0, std_Q=1.0)
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "marks.h5"
+            w = PulseHDF5Writer(path, [1], {1: ns}, {})
+            w.append_pulse(1, 1, d, ns)
+            w.finalize()
+            with PulseHDF5Reader(path) as r:
+                got = r.get_pulse(1, 1)
+        for key in ("trigger_index", "end_index", "below_threshold_index",
+                    "end_confirm_samples", "end_confirm_target"):
+            assert got[key] == d[key], key
+        assert got["end_time"] == pytest.approx(d["end_time"])

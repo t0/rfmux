@@ -474,12 +474,42 @@ class PulseCapture:
         Q_win = self._window(self.buf[channel]["Q"], start, end)
         ts_win = self._window(self.buf[channel]["ts"], start, end)
 
+        # Where the state machine actually acted, so a capture can be
+        # read back against the decisions that produced it.
+        #
+        # The end index is normally PAST the last saved sample: the
+        # window is trimmed back by confirmation_trim so it ends where
+        # the signal returned to baseline rather than where the leaky
+        # bucket finished confirming it.  Times are carried alongside
+        # the indices for exactly that reason.
+        ts_all = self.buf[channel]["ts"].data()
+        trigger_index = trig_fifo - start
+        end_index = (L - 1) - start
+        below_index = (trigger_index + st.active_duration
+                       if st.active_duration is not None else None)
+
         pulse_data = {
             "Amp_I": np.array(I_win),
             "Amp_Q": np.array(Q_win),
             "Time": np.array(ts_win),
             "pileup": pileup,
+            "trigger_index": int(trigger_index),
+            "end_index": int(end_index),
+            "trigger_time": float(ts_all[trig_fifo]),
+            "end_time": float(ts_all[L - 1]),
+            "end_confirm_samples": int(st.end_ptr_count),
+            "end_confirm_target": int(max(
+                self._MIN_END_SAMPLES,
+                int(self.margin_fraction * (
+                    st.active_duration
+                    if st.active_duration is not None
+                    else st.ch_sample_n - st.trig_abs)))),
         }
+        if below_index is not None:
+            pulse_data["below_threshold_index"] = int(below_index)
+            if 0 <= below_index < len(ts_win):
+                pulse_data["below_threshold_time"] = float(
+                    ts_win[below_index])
 
         ch_key = f"Channel {channel}"
         self.pulse_count[ch_key] += 1

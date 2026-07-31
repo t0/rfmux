@@ -382,6 +382,68 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     # Name once per pair, or the legend doubles up.
                     name=f"{prefix}{tag}" if i == 0 else None)
 
+    @staticmethod
+    def _decision_text(wf) -> str:
+        """One line describing how the capture was bounded."""
+        if not isinstance(wf, dict) or "trigger_index" not in wf:
+            return ""
+        trig = wf.get("trigger_index")
+        end = wf.get("end_index")
+        below = wf.get("below_threshold_index")
+        got = wf.get("end_confirm_samples")
+        want = wf.get("end_confirm_target")
+        parts = [f"trigger @ sample {trig}"]
+        if below is not None:
+            parts.append(f"below threshold @ {below}")
+        if end is not None:
+            parts.append(f"end confirmed @ {end}")
+        if got is not None and want is not None:
+            parts.append(f"bucket {got}/{want}")
+        return "\n" + "   ".join(parts)
+
+    def _annotate_decisions(self, plot, wf, t0, quad) -> None:
+        """Mark where the detector triggered and where the leaky bucket
+        confirmed the end.
+
+        Vertical lines rather than markers on the trace: the end point
+        normally sits PAST the last saved sample, because the window is
+        trimmed back to where the signal returned to baseline rather
+        than where the bucket finished confirming it.  A line still
+        shows that, a data marker could not.
+        """
+        t = np.asarray(wf.get("Time"), dtype=np.float64)
+        if not len(t):
+            return
+
+        def _t_at(idx_key, time_key):
+            tv = wf.get(time_key)
+            if tv is not None and np.isfinite(tv):
+                return float(tv) - t0
+            idx = wf.get(idx_key)
+            if idx is None or not (0 <= int(idx) < len(t)):
+                return None
+            return float(t[int(idx)]) - t0
+
+        marks = (
+            ("trigger_index", "trigger_time", "#33CC66", "trigger"),
+            ("below_threshold_index", "below_threshold_time", "#CCAA33",
+             "below threshold"),
+            ("end_index", "end_time", "#CC3366", "end confirmed"),
+        )
+        for idx_key, time_key, color, label in marks:
+            x = _t_at(idx_key, time_key)
+            if x is None:
+                continue
+            plot.addItem(pg.InfiniteLine(
+                pos=x, angle=90,
+                pen=pg.mkPen(color, width=1.4,
+                             style=QtCore.Qt.PenStyle.DashLine),
+                # Label only on the top plot; the two are x-linked, so
+                # repeating it underneath is noise.
+                label=label if quad == "I" else None,
+                labelOpts={"position": 0.95, "color": color,
+                           "fill": (0, 0, 0, 120), "movable": False}))
+
     def _set_pulse_x_axis(self, label: str, units: str | None = None) -> None:
         """Label BOTH stacked plots the same way.
 
@@ -1567,7 +1629,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"{summary.get('duration_ms', 0):.2f} ms   "
             f"peak {summary.get('peak_amp', 0):.0f} cts "
             f"({summary.get('snr', 0):.1f}σ)\n"
-            f"derived τ = {tau_str}")
+            f"derived τ = {tau_str}"
+            + self._decision_text(wf))
 
         for plot in (self.pulse_plot_i, self.pulse_plot_q):
             plot.clear()
@@ -1602,6 +1665,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                       pen=pg.mkPen(IQ_COLORS[quad], width=LINE_WIDTH),
                       name=f"{quad} (pulse)")
             self._annotate_noise_bands(plot, quad, ns, x0, x1, "#888888")
+            self._annotate_decisions(plot, wf, t0, quad)
 
     def _show_pair(self, channel: int, pair_idx: int) -> None:
         """Matched-pair overlay: dense fast trace under slow markers,
@@ -1734,6 +1798,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 self._annotate_noise_bands(
                     plot, quad, stats.get(channel), x0, x1, tint,
                     prefix=f"{stream} ")
+                # Present only on a stream's own triggered window — a
+                # ring extract taken because the OTHER stream fired
+                # carries no decisions of its own.
+                self._annotate_decisions(plot, wf, t0, quad)
 
     # ── Histograms ────────────────────────────────────────────────
 

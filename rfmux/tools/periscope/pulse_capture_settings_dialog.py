@@ -46,9 +46,9 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self._updating = False
 
         # Two decisions belong to the user — how selective the trigger
-        # is, and how long they are willing to spend training.  The rest
-        # is measured from the training record or has a defensible
-        # default, so it lives under Advanced.
+        # is, and how long a pulse can be.  Everything else is derived
+        # from those, measured from the training record, or has a
+        # defensible default, so it lives under Advanced.
         outer = QtWidgets.QVBoxLayout(self)
         form = QtWidgets.QFormLayout()
         outer.addLayout(form)
@@ -68,18 +68,27 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "baseline")
         form.addRow("Threshold σ:", self.threshold_spin)
 
-        self.noise_spin = QtWidgets.QDoubleSpinBox()
-        self.noise_spin.setRange(0.001, 300.0)
-        self.noise_spin.setDecimals(3)
-        self.noise_spin.setSingleStep(1.0)
-        self.noise_spin.setValue(config.noise_train_ms / 1000.0)
-        self.noise_spin.setToolTip(
-            "How long to watch before capturing starts.\n"
-            "This record is fitted for the noise level and for the 1/f "
-            "knee that sets the baseline tracking window; the knee is "
-            "only visible if training runs well past it.\n"
+        self.max_pulse_spin = QtWidgets.QDoubleSpinBox()
+        self.max_pulse_spin.setRange(0.1, 60_000.0)
+        self.max_pulse_spin.setDecimals(1)
+        self.max_pulse_spin.setValue(config.max_pulse_ms)
+        self.max_pulse_spin.setToolTip(
+            "Longest pulse the ring buffer must hold — captures that "
+            "outlast the buffer lose their rising edge.\n"
+            "Estimate generously: it also sets the noise-training "
+            "length and the floor under the baseline tracking window.")
+        form.addRow("Max pulse (ms):", self.max_pulse_spin)
+
+        # Training is derived, not chosen: what matters is that the
+        # window is long compared with a pulse, and that ratio follows
+        # the pulse length automatically.
+        self.noise_label = QtWidgets.QLabel()
+        self.noise_label.setToolTip(
+            f"{PulseCaptureConfig.NOISE_TRAIN_PULSES}x the max pulse "
+            "length.  The record is fitted for the noise level and for "
+            "the 1/f knee that sets the baseline tracking window.\n"
             "Robust estimators tolerate pulses in the window.")
-        form.addRow("Noise training (s):", self.noise_spin)
+        form.addRow("Noise training:", self.noise_label)
 
         adv_box = QtWidgets.QGroupBox("Advanced")
         adv_box.setCheckable(True)
@@ -134,17 +143,6 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "glitches (0 = keep everything)")
         adv.addRow("Min pulse (ms):", self.min_pulse_spin)
 
-        self.max_pulse_spin = QtWidgets.QDoubleSpinBox()
-        self.max_pulse_spin.setRange(0.1, 60_000.0)
-        self.max_pulse_spin.setDecimals(1)
-        self.max_pulse_spin.setValue(config.max_pulse_ms)
-        self.max_pulse_spin.setToolTip(
-            "Longest pulse the ring buffer must hold — captures that "
-            "outlast the buffer lose their rising edge.\n"
-            "Estimate generously: it also sets the floor under the "
-            "baseline tracking window.")
-        adv.addRow("Max pulse (ms):", self.max_pulse_spin)
-
         self.baseline_auto_check = QtWidgets.QCheckBox(
             "Measure from noise training")
         self.baseline_auto_check.setChecked(config.baseline_track_auto)
@@ -195,7 +193,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
 
         for w in (self.threshold_spin, self.end_spin, self.margin_spin,
                   self.min_pulse_spin, self.max_pulse_spin,
-                  self.noise_spin, self.baseline_spin, self.trigger_spin):
+                  self.baseline_spin, self.trigger_spin):
             w.valueChanged.connect(self._update_dependent_values)
         for c in (self.pileup_check, self.baseline_auto_check):
             c.toggled.connect(self._update_dependent_values)
@@ -212,7 +210,6 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             trigger_samples=int(self.trigger_spin.value()),
             min_pulse_ms=float(self.min_pulse_spin.value()),
             max_pulse_ms=float(self.max_pulse_spin.value()),
-            noise_train_ms=float(self.noise_spin.value()) * 1000.0,
             baseline_track_auto=self.baseline_auto_check.isChecked(),
             baseline_track_ms=float(self.baseline_spin.value()),
             enable_pileup=self.pileup_check.isChecked(),
@@ -229,6 +226,10 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             # live-looking controls for one quantity.
             self.baseline_spin.setEnabled(not cfg.baseline_track_auto)
             d = cfg.describe(self.sample_rate, self.n_channels)
+            span = d["noise_train_span_ms"]
+            self.noise_label.setText(
+                f"{span/1000:.3g} s "
+                f"({cfg.NOISE_TRAIN_PULSES}× the max pulse length)")
             acc = d["accidental_per_min"]
             acc_str = (f"{acc:,.0f}/min" if acc >= 1 else
                        f"{acc*60:.2g}/hr" if acc >= 0.001 else "negligible")

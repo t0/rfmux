@@ -67,11 +67,20 @@ def _spin_until(qt_app, predicate, timeout=8.0):
 
 
 def _make_panel(qt_app, tmp_path, runtime):
+    from dataclasses import replace
+
     panel = PulseCapturePanel(periscope=runtime, dark_mode=True)
     panel._browse_dir = str(tmp_path)
     panel.channels_edit.setText("1")
     panel.threshold_spin.setValue(5.0)
     panel.end_spin.setValue(1.5)
+    # Training is derived from the pulse length (20x), which at the
+    # default 250 ms would ask for more samples than these tests feed.
+    # Override just the training length: max_pulse_ms is left alone
+    # because it also sets the baseline-tracking floor, and 250 ms is
+    # the right scale for the sample-indexed pulses fed below.
+    panel.capture_config = replace(panel.capture_config,
+                                   noise_train_ms=1.0)
     return panel
 
 

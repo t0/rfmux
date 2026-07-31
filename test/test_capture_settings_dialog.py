@@ -58,7 +58,6 @@ def test_roundtrip(qt_app):
     dlg.threshold_spin.setValue(8.0)
     dlg.min_pulse_spin.setValue(0.5)
     dlg.max_pulse_spin.setValue(100.0)
-    dlg.noise_spin.setValue(0.08)   # seconds in the UI, ms in the config
     dlg.margin_spin.setValue(0.2)
     dlg.pileup_check.setChecked(False)
 
@@ -66,7 +65,10 @@ def test_roundtrip(qt_app):
     assert cfg.threshold_sigma == 8.0
     assert cfg.min_pulse_ms == 0.5
     assert cfg.max_pulse_ms == 100.0
-    assert cfg.noise_train_ms == 80.0
+    # Training is derived from the pulse length, not entered.
+    assert cfg.noise_train_ms == 0.0
+    assert cfg.noise_train_span_ms() == 100.0 * cfg.NOISE_TRAIN_PULSES
+    assert "20×" in dlg.noise_label.text()
     assert cfg.margin_fraction == 0.2
     assert cfg.enable_pileup is False
     dlg.close()
@@ -88,4 +90,21 @@ def test_auto_baseline_toggle(qt_app):
     assert cfg.baseline_track_auto is False
     assert cfg.baseline_track_ms == 2000.0
     assert "baseline EMA" in dlg.derived_label.text()
+    dlg.close()
+
+
+def test_max_pulse_is_a_primary_control_and_drives_training(qt_app):
+    """Max pulse sits in the main form, and the derived training length
+    tracks it — the ratio is what matters, not any absolute duration."""
+    dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
+    # Not hidden behind Advanced.
+    assert not dlg.adv_box.isChecked()
+    assert dlg.max_pulse_spin.isVisible() or not dlg.isVisible()
+
+    dlg.max_pulse_spin.setValue(10.0)
+    assert dlg.get_config().noise_train_span_ms() == 200.0
+    first = dlg.noise_label.text()
+    dlg.max_pulse_spin.setValue(40.0)
+    assert dlg.get_config().noise_train_span_ms() == 800.0
+    assert dlg.noise_label.text() != first, "readout did not follow"
     dlg.close()

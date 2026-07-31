@@ -103,14 +103,9 @@ class PulseCaptureConfig:
     #: under the baseline tracking window.  Estimate it generously — a
     #: capture that outlasts the ring loses its rising edge.
     max_pulse_ms: float = 250.0
-    #: Training length, in SAMPLE time — so the wall-clock cost scales
-    #: with how fast the stream actually runs.  Deliberately short by
-    #: default: on the mock, and on the PFB stream generally, a long
-    #: training window is expensive, and the measurements below degrade
-    #: gracefully to their fallbacks rather than failing.  Raise it
-    #: (seconds are reasonable on hardware) when you want the pulse
-    #: scale and the 1/f knee actually measured rather than guessed.
-    noise_train_ms: float = 50.0
+    #: Training length override, in SAMPLE time.  0 (the default)
+    #: derives it from the pulse length — see noise_train_span_ms().
+    noise_train_ms: float = 0.0
     enable_pileup: bool = True
     #: Measure the baseline tracking window from the noise training data
     #: instead of taking ``baseline_track_ms``.  The upper end of the
@@ -135,6 +130,12 @@ class PulseCaptureConfig:
     #: moves by at most (pulse / tau) * end_sigma * sigma during a
     #: pulse, so 20x bounds that bite at a few hundredths of a sigma.
     BASELINE_PULSE_FACTOR = 20
+    #: Training window as a multiple of the max pulse length.  Tying it
+    #: to the pulse scale is what makes one setting work across every
+    #: stream rate: the training window has to be long compared with a
+    #: pulse (so the fit sees baseline, not signal), and that ratio —
+    #: not any absolute duration — is the thing that matters.
+    NOISE_TRAIN_PULSES = 20
     #: Independent block pairs wanted before the knee is measurable —
     #: mirrors _MIN_ALLAN_PAIRS in the estimator.
     _KNEE_PAIRS = 9
@@ -157,8 +158,21 @@ class PulseCaptureConfig:
         binds only at fast rates, where a long span is neither needed
         nor achievable — describe() reports the duration actually used.
         """
-        want = int(round(self.noise_train_ms * 1e-3 * sample_rate))
+        want = int(round(self.noise_train_span_ms() * 1e-3 * sample_rate))
         return max(self._MIN_NOISE, min(want, self._MAX_NOISE))
+
+    def noise_train_span_ms(self) -> float:
+        """Effective training length.
+
+        Derived from the pulse length by default: the window must be
+        long compared with a pulse for the fit to see baseline rather
+        than signal, and expressing that as a ratio means it follows
+        whatever pulse scale the user sets instead of needing its own
+        answer.  A positive noise_train_ms overrides it.
+        """
+        if self.noise_train_ms > 0:
+            return self.noise_train_ms
+        return self.NOISE_TRAIN_PULSES * self.max_pulse_ms
 
     def _cross_prob(self) -> float:
         """Per-sample probability that noise alone clears the threshold
@@ -245,6 +259,7 @@ class PulseCaptureConfig:
             "sample_rate_hz": sample_rate,
             "min_pulse_samples": self.min_pulse_samples(sample_rate),
             "noise_samples": self.noise_samples(sample_rate),
+            "noise_train_span_ms": self.noise_train_span_ms(),
             "noise_train_actual_ms":
                 self.noise_samples(sample_rate) / sample_rate * 1e3,
             "buf_samples": buf,
@@ -306,9 +321,9 @@ class PulseCaptureConfig:
             issues.append(("error",
                            "Min pulse length must be below max pulse "
                            "length."))
-        if self.noise_train_ms <= 0:
+        if self.noise_train_ms < 0:
             issues.append(("error",
-                           "Noise training length must be positive."))
+                           "Noise training override cannot be negative."))
         if self.baseline_track_auto:
             # The knee is only visible if the training record reaches it;
             # otherwise the fit honestly reports "no drift measured" and
@@ -327,7 +342,8 @@ class PulseCaptureConfig:
                               else f"{want:,.0f} ms")
                     issues.append((
                         "warning",
-                        f"Noise training ({self.noise_train_ms:g} ms) can "
+                        f"Noise training "
+                        f"({self.noise_train_span_ms():g} ms) can "
                         f"only resolve drift faster than {meas:.3g} ms, "
                         f"below the {floor_ms:g} ms floor — the knee "
                         "cannot be measured and the floor will be used. "

@@ -54,6 +54,7 @@ from .pulse_detection import (
     ChannelNoiseStats,
     PulseCapture,
     estimate_noise_stats,
+    measure_pulse_scale,
     recommend_baseline_track_samples,
 )
 from .pulse_analysis import pulse_summary
@@ -87,11 +88,39 @@ class PulseCaptureConfig:
     threshold_sigma: float = 5.0
     end_sigma: float = 1.5
     #: Consecutive samples that must clear the threshold to trigger.
-    #: One sample is not evidence of a pulse — see accidental_rate_hz().
-    trigger_samples: int = 2
+    #: 0 = choose it from the stream rate, which is the right default:
+    #: the accidental rate scales with sample rate, so one sample is
+    #: plenty of evidence at 596 Hz (2.5 accidentals per HOUR) and
+    #: nowhere near enough at 1.22 MHz (1.4 per SECOND).  Demanding two
+    #: everywhere would reject real pulses on a heavily decimated slow
+    #: stream, where a fast pulse spans less than one sample.
+    trigger_samples: int = 0
+    #: Accidental-trigger budget used to pick trigger_samples, per
+    #: channel per minute.
+    max_accidental_per_min: float = 1.0
     margin_fraction: float = 0.1
     min_pulse_ms: float = 0.0      # 0 = no glitch rejection
-    max_pulse_ms: float = 250.0    # sizes the ring buffer
+    #: Longest pulse the ring must hold.  Used as the starting guess and
+    #: as the fallback when ``max_pulse_auto`` finds nothing to measure.
+    max_pulse_ms: float = 250.0
+    #: Measure the pulse length from the training record rather than
+    #: taking ``max_pulse_ms``.  This is the parameter users can least
+    #: supply from first principles, and it sets both the ring buffer
+    #: and the floor under the baseline window.
+    #:
+    #: Off by default because it costs a second detection pass over the
+    #: training record, run synchronously when training ends — on a fast
+    #: stream that stalls the receive loop long enough to drop packets.
+    #: Turn it on together with a training window long enough to contain
+    #: a useful number of pulses.
+    max_pulse_auto: bool = False
+    #: Training length, in SAMPLE time — so the wall-clock cost scales
+    #: with how fast the stream actually runs.  Deliberately short by
+    #: default: on the mock, and on the PFB stream generally, a long
+    #: training window is expensive, and the measurements below degrade
+    #: gracefully to their fallbacks rather than failing.  Raise it
+    #: (seconds are reasonable on hardware) when you want the pulse
+    #: scale and the 1/f knee actually measured rather than guessed.
     noise_train_ms: float = 50.0
     enable_pileup: bool = True
     #: Measure the baseline tracking window from the noise training data
@@ -110,6 +139,9 @@ class PulseCaptureConfig:
     BUFFER_SAFETY = 1.5
     _MIN_BUF = 1000
     _MIN_NOISE = 200
+    #: Ceiling on the held training record, per channel.  complex128, so
+    #: this is 32 MB/channel.
+    _MAX_NOISE = 2_000_000
     #: How many max-length pulses the tracker must span.  A clamped EMA
     #: moves by at most (pulse / tau) * end_sigma * sigma during a
     #: pulse, so 20x bounds that bite at a few hundredths of a sigma.
@@ -128,8 +160,39 @@ class PulseCaptureConfig:
         return max(self._MIN_BUF, int(math.ceil(need)))
 
     def noise_samples(self, sample_rate: float) -> int:
-        return max(self._MIN_NOISE,
-                   int(round(self.noise_train_ms * 1e-3 * sample_rate)))
+        """Training length in samples, memory-bounded.
+
+        The record is held whole (it is fitted, not streamed), so a
+        duration that is comfortable on the slow stream is not on the
+        PFB one: 30 s at 1.22 MHz is 36.6M samples per channel.  The cap
+        binds only at fast rates, where a long span is neither needed
+        nor achievable — describe() reports the duration actually used.
+        """
+        want = int(round(self.noise_train_ms * 1e-3 * sample_rate))
+        return max(self._MIN_NOISE, min(want, self._MAX_NOISE))
+
+    def _cross_prob(self) -> float:
+        """Per-sample probability that noise alone clears the threshold
+        on either quadrature."""
+        p1 = math.erfc(self.threshold_sigma / math.sqrt(2.0))
+        return 1.0 - (1.0 - p1) ** 2
+
+    def trigger_samples_for(self, sample_rate: float) -> int:
+        """Confirmation length: the fewest samples that hold accidental
+        triggers under the budget at this rate.
+
+        Deriving it rather than fixing it is what lets one setting work
+        across a 2000x span of stream rates: at 596 Hz the answer is 1,
+        at 38 kHz and above it is 2.
+        """
+        if self.trigger_samples > 0:
+            return self.trigger_samples
+        p = self._cross_prob()
+        n = 1
+        while (60.0 * sample_rate * p ** n > self.max_accidental_per_min
+               and n < 16):
+            n += 1
+        return n
 
     def accidental_rate_hz(self, sample_rate: float) -> float:
         """Expected triggers per second per channel on noise alone.
@@ -140,9 +203,8 @@ class PulseCaptureConfig:
         figure is exact and is the one that bites: at 5 sigma it is
         ~1.4 Hz per channel on the PFB stream.
         """
-        p1 = math.erfc(self.threshold_sigma / math.sqrt(2.0))
-        p = 1.0 - (1.0 - p1) ** 2          # either I or Q
-        return sample_rate * p ** max(1, self.trigger_samples)
+        return (sample_rate
+                * self._cross_prob() ** self.trigger_samples_for(sample_rate))
 
     def max_pulse_samples(self, sample_rate: float) -> int:
         return max(1, int(round(self.max_pulse_ms * 1e-3 * sample_rate)))
@@ -175,10 +237,13 @@ class PulseCaptureConfig:
             "end_sigma": self.end_sigma,
             "margin_fraction": self.margin_fraction,
             "min_pulse_samples": self.min_pulse_samples(sample_rate),
-            "trigger_samples": self.trigger_samples,
+            "trigger_samples": self.trigger_samples_for(sample_rate),
             "enable_pileup": self.enable_pileup,
             "buf_size": self.buf_size(sample_rate),
             "noise_samples": self.noise_samples(sample_rate),
+            "max_pulse_auto": self.max_pulse_auto,
+            "buffer_safety": self.BUFFER_SAFETY,
+            "baseline_pulse_factor": self.BASELINE_PULSE_FACTOR,
             "baseline_track_auto": self.baseline_track_auto,
             "baseline_track_samples":
                 self.baseline_track_samples(sample_rate),
@@ -209,7 +274,8 @@ class PulseCaptureConfig:
                 self.baseline_track_min_samples(sample_rate)
                 / sample_rate * 1e3,
             "knee_measurable_ms": self.knee_measurable_ms(sample_rate),
-            "trigger_samples": self.trigger_samples,
+            "max_pulse_auto": self.max_pulse_auto,
+            "trigger_samples": self.trigger_samples_for(sample_rate),
             "accidental_per_min":
                 60.0 * self.accidental_rate_hz(sample_rate),
             "accidental_per_min_unconfirmed": 60.0 * sample_rate * (
@@ -241,16 +307,9 @@ class PulseCaptureConfig:
             issues.append(("warning",
                            f"Threshold {self.threshold_sigma:g}σ will "
                            "trigger frequently on plain noise."))
-        if self.trigger_samples < 1:
+        if self.trigger_samples < 0:
             issues.append(("error",
-                           "Trigger confirmation must be at least 1 sample."))
-        elif self.trigger_samples == 1:
-            issues.append((
-                "warning",
-                "Single-sample triggering: one noise excursion is enough "
-                "to start a capture. Requiring 2 consecutive samples "
-                "costs a real pulse nothing and removes almost all "
-                "accidentals."))
+                           "Trigger confirmation cannot be negative."))
         if not 0 <= self.margin_fraction <= 1:
             issues.append(("error",
                            "Margin fraction must be within 0–1."))
@@ -400,6 +459,9 @@ class PulseCaptureSession:
         buf_size: int = 5000,
         sample_rate: Optional[float] = None,
         noise_samples: int = 1000,
+        max_pulse_auto: bool = False,
+        buffer_safety: float = 1.5,
+        baseline_pulse_factor: int = 20,
         baseline_track_auto: bool = False,
         baseline_track_samples: int = 0,
         baseline_track_min_samples: int = 0,
@@ -428,6 +490,11 @@ class PulseCaptureSession:
         self.buf_size = buf_size
         self.sample_rate = sample_rate
         self.noise_samples = int(noise_samples)
+        self.max_pulse_auto = bool(max_pulse_auto)
+        self.buffer_safety = float(buffer_safety)
+        self.baseline_pulse_factor = int(baseline_pulse_factor)
+        #: Diagnostics from the last pulse-scale measurement.
+        self.pulse_scale_info: Optional[Dict[str, Any]] = None
         self.baseline_track_auto = bool(baseline_track_auto)
         self.baseline_track_samples = int(baseline_track_samples)
         self.baseline_track_min_samples = int(baseline_track_min_samples)
@@ -450,12 +517,8 @@ class PulseCaptureSession:
         hist_kwargs["threshold_sigma"] = threshold_sigma
         self.histograms = PulseHistogramSet(**hist_kwargs)
 
-        # Trigger-aligned stacking: window sized from the ring so it
-        # covers the longest expected pulse without unbounded memory.
-        post = max(64, min(buf_size // 2, 20000))
-        self.templates = PulseTemplateSet(
-            pre_samples=max(8, post // 10), post_samples=post,
-            threshold_sigma=threshold_sigma, sample_rate=sample_rate)
+        self.templates: PulseTemplateSet
+        self._resize_templates()
 
         self.state = CaptureState.IDLE
         self.noise_stats: Dict[int, ChannelNoiseStats] = {}
@@ -465,8 +528,12 @@ class PulseCaptureSession:
         self.pcap: Optional[PulseCapture] = None
         self.writer = None
 
-        # Noise-estimation accumulation buffers (complex samples)
-        self._noise_buf: Dict[int, List[complex]] = {}
+        # Noise-estimation accumulation.  Preallocated numpy rather
+        # than a list of Python complex objects: the record is held
+        # whole, and at 4x the memory per sample a long training run
+        # on a fast stream would not fit.
+        self._noise_buf: Dict[int, np.ndarray] = {}
+        self._noise_n: Dict[int, int] = {}
 
         # Counters / timing (sample time, from fed timestamps)
         self.pulse_counts: Dict[int, int] = {c: 0 for c in self.channels}
@@ -482,7 +549,7 @@ class PulseCaptureSession:
         """Begin the session: enter noise estimation."""
         if self.state is not CaptureState.IDLE:
             raise RuntimeError(f"start() called in state {self.state.name}")
-        self._noise_buf = {c: [] for c in self.channels}
+        self._alloc_noise_buffers()
         self.state = CaptureState.ESTIMATING
 
     def re_estimate_noise(self) -> None:
@@ -497,7 +564,7 @@ class PulseCaptureSession:
                 f"re_estimate_noise() called in state {self.state.name}")
         if self.pcap is not None:
             self.pcap.freeze_triggers = True
-        self._noise_buf = {c: [] for c in self.channels}
+        self._alloc_noise_buffers()
         self.state = CaptureState.ESTIMATING
 
     def stop(self) -> None:
@@ -537,16 +604,17 @@ class PulseCaptureSession:
         """
         if self.state is CaptureState.ESTIMATING:
             buf = self._noise_buf.get(channel)
-            if buf is None or len(buf) >= self.noise_samples:
+            n = self._noise_n.get(channel, 0)
+            if buf is None or n >= self.noise_samples:
                 self._maybe_finish_estimation()
                 return
-            buf.append(complex(i_val, q_val))
-            n = len(buf)
+            buf[n] = complex(i_val, q_val)
+            n += 1
+            self._noise_n[channel] = n
             if n % self.progress_every == 0 or n == self.noise_samples:
                 self._callback(self.on_progress, {
                     "state": self.state.value,
-                    "collected": {c: len(self._noise_buf.get(c, []))
-                                  for c in self.channels},
+                    "collected": dict(self._noise_n),
                     "target": self.noise_samples,
                 })
             if n >= self.noise_samples:
@@ -595,18 +663,53 @@ class PulseCaptureSession:
 
     # ── Internals ─────────────────────────────────────────────────
 
+    def _resize_templates(self) -> None:
+        """(Re)build the stacking window from the current ring size.
+
+        Called again if the measured pulse scale enlarges the ring —
+        only ever before the first pulse arrives, so nothing is lost.
+        """
+        post = max(64, min(self.buf_size // 2, 20000))
+        self.templates = PulseTemplateSet(
+            pre_samples=max(8, post // 10), post_samples=post,
+            threshold_sigma=self.threshold_sigma,
+            sample_rate=self.sample_rate)
+
+    def _alloc_noise_buffers(self) -> None:
+        self._noise_buf = {c: np.empty(self.noise_samples,
+                                       dtype=np.complex128)
+                           for c in self.channels}
+        self._noise_n = {c: 0 for c in self.channels}
+
     def _maybe_finish_estimation(self) -> None:
-        if any(len(self._noise_buf.get(c, [])) < self.noise_samples
+        if any(self._noise_n.get(c, 0) < self.noise_samples
                for c in self.channels):
             return
 
-        samples = {
-            c: np.asarray(self._noise_buf[c], dtype=np.complex128)
-            for c in self.channels
-        }
+        samples = {c: self._noise_buf[c][:self._noise_n[c]]
+                   for c in self.channels}
         self.noise_stats, self.noise_data = estimate_noise_stats(
             samples, self.channels)
-        self._noise_buf = {}
+
+        # The training record carries more than the trigger threshold:
+        # the pulse timescale and the drift timescale are both in it.
+        # Measure the pulse scale FIRST — it sets the ring buffer and
+        # the floor under the tracking window.
+        if self.max_pulse_auto and self.pcap is None:
+            rec, self.pulse_scale_info = measure_pulse_scale(
+                samples, self.channels, self.noise_stats,
+                threshold_sigma=self.threshold_sigma,
+                end_sigma=self.end_sigma,
+                trigger_samples=self.trigger_samples,
+                margin_fraction=self.margin_fraction,
+                enable_pileup=self.enable_pileup,
+                safety=self.buffer_safety)
+            if rec:
+                self.buf_size = max(self.buf_size, rec)
+                self.baseline_track_min_samples = int(
+                    self.baseline_pulse_factor
+                    * self.pulse_scale_info["p99_samples"])
+                self._resize_templates()
 
         # The same record that gives the trigger threshold also carries
         # the drift timescale, so measure the tracking window here

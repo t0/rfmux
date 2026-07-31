@@ -45,7 +45,13 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         config = config or PulseCaptureConfig()
         self._updating = False
 
-        form = QtWidgets.QFormLayout(self)
+        # Two decisions belong to the user — how selective the trigger
+        # is, and how long they are willing to spend training.  The rest
+        # is measured from the training record or has a defensible
+        # default, so it lives under Advanced.
+        outer = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        outer.addLayout(form)
 
         rate_str = (f"{self.sample_rate/1e6:.2f} MHz" if
                     self.sample_rate >= 1e5
@@ -62,13 +68,53 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "baseline")
         form.addRow("Threshold σ:", self.threshold_spin)
 
+        self.noise_spin = QtWidgets.QDoubleSpinBox()
+        self.noise_spin.setRange(0.001, 300.0)
+        self.noise_spin.setDecimals(3)
+        self.noise_spin.setSingleStep(1.0)
+        self.noise_spin.setValue(config.noise_train_ms / 1000.0)
+        self.noise_spin.setToolTip(
+            "How long to watch before capturing starts.\n"
+            "This record is fitted for the noise level, the pulse "
+            "length, and the 1/f knee that sets the baseline tracking "
+            "window — longer training measures more of them.\n"
+            "Robust estimators tolerate pulses in the window.")
+        form.addRow("Noise training (s):", self.noise_spin)
+
+        adv_box = QtWidgets.QGroupBox("Advanced")
+        adv_box.setCheckable(True)
+        adv_box.setChecked(False)
+        adv = QtWidgets.QFormLayout(adv_box)
+        outer.addWidget(adv_box)
+        self.adv_box = adv_box
+        adv_box.toggled.connect(
+            lambda on: [adv.itemAt(i).widget().setVisible(on)
+                        for i in range(adv.count())
+                        if adv.itemAt(i).widget() is not None])
+
+        self.trigger_spin = QtWidgets.QSpinBox()
+        self.trigger_spin.setRange(0, 64)
+        self.trigger_spin.setSpecialValueText("auto")
+        self.trigger_spin.setValue(config.trigger_samples)
+        self.trigger_spin.setToolTip(
+            "Consecutive samples that must clear the threshold before a "
+            "capture starts.  auto keeps accidental triggers under "
+            "1/min per channel at this stream rate.\n"
+            "How much evidence one sample is depends entirely on the "
+            "rate: at 5σ noise alone crosses ~2.5 times per HOUR at "
+            "596 Hz but ~1.4 times per SECOND on the PFB stream.  "
+            "Forcing 2 everywhere would reject real pulses on a heavily "
+            "decimated slow stream, where a fast pulse spans less than "
+            "one sample.")
+        adv.addRow("Trigger confirmation (samples):", self.trigger_spin)
+
         self.end_spin = QtWidgets.QDoubleSpinBox()
         self.end_spin.setRange(0.1, 100.0)
         self.end_spin.setSingleStep(0.1)
         self.end_spin.setValue(config.end_sigma)
         self.end_spin.setToolTip(
             "Pulse ends when BOTH I and Q stay within this band")
-        form.addRow("End σ:", self.end_spin)
+        adv.addRow("End σ:", self.end_spin)
 
         self.margin_spin = QtWidgets.QDoubleSpinBox()
         self.margin_spin.setRange(0.0, 1.0)
@@ -77,7 +123,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.margin_spin.setToolTip(
             "Fraction of the pulse length shown before the trigger, "
             "and the adaptive end-confirmation count")
-        form.addRow("Margin fraction:", self.margin_spin)
+        adv.addRow("Margin fraction:", self.margin_spin)
 
         self.min_pulse_spin = QtWidgets.QDoubleSpinBox()
         self.min_pulse_spin.setRange(0.0, 10_000.0)
@@ -86,7 +132,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.min_pulse_spin.setToolTip(
             "Completed captures shorter than this are discarded as "
             "glitches (0 = keep everything)")
-        form.addRow("Min pulse (ms):", self.min_pulse_spin)
+        adv.addRow("Min pulse (ms):", self.min_pulse_spin)
 
         self.max_pulse_spin = QtWidgets.QDoubleSpinBox()
         self.max_pulse_spin.setRange(0.1, 60_000.0)
@@ -95,16 +141,18 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.max_pulse_spin.setToolTip(
             "Longest pulse the ring buffer must hold — captures that "
             "outlast the buffer lose their rising edge")
-        form.addRow("Max pulse (ms):", self.max_pulse_spin)
 
-        self.noise_spin = QtWidgets.QDoubleSpinBox()
-        self.noise_spin.setRange(1.0, 60_000.0)
-        self.noise_spin.setDecimals(1)
-        self.noise_spin.setValue(config.noise_train_ms)
-        self.noise_spin.setToolTip(
-            "Noise-training length before capturing starts (robust "
-            "estimators tolerate pulses in the window)")
-        form.addRow("Noise training (ms):", self.noise_spin)
+        self.max_pulse_auto_check = QtWidgets.QCheckBox(
+            "Measure from noise training")
+        self.max_pulse_auto_check.setChecked(config.max_pulse_auto)
+        self.max_pulse_auto_check.setToolTip(
+            "Take the pulse length from the pulses seen during "
+            "training, rather than guessing it.\n"
+            "It sets both the ring buffer and the floor under the "
+            "baseline tracking window, and the value below is kept as "
+            "the fallback when training sees too few pulses.")
+        adv.addRow("Max pulse:", self.max_pulse_auto_check)
+        adv.addRow("   … fallback (ms):", self.max_pulse_spin)
 
         self.baseline_auto_check = QtWidgets.QCheckBox(
             "Measure from noise training")
@@ -118,7 +166,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "measures exactly that.\n"
             "Floored at a multiple of the max pulse length so the "
             "tracker can never absorb a pulse tail.")
-        form.addRow("Baseline tracking:", self.baseline_auto_check)
+        adv.addRow("Baseline tracking:", self.baseline_auto_check)
 
         self.baseline_spin = QtWidgets.QDoubleSpinBox()
         self.baseline_spin.setRange(0.0, 600_000.0)
@@ -132,12 +180,12 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "causing false triggers and, worse, an end condition that "
             "can never be satisfied.\n"
             "Choose pulse length << this << drift timescale.")
-        form.addRow("   … or fixed (ms):", self.baseline_spin)
+        adv.addRow("   … or fixed (ms):", self.baseline_spin)
 
         self.pileup_check = QtWidgets.QCheckBox(
             "Split piled-up events (derivative re-trigger)")
         self.pileup_check.setChecked(config.enable_pileup)
-        form.addRow(self.pileup_check)
+        adv.addRow(self.pileup_check)
 
         self.derived_label = QtWidgets.QLabel()
         self.derived_label.setWordWrap(True)
@@ -156,22 +204,26 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
 
         for w in (self.threshold_spin, self.end_spin, self.margin_spin,
                   self.min_pulse_spin, self.max_pulse_spin,
-                  self.noise_spin, self.baseline_spin):
+                  self.noise_spin, self.baseline_spin, self.trigger_spin):
             w.valueChanged.connect(self._update_dependent_values)
-        self.pileup_check.toggled.connect(self._update_dependent_values)
-        self.baseline_auto_check.toggled.connect(
-            self._update_dependent_values)
+        for c in (self.pileup_check, self.baseline_auto_check,
+                  self.max_pulse_auto_check):
+            c.toggled.connect(self._update_dependent_values)
+        adv_box.setChecked(False)
+        adv_box.toggled.emit(False)
         self._update_dependent_values()
-        self.resize(480, 460)
+        self.resize(520, 400)
 
     def get_config(self) -> PulseCaptureConfig:
         return PulseCaptureConfig(
             threshold_sigma=float(self.threshold_spin.value()),
             end_sigma=float(self.end_spin.value()),
             margin_fraction=float(self.margin_spin.value()),
+            trigger_samples=int(self.trigger_spin.value()),
             min_pulse_ms=float(self.min_pulse_spin.value()),
             max_pulse_ms=float(self.max_pulse_spin.value()),
-            noise_train_ms=float(self.noise_spin.value()),
+            max_pulse_auto=self.max_pulse_auto_check.isChecked(),
+            noise_train_ms=float(self.noise_spin.value()) * 1000.0,
             baseline_track_auto=self.baseline_auto_check.isChecked(),
             baseline_track_ms=float(self.baseline_spin.value()),
             enable_pileup=self.pileup_check.isChecked(),
@@ -183,18 +235,25 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self._updating = True
         try:
             cfg = self.get_config()
-            # The fixed value is dead while auto is on; grey it out
-            # rather than leaving two live-looking controls.
+            # Values that auto supersedes stay visible (they are the
+            # fallbacks) but greyed, rather than leaving two
+            # live-looking controls for one quantity.
             self.baseline_spin.setEnabled(not cfg.baseline_track_auto)
             d = cfg.describe(self.sample_rate, self.n_channels)
+            acc = d["accidental_per_min"]
+            acc_str = (f"{acc:,.0f}/min" if acc >= 1 else
+                       f"{acc*60:.2g}/hr" if acc >= 0.001 else "negligible")
             self.derived_label.setText(
-                f"min pulse = {d['min_pulse_samples']} samples · "
+                f"noise training = {d['noise_samples']:,} samples "
+                f"({d['noise_train_actual_ms']/1000:.3g} s) · "
+                f"accidental triggers ≈ {acc_str} per channel · "
                 f"buffer = {d['buf_samples']:,} samples "
                 f"({d['buf_mb_per_channel']:.2f} MB/ch, "
                 f"{d['buf_mb_total']:.2f} MB total) · "
                 f"longest recordable ≈ {d['max_recordable_ms']:,.0f} ms · "
-                f"noise training = {d['noise_samples']:,} samples "
-                f"({d['noise_train_actual_ms']:.0f} ms)"
+                f"min pulse = {d['min_pulse_samples']} samples"
+                + (" · pulse length measured at training"
+                   if d["max_pulse_auto"] else "")
                 + (f" · baseline measured at training, no faster than "
                    f"{d['baseline_track_min_ms']:,.0f} ms "
                    f"({d['baseline_track_min_samples']:,} samples)"

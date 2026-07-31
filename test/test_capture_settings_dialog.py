@@ -58,7 +58,7 @@ def test_roundtrip(qt_app):
     dlg.threshold_spin.setValue(8.0)
     dlg.min_pulse_spin.setValue(0.5)
     dlg.max_pulse_spin.setValue(100.0)
-    dlg.noise_spin.setValue(80.0)
+    dlg.noise_spin.setValue(0.08)   # seconds in the UI, ms in the config
     dlg.margin_spin.setValue(0.2)
     dlg.pileup_check.setChecked(False)
 

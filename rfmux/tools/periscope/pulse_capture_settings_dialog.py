@@ -75,9 +75,9 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.noise_spin.setValue(config.noise_train_ms / 1000.0)
         self.noise_spin.setToolTip(
             "How long to watch before capturing starts.\n"
-            "This record is fitted for the noise level, the pulse "
-            "length, and the 1/f knee that sets the baseline tracking "
-            "window — longer training measures more of them.\n"
+            "This record is fitted for the noise level and for the 1/f "
+            "knee that sets the baseline tracking window; the knee is "
+            "only visible if training runs well past it.\n"
             "Robust estimators tolerate pulses in the window.")
         form.addRow("Noise training (s):", self.noise_spin)
 
@@ -140,19 +140,10 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.max_pulse_spin.setValue(config.max_pulse_ms)
         self.max_pulse_spin.setToolTip(
             "Longest pulse the ring buffer must hold — captures that "
-            "outlast the buffer lose their rising edge")
-
-        self.max_pulse_auto_check = QtWidgets.QCheckBox(
-            "Measure from noise training")
-        self.max_pulse_auto_check.setChecked(config.max_pulse_auto)
-        self.max_pulse_auto_check.setToolTip(
-            "Take the pulse length from the pulses seen during "
-            "training, rather than guessing it.\n"
-            "It sets both the ring buffer and the floor under the "
-            "baseline tracking window, and the value below is kept as "
-            "the fallback when training sees too few pulses.")
-        adv.addRow("Max pulse:", self.max_pulse_auto_check)
-        adv.addRow("   … fallback (ms):", self.max_pulse_spin)
+            "outlast the buffer lose their rising edge.\n"
+            "Estimate generously: it also sets the floor under the "
+            "baseline tracking window.")
+        adv.addRow("Max pulse (ms):", self.max_pulse_spin)
 
         self.baseline_auto_check = QtWidgets.QCheckBox(
             "Measure from noise training")
@@ -206,8 +197,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
                   self.min_pulse_spin, self.max_pulse_spin,
                   self.noise_spin, self.baseline_spin, self.trigger_spin):
             w.valueChanged.connect(self._update_dependent_values)
-        for c in (self.pileup_check, self.baseline_auto_check,
-                  self.max_pulse_auto_check):
+        for c in (self.pileup_check, self.baseline_auto_check):
             c.toggled.connect(self._update_dependent_values)
         adv_box.setChecked(False)
         adv_box.toggled.emit(False)
@@ -222,7 +212,6 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             trigger_samples=int(self.trigger_spin.value()),
             min_pulse_ms=float(self.min_pulse_spin.value()),
             max_pulse_ms=float(self.max_pulse_spin.value()),
-            max_pulse_auto=self.max_pulse_auto_check.isChecked(),
             noise_train_ms=float(self.noise_spin.value()) * 1000.0,
             baseline_track_auto=self.baseline_auto_check.isChecked(),
             baseline_track_ms=float(self.baseline_spin.value()),
@@ -252,8 +241,6 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
                 f"{d['buf_mb_total']:.2f} MB total) · "
                 f"longest recordable ≈ {d['max_recordable_ms']:,.0f} ms · "
                 f"min pulse = {d['min_pulse_samples']} samples"
-                + (" · pulse length measured at training"
-                   if d["max_pulse_auto"] else "")
                 + (f" · baseline measured at training, no faster than "
                    f"{d['baseline_track_min_ms']:,.0f} ms "
                    f"({d['baseline_track_min_samples']:,} samples)"

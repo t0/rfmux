@@ -35,8 +35,6 @@ Usage::
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence
@@ -661,96 +659,6 @@ def estimate_noise_stats(
         )
 
     return noise_stats, raw_data
-
-
-# ─────────────── Pulse timescale from the training data ────────────
-
-def measure_pulse_scale(
-    samples_by_channel: Dict[int, np.ndarray],
-    channels: List[int],
-    noise_stats: Dict[int, ChannelNoiseStats],
-    *,
-    threshold_sigma: float = 5.0,
-    end_sigma: float = 1.5,
-    trigger_samples: int = 2,
-    margin_fraction: float = 0.1,
-    enable_pileup: bool = True,
-    percentile: float = 99.0,
-    safety: float = 2.0,
-    min_pulses: int = 5,
-    enough_pulses: int = 200,
-    scan_cap: int = 200_000,
-    buf_cap: int = 1 << 19,
-) -> tuple[Optional[int], Dict[str, object]]:
-    """Measure how long this detector's pulses actually are.
-
-    ``max_pulse_ms`` is the parameter users are least able to supply
-    from first principles, and it drives everything downstream — the
-    ring buffer that caps recordable length, and the floor under the
-    baseline tracking window.  If pulses occur during noise training,
-    it does not have to be guessed: run the detector over the training
-    record and look at the distribution.
-
-    Returns ``(recommended_buf_size, info)``.  ``None`` means too few
-    pulses were seen to say anything, and the caller should keep
-    whatever was configured.
-    """
-    durations: List[int] = []
-    per_channel: Dict[int, int] = {}
-
-    for c in channels:
-        arr = samples_by_channel.get(c)
-        if arr is None or len(arr) < 16:
-            continue
-        # This is a second pass over the record, in a Python loop, so
-        # bound it: a few hundred pulses already pin a percentile, and
-        # the training record may be long by design.
-        arr = arr[:scan_cap]
-        seen: List[int] = []
-        pcap = PulseCapture(
-            buf_size=min(len(arr), buf_cap),
-            channels=[c],
-            noise_stats={c: noise_stats.get(c, ChannelNoiseStats())},
-            threshold_sigma=threshold_sigma,
-            end_sigma=end_sigma,
-            trigger_samples=trigger_samples,
-            margin_fraction=margin_fraction,
-            enable_pileup=enable_pileup,
-            accumulate=False,
-            on_pulse=lambda _ch, _i, d, _s=seen: _s.append(len(d["Amp_I"])),
-        )
-        for k in range(len(arr)):
-            pcap.process_sample(c, float(arr[k].real), float(arr[k].imag),
-                                float(k))
-            if len(seen) >= enough_pulses:
-                break
-        per_channel[c] = len(seen)
-        durations.extend(seen)
-
-    info: Dict[str, object] = {
-        "n_pulses": len(durations),
-        "per_channel": per_channel,
-    }
-    if len(durations) < min_pulses:
-        info["summary"] = (
-            f"only {len(durations)} pulse(s) in the training record — "
-            "keeping the configured max pulse length")
-        return None, info
-
-    d = np.asarray(durations, dtype=float)
-    p = float(np.percentile(d, percentile))
-    info.update(median_samples=float(np.median(d)),
-                p99_samples=p,
-                max_samples=float(d.max()))
-    # The captured window already carries the pre-trigger margin and the
-    # end-confirmation tail, so it is the quantity the ring must hold;
-    # the safety factor covers pulses larger than any seen so far.
-    rec = int(math.ceil(p * safety))
-    info["recommended_buf"] = rec
-    info["summary"] = (
-        f"{len(durations)} pulses: median {np.median(d):,.0f}, "
-        f"p{percentile:g} {p:,.0f} samples → ring {rec:,}")
-    return rec, info
 
 
 # ─────────────── Baseline-tracking window from noise data ───────────

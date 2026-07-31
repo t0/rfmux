@@ -1518,92 +1518,12 @@ def _run_len(trigger_samples, spike_len):
     return pcap.pulse_count["Channel 1"]
 
 
-# ─────────────── Pulse timescale measured from training ─────────────
+# ────────────────── Training window is memory-bounded ───────────────
 
-from rfmux.algorithms.measurement.pulse_detection import measure_pulse_scale
-
-
-def _pulsed_record(n, rng, *, n_pulses, tau, amp=20.0, sigma=1.0):
-    x = rng.normal(0, sigma, n) + 1j * rng.normal(0, sigma, n)
-    step = n // (n_pulses + 1)
-    for k in range(n_pulses):
-        start = step * (k + 1)
-        t = np.arange(min(int(8 * tau), n - start))
-        x[start:start + len(t)] += amp * np.exp(-t / tau)
-    return x
-
-
-class TestPulseScaleMeasurement:
-    """max_pulse_ms is the parameter users can least supply from first
-    principles, and it sets both the ring buffer and the baseline floor.
-    If pulses occur during training it does not have to be guessed."""
-
-    def _stats(self):
-        return {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
-                                     mean_Q=0.0, std_Q=1.0)}
-
-    def test_measures_a_known_decay(self):
-        rng = np.random.default_rng(0)
-        rec = _pulsed_record(60000, rng, n_pulses=20, tau=200.0)
-        buf, info = measure_pulse_scale(
-            {1: rec}, [1], self._stats(), threshold_sigma=5.0, safety=1.5)
-        assert info["n_pulses"] >= 15, info["summary"]
-        # The window runs to the END condition, not the threshold: a
-        # 20σ pulse with τ=200 reaches end_sigma=1.5 after
-        # τ·ln(20/1.5) ≈ 518 samples, plus the pre-trigger margin and
-        # the leaky-bucket tail.  That total is what the ring must hold.
-        assert 450 < info["median_samples"] < 900, info["summary"]
-        assert buf > info["p99_samples"]
-
-    def test_longer_pulses_give_a_bigger_ring(self):
-        rng = np.random.default_rng(1)
-        sizes = []
-        for tau in (50.0, 200.0, 800.0):
-            rec = _pulsed_record(120000, rng, n_pulses=15, tau=tau)
-            buf, info = measure_pulse_scale(
-                {1: rec}, [1], self._stats(), threshold_sigma=5.0)
-            assert info["n_pulses"] >= 10, info["summary"]
-            sizes.append(buf)
-        assert sizes[0] < sizes[1] < sizes[2], sizes
-
-    def test_quiet_record_declines_to_guess(self):
-        rng = np.random.default_rng(2)
-        quiet = rng.normal(0, 1, 20000) + 1j * rng.normal(0, 1, 20000)
-        buf, info = measure_pulse_scale(
-            {1: quiet}, [1], self._stats(), threshold_sigma=5.0)
-        assert buf is None
-        assert "keeping the configured" in info["summary"]
-
-    def test_session_sizes_the_ring_and_the_baseline_floor(self):
-        """End to end: the ring and the baseline floor both come from
-        the pulses the session saw during its own training."""
-        rng = np.random.default_rng(3)
-        n = 60000
-        rec = _pulsed_record(n, rng, n_pulses=20, tau=200.0)
-        sess = PulseCaptureSession(
-            channels=[1], sample_rate=1000.0, noise_samples=n,
-            threshold_sigma=5.0, buf_size=1000,
-            max_pulse_auto=True, baseline_track_auto=True,
-            baseline_pulse_factor=20, baseline_track_min_samples=10)
-        sess.start()
-        for k in range(n):
-            sess.feed_sample(1, float(rec[k].real), float(rec[k].imag),
-                             k / 1000.0)
-        assert sess.state is CaptureState.CAPTURING
-        assert sess.pulse_scale_info["n_pulses"] >= 15
-        # Ring grew from the 1000 it was constructed with.
-        assert sess.buf_size > 1000
-        assert sess.pcap.buf_size == sess.buf_size
-        # Stacking window followed the ring.
-        assert sess.templates.post_samples <= sess.buf_size // 2
-        # Baseline floor is now 20x the measured pulse, not the stub.
-        assert sess.baseline_track_min_samples > 10
-        assert sess.baseline_track_samples >= \
-            sess.baseline_track_min_samples
-
+class TestTrainingWindow:
     def test_training_length_is_memory_bounded(self):
-        """'Just train for 30 s' must stay safe on the PFB stream: the
-        record is held whole, and 30 s at 1.22 MHz is 36.6M samples."""
+        """Raising the window by hand must stay safe: the record is held
+        whole, and 30 s at 1.22 MHz is 36.6M samples per channel."""
         cfg = PulseCaptureConfig(noise_train_ms=30_000.0)
         assert cfg.noise_samples(19073.486328125) == 572_205
         assert cfg.noise_samples(1220703.125) == cfg._MAX_NOISE

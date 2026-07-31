@@ -50,6 +50,11 @@ class MockResonatorModel:
         # the resonator count is known; None disables it entirely.
         self._tls_generator = None
         self._nqp_sens_cache = None
+        self._nqp_state_t = None
+        self._nqp_state_noise = None
+        self._nqp_state_values = []
+        self._nqp_const_arrays = None
+        self._cache_key_params = {}
         self.tls_noise_enabled = default_config.get('tls_noise_enabled',
                                                     False)
         self.tls_fractional_rms = default_config.get('tls_fractional_rms',
@@ -294,6 +299,11 @@ class MockResonatorModel:
         self.tls_corner_hz = config.get('tls_corner_hz', 100.0)
         self._tls_generator = None  # rebuilt below once count is known
         self._nqp_sens_cache = None  # depends on resonator params
+        self._nqp_state_t = None
+        self._nqp_state_noise = None
+        self._nqp_state_values = []
+        self._nqp_const_arrays = None
+        self._cache_key_params = {}
 
         self.nqp_noise_enabled = config.get('nqp_noise_enabled', True)
         self.nqp_noise_std_factor = config.get('nqp_noise_std_factor', 0.001)  # Default 0.1% noise if not in config
@@ -647,12 +657,38 @@ class MockResonatorModel:
         # Use provided pulse_time or fall back to shared last_update_time
         t_for_pulses = pulse_time if pulse_time is not None else self.last_update_time
         
-        # Calculate effective nqp with fresh noise for ALL resonators (vectorized)
+        # Per-sample QP state is memoised on time.  The multi-sample
+        # (PFB) loop evaluates every (channel, tone) pair at each
+        # instant, so without this the pulse sum, the nqp -> Lk/R
+        # physics update and the noise draw are all recomputed once per
+        # CHANNEL rather than once per sample — 5x wasted work at the
+        # default 5 resonators.  Sharing across channels at a given
+        # instant is also more physically correct: they observe the
+        # same resonators at the same moment and should see the same
+        # state, not independent noise draws.
+        if (self._nqp_state_t is not None
+                and t_for_pulses == self._nqp_state_t):
+            nqp_noise_frac = self._nqp_state_noise
+        else:
+            nqp_noise_frac = self._compute_nqp_state(t_for_pulses)
+            self._nqp_state_t = t_for_pulses
+            self._nqp_state_noise = nqp_noise_frac
+
+        return self._s21_from_current_state(
+            frequency, amplitude, t_for_pulses, nqp_noise_frac, t_start)
+
+    def _compute_nqp_state(self, t_for_pulses):
+        """Advance QP state (pulses + noise draw) to *t_for_pulses*.
+
+        Writes the resulting Lk/R into ``base_lekid_params`` and returns
+        the fractional white-noise draw for this instant (or None).
+        """
+        # Calculate effective nqp for ALL resonators (vectorized)
         base_nqp_array = np.array(self.base_nqp_values, dtype=np.float64)
-        
+
         # Start with base values
         effective_nqp_array = base_nqp_array.copy()
-        
+
         # Add pulse contributions (only loop through active pulses)
         for pulse in self.pulse_events:
             i = pulse['resonator_index']
@@ -687,9 +723,27 @@ class MockResonatorModel:
         
         # Always update R,Lk from physics (fast, preserves IQ behavior)
         self.update_base_params_from_nqp(effective_nqp)
-        
-        # === OPTIMIZATION: Check if we need convergence (per-resonator qp-aware key) ===
-        # Compute nearest resonator by current f0 estimate
+        self._nqp_state_values = effective_nqp
+        return nqp_noise_frac
+
+    def _cache_key_gen(self):
+        """Generation counter for the cache-key memo.
+
+        Bumped implicitly whenever the resonator set is regenerated or the
+        physics config is edited, so stale quantization steps cannot survive
+        a reconfigure.
+        """
+        phys = getattr(self.mock_crs, '_physics_config', {})
+        if not isinstance(phys, dict):
+            phys = {}
+        return (getattr(self, '_resonator_gen', 0),
+                len(self.mr_lekids),
+                phys.get('cache_freq_step'),
+                phys.get('cache_amp_step'),
+                phys.get('cache_qp_step'))
+
+    def _compute_cache_key_params(self, frequency):
+        """(nearest_idx, freq_step, amp_step, qp_step) for a tone."""
         f0_list = []
         for lek in self.mr_lekids:
             try:
@@ -703,35 +757,64 @@ class MockResonatorModel:
         else:
             nearest_idx = 0
 
-        # Get cache parameters from config
         phys = getattr(self.mock_crs, '_physics_config', {})
         if not isinstance(phys, dict):
             phys = {}
-        
-        # Frequency step from config
+
         freq_step = phys.get('cache_freq_step', 0.0001)  # Default 0.0001 Hz
-        if freq_step <= 0:
+        if not freq_step or freq_step <= 0:
             freq_step = 0.0001
-        freq_key = round(frequency / freq_step) * freq_step
 
-        # Amplitude step from config
         amp_step = phys.get('cache_amp_step', 1e-8)  # Default 1e-8
-        if amp_step <= 0:
+        if not amp_step or amp_step <= 0:
             amp_step = 1e-8
-        amp_key = round(amplitude / amp_step) * amp_step
 
-        # QP step from config (as fraction of base QP)
         qp_step_fraction = phys.get('cache_qp_step', 0.001)  # Default 0.1%
-        if qp_step_fraction <= 0:
+        if not qp_step_fraction or qp_step_fraction <= 0:
             qp_step_fraction = 0.001
-        
-        # Calculate absolute QP step based on median base value
+
+        # Absolute QP step based on median base value
         if self.base_nqp_values:
-            base_med = float(np.median(np.array(self.base_nqp_values, dtype=float)))
+            base_med = float(np.median(
+                np.array(self.base_nqp_values, dtype=float)))
             qp_step = max(1e-300, abs(base_med) * qp_step_fraction)
         else:
             qp_step = 1e-6  # Fallback
-        
+
+        return nearest_idx, freq_step, amp_step, qp_step
+
+    def _s21_from_current_state(self, frequency, amplitude, t_for_pulses,
+                                nqp_noise_frac, t_start):
+        """Frequency-dependent half: convergence (cached) + S21.
+
+        Assumes the QP state for this instant has already been applied
+        by :meth:`_compute_nqp_state`.
+        """
+        import time
+
+        # === OPTIMIZATION: Check if we need convergence (per-resonator qp-aware key) ===
+        # Cache-key inputs are per-call constants: which resonator is
+        # nearest to this tone, and the three quantization steps.  Recomputing
+        # them (a Python loop over resonators, an np.median, four dict
+        # lookups) once per PFB sample cost more than the physics itself, so
+        # they are memoised per tone frequency and refreshed only when the
+        # resonators or the config actually change.
+        keys = self._cache_key_params.get(frequency)
+        if keys is None or keys[0] != self._cache_key_gen():
+            keys = (self._cache_key_gen(),) + self._compute_cache_key_params(frequency)
+            if len(self._cache_key_params) > 4096:
+                self._cache_key_params.clear()
+            self._cache_key_params[frequency] = keys
+        _, nearest_idx, freq_step, amp_step, qp_step = keys
+
+        freq_key = round(frequency / freq_step) * freq_step
+        amp_key = round(amplitude / amp_step) * amp_step
+
+        phys = getattr(self.mock_crs, '_physics_config', {})
+        if not isinstance(phys, dict):
+            phys = {}
+
+        effective_nqp = self._nqp_state_values
         qp_val = effective_nqp[nearest_idx] if 0 <= nearest_idx < len(effective_nqp) else 0.0
         qp_key = round(qp_val / qp_step) * qp_step
 
@@ -1042,24 +1125,32 @@ class MockResonatorModel:
         noisy_nqp_values : list
             List of noisy nqp values, one per resonator
         """
-        # Prepare arrays for vectorized calculation
+        # The material/geometry arrays below are fixed for a given
+        # resonator set, but this runs once per PFB sample — rebuilding
+        # eight np.full() arrays each time cost more than the physics.
         n = len(self.mr_complex_resonators)
-        nqp_array = np.array(noisy_nqp_values, dtype=np.float64)
-        readout_freqs = np.array([cr.readout_f for cr in self.mr_complex_resonators], dtype=np.float64)
-        T_array = np.full(n, self.mr_complex_resonators[0].T, dtype=np.float64)
-        Delta0_array = np.full(n, self.mr_complex_resonators[0].Delta0, dtype=np.float64)
-        N0_array = np.full(n, self.mr_complex_resonators[0].N0, dtype=np.float64)
-        sigmaN_array = np.full(n, self.mr_complex_resonators[0].sigmaN, dtype=np.float64)
-        thickness_array = np.full(n, self.mr_complex_resonators[0].thickness, dtype=np.float64)
-        width_array = np.full(n, self.mr_complex_resonators[0].width, dtype=np.float64)
-        length_array = np.full(n, self.mr_complex_resonators[0].length, dtype=np.float64)
-        R_spoiler_array = np.full(n, self.mr_complex_resonators[0].R_spoiler, dtype=np.float64)
-        
+        const = self._nqp_const_arrays
+        if const is None or const[0] != n:
+            cr0 = self.mr_complex_resonators[0]
+            const = (
+                n,
+                np.array([cr.readout_f for cr in self.mr_complex_resonators],
+                         dtype=np.float64),
+                np.full(n, cr0.T, dtype=np.float64),
+                np.full(n, cr0.Delta0, dtype=np.float64),
+                np.full(n, cr0.N0, dtype=np.float64),
+                np.full(n, cr0.sigmaN, dtype=np.float64),
+                np.full(n, cr0.thickness, dtype=np.float64),
+                np.full(n, cr0.width, dtype=np.float64),
+                np.full(n, cr0.length, dtype=np.float64),
+                np.full(n, cr0.R_spoiler, dtype=np.float64),
+            )
+            self._nqp_const_arrays = const
+        nqp_array = np.asarray(noisy_nqp_values, dtype=np.float64)
+
         # Call JIT-compiled function - computes ALL resonators in parallel
         R_array, Lk_array = jit_physics.vectorized_update_params_from_nqp(
-            nqp_array, readout_freqs, T_array, Delta0_array,
-            N0_array, sigmaN_array, thickness_array,
-            width_array, length_array, R_spoiler_array
+            nqp_array, *const[1:]
         )
         
         # Update all base parameters
@@ -1107,7 +1198,11 @@ class MockResonatorModel:
         
         dt = current_time - self.last_update_time
         self.last_update_time = current_time
-        
+
+        # Everything below mutates state the per-sample QP memo depends
+        # on (new pulses, pruned pulses, base_lekid_params), so drop it.
+        self._nqp_state_t = None
+
         # Check if we should trigger new pulses
         self._check_trigger_pulses(current_time, dt)
         
@@ -1560,58 +1655,57 @@ class MockResonatorModel:
             # Base pulse time — will be advanced per sample
             base_pulse_time = pulse_time  # May be None (slow streamer) or float (PFB)
 
+            n_obs = len(obs_channels)
+            n_tones = len(active_tone_freqs)
+            signals = np.zeros((n_obs, num_samples), dtype=complex)
+
+            # Per-tone invariants, hoisted out of the sample loop.
+            tone_mag = np.abs(np.asarray(active_tone_amps))
+            tone_phase = np.exp(1j * np.angle(np.asarray(active_tone_amps)))
+
+            # CIC response depends only on (freq_diff, dec_stage), both
+            # fixed for the batch — evaluate the (n_obs, n_tones) grid once
+            # rather than once per sample.
+            cic_grid = np.zeros((n_obs, n_tones))
+            for i in range(n_obs):
+                for j in range(n_tones):
+                    if within_bandwidth[i, j]:
+                        cic_grid[i, j] = self._get_cached_cic_response(
+                            freq_diffs[i, j], dec_stage)
+            is_dc = np.abs(freq_diffs) < 0.1
+
             with self._physics_lock:
-                # For each observing channel
-                for i, ch in enumerate(obs_channels):
-                    signal = np.zeros(num_samples, dtype=complex)
-                    obs_freq = obs_freqs_arr[i]
+                # Samples OUTER, channels INNER.  Every channel observing a
+                # given instant then shares one QP-state evaluation (see the
+                # memo in _s21_lc_response_internal); with the loops the
+                # other way round the time changes on every call and the
+                # memo can never hit.
+                for sample_idx in range(num_samples):
+                    # Per-sample pulse time: advance from base by sample offset
+                    if base_pulse_time is not None:
+                        sample_pulse_time = base_pulse_time + sample_idx / sample_rate
+                    else:
+                        sample_pulse_time = None
 
-                    # For each time sample
-                    for sample_idx in range(num_samples):
-                        sample_contribution = 0 + 0j
+                    # S21 for a tone at a given instant does not depend on
+                    # which channel observes it — evaluate once per tone.
+                    s21_by_tone = np.zeros(n_tones, dtype=complex)
+                    for j in range(n_tones):
+                        if tone_mag[j] > 0 and within_bandwidth[:, j].any():
+                            s21_by_tone[j] = self._s21_lc_response_internal(
+                                active_tone_freqs[j], tone_mag[j],
+                                pulse_time=sample_pulse_time)
+                    tone_amp_fresh = tone_mag * s21_by_tone * tone_phase
 
-                        # Per-sample pulse time: advance from base by sample offset
-                        if base_pulse_time is not None:
-                            sample_pulse_time = base_pulse_time + sample_idx / sample_rate
-                        else:
-                            sample_pulse_time = None
+                    beat = np.where(
+                        is_dc, 1.0,
+                        np.exp(2j * np.pi * freq_diffs * t[sample_idx]))
+                    signals[:, sample_idx] = np.sum(
+                        tone_amp_fresh[np.newaxis, :] * cic_grid * beat,
+                        axis=1)
 
-                        # Process each active tone with fresh S21 evaluation
-                        for j in range(len(active_tone_freqs)):
-                            if within_bandwidth[i, j]:
-                                tone_freq = active_tone_freqs[j]
-                                tone_amp_base = active_tone_amps[j]
-                                freq_diff = freq_diffs[i, j]
-
-                                # Get fresh S21 for this tone at this time sample
-                                # This gives us new QP noise realization for each sample
-                                amp_magnitude = abs(tone_amp_base)
-                                if amp_magnitude > 0:
-                                    # Call internal (lock already held) with per-sample pulse_time
-                                    s21_fresh = self._s21_lc_response_internal(
-                                        tone_freq, amp_magnitude, pulse_time=sample_pulse_time
-                                    )
-
-                                    # Apply phase from original tone
-                                    phase_original = np.angle(tone_amp_base)
-                                    tone_amp_fresh = amp_magnitude * s21_fresh * np.exp(1j * phase_original)
-                                else:
-                                    tone_amp_fresh = 0 + 0j
-
-                                # Apply CIC filter response
-                                cic_response = self._get_cached_cic_response(freq_diff, dec_stage)
-
-                                # Calculate beat contribution at this time
-                                if abs(freq_diff) < 0.1:  # DC
-                                    sample_contribution += tone_amp_fresh * cic_response
-                                else:
-                                    # Beat frequency at time t[sample_idx]
-                                    beat_phase = 2 * np.pi * freq_diff * t[sample_idx]
-                                    sample_contribution += tone_amp_fresh * cic_response * np.exp(1j * beat_phase)
-
-                        signal[sample_idx] = sample_contribution
-
-                    responses[ch] = signal
+            for i, ch in enumerate(obs_channels):
+                responses[ch] = signals[i]
         
         return responses
 

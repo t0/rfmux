@@ -34,12 +34,12 @@ def test_no_dead_physics_config_references():
 
 
 def test_cache_tuning_reads_the_real_attribute():
-    """The convergence-cache steps live in _s21_lc_response_internal;
+    """The convergence-cache steps come from _compute_cache_key_params;
     they must read _physics_config so dialog settings take effect."""
     from rfmux.mock.resonator_model import MockResonatorModel
 
     src = inspect.getsource(
-        MockResonatorModel._s21_lc_response_internal)
+        MockResonatorModel._compute_cache_key_params)
     assert "_physics_config" in src
     assert "cache_freq_step" in src
     for line in src.splitlines():

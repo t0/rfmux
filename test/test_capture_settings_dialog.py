@@ -74,24 +74,14 @@ def test_roundtrip(qt_app):
     dlg.close()
 
 
-def test_auto_baseline_toggle(qt_app):
-    """Auto is the default; the fixed spinbox is only live when it is
-    off, and the derived line says which one is in force."""
+def test_rolling_baseline_span_is_shown(qt_app):
+    """No baseline controls left to get wrong — the window is the
+    training span, so the dialog only reports it."""
     dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
-    assert dlg.baseline_auto_check.isChecked()
-    assert not dlg.baseline_spin.isEnabled()
-    assert dlg.get_config().baseline_track_auto is True
-    assert "baseline measured at training" in dlg.derived_label.text()
-
-    dlg.baseline_auto_check.setChecked(False)
-    dlg.baseline_spin.setValue(2000.0)
-    assert dlg.baseline_spin.isEnabled()
-    cfg = dlg.get_config()
-    assert cfg.baseline_track_auto is False
-    assert cfg.baseline_track_ms == 2000.0
-    assert "baseline EMA" in dlg.derived_label.text()
+    assert not hasattr(dlg, "baseline_spin")
+    assert not hasattr(dlg, "baseline_auto_check")
+    assert "rolling baseline median" in dlg.derived_label.text()
     dlg.close()
-
 
 def test_max_pulse_is_a_primary_control_and_drives_training(qt_app):
     """Max pulse sits in the main form, and the derived training length

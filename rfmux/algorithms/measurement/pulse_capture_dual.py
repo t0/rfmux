@@ -361,7 +361,25 @@ class DualPulseCaptureSession:
                 self.writer.set_noise_stats(stream, noise_stats)
             except Exception as e:
                 self._error(f"HDF5 noise write failed: {e}")
+        self._sync_capture_start()
         self._callback(self.on_noise, stream, noise_stats)
+
+    def _sync_capture_start(self) -> None:
+        """Hold triggering until BOTH streams have finished training.
+
+        The two streams need the same training span in sample time but
+        reach it at different moments — the fast one collects its
+        samples far quicker and is additionally capped, so it can
+        finish seconds ahead.  Left alone it triggers into a partner
+        that has no ring yet, and every pair comes out one-sided with
+        "window unavailable".  Its buffers keep filling while frozen,
+        so nothing is lost by waiting.
+        """
+        both_ready = all(s.state is CaptureState.CAPTURING
+                         for s in (self.slow, self.fast))
+        for s in (self.slow, self.fast):
+            if s.pcap is not None:
+                s.pcap.freeze_triggers = not both_ready
 
     def _on_stream_pulse(self, stream: str, channel: int, pulse_idx: int,
                          summary: dict, pulse_data: dict) -> None:

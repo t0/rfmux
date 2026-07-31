@@ -96,6 +96,10 @@ class _ChState:
     run_start_I: float = 0.0
     run_start_Q: float = 0.0
     run_start_jump: float = 0.0
+    # Rolling-baseline bookkeeping: decimation phase, and insertions
+    # since the last re-estimate.
+    decim_n: int = 0
+    since_refresh: int = 0
 
 
 # ───────────────────────── PulseCapture ─────────────────────────────
@@ -144,11 +148,22 @@ class PulseCapture:
         Enable derivative-based pileup detection.  When True, a new
         pulse arriving during the tail of a previous one is split into
         a separate event.  Default True.
+    baseline_window : int
+        Samples spanned by the rolling-baseline median (0 = frozen
+        baseline).  Must be long compared with a pulse: the median
+        tolerates pulses up to ~50% duty, so the ring buffer itself
+        (1.5x the max pulse) is too short and the training window is
+        the natural choice.
     """
 
     # Minimum leaky-bucket end confirmation count — prevents premature
     # termination on very short pulses or when margin_fraction is tiny.
     _MIN_END_SAMPLES: int = 10
+
+    #: Entries kept for the rolling-baseline median.  Fixed, so cost and
+    #: memory do not scale with the window: a decimated reservoir tracks
+    #: the full-stream median to ~0.01 sigma.
+    _BASELINE_RESERVOIR: int = 4096
 
     def __init__(
         self,
@@ -164,7 +179,7 @@ class PulseCapture:
         enable_pileup: bool = True,
         on_pulse: Optional[Callable[[int, int, dict], None]] = None,
         accumulate: bool = True,
-        baseline_track_samples: int = 0,
+        baseline_window: int = 0,
     ):
         self.channels = list(channels)
         self.buf_size = buf_size
@@ -188,13 +203,44 @@ class PulseCapture:
         # Per-channel noise stats
         self.noise_stats = noise_stats
 
-        # Baseline tracking (0 = frozen, the historical behaviour).
-        # Under 1/f noise the true baseline random-walks away from the
-        # value captured at training while sigma stays put, so triggers
-        # fire on drift and the end condition can become unsatisfiable.
-        # An EMA of the quiet samples follows the drift instead.
-        # Validity window: tau_pulse << tau_track << 1/f_drift.
-        self.set_baseline_track_samples(baseline_track_samples)
+        # ── Rolling baseline ──────────────────────────────────────
+        # Under 1/f the true baseline wanders away from the value fixed
+        # at training while sigma stays put, so deviations grow with no
+        # signal: triggers fire on drift, and the end condition can
+        # become unsatisfiable because the signal never comes back
+        # inside a band centred on a stale mean.
+        #
+        # sigma and the mean want different things.  sigma is
+        # stationary and is measured from the long training record by a
+        # high-pass (diff/MAD) estimator that drift cannot corrupt.
+        # The mean is the part that moves, so it is re-estimated
+        # continuously as the MEDIAN of a window long compared with a
+        # pulse.
+        #
+        # The median, not a mean or a clamped average: it IGNORES
+        # pulses rather than merely bounding their pull, holding to
+        # ~0.15 sigma at 10% pulse duty and only breaking down near
+        # 50%.  Excluding flagged-pulse samples instead would be worse,
+        # not better — drift can park the signal outside the band, and
+        # a capture that can then never end would gate the update off
+        # permanently.  A plain median over everything has no such
+        # state and walks out of that on its own.
+        self.baseline_window = max(0, int(baseline_window))
+        # A fixed-size decimated reservoir keeps memory and refresh cost
+        # constant however long the window is; every M-th sample
+        # preserves the amplitude distribution (block averaging would
+        # smear pulses across neighbours).
+        self._bl_capacity = min(self.baseline_window,
+                                self._BASELINE_RESERVOIR)
+        self._bl_decim = max(1, self.baseline_window
+                             // max(1, self._bl_capacity))
+        self._bl_refresh = max(8, self._bl_capacity // 8)
+        self._bl_min = min(64, self._bl_capacity)
+        self._bl: Dict[int, Dict[str, Circular]] = {}
+        if self.baseline_window > 0:
+            for c in self.channels:
+                self._bl[c] = {k: Circular(self._bl_capacity)
+                               for k in ("I", "Q")}
 
         # Per-channel circular buffers
         self.buf: Dict[int, Dict[str, Circular]] = {}
@@ -221,16 +267,16 @@ class PulseCapture:
 
     # ── Public API ────────────────────────────────────────────────
 
-    def set_baseline_track_samples(self, n: int) -> None:
-        """Set the baseline EMA time constant, in samples (0 = frozen).
-
-        Settable after construction so a re-estimation can install a
-        freshly measured window without rebuilding the engine and
-        losing the ring buffers.
-        """
-        self.baseline_track_samples = max(0, int(n))
-        self._baseline_alpha = (1.0 / self.baseline_track_samples
-                                if self.baseline_track_samples > 0 else 0.0)
+    def _refresh_baseline(self, channel: int) -> None:
+        """Re-centre this channel's band on the median of the window."""
+        bl = self._bl.get(channel)
+        if bl is None or bl["I"].count < self._bl_min:
+            return
+        ns = self.noise_stats.get(channel)
+        if ns is None:
+            return
+        ns.mean_I = float(np.median(bl["I"].data()))
+        ns.mean_Q = float(np.median(bl["Q"].data()))
 
     def process_sample(
         self,
@@ -286,36 +332,19 @@ class PulseCapture:
         # Fires once, on the sample that completes the run.
         confirmed = st.above_run == self.trigger_samples
 
-        # ── Baseline tracking (clamped EMA) ───────────────────────
-        # Every sample contributes, but its influence is CLAMPED to
-        # +/- end_sigma * sigma.  Gating on "not capturing" or "quiet"
-        # instead would deadlock: drift parks the signal outside the
-        # band, the engine starts capturing and never finishes, and a
-        # gated tracker can neither update nor bootstrap out of it.
-        #
-        # Clamping gives both properties we need:
-        #  - a rare pulse shifts the baseline by at most
-        #    (duration / tau_track) * end_sigma * sigma, which is
-        #    negligible when tau_track >> pulse length;
-        #  - persistent drift, offset in the same direction on every
-        #    sample, is followed at up to end_sigma * sigma per
-        #    tau_track — enough to escape a stuck capture.
-        if self._baseline_alpha > 0.0:
-            a = self._baseline_alpha
-            clamp_I = self.end_sigma * max(ns.std_I, 1e-30)
-            clamp_Q = self.end_sigma * max(ns.std_Q, 1e-30)
-            innov_I = i_val - ns.mean_I
-            innov_Q = q_val - ns.mean_Q
-            if innov_I > clamp_I:
-                innov_I = clamp_I
-            elif innov_I < -clamp_I:
-                innov_I = -clamp_I
-            if innov_Q > clamp_Q:
-                innov_Q = clamp_Q
-            elif innov_Q < -clamp_Q:
-                innov_Q = -clamp_Q
-            ns.mean_I += a * innov_I
-            ns.mean_Q += a * innov_Q
+        # ── Rolling baseline ──────────────────────────────────────
+        # Fed before the trigger test so the band is centred on the
+        # most recent estimate available.
+        if self.baseline_window > 0:
+            st.decim_n += 1
+            if st.decim_n >= self._bl_decim:
+                st.decim_n = 0
+                self._bl[channel]["I"].add(i_val)
+                self._bl[channel]["Q"].add(q_val)
+                st.since_refresh += 1
+                if st.since_refresh >= self._bl_refresh:
+                    st.since_refresh = 0
+                    self._refresh_baseline(channel)
 
         # ── Trigger: EITHER I or Q exceeds threshold_sigma ────────
         # NOTE: Baseline confirmation is handled by _wait_for_baseline()
@@ -689,224 +718,6 @@ def estimate_noise_stats(
         )
 
     return noise_stats, raw_data
-
-
-# ─────────────── Baseline-tracking window from noise data ───────────
-
-#: Fewest independent block pairs before a lag is worth fitting.  This
-#: bounds the longest lag examined; confidence is handled by the error
-#: model rather than by this alone.
-_MIN_ALLAN_PAIRS = 8
-
-
-def _allan_curve(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Overlapping, MAD-based Allan deviation at octave-spaced lags.
-
-    For a block length ``m``, the variance of the block mean falls as
-    1/m under white noise but saturates under 1/f, so the curve
-    separates the two.  Differences of *adjacent* block means are used
-    (rather than deviations from a global mean) so any slow trend
-    cancels to first order.
-
-    Every block position is used, not just the disjoint ones — the
-    overlapping estimator wrings far more confidence out of a short
-    record at long lags, which is exactly where a training window is
-    poorest.  Reported degrees of freedom stay at the *independent*
-    pair count, so the error bars remain conservative.
-
-    The scale of the differences comes from the same MAD estimator the
-    noise fit uses: a pulse landing in the training window spoils a few
-    blocks, and the median ignores them.
-
-    Returns ``(lags, sigma_allan, dof)``.
-    """
-    n = len(x)
-    csum = np.concatenate([[0.0], np.cumsum(np.asarray(x, dtype=np.float64))])
-    lags, sig, dof = [], [], []
-    m = 1
-    while n // m >= _MIN_ALLAN_PAIRS + 1:
-        k = n - 2 * m + 1
-        # Difference of adjacent length-m block means, at every offset.
-        d = (csum[2 * m:2 * m + k]
-             - 2.0 * csum[m:m + k] + csum[:k]) / float(m)
-        # std(diff) = sqrt(2) * sigma_allan for the Allan definition.
-        sig.append(_robust_std(d) / np.sqrt(2.0))
-        lags.append(m)
-        dof.append(n // m - 1)
-        m *= 2
-    return (np.asarray(lags, dtype=float),
-            np.asarray(sig, dtype=float),
-            np.asarray(dof, dtype=float))
-
-
-def _knee_samples(x: np.ndarray, n_sigma: float
-                  ) -> tuple[Optional[float], dict]:
-    """Locate the white/flicker crossover in *x*, in samples.
-
-    Fits sigma_A^2(m) = A/m + B — A the white-noise power, B the flicker
-    floor — and returns the lag where an EMA's white-noise averaging
-    error falls to the flicker floor, N = A / 2B.  Below N the tracker
-    is only smoothing white noise; above it the baseline has already
-    moved on.
-
-    ``None`` means B did not stand clear of its own uncertainty, i.e.
-    the record shows no drift.  That test matters: the variance of an
-    Allan point is 2*sigma_A^4/dof, so at a handful of pairs a lone
-    upward fluctuation looks exactly like a flicker floor.
-    """
-    lags, sig, dof = _allan_curve(x)
-    diag = {"lags": lags.tolist(), "allan": sig.tolist()}
-    if len(lags) < 3 or not np.all(sig > 0):
-        diag["reason"] = "record too short for an Allan fit"
-        return None, diag
-
-    # Inverse-variance weighted fit.  The uncertainty on an Allan
-    # variance is proportional to the variance itself, so equal
-    # weighting would let the short lags (where sigma_A^2 is largest)
-    # swamp the very points that constrain B.
-    var = 2.0 * sig ** 4 / dof
-    design = np.column_stack([1.0 / lags, np.ones_like(lags)])
-    dtw = design.T / var
-    normal = dtw @ design
-    try:
-        cov = np.linalg.inv(normal)
-    except np.linalg.LinAlgError:
-        diag["reason"] = "degenerate Allan fit"
-        return None, diag
-    A, B = (cov @ (dtw @ sig ** 2)).tolist()
-    sigma_B = float(np.sqrt(max(cov[1, 1], 0.0)))
-    diag.update(white_var=A, flicker_var=B, flicker_var_err=sigma_B)
-
-    if A <= 0:
-        diag["reason"] = "degenerate fit (no white-noise term)"
-        return None, diag
-    if B <= n_sigma * sigma_B:
-        diag["reason"] = (f"no drift: flicker floor under {n_sigma:g}x its "
-                          "own uncertainty")
-        return None, diag
-
-    diag["reason"] = "knee from white/flicker crossover"
-    return A / (2.0 * B), diag
-
-
-def recommend_baseline_track_samples(
-    samples_by_channel: Dict[int, np.ndarray],
-    channels: List[int],
-    *,
-    min_samples: int = 0,
-    max_samples: Optional[int] = None,
-    n_sigma: float = 2.0,
-) -> tuple[int, Dict[str, object]]:
-    """Choose the baseline EMA time constant from the noise training data.
-
-    The tracker has to sit in the window ``pulse << tau << drift``.  Its
-    upper end is a property of the detector, not a user preference, and
-    the training record already contains it: the 1/f knee, where
-    averaging longer stops improving the baseline estimate.  Below the
-    knee the EMA is only smoothing white noise; above it the baseline
-    has already moved.
-
-    Parameters
-    ----------
-    samples_by_channel, channels
-        As for :func:`estimate_noise_stats` — the same arrays.
-    min_samples
-        Hard floor, normally a multiple of the longest expected pulse so
-        the tracker cannot absorb pulse tails.
-    max_samples
-        Hard ceiling; defaults to the training length, since drift
-        slower than the record is not something it measured.
-    n_sigma
-        Detection threshold: how far the fitted flicker floor must
-        stand above its own uncertainty to count as real drift.  Set
-        at 2 rather than a stricter 3 because the two errors are not
-        symmetric — a marginal false positive lands the window near
-        record/9, still far above the pulse floor and harmless, while
-        a miss lets the drift the tracker exists for go unfollowed.
-        (Measured: 2 sigma gives ~5% false positives on white noise
-        and finds a knee at 1/30 of the record 9 times in 10; 3 sigma
-        gives no false positives but finds that knee half the time.)
-
-    Returns
-    -------
-    (samples, info)
-        ``samples`` is ready to hand to :class:`PulseCapture`; 0 means
-        "leave the baseline frozen" and is only returned when the caller
-        allows it via ``max_samples=0``.  ``info`` carries the per-channel
-        fits and a human-readable ``summary`` for display.
-    """
-    per_channel: Dict[int, dict] = {}
-    knees: List[float] = []
-    n_train = 0
-
-    for c in channels:
-        arr = samples_by_channel.get(c)
-        if arr is None or len(arr) < 32:
-            continue
-        n_train = max(n_train, len(arr))
-        k_I, d_I = _knee_samples(np.real(arr), n_sigma)
-        k_Q, d_Q = _knee_samples(np.imag(arr), n_sigma)
-        found = [k for k in (k_I, k_Q) if k is not None]
-        # Both quadratures share one EMA, so the faster-drifting one sets
-        # the pace for the channel.
-        knee = min(found) if found else None
-        per_channel[c] = {"I": d_I, "Q": d_Q, "knee_samples": knee}
-        if knee is not None:
-            knees.append(knee)
-
-    if max_samples is None:
-        max_samples = n_train if n_train else 0
-
-    info: Dict[str, object] = {
-        "per_channel": per_channel,
-        "min_samples": int(min_samples),
-        "max_samples": int(max_samples),
-        "n_train": int(n_train),
-        "drift_detected": bool(knees),
-    }
-
-    if not per_channel:
-        info["summary"] = "no usable training data — baseline left frozen"
-        return 0, info
-
-    if knees:
-        # Median across channels: one bad fit should not drag the whole
-        # module, and the floor below bounds the damage if it does.
-        raw = float(np.median(knees))
-        info["knee_samples"] = raw
-        basis = "1/f knee"
-    else:
-        # Nothing drifting within the record, so track no faster than the
-        # span over which we confirmed that.
-        raw = float(max_samples)
-        info["knee_samples"] = None
-        basis = "no drift measured"
-
-    chosen = int(round(max(min_samples, min(raw, float(max_samples)))))
-    info["raw_samples"] = raw
-    info["samples"] = chosen
-
-    # Lead with what was actually used — the basis is secondary when a
-    # clamp overrode it.
-    if chosen == min_samples and raw < min_samples:
-        if min_samples > max_samples:
-            info["summary"] = (
-                f"floored at {chosen:,} samples: the {max_samples:,}-sample "
-                "training window is too short to measure drift on that "
-                "timescale — lengthen noise training")
-        else:
-            info["summary"] = (
-                f"floored at {chosen:,} samples — the {basis} "
-                f"({raw:,.0f}) is too fast to separate from a pulse")
-    elif chosen == max_samples and raw > max_samples:
-        info["summary"] = (f"capped at {chosen:,} samples "
-                           f"({basis}, {raw:,.0f})")
-    elif knees:
-        info["summary"] = f"{basis} at {chosen:,} samples"
-    else:
-        info["summary"] = (f"{basis}; tracking at the training span, "
-                           f"{chosen:,} samples")
-    return chosen, info
 
 
 # ── Legacy API compat (for slow_trigger_capture backward compat) ──

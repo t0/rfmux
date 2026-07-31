@@ -1107,7 +1107,7 @@ def _wandering_stream(n, amp, sigma=1.0, seed=0, cycles=3.0,
     return sig, k / fs
 
 
-def _run(track_samples, amp, seed=0, n=20000, pulse_at=None,
+def _run(baseline_window, amp, seed=0, n=20000, pulse_at=None,
          monotonic=False):
     """Feed a drifting stream; return (pcap, noise_stats)."""
     ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
@@ -1115,7 +1115,7 @@ def _run(track_samples, amp, seed=0, n=20000, pulse_at=None,
     pcap = PulseCapture(
         buf_size=5000, channels=[1], noise_stats=ns,
         threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1,
-        accumulate=True, baseline_track_samples=track_samples)
+        accumulate=True, baseline_window=baseline_window)
     if monotonic:
         rng = np.random.default_rng(seed)
         k = np.arange(n)
@@ -1130,292 +1130,135 @@ def _run(track_samples, amp, seed=0, n=20000, pulse_at=None,
     return pcap, ns[1]
 
 
-class TestTrackedBaseline:
+class TestRollingBaseline:
+    """sigma is stationary and comes from the long training record; the
+    mean drifts, so it is re-estimated continuously as the median of a
+    window long compared with a pulse."""
+
     def test_frozen_baseline_gets_stuck_on_monotonic_drift(self):
-        """The nastiest failure mode: once drift parks the signal past
-        threshold, the end condition (BOTH quadratures inside end_sigma
-        of the FROZEN mean) can never be satisfied, so the capture runs
-        forever and no pulse is ever emitted."""
-        pcap, ns = _run(track_samples=0, amp=15.0, monotonic=True)
+        """The failure this exists to prevent: once drift parks the
+        signal past threshold, the end condition (BOTH quadratures
+        inside end_sigma of the FROZEN mean) can never be satisfied, so
+        the capture runs forever and no pulse is ever emitted."""
+        pcap, ns = _run(baseline_window=0, amp=15.0, monotonic=True)
         assert pcap.state[1].capturing, \
             "expected the engine to be stuck mid-capture"
         assert pcap.pulse_count["Channel 1"] == 0
         assert ns.mean_I == 0.0, "frozen baseline must not move"
 
-    def test_tracking_survives_monotonic_drift(self):
-        pcap, ns = _run(track_samples=500, amp=15.0, monotonic=True)
+    def test_rolling_baseline_survives_monotonic_drift(self):
+        pcap, ns = _run(baseline_window=1000, amp=15.0, monotonic=True)
         assert not pcap.state[1].capturing, \
-            "tracking should have kept the engine free"
+            "the rolling median should have kept the engine free"
         assert ns.mean_I > 5.0, f"baseline barely moved ({ns.mean_I:.2f})"
 
-    def test_tracking_suppresses_false_triggers_on_wander(self):
-        """A 4σ wander is the regime the tracker exists for: a frozen
-        baseline drifts past the 5σ threshold and fires repeatedly,
-        while the EMA follows it.  (Much larger wander outruns the
-        clamped EMA's slew limit of end_sigma·σ per time constant, and
-        both then trigger — that is the tracker's honest limit, not a
-        regression.)"""
-        frozen, _ = _run(track_samples=0, amp=4.0)
-        tracked, _ = _run(track_samples=500, amp=4.0)
+    def test_it_walks_out_of_a_stuck_capture(self):
+        """A median over ALL samples has no gate to be shut off by, so
+        it recovers from inside a capture that cannot end.  Restricting
+        the update to samples 'not determined to be a pulse' would
+        deadlock exactly here: a 15σ step starts a capture that never
+        finishes, and every subsequent sample is inside it."""
+        def step(window):
+            ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                       mean_Q=0.0, std_Q=1.0)}
+            pcap = PulseCapture(
+                buf_size=5000, channels=[1], noise_stats=ns,
+                threshold_sigma=5.0, end_sigma=1.5,
+                baseline_window=window)
+            rng = np.random.default_rng(1)
+            for k in range(20000):
+                v = rng.normal(0, 1.0) + (15.0 if k >= 5000 else 0.0)
+                pcap.process_sample(1, float(v),
+                                    float(rng.normal(0, 1.0)), k * 1e-3)
+            return pcap, ns[1]
+
+        stuck, frozen_ns = step(0)
+        assert stuck.state[1].capturing and \
+            stuck.pulse_count["Channel 1"] == 0, "expected a deadlock"
+        assert frozen_ns.mean_I == 0.0
+
+        freed, ns = step(2000)
+        assert not freed.state[1].capturing, "did not recover"
+        assert freed.pulse_count["Channel 1"] == 1, \
+            "the stuck capture should close out as one event"
+        assert ns.mean_I == pytest.approx(15.0, abs=0.2)
+
+    def test_suppresses_false_triggers_on_wander(self):
+        """The window has to be short compared with the drift as well as
+        long compared with a pulse.  The wander here has a 6667-sample
+        period and a trailing window lags by W/2, so W=1000 (27° of
+        lag) suppresses it completely while W=4000 (108°) does not —
+        that is the honest limit, not a regression."""
+        frozen, _ = _run(baseline_window=0, amp=4.0)
+        tracked, _ = _run(baseline_window=1000, amp=4.0)
         n_frozen = frozen.pulse_count["Channel 1"]
         n_tracked = tracked.pulse_count["Channel 1"]
         assert n_frozen >= 4, "wander should trigger a frozen baseline"
         assert n_tracked == 0, \
-            f"tracking did not help ({n_tracked} vs {n_frozen})"
+            f"rolling baseline did not help ({n_tracked} vs {n_frozen})"
+        too_slow, _ = _run(baseline_window=4000, amp=4.0)
+        assert too_slow.pulse_count["Channel 1"] >= n_frozen - 1, \
+            "a window comparable to the drift period cannot follow it"
 
-    def test_tracking_does_not_absorb_a_pulse(self):
-        """A real pulse must still be detected, and must not drag the
-        baseline toward the signal."""
-        pcap, ns = _run(track_samples=500, amp=0.0, pulse_at=8000)
+    def test_a_pulse_does_not_move_the_baseline(self):
+        """The median ignores pulses outright rather than bounding their
+        pull, so no clamp is needed."""
+        pcap, ns = _run(baseline_window=1000, amp=0.0, pulse_at=8000)
         assert pcap.pulse_count["Channel 1"] >= 1, \
-            "tracking swallowed the pulse"
-        assert abs(ns.mean_I) < 1.0, \
+            "the baseline swallowed the pulse"
+        assert abs(ns.mean_I) < 0.2, \
             f"pulse pulled the baseline to {ns.mean_I:.2f}"
 
-    def test_disabled_by_default(self):
+    def test_reservoir_is_bounded_however_long_the_window(self):
+        """Cost and memory must not scale with the window: a decimated
+        reservoir tracks the full-stream median."""
+        ns = {1: ChannelNoiseStats(std_I=1.0, std_Q=1.0)}
+        big = PulseCapture(buf_size=100, channels=[1], noise_stats=ns,
+                           baseline_window=10_000_000)
+        assert big._bl_capacity == PulseCapture._BASELINE_RESERVOIR
+        assert big._bl_decim > 1
+        small = PulseCapture(buf_size=100, channels=[1], noise_stats=ns,
+                             baseline_window=500)
+        assert small._bl_capacity == 500 and small._bl_decim == 1
+
+    def test_tracks_an_offset_to_the_right_value(self):
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = PulseCapture(buf_size=500, channels=[1], noise_stats=ns,
+                            threshold_sigma=50.0, baseline_window=4000)
+        rng = np.random.default_rng(4)
+        for k in range(20000):
+            pcap.process_sample(1, float(7.0 + rng.normal(0, 1.0)),
+                                float(-3.0 + rng.normal(0, 1.0)),
+                                k * 1e-3)
+        assert ns[1].mean_I == pytest.approx(7.0, abs=0.2)
+        assert ns[1].mean_Q == pytest.approx(-3.0, abs=0.2)
+
+    def test_off_by_default(self):
         ns = {1: ChannelNoiseStats(std_I=1.0, std_Q=1.0)}
         pcap = PulseCapture(buf_size=100, channels=[1], noise_stats=ns)
-        assert pcap.baseline_track_samples == 0
-        assert pcap._baseline_alpha == 0.0
+        assert pcap.baseline_window == 0
 
 
 class TestBaselineConfig:
-    def test_ms_to_samples(self):
-        cfg = PulseCaptureConfig(baseline_track_ms=500.0)
-        assert cfg.baseline_track_samples(1000.0) == 500
-        assert PulseCaptureConfig().baseline_track_samples(1000.0) == 0
-
-    def test_session_kwargs_include_it(self):
-        cfg = PulseCaptureConfig(baseline_track_ms=250.0)
-        kwargs = cfg.session_kwargs(1000.0)
-        assert kwargs["baseline_track_samples"] == 250
-
-    # baseline_track_ms is the manual override, so these select it
-    # explicitly — auto is the default and ignores the field.
-
-    def test_validate_warns_when_faster_than_pulses(self):
-        cfg = PulseCaptureConfig(max_pulse_ms=50.0,
-                                 baseline_track_auto=False,
-                                 baseline_track_ms=100.0)
-        issues = cfg.validate()
-        assert any(s == "warning" and "absorb pulse tails" in m
-                   for s, m in issues)
-
-    def test_validate_accepts_a_sane_window(self):
-        cfg = PulseCaptureConfig(max_pulse_ms=50.0,
-                                 baseline_track_auto=False,
-                                 baseline_track_ms=5000.0)
-        issues = cfg.validate()
-        assert not any(s == "error" for s, _ in issues)
-        assert any("Baseline tracked" in m for _, m in issues)
-
-    def test_negative_is_an_error(self):
-        issues = PulseCaptureConfig(baseline_track_auto=False,
-                                    baseline_track_ms=-1.0).validate()
-        assert any(s == "error" for s, _ in issues)
-
-
-# ────────────── Auto baseline window from noise training ────────────
-
-from rfmux.algorithms.measurement.pulse_detection import (
-    recommend_baseline_track_samples,
-)
-
-
-def _flicker(n, h, rng):
-    """1/f with a fixed spectral density (not normalised by rms, which
-    would make the level depend on record length)."""
-    f = np.fft.rfftfreq(n)
-    amp = np.zeros_like(f)
-    amp[1:] = h / np.sqrt(f[1:])
-    spec = (rng.normal(size=len(f)) + 1j * rng.normal(size=len(f))) * amp
-    return np.fft.irfft(spec, n) * np.sqrt(n)
-
-
-def _noisy(n, h, rng, sigma=1.0):
-    def one():
-        return rng.normal(0, sigma, n) + (_flicker(n, h, rng) if h else 0.0)
-    return one() + 1j * one()
-
-
-class TestAutoBaselineWindow:
-    """The tracking window is the 1/f knee, which the training record
-    already measures: below it the EMA only smooths white noise, above
-    it the baseline has already moved."""
-
-    def test_white_noise_rarely_and_harmlessly_claims_drift(self):
-        """An Allan point at a handful of pairs has ~50% scatter, so a
-        naive threshold would flag drift about half the time.  The
-        fitted floor is tested against its own uncertainty instead,
-        which leaves ~5% — and those survivors land near record/9, so
-        they are still vastly slower than any pulse."""
-        rng = np.random.default_rng(0)
-        claimed, windows = 0, []
-        for _ in range(20):
-            n, info = recommend_baseline_track_samples(
-                {1: _noisy(8192, 0.0, rng)}, [1], max_samples=10 ** 9)
-            if info["drift_detected"]:
-                claimed += 1
-                windows.append(n)
-        assert claimed <= 3, f"drift claimed in {claimed}/20 white records"
-        assert all(w > 300 for w in windows), \
-            f"a false positive produced a fast tracker: {windows}"
-
-    def test_no_drift_falls_back_to_the_training_span(self):
-        rng = np.random.default_rng(1)
-        n, info = recommend_baseline_track_samples(
-            {1: _noisy(4096, 0.0, rng)}, [1])
-        assert not info["drift_detected"]
-        assert n == 4096, "should track at the span it verified as quiet"
-
-    def test_recovers_an_injected_knee(self):
-        """Ground truth from a long record; the estimator sees a slice."""
-        rng = np.random.default_rng(2)
-        long_arr = _noisy(1 << 18, 1e-2, rng)
-        truth, _ = recommend_baseline_track_samples(
-            {1: long_arr}, [1], max_samples=10 ** 9)
-        got, info = recommend_baseline_track_samples(
-            {1: long_arr[:32768]}, [1], max_samples=10 ** 9)
-        assert info["drift_detected"]
-        assert 0.4 * truth < got < 2.5 * truth, \
-            f"knee {got} far from truth {truth}"
-
-    def test_stronger_drift_gives_a_faster_tracker(self):
-        """Record length chosen so all three knees sit inside what it
-        can resolve — detection needs roughly 30x the knee, and a knee
-        slower than that falls back to the ceiling rather than
-        ordering itself."""
-        rng = np.random.default_rng(3)
-        knees = []
-        for h in (1e-2, 3e-2, 1e-1):
-            n, info = recommend_baseline_track_samples(
-                {1: _noisy(1 << 16, h, rng)}, [1], max_samples=10 ** 9)
-            assert info["drift_detected"], f"h={h:g} drift went unseen"
-            knees.append(n)
-        assert knees[0] > knees[1] > knees[2], \
-            f"knee should shrink as drift grows: {knees}"
-
-    def test_knee_beyond_the_record_is_not_claimed(self):
-        """Drift far slower than the training window is invisible — the
-        honest answer is the fallback, not an extrapolated knee."""
-        rng = np.random.default_rng(4)
-        _, info = recommend_baseline_track_samples(
-            {1: _noisy(2048, 1e-3, rng)}, [1], max_samples=10 ** 9)
-        assert not info["drift_detected"]
-
-    def test_pulse_contamination_is_clamped_by_the_floor(self):
-        """Pulses bias the knee downward (fast tracking).  That is the
-        safe direction only because the pulse-length floor catches it."""
-        rng = np.random.default_rng(5)
-        base = _noisy(32768, 1e-2, rng)
-        dirty = base.copy()
-        for start in rng.integers(0, 32768 - 400, 20):
-            t = np.arange(300)
-            dirty[start:start + 300] += 30.0 * np.exp(-t / 40.0)
-        free, _ = recommend_baseline_track_samples(
-            {1: dirty}, [1], max_samples=10 ** 9)
-        clamped, _ = recommend_baseline_track_samples(
-            {1: dirty}, [1], min_samples=600, max_samples=10 ** 9)
-        assert free < 600, "expected contamination to pull the knee in"
-        assert clamped == 600, "floor must catch a contaminated fit"
-
-    def test_floor_above_ceiling_says_so(self):
-        rng = np.random.default_rng(6)
-        n, info = recommend_baseline_track_samples(
-            {1: _noisy(4096, 0.0, rng)}, [1],
-            min_samples=50_000, max_samples=4096)
-        assert n == 50_000
-        assert "lengthen noise training" in info["summary"]
-
-    def test_empty_input_is_survivable(self):
-        n, info = recommend_baseline_track_samples({}, [1])
-        assert n == 0 and "no usable training data" in info["summary"]
-
-
-class TestAutoBaselineWiring:
-    def test_config_floors_at_a_multiple_of_the_pulse_length(self):
-        cfg = PulseCaptureConfig(max_pulse_ms=10.0)
-        assert cfg.baseline_track_auto is True
-        assert (cfg.baseline_track_min_samples(1000.0)
-                == cfg.BASELINE_PULSE_FACTOR * 10)
-
-    def test_session_kwargs_carry_auto_and_the_floor(self):
-        cfg = PulseCaptureConfig(max_pulse_ms=10.0)
+    def test_window_is_the_training_span_floored_against_the_ring(self):
+        """One window, one requirement: long compared with a pulse.
+        The ring holds one max-length pulse, so the window is floored
+        against it in case training was overridden short."""
+        # Once the ring is above its own minimum size, training (20x the
+        # pulse) beats the ring floor (8 x 1.5x the pulse) and wins.
+        cfg = PulseCaptureConfig(max_pulse_ms=1000.0)
         kw = cfg.session_kwargs(1000.0)
-        assert kw["baseline_track_auto"] is True
-        assert kw["baseline_track_min_samples"] == 200
+        assert kw["baseline_window"] == cfg.noise_samples(1000.0) == 20000
+        assert kw["baseline_window"] > cfg.buf_size(1000.0)
 
-    def test_validate_says_when_the_measurement_cannot_bind(self):
-        """A knee faster than the resolvable limit IS measurable — it
-        just gets clamped up to the floor, so it cannot change the
-        window.  The two ranges have to overlap to have any effect."""
-        cfg = PulseCaptureConfig(max_pulse_ms=10.0, noise_train_ms=50.0)
-        issues = cfg.validate(sample_rate=1000.0)
-        msg = next(m for s, m in issues if "floor" in m and s == "info")
-        assert "cannot change it" in msg, msg
-        assert "would open a band" in msg, msg
-
-    def test_derived_training_never_lets_a_knee_bind(self):
-        """Structural, with training derived at NOISE_TRAIN_PULSES x the
-        pulse length: the floor is BASELINE_PULSE_FACTOR x the pulse
-        length while the fit resolves only NOISE_TRAIN_PULSES/9 x it,
-        so the measurable range sits entirely under the floor."""
-        cfg = PulseCaptureConfig()
-        assert cfg.NOISE_TRAIN_PULSES / cfg._KNEE_PAIRS \
-            < cfg.BASELINE_PULSE_FACTOR, \
-            "a measured knee can now bind — update the guidance above"
-        for mp in (5.0, 20.0, 250.0):
-            c = PulseCaptureConfig(max_pulse_ms=mp)
-            for fs in (596.0464477539062, 19073.486328125):
-                assert (c.knee_measurable_ms(fs)
-                        < c.BASELINE_PULSE_FACTOR * mp)
-
-    def test_session_measures_the_window_during_training(self):
-        """End to end: feeding drifting noise through the session must
-        leave a measured window on the engine, not the default 0."""
-        rng = np.random.default_rng(7)
-        n = 32768
-        arr = _noisy(n, 1e-2, rng)
-        sess = PulseCaptureSession(
-            channels=[1], sample_rate=1000.0, noise_samples=n,
-            baseline_track_auto=True, baseline_track_min_samples=0,
-            threshold_sigma=50.0)
-        sess.start()
-        for k in range(n):
-            sess.feed_sample(1, float(arr[k].real), float(arr[k].imag),
-                             k / 1000.0)
-        assert sess.state is CaptureState.CAPTURING
-        assert sess.baseline_track_info["drift_detected"]
-        assert sess.baseline_track_samples > 0
-        assert (sess.pcap.baseline_track_samples
-                == sess.baseline_track_samples)
-        assert sess.pcap._baseline_alpha > 0.0
-        assert sess.stats()["baseline_track_ms"] > 0
-
-    def test_re_estimation_installs_the_new_window_in_place(self):
-        rng = np.random.default_rng(8)
-        n = 8192
-        sess = PulseCaptureSession(
-            channels=[1], sample_rate=1000.0, noise_samples=n,
-            baseline_track_auto=True, threshold_sigma=50.0)
-        sess.start()
-        arr = _noisy(n, 0.0, rng)
-        for k in range(n):
-            sess.feed_sample(1, float(arr[k].real), float(arr[k].imag),
-                             k / 1000.0)
-        engine = sess.pcap
-        first = sess.baseline_track_samples
-
-        # Re-train on strongly drifting data: same engine, new window.
-        sess.re_estimate_noise()
-        arr = _noisy(n, 3e-2, rng)
-        for k in range(n):
-            sess.feed_sample(1, float(arr[k].real), float(arr[k].imag),
-                             (n + k) / 1000.0)
-        assert sess.pcap is engine, "engine should not be rebuilt"
-        assert sess.baseline_track_samples < first
-        assert (engine.baseline_track_samples
-                == sess.baseline_track_samples)
+        # Training overridden far too short: the ring floor takes over,
+        # so the median never runs in a window a pulse could dominate.
+        short = PulseCaptureConfig(max_pulse_ms=1000.0, noise_train_ms=1.0)
+        kw = short.session_kwargs(1000.0)
+        assert kw["baseline_window"] == (short.BASELINE_MIN_RINGS
+                                         * short.buf_size(1000.0))
+        assert kw["baseline_window"] > short.noise_samples(1000.0)
 
 
 # ────────────────────── Trigger confirmation ────────────────────────

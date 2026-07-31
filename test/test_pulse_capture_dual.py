@@ -281,3 +281,42 @@ def test_one_sided_emits_live_with_cross_tod(tmp_path):
         "cross-stream TOD must be captured while the ring covers it"
     assert len(pair["fast_tod"]["Amp_I"]) > 0
     dual.stop()
+
+
+def test_streams_start_capturing_together():
+    """The fast stream reaches its training target far sooner (more
+    samples per second, and a cap on top), so left alone it triggers
+    into a partner with no ring yet and every pair comes out one-sided
+    with 'window unavailable'."""
+    import numpy as np
+    from rfmux.algorithms.measurement.pulse_capture_session import (
+        CaptureState)
+
+    dual = DualPulseCaptureSession(
+        channels=[1], slow_rate=1000.0, fast_rate=10000.0,
+        config=PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                                  max_pulse_ms=20.0, noise_train_ms=100.0))
+    dual.start()
+    rng = np.random.default_rng(0)
+
+    # Feed the fast stream alone until it finishes training.
+    k = 0
+    while dual.fast.state is not CaptureState.CAPTURING and k < 200_000:
+        dual.feed_fast(1, float(rng.normal(0, 1)), float(rng.normal(0, 1)),
+                       k * 1e-4)
+        k += 1
+    assert dual.fast.state is CaptureState.CAPTURING
+    assert dual.slow.state is CaptureState.ESTIMATING
+    assert dual.fast.pcap.freeze_triggers, \
+        "fast must hold until its partner has a ring"
+
+    # Now bring the slow stream up; both should be live afterwards.
+    j = 0
+    while dual.slow.state is not CaptureState.CAPTURING and j < 200_000:
+        dual.feed_slow(1, float(rng.normal(0, 1)), float(rng.normal(0, 1)),
+                       j * 1e-3)
+        j += 1
+    assert dual.slow.state is CaptureState.CAPTURING
+    assert not dual.fast.pcap.freeze_triggers
+    assert not dual.slow.pcap.freeze_triggers
+    dual.stop()

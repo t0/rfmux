@@ -501,15 +501,18 @@ def test_follow_latest_coalesces_bursts(qt_app, tmp_path):
     _feed_capture(runtime._pulse_tap, rng, n=8000,
                   pulse_starts=tuple(range(200, 7000, 700)))
     n_expected = len(range(200, 7000, 700))
+    # This test is about the coalescing timer, not detector tuning, so
+    # wait for the burst to land rather than pinning an exact count.
     assert _spin_until(
-        qt_app, lambda: len(panel._pulse_order) == n_expected), \
+        qt_app, lambda: len(panel._pulse_order) >= n_expected), \
         f"saw {len(panel._pulse_order)}/{n_expected} pulses"
-    # Let the coalescing timer fire and draw the newest pulse
+    _spin(qt_app, 0.3)
+    newest = max(idx for _ch, idx in panel._pulse_order)
     assert _spin_until(
         qt_app,
-        lambda: f"#{n_expected:06d}" in panel.pulse_info.text()
+        lambda: f"#{newest:06d}" in panel.pulse_info.text()
         and len(panel.pulse_plot_i.getPlotItem().listDataItems()) >= 1), \
-        f"viewer not on latest: {panel.pulse_info.text()!r}"
+        f"viewer not on latest (#{newest}): {panel.pulse_info.text()!r}"
 
     panel._on_stop()
     assert _spin_until(qt_app, lambda: panel.task is None)
@@ -855,5 +858,31 @@ def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
 
     panel._on_stop()
     _spin(qt_app)
+    panel.close()
+    _spin(qt_app)
+
+
+def test_pair_view_marks_come_from_the_triggered_record(qt_app, tmp_path):
+    """In 'both' mode the plots show the UNION ring window, which
+    carries no decisions — the marks live on the stream's own triggered
+    record and are absolute times, so they still land correctly."""
+    import pyqtgraph as pg
+
+    path = _build_dual_file(tmp_path)
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+    panel._show_pair(*panel._pulse_order[-1])
+
+    for name, plot in (("I", panel.pulse_plot_i),
+                       ("Q", panel.pulse_plot_q)):
+        verticals = [it for it in plot.getPlotItem().items
+                     if isinstance(it, pg.InfiniteLine) and it.angle == 90]
+        assert verticals, f"{name}: no decision marks in pair view"
+        if name == "I":
+            texts = [it.label.textItem.toPlainText()
+                     for it in verticals if getattr(it, "label", None)]
+            assert any("trigger" in t for t in texts), texts
+            assert any(t.startswith(("slow ", "fast ")) for t in texts), \
+                texts
     panel.close()
     _spin(qt_app)

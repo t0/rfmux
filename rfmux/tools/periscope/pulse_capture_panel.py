@@ -401,7 +401,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             parts.append(f"bucket {got}/{want}")
         return "\n" + "   ".join(parts)
 
-    def _annotate_decisions(self, plot, wf, t0, quad) -> None:
+    def _annotate_decisions(self, plot, wf, t0, quad,
+                            prefix="") -> None:
         """Mark where the detector triggered and where the leaky bucket
         confirmed the end.
 
@@ -416,6 +417,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         def _t_at(idx_key, time_key):
+            # Prefer the absolute time: when these marks were looked up
+            # from a triggered record but drawn over a different
+            # (union) window, its indices do not apply here.
             tv = wf.get(time_key)
             if tv is not None and np.isfinite(tv):
                 return float(tv) - t0
@@ -431,6 +435,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             ("end_index", "end_time", "#CC3366", "end confirmed"),
         )
         for idx_key, time_key, color, label in marks:
+            label = f"{prefix}{label}"
             x = _t_at(idx_key, time_key)
             if x is None:
                 continue
@@ -1264,13 +1269,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                          + " | ".join(parts), "#FFCC33")
 
     def _baseline_summary(self) -> str:
-        """What the training data said the tracking window should be.
-
-        Read off the session rather than the signal payload: the
-        measurement happens inside the session at the end of training,
-        and the single- and dual-stream callbacks carry different
-        shapes.
-        """
+        """The span the rolling baseline median covers."""
         sess = getattr(self.task, "session", None)
         if sess is None:
             return ""
@@ -1279,15 +1278,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                   else [("", sess)])
         parts = []
         for name, s in inners:
-            n = getattr(s, "baseline_track_samples", 0)
-            if not getattr(s, "baseline_track_auto", False) or not n:
+            n = getattr(s, "baseline_window", 0)
+            if not n:
                 continue
             rate = getattr(s, "sample_rate", None)
-            span = f"{n / rate * 1e3:,.0f} ms" if rate else f"{n:,} samples"
-            info = getattr(s, "baseline_track_info", None) or {}
-            how = "1/f knee" if info.get("drift_detected") else "no drift seen"
-            parts.append(f"{name + ' ' if name else ''}{span} ({how})")
-        return ("   —   baseline τ:  " + ",  ".join(parts)) if parts else ""
+            span = f"{n / rate:,.3g} s" if rate else f"{n:,} samples"
+            parts.append(f"{name + ' ' if name else ''}{span}")
+        return ("   —   baseline median over:  " + ",  ".join(parts)
+                if parts else "")
 
     def _on_noise_estimated(self, noise_stats: dict) -> None:
         if "stream" in noise_stats and "stats" in noise_stats:
@@ -1798,10 +1796,18 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 self._annotate_noise_bands(
                     plot, quad, stats.get(channel), x0, x1, tint,
                     prefix=f"{stream} ")
-                # Present only on a stream's own triggered window — a
-                # ring extract taken because the OTHER stream fired
-                # carries no decisions of its own.
-                self._annotate_decisions(plot, wf, t0, quad)
+                # The displayed window is usually the UNION ring
+                # extract, which carries no decisions — those live on
+                # the stream's own triggered record.  The marks are
+                # absolute times, so they land correctly on the union
+                # axis once looked up.
+                idx = meta.get(f"{stream}_idx")
+                marks = wf if "trigger_index" in wf else None
+                if marks is None and idx is not None:
+                    marks = self._get_waveform(channel, idx, stream)
+                if marks is not None:
+                    self._annotate_decisions(plot, marks, t0, quad,
+                                             prefix=f"{stream} ")
 
     # ── Histograms ────────────────────────────────────────────────
 

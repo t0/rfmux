@@ -153,12 +153,13 @@ async def main(serial: str = "MOCK") -> int:
         session.stop()
         print(f"   ✓ {session.total_pulses} pulses in {covered:.2f} s "
               f"→ {slow_path}")
-        # The baseline EMA window is measured from the same training
-        # record that sets the trigger threshold — see
-        # recommend_baseline_track_samples().
-        if session.baseline_track_info:
-            print(f"   baseline tracking: "
-                  f"{session.baseline_track_info['summary']}")
+        # sigma comes from the training record; the mean is re-estimated
+        # continuously as the median of the same span, so 1/f drift does
+        # not walk the trigger band away from the data.
+        if session.baseline_window:
+            print(f"   rolling baseline median over "
+                  f"{session.baseline_window:,} samples "
+                  f"({session.baseline_window / fs_slow:.2f} s)")
 
         with PulseHDF5Reader(slow_path) as reader:
             hist = reader.get_histograms()

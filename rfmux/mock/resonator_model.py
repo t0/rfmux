@@ -176,9 +176,23 @@ class MockResonatorModel:
     
     # --- MR_Resonator Methods ---
     def generate_resonators(self, num_resonances=2, config=None):
+        """Regenerate the resonator set, atomically w.r.t. the streamer.
+
+        Regeneration empties mr_lekids / mr_complex_resonators /
+        base_nqp_values and refills them one resonator at a time.  The
+        streamer thread reads those lists under _physics_lock, so without
+        holding it here it can sample a half-built set — e.g. 4 lekids
+        against 3 complex resonators, which crashed the streamer's noise
+        perturbation with a broadcast error.  RLock, so any re-entrant
+        s21 call made during generation is fine.
+        """
+        with self._physics_lock:
+            return self._generate_resonators_locked(num_resonances, config)
+
+    def _generate_resonators_locked(self, num_resonances=2, config=None):
         '''
         Generate mr_resonator objects with circuit parameters.
-        
+
         Parameters
         ----------
         num_resonances : int
@@ -927,7 +941,10 @@ class MockResonatorModel:
         # alpha_k = Lk/L, so dL/L = alpha_k * s_Lk * eps.
         if nqp_noise_frac is not None:
             s_Lk, s_R = self._nqp_sensitivity()
-            m = min(n_relevant, len(nqp_noise_frac))
+            # Clamp against every participating array, as the TLS block
+            # below does: these are sized from three different lists and
+            # a mid-rebuild sample must degrade, not raise.
+            m = min(n_relevant, len(nqp_noise_frac), len(s_Lk), len(s_R))
             if m:
                 eps = nqp_noise_frac[:m]
                 alpha_k = np.array(
@@ -1088,10 +1105,14 @@ class MockResonatorModel:
 
         Returns ``(s_Lk, s_R)`` where ``dLk/Lk = s_Lk * dnqp/nqp``.
         """
-        if self._nqp_sens_cache is not None:
-            return self._nqp_sens_cache
-
+        # Keyed on the resonator count, not merely invalidated at the top
+        # of generate_resonators: this is computed lazily, so a call that
+        # lands mid-rebuild would otherwise cache an array sized for the
+        # partial set and keep serving it afterwards.
         n = len(self.mr_complex_resonators)
+        if self._nqp_sens_cache is not None and self._nqp_sens_cache[0] == n:
+            return self._nqp_sens_cache[1:]
+
         base = np.array(self.base_nqp_values[:n], dtype=np.float64)
         cr0 = self.mr_complex_resonators[0]
         common = (
@@ -1110,9 +1131,9 @@ class MockResonatorModel:
         with np.errstate(divide="ignore", invalid="ignore"):
             s_Lk = np.where(Lk0 != 0, (Lk1 - Lk0) / (Lk0 * delta), 0.0)
             s_R = np.where(R0 != 0, (R1 - R0) / (R0 * delta), 0.0)
-        self._nqp_sens_cache = (np.nan_to_num(s_Lk),
+        self._nqp_sens_cache = (n, np.nan_to_num(s_Lk),
                                 np.nan_to_num(s_R))
-        return self._nqp_sens_cache
+        return self._nqp_sens_cache[1:]
 
     def update_base_params_from_nqp(self, noisy_nqp_values):
         """

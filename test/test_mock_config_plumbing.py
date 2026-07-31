@@ -11,6 +11,10 @@ Two bugs found while designing the TLS/1-f noise model:
    enabled its batches advance the clock past the slow frame — so the
    slow emitter must pass ``pulse_time`` explicitly or its samples get
    evaluated at the PFB's (later) time.
+3. ``generate_resonators`` rebuilds mr_lekids / mr_complex_resonators /
+   base_nqp_values incrementally without holding ``_physics_lock``, so a
+   streamer sample landing mid-rebuild saw mismatched lengths and raised
+   "operands could not be broadcast together with shapes (4,) (3,)".
 """
 
 import inspect
@@ -133,6 +137,106 @@ def test_qp_noise_still_reaches_the_signal():
     ratio = scatter[0.1] / scatter[0.01]
     assert 5.0 < ratio < 20.0, \
         f"scatter should scale ~10x with 10x noise, got {ratio:.1f}x"
+
+
+def _mk_model(n=3, **extra):
+    import asyncio
+
+    from rfmux.mock.crs import ServerMockCRS
+
+    crs = ServerMockCRS("0000")
+    cfg = {"num_resonances": n, "resonator_random_seed": 3,
+           "auto_bias_kids": False, "bias_amplitude": 0.001}
+    cfg.update(extra)
+    asyncio.run(crs.generate_resonators(cfg))
+    return crs, crs._resonator_model
+
+
+def test_nqp_sensitivity_tracks_resonator_count():
+    """The sensitivity arrays are filled lazily from
+    mr_complex_resonators.  A call landing mid-rebuild used to pin a
+    short array for the rest of the run, and every later sample then
+    crashed the streamer in the QP perturbation."""
+    crs, m = _mk_model(3)
+    # Fill the cache against a deliberately short (mid-rebuild) set.
+    full_cr = list(m.mr_complex_resonators)
+    full_nqp = list(m.base_nqp_values)
+    m.mr_complex_resonators = full_cr[:2]
+    m.base_nqp_values = full_nqp[:2]
+    assert len(m._nqp_sensitivity()[0]) == 2
+
+    # Rebuild completes — the cache must follow, not stay at 2.
+    m.mr_complex_resonators = full_cr
+    m.base_nqp_values = full_nqp
+    s_Lk, s_R = m._nqp_sensitivity()
+    assert len(s_Lk) == 3 and len(s_R) == 3
+
+
+def test_partial_rebuild_degrades_instead_of_raising():
+    """Belt and braces: even with a short sensitivity array in hand, the
+    S21 path must return a value rather than take the streamer down."""
+    crs, m = _mk_model(3, nqp_noise_enabled=True, nqp_noise_std_factor=0.01)
+    m._nqp_sensitivity()
+    m._nqp_sens_cache = (2, m._nqp_sens_cache[1][:2], m._nqp_sens_cache[2][:2])
+    val = m._s21_lc_response_internal(float(m.resonator_frequencies[0]),
+                                      0.001, pulse_time=1e-6)
+    assert val == val  # not NaN
+
+
+def test_generate_resonators_holds_the_physics_lock():
+    """Serialising the rebuild against the streamer thread is the actual
+    fix; the clamps above only stop it being fatal."""
+    from rfmux.mock.resonator_model import MockResonatorModel
+
+    crs, m = _mk_model(2)
+    held = []
+    real = MockResonatorModel._generate_resonators_locked
+
+    def spy(self, *a, **k):
+        held.append(self._physics_lock._is_owned())
+        return real(self, *a, **k)
+
+    MockResonatorModel._generate_resonators_locked = spy
+    try:
+        m.generate_resonators(num_resonances=2, config=crs._physics_config)
+    finally:
+        MockResonatorModel._generate_resonators_locked = real
+    assert held == [True]
+
+
+def test_streaming_across_a_regeneration_does_not_crash():
+    """The reported failure, reproduced: sample S21 from one thread while
+    another regenerates the resonator set."""
+    import threading
+
+    crs, m = _mk_model(3, nqp_noise_enabled=True, nqp_noise_std_factor=0.01)
+    errors = []
+    stop = threading.Event()
+
+    def sampler():
+        k = 0
+        while not stop.is_set():
+            try:
+                # Same entry point and lock discipline as the PFB batch loop.
+                with m._physics_lock:
+                    m._s21_lc_response_internal(1.0e9, 0.001,
+                                                pulse_time=k * 1e-6)
+            except Exception as exc:          # noqa: BLE001 — that's the test
+                errors.append(exc)
+                return
+            k += 1
+
+    t = threading.Thread(target=sampler, daemon=True)
+    t.start()
+    try:
+        for n in (5, 3, 6, 2):
+            m.generate_resonators(num_resonances=n,
+                                  config=dict(crs._physics_config,
+                                              num_resonances=n))
+    finally:
+        stop.set()
+        t.join(timeout=10)
+    assert not errors, f"streamer thread died: {errors[0]!r}"
 
 
 def test_nqp_linearisation_matches_the_exact_kernel():

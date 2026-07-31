@@ -4,6 +4,7 @@ Handles the mock server setup, process management, and request handling for Tube
 """
 import asyncio
 import json
+import os
 import socket
 import multiprocessing
 from aiohttp import web
@@ -106,6 +107,19 @@ class ServerProcess(mp_ctx.Process):
         super().__init__()
 
     def run(self):
+        # Undo any CPU pinning inherited across fork().  Periscope pins
+        # its GUI thread to a single core (periscope/utils.py
+        # pin_current_thread_to_core) BEFORE this process is forked, and
+        # fork inherits the affinity mask — which would confine the
+        # whole simulation, streamer thread and every numba worker, to
+        # one core.  The pin is meant for the Qt event loop, not for a
+        # compute-bound child.
+        try:
+            n_cpus = os.cpu_count() or 1
+            os.sched_setaffinity(0, set(range(n_cpus)))
+        except (AttributeError, OSError):
+            pass  # not Linux, or not permitted — harmless
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 

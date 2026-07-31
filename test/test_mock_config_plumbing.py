@@ -64,3 +64,105 @@ def test_ratchet_still_guards_pulse_generation():
     src = inspect.getsource(
         MockResonatorModel.update_qp_densities_for_time)
     assert "<= self.last_update_time" in src
+
+
+def test_qp_noise_does_not_defeat_the_convergence_cache():
+    """White QP noise is a fresh draw per call; folding it into the nqp
+    used for the cache key made every call a miss (85% -> 4% hit rate
+    at 10% noise, a 12x slowdown). It must be applied as a post-cache
+    perturbation instead, so the hit rate is independent of it."""
+    import asyncio
+
+    from rfmux.mock.crs import ServerMockCRS
+
+    rates = {}
+    for noise in (0.001, 0.1):
+        crs = ServerMockCRS("0000")
+        asyncio.run(crs.generate_resonators({
+            "num_resonances": 2, "resonator_random_seed": 3,
+            "auto_bias_kids": True, "bias_amplitude": 0.001,
+            "nqp_noise_enabled": True, "nqp_noise_std_factor": noise}))
+        m = crs._resonator_model
+        m._convergence_cache.clear()
+        m._convergence_stats = {"full": 0, "skipped": 0,
+                                "last_reason": None}
+        for k in range(200):
+            m._s21_lc_response_internal(1.0e9, 0.001, pulse_time=k * 1e-6)
+        st = m._convergence_stats
+        rates[noise] = st["skipped"] / max(st["full"] + st["skipped"], 1)
+
+    assert rates[0.1] > 0.5 * rates[0.001], (
+        f"cache hit rate collapses with noise: "
+        f"{rates[0.001]:.2f} -> {rates[0.1]:.2f}")
+
+
+def test_qp_noise_still_reaches_the_signal():
+    """The perturbation must not be optimised away.
+
+    Absolute scatter is a bad probe: the response is dominated by R
+    (s_R ~ 1) while Lk barely moves (s_Lk ~ 3e-5), and the S21 dip sits
+    off the nominal resonator frequency, so the sensitivity at any
+    given probe point is arbitrary.  What must hold regardless is
+    PROPORTIONALITY — 10x the noise gives 10x the scatter — plus a
+    deterministic no-noise case.
+    """
+    import asyncio
+
+    import numpy as np
+
+    from rfmux.mock.crs import ServerMockCRS
+
+    scatter = {}
+    for noise in (0.0, 0.01, 0.1):
+        crs = ServerMockCRS("0000")
+        asyncio.run(crs.generate_resonators({
+            "num_resonances": 2, "resonator_random_seed": 3,
+            "auto_bias_kids": True, "bias_amplitude": 0.001,
+            "nqp_noise_enabled": noise > 0,
+            "nqp_noise_std_factor": max(noise, 1e-12)}))
+        m = crs._resonator_model
+        f_probe = float(m.resonator_frequencies[0])
+        vals = [abs(m._s21_lc_response_internal(f_probe, 0.001,
+                                                pulse_time=k * 1e-6))
+                for k in range(300)]
+        scatter[noise] = float(np.std(vals))
+
+    assert scatter[0.01] > 0.0, "noise did not reach the output at all"
+    assert scatter[0.0] < scatter[0.01] / 5.0, \
+        "no-noise case should be far quieter than the noisy ones"
+    ratio = scatter[0.1] / scatter[0.01]
+    assert 5.0 < ratio < 20.0, \
+        f"scatter should scale ~10x with 10x noise, got {ratio:.1f}x"
+
+
+def test_nqp_linearisation_matches_the_exact_kernel():
+    """The post-cache perturbation is a linearisation; confirm it
+    reproduces the exact physics kernel over the usable noise range."""
+    import asyncio
+
+    import numpy as np
+
+    from rfmux.mock.crs import ServerMockCRS
+    from rfmux.mr_resonator import jit_physics
+
+    crs = ServerMockCRS("0000")
+    asyncio.run(crs.generate_resonators({
+        "num_resonances": 2, "resonator_random_seed": 3,
+        "auto_bias_kids": True, "bias_amplitude": 0.001}))
+    m = crs._resonator_model
+    s_Lk, s_R = m._nqp_sensitivity()
+
+    n = len(m.mr_complex_resonators)
+    base = np.array(m.base_nqp_values[:n])
+    cr0 = m.mr_complex_resonators[0]
+    common = (np.array([cr.readout_f for cr in m.mr_complex_resonators]),
+              np.full(n, cr0.T), np.full(n, cr0.Delta0),
+              np.full(n, cr0.N0), np.full(n, cr0.sigmaN),
+              np.full(n, cr0.thickness), np.full(n, cr0.width),
+              np.full(n, cr0.length), np.full(n, cr0.R_spoiler))
+    R0, Lk0 = jit_physics.vectorized_update_params_from_nqp(base, *common)
+    for eps in (0.01, 0.1):
+        R1, Lk1 = jit_physics.vectorized_update_params_from_nqp(
+            base * (1.0 + eps), *common)
+        assert np.allclose((Lk1 - Lk0) / Lk0, s_Lk * eps, rtol=1e-3)
+        assert np.allclose((R1 - R0) / R0, s_R * eps, rtol=1e-3)

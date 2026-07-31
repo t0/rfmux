@@ -49,6 +49,7 @@ class MockResonatorModel:
         # TLS (1/f) frequency wander — built in generate_resonators once
         # the resonator count is known; None disables it entirely.
         self._tls_generator = None
+        self._nqp_sens_cache = None
         self.tls_noise_enabled = default_config.get('tls_noise_enabled',
                                                     False)
         self.tls_fractional_rms = default_config.get('tls_fractional_rms',
@@ -292,6 +293,7 @@ class MockResonatorModel:
         self.tls_alpha = config.get('tls_alpha', 1.0)
         self.tls_corner_hz = config.get('tls_corner_hz', 100.0)
         self._tls_generator = None  # rebuilt below once count is known
+        self._nqp_sens_cache = None  # depends on resonator params
 
         self.nqp_noise_enabled = config.get('nqp_noise_enabled', True)
         self.nqp_noise_std_factor = config.get('nqp_noise_std_factor', 0.001)  # Default 0.1% noise if not in config
@@ -665,14 +667,20 @@ class MockResonatorModel:
                     excess_factor = (pulse['amplitude'] - 1.0) * time_factor
                     effective_nqp_array[i] += excess_factor * base_nqp_array[i]
         
-        # Add fresh noise (vectorized)
-        if self.nqp_noise_enabled:
-            # Generate noise for all resonators at once
-            noise_array = np.random.normal(0, base_nqp_array * self.nqp_noise_std_factor, len(base_nqp_array))
-            effective_nqp_array = np.maximum(0, effective_nqp_array + noise_array)
+        # White QP noise is deliberately NOT folded into the nqp used
+        # below.  It is a fresh draw every call, so it would miss the
+        # convergence cache every time (measured: 85% hit rate -> 4% at
+        # a 10% noise level, a 12x slowdown) and force a full
+        # self-consistent re-convergence for what is a tiny
+        # perturbation.  Instead it is carried as a FRACTIONAL
+        # deviation and applied to Lk/R after the cache restore, the
+        # same way the TLS wander is.
+        effective_nqp_array = np.maximum(0, effective_nqp_array)
+        if self.nqp_noise_enabled and self.nqp_noise_std_factor > 0:
+            nqp_noise_frac = np.random.normal(
+                0.0, self.nqp_noise_std_factor, len(base_nqp_array))
         else:
-            # Ensure non-negative even without noise
-            effective_nqp_array = np.maximum(0, effective_nqp_array)
+            nqp_noise_frac = None
         
         # Convert to list for compatibility with existing code
         effective_nqp = effective_nqp_array.tolist()
@@ -829,6 +837,23 @@ class MockResonatorModel:
             R_subset[i] = lekid.R
             Cc_subset[i] = lekid.Cc
         
+        # ── White QP noise, as a post-cache perturbation ──────────
+        # Linearised about the operating point: a fractional nqp
+        # deviation eps maps to fractional changes s_Lk*eps in Lk and
+        # s_R*eps in R.  Lk enters the total inductance weighted by
+        # alpha_k = Lk/L, so dL/L = alpha_k * s_Lk * eps.
+        if nqp_noise_frac is not None:
+            s_Lk, s_R = self._nqp_sensitivity()
+            m = min(n_relevant, len(nqp_noise_frac))
+            if m:
+                eps = nqp_noise_frac[:m]
+                alpha_k = np.array(
+                    [self.mr_lekids[i].alpha_k for i in range(m)])
+                L_subset[:m] = L_subset[:m] * (
+                    1.0 + alpha_k * s_Lk[:m] * eps)
+                R_subset[:m] = np.maximum(
+                    0.0, R_subset[:m] * (1.0 + s_R[:m] * eps))
+
         # ── TLS (1/f) frequency wander ────────────────────────────
         # Applied HERE, after any convergence-cache restore, because
         # the cache quantizes QP and restores L/Lk/R verbatim on a hit —
@@ -969,6 +994,42 @@ class MockResonatorModel:
         if not hasattr(self, '_convergence_counter'):
             self._convergence_counter = 0
         self._convergence_counter += 1
+
+    def _nqp_sensitivity(self):
+        """Fractional response of (Lk, R) to a fractional nqp change.
+
+        Computed once per resonator configuration by finite-differencing
+        the same physics kernel the model uses, then reused for every
+        sample — the operating point moves only slowly, and the white
+        noise it serves is a small perturbation about it.
+
+        Returns ``(s_Lk, s_R)`` where ``dLk/Lk = s_Lk * dnqp/nqp``.
+        """
+        if self._nqp_sens_cache is not None:
+            return self._nqp_sens_cache
+
+        n = len(self.mr_complex_resonators)
+        base = np.array(self.base_nqp_values[:n], dtype=np.float64)
+        cr0 = self.mr_complex_resonators[0]
+        common = (
+            np.array([cr.readout_f for cr in self.mr_complex_resonators],
+                     dtype=np.float64),
+            np.full(n, cr0.T), np.full(n, cr0.Delta0),
+            np.full(n, cr0.N0), np.full(n, cr0.sigmaN),
+            np.full(n, cr0.thickness), np.full(n, cr0.width),
+            np.full(n, cr0.length), np.full(n, cr0.R_spoiler),
+        )
+        delta = 1e-3
+        R0, Lk0 = jit_physics.vectorized_update_params_from_nqp(
+            base, *common)
+        R1, Lk1 = jit_physics.vectorized_update_params_from_nqp(
+            base * (1.0 + delta), *common)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            s_Lk = np.where(Lk0 != 0, (Lk1 - Lk0) / (Lk0 * delta), 0.0)
+            s_R = np.where(R0 != 0, (R1 - R0) / (R0 * delta), 0.0)
+        self._nqp_sens_cache = (np.nan_to_num(s_Lk),
+                                np.nan_to_num(s_R))
+        return self._nqp_sens_cache
 
     def update_base_params_from_nqp(self, noisy_nqp_values):
         """

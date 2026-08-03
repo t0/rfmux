@@ -2,7 +2,6 @@ from importlib import util
 from pathlib import Path
 import pytest
 
-pytestmark = pytest.mark.mock_e2e  # spawns a MockCRS server
 import asyncio
 import numpy as np
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
@@ -21,8 +20,15 @@ run_algorithm_flow = simplified_tuning_flow.run_algorithm_flow
 sys.modules["simplified_tuning_flow"] = simplified_tuning_flow
 
 class TestIntegration:
-    """Full integration tests."""
-    
+    """Full integration tests.
+
+    Only this class spawns a MockCRS server (~21 s), so mock_e2e belongs here
+    rather than at module scope: TestSimpleTuningFlow below drives the flow
+    with AsyncMock and runs in single-digit milliseconds.
+    """
+
+    pytestmark = pytest.mark.mock_e2e
+
     @pytest.mark.asyncio
     @pytest.mark.integration
     async def test_mock_mode_execution(self):

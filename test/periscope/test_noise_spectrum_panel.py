@@ -31,8 +31,12 @@ def qt_app():
 
 
 def _spin(qt_app, seconds=0.05):
-    """Let Qt run deferred deletions; without this pyqtgraph's ViewBox
-    teardown fires against already-freed widgets and spews to stderr."""
+    """Let Qt drain deferred deletions after closing a panel.
+
+    This does NOT silence pyqtgraph's teardown tracebacks — see the note in
+    test/README.md. Those come from named ViewBoxes deregistering during GC and
+    are upstream noise, not something the test can spin away.
+    """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         qt_app.processEvents()

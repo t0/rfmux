@@ -180,9 +180,41 @@ pays their setup on every default run. Put it on the class.
 
 GUI tests set `QT_QPA_PLATFORM=offscreen` at import time and
 `pytest.importorskip("PyQt6")`. They share one `QApplication` via a `qt_app`
-fixture and call `_spin(qt_app)` after closing a panel — without that, Qt's
-deferred deletion runs during interpreter teardown and pyqtgraph's ViewBox
-cleanup writes tracebacks to stderr.
+fixture and call `_spin(qt_app)` after closing a panel, to let Qt drain
+deferred deletions before the next assertion.
+
+### Expected stderr noise from pyqtgraph
+
+Panel tests print tracebacks ending in:
+
+```
+RuntimeError: wrapped C/C++ object of type QComboBox has been deleted
+```
+
+**These are not failures.** The run is green; check the summary line, not the
+stderr. They come from panels whose plots are built as
+`pg.PlotWidget(..., name=...)`. A *named* ViewBox registers in pyqtgraph's
+process-global registry, and when one is garbage collected its `destroyed`
+handler calls `ViewBox.updateAllViewLists()`, which rebuilds the menu of every
+other registered view — including ones whose C++ side Qt has already freed.
+
+pyqtgraph does ship the fix: `cleanup()` disconnects those handlers, and it is
+wired to `QApplication.aboutToQuit`. Under pytest that signal never fires,
+because no test calls `app.exec()`. Calling `cleanup()` at session end does not
+help either, since most of these collections happen *mid-run*, between tests.
+
+Things that were tried and did not work, so nobody repeats them:
+
+- `_spin(qt_app)` after `close()` — deferred deletion is not the trigger.
+- Holding panel references to prevent collection — made it *worse*, because more
+  registered views means more menus rebuilt per destruction.
+- A session-scoped `pyqtgraph.cleanup()` fixture — too late for mid-run GC.
+- Filtering `sys.excepthook` / `sys.unraisablehook` — the traceback is printed
+  from inside Qt's C++ slot invocation; replacing those hooks **core-dumps**.
+
+The count is racy (the same file prints 0, 1, 2 or 3 depending on shutdown
+ordering), so do not assert on it. A real fix would mean not passing `name=` to
+those plot widgets, or an upstream pyqtgraph change.
 
 ## Notebook tests
 

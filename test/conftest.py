@@ -10,54 +10,10 @@ import pytest_asyncio
 # live one, so even its crs_mock fixture needs a board behind it.
 HARDWARE_FIXTURES = frozenset({"live_session", "crs", "serial"})
 
-# Named tiers, so an invocation says what it covers instead of making the reader
-# evaluate a marker expression. Every tier except "hardware" and "all" excludes
-# the board tests, so they report zero skips: a bare pass/fail rather than a
-# result buried under ~75 "no --serial" skips.
-#
-# Values are marker expressions; "" means no filtering at all.
-TIERS = {
-    # no CRS and no GUI — the subset tox runs on every supported Python
-    "portable": "portable and not hardware",
-    # the edit loop: no server, no board
-    "quick": "not slow_acquisition and not hardware",
-    # only the data-acquisition tests: MockCRS server + UDP over loopback
-    "acquisition": "slow_acquisition and not hardware",
-    # everything runnable without a board — run this before pushing
-    "full": "not hardware",
-    # the board tests on their own (needs --serial)
-    "hardware": "hardware",
-    # literally everything (needs --serial, or the hardware tier just skips)
-    "all": "",
-}
-
-
-def pytest_addoption(parser):
-    parser.addoption("--serial", action="store", default=None)
-    parser.addoption(
-        "--tier",
-        choices=sorted(TIERS),
-        default=None,
-        help="Run a named tier instead of writing a -m expression. "
-             + "; ".join(f"{k}={v or 'everything'}" for k, v in TIERS.items()),
-    )
-
-
-def pytest_configure(config):
-    tier = config.getoption("tier")
-    if tier is None:
-        return
-
-    # -m from the command line and --tier are two ways to say the same thing,
-    # and silently letting one win would misreport what ran. addopts always
-    # sets markexpr, so inspect the real argv rather than the resolved value.
-    if any(a == "-m" or a.startswith("-m") and len(a) > 2 or a.startswith("--markexpr")
-           for a in config.invocation_params.args):
-        raise pytest.UsageError(
-            f"--tier={tier} and -m both select tests; use one or the other."
-        )
-
-    config.option.markexpr = TIERS[tier]
+# --serial and --tier are declared in the ROOT conftest.py, not here.
+# pytest only honours pytest_addoption from an initial conftest, so options
+# declared in this file are invisible whenever the arguments do not point into
+# test/ — e.g. running pytest from a subdirectory.
 
 
 def pytest_collection_modifyitems(config, items):

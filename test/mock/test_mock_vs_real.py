@@ -54,15 +54,6 @@ def load_fresh_rfmux():
     return importlib.import_module("rfmux")
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--serial",
-        action="store",
-        required=True,
-        help="Serial number of the real CRS board."
-    )
-
-
 @pytest.fixture(scope="session")
 def serial(request):
     s = request.config.getoption("--serial")

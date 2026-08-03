@@ -1,7 +1,18 @@
 # rfmux test suite
 
-Run everything from the repo root. `pyproject.toml` sets `testpaths = ["test"]`,
-so a bare `pytest` finds this directory.
+**Run from the repo root.** `pyproject.toml` sets `testpaths = ["test"]`, which
+pytest only consults when you give it no path — and only relative to the rootdir
+when the rootdir is where you are. From a subdirectory, pytest treats the
+current directory as the target instead, so `cd rfmux && pytest` quietly
+collects the QC suite (which then demands `--serial`) rather than running
+anything here. That is pytest's normal behaviour, not a misconfiguration; it
+just means "run from the root" is load-bearing advice.
+
+Command-line options (`--tier`, `--serial`) are declared in the **root**
+`conftest.py` rather than this directory's, because pytest only honours
+`pytest_addoption` from a conftest it loads *before* parsing arguments. Declared
+down here they vanished — `pytest --tier=quick` from a subdirectory failed with
+"unrecognized arguments" instead of running.
 
 ## Which command do I want?
 
@@ -13,7 +24,7 @@ developer laptop; treat them as orders of magnitude.
 | `pytest --tier=portable` | 9 | **~6 s** | Sanity check on an unfamiliar Python. No CRS, no GUI, minimal deps. |
 | `pytest --tier=quick` | 224 | **~20 s** | The normal edit/run loop. |
 | `pytest --tier=acquisition` | 12 | **~1 min** | You touched streaming, decimation, the PFB path, or pulse capture. |
-| `pytest --tier=full` | 236 | **~1 min 45 s** | Everything runnable without a board. Run this before pushing. |
+| `pytest --tier=full` | 236 | **~1 min 45 s** | Everything runnable without a board. Run this before pushing. (See the known flake below.) |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | You have a CRS in front of you. |
 | `pytest --tier=all --serial 0024` | 311 | needs a board | Belt and braces before a release. |
 
@@ -41,6 +52,36 @@ the signal.
 `./test.sh` is a separate thing — it drives tox to run the `portable` tier
 across every supported Python version. Use it when changing packaging or
 touching version-sensitive code, not in the edit loop.
+
+### Known flake: `test_both_mode_end_to_end` under load
+
+`test/pulse_capture/test_pulse_capture_fast.py::test_both_mode_end_to_end`
+fails intermittently with `no matched pairs`, a slow stream reporting
+thousands of pulses, and a negative `elapsed_s`. It is load-sensitive, so it
+tends to show up in `--tier=full` and not when run alone.
+
+The cause is a rate-invariance gap in the rolling baseline, not the test
+harness. `PulseCaptureConfig.buf_size` floors the ring at `_MIN_BUF = 1000`
+samples, and `baseline_window_samples` returns `BASELINE_MIN_RINGS (8) *
+buf_size`. That floor stops scaling down with the sample rate, so the baseline
+window in *time* is:
+
+| stream | rate | baseline window |
+| --- | --- | --- |
+| slow, dec=6 | 596 Hz | **13.42 s** |
+| slow, dec=1 | 19 kHz | 0.42 s |
+| slow, dec=0 | 38 kHz | 0.24 s |
+| fast (PFB) | 1.22 MHz | 0.24 s |
+
+Every rate wants ~0.24 s except dec=6, which demands 56× more. Until that much
+slow data has accumulated the median baseline is unusable, the detector
+triggers on noise, and nothing pairs — so whether the test passes depends on
+how much wall time the run gets, which is why it is flaky rather than broken.
+
+The test steers straight into the worst case: `dec = crs.get_decimation() or 6`
+picks dec=6. That line has a second problem — stage 0 is a *valid* decimation
+(the ~38 kHz rate that `test_streamer_config` exercises), and `0 or 6`
+silently rewrites it to 6.
 
 ## What each tier actually covers
 
@@ -101,8 +142,9 @@ spans `rfmux/algorithms/measurement/` and `rfmux/tools/periscope/`.
 | `pulse_capture/` | pulse detection + its Periscope panel and dialog |
 | `notebooks/` | Jupyter-based quantitative tests (see below) |
 
-`conftest.py` stays at this level: it registers `--serial`, the `live_session` /
-`crs` fixtures, and the automatic `hardware` marking, for every directory.
+`conftest.py` stays at this level for the `live_session` / `crs` fixtures and
+the automatic `hardware` marking. The `--serial` and `--tier` *options* live in
+the root `conftest.py` — see the note at the top of this file.
 
 Mark at the narrowest scope that is true. A module-level
 `pytestmark = pytest.mark.slow_acquisition` on a file where only one class

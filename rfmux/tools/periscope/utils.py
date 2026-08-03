@@ -13,6 +13,7 @@ import pickle
 import traceback
 import csv
 import datetime
+import weakref
 from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 import concurrent.futures
@@ -509,13 +510,43 @@ class ClickableViewBox(pg.ViewBox):
     # Signal to emit the mouse event on double click, allowing connected slots to accept it.
     doubleClickedEvent = pyqtSignal(object)
     # Declare attributes that are dynamically assigned elsewhere to satisfy Pylance
-    parent_window: Optional[QtWidgets.QWidget] = None
     module_id: Optional[int] = None
     plot_role: Optional[str] = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setMouseMode(pg.ViewBox.RectMode)
+
+    # ── parent_window: a WEAK back-pointer.  Do not make this a plain attribute.
+    #
+    # Panels assign ``vb.parent_window = self`` (noise_spectrum_panel,
+    # network_analysis_panel, detector_digest_panel, multisweep_panel).  Held
+    # strongly, that closes a reference cycle — ViewBox -> panel -> PlotWidget ->
+    # ViewBox — so tearing a panel down goes through Python's *cyclic* collector,
+    # which finalizes a graph of PyQt objects in arbitrary order and frees C++
+    # objects out from under live wrappers.  The mild symptom is pyqtgraph's
+    # "wrapped C/C++ object of type QComboBox has been deleted" on stderr; the
+    # real one is a segfault.  Building and dropping a single NoiseSpectrumPanel
+    # in a bare script was enough:
+    #
+    #     p = NoiseSpectrumPanel(...); p.close(); del p; gc.collect()
+    #     -> Segmentation fault
+    #
+    # A weak reference keeps the back-pointer working for as long as anyone could
+    # use it — the panel owns the ViewBox through Qt's parent-child tree, so it
+    # always outlives it — while removing the upward strong edge that closed the
+    # cycle.  Callers are unchanged; ``getattr(vb, 'parent_window', None)`` still
+    # works, and now simply reads None once the panel is gone.
+    #
+    # Pinned by test/periscope/test_viewbox_lifetime.py.
+    @property
+    def parent_window(self) -> Optional[QtWidgets.QWidget]:
+        ref = getattr(self, "_parent_window_ref", None)
+        return None if ref is None else ref()
+
+    @parent_window.setter
+    def parent_window(self, window: Optional[QtWidgets.QWidget]) -> None:
+        self._parent_window_ref = None if window is None else weakref.ref(window)
 
     def enableZoomBoxMode(self, enable=True):
         self.setMouseMode(pg.ViewBox.RectMode if enable else pg.ViewBox.PanMode)

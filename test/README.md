@@ -183,38 +183,55 @@ GUI tests set `QT_QPA_PLATFORM=offscreen` at import time and
 fixture and call `_spin(qt_app)` after closing a panel, to let Qt drain
 deferred deletions before the next assertion.
 
-### Expected stderr noise from pyqtgraph
+### Panels must not be strongly referenced by their own ViewBoxes
 
-Panel tests print tracebacks ending in:
+If panel tests start printing tracebacks ending in:
 
 ```
 RuntimeError: wrapped C/C++ object of type QComboBox has been deleted
 ```
 
-**These are not failures.** The run is green; check the summary line, not the
-stderr. They come from panels whose plots are built as
-`pg.PlotWidget(..., name=...)`. A *named* ViewBox registers in pyqtgraph's
-process-global registry, and when one is garbage collected its `destroyed`
-handler calls `ViewBox.updateAllViewLists()`, which rebuilds the menu of every
-other registered view — including ones whose C++ side Qt has already freed.
+something has reintroduced a reference cycle between a panel and one of its
+plots, and the suite is one `gc.collect()` away from a segfault rather than a
+traceback.
 
-pyqtgraph does ship the fix: `cleanup()` disconnects those handlers, and it is
-wired to `QApplication.aboutToQuit`. Under pytest that signal never fires,
-because no test calls `app.exec()`. Calling `cleanup()` at session end does not
-help either, since most of these collections happen *mid-run*, between tests.
+Panels give their ViewBox a back-pointer so the double-click handler in
+`utils.py` can reach the window:
 
-Things that were tried and did not work, so nobody repeats them:
+```python
+vb = ClickableViewBox()
+vb.parent_window = self        # noise_spectrum, network_analysis,
+                               # detector_digest, multisweep
+```
 
-- `_spin(qt_app)` after `close()` — deferred deletion is not the trigger.
-- Holding panel references to prevent collection — made it *worse*, because more
-  registered views means more menus rebuilt per destruction.
-- A session-scoped `pyqtgraph.cleanup()` fixture — too late for mid-run GC.
-- Filtering `sys.excepthook` / `sys.unraisablehook` — the traceback is printed
-  from inside Qt's C++ slot invocation; replacing those hooks **core-dumps**.
+Held *strongly*, that closes a cycle — ViewBox → panel → PlotWidget → ViewBox —
+so tearing the panel down goes through Python's **cyclic** collector, which
+finalizes PyQt objects in arbitrary order and frees C++ objects out from under
+live wrappers. Building and dropping one panel in a bare script was enough to
+segfault the interpreter; under pytest the same cycle usually collapses at a
+survivable moment and only prints the traceback above.
 
-The count is racy (the same file prints 0, 1, 2 or 3 depending on shutdown
-ordering), so do not assert on it. A real fix would mean not passing `name=` to
-those plot widgets, or an upstream pyqtgraph change.
+`ClickableViewBox.parent_window` is therefore a **weakref-backed property**.
+Reads are unchanged (`getattr(vb, 'parent_window', None)` still works and still
+returns the window while it lives); it simply no longer keeps the panel alive.
+
+`test/periscope/test_viewbox_lifetime.py` pins both halves: the weakref contract
+directly, and the build/drop/`gc.collect()` loop that used to crash. That loop
+runs in a **subprocess** on purpose — a regression is a SIGSEGV, which in-process
+would take the whole pytest session down instead of failing one test.
+
+Dead ends, recorded so nobody repeats them — none of these address the cycle:
+
+- `_spin(qt_app)` after `close()` — Qt's event queue is not the trigger; Python's
+  GC is.
+- Holding panel references to prevent collection — made it *worse*.
+- A session-scoped `pyqtgraph.cleanup()` fixture — too late; the collections
+  happen mid-run.
+- Dropping `name=` from the plot widgets — moved the segfault from the first
+  panel to the second.
+- Filtering `sys.excepthook` / `sys.unraisablehook` — the traceback comes from
+  inside Qt's C++ slot invocation; replacing those hooks **core-dumps**. It would
+  also have hidden a crash.
 
 ## Notebook tests
 

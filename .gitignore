@@ -3,3 +3,5 @@ __pycache__/
 rfmux.egg-info/
 *.swp
 rfmux/_version.py
+test/session_testing/
+.ipynb_checkpoints/

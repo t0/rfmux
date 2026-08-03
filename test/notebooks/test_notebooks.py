@@ -9,23 +9,25 @@ pytest for quantitative tests where visualizations are helpful.
 How this works
 --------------
 
-Tests are invoked using pytest as you'd expect:
+Tests are invoked using pytest as you'd expect, from the repo root or from
+this directory:
 
+$ pytest test/notebooks/
 $ ./test_notebooks.py
 
-The 'test_jupyter_notebook' test case is parameterized, and causes any
-JupyterLab notebooks in the directory to be executed. One pytest test is
-executed per notebook. If all cells in a given notebooks run successfully, the
+The 'test_jupytext_notebook' test case is parameterized, and causes any
+JupyterLab notebooks in this directory to be executed. One pytest test is
+executed per notebook. If all cells in a given notebook run successfully, the
 test is considered as a "pass". Any exceptions raised in any notebook cells
-caues the associated test to fail.
+cause the associated test to fail.
 
-Viewing Test Rsults
--------------------
+Viewing Test Results
+--------------------
 
-Files matching the pattern test_jupyter_notebook*.ipynb directory are test
-results, and can be viewed like any other .ipynb file. (Modifications to these
-files are not saved - you can edit and run them as normal, but should expect
-them to be overwritten.
+Files matching the pattern test_jupytext_notebook*.ipynb are test results, and
+can be viewed like any other .ipynb file. (Modifications to these files are not
+saved - you can edit and run them as normal, but should expect them to be
+overwritten.)
 
 Modifying Tests
 ---------------
@@ -49,19 +51,31 @@ follows:
 $ jupytext -o filename.md filename.ipynb
 """
 
+import pathlib
+
 import pytest
 import jupytext
 import nbformat
 import nbclient
-import glob
+
+HERE = pathlib.Path(__file__).parent
+
+# Glob relative to this file, not the working directory: pytest is normally
+# invoked from the repo root, where a bare "test*.md" matches nothing and the
+# whole parameter set silently collapses to empty ("got empty parameter set").
+NOTEBOOKS = sorted(p.name for p in HERE.glob("test*.md"))
 
 
-@pytest.mark.parametrize("notebook_file", glob.glob("test*.md"))
+@pytest.mark.parametrize("notebook_file", NOTEBOOKS)
 def test_jupytext_notebook(request, notebook_file):
-    with open(notebook_file, "r", encoding="utf-8") as f:
+    with open(HERE / notebook_file, "r", encoding="utf-8") as f:
         notebook = jupytext.read(f)
 
-    client = nbclient.NotebookClient(notebook, timeout=600, kernel_name="python3")
+    # Notebooks reference the repo by relative path, so execute them with this
+    # directory as the kernel's working directory regardless of pytest's cwd.
+    client = nbclient.NotebookClient(
+        notebook, timeout=600, kernel_name="python3", resources={
+            "metadata": {"path": str(HERE)}})
 
     # Run the notebook and store the results in an .ipynb file, regardless of
     # success/failure.
@@ -72,5 +86,5 @@ def test_jupytext_notebook(request, notebook_file):
             f"Notebook execution failed! Check {request.node.name}.ipynb for details."
         ) from e
     finally:
-        with open(f"{request.node.name}.ipynb", "w", encoding="utf-8") as f:
+        with open(HERE / f"{request.node.name}.ipynb", "w", encoding="utf-8") as f:
             nbformat.write(notebook, f)

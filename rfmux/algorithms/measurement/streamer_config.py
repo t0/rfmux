@@ -9,7 +9,7 @@ a thin view over :func:`describe` and :func:`validate`; scripts and
 notebooks use :func:`apply_streamer_config` or the registered
 ``crs.configure_streamer(...)`` macro directly.
 
-Rules encoded here (sources: firmware/CHANGES, test/test_spotcheck.py
+Rules encoded here (sources: firmware/CHANGES, test/core/test_spotcheck.py
 against real hardware, and the noise-dialog advisories):
 
 - decimation stage 0-6; slow rate = 625 MHz / 256 / 64 / 2**stage.

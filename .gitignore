@@ -5,3 +5,13 @@ rfmux.egg-info/
 rfmux/_version.py
 test/session_testing/
 .ipynb_checkpoints/
+.pytest_cache/
+
+# Diagnostics write their plots and captures next to themselves; the scripts
+# are tracked, their output is not.
+diagnostics/*.png
+diagnostics/*.h5
+
+# Untracked scratch from ad-hoc debugging sessions. Anything here worth
+# keeping belongs in test/ as a real test, or in diagnostics/ as a diag_*.py.
+test_debug_scripts/

@@ -2,7 +2,10 @@
 """
 Does the pulse architecture survive 1/f noise?  Measure, don't argue.
 
-Sweeps TLS drift amplitude against the baseline-tracking time constant
+Sweeps TLS drift amplitude against the rolling-median baseline window
+(the "track_ms" axis below; it was an EMA time constant before the
+rolling-median rework, and the experiment is the same either way ---
+how much baseline history you average over vs. the drift timescale)
 and reports, for each cell:
 
   * false triggers    — captures with no injected pulse behind them
@@ -77,7 +80,7 @@ def run_cell(drift_sigma, track_ms, seed=0, corner_hz=5.0):
         buf_size=int(5 * FS), channels=[1], noise_stats=ns,
         threshold_sigma=THRESHOLD_SIGMA, end_sigma=END_SIGMA,
         margin_fraction=0.1, accumulate=False,
-        baseline_track_samples=track_samples,
+        baseline_window=track_samples,
         on_pulse=lambda ch, idx, pd: detected.append(
             float(np.nanmin(pd["Time"]))),
     )

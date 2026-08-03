@@ -57,7 +57,7 @@ jobs:
       env:
         CRS_EMBEDDED: "1"  # Skip PyQt6/GUI imports
       run: |
-        pytest test/test_packets.py -v
+        pytest test/streamer/test_packets.py -v
 
   build-wheels:
     name: Build Wheels

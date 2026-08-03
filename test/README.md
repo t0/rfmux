@@ -22,11 +22,11 @@ developer laptop; treat them as orders of magnitude.
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
 | `pytest --tier=portable` | 9 | **~6 s** | Sanity check on an unfamiliar Python. No CRS, no GUI, minimal deps. |
-| `pytest --tier=quick` | 224 | **~20 s** | The normal edit/run loop. |
+| `pytest --tier=quick` | 229 | **~20 s** | The normal edit/run loop. |
 | `pytest --tier=acquisition` | 12 | **~1 min** | You touched streaming, decimation, the PFB path, or pulse capture. |
-| `pytest --tier=full` | 236 | **~1 min 25 s** | Everything runnable without a board. Run this before pushing. |
+| `pytest --tier=full` | 241 | **~1 min 40 s** | Everything runnable without a board. Run this before pushing. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | You have a CRS in front of you. |
-| `pytest --tier=all --serial 0024` | 311 | needs a board | Belt and braces before a release. |
+| `pytest --tier=all --serial 0024` | 316 | needs a board | Belt and braces before a release. |
 
 Every tier except `hardware` and `all` excludes the board tests, so all of the
 above report **zero skips** — a bare pass/fail, rather than a result buried
@@ -45,7 +45,7 @@ pytest -m "portable or hardware"   # an expression no tier covers
 Passing both `--tier` and `-m` is an error rather than one silently winning.
 
 A bare `pytest` with no arguments still behaves as it always has — the `quick`
-tier plus the hardware tests skipping, so 224 passed and ~75 skipped. That is
+tier plus the hardware tests skipping, so 229 passed and ~75 skipped. That is
 normal, not a problem; use `--tier=quick` when the skip count is drowning out
 the signal.
 
@@ -53,23 +53,43 @@ the signal.
 across every supported Python version. Use it when changing packaging or
 touching version-sensitive code, not in the edit loop.
 
-### Don't run two acquisition runs at once
+### One acquisition run at a time — including back-to-back runs
+
+**Read this before believing any acquisition-tier failure.** Two runs overlapping
+produces failures that look exactly like detector bugs, and the overlap is easy
+to cause by accident.
 
 The MockCRS streamer binds fixed ports (9876 slow, 9877 PFB) and
-`get_multicast_socket()` sets `SO_REUSEPORT`, so a second concurrent run does
-not fail to bind — it silently shares the ports and both runs read each other's
-packets. The symptom is
-`test/pulse_capture/test_pulse_capture_fast.py::test_both_mode_end_to_end`
-failing with `no matched pairs`, a slow stream reporting thousands of pulses,
-and a negative `elapsed_s`.
+`get_multicast_socket()` sets `SO_REUSEPORT`. A second run therefore does *not*
+fail to bind — it joins the same multicast group, and the two runs split each
+other's packets. Nothing errors; both just silently see partial data.
 
-If you see that, check for leftover servers before believing it:
+The trap is that this bites **sequential** runs, not just deliberately parallel
+ones. `rfmux/mock/server.py` registers one `atexit` handler per mock session,
+each doing `terminate()` + `join(2.0)` and possibly `kill()` + `join(2.0)`. The
+full tier creates ~20 sessions, so after pytest prints its summary the process
+spends a long time reaping servers — you will see ~20 `[MockCRS] Shutting down
+server process...` lines *after* the result line — and it holds the receive
+sockets throughout. Start the next run in that window and it is corrupted by the
+previous run's corpse.
+
+Symptoms, all observed: `test_pulse_capture_fast.py::test_both_mode_end_to_end`
+failing `no matched pairs` with the slow stream reporting thousands of pulses;
+`test_streamer_config.py::TestSources::test_slow_source_feeds_session` stuck in
+`CaptureState.ESTIMATING` with an `elapsed` far larger than its `duration_s`. The
+`elapsed_s` in the dual stats may be positive or negative — don't use its sign
+as the tell.
+
+So before diagnosing, confirm nothing is holding the ports:
 
 ```bash
-ps -eo pid,etimes,cmd | grep '[p]ytest'   # interrupted runs can leave children
+ps -eo pid,etimes,cmd | grep '[p]ytest'      # a finished run can still be dying
+ss -ulnp | grep -E '9876|9877'               # must be empty
 ```
 
-A clean solo `--tier=full` is 236 passed in ~1 min 25 s.
+A clean solo `--tier=full` is 241 passed in ~1 min 40 s. If you get failures,
+re-run solo with the ports verified free before concluding anything about the
+code — two separate investigations here started by trusting a contaminated run.
 
 ### Rate-invariance caveat in the rolling baseline
 

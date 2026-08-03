@@ -159,6 +159,18 @@ class PulseCaptureConfig:
             return self.noise_train_ms
         return self.NOISE_TRAIN_PULSES * self.max_pulse_ms
 
+    def baseline_window_samples(self, sample_rate: float) -> int:
+        """Span of the rolling-baseline median, in samples.
+
+        The same window the noise fit used: long compared with a pulse,
+        which is exactly the requirement.  Floored against the ring in
+        case the training length was overridden short — the median only
+        ignores pulses while they are a minority of its window, and the
+        ring holds one max-length pulse.
+        """
+        return max(self.noise_samples(sample_rate),
+                   self.BASELINE_MIN_RINGS * self.buf_size(sample_rate))
+
     def _cross_prob(self) -> float:
         """Per-sample probability that noise alone clears the threshold
         on either quadrature."""
@@ -208,15 +220,7 @@ class PulseCaptureConfig:
             "enable_pileup": self.enable_pileup,
             "buf_size": self.buf_size(sample_rate),
             "noise_samples": self.noise_samples(sample_rate),
-            # The baseline median spans the same window the noise fit
-            # used: long compared with a pulse, which is exactly the
-            # requirement.  Floored against the ring in case the
-            # training length was overridden short — the median only
-            # ignores pulses while they are a minority of its window,
-            # and the ring holds one max-length pulse.
-            "baseline_window": max(
-                self.noise_samples(sample_rate),
-                self.BASELINE_MIN_RINGS * self.buf_size(sample_rate)),
+            "baseline_window": self.baseline_window_samples(sample_rate),
         }
 
     def describe(self, sample_rate: float,
@@ -234,15 +238,15 @@ class PulseCaptureConfig:
             "buf_mb_per_channel": buf * 3 * 8 / 1e6,
             "buf_mb_total": buf * 3 * 8 * n_channels / 1e6,
             "max_recordable_ms": buf / sample_rate * 1e3,
-            "baseline_window": self.noise_samples(sample_rate),
+            "baseline_window": self.baseline_window_samples(sample_rate),
             "baseline_window_ms":
-                self.noise_samples(sample_rate) / sample_rate * 1e3,
+                self.baseline_window_samples(sample_rate)
+                / sample_rate * 1e3,
             "trigger_samples": self.trigger_samples_for(sample_rate),
             "accidental_per_min":
                 60.0 * self.accidental_rate_hz(sample_rate),
-            "accidental_per_min_unconfirmed": 60.0 * sample_rate * (
-                1.0 - (1.0 - math.erfc(
-                    self.threshold_sigma / math.sqrt(2.0))) ** 2),
+            "accidental_per_min_unconfirmed":
+                60.0 * sample_rate * self._cross_prob(),
         }
 
     def validate(self, sample_rate: Optional[float] = None

@@ -5,21 +5,38 @@ so a bare `pytest` finds this directory.
 
 ## Which command do I want?
 
-Tiers are cumulative in cost, not nested in content. Times are wall clock from
-a warm checkout on a developer laptop; treat them as orders of magnitude.
+Ask for a tier by name. Times are wall clock from a warm checkout on a
+developer laptop; treat them as orders of magnitude.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest -m portable` | 9 | **~6 s** | Sanity check on an unfamiliar Python. No CRS, no GUI, minimal deps. |
-| `pytest` | 224, 75 skipped | **~20 s** | The normal edit/run loop. This is the default tier. |
-| `pytest -m "not hardware and not slow_acquisition"` | 224, 0 skipped | **~20 s** | Same as above with the hardware skips silenced — a clean pass/fail with no noise. |
-| `pytest -m slow_acquisition test/` | 12 | **~1 min** | You touched streaming, decimation, the PFB path, or pulse capture. |
-| `pytest -m "not hardware"` | 236 | **~2 min** | Everything runnable without a board. What to run before pushing. |
-| `pytest -m hardware --serial 0024` | 75 | needs a board | You have a CRS in front of you. |
+| `pytest --tier=portable` | 9 | **~6 s** | Sanity check on an unfamiliar Python. No CRS, no GUI, minimal deps. |
+| `pytest --tier=quick` | 224 | **~20 s** | The normal edit/run loop. |
+| `pytest --tier=acquisition` | 12 | **~1 min** | You touched streaming, decimation, the PFB path, or pulse capture. |
+| `pytest --tier=full` | 236 | **~1 min 45 s** | Everything runnable without a board. Run this before pushing. |
+| `pytest --tier=hardware --serial 0024` | 75 | needs a board | You have a CRS in front of you. |
+| `pytest --tier=all --serial 0024` | 311 | needs a board | Belt and braces before a release. |
 
-A bare `pytest` reporting ~75 skips is normal, not a problem: those are the
-hardware tests declining to run. Use the third row if the skip count is
-drowning out the signal.
+Every tier except `hardware` and `all` excludes the board tests, so all of the
+above report **zero skips** — a bare pass/fail, rather than a result buried
+under ~75 "no `--serial`" skips.
+
+`--tier` is a shorthand for a marker expression, nothing more; `pytest --help`
+lists what each one expands to. Reach for `-m` directly when you want something
+the tiers don't cover:
+
+```bash
+pytest test/pulse_capture/         # just one subsystem
+pytest --tier=quick -k baseline    # narrow within a tier
+pytest -m "portable or hardware"   # an expression no tier covers
+```
+
+Passing both `--tier` and `-m` is an error rather than one silently winning.
+
+A bare `pytest` with no arguments still behaves as it always has — the `quick`
+tier plus the hardware tests skipping, so 224 passed and ~75 skipped. That is
+normal, not a problem; use `--tier=quick` when the skip count is drowning out
+the signal.
 
 `./test.sh` is a separate thing — it drives tox to run the `portable` tier
 across every supported Python version. Use it when changing packaging or
@@ -51,6 +68,9 @@ The QC suite is not here at all: it lives in `rfmux/tools/qc/`, carries the
 `qc_stage1`/`qc_stage2` markers, and runs via `rfmux qc`.
 
 ## Markers
+
+Markers tag *tests*; `--tier` names *invocations*. The tiers above are defined
+in `conftest.py` as marker expressions over these:
 
 Declared in `pyproject.toml`. The default run applies
 `-m "not slow_acquisition"` via `addopts`, so the acquisition tier is opt-in —

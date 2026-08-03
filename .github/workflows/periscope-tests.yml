@@ -73,13 +73,13 @@ jobs:
             libxcb-render-util0 \
             libxcb-xinerama0
 
-      - name: Run default test tier
+      - name: Run quick tier (no server, no board)
         run: |
-          pytest -v test/
+          pytest -v --tier=quick test/
 
       - name: Run acquisition tier (MockCRS servers + UDP streaming)
         run: |
-          pytest -v -s -m slow_acquisition test/
+          pytest -v -s --tier=acquisition test/
 
       - name: Run test_periscope_flow.py
         run: |

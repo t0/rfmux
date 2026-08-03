@@ -24,7 +24,7 @@ developer laptop; treat them as orders of magnitude.
 | `pytest --tier=portable` | 9 | **~6 s** | Sanity check on an unfamiliar Python. No CRS, no GUI, minimal deps. |
 | `pytest --tier=quick` | 224 | **~20 s** | The normal edit/run loop. |
 | `pytest --tier=acquisition` | 12 | **~1 min** | You touched streaming, decimation, the PFB path, or pulse capture. |
-| `pytest --tier=full` | 236 | **~1 min 45 s** | Everything runnable without a board. Run this before pushing. (See the known flake below.) |
+| `pytest --tier=full` | 236 | **~1 min 25 s** | Everything runnable without a board. Run this before pushing. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | You have a CRS in front of you. |
 | `pytest --tier=all --serial 0024` | 311 | needs a board | Belt and braces before a release. |
 
@@ -53,18 +53,31 @@ the signal.
 across every supported Python version. Use it when changing packaging or
 touching version-sensitive code, not in the edit loop.
 
-### Known flake: `test_both_mode_end_to_end` under load
+### Don't run two acquisition runs at once
 
+The MockCRS streamer binds fixed ports (9876 slow, 9877 PFB) and
+`get_multicast_socket()` sets `SO_REUSEPORT`, so a second concurrent run does
+not fail to bind — it silently shares the ports and both runs read each other's
+packets. The symptom is
 `test/pulse_capture/test_pulse_capture_fast.py::test_both_mode_end_to_end`
-fails intermittently with `no matched pairs`, a slow stream reporting
-thousands of pulses, and a negative `elapsed_s`. It is load-sensitive, so it
-tends to show up in `--tier=full` and not when run alone.
+failing with `no matched pairs`, a slow stream reporting thousands of pulses,
+and a negative `elapsed_s`.
 
-The cause is a rate-invariance gap in the rolling baseline, not the test
-harness. `PulseCaptureConfig.buf_size` floors the ring at `_MIN_BUF = 1000`
-samples, and `baseline_window_samples` returns `BASELINE_MIN_RINGS (8) *
-buf_size`. That floor stops scaling down with the sample rate, so the baseline
-window in *time* is:
+If you see that, check for leftover servers before believing it:
+
+```bash
+ps -eo pid,etimes,cmd | grep '[p]ytest'   # interrupted runs can leave children
+```
+
+A clean solo `--tier=full` is 236 passed in ~1 min 25 s.
+
+### Rate-invariance caveat in the rolling baseline
+
+Not a failure today, but worth knowing when reading pulse-capture results.
+`PulseCaptureConfig.buf_size` floors the ring at `_MIN_BUF = 1000` samples, and
+`baseline_window_samples` returns `BASELINE_MIN_RINGS (8) * buf_size`. That
+floor stops scaling down with the sample rate, so the baseline window in *time*
+is:
 
 | stream | rate | baseline window |
 | --- | --- | --- |
@@ -73,15 +86,16 @@ window in *time* is:
 | slow, dec=0 | 38 kHz | 0.24 s |
 | fast (PFB) | 1.22 MHz | 0.24 s |
 
-Every rate wants ~0.24 s except dec=6, which demands 56× more. Until that much
-slow data has accumulated the median baseline is unusable, the detector
-triggers on noise, and nothing pairs — so whether the test passes depends on
-how much wall time the run gets, which is why it is flaky rather than broken.
+Every rate wants ~0.24 s except dec=6, which demands 56× more, because 8000
+samples is a long time at 596 Hz. Until that much data has accumulated the
+median baseline has nothing solid to sit on, which shortens the margin on the
+slow stream at high decimation stages more than the numbers suggest.
 
-The test steers straight into the worst case: `dec = crs.get_decimation() or 6`
-picks dec=6. That line has a second problem — stage 0 is a *valid* decimation
-(the ~38 kHz rate that `test_streamer_config` exercises), and `0 or 6`
-silently rewrites it to 6.
+Relatedly, `test_pulse_capture_fast.py` picks its slow rate with
+`dec = crs.get_decimation() or 6`. Stage 0 is a *valid* decimation — the ~38 kHz
+rate `test_streamer_config` exercises — so `0 or 6` would silently rewrite it to
+6 and test a rate 64× off from the stream's. It reads 6 today because that is
+the mock's default, so the bug is latent rather than active.
 
 ## What each tier actually covers
 

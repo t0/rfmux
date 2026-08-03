@@ -3,12 +3,67 @@
 Run everything from the repo root. `pyproject.toml` sets `testpaths = ["test"]`,
 so a bare `pytest` finds this directory.
 
-```bash
-pytest                      # default tier, ~20 s
-pytest -m mock_e2e test/    # heavy tier: spawns MockCRS servers, streams UDP
-pytest test/pulse_capture/  # one subsystem
-./test.sh                   # tox across Python versions (offline tests only)
-```
+## Which command do I want?
+
+Tiers are cumulative in cost, not nested in content. Times are wall clock from
+a warm checkout on a developer laptop; treat them as orders of magnitude.
+
+| Command | Runs | Time | Use when |
+| --- | --- | --- | --- |
+| `pytest -m portable` | 9 | **~6 s** | Sanity check on an unfamiliar Python. No CRS, no GUI, minimal deps. |
+| `pytest` | 224, 75 skipped | **~20 s** | The normal edit/run loop. This is the default tier. |
+| `pytest -m "not hardware and not slow_acquisition"` | 224, 0 skipped | **~20 s** | Same as above with the hardware skips silenced — a clean pass/fail with no noise. |
+| `pytest -m slow_acquisition test/` | 12 | **~1 min** | You touched streaming, decimation, the PFB path, or pulse capture. |
+| `pytest -m "not hardware"` | 236 | **~2 min** | Everything runnable without a board. What to run before pushing. |
+| `pytest -m hardware --serial 0024` | 75 | needs a board | You have a CRS in front of you. |
+
+A bare `pytest` reporting ~75 skips is normal, not a problem: those are the
+hardware tests declining to run. Use the third row if the skip count is
+drowning out the signal.
+
+`./test.sh` is a separate thing — it drives tox to run the `portable` tier
+across every supported Python version. Use it when changing packaging or
+touching version-sensitive code, not in the edit loop.
+
+## What each tier actually covers
+
+**`portable`** — hardware-map YAML/CSV parsing, schema validation, and session
+threading. Pure library behavior with no I/O, which is why it is the subset tox
+can run on Python 3.9 through 3.12.
+
+**default** (everything not `slow_acquisition`) — the bulk of the suite: packet
+decode, mock config plumbing, TLS 1/f noise, JIT dispatch, all the Periscope
+panels and dialogs, and the pulse detection/analysis logic. Fast because it
+never spawns a server: Qt runs offscreen and detection is driven by synthetic
+arrays and `AsyncMock`.
+
+**`slow_acquisition`** — the data-acquisition path for real, which is where the
+minute goes. These spawn a MockCRS server subprocess and stream UDP over
+loopback, so they cover what no unit test can: streamer configuration actually
+taking effect, the slow (~38 kHz) and PFB (~1.22 MHz) sources actually feeding a
+session, decimation stage constraints, carrier-scale parity between the two
+streams, and end-to-end pulse capture in slow, fast, and both modes.
+
+**`hardware`** — the same API exercised against a real CRS, plus mock-vs-real
+attribute and signature comparison. Skipped unless you pass `--serial`.
+
+The QC suite is not here at all: it lives in `rfmux/tools/qc/`, carries the
+`qc_stage1`/`qc_stage2` markers, and runs via `rfmux qc`.
+
+## Markers
+
+Declared in `pyproject.toml`. The default run applies
+`-m "not slow_acquisition"` via `addopts`, so the acquisition tier is opt-in —
+passing your own `-m` on the command line replaces that filter entirely.
+
+- `portable` — needs no CRS and no GUI.
+- `slow_acquisition` — slow because it spawns a MockCRS server and streams UDP.
+- `hardware` — needs a real board. **Applied automatically**: `conftest.py`
+  marks any test whose fixture closure includes `live_session`, `crs`, or
+  `serial`. Do not add it by hand; request the fixture and the marker follows.
+  This exists so the hardware tier is addressable — the tests are gated by a
+  skip *inside* those fixtures, which otherwise leaves nothing to write
+  after `-m`.
 
 ## Layout
 
@@ -26,30 +81,14 @@ spans `rfmux/algorithms/measurement/` and `rfmux/tools/periscope/`.
 | `pulse_capture/` | pulse detection + its Periscope panel and dialog |
 | `notebooks/` | Jupyter-based quantitative tests (see below) |
 
-`conftest.py` stays at this level: it registers `--serial` and the
-`live_session` / `crs` fixtures for every directory.
+`conftest.py` stays at this level: it registers `--serial`, the `live_session` /
+`crs` fixtures, and the automatic `hardware` marking, for every directory.
 
-## Tiers and markers
-
-Markers are declared in `pyproject.toml`. The default run is
-`-m "not mock_e2e"`, so the slow tier is opt-in.
-
-- `mock_e2e` — spawns a MockCRS server and streams real UDP. Slow (~70 s),
-  excluded by default, run explicitly in CI.
-- `offline` — no hardware and no server; what `tox`/`test.sh` runs.
-- `integration` — multi-component flows.
-- `qc_stage1` / `qc_stage2` — the QC suite, which lives in `rfmux/tools/qc/`
-  and runs via `rfmux qc`, not via this directory.
-
-Tests that need real hardware take the `crs` fixture and skip unless you pass
-a board serial:
-
-```bash
-pytest --serial 0024        # unskips the hardware tests
-```
-
-Roughly 75 tests are hardware-gated, so a large skip count in a normal run is
-expected, not a problem.
+Mark at the narrowest scope that is true. A module-level
+`pytestmark = pytest.mark.slow_acquisition` on a file where only one class
+spawns a server exiles the fast tests in that file for a cost they never incur —
+and because `pytestmark` gates *selection* and not *import*, the suite still
+pays their setup on every default run. Put it on the class.
 
 ## Qt tests
 
@@ -79,6 +118,11 @@ jupytext -o test_py_get_samples.ipynb test_py_get_samples.md
 # ...edit in JupyterLab...
 jupytext -o test_py_get_samples.md test_py_get_samples.ipynb
 ```
+
+Glob the notebooks relative to `__file__`, never the working directory. A
+CWD-relative glob silently yields an empty parameter set from the repo root,
+which reports as one skip rather than an error — this suite's notebook test
+went unrun in CI that way.
 
 ## Diagnostics are not tests
 

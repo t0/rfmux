@@ -3,8 +3,30 @@ import rfmux
 import os
 import pytest_asyncio
 
+# Fixtures that can only be satisfied by a real board. Requesting one — directly
+# or transitively — is what makes a test part of the hardware tier.
+#
+# "serial" is test_mock_vs_real.py's own gate; it compares a mock CRS against a
+# live one, so even its crs_mock fixture needs a board behind it.
+HARDWARE_FIXTURES = frozenset({"live_session", "crs", "serial"})
+
+
 def pytest_addoption(parser):
     parser.addoption("--serial", action="store", default=None)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Mark hardware tests by the fixtures they request.
+
+    The board-dependent tests are gated by a skip inside ``live_session``,
+    which makes them impossible to select: there is nothing to write after
+    ``-m``. Deriving the marker from the fixture graph keeps the hardware tier
+    addressable (``-m hardware``, ``-m "not hardware"``) without asking anyone
+    to remember a decorator that duplicates what the fixtures already say.
+    """
+    for item in items:
+        if HARDWARE_FIXTURES & set(getattr(item, "fixturenames", ())):
+            item.add_marker(pytest.mark.hardware)
 
 
 @pytest.fixture

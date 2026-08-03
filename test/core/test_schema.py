@@ -21,7 +21,7 @@ import pytest
 import textwrap
 
 
-@pytest.mark.offline
+@pytest.mark.portable
 def test_hardware_map_with_single_board():
     s = rfmux.load_session(
         """
@@ -33,7 +33,7 @@ def test_hardware_map_with_single_board():
     assert d.serial == "0024"
 
 
-@pytest.mark.offline
+@pytest.mark.portable
 def test_hardware_map_with_single_crate():
     s = rfmux.load_session(
         """
@@ -46,7 +46,7 @@ def test_hardware_map_with_single_crate():
 
 
 @pytest.mark.xfail
-@pytest.mark.offline
+@pytest.mark.portable
 def test_hardware_map_with_crate_slots_indexed_by_list():
     s = rfmux.load_session(
         """
@@ -81,7 +81,7 @@ def test_hardware_map_with_crate_slots_indexed_by_list():
 
 
 @pytest.mark.xfail
-@pytest.mark.offline
+@pytest.mark.portable
 def test_hardware_map_with_crate_slots_indexed_by_dictionary():
     s = rfmux.load_session(
         """
@@ -105,7 +105,7 @@ def test_hardware_map_with_crate_slots_indexed_by_dictionary():
 
 
 @pytest.mark.xfail
-@pytest.mark.offline
+@pytest.mark.portable
 def test_hardware_map_with_wafer_and_resonator_csv(tmp_path):
     csvfile = tmp_path / "test.csv"
 
@@ -147,7 +147,7 @@ def test_hardware_map_with_wafer_and_resonator_csv(tmp_path):
 
 
 @pytest.mark.xfail
-@pytest.mark.offline
+@pytest.mark.portable
 def test_hardware_map_with_channel_mappings(tmp_path):
 
     # Create a CSV file describing a few Resonators. We'll load this below in

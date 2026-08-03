@@ -77,9 +77,9 @@ jobs:
         run: |
           pytest -v test/
 
-      - name: Run mock e2e tier (MockCRS servers + UDP streaming)
+      - name: Run acquisition tier (MockCRS servers + UDP streaming)
         run: |
-          pytest -v -s -m mock_e2e test/
+          pytest -v -s -m slow_acquisition test/
 
       - name: Run test_periscope_flow.py
         run: |

@@ -22,15 +22,14 @@ sys.modules["simplified_tuning_flow"] = simplified_tuning_flow
 class TestIntegration:
     """Full integration tests.
 
-    Only this class spawns a MockCRS server (~21 s), so mock_e2e belongs here
-    rather than at module scope: TestSimpleTuningFlow below drives the flow
-    with AsyncMock and runs in single-digit milliseconds.
+    Only this class spawns a MockCRS server (~21 s), so slow_acquisition
+    belongs here rather than at module scope: TestSimpleTuningFlow below
+    drives the flow with AsyncMock and runs in single-digit milliseconds.
     """
 
-    pytestmark = pytest.mark.mock_e2e
+    pytestmark = pytest.mark.slow_acquisition
 
     @pytest.mark.asyncio
-    @pytest.mark.integration
     async def test_mock_mode_execution(self):
         """Test that mock mode executes without errors."""
         print("\n=== Testing mock mode execution ===")

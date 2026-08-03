@@ -118,15 +118,18 @@ exclude-newer = "3 weeks"
 testpaths = ["test"]
 
 markers = [
-  "offline",
+  # Tiers, in order of what infrastructure they need. See test/README.md.
+  "portable: needs no CRS at all and no GUI — the subset tox runs on every supported Python",
+  "slow_acquisition: slow (~1 min) because it exercises the data-acquisition path for real — spawns a MockCRS server subprocess and streams UDP over loopback",
+  "hardware: needs a real CRS board; applied automatically to anything using the crs/live_session fixtures, and skipped unless --serial is given",
+
+  # The QC suite lives in rfmux/tools/qc/ and runs via "rfmux qc", not from here.
   "qc_stage1",
   "qc_stage2",
-  "integration",
-  "mock_e2e: slow tests that spawn a MockCRS server and stream real UDP",
 ]
 
-# Default runs are the fast tier (~20 s). Run the heavy mock tier with:
-#   pytest -m mock_e2e test/
-addopts = '-m "not mock_e2e"'
+# Default runs are the fast tier (~20 s). Run the acquisition tier with:
+#   pytest -m slow_acquisition test/
+addopts = '-m "not slow_acquisition"'
 
 asyncio_default_fixture_loop_scope = "session"

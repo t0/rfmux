@@ -19,7 +19,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
-pytestmark = pytest.mark.mock_e2e
+pytestmark = pytest.mark.slow_acquisition
 
 from PyQt6 import QtWidgets  # noqa: E402
 

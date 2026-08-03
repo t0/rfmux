@@ -17,7 +17,7 @@ import asyncio
 import numpy as np
 import pytest
 
-pytestmark = pytest.mark.mock_e2e  # heavy resonator generation
+pytestmark = pytest.mark.slow_acquisition  # heavy resonator generation
 
 
 @pytest.fixture(scope="module")

@@ -152,7 +152,13 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path):
     path = tmp_path / "both_capture.h5"
     cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
                              max_pulse_ms=20.0, noise_train_ms=50.0)
-    dec = loop.run_until_complete(crs.get_decimation()) or 6
+    # Stage 0 is a valid decimation (the ~38 kHz rate), so test it against
+    # None rather than falsiness: "or 6" would rewrite stage 0 to stage 6 and
+    # build the session at 596 Hz for a stream running 64x faster.  Mirrors
+    # trigger_capture.py, which does get the None check right.
+    dec = loop.run_until_complete(crs.get_decimation())
+    if dec is None:
+        dec = 6
     dual = DualPulseCaptureSession(
         channels=channels, module=1,
         slow_rate=slow_sample_rate(dec),

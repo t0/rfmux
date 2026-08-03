@@ -91,11 +91,21 @@ samples is a long time at 596 Hz. Until that much data has accumulated the
 median baseline has nothing solid to sit on, which shortens the margin on the
 slow stream at high decimation stages more than the numbers suggest.
 
-Relatedly, `test_pulse_capture_fast.py` picks its slow rate with
-`dec = crs.get_decimation() or 6`. Stage 0 is a *valid* decimation — the ~38 kHz
-rate `test_streamer_config` exercises — so `0 or 6` would silently rewrite it to
-6 and test a rate 64× off from the stream's. It reads 6 today because that is
-the mock's default, so the bug is latent rather than active.
+When reading a decimation stage back, test it against `None`, not falsiness.
+**Stage 0 is a valid decimation** — the ~38 kHz rate `test_streamer_config`
+exercises — so the tempting `dec = await crs.get_decimation() or 6` rewrites
+stage 0 to stage 6 and derives a sample rate 64× off from the stream's. Write
+the explicit check, as `trigger_capture.py` does:
+
+```python
+dec = await crs.get_decimation()
+if dec is None:      # genuinely unset; not the same as stage 0
+    dec = 6
+```
+
+`get_decimation()` really does return `None` before any `set_decimation` call
+(see `test/core/test_spotcheck.py`), so the fallback itself is needed — it just
+has to distinguish "unset" from "stage 0".
 
 ## What each tier actually covers
 

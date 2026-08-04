@@ -55,8 +55,15 @@ class TestDefaults:
 
 
 class TestDialog:
+    # staticmethod, not an instance method: pytest 10 drops support for
+    # class-scoped fixtures defined as instance methods, because the fixture runs
+    # once per class while each test gets a fresh instance — so anything it set
+    # on self would be invisible to the tests. This one only yields, so the
+    # behaviour was already correct; this just silences the deprecation without
+    # pretending self was ever used.
     @pytest.fixture(scope="class")
-    def qt_app(self):
+    @staticmethod
+    def qt_app():
         pytest.importorskip("PyQt6")
         from PyQt6 import QtWidgets
         yield QtWidgets.QApplication.instance() \

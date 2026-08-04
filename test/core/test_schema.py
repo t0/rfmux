@@ -45,7 +45,14 @@ def test_hardware_map_with_single_crate():
     assert d.serial == "001"
 
 
-@pytest.mark.xfail
+@pytest.mark.xfail(
+    strict=True,
+    reason="Crate slot indexing is unsupported. The tuber client's "
+           "__getattr__ intercepts _items, so len() and iteration on a Dfmux "
+           "proxy raise instead of reaching the mapping "
+           "(tuber/client.py:792,798). A settled limitation, not a flake — "
+           "strict=True so that fixing it fails here instead of quietly "
+           "becoming an XPASS nobody notices.")
 @pytest.mark.portable
 def test_hardware_map_with_crate_slots_indexed_by_list():
     s = rfmux.load_session(
@@ -80,7 +87,14 @@ def test_hardware_map_with_crate_slots_indexed_by_list():
     assert {c.serial, d1.crate.serial, d2.crate.serial, d3.crate.serial} == {"001"}
 
 
-@pytest.mark.xfail
+@pytest.mark.xfail(
+    strict=True,
+    reason="Crate slot indexing is unsupported. The tuber client's "
+           "__getattr__ intercepts _items, so len() and iteration on a Dfmux "
+           "proxy raise instead of reaching the mapping "
+           "(tuber/client.py:792,798). A settled limitation, not a flake — "
+           "strict=True so that fixing it fails here instead of quietly "
+           "becoming an XPASS nobody notices.")
 @pytest.mark.portable
 def test_hardware_map_with_crate_slots_indexed_by_dictionary():
     s = rfmux.load_session(
@@ -104,7 +118,6 @@ def test_hardware_map_with_crate_slots_indexed_by_dictionary():
     assert c.slot[3].serial == "0026"
 
 
-@pytest.mark.xfail
 @pytest.mark.portable
 def test_hardware_map_with_wafer_and_resonator_csv(tmp_path):
     csvfile = tmp_path / "test.csv"
@@ -146,7 +159,14 @@ def test_hardware_map_with_wafer_and_resonator_csv(tmp_path):
     assert r2.wafer.name == "some_wafer"
 
 
-@pytest.mark.xfail
+@pytest.mark.xfail(
+    strict=True,
+    reason="Crate slot indexing is unsupported. The tuber client's "
+           "__getattr__ intercepts _items, so len() and iteration on a Dfmux "
+           "proxy raise instead of reaching the mapping "
+           "(tuber/client.py:792,798). A settled limitation, not a flake — "
+           "strict=True so that fixing it fails here instead of quietly "
+           "becoming an XPASS nobody notices.")
 @pytest.mark.portable
 def test_hardware_map_with_channel_mappings(tmp_path):
 

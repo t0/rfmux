@@ -32,11 +32,32 @@ that is unavailable here.
 | Per-pulse metrics (SNR, derived τ) | `rfmux.algorithms.measurement.pulse_analysis` |
 | Streaming HDF5 persistence | `rfmux.algorithms.measurement.pulse_hdf5` |
 
+## How to use this document
+
+**This is a runnable notebook, not a web page.** Every grey block below is a live
+code cell: put the cursor in it and press **Shift+Enter** to execute it. The
+output — numbers, tables, plots — appears underneath the cell as it runs.
+
+- **Run the cells in order, top to bottom.** Later cells use variables the
+  earlier ones defined, so skipping ahead will fail with a `NameError`. If you
+  lose your place, *Kernel → Restart Kernel and Run All Cells* starts clean.
+- **The outputs you see are the ones you just produced.** This file is stored as
+  jupytext markdown, which keeps no saved outputs, so a cell is blank until you
+  run it. Nothing here can show you a stale number from someone else's run.
+- **Editing is encouraged.** Change a threshold, a channel list, a capture
+  length, and re-run — that is what this document is for. The shipped copy is
+  read-only, so *File → Save Notebook As…* to keep your changes.
+- **You need a CRS**, real or simulated. Section 1 sorts that out; if you have no
+  hardware, section 2 gives you a simulated one and the rest works unchanged.
+- **Captures are written to disk** in `OUTPUT_DIR` (printed by the next cell).
+  Section 7 reads them back, and Periscope can open them in review mode.
+
 ```python
 %matplotlib inline
 
 import asyncio
 import os
+import socket
 import tempfile
 from pathlib import Path
 
@@ -44,6 +65,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import rfmux
+from rfmux import streamer
 from rfmux.algorithms.measurement.pulse_analysis import counts_to_hz_scale
 from rfmux.algorithms.measurement.pulse_capture_dual import (
     DualPulseCaptureSession,
@@ -71,44 +93,148 @@ print(f"capture files → {OUTPUT_DIR}")
 
 ## 1. Connect
 
-Mock mode below, so this notebook runs anywhere. The commented block is the only
-thing that changes for a real board — everything after this cell is identical.
+Three ways to get a CRS, tried in order:
+
+1. **Opened from Periscope?** Then Periscope has already told this kernel which
+   board it is using (`RFMUX_CRS_HOSTNAME`), and we attach to *that* one. This is
+   not just convenience — see the warning in section 2.
+2. **Your own board?** Set `SERIAL` below.
+3. **Neither?** `crs` stays `None` and section 2 simulates one.
 
 On real hardware the detectors must already be biased, since pulse detection
 works on the deviation of a parked carrier. Run `simplified_tuning_flow.py` (in
-this folder) first, or the Periscope tuning panels.
+this folder) first, or use the Periscope tuning panels.
 
 ```python
 MODULE = 1
 CHANNELS = [1, 2]
+SERIAL = None          # e.g. "0042" to use your own board
 
-from rfmux.mock.helpers import create_mock_crs
-
-crs = await create_mock_crs(
-    module=MODULE,
-    config={
-        "num_resonances": 2,
-        "resonator_random_seed": 42,
-        "auto_bias_kids": True,       # park carriers on the resonators
-        "bias_amplitude": 0.001,
-        "pulse_mode": "periodic",     # inject quasiparticle pulses
-        "pulse_period": 0.05,         # one every 50 ms
-        "pulse_tau_rise": 1e-6,
-        "pulse_tau_decay": 1e-3,      # 1 ms decay constant
-        "pulse_amplitude": 2.0,
-    },
-    verbose=False,
-)
+crs = None
 host = "127.0.0.1"
 
-# ── Real hardware ────────────────────────────────────────────────
-# s = rfmux.load_session('!HardwareMap [ !CRS { serial: "0042" } ]')
-# crs = s.query(rfmux.CRS).one()
-# await crs.resolve()
-# host = crs.tuber_hostname
+_periscope_host = os.environ.get("RFMUX_CRS_HOSTNAME")
+
+if _periscope_host:
+    # Periscope launched this kernel and handed over the board it is on.
+    _serial = os.environ.get("RFMUX_CRS_SERIAL", "0000")
+    _s = rfmux.load_session(
+        f'!HardwareMap [ !CRS {{ serial: "{_serial}", '
+        f'hostname: "{_periscope_host}" }} ]')
+    crs = _s.query(rfmux.CRS).one()
+    await crs.resolve()
+    host = _periscope_host.split(":")[0]
+    print(f"attached to Periscope's CRS {_serial} at {_periscope_host}")
+elif SERIAL:
+    _s = rfmux.load_session(f'!HardwareMap [ !CRS {{ serial: "{SERIAL}" }} ]')
+    crs = _s.query(rfmux.CRS).one()
+    await crs.resolve()
+    host = crs.tuber_hostname
+    print(f"connected to CRS {SERIAL}")
+else:
+    print("no CRS yet — run section 2 to simulate one")
 ```
 
-## 2. Configure the streamers
+## 2. Mock mode configuration
+
+**Skip this section entirely if section 1 already gave you a CRS** — the cell
+below no-ops in that case.
+
+If you have no hardware, this stands up a simulated CRS: a couple of resonators
+with carriers parked on them, and periodic quasiparticle pulses to detect. The
+noise is deliberately not idealised, because a detector that only works on white
+noise is not worth testing:
+
+- **White readout noise** (`udp_noise_level`) — the flat floor the σ thresholds
+  are measured against.
+- **Quasiparticle number fluctuations** (`nqp_noise_enabled`) — physical
+  generation–recombination noise in the resonator itself.
+- **TLS 1/f frequency noise** (`tls_noise_enabled`) — two-level systems in the
+  substrate make the resonant frequency wander with a `1/f**alpha` spectrum.
+  This is the interesting one: it is exactly what a naive fixed-baseline
+  detector triggers on endlessly. It is what the rolling-median baseline and the
+  edge gate in section 4 exist to survive, so leaving it off would let this
+  notebook demonstrate a detector that cannot handle a real detector.
+
+At the level set below, the baseline wanders roughly **14 white-noise σ** over a
+three-second capture — far more than enough to swamp a fixed threshold — and the
+detector still finds essentially every pulse (58 of ~60 expected, against 59
+with 1/f switched off).
+
+What 1/f costs is not detections but **window quality**, and it is worth
+watching for. A pulse riding a drifting baseline can take much longer to fall
+back inside `end_sigma`, so a fraction of windows stay open far longer than the
+pulse itself: at this level about 8 of 58, against 0 with 1/f off. Those windows
+still measure the right τ — the decay is fitted from the peak and the threshold
+crossing, not the window length — but their `duration_ms` is a property of the
+baseline, not the event. Push the wander up another factor of two and it becomes
+a third of all windows, and the fast stream begins over-triggering because its
+short training record never sees drift this slow. That is the real reason the
+hard stop exists.
+
+> ⚠️ **Do not run this while Periscope is in mock mode**, unless Periscope
+> launched this notebook. A second `create_mock_crs()` is a second, *unrelated*
+> simulation streaming to the same UDP port, and a receiver then gets the two
+> interleaved — different resonators, different pulses, no error anywhere. The
+> guard below refuses rather than hand you plausible garbage. Opening this
+> notebook from Periscope's Jupyter panel avoids the problem entirely: section 1
+> attaches to the simulation Periscope is already running.
+
+```python
+MOCK_CONFIG = {
+    "num_resonances": 2,
+    "resonator_random_seed": 42,
+    "auto_bias_kids": True,        # park carriers on the resonators
+    "bias_amplitude": 0.001,
+
+    # ── Noise ───────────────────────────────────────────────────
+    "udp_noise_level": 10.0,       # white readout noise (ADC counts)
+    "nqp_noise_enabled": True,     # quasiparticle generation-recombination
+    "nqp_noise_std_factor": 0.001,
+    "tls_noise_enabled": True,     # TLS 1/f frequency wander
+    "tls_fractional_rms": 1e-7,    # RMS of df/f
+    "tls_alpha": 1.0,              # PSD ~ 1/f**alpha
+    "tls_corner_hz": 100.0,        # upper corner; law spans 3 decades below
+
+    # ── Pulses to detect ────────────────────────────────────────
+    "pulse_mode": "periodic",
+    "pulse_period": 0.05,          # one every 50 ms
+    "pulse_tau_rise": 1e-6,
+    "pulse_tau_decay": 1e-3,       # 1 ms decay constant
+    "pulse_amplitude": 2.0,
+}
+
+IS_MOCK = False
+
+if crs is not None:
+    print("already have a CRS — nothing to do here")
+else:
+    # Refuse to start a second simulation on top of a running one.
+    with streamer.get_multicast_socket(
+            "127.0.0.1", port=streamer.STREAMER_PORT) as _probe:
+        _probe.settimeout(1.5)
+        try:
+            _probe.recv(streamer.LONG_PACKET_SIZE)
+            raise RuntimeError(
+                "Something is already streaming on port "
+                f"{streamer.STREAMER_PORT} — most likely Periscope in mock "
+                "mode. Starting a second simulation would interleave two "
+                "unrelated data sets on this port. Either open this notebook "
+                "from Periscope's Jupyter panel (it will attach to the running "
+                "simulation), or stop the other streamer first.")
+        except socket.timeout:
+            pass          # nothing streaming — safe to create our own
+
+    from rfmux.mock.helpers import create_mock_crs
+    crs = await create_mock_crs(module=MODULE, config=MOCK_CONFIG,
+                                verbose=False)
+    IS_MOCK = True
+    host = "127.0.0.1"
+    print(f"simulated CRS ready: {MOCK_CONFIG['num_resonances']} resonators, "
+          f"1/f on (df/f = {MOCK_CONFIG['tls_fractional_rms']:.0e} rms)")
+```
+
+## 3. Configure the streamers
 
 Two streams carry samples off the board:
 
@@ -125,6 +251,11 @@ bandwidth for nothing and risking dropped packets.
 `validate()` reports the hardware rules (long packets need stage ≥ 3, the 1 GbE
 budget, OS receive-buffer advice) as `(severity, message)` pairs. `describe()`
 returns the derived rates and link budget.
+
+> If you attached to Periscope's CRS in section 1, remember the streamer is a
+> shared resource: changing the decimation here changes it for Periscope's plots
+> too, exactly as the *Streamer…* dialog would. That is usually what you want —
+> one board, one configuration — but it is not a private setting.
 
 ```python
 PULSE_TAU_S = 1e-3          # expected decay constant
@@ -150,12 +281,13 @@ info
 ```
 
 ```python
-# Mock only: start the simulated stream and let it settle
-await crs.start_udp_streaming()
-await asyncio.sleep(2.0)
+if IS_MOCK:
+    # The simulated streamer needs a moment to fill after a rate change.
+    await crs.start_udp_streaming()
+    await asyncio.sleep(2.0)
 ```
 
-## 3. Choose the detection parameters
+## 4. Choose the detection parameters
 
 `PulseCaptureConfig` holds every user-facing parameter in **physical units**
 (σ and milliseconds). It converts them to samples for whatever stream rate you
@@ -185,6 +317,13 @@ How the detector works:
   capture that outlasts the ring silently loses its own rising edge.
 - **Captures cannot wedge.** One that never satisfies its end condition is
   force-closed at a hard stop of 1.2 × `max_pulse_ms` and flagged `truncated`.
+
+![Anatomy of one capture window](pulse_capture_anatomy.png)
+
+The shaded region is what gets saved. It extends `margin_fraction` of the window
+past the trigger on each side — 10% by default, too small to draw legibly here —
+so the record keeps some pre-trigger baseline to measure against rather than
+starting exactly at the crossing.
 
 `describe()` reports everything derived at a given rate, and `validate()` catches
 inconsistent settings before you spend a capture on them.
@@ -231,7 +370,7 @@ for rate, label in [(596.0, "slow, stage 6"), (fs, f"slow, stage {dec}"),
           f"{dd['accidental_per_min']:.2e} accidentals/min")
 ```
 
-## 4. One-shot capture
+## 5. One-shot capture
 
 `trigger_capture` is the simplest entry point — one call, no session lifecycle,
 everything handed back in memory. Underneath it is a thin caller over exactly
@@ -293,7 +432,7 @@ detector with one decay time every energy line collapses onto a single τ. It is
 a live cross-check, not a precision measurement: the discrete crossing sample
 lands slightly below the true crossing, so it runs a few percent low.
 
-## 5. Live capture with streaming persistence
+## 6. Live capture with streaming persistence
 
 `PulseCaptureSession` is what the panel actually runs. It trains on noise, then
 detects, and as each pulse closes it appends to HDF5, updates running histograms
@@ -330,7 +469,7 @@ print(f"rolling baseline median over {session.baseline_window:,} samples "
 clock, so a capture covers the span you asked for even if packets arrive late.
 Pass `should_stop=<callable>` instead to run until you decide to stop.
 
-## 6. Read the capture back
+## 7. Read the capture back
 
 The file holds every pulse waveform, the running histograms, the templates, and
 the noise statistics and capture parameters as attributes. Periscope opens these
@@ -439,7 +578,7 @@ for ch in reader.channels:
 reader.close()
 ```
 
-## 7. Fast (PFB) capture
+## 8. Fast (PFB) capture
 
 The fast streamer carries up to **4 channels of one module** at ~1.22 MHz —
 about 64× the slow stream here, enough to resolve a rise time the slow stream
@@ -470,7 +609,7 @@ finally:
                                  modules=[MODULE], pfb_channels=[])
 ```
 
-## 8. Both streams at once, with matched pairs
+## 9. Both streams at once, with matched pairs
 
 `DualPulseCaptureSession` runs two independent detectors — one per stream, each
 with its own noise training and rate-appropriate parameters — and matches their
@@ -557,7 +696,7 @@ with PulseHDF5Reader(OUTPUT_DIR / "pulse_capture_dual.h5") as r:
               f"pairs={r.pair_count(ch)}")
 ```
 
-## 9. Where this maps in Periscope
+## 10. Where this maps in Periscope
 
 If you also use the GUI, the correspondence is exact — the panel sets the same
 objects this notebook does:
@@ -581,6 +720,11 @@ For an unattended acquisition run with no notebook at all, see
     python pulse_capture_flow.py 0042      # real board
 
 ```python
-# Mock cleanup
-await crs.stop_udp_streaming()
+# Only tear down a streamer this notebook started. If section 1 attached to
+# Periscope's CRS, stopping it here would kill Periscope's own live plots.
+if IS_MOCK:
+    await crs.stop_udp_streaming()
+    print("simulated streamer stopped")
+else:
+    print("left the streamer running — it is not ours to stop")
 ```

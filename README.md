@@ -79,6 +79,12 @@ samples = await crs.get_samples(1000, channel=1, module=1)
 - **[Getting Started](docs/guides/getting-started.md)** - Usage patterns, hardware hierarchy, common operations
 - **[Networking Guide](docs/guides/networking.md)** - UDP tuning, multicast configuration, troubleshooting
 - **[Firmware Guide](docs/guides/firmware.md)** - Fetching, managing, and flashing firmware
+- **[Pulse Capture](rfmux/reference-notebooks/Demos/pulse_capture.md)** - Detecting and recording detector pulses from the API, with streaming HDF5, histograms and matched slow+fast capture
+
+Reference notebooks ship with the package and are linked into the Jupyter
+session Periscope launches. They are jupytext markdown: open one in JupyterLab
+with right-click → *Open With* → *Notebook*, or convert it with
+`jupytext -o pulse_capture.ipynb pulse_capture.md`.
 
 ## Repository Structure
 

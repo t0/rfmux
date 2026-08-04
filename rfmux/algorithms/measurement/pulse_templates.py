@@ -85,7 +85,16 @@ class PulseTemplateAccumulator:
 
     def add(self, pulse_data: dict,
             noise_stats: Optional[ChannelNoiseStats]) -> bool:
-        """Stack one pulse.  Returns False when it can't be aligned."""
+        """Stack one pulse.  Returns False when it can't be aligned or
+        is pileup-affected.
+
+        Pileup fragments are excluded outright: the first fragment's
+        tail is cut at the split, and the successor sits on the
+        previous pulse's decaying pedestal — both would bias the mean
+        template and inflate the residual RMS."""
+        if pulse_data.get("pileup"):
+            self.n_skipped += 1
+            return False
         trig = find_trigger_index(pulse_data, noise_stats,
                                   self.threshold_sigma)
         if trig is None:

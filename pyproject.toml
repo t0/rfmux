@@ -25,6 +25,10 @@ dependencies = [
   "ipykernel<7",
   "ipython",
   "jupyterlab",
+  # Ships jupyterlab_jupytext, which lets JupyterLab open the .md reference
+  # notebooks (rfmux/reference-notebooks/) as real notebooks. Without it they
+  # are inert markdown, so this is a runtime dependency and not a dev one.
+  "jupytext",
   "matplotlib",
   "numba",  # Required for high-performance physics calculations in MockCRS
   "numpy",
@@ -83,7 +87,6 @@ periscope = "rfmux.tools.periscope.__main__:main"
 [dependency-groups]
 dev = [
   "rfmux[qc]",  # run the QC suite from a checkout
-  "jupytext",
   "nbclient",
   "nbformat",
   "pytest_check",

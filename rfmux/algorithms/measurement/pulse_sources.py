@@ -16,19 +16,22 @@ Usage (fast/PFB capture, headless)::
     await run_pfb_source(session, crs.tuber_hostname, [1, 2],
                          duration_s=10.0)
     session.stop()
+
+:func:`run_dual_source` drives both streams at once for a
+:class:`~rfmux.algorithms.measurement.pulse_capture_dual.DualPulseCaptureSession`,
+which is what live cross-stream pulse matching needs.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from typing import Callable, List, Optional
+from typing import Awaitable, Callable, List, Optional, Tuple
 
 import numpy as np
 
 from ... import streamer
 from .streamer_config import PFB_SAMPLE_RATE
-from .trigger_capture import _ts_to_seconds
 
 
 def _flush(sock) -> None:
@@ -88,7 +91,7 @@ async def run_slow_source(
             if pkt.module != module - 1:
                 continue
             raw = np.array(pkt) / 256.0
-            ts = _ts_to_seconds(pkt.ts)
+            ts = streamer.ts_to_seconds(pkt.ts)
             for ch in channels:
                 if len(pkt) <= ch - 1:
                     continue
@@ -151,7 +154,7 @@ async def run_pfb_source(
             # the slow readout path).  Without it, fast samples sit
             # exactly 256x above slow samples for the same signal.
             raw = np.array(pkt) / 256.0
-            ts = _ts_to_seconds(pkt.ts)
+            ts = streamer.ts_to_seconds(pkt.ts)
             time_samples = pkt.num_samples // n_groups
             for si in range(time_samples):
                 t = (ts + si / sample_rate) if ts is not None else None
@@ -167,3 +170,77 @@ async def run_pfb_source(
             if duration_s is not None and elapsed >= duration_s:
                 break
     return elapsed
+
+
+async def run_dual_source(
+    session,
+    host: str,
+    channels: List[int],
+    *,
+    module: int = 1,
+    duration_s: Optional[float] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+    slow_source: Optional[Callable[[Callable[[], bool]],
+                                   Awaitable[float]]] = None,
+) -> Tuple[float, float]:
+    """Feed both streams of a :class:`DualPulseCaptureSession` at once.
+
+    The two streams live on different ports (9876 / 9877), so they run
+    as concurrent tasks against their own sockets.  Whichever side
+    finishes first stops the other: the pair is only useful while both
+    are live, and a matcher fed by one stream alone just accumulates
+    one-sided pulses.
+
+    The caller enables and tears down the PFB streamer, exactly as for
+    :func:`run_pfb_source` — do it in a ``try``/``finally`` so a failed
+    capture still leaves the fast streamer off::
+
+        await crs.configure_streamer(dec, modules=[1],
+                                     pfb_channels=[1, 2], pfb_module=1)
+        try:
+            await run_dual_source(session, host, [1, 2], duration_s=2.0)
+        finally:
+            await crs.configure_streamer(dec, modules=[1], pfb_channels=[])
+
+    Parameters
+    ----------
+    session : DualPulseCaptureSession
+        Started session; fed through its ``slow_feed``/``fast_feed``
+        facades so stream time advances the matcher.
+    slow_source : callable, optional
+        Override for the slow side, called with a stop predicate and
+        awaited.  Periscope passes its tap pump here: the mock streamer
+        sends unicast, and with ``SO_REUSEPORT`` the kernel hands each
+        datagram to exactly one socket, so a second listener alongside
+        Periscope's own receiver would silently starve.  Headless there
+        is no competing receiver and the default socket source is right.
+
+    Returns ``(slow_elapsed, fast_elapsed)`` in seconds of sample time.
+    """
+    finished = False
+
+    def _stop() -> bool:
+        return finished or (should_stop is not None and should_stop())
+
+    async def _slow() -> float:
+        nonlocal finished
+        try:
+            if slow_source is not None:
+                return await slow_source(_stop)
+            return await run_slow_source(
+                session.slow_feed, host, module=module,
+                duration_s=duration_s, should_stop=_stop)
+        finally:
+            finished = True
+
+    async def _fast() -> float:
+        nonlocal finished
+        try:
+            return await run_pfb_source(
+                session.fast_feed, host, channels,
+                duration_s=duration_s, should_stop=_stop)
+        finally:
+            finished = True
+
+    slow_elapsed, fast_elapsed = await asyncio.gather(_slow(), _fast())
+    return slow_elapsed, fast_elapsed

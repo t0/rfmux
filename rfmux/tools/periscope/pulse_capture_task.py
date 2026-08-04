@@ -240,16 +240,17 @@ class PulseCaptureTask(QtCore.QThread):
     async def _run_both(self) -> None:
         """Concurrent slow+fast capture (DualPulseCaptureSession).
 
-        The SLOW side must come from the Periscope tap, not a second
-        socket: the mock streamer sends UNICAST, and with SO_REUSEPORT
-        the kernel load-balances unicast datagrams to ONE socket —
-        Periscope's own receiver wins and a second listener silently
-        starves.  (Real hardware multicasts, but the tap works for
-        both and costs nothing.)  The fast/PFB side keeps its own
-        socket — nothing else listens on that port.
+        The gather, the shared stop and the fast socket all live in
+        run_dual_source — this adds only the PFB streamer lifecycle and
+        the tap-fed slow side.  The SLOW side must come from the
+        Periscope tap, not a second socket: the mock streamer sends
+        UNICAST, and with SO_REUSEPORT the kernel hands each datagram
+        to ONE socket — Periscope's own receiver wins and a second
+        listener silently starves.  (Real hardware multicasts, but the
+        tap works for both and costs nothing.)
         """
         from ...algorithms.measurement.pulse_sources import (
-            run_pfb_source,
+            run_dual_source,
         )
 
         channels = list(self.session.channels)
@@ -259,11 +260,9 @@ class PulseCaptureTask(QtCore.QThread):
         try:
             stop = (lambda: self._stop_requested
                     or self.isInterruptionRequested())
-            await asyncio.gather(
-                self._slow_tap_pump(stop),
-                run_pfb_source(self.session.fast_feed, self.host,
-                               channels, should_stop=stop),
-            )
+            await run_dual_source(
+                self.session, self.host, channels, module=self.module,
+                should_stop=stop, slow_source=self._slow_tap_pump)
         finally:
             try:
                 await self.crs.set_pfb_streamer(channel=None,
@@ -271,9 +270,15 @@ class PulseCaptureTask(QtCore.QThread):
             except Exception as e:
                 self.signals.error.emit(f"PFB teardown failed: {e}")
 
-    async def _slow_tap_pump(self, stop) -> None:
+    async def _slow_tap_pump(self, stop) -> float:
         """Drain tap-fed slow samples + control items into the dual
-        session.  Warns once if no slow samples arrive at all."""
+        session.  Warns once if no slow samples arrive at all.
+
+        Returns 0.0 for run_dual_source's slow_elapsed: the tap hands
+        over samples without the packet timestamps the socket sources
+        accumulate sample time from, and the GUI reads its elapsed time
+        off the session stats instead.
+        """
         fed = 0
         warned = False
         t_start = time.monotonic()
@@ -294,6 +299,7 @@ class PulseCaptureTask(QtCore.QThread):
             ch, i_val, q_val, ts = item
             self.session.feed_slow(ch, i_val, q_val, ts)
             fed += 1
+        return 0.0
 
     async def _control_pump(self) -> None:
         """Service __reestimate__/__fetch__ requests while a socket

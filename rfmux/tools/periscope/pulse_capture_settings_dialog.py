@@ -64,8 +64,15 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.threshold_spin.setSingleStep(0.5)
         self.threshold_spin.setValue(config.threshold_sigma)
         self.threshold_spin.setToolTip(
-            "Trigger when EITHER I or Q deviates this many σ from "
-            "baseline")
+            "How significant an event must be, used by BOTH trigger "
+            "tests:\n"
+            "• amplitude — EITHER I or Q deviates this many σ from "
+            "baseline, and\n"
+            "• edge — the deviation GREW by this many jump-σ within "
+            "the edge lookback.\n"
+            "The edge test compares two raw samples, so the baseline "
+            "cancels out of it: slow 1/f wander that drifts across the "
+            "amplitude band cannot fake it.")
         form.addRow("Threshold σ:", self.threshold_spin)
 
         self.max_pulse_spin = QtWidgets.QDoubleSpinBox()
@@ -73,11 +80,12 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.max_pulse_spin.setDecimals(1)
         self.max_pulse_spin.setValue(config.max_pulse_ms)
         self.max_pulse_spin.setToolTip(
-            "Longest pulse the ring buffer must hold — captures that "
-            "outlast the buffer lose their rising edge.\n"
-            "Estimate generously: it also sets the noise-training "
-            "length, and with it the window the rolling baseline "
-            "median spans.")
+            "Longest pulse you expect — every time scale in the "
+            "detector derives from this.  Estimate generously.\n"
+            "Sets the ring buffer (1.5×), the hard stop that "
+            "force-ends a stuck capture (1.2×), the noise-training "
+            "length (20×), the rolling-baseline median span, and the "
+            "edge-detector lookback (10%).")
         form.addRow("Max pulse (ms):", self.max_pulse_spin)
 
         # Training is derived, not chosen: what matters is that the
@@ -133,7 +141,8 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.margin_spin.setSingleStep(0.05)
         self.margin_spin.setValue(config.margin_fraction)
         self.margin_spin.setToolTip(
-            "Fraction of the pulse length shown before the trigger, "
+            "Fraction of the pulse length kept before the trigger and "
+            "after the pulse drops below threshold (the saved tail), "
             "and the adaptive end-confirmation count")
         adv.addRow("Margin fraction:", self.margin_spin)
 
@@ -147,13 +156,32 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         adv.addRow("Min pulse (ms):", self.min_pulse_spin)
 
         self.pileup_check = QtWidgets.QCheckBox(
-            "Split piled-up events (derivative re-trigger)")
+            "Split piled-up events (edge re-trigger)")
+        self.pileup_check.setToolTip(
+            "A fresh edge arriving while the current pulse is decaying "
+            "splits the capture into separate events.  Uses the same "
+            "edge detector as the trigger.")
         self.pileup_check.setChecked(config.enable_pileup)
         adv.addRow(self.pileup_check)
 
-        self.derived_label = QtWidgets.QLabel()
-        self.derived_label.setWordWrap(True)
-        form.addRow("At this rate:", self.derived_label)
+        # What each primary knob drives, at the actual stream rate —
+        # the derivations live in PulseCaptureConfig, this only renders
+        # them.
+        self.pulse_derived_label = QtWidgets.QLabel()
+        self.pulse_derived_label.setWordWrap(True)
+        self.pulse_derived_label.setToolTip(
+            "Everything with units of time derives from the max pulse "
+            "length, so one setting works at any stream rate.")
+        form.addRow("Max pulse sets:", self.pulse_derived_label)
+
+        self.sigma_derived_label = QtWidgets.QLabel()
+        self.sigma_derived_label.setWordWrap(True)
+        self.sigma_derived_label.setToolTip(
+            "Everything statistical derives from the threshold.  The "
+            "edge jump-σ itself is measured from the training record "
+            "at the lookback lag, so filter correlation and 1/f power "
+            "are priced in automatically.")
+        form.addRow("Threshold σ sets:", self.sigma_derived_label)
 
         self.status_label = QtWidgets.QLabel()
         self.status_label.setWordWrap(True)
@@ -202,18 +230,31 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             acc = d["accidental_per_min"]
             acc_str = (f"{acc:,.0f}/min" if acc >= 1 else
                        f"{acc*60:.2g}/hr" if acc >= 0.001 else "negligible")
-            self.derived_label.setText(
-                f"noise training = {d['noise_samples']:,} samples "
-                f"({d['noise_train_actual_ms']/1000:.3g} s) · "
-                f"accidental triggers ≈ {acc_str} per channel · "
-                f"buffer = {d['buf_samples']:,} samples "
+
+            def _ms(ms):
+                return f"{ms/1000:.3g} s" if ms >= 1000 else f"{ms:.3g} ms"
+
+            self.pulse_derived_label.setText(
+                f"ring buffer {d['buf_samples']:,} samples "
                 f"({d['buf_mb_per_channel']:.2f} MB/ch, "
                 f"{d['buf_mb_total']:.2f} MB total) · "
-                f"longest recordable ≈ {d['max_recordable_ms']:,.0f} ms · "
-                f"min pulse = {d['min_pulse_samples']} samples"
-                + f" · rolling baseline median over "
-                  f"{d['baseline_window']:,} samples "
-                  f"({d['baseline_window_ms']/1000:.3g} s)")
+                f"hard stop at {_ms(d['max_capture_ms'])} "
+                f"(1.2× — a stuck capture is saved and flagged "
+                f"truncated) · "
+                f"noise training {_ms(d['noise_train_actual_ms'])} "
+                f"({d['noise_samples']:,} samples) · "
+                f"baseline median over {_ms(d['baseline_window_ms'])} · "
+                f"edge lookback {_ms(d['edge_lookback_ms'])} "
+                f"({d['edge_lookback']:,} samples)"
+                + (f" · min pulse {d['min_pulse_samples']} samples"
+                   if cfg.min_pulse_ms > 0 else ""))
+            self.sigma_derived_label.setText(
+                f"confirmation {d['trigger_samples']} sample"
+                f"{'s' if d['trigger_samples'] != 1 else ''} "
+                f"(accidentals ≈ {acc_str} per channel) · "
+                f"edge jump > {cfg.threshold_sigma:g} jump-σ over the "
+                f"lookback (≈ {d['edge_floor_sigma']:.1f}σ amplitude "
+                f"floor in white noise)")
 
             issues = cfg.validate(self.sample_rate)
             errors = [m for s, m in issues if s == "error"]

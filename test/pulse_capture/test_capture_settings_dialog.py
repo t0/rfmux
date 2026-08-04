@@ -33,13 +33,13 @@ def test_derived_labels_follow_rate(qt_app):
     cfg = PulseCaptureConfig(min_pulse_ms=1.0)
     slow = PulseCaptureSettingsDialog(
         config=cfg, sample_rate=19073.486328125, mode="slow")
-    assert "min pulse = 19 samples" in slow.derived_label.text()
+    assert "min pulse 19 samples" in slow.pulse_derived_label.text()
     slow.close()
 
     fast = PulseCaptureSettingsDialog(
         config=cfg, sample_rate=1220703.125, mode="fast")
-    assert "min pulse = 1,221 samples" in fast.derived_label.text() or \
-        "min pulse = 1221 samples" in fast.derived_label.text()
+    assert "min pulse 1,221 samples" in fast.pulse_derived_label.text() or \
+        "min pulse 1221 samples" in fast.pulse_derived_label.text()
     fast.close()
 
 
@@ -80,7 +80,36 @@ def test_rolling_baseline_span_is_shown(qt_app):
     dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
     assert not hasattr(dlg, "baseline_spin")
     assert not hasattr(dlg, "baseline_auto_check")
-    assert "rolling baseline median" in dlg.derived_label.text()
+    assert "baseline median" in dlg.pulse_derived_label.text()
+    dlg.close()
+
+
+def test_derived_readouts_split_by_driving_knob(qt_app):
+    """The dialog shows WHAT each primary input drives: every time
+    scale under max pulse, everything statistical under threshold σ —
+    including the two new derived quantities (edge lookback, hard
+    stop) and the edge amplitude floor."""
+    dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
+    pulse_txt = dlg.pulse_derived_label.text()
+    sigma_txt = dlg.sigma_derived_label.text()
+    for piece in ("ring buffer", "hard stop", "noise training",
+                  "baseline median", "edge lookback"):
+        assert piece in pulse_txt, piece
+    for piece in ("confirmation", "accidentals", "edge jump",
+                  "amplitude floor"):
+        assert piece in sigma_txt, piece
+    # The floor readout follows the threshold: 5σ → ≈7.1σ.
+    assert "7.1σ" in sigma_txt
+    dlg.threshold_spin.setValue(10.0)
+    assert "14.1σ" in dlg.sigma_derived_label.text()
+
+    # And the time scales follow max pulse: 250 ms → 300 ms hard stop,
+    # 25 ms edge lookback.
+    assert "300 ms" in pulse_txt
+    assert "25 ms" in pulse_txt
+    dlg.max_pulse_spin.setValue(500.0)
+    assert "600 ms" in dlg.pulse_derived_label.text()
+    assert "50 ms" in dlg.pulse_derived_label.text()
     dlg.close()
 
 def test_max_pulse_is_a_primary_control_and_drives_training(qt_app):

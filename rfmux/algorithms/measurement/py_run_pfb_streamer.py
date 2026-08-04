@@ -32,13 +32,6 @@ from .py_get_pfb_samples import separate_iq_fft_to_i_and_q_linear, apply_pfb_cor
 
 # ── Timestamp → absolute seconds-of-day ───────────────────────────
 
-def _ts_to_seconds(ts) -> Optional[float]:
-    """Convert a streamer Timestamp to seconds-of-day (None if not recent)."""
-    if not ts.recent:
-        return None
-    return ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND
-
-
 # PFB bin bandwidth (no CIC decimation chain)
 _PFB_SAMPLE_RATE = 625e6 / 512  # ≈1.22 MHz
 
@@ -196,7 +189,7 @@ async def py_run_pfb_streamer(crs : CRS,
                         lst.extend(p[sl])
 
                     # Track elapsed sample time from packet timestamps
-                    ts_sec = _ts_to_seconds(p.ts)
+                    ts_sec = streamer.ts_to_seconds(p.ts)
                     if ts_sec is not None:
                         if _start_time_ref is None:
                             _start_time_ref = ts_sec

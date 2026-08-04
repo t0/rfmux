@@ -85,6 +85,22 @@ from .socket import (
 	get_local_ip,
 )
 
+
+def ts_to_seconds(ts):
+	"""Convert a packet Timestamp to seconds-of-day, or None if not recent.
+
+	``recent`` is the firmware's own flag for "this timestamp has been
+	disciplined"; an undisciplined one is not a small error but a
+	meaningless number, so callers get None and must decide rather than
+	silently accumulating garbage into a time axis.
+
+	Note this wraps at midnight — consumers accumulating elapsed time
+	should clamp per-packet deltas rather than subtracting endpoints.
+	"""
+	if not ts.recent:
+		return None
+	return ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / SS_PER_SECOND
+
 # Backwards compatibility aliases
 DfmuxPacket = ReadoutPacket
 STREAMER_MAGIC = READOUT_PACKET_MAGIC
@@ -113,6 +129,9 @@ __all__ = [
 	'get_multicast_socket',
 	'get_local_ip',
 	'ip_mreq_source',
+
+	# Timestamp helpers
+	'ts_to_seconds',
 
 	# Constants
 	'MULTICAST_GROUP',

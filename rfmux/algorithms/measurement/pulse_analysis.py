@@ -32,6 +32,7 @@ import numpy as np
 from typing import Dict, Optional
 
 from .pulse_detection import ChannelNoiseStats
+from ...core.transferfunctions import VOLTS_PER_ROC
 
 
 def pulse_peaks(
@@ -161,9 +162,10 @@ def pulse_summary(
     Returns
     -------
     dict
-        ``n_samples``, ``pileup``, ``peak_I``, ``peak_Q``, ``peak_amp``,
-        ``snr``, ``duration_s``, ``duration_ms``, ``timestamp`` (first
-        valid time), ``tau_s``, ``tau_ms`` (NaN when not derivable).
+        ``n_samples``, ``pileup``, ``truncated``, ``peak_I``, ``peak_Q``,
+        ``peak_amp``, ``snr``, ``duration_s``, ``duration_ms``,
+        ``timestamp`` (first valid time), ``tau_s``, ``tau_ms`` (NaN when
+        not derivable).
     """
     peaks = pulse_peaks(pulse_data, noise_stats)
 
@@ -184,6 +186,7 @@ def pulse_summary(
     return {
         "n_samples": int(len(np.asarray(pulse_data["Amp_I"]))),
         "pileup": bool(pulse_data.get("pileup", False)),
+        "truncated": bool(pulse_data.get("truncated", False)),
         **peaks,
         "duration_s": duration_s,
         "duration_ms": duration_s * 1e3,
@@ -191,3 +194,24 @@ def pulse_summary(
         "tau_s": tau_s,
         "tau_ms": tau_s * 1e3,
     }
+
+
+def counts_to_hz_scale(df_calibration: Optional[float]) -> Optional[float]:
+    """Multiplier taking pulse amplitudes from ADC counts to Δf in Hz.
+
+    Pulse waveforms and every amplitude-like metric derived from them
+    are stored in raw counts, which are only comparable across channels
+    once calibrated.  ``df_calibration`` (Hz per radian, from
+    :func:`~rfmux.algorithms.measurement.bias_kids.bias_kids` and saved
+    into the capture file) combines with the readout's counts-to-volts
+    constant into a single linear factor::
+
+        amplitude_hz = amplitude_counts * counts_to_hz_scale(df_cal)
+
+    Returns None when the channel is uncalibrated, which callers should
+    treat as "display raw counts" rather than substituting 1.0 —
+    unscaled counts mislabelled as Hz are worse than no calibration.
+    """
+    if df_calibration is None:
+        return None
+    return float(df_calibration) * VOLTS_PER_ROC

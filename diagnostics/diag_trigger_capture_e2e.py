@@ -18,8 +18,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import numpy as np
 import rfmux
 
-from rfmux.algorithms.measurement.pulse_hdf5 import PulseHDF5Writer, PulseHDF5Reader
-from rfmux.algorithms.measurement.pulse_histograms import PulseHistogramSet
+from rfmux.algorithms.measurement.pulse_hdf5 import PulseHDF5Reader
 
 
 # ── Plotting ──────────────────────────────────────────────────────
@@ -54,15 +53,13 @@ def plot_results(slow_results, fast_results, outpath):
     for mode_label, results in datasets:
         if results is None:
             continue
-        _start, pulses, noise_stats = results
-        ch_keys = sorted(pulses.keys())
-        for ch_key in ch_keys[:2]:
-            ch_num = int(ch_key.split()[-1])
-            ns = noise_stats.get(ch_num)
-            ch_pulses = pulses[ch_key]
+        pulses = results.pulses
+        for ch_num in sorted(pulses)[:2]:
+            ch_pulses = pulses[ch_num]
             if len(ch_pulses) == 0:
                 continue
-            groups.append((mode_label, ch_key, ch_num, ch_pulses, ns))
+            groups.append((mode_label, f"Channel {ch_num}", ch_num,
+                           ch_pulses, results.noise.get(ch_num)))
 
     if not groups:
         print("  No pulses to plot — skipping")
@@ -191,14 +188,12 @@ def plot_both_results(both_results, outpath):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    _start, matched, noise = both_results
-
-    # Collect all pulse entries (matched or single-stream)
-    all_pairs = []
-    for ch_key in sorted(matched.keys()):
-        for pulse_idx, pair in sorted(matched[ch_key].items()):
-            if pair.get("slow") is not None or pair.get("fast") is not None:
-                all_pairs.append((ch_key, pulse_idx, pair))
+    # Pairs carry union-window TOD from both rings; either side may be
+    # None on a one-sided match.
+    all_pairs = [(f"Channel {pair['channel']}", pair["pair_idx"], pair)
+                 for pair in both_results.pairs
+                 if pair.get("slow_tod") is not None
+                 or pair.get("fast_tod") is not None]
 
     if not all_pairs:
         print("  No pulses at all — skipping plot")
@@ -337,40 +332,40 @@ async def setup_mock():
 async def test_trigger_capture_slow(crs):
     """Test trigger_capture with slow readout streamer — sigma-based.
 
-    Returns (success, (start, pulses, noise_stats)) or (success, None).
+    Returns (success, PulseCaptureResult) or (success, None).
     """
     print("=" * 60)
-    print("TEST: trigger_capture(streamer_mode='slow', threshold_sigma=3.0)")
+    print("TEST: trigger_capture(streamer_mode='slow', threshold_sigma=50)")
     print("=" * 60)
 
     try:
-        start, pulses, noise_stats = await crs.trigger_capture(
+        res = await crs.trigger_capture(
             channel=[1, 2],
             module=1,
             streamer_mode="slow",
-            time_run=10,            # 0.1s of sample time → ~10 pulses (period=0.01s)
-            threshold_sigma=50.0,     # 3σ trigger on EITHER I or Q
-            end_sigma=3,           # End when both return within 1.5σ
-            buf_size=5000,
-            noise_packets=100,
+            time_run=10,
+            threshold_sigma=50.0,   # deliberately high: mock pulses are huge
+            end_sigma=3,
+            max_pulse_ms=50.0,
+            hdf5_path=os.path.join(os.path.dirname(__file__),
+                                   "trigger_capture_slow.h5"),
         )
 
-        print(f"  start_time: {start}")
-        total = 0
-        for ch_key, ch_pulses in pulses.items():
-            n = len(ch_pulses)
-            total += n
-            print(f"  {ch_key}: {n} pulses")
-            for k, p in list(ch_pulses.items())[:3]:
-                print(f"    Pulse {k}: {len(p['Amp_I'])} samples, "
-                      f"I_peak={max(abs(p['Amp_I'])):.0f}, Q_peak={max(abs(p['Amp_Q'])):.0f}")
+        print(f"  start_time: {res.start_time}")
+        for ch in sorted(res.pulses):
+            print(f"  Channel {ch}: {len(res.pulses[ch])} pulses")
+            for k in sorted(res.pulses[ch])[:3]:
+                pd = res.pulses[ch][k]
+                print(f"    Pulse {k}: {len(pd['Amp_I'])} samples, "
+                      f"I_peak={max(abs(pd['Amp_I'])):.0f}, "
+                      f"Q_peak={max(abs(pd['Amp_Q'])):.0f}")
 
-        print(f"  Total pulses: {total}")
-        if total > 0:
+        print(f"  Total pulses: {res.total_pulses}")
+        if res.total_pulses > 0:
             print("  ✅ PASS — pulses detected!\n")
         else:
             print("  ⚠ No pulses detected (may need threshold tuning)\n")
-        return True, (start, pulses, noise_stats)
+        return True, res
 
     except Exception as e:
         print(f"  ✗ FAIL: {e}")
@@ -381,40 +376,38 @@ async def test_trigger_capture_slow(crs):
 async def test_trigger_capture_fast(crs):
     """Test trigger_capture with fast PFB streamer — sigma-based.
 
-    Returns (success, (start, pulses, noise_stats)) or (success, None).
+    Returns (success, PulseCaptureResult) or (success, None).
     """
     print("=" * 60)
-    print("TEST: trigger_capture(streamer_mode='fast', threshold_sigma=3.0)")
+    print("TEST: trigger_capture(streamer_mode='fast', threshold_sigma=50)")
     print("=" * 60)
 
     try:
-        start, pulses, noise_stats = await crs.trigger_capture(
+        res = await crs.trigger_capture(
             channel=[1, 2],
             module=1,
             streamer_mode="fast",
-            time_run=0.1,           
+            time_run=0.1,
             threshold_sigma=50.0,
             end_sigma=3,
-            buf_size=200000,
-            noise_packets=1000,
-            enable_pileup=True
+            max_pulse_ms=5.0,
+            hdf5_path=os.path.join(os.path.dirname(__file__),
+                                   "trigger_capture_fast.h5"),
         )
 
-        print(f"  start_time: {start}")
-        total = 0
-        for ch_key, ch_pulses in pulses.items():
-            n = len(ch_pulses)
-            total += n
-            print(f"  {ch_key}: {n} pulses")
-            for k, p in list(ch_pulses.items())[:3]:
-                print(f"    Pulse {k}: {len(p['Amp_I'])} samples")
+        print(f"  start_time: {res.start_time}")
+        for ch in sorted(res.pulses):
+            print(f"  Channel {ch}: {len(res.pulses[ch])} pulses")
+            for k in sorted(res.pulses[ch])[:3]:
+                print(f"    Pulse {k}: "
+                      f"{len(res.pulses[ch][k]['Amp_I'])} samples")
 
-        print(f"  Total pulses: {total}")
-        if total > 0:
+        print(f"  Total pulses: {res.total_pulses}")
+        if res.total_pulses > 0:
             print("  ✅ PASS — pulses detected!\n")
         else:
             print("  ⚠ No pulses detected (may need threshold tuning)\n")
-        return True, (start, pulses, noise_stats)
+        return True, res
 
     except Exception as e:
         print(f"  ✗ FAIL: {e}")
@@ -425,50 +418,53 @@ async def test_trigger_capture_fast(crs):
 async def test_trigger_capture_both(crs):
     """Test trigger_capture with both streamers simultaneously.
 
-    Returns (success, (start, pulses_dict, noise_dict)) or (success, None).
+    Returns (success, PulseCaptureResult) or (success, None).
     """
     print("=" * 60)
-    print("TEST: trigger_capture(streamer_mode='both', threshold_sigma=3.0)")
+    print("TEST: trigger_capture(streamer_mode='both', threshold_sigma=50)")
     print("=" * 60)
 
     try:
-        # "both" returns matched pulses: {ch: {idx: {"slow": ..., "fast": ...}}}
-        start, matched, noise_stats = await crs.trigger_capture(
+        res = await crs.trigger_capture(
             channel=[1, 2],
             module=1,
             streamer_mode="both",
-            time_run=0.2,            # pulse period is 0.05s → ~4 pulses/ch
-            threshold_sigma=50.0,     # Higher for fast noise immunity
+            time_run=0.2,           # pulse period is 0.05s → ~4 pulses/ch
+            threshold_sigma=50.0,
             end_sigma=3,
-            buf_size=200000,         # PFB at 1.22 MHz needs large buffer
-            noise_packets=1000,       # More packets for 32-sample PFB packets
+            max_pulse_ms=5.0,
+            hdf5_path=os.path.join(os.path.dirname(__file__),
+                                   "trigger_capture_both.h5"),
         )
 
-        print(f"  start_time: {start}")
-        n_matched = 0
-        for ch_key in sorted(matched.keys()):
-            ch_pairs = matched[ch_key]
-            n_total = len(ch_pairs)
-            n_both = sum(1 for p in ch_pairs.values()
-                         if p.get("fast") is not None)
-            n_matched += n_both
-            print(f"  {ch_key}: {n_total} pulses ({n_both} matched slow+fast)")
-            for k, pair in list(ch_pairs.items())[:3]:
-                s = pair.get("slow") or pair.get("slow_tod")
-                f = pair.get("fast") or pair.get("fast_tod")
-                s_n = len(s["Amp_I"]) if s else 0
-                f_n = len(f["Amp_I"]) if f else 0
-                s_tag = "trig" if pair.get("slow") else "tod"
-                f_tag = "trig" if pair.get("fast") else "tod"
-                print(f"    Pulse {k}: slow={s_n}({s_tag}), fast={f_n}({f_tag})")
+        print(f"  start_time: {res.start_time}")
+        two_sided = [p for p in res.pairs
+                     if p.get("slow_idx") is not None
+                     and p.get("fast_idx") is not None]
+        by_ch = {}
+        for pair in res.pairs:
+            by_ch.setdefault(pair["channel"], []).append(pair)
+        for ch in sorted(by_ch):
+            pairs = by_ch[ch]
+            n_both = sum(1 for p in pairs if p.get("fast_idx") is not None
+                         and p.get("slow_idx") is not None)
+            print(f"  Channel {ch}: {len(pairs)} pairs "
+                  f"({n_both} matched slow+fast)")
+            for pair in pairs[:3]:
+                sp, fp = pair.get("slow_tod"), pair.get("fast_tod")
+                s_n = len(sp["Amp_I"]) if sp else 0
+                f_n = len(fp["Amp_I"]) if fp else 0
+                print(f"    Pair {pair['pair_idx']}: slow={s_n}, "
+                      f"fast={f_n}, offset="
+                      f"{(pair.get('time_offset') or 0)*1e6:+.0f} us")
 
-        if n_matched > 0:
-            print(f"  ✅ PASS — {n_matched} matched slow+fast pulse pairs!\n")
-            return True, (start, matched, noise_stats)
+        if two_sided:
+            print(f"  ✅ PASS — {len(two_sided)} matched slow+fast pairs!\n")
+            return True, res
         # Verified working (12/12 matched at time_run=0.3, 2026-07-29):
         # zero matches now means a real regression, not a thin window.
         print("  ✗ FAIL — no matched slow+fast pairs\n")
-        return False, (start, matched, noise_stats)
+        return False, res
 
     except Exception as e:
         print(f"  ✗ FAIL: {e}")
@@ -476,124 +472,48 @@ async def test_trigger_capture_both(crs):
         return False, None
 
 
-def save_results_to_hdf5(results, mode_label, outdir):
-    """Save capture results to HDF5 and compute histograms.
+def verify_hdf5(res, mode_label):
+    """Read back the file the capture wrote and report what is in it.
 
-    Demonstrates the Phase 1 infrastructure: PulseHDF5Writer for
-    streaming-style writes and PulseHistogramSet for incremental
-    histogram computation.
-
-    Parameters
-    ----------
-    results : tuple
-        (start_time, pulses_dict, noise_stats) from trigger_capture.
-    mode_label : str
-        Label for the file (e.g. "slow", "fast").
-    outdir : str
-        Directory for the output file.
-
-    Returns
-    -------
-    str or None
-        Path to the HDF5 file, or None on failure.
+    The session writes pulses, noise stats, histograms and templates as
+    the capture runs — trigger_capture just passes hdf5_path through — so
+    there is nothing to assemble here, only to check.
     """
-    if results is None:
+    if res is None or res.hdf5_path is None:
+        return None
+    if not os.path.exists(res.hdf5_path):
+        print(f"  [{mode_label}] no file at {res.hdf5_path}")
         return None
 
-    start_time, pulses, noise_stats = results
-    h5_path = os.path.join(outdir, f'trigger_capture_{mode_label}.h5')
-
-    # Extract channel numbers from "Channel N" keys
-    channels = []
-    for ch_key in sorted(pulses.keys()):
-        try:
-            channels.append(int(ch_key.split()[-1]))
-        except (ValueError, IndexError):
-            continue
-
-    if not channels:
-        print(f"  [{mode_label}] No channels in results — skipping HDF5")
-        return None
-
-    # Count total pulses
-    total_pulses = sum(len(ch_pulses) for ch_pulses in pulses.values())
-    if total_pulses == 0:
-        print(f"  [{mode_label}] No pulses — skipping HDF5")
-        return None
-
-    capture_params = {
-        'streamer_mode': mode_label,
-        'threshold_sigma': 50.0,
-        'end_sigma': 3.0,
-        'module': 1,
-    }
-
-    # ── Write pulses to HDF5 (streaming style) ───────────────────
-    writer = PulseHDF5Writer(h5_path, channels, noise_stats, capture_params)
-    histograms = PulseHistogramSet(
-        amp_range=(0, 5000), amp_bins=50,
-        duration_range_ms=(0, 20), duration_bins=50,
-        snr_range=(0, 100), snr_bins=50,
-    )
-
-    for ch_key in sorted(pulses.keys()):
-        ch_num = int(ch_key.split()[-1])
-        ns = noise_stats.get(ch_num)
-        for pulse_idx, pulse_data in pulses[ch_key].items():
-            writer.append_pulse(ch_num, pulse_idx, pulse_data, ns)
-            histograms.add_pulse(ch_num, pulse_data, ns)
-
-    # Write histograms and finalize
-    writer.update_histograms(histograms.get_histogram_data())
-    writer.finalize()
-
-    # ── Verify round-trip ─────────────────────────────────────────
-    with PulseHDF5Reader(h5_path) as reader:
-        print(f"\n  📦 HDF5 saved: {h5_path}")
-        print(f"     Metadata: mode={reader.metadata.get('streamer_mode')}, "
-              f"channels={reader.channels}")
+    with PulseHDF5Reader(res.hdf5_path) as reader:
+        print(f"\n  HDF5: {res.hdf5_path}")
+        print(f"     mode={reader.metadata.get('streamer_mode')}, "
+              f"channels={reader.channels}, dual={reader.dual}")
         for ch in reader.channels:
-            count = reader.pulse_count(ch)
-            ns = reader.noise_stats(ch)
-            print(f"     Channel {ch}: {count} pulses, "
-                  f"noise I={ns.mean_I:.1f}±{ns.std_I:.2f}, "
-                  f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}")
+            streams = reader.streams or [None]
+            for stream in streams:
+                count = reader.pulse_count(ch, stream=stream)
+                ns = reader.noise_stats(ch, stream=stream)
+                tag = f" [{stream}]" if stream else ""
+                print(f"     Channel {ch}{tag}: {count} pulses, "
+                      f"noise I={ns.mean_I:.1f}+-{ns.std_I:.2f}, "
+                      f"Q={ns.mean_Q:.1f}+-{ns.std_Q:.2f}")
+                if count > 0:
+                    pd = reader.get_pulse(ch, 1, stream=stream)
+                    print(f"       Pulse 1: {pd['n_samples']} samples, "
+                          f"peak_I={pd['peak_I']:.0f}, "
+                          f"duration={pd['duration_s']*1e3:.2f} ms")
+            if reader.dual:
+                print(f"     Channel {ch}: {reader.pair_count(ch)} pairs")
 
-            # Spot-check first pulse
-            if count > 0:
-                p = reader.get_pulse(ch, 1)
-                print(f"       Pulse 1: {p['n_samples']} samples, "
-                      f"peak_I={p['peak_I']:.0f} ({p['peak_snr_I']:.1f}σ), "
-                      f"duration={p['duration_s']*1e3:.2f}ms")
-
-        # Histogram summary
         hists = reader.get_histograms()
         for ch in reader.channels:
-            amp_key = f"amplitude_counts_ch{ch}"
-            if amp_key in hists:
-                total = int(np.sum(hists[amp_key]))
-                print(f"     Histogram ch{ch}: {total} pulses binned")
+            key = f"amplitude_counts_ch{ch}"
+            if key in hists:
+                print(f"     Histogram ch{ch}: "
+                      f"{int(np.sum(hists[key]))} pulses binned")
 
-    # ── Print histogram statistics ────────────────────────────────
-    print(f"\n  📊 Histogram summary ({mode_label}):")
-    for ch in channels:
-        ch_hists = histograms.get_channel_histograms(ch)
-        if ch_hists is None:
-            continue
-        amp = ch_hists['amplitude']
-        dur = ch_hists['duration_ms']
-        snr = ch_hists['snr']
-        print(f"     Ch {ch}: {amp.total} pulses")
-        if amp.total > 0:
-            # Weighted mean from histogram
-            amp_mean = np.average(amp.bin_centers, weights=amp.counts) if amp.total > 0 else 0
-            dur_mean = np.average(dur.bin_centers, weights=dur.counts) if dur.total > 0 else 0
-            snr_mean = np.average(snr.bin_centers, weights=snr.counts) if snr.total > 0 else 0
-            print(f"       Amplitude: mean={amp_mean:.0f} counts")
-            print(f"       Duration:  mean={dur_mean:.2f} ms")
-            print(f"       SNR:       mean={snr_mean:.1f} σ")
-
-    return h5_path
+    return res.hdf5_path
 
 
 async def main():
@@ -621,10 +541,11 @@ async def main():
     # ── Save to HDF5 + compute histograms ─────────────────────────
     outdir = os.path.dirname(__file__)
     print("\n" + "=" * 60)
-    print("HDF5 SAVE + HISTOGRAM COMPUTATION")
+    print("HDF5 READ-BACK")
     print("=" * 60)
-    save_results_to_hdf5(slow_results, "slow", outdir)
-    save_results_to_hdf5(fast_results, "fast", outdir)
+    verify_hdf5(slow_results, "slow")
+    verify_hdf5(fast_results, "fast")
+    verify_hdf5(both_results, "both")
 
     # ── Generate diagnostic plots ─────────────────────────────────
     outpath = os.path.join(outdir, 'trigger_capture_pulses.png')

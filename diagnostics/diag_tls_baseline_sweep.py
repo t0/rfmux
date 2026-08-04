@@ -79,7 +79,7 @@ def run_cell(drift_sigma, track_ms, seed=0, corner_hz=5.0):
     pcap = PulseCapture(
         buf_size=int(5 * FS), channels=[1], noise_stats=ns,
         threshold_sigma=THRESHOLD_SIGMA, end_sigma=END_SIGMA,
-        margin_fraction=0.1, accumulate=False,
+        margin_fraction=0.1,
         baseline_window=track_samples,
         on_pulse=lambda ch, idx, pd: detected.append(
             float(np.nanmin(pd["Time"]))),

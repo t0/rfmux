@@ -46,7 +46,7 @@ from ...algorithms.measurement.streamer_config import (
     PFB_SAMPLE_RATE,
     slow_sample_rate,
 )
-from ...core.transferfunctions import VOLTS_PER_ROC
+from ...algorithms.measurement.pulse_analysis import counts_to_hz_scale
 
 # Fast/PFB stream overlay colors (darker variants, HUD convention)
 FAST_IQ_COLORS = {"I": "#24478F", "Q": "#8F4724"}
@@ -1102,6 +1102,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 summary = {
                     "n_samples": int(m.get("n_samples", 0)),
                     "pileup": bool(m.get("pileup", False)),
+                    "truncated": bool(m.get("truncated", False)),
                     "peak_amp": float(m.get("peak_amp") or max(
                         m.get("peak_I", 0.0), m.get("peak_Q", 0.0))),
                     "snr": snr,
@@ -1114,14 +1115,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 self._counts[c] = self._counts.get(c, 0) + 1
                 parent = self._channel_items.get(c)
                 if parent is not None:
-                    label = ("⚠" if summary["pileup"] else "◆") \
+                    label = ("⊘" if summary["truncated"] else
+                             "⚠" if summary["pileup"] else "◆") \
                         + f" #{idx:06d}"
                     item = QtWidgets.QTreeWidgetItem(
                         [label, str(summary["n_samples"]),
                          f"{snr:.1f}σ"])
                     item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
                                  ("pulse", c, idx))
-                    if summary["pileup"]:
+                    if summary["truncated"]:
+                        for col in range(3):
+                            item.setBackground(col, QtGui.QColor(
+                                "#3a2222" if self.dark_mode else "#ffd9d2"))
+                    elif summary["pileup"]:
                         for col in range(3):
                             item.setBackground(col, QtGui.QColor(
                                 "#3a3320" if self.dark_mode else "#fff3c2"))
@@ -1303,6 +1309,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             print(f"[PulseCapture] Noise estimated ({stream})"
                   f"{self._baseline_summary()}")
             self._refresh_status_line()
+            # Show what the estimator saw for this stream (most recent
+            # estimate wins until the first pulse replaces it)
+            if self.follow_check.isChecked() or self._current_view is None:
+                self._show_noise_segment(stream)
             return
 
         self.noise_stats = noise_stats
@@ -1348,13 +1358,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         parent = self._channel_items.get(channel)
         if parent is not None:
             pileup = summary.get("pileup", False)
-            label = ("⚠" if pileup else "◆") + f" #{pulse_idx:06d}"
+            truncated = summary.get("truncated", False)
+            label = ("⊘" if truncated else "⚠" if pileup else "◆") \
+                + f" #{pulse_idx:06d}"
             item = QtWidgets.QTreeWidgetItem(
                 [label, str(summary.get("n_samples", "")),
                  f"{summary.get('snr', 0):.1f}σ"])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
                          ("pulse", channel, pulse_idx))
-            if pileup:
+            if truncated:
+                for col in range(3):
+                    item.setBackground(col, QtGui.QColor(
+                        "#3a2222" if self.dark_mode else "#ffd9d2"))
+            elif pileup:
                 for col in range(3):
                     item.setBackground(col, QtGui.QColor(
                         "#3a3320" if self.dark_mode else "#fff3c2"))
@@ -1444,7 +1460,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def _df_scale(self, channel: int) -> Optional[float]:
         """counts → Hz factor for *channel*, or None if uncalibrated.
 
-        Conversion is linear: counts × VOLTS_PER_ROC × df_calibration.
+        Only the lookup through the nested/flat calibration mapping is
+        GUI business; the conversion itself is shared with headless
+        callers as counts_to_hz_scale.
         """
         cal = self.df_calibrations
         if not cal:
@@ -1455,9 +1473,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             df_cal = per_module.get(channel)
         else:  # flat {channel: cal} mapping
             df_cal = cal.get(channel) if isinstance(cal, dict) else None
-        if df_cal is None:
-            return None
-        return float(df_cal) * VOLTS_PER_ROC
+        return counts_to_hz_scale(df_cal)
 
     def _units_are_hz(self) -> bool:
         return self.units_combo.currentText() == "Hz"
@@ -1490,24 +1506,37 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._set_status(f"● Error: {message}", "#E5484D")
         print(f"[PulseCapture] ERROR: {message}")
 
-    def _show_noise_segment(self) -> None:
+    def _show_noise_segment(self, stream: str | None = None) -> None:
         """Plot the noise-training segment with the fitted baselines and
-        trigger/end bands — visual confirmation of what the estimator saw."""
+        trigger/end bands — visual confirmation of what the estimator saw.
+
+        In "both" mode the dual session holds one training record per
+        stream (``session.slow`` / ``session.fast``); *stream* selects
+        which one, and the most recent estimate wins the view."""
         if self.task is None:
             return
-        noise_data = getattr(self.task.session, "noise_data", {})
-        channel = next((c for c in sorted(self.noise_stats)
+        session = self.task.session
+        stats = self.noise_stats
+        tag = ""
+        if stream is not None:
+            session = getattr(session, stream, None)
+            stats = self._noise_by_stream.get(stream, {})
+            tag = f" ({stream})"
+        if session is None:
+            return
+        noise_data = getattr(session, "noise_data", {})
+        channel = next((c for c in sorted(stats)
                         if c in noise_data and len(noise_data[c])), None)
         if channel is None:
             return
         arr = noise_data[channel]
-        ns = self.noise_stats[channel]
+        ns = stats[channel]
         thr = float(self.threshold_spin.value())
         end = float(self.end_spin.value())
 
         self._current_view = None
         self.pulse_info.setText(
-            f"Noise training segment — Channel {channel} "
+            f"Noise training segment{tag} — Channel {channel} "
             f"({len(arr)} samples)\n"
             f"I = {ns.mean_I:.1f} ± {ns.std_I:.2f}   "
             f"Q = {ns.mean_Q:.1f} ± {ns.std_Q:.2f}\n"
@@ -1516,7 +1545,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         x = np.arange(len(arr))
         self.pulse_plot_i.clear()
         self.pulse_plot_q.clear()
-        self.pulse_plot_i.setTitle(f"Noise training — Channel {channel}")
+        self.pulse_plot_i.setTitle(f"Noise training{tag} — Channel {channel}")
         self.pulse_plot_q.setTitle(None)
         self._set_pulse_x_axis("sample")
         x1 = float(len(arr) - 1) if len(arr) else 1.0
@@ -1619,6 +1648,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if summary is None:
             return
         pile = "[pileup]" if summary.get("pileup") else "[no pileup]"
+        if summary.get("truncated"):
+            pile += "  [truncated at max pulse — hard stop]"
         tau_ms = summary.get("tau_ms", float("nan"))
         tau_str = f"{tau_ms:.2f} ms" if np.isfinite(tau_ms) else "n/a"
         self.pulse_info.setText(

@@ -119,6 +119,8 @@ class PulseHDF5Writer:
             grp.attrs["noise_std_I"] = ns.std_I
             grp.attrs["noise_mean_Q"] = ns.mean_Q
             grp.attrs["noise_std_Q"] = ns.std_Q
+            grp.attrs["noise_jump_std_I"] = ns.jump_std_I
+            grp.attrs["noise_jump_std_Q"] = ns.jump_std_Q
             grp.attrs["pulse_count"] = 0
             if df_calibrations and ch in df_calibrations:
                 grp.attrs["df_calibration"] = df_calibrations[ch]
@@ -202,6 +204,8 @@ class PulseHDF5Writer:
                 grp.attrs["noise_std_I"] = ns.std_I
                 grp.attrs["noise_mean_Q"] = ns.mean_Q
                 grp.attrs["noise_std_Q"] = ns.std_Q
+                grp.attrs["noise_jump_std_I"] = ns.jump_std_I
+                grp.attrs["noise_jump_std_Q"] = ns.jump_std_Q
         self.f.flush()
 
     def update_histograms(self, histogram_data: Dict[str, np.ndarray]) -> None:
@@ -327,6 +331,8 @@ class DualPulseHDF5Writer:
                 grp.attrs["noise_std_I"] = ns.std_I
                 grp.attrs["noise_mean_Q"] = ns.mean_Q
                 grp.attrs["noise_std_Q"] = ns.std_Q
+                grp.attrs["noise_jump_std_I"] = ns.jump_std_I
+                grp.attrs["noise_jump_std_Q"] = ns.jump_std_Q
         self.f.flush()
 
     def append_pulse(self, stream: str, channel: int, pulse_idx: int,
@@ -483,6 +489,8 @@ class PulseHDF5Reader:
             std_I=float(grp.attrs["noise_std_I"]),
             mean_Q=float(grp.attrs["noise_mean_Q"]),
             std_Q=float(grp.attrs["noise_std_Q"]),
+            jump_std_I=float(grp.attrs.get("noise_jump_std_I", 0.0)),
+            jump_std_Q=float(grp.attrs.get("noise_jump_std_Q", 0.0)),
         )
 
     def df_calibration(self, channel: int,
@@ -654,6 +662,7 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
                                  compression_opts=1)
 
     pulse_grp.attrs["pileup"] = bool(pulse_data.get("pileup", False))
+    pulse_grp.attrs["truncated"] = bool(pulse_data.get("truncated", False))
     pulse_grp.attrs["n_samples"] = len(amp_I)
 
     # Where the detector triggered and where the leaky bucket confirmed
@@ -710,6 +719,7 @@ def _pulse_dict_from_group(grp) -> dict:
         "Amp_Q": np.array(grp["Amp_Q"]),
         "Time": np.array(grp["Time"]),
         "pileup": bool(grp.attrs.get("pileup", False)),
+        "truncated": bool(grp.attrs.get("truncated", False)),
         "peak_I": float(grp.attrs.get("peak_I", 0)),
         "peak_Q": float(grp.attrs.get("peak_Q", 0)),
         "peak_snr_I": float(grp.attrs.get("peak_snr_I", 0)),

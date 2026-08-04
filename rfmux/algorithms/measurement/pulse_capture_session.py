@@ -124,6 +124,11 @@ class PulseCaptureConfig:
     #: pulse (so the fit sees baseline, not signal), and that ratio —
     #: not any absolute duration — is the thing that matters.
     NOISE_TRAIN_PULSES = 20
+    #: Hard stop on a capture, as a multiple of the max pulse length.
+    #: The ring (1.5x) still has room for the pre-trigger margin, and a
+    #: baseline that drifted mid-capture can delay the end condition but
+    #: never wedge the detector.
+    HARD_STOP_FACTOR = 1.2
 
     # ── ms → samples (per stream rate) ────────────────────────────
 
@@ -209,6 +214,24 @@ class PulseCaptureConfig:
     def max_pulse_samples(self, sample_rate: float) -> int:
         return max(1, int(round(self.max_pulse_ms * 1e-3 * sample_rate)))
 
+    def edge_lookback_samples(self, sample_rate: float) -> int:
+        """Edge-detector lag K: margin_fraction of the max pulse.
+
+        Long enough to contain any physical rise (KID rise times are a
+        small fraction of the decay the pulse length is set from), short
+        enough that 1/f wander moves negligibly across it.  The jump-σ
+        the edge threshold uses is measured from the training record at
+        exactly this lag."""
+        return max(1, int(round(self.margin_fraction
+                                * self.max_pulse_samples(sample_rate))))
+
+    def max_capture_samples(self, sample_rate: float) -> int:
+        """Hard stop on a capture — HARD_STOP_FACTOR × the max pulse,
+        floored so the stop can never sit inside the end-confirmation
+        count of a legitimate short pulse."""
+        return max(32, int(round(self.HARD_STOP_FACTOR
+                                 * self.max_pulse_samples(sample_rate))))
+
     def session_kwargs(self, sample_rate: float) -> Dict[str, Any]:
         """Keyword arguments for :class:`PulseCaptureSession`."""
         return {
@@ -221,6 +244,8 @@ class PulseCaptureConfig:
             "buf_size": self.buf_size(sample_rate),
             "noise_samples": self.noise_samples(sample_rate),
             "baseline_window": self.baseline_window_samples(sample_rate),
+            "edge_lookback": self.edge_lookback_samples(sample_rate),
+            "max_capture_samples": self.max_capture_samples(sample_rate),
         }
 
     def describe(self, sample_rate: float,
@@ -247,6 +272,16 @@ class PulseCaptureConfig:
                 60.0 * self.accidental_rate_hz(sample_rate),
             "accidental_per_min_unconfirmed":
                 60.0 * sample_rate * self._cross_prob(),
+            "edge_lookback": self.edge_lookback_samples(sample_rate),
+            "edge_lookback_ms":
+                self.edge_lookback_samples(sample_rate) / sample_rate * 1e3,
+            "max_capture_samples": self.max_capture_samples(sample_rate),
+            "max_capture_ms":
+                self.max_capture_samples(sample_rate) / sample_rate * 1e3,
+            # For a marginal pulse in white noise the edge test is the
+            # stricter of the two: it compares against √2·σ.  Shown so
+            # the user knows the effective amplitude floor.
+            "edge_floor_sigma": self.threshold_sigma * math.sqrt(2.0),
         }
 
     def validate(self, sample_rate: Optional[float] = None
@@ -381,6 +416,8 @@ class PulseCaptureSession:
         sample_rate: Optional[float] = None,
         noise_samples: int = 1000,
         baseline_window: int = 0,
+        edge_lookback: Optional[int] = None,
+        max_capture_samples: Optional[int] = None,
         hdf5_path: Optional[str | Path] = None,
         df_calibrations: Optional[Dict[int, float]] = None,
         histogram_config: Optional[Dict[str, Any]] = None,
@@ -407,6 +444,16 @@ class PulseCaptureSession:
         self.sample_rate = sample_rate
         self.noise_samples = int(noise_samples)
         self.baseline_window = int(baseline_window)
+        # Resolved here (not in the engine) so noise estimation measures
+        # the jump-σ at exactly the lag the edge detector will use.
+        if edge_lookback is None:
+            edge_lookback = PulseCapture.default_edge_lookback(
+                buf_size, margin_fraction)
+        self.edge_lookback = max(0, int(edge_lookback))
+        if max_capture_samples is None:
+            max_capture_samples = int(round(
+                PulseCapture.HARD_STOP_RING_FRACTION * buf_size))
+        self.max_capture_samples = max(0, int(max_capture_samples))
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
         self.df_calibrations = df_calibrations
         self.histogram_flush_every = int(histogram_flush_every)
@@ -590,13 +637,17 @@ class PulseCaptureSession:
         samples = {c: self._noise_buf[c][:self._noise_n[c]]
                    for c in self.channels}
         self.noise_stats, self.noise_data = estimate_noise_stats(
-            samples, self.channels)
+            samples, self.channels, jump_lag=self.edge_lookback)
 
         if self.pcap is None:
             self._build_engine_and_writer()
         else:
             # Re-estimation: swap stats in place and resume triggering.
+            # The edge detector must not difference across the swap —
+            # samples taken under the old mean read as huge jumps
+            # against the new one.
             self.pcap.noise_stats = self.noise_stats
+            self.pcap.reset_edge_history()
             if self.writer is not None:
                 self.writer.update_noise_stats(self.noise_stats)
             self.pcap.freeze_triggers = False
@@ -617,8 +668,9 @@ class PulseCaptureSession:
             trigger_samples=self.trigger_samples,
             enable_pileup=self.enable_pileup,
             baseline_window=self.baseline_window,
+            edge_lookback=self.edge_lookback,
+            max_capture_samples=self.max_capture_samples,
             on_pulse=self._on_engine_pulse,
-            accumulate=False,
         )
 
         if self.hdf5_path is not None:
@@ -635,6 +687,8 @@ class PulseCaptureSession:
                 "enable_pileup": self.enable_pileup,
                 "module": self.module,
                 "baseline_window": self.baseline_window,
+                "edge_lookback": self.edge_lookback,
+                "max_capture_samples": self.max_capture_samples,
             }
             if self.sample_rate:
                 key = ("sample_rate_fast" if self.streamer_mode == "fast"

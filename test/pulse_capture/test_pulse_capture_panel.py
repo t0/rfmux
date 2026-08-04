@@ -886,3 +886,41 @@ def test_pair_view_marks_come_from_the_triggered_record(qt_app, tmp_path):
                 texts
     panel.close()
     _spin(qt_app)
+
+
+def test_both_mode_noise_segment_is_plotted(qt_app):
+    """In "both" mode the per-stream noise estimate must draw the
+    training-segment plot, pulling the record from the dual session's
+    inner stream session (regression: the both-mode branch returned
+    before plotting, and the dual session has no top-level noise_data)."""
+    from types import SimpleNamespace
+    from rfmux.algorithms.measurement.pulse_detection import (
+        ChannelNoiseStats,
+    )
+
+    panel = PulseCapturePanel(dark_mode=False)
+    rng = np.random.default_rng(0)
+    arr = (rng.normal(0, 1, 500)
+           + 1j * rng.normal(0, 1, 500)).astype(np.complex128)
+    panel.task = SimpleNamespace(session=SimpleNamespace(
+        slow=SimpleNamespace(noise_data={1: arr}),
+        fast=SimpleNamespace(noise_data={})))
+    panel.follow_check.setChecked(True)
+
+    panel._on_noise_estimated({
+        "stream": "slow",
+        "stats": {1: ChannelNoiseStats(std_I=1.0, std_Q=1.0)}})
+    assert "Noise training segment (slow)" in panel.pulse_info.text()
+    assert "(slow)" in panel.pulse_plot_i.getPlotItem().titleLabel.text
+    assert len(panel.pulse_plot_i.getPlotItem().listDataItems()) >= 1
+
+    # The fast stream's estimate lands later and takes over the view.
+    panel.task.session.fast.noise_data = {1: arr}
+    panel._on_noise_estimated({
+        "stream": "fast",
+        "stats": {1: ChannelNoiseStats(std_I=2.0, std_Q=2.0)}})
+    assert "Noise training segment (fast)" in panel.pulse_info.text()
+
+    panel.task = None
+    panel.close()
+    _spin(qt_app)

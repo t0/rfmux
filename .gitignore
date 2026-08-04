@@ -3,9 +3,19 @@ __pycache__/
 rfmux.egg-info/
 *.swp
 rfmux/_version.py
-test/session_testing/
 .ipynb_checkpoints/
 .pytest_cache/
+
+# Periscope session output — captures, screenshots, exported .h5/.pkl. This is
+# run data, not source: it is large (GBs) and never belongs in the repo.
+#
+# The session base directory is whatever you last picked in the session dialog,
+# remembered in QSettings, so it can land anywhere. Point it at outputs/.
+# It used to point at test/session_testing/, which put a gigabyte of captures
+# inside the test suite; that path stays ignored below in case any older
+# QSettings still references it.
+outputs/
+test/session_testing/
 
 # Diagnostics write their plots and captures next to themselves; the scripts
 # are tracked, their output is not.

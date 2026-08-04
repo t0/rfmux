@@ -286,6 +286,27 @@ CWD-relative glob silently yields an empty parameter set from the repo root,
 which reports as one skip rather than an error — this suite's notebook test
 went unrun in CI that way.
 
+## Session output does not live here
+
+Periscope writes each session — captures, screenshots, exported `.h5`/`.pkl` —
+into a folder named `session_<date>_<time>` under whatever base directory you
+last chose in the session dialog. That choice is remembered in QSettings, so it
+follows wherever it was last pointed, and nothing in the code pins it.
+
+It had been pointed at `test/session_testing/`, which accumulated **~1.1 GB of
+capture data across 126 session folders inside the test suite**. That is now at
+`outputs/` in the repo root, which is gitignored. Point the session dialog there.
+
+Two guards, because the setting is per-user and can drift again:
+
+- `outputs/` is ignored in the root `.gitignore` (as is the old
+  `test/session_testing/`, for anyone whose settings still resolve to it).
+- `test/.gitignore` ignores `session_*/` anywhere beneath this directory, so
+  session output landing back in the test tree still cannot be committed.
+
+Neither is a substitute for pointing the dialog at `outputs/` — they only stop
+run data reaching a commit.
+
 ## Diagnostics are not tests
 
 `diagnostics/` at the repo root holds plot-generating, eyeball-it scripts —

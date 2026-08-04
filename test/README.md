@@ -53,43 +53,42 @@ the signal.
 across every supported Python version. Use it when changing packaging or
 touching version-sensitive code, not in the edit loop.
 
-### One acquisition run at a time — including back-to-back runs
+### One acquisition run at a time
 
-**Read this before believing any acquisition-tier failure.** Two runs overlapping
-produces failures that look exactly like detector bugs, and the overlap is easy
-to cause by accident.
+The mock streamer binds fixed ports — 9876 slow, 9877 PFB — and
+`get_multicast_socket()` sets `SO_REUSEPORT`. A second listener therefore does
+*not* collide: it joins the same multicast group and the two readers split the
+packet stream. Neither errors, both see partial data, and the tests report it as
+a pulse-detector fault (`no matched pairs`, thousands of phantom pulses,
+nonsensical elapsed times) with nothing pointing at the real cause. Two
+investigations on this branch were lost to that misdirection.
 
-The MockCRS streamer binds fixed ports (9876 slow, 9877 PFB) and
-`get_multicast_socket()` sets `SO_REUSEPORT`. A second run therefore does *not*
-fail to bind — it joins the same multicast group, and the two runs split each
-other's packets. Nothing errors; both just silently see partial data.
+You should not be able to hit it silently any more. Three things changed:
 
-The trap is that this bites **sequential** runs, not just deliberately parallel
-ones. `rfmux/mock/server.py` registers one `atexit` handler per mock session,
-each doing `terminate()` + `join(2.0)` and possibly `kill()` + `join(2.0)`. The
-full tier creates ~20 sessions, so after pytest prints its summary the process
-spends a long time reaping servers — you will see ~20 `[MockCRS] Shutting down
-server process...` lines *after* the result line — and it holds the receive
-sockets throughout. Start the next run in that window and it is corrupted by the
-previous run's corpse.
+- **The tier refuses to start** if 9876/9877 are already held. The guard lives in
+  `conftest.py` here and prints the `ss` command to find the holder. Override
+  with `--allow-busy-streamer-ports` if you genuinely want two readers.
+- **A failing test no longer leaks its reader.** `test_pulse_capture_fast.py`
+  used to stop its tap thread and capture task only on the success path, so a
+  failed assertion left them holding both ports for the rest of the process — one
+  leaked run was measured still holding them 419 s later. The `stream_guard`
+  fixture now tears them down unconditionally.
+- **Exiting is fast.** `rfmux/mock/server.py` used to register one `atexit`
+  handler per mock session, each with its own `terminate()`/`join(2.0)` grace
+  period, so ~20 sessions serialised into a minute-plus of teardown *after* the
+  summary line — all of it with the sockets still open. One hook now terminates
+  the fleet and joins against a single deadline.
 
-Symptoms, all observed: `test_pulse_capture_fast.py::test_both_mode_end_to_end`
-failing `no matched pairs` with the slow stream reporting thousands of pulses;
-`test_streamer_config.py::TestSources::test_slow_source_feeds_session` stuck in
-`CaptureState.ESTIMATING` with an `elapsed` far larger than its `duration_s`. The
-`elapsed_s` in the dual stats may be positive or negative — don't use its sign
-as the tell.
-
-So before diagnosing, confirm nothing is holding the ports:
+If an acquisition failure still looks like a detector bug, check for a stranded
+reader before believing it:
 
 ```bash
-ps -eo pid,etimes,cmd | grep '[p]ytest'      # a finished run can still be dying
 ss -ulnp | grep -E '9876|9877'               # must be empty
+ps -eo pid,etimes,cmd | grep '[p]ytest'      # a finished run can still be dying
 ```
 
-A clean solo `--tier=full` is 241 passed in ~1 min 40 s. If you get failures,
-re-run solo with the ports verified free before concluding anything about the
-code — two separate investigations here started by trusting a contaminated run.
+A clean solo `--tier=full` is 241 passed in ~1 min 40 s. Re-run solo with the
+ports verified free before drawing any conclusion about the code.
 
 ### Rate-invariance caveat in the rolling baseline
 
@@ -195,6 +194,14 @@ Mark at the narrowest scope that is true. A module-level
 spawns a server exiles the fast tests in that file for a cost they never incur —
 and because `pytestmark` gates *selection* and not *import*, the suite still
 pays their setup on every default run. Put it on the class.
+
+Own your sockets and threads from a fixture, not from the success path. Anything
+that binds a streamer port — a `PulseCaptureTask`, a thread running
+`run_slow_source` — must be stopped in fixture teardown, so a failing assertion
+cannot strand it. Cleaning up after the last assertion means the cleanup is
+skipped exactly when something has already gone wrong, and a stranded reader
+turns one local failure into corruption of everything that follows. See
+`stream_guard` in `pulse_capture/test_pulse_capture_fast.py`.
 
 ## Qt tests
 

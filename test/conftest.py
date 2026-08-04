@@ -1,6 +1,7 @@
 import pytest
 import rfmux
 import os
+import socket
 import pytest_asyncio
 
 # Fixtures that can only be satisfied by a real board. Requesting one — directly
@@ -28,6 +29,82 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if HARDWARE_FIXTURES & set(getattr(item, "fixturenames", ())):
             item.add_marker(pytest.mark.hardware)
+
+
+def _port_holder(port):
+    """Return a description of whatever holds ``port``, or None if it is free.
+
+    Probes with a PLAIN bind and no socket options on purpose. The streamer sets
+    ``SO_REUSEPORT``, so a probe that also set it would happily bind alongside an
+    existing listener and report the port as free — which is precisely the
+    condition being looked for. Without it the kernel refuses with EADDRINUSE.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.bind(("", port))
+        return None
+    except OSError as exc:
+        return f"{exc.strerror or exc}"
+    finally:
+        probe.close()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _streamer_ports_free(request):
+    """Refuse to start the acquisition tier if the streamer ports are taken.
+
+    The mock streamer binds fixed ports (9876 slow, 9877 PFB) with
+    ``SO_REUSEPORT``, so a second listener does not collide — it joins the same
+    multicast group, and the two readers split the packet stream. Neither errors.
+    Both silently see partial data, and the tests report it as a pulse-detector
+    fault: "no matched pairs", thousands of phantom pulses, nonsensical elapsed
+    times. That misdirection cost two full investigations on this branch, so the
+    condition is now named at the point it can still be explained.
+
+    The usual cause is a previous run that has not finished dying — its servers
+    are still being reaped, or a test leaked a reader thread. A live Periscope
+    listening on the same ports will do it too.
+
+    Checked once per session rather than per test: mid-session the suite's own
+    readers legitimately hold these ports, so a per-test probe would fail on the
+    run's own traffic.
+
+    Escape hatch, for when you know two readers are fine:
+    ``--allow-busy-streamer-ports``.
+    """
+    if request.config.getoption("allow_busy_streamer_ports", default=False):
+        return
+
+    # session.items is the list that survived deselection, which is what
+    # matters: read at collection time it still holds every marker-excluded
+    # test, so `pytest --tier=quick` would trip a guard meant for the
+    # acquisition tier.
+    if not any(item.get_closest_marker("slow_acquisition")
+               for item in getattr(request.session, "items", ())):
+        return
+
+    from rfmux import streamer
+
+    busy = {}
+    for port in (streamer.STREAMER_PORT, streamer.PFB_STREAMER_PORT):
+        holder = _port_holder(port)
+        if holder is not None:
+            busy[port] = holder
+    if not busy:
+        return
+
+    detail = "; ".join(f"{port} ({why})" for port, why in sorted(busy.items()))
+    pytest.exit(
+        "Streamer port(s) already in use: " + detail + ".\n"
+        "The acquisition tests would share them via SO_REUSEPORT and read only "
+        "part of the packet stream, which surfaces as bogus pulse-detection "
+        "failures rather than as this clash.\n"
+        "Find the holder with:  ss -ulnp | grep -E '9876|9877'\n"
+        "A finished pytest run can still hold them while it reaps mock servers; "
+        "wait for it to exit, or kill it.\n"
+        "Override with --allow-busy-streamer-ports if you know it is safe.",
+        returncode=pytest.ExitCode.USAGE_ERROR,
+    )
 
 
 @pytest.fixture

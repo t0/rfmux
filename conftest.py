@@ -55,6 +55,18 @@ def pytest_addoption(parser):
         help="Run a named tier instead of writing a -m expression. "
              + "; ".join(f"{k}={v or 'everything'}" for k, v in TIERS.items()),
     )
+    # Consumed by the _streamer_ports_free guard in test/conftest.py. Declared
+    # here for the same reason as the options above: pytest only honours
+    # pytest_addoption from an initial conftest.
+    parser.addoption(
+        "--allow-busy-streamer-ports",
+        action="store_true",
+        default=False,
+        help="Run the acquisition tests even if UDP 9876/9877 are already "
+             "bound. They would be shared via SO_REUSEPORT and each reader "
+             "would see only part of the stream, so expect spurious "
+             "pulse-detection failures.",
+    )
 
 
 def pytest_configure(config):

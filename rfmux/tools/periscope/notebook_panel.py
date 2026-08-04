@@ -18,6 +18,12 @@ from ...paths import get_reference_notebook_dir, get_user_notebook_dir
 import sys
 
 
+#: JupyterLab settings shipped with Periscope (overrides.json). Passed as
+#: --LabApp.app_settings_dir so the defaults it sets apply on top of, rather
+#: than in place of, whatever the user has configured for themselves.
+_JUPYTER_SETTINGS_DIR = Path(__file__).parent / "jupyter_settings"
+
+
 class JupyterServerManager(QtCore.QObject):
     """
     Manages a local Jupyter notebook server.
@@ -73,6 +79,14 @@ class JupyterServerManager(QtCore.QObject):
             '--ServerApp.token=periscope',
             '--ServerApp.disable_check_xsrf=True',
             '--InteractiveShellApp.extensions=awaitless',
+            # Make the shipped .md reference notebooks open as notebooks on
+            # double-click instead of as raw markdown. This is app_settings_dir
+            # (overrides.json), not user_settings_dir, deliberately: overrides
+            # set the schema DEFAULT, so the user's own JupyterLab theme,
+            # fonts and keybindings still apply, and they can still change the
+            # viewer back in Settings -> Document Manager. Pointing
+            # user_settings_dir here instead would silently discard all of it.
+            f'--LabApp.app_settings_dir={_JUPYTER_SETTINGS_DIR}',
         ]
         
         try:

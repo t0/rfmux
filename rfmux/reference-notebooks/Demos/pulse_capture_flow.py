@@ -9,7 +9,8 @@ Pulse Capture panel, for cron jobs, overnight runs and smoke-testing a
 board from a terminal.
 
 For what any of these parameters mean and how the detector works, open
-pulse_capture.md in this folder as a notebook (JupyterLab: right-click →
+pulse_capture.md in this folder as a notebook (double-click it in the
+Jupyter panel Periscope launches; in your own JupyterLab, right-click →
 Open With → Notebook).  It is the documentation; this is the runner.
 
 Usage:

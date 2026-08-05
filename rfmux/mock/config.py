@@ -10,7 +10,12 @@ This module centralizes all parameters used by:
 External code should import MOCK_DEFAULTS and optionally call apply_overrides()
 to merge user-provided overrides with validated defaults.
 
-No other module should define mock defaults or duplicate parameters.
+No other module should define mock defaults or duplicate parameters.  This is
+worth enforcing rather than assuming: a copy of this file lived at
+rfmux/core/mock_config.py carrying the same claim, drifted 13 keys and 5 values
+behind without anyone noticing (it had no importers at all), and was deleted.
+A duplicate that nothing imports is worse than no duplicate, because editing it
+looks like it worked.
 """
 
 from __future__ import annotations

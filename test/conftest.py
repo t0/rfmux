@@ -17,6 +17,44 @@ HARDWARE_FIXTURES = frozenset({"live_session", "crs", "serial"})
 # test/ — e.g. running pytest from a subdirectory.
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_qsettings(tmp_path_factory):
+    """Keep the suite out of the developer's real Periscope preferences.
+
+    QSettings is a per-user store, not a per-process one, so anything that
+    writes it during a test writes ~/.config/rfmux/periscope.conf for real.
+    That is not hypothetical: SessionManager.start_session() records the
+    session path, and a test calling it with tmp_path left the user's
+    "last session" pointing at /tmp/pytest-of-.../session_test — which then
+    turned up as the default in Periscope's session dialog, long after the
+    test run was over.
+
+    Redirect the store to a temp file for the whole session. Tests that
+    genuinely exercise settings still work; they just stop being destructive.
+    Skipped entirely when PyQt6 is unavailable (the portable tier).
+
+    Patching the module's one constructor rather than calling
+    QSettings.setPath(): setPath only takes effect for objects created before
+    Qt has resolved the native location, which it already has by the time any
+    fixture runs, so it silently does nothing here. Every read and write in the
+    package goes through settings._get_settings(), so this is the whole surface.
+    """
+    try:
+        from PyQt6.QtCore import QSettings
+    except ImportError:
+        yield
+        return
+
+    from rfmux.tools.periscope import settings as periscope_settings
+
+    store = tmp_path_factory.mktemp("qsettings") / "periscope.ini"
+    original = periscope_settings._get_settings
+    periscope_settings._get_settings = (
+        lambda: QSettings(str(store), QSettings.Format.IniFormat))
+    yield
+    periscope_settings._get_settings = original
+
+
 def pytest_collection_modifyitems(config, items):
     """Mark hardware tests by the fixtures they request.
 

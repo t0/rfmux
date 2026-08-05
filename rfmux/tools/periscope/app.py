@@ -2638,15 +2638,25 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         # Show folder selection dialog
         # Use Qt dialog (not native) to prevent hanging on some systems
+        #
+        # Start where the user last put a session.  An empty string here does
+        # NOT mean "the current directory" in practice: Qt falls back to its
+        # own process-global last-visited directory, so the dialog silently
+        # followed whatever other file dialog was opened most recently in this
+        # run of Periscope.
         base_path = QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select Session Location",
-            "",  # Start in current directory
+            settings.get_last_session_directory(),
             QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
         )
-        
+
         if not base_path:
             return
+
+        # Remember it, so the next session starts here rather than wherever
+        # the file dialog happened to drift to.
+        settings.set_last_session_directory(base_path)
         
         # Generate default folder name with timestamp
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2681,18 +2691,27 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         Shows a folder selection dialog to choose an existing session folder.
         """
-        # Use Qt dialog (not native) to prevent hanging on some systems
+        # Use Qt dialog (not native) to prevent hanging on some systems.
+        # Start from the last session directory for the same reason as
+        # _start_new_session — see the note there about the empty string.
         session_path = QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select Session Folder",
-            "",
+            settings.get_last_session_directory(),
             QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
         )
-        
+
         if session_path:
             success = self.session_manager.load_session(session_path)
-            
+
             if success:
+                # A loaded session names a session folder, so the base
+                # directory to remember is its parent.
+                from pathlib import Path
+                settings.set_last_session_directory(
+                    str(Path(session_path).parent))
+                settings.set_last_session_path(session_path)
+
                 # Restore mock config if present and in mock mode
                 self._restore_mock_config_from_session()
                 

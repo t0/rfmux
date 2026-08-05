@@ -19,12 +19,14 @@ TLS_KEYS = ("tls_noise_enabled", "tls_fractional_rms", "tls_alpha",
 
 
 class TestDefaults:
-    def test_keys_present_and_disabled_by_default(self):
+    def test_keys_present_and_enabled_by_default(self):
         cfg = mock_config.defaults()
         for key in TLS_KEYS:
             assert key in cfg, f"{key} missing from MOCK_DEFAULTS"
-        assert cfg["tls_noise_enabled"] is False, \
-            "TLS must default off so existing behaviour is unchanged"
+        # TLS was introduced opt-in, then turned on: real KIDs drift, and a
+        # simulator without drift lets code pass here and fail on hardware.
+        assert cfg["tls_noise_enabled"] is True, \
+            "TLS must default on so the mock drifts like a real detector"
 
     def test_string_values_are_coerced(self):
         cfg = mock_config.apply_overrides({
@@ -92,10 +94,12 @@ class TestDialog:
         from rfmux.tools.periscope.mock_configuration_dialog import (
             MockConfigurationDialog,
         )
+        default_on = mock_config.defaults()["tls_noise_enabled"]
         dlg = MockConfigurationDialog(None, mock_config.defaults())
-        dlg.tls_noise_enabled_cb.setChecked(True)
+        # Move away from the default, whatever it is, then reset back to it.
+        dlg.tls_noise_enabled_cb.setChecked(not default_on)
         dlg._reset_to_defaults()
-        assert dlg.tls_noise_enabled_cb.isChecked() is False
+        assert dlg.tls_noise_enabled_cb.isChecked() is default_on
         dlg.close()
 
     def test_load_current_values(self, qt_app):

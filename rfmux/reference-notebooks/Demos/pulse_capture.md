@@ -162,9 +162,15 @@ else:
 below no-ops in that case.
 
 If you have no hardware, this stands up a simulated CRS: a couple of resonators
-with carriers parked on them, and periodic quasiparticle pulses to detect. The
-noise is deliberately not idealised, because a detector that only works on white
-noise is not worth testing:
+with carriers parked on them, and periodic quasiparticle pulses to detect.
+
+Pulse heights are drawn uniformly between `pulse_random_amp_min` and
+`..._max` rather than repeating one value, so the amplitude histogram in
+section 7 shows a distribution instead of a single spike — which is the whole
+point of plotting one.
+
+The noise is deliberately not idealised either, because a detector that only
+works on white noise is not worth testing:
 
 - **White readout noise** (`udp_noise_level`) — the flat floor the σ thresholds
   are measured against.
@@ -177,21 +183,27 @@ noise is not worth testing:
   edge gate in section 4 exist to survive, so leaving it off would let this
   notebook demonstrate a detector that cannot handle a real detector.
 
-At the level set below, the baseline wanders roughly **14 white-noise σ** over a
-three-second capture — far more than enough to swamp a fixed threshold — and the
-detector still finds essentially every pulse (58 of ~60 expected, against 59
-with 1/f switched off).
+At these settings the quasiparticle term dominates the slow-stream noise floor:
+σ ≈ 8.6 counts at stage 1, against ≈ 1 count when it is set ten times lower.
+That is worth knowing, because it means the σ your thresholds are quoted in is a
+*physical* quantity here, not a readout artefact — and it is what makes the
+pulse SNRs below look like real detector numbers rather than the enormous ones a
+noiseless simulation produces.
 
-What 1/f costs is not detections but **window quality**, and it is worth
-watching for. A pulse riding a drifting baseline can take much longer to fall
-back inside `end_sigma`, so a fraction of windows stay open far longer than the
-pulse itself: at this level about 8 of 58, against 0 with 1/f off. Those windows
-still measure the right τ — the decay is fitted from the peak and the threshold
-crossing, not the window length — but their `duration_ms` is a property of the
-baseline, not the event. Push the wander up another factor of two and it becomes
-a third of all windows, and the fast stream begins over-triggering because its
-short training record never sees drift this slow. That is the real reason the
-hard stop exists.
+The 1/f on top of it is correlated rather than white, so it moves the baseline
+instead of scattering it: about 2.8 σ of wander over a three-second capture,
+against 2.2 σ with TLS off. The detector absorbs that without complaint — same
+59 pulses either way, no over-long windows.
+
+**Which is the point, and also the trap.** Turn the quasiparticle noise back
+down and the same absolute drift becomes 14 σ, and roughly one window in seven
+stays open until the hard stop, because a pulse riding a drifting baseline is
+slow to fall back inside `end_sigma`. Those windows still measure the right τ —
+the decay is derived from the peak and the threshold crossing, not the window
+length — but their `duration_ms` describes the baseline, not the event. That
+failure mode is why the rolling median and edge gate exist, and it is exactly
+the kind of thing that stays invisible in simulation and then bites on
+hardware.
 
 > ⚠️ **Only run this if nothing else is already streaming.** If Periscope is in
 > mock mode, attach to its simulation with option 1A instead — creating a second
@@ -205,10 +217,10 @@ MOCK_CONFIG = {
     "auto_bias_kids": True,        # park carriers on the resonators
     "bias_amplitude": 0.001,
 
-    # ── Noise ───────────────────────────────────────────────────
+    # ── Noise (these are the shipped defaults, spelled out) ─────
     "udp_noise_level": 10.0,       # white readout noise (ADC counts)
     "nqp_noise_enabled": True,     # quasiparticle generation-recombination
-    "nqp_noise_std_factor": 0.001,
+    "nqp_noise_std_factor": 0.01,  # 1% of base quasiparticle density
     "tls_noise_enabled": True,     # TLS 1/f frequency wander
     "tls_fractional_rms": 1e-7,    # RMS of df/f
     "tls_alpha": 1.0,              # PSD ~ 1/f**alpha
@@ -219,7 +231,9 @@ MOCK_CONFIG = {
     "pulse_period": 0.05,          # one every 50 ms
     "pulse_tau_rise": 1e-6,
     "pulse_tau_decay": 1e-3,       # 1 ms decay constant
-    "pulse_amplitude": 2.0,
+    "pulse_random_amp_mode": "uniform",   # spread of pulse heights,
+    "pulse_random_amp_min": 1.5,          # not one repeated event
+    "pulse_random_amp_max": 3.0,
 }
 
 if crs is not None:

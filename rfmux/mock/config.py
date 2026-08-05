@@ -72,13 +72,15 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Noise configuration
     # -------------------------------------------------------------------------
     "nqp_noise_enabled": True,  # Enable noise on quasiparticle density
-    "nqp_noise_std_factor": 0.001,  # Std dev as fraction of base nqp (0.1%)
+    "nqp_noise_std_factor": 0.01,   # Std dev as fraction of base nqp (1%)
 
     # TLS (two-level system) 1/f frequency noise.  Real KIDs show
     # fractional frequency wander with a 1/f**alpha spectrum from TLS in
     # the surface dielectric; unlike nqp_noise above it is CORRELATED in
     # time, so it drifts the baseline rather than adding scatter.
-    "tls_noise_enabled": False,     # Off by default (legacy behaviour)
+    "tls_noise_enabled": True,      # On: real KIDs drift, and code that
+                                    # cannot survive drift should fail here
+                                    # rather than on hardware
     "tls_fractional_rms": 1e-7,     # RMS fractional frequency wander df/f
     "tls_alpha": 1.0,               # Spectral slope: PSD ~ 1/f**alpha
     "tls_corner_hz": 100.0,         # Upper corner; law spans 3 decades below
@@ -132,7 +134,7 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "pulse_resonators": "all",    # 'all' or list of resonator indices
 
     # Random pulse amplitude distribution (random mode only)
-    "pulse_random_amp_mode": "fixed",   # "fixed" | "uniform" | "lognormal"
+    "pulse_random_amp_mode": "uniform",  # "fixed" | "uniform" | "lognormal"
     "pulse_random_amp_min": 1.5,        # for uniform mode (>= 1.0)
     "pulse_random_amp_max": 3.0,        # for uniform mode (>= min)
     "pulse_random_amp_logmean": 0.7,    # for lognormal mode

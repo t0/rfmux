@@ -10,6 +10,16 @@ Carrier-only (no pulses): with QP pulses active the carrier baseline
 drifts with quasiparticle density, and short pulses are legitimately
 temporally unresolved on the slow stream — so stream-data amplitude
 comparisons are NOT valid invariants; this model-level one is.
+
+Both noise sources are off here for the same reason, and that is not
+optional.  The invariant above is about a *fixed* carrier, but the two
+means are taken over different spans (50 slow samples cover 10 ms at
+dec 3, the 512 PFB samples 0.4 ms) and over different sample counts, so
+anything time-varying lands unequally in them: TLS drift moves the
+resonant frequency between the two windows, and quasiparticle noise
+leaves more residual in a 50-sample mean than a 512-sample one.  Either
+one alone pushes the ratio past the 1% this test resolves.  Scale parity
+is the invariant; noise is a separate signal that would only mask it.
 """
 
 import asyncio
@@ -26,7 +36,9 @@ def model():
     crs = ServerMockCRS("0000")
     asyncio.run(crs.generate_resonators({
         "num_resonances": 2, "resonator_random_seed": 3,
-        "auto_bias_kids": True, "bias_amplitude": 0.001}))
+        "auto_bias_kids": True, "bias_amplitude": 0.001,
+        "tls_noise_enabled": False,        # see module docstring
+        "nqp_noise_enabled": False}))
     yield crs, crs._resonator_model
 
 

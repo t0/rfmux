@@ -47,8 +47,10 @@ output — numbers, tables, plots — appears underneath the cell as it runs.
 - **Editing is encouraged.** Change a threshold, a channel list, a capture
   length, and re-run — that is what this document is for. The shipped copy is
   read-only, so *File → Save Notebook As…* to keep your changes.
-- **You need a CRS**, real or simulated. Section 1 sorts that out; if you have no
-  hardware, section 2 gives you a simulated one and the rest works unchanged.
+- **Section 1 is the one exception to running everything.** It offers three ways
+  to get a CRS — attach to a running one, use your own board, or simulate one —
+  and you run only the one that fits. Everything after it is identical whichever
+  you chose.
 - **Captures are written to disk** in `OUTPUT_DIR` (printed by the next cell).
   Section 7 reads them back, and Periscope can open them in review mode.
 
@@ -57,7 +59,6 @@ output — numbers, tables, plots — appears underneath the cell as it runs.
 
 import asyncio
 import os
-import socket
 import tempfile
 from pathlib import Path
 
@@ -65,7 +66,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import rfmux
-from rfmux import streamer
 from rfmux.algorithms.measurement.pulse_analysis import counts_to_hz_scale
 from rfmux.algorithms.measurement.pulse_capture_dual import (
     DualPulseCaptureSession,
@@ -88,51 +88,72 @@ from rfmux.algorithms.measurement.streamer_config import (
 OUTPUT_DIR = Path(os.environ.get(
     "RFMUX_DEMO_OUTPUT", Path(tempfile.gettempdir()) / "rfmux_pulse_capture"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+MODULE = 1
+CHANNELS = [1, 2]
+
+crs = None          # set by whichever cell in section 1 or 2 you run
+host = "127.0.0.1"  # where the streamers send
+IS_MOCK = False     # True only if THIS notebook created the simulation
+
 print(f"capture files → {OUTPUT_DIR}")
 ```
 
 ## 1. Connect
 
-Three ways to get a CRS, tried in order:
+Everything below needs a CRS. **Run exactly one** of the three options:
 
-1. **Opened from Periscope?** Then Periscope has already told this kernel which
-   board it is using (`RFMUX_CRS_HOSTNAME`), and we attach to *that* one. This is
-   not just convenience — see the warning in section 2.
-2. **Your own board?** Set `SERIAL` below.
-3. **Neither?** `crs` stays `None` and section 2 simulates one.
+| | When to use it | Where |
+|---|---|---|
+| **A. Attach to a running board** | Periscope launched this notebook, or you know the board's address | below |
+| **B. Your own board** | You have hardware and its serial | below |
+| **C. Simulate one** | No hardware, and nothing already running | section 2 |
 
 On real hardware the detectors must already be biased, since pulse detection
 works on the deviation of a parked carrier. Run `simplified_tuning_flow.py` (in
 this folder) first, or use the Periscope tuning panels.
 
+### A. Attach to a board that is already running
+
+Use this when Periscope is driving a board — real or simulated — and you want to
+work with *that* one rather than starting your own.
+
+Periscope sets `RFMUX_CRS_HOSTNAME` when it launches this notebook, which is how
+the cell finds the board with no configuration from you. It is not magic and not
+required: paste an address into `HOSTNAME` and this works from any kernel.
+
+Attaching matters most in mock mode. A simulated CRS is created, not discovered
+— its RPC port is assigned by the OS at startup — so there is no address to look
+up, and a second `create_mock_crs()` gives you a *second, unrelated* simulation
+streaming to the same UDP port as the first. A receiver then sees both
+interleaved, with no error anywhere.
+
 ```python
-MODULE = 1
-CHANNELS = [1, 2]
-SERIAL = None          # e.g. "0042" to use your own board
+HOSTNAME = os.environ.get("RFMUX_CRS_HOSTNAME")   # or paste "127.0.0.1:43431"
+SERIAL = os.environ.get("RFMUX_CRS_SERIAL", "0000")
 
-crs = None
-host = "127.0.0.1"
-
-_periscope_host = os.environ.get("RFMUX_CRS_HOSTNAME")
-
-if _periscope_host:
-    # Periscope launched this kernel and handed over the board it is on.
-    _serial = os.environ.get("RFMUX_CRS_SERIAL", "0000")
+if HOSTNAME:
     _s = rfmux.load_session(
-        f'!HardwareMap [ !CRS {{ serial: "{_serial}", '
-        f'hostname: "{_periscope_host}" }} ]')
+        f'!HardwareMap [ !CRS {{ serial: "{SERIAL}", '
+        f'hostname: "{HOSTNAME}" }} ]')
     crs = _s.query(rfmux.CRS).one()
     await crs.resolve()
-    host = _periscope_host.split(":")[0]
-    print(f"attached to Periscope's CRS {_serial} at {_periscope_host}")
-elif SERIAL:
-    _s = rfmux.load_session(f'!HardwareMap [ !CRS {{ serial: "{SERIAL}" }} ]')
-    crs = _s.query(rfmux.CRS).one()
-    await crs.resolve()
-    host = crs.tuber_hostname
-    print(f"connected to CRS {SERIAL}")
+    host = HOSTNAME.split(":")[0]
+    print(f"attached to CRS {SERIAL} at {HOSTNAME}")
 else:
-    print("no CRS yet — run section 2 to simulate one")
+    print("Nothing advertised a board. Set HOSTNAME above, or use option B "
+          "(your own board) or section 2 (simulation).")
+```
+
+### B. Your own board
+
+```python
+# SERIAL = "0042"
+# _s = rfmux.load_session(f'!HardwareMap [ !CRS {{ serial: "{SERIAL}" }} ]')
+# crs = _s.query(rfmux.CRS).one()
+# await crs.resolve()
+# host = crs.tuber_hostname
+# print(f"connected to CRS {SERIAL} at {host}")
 ```
 
 ## 2. Mock mode configuration
@@ -172,13 +193,10 @@ a third of all windows, and the fast stream begins over-triggering because its
 short training record never sees drift this slow. That is the real reason the
 hard stop exists.
 
-> ⚠️ **Do not run this while Periscope is in mock mode**, unless Periscope
-> launched this notebook. A second `create_mock_crs()` is a second, *unrelated*
-> simulation streaming to the same UDP port, and a receiver then gets the two
-> interleaved — different resonators, different pulses, no error anywhere. The
-> guard below refuses rather than hand you plausible garbage. Opening this
-> notebook from Periscope's Jupyter panel avoids the problem entirely: section 1
-> attaches to the simulation Periscope is already running.
+> ⚠️ **Only run this if nothing else is already streaming.** If Periscope is in
+> mock mode, attach to its simulation with option 1A instead — creating a second
+> one here would put two unrelated simulations on the same UDP port, and a
+> receiver would get them interleaved with no error to tell you so.
 
 ```python
 MOCK_CONFIG = {
@@ -204,27 +222,9 @@ MOCK_CONFIG = {
     "pulse_amplitude": 2.0,
 }
 
-IS_MOCK = False
-
 if crs is not None:
-    print("already have a CRS — nothing to do here")
+    print("already connected — skip this cell")
 else:
-    # Refuse to start a second simulation on top of a running one.
-    with streamer.get_multicast_socket(
-            "127.0.0.1", port=streamer.STREAMER_PORT) as _probe:
-        _probe.settimeout(1.5)
-        try:
-            _probe.recv(streamer.LONG_PACKET_SIZE)
-            raise RuntimeError(
-                "Something is already streaming on port "
-                f"{streamer.STREAMER_PORT} — most likely Periscope in mock "
-                "mode. Starting a second simulation would interleave two "
-                "unrelated data sets on this port. Either open this notebook "
-                "from Periscope's Jupyter panel (it will attach to the running "
-                "simulation), or stop the other streamer first.")
-        except socket.timeout:
-            pass          # nothing streaming — safe to create our own
-
     from rfmux.mock.helpers import create_mock_crs
     crs = await create_mock_crs(module=MODULE, config=MOCK_CONFIG,
                                 verbose=False)
@@ -232,6 +232,24 @@ else:
     host = "127.0.0.1"
     print(f"simulated CRS ready: {MOCK_CONFIG['num_resonances']} resonators, "
           f"1/f on (df/f = {MOCK_CONFIG['tls_fractional_rms']:.0e} rms)")
+```
+
+### Ready?
+
+Whichever route you took, this is the checkpoint — it confirms what the rest of
+the notebook will be talking to.
+
+```python
+if crs is None:
+    raise RuntimeError(
+        "No CRS. Run option 1A (attach), 1B (your board), or the cell above "
+        "(simulate one) before continuing.")
+
+print(f"CRS       {crs.tuber_hostname}")
+print(f"streamers {host}")
+print(f"module {MODULE}, channels {CHANNELS}")
+print("simulation created by this notebook" if IS_MOCK
+      else "pre-existing board — this notebook will not tear it down")
 ```
 
 ## 3. Configure the streamers

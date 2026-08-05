@@ -12,6 +12,13 @@ Subcommands:
   reflash-mmc IMAGE    write a WIC image (raw or gzipped) to MMC (whole card,
                        including /home)
   repl [COMMAND]       run one U-Boot command, or open an interactive console
+  write-backplane-eeprom
+                       program the crate backplane EEPROM behind each board's
+                       slot with an IPMI FRU descriptor (a "--slot SERIAL=N"
+                       mapping programs a whole crate in one run)
+  read-backplane-eeprom
+                       read back and decode the backplane FRU descriptor,
+                       optionally verifying slot numbers against a mapping
 
 The target board(s) are selected with --serial on the group (repeatable, or
 "any"). Multiple boards are handled concurrently: each beaconing board that
@@ -20,6 +27,7 @@ serial is done; otherwise it listens until --timeout (default: never).
 """
 
 import click
+import datetime
 import functools
 import gzip
 import hashlib
@@ -41,6 +49,7 @@ import zlib
 # optional dependencies - not mandated in pyproject.toml because they would
 # bloat the Yocto build (where they are certainly unnecessary).
 try:
+    import fru
     import pexpect
     import pexpect.fdpexpect
     import tqdm
@@ -329,6 +338,172 @@ def repl(stream, child, serial, position, cmd=None):
     return True
 
 
+# ---------------------------------------------------------------------------
+# Backplane EEPROM
+#
+# Each crate slot carries its own EEPROM on the backplane, wired to the i2c0
+# bus of whatever CRS board occupies it (the rest of the board's I2C tree
+# hangs off i2c1). The EEPROM holds an IPMI FRU descriptor for the crate; the
+# slot number is stored as a chassis-area custom field ("slot=N"), which is
+# the only way a board can discover which slot it occupies.
+# ---------------------------------------------------------------------------
+
+# Minutes since this epoch is the FRU board-area manufacturing-date encoding.
+FRU_EPOCH = datetime.datetime(1996, 1, 1, tzinfo=datetime.timezone.utc)
+
+# Known backplane designs, selected with "--backplane".
+BACKPLANES = {
+    "4sbp": {
+        "eeprom": {"address": 0x51, "size": 256}, # 24lc025t (2kbit)
+        "chassis": {"type": 0x17}, # rack-mount chassis
+        "board": {
+            "manufacturer": "t0.technology",
+            "product_name": "4-slot backplane",
+            "part_number": "4SBP",
+        },
+    },
+}
+
+SLOT_FIELD = re.compile(r"slot=(\d+)$")
+
+# One line of "i2c md" output: a 16-bit offset, then hex byte pairs (the
+# trailing ASCII column can't false-match: it is set off by two or more
+# consecutive spaces, which the single-space byte separator won't cross).
+HEXDUMP_LINE = re.compile(r"^([0-9A-Fa-f]{4}):((?: [0-9A-Fa-f]{2})+)", re.M)
+
+
+def select_backplane_eeprom(child, serial, bus, chip):
+    """Select the backplane I2C bus and confirm the EEPROM answers a probe."""
+
+    child.sendline(f"i2c dev {bus}")
+    child.expect(PROMPT)
+    if "Failure" in child.before:
+        log.error("[%s] cannot select I2C bus %d: %s",
+                  serial, bus, child.before.strip())
+        return False
+
+    child.sendline("i2c probe")
+    child.expect(PROMPT, timeout=30)
+    found = re.search(r"Valid chip addresses:((?: [0-9A-Fa-f]{2})*)", child.before)
+    chips = [int(c, 16) for c in found.group(1).split()] if found else []
+    if chip not in chips:
+        log.error("[%s] no EEPROM at %#04x on I2C bus %d (probe found: %s). "
+                  "Is the board seated in a crate?",
+                  serial, chip, bus,
+                  ", ".join(f"{c:#04x}" for c in chips) or "nothing")
+        return False
+    return True
+
+
+def write_backplane_eeprom(stream, child, serial, position, images, size,
+                           bus, chip, alen):
+    """Write a FRU image to the backplane EEPROM and verify it by readback.
+
+    "images" maps each targeted board serial to its (path, md5, slot): the
+    boards in a crate are programmed concurrently, each with its own slot.
+    """
+    path, md5, slot = images[serial]
+
+    if not select_backplane_eeprom(child, serial, bus, chip):
+        return False
+
+    log.info("[%s] transferring slot-%d FRU image (%d bytes) over xmodem",
+             serial, slot, size)
+    if not send_xmodem(stream, child, serial, position, path):
+        log.error("[%s] xmodem transfer failed", serial)
+        return False
+
+    # Use the exact size, not $filesize: loadx sets $filesize to the transfer
+    # padded to a whole xmodem block.
+    child.sendline(f"md5sum $loadaddr {size:#x}")
+    child.expect(md5, timeout=5)
+    child.expect(PROMPT)
+
+    log.info("[%s] writing EEPROM at %#04x on I2C bus %d", serial, chip, bus)
+    child.sendline(f"i2c write $loadaddr {chip:#x} 0.{alen} {size:#x}")
+    child.expect(PROMPT, timeout=5)
+    if "Error" in child.before:
+        log.error("[%s] EEPROM write failed: %s", serial, child.before.strip())
+        return False
+
+    # Read back through the EEPROM (into scratch memory well past the image)
+    # and require the md5 to match, so a write-protected or flaky part can't
+    # pass silently.
+    child.sendline(f"setexpr bpaddr $loadaddr + {2*size:#x}")
+    child.expect(PROMPT)
+    child.sendline(f"i2c read {chip:#x} 0.{alen} {size:#x} $bpaddr")
+    child.expect(PROMPT, timeout=5)
+    child.sendline(f"md5sum $bpaddr {size:#x}")
+    if child.expect([md5, PROMPT], timeout=5) != 0:
+        log.error("[%s] EEPROM readback mismatch: %s",
+                  serial, child.before.strip())
+        return False
+    child.expect(PROMPT)
+    log.info("[%s] EEPROM readback verified (md5 %s)", serial, md5)
+    return True
+
+
+def read_backplane_eeprom(stream, child, serial, position, size, bus, chip,
+                          alen, expected):
+    """Read the backplane EEPROM and decode its FRU descriptor.
+
+    "expected" maps board serials to the slot number each EEPROM should
+    claim; a board present in the map fails unless its EEPROM agrees.
+    """
+    if not select_backplane_eeprom(child, serial, bus, chip):
+        return False
+
+    child.sendline(f"i2c md {chip:#x} 0.{alen} {size:#x}")
+    child.expect(PROMPT, timeout=5)
+    blob = b"".join(bytes.fromhex(m.group(2).replace(" ", ""))
+                    for m in HEXDUMP_LINE.finditer(child.before))
+    if len(blob) != size:
+        log.error("[%s] short EEPROM dump: expected %d bytes, parsed %d",
+                  serial, size, len(blob))
+        return False
+
+    try:
+        data = fru.load(blob=blob)
+    except ValueError as e:
+        log.error("[%s] EEPROM contents are not a valid FRU descriptor (%s)",
+                  serial, e)
+        return False
+
+    slot = next((int(m.group(1))
+                 for f in data.get("chassis", {}).get("custom_fields", [])
+                 if (m := SLOT_FIELD.match(f))), None)
+    if slot is None:
+        log.warning('[%s] FRU descriptor has no "slot=N" chassis custom field',
+                    serial)
+
+    # Render the decoded FRU as indented text for the log.
+    lines = []
+    for area in ("chassis", "board", "product"):
+        if area not in data:
+            continue
+        lines.append(f"  {area}:")
+        for key, value in data[area].items():
+            if key == "format_version" or value in ("", [], 0):
+                continue
+            if key == "mfg_date_time":
+                value = (FRU_EPOCH + datetime.timedelta(minutes=value)
+                         ).strftime("%Y-%m-%d %H:%M UTC")
+            elif key == "custom_fields":
+                value = ", ".join(value)
+            lines.append(f"    {key}: {value}")
+    log.info("[%s] backplane FRU (slot %s):\n%s",
+             serial, slot if slot is not None else "unknown", "\n".join(lines))
+
+    expect = expected.get(serial)
+    if expect is not None:
+        if slot != expect:
+            log.error("[%s] slot mismatch: EEPROM says %s, expected %d",
+                      serial, slot if slot is not None else "nothing", expect)
+            return False
+        log.info("[%s] slot %d verified", serial, slot)
+    return True
+
+
 def validate_boot_bin(data, path):
     """Sanity-check that data looks like a complete ZynqMP boot.bin."""
 
@@ -464,6 +639,9 @@ def cli(ctx, serials, discovery_port, bind, verbose):
         rfmux firmware --serial 0110 reflash-spi boot.bin
         rfmux firmware --serial 0110 reflash-spi boot.bin --md5sum $(md5sum boot.bin | cut -d' ' -f1)
         rfmux firmware --serial 0110 reflash-mmc t0-crs-image.wic.gz
+        rfmux firmware --serial 0110 write-backplane-eeprom --backplane 4sbp --chassis-serial-number C0021 --slot 3
+        rfmux firmware --serial any  write-backplane-eeprom --backplane 4sbp --chassis-serial-number C0021 --slot 0110=1 --slot 0111=2
+        rfmux firmware --serial any  read-backplane-eeprom --backplane 4sbp --slot 0110=1 --slot 0111=2
     """
     # Optional dependencies, checked here (the single gateway to every
     # subcommand) so a missing package fails with a remedy now, not mid-flash
@@ -593,6 +771,178 @@ def repl_cmd(ctx, command):
         raise click.UsageError(
             "interactive repl needs exactly one specific --serial")
     run(ctx.obj, functools.partial(repl, cmd=command))
+
+
+def parse_slot_map(slots, serials):
+    """Parse --slot occurrences into a {serial: slot} mapping.
+
+    Two forms: a single bare "N" (which needs exactly one specific --serial
+    to attach to) or repeated "SERIAL=N" mappings for programming a whole
+    crate in one run.
+    """
+    def slot_number(text):
+        try:
+            return int(text)
+        except ValueError:
+            raise click.UsageError(f"slot number {text!r} is not an integer")
+
+    bare = [s for s in slots if "=" not in s]
+    if bare and len(bare) != len(slots):
+        raise click.UsageError(
+            '--slot forms cannot be mixed: use a single bare "N" or '
+            'repeated "SERIAL=N"')
+
+    if bare:
+        if len(bare) != 1:
+            raise click.UsageError(
+                "only one bare --slot N is meaningful; use --slot SERIAL=N "
+                "to address several boards")
+        if serials == ("any",) or len(set(serials)) != 1:
+            raise click.UsageError(
+                'a bare "--slot N" needs exactly one specific --serial; use '
+                '"--slot SERIAL=N" to address a full crate')
+        return {serials[0]: slot_number(bare[0])}
+
+    mapping = {}
+    for item in slots:
+        serial, _, slot = item.partition("=")
+        if not serial or serial == "any":
+            raise click.UsageError(f"--slot {item}: missing board serial")
+        if serial in mapping:
+            raise click.UsageError(
+                f"--slot {item}: serial {serial} is mapped more than once")
+        mapping[serial] = slot_number(slot)
+
+    claimants = {}
+    for serial, slot in mapping.items():
+        claimants.setdefault(slot, []).append(serial)
+    duplicates = {slot: sers for slot, sers in claimants.items()
+                  if len(sers) > 1}
+    if duplicates:
+        raise click.UsageError(
+            "each slot may be mapped to only one serial: " + "; ".join(
+                f"slot {slot} claimed by {', '.join(sers)}"
+                for slot, sers in sorted(duplicates.items())))
+    return mapping
+
+
+def reconcile_slot_serials(opts, mapping):
+    """Make a slot map the run's target list, or check it matches --serial.
+
+    "--serial any" with a SERIAL=N map means "target exactly the mapped
+    boards" (which also lets the run terminate once they're all done); an
+    explicit --serial list must name exactly the mapped boards.
+    """
+    if opts["serials"] == ("any",):
+        opts["serials"] = tuple(sorted(mapping))
+    elif set(opts["serials"]) != set(mapping):
+        raise click.UsageError(
+            "--slot SERIAL=N mappings must cover exactly the boards named "
+            "with --serial (or use --serial any to target the mapped boards)")
+
+
+backplane_option = click.option(
+    "--backplane", type=click.Choice(sorted(BACKPLANES)), required=True,
+    help="Backplane design. Pins every FRU field and the EEPROM geometry "
+         "that are properties of the design, so EEPROM contents stay "
+         "consistent across crates.")
+
+
+@cli.command(name="write-backplane-eeprom")
+@backplane_option
+@click.option("--slot", "slots", multiple=True, required=True,
+              metavar="[SERIAL=]N",
+              help='Crate slot number, stored as the "slot=N" chassis-area '
+                   "custom field. Each slot's EEPROM is the sole record of "
+                   "its position, so this is how boards learn their slot. "
+                   "Give a bare N with a single --serial, or repeat "
+                   "SERIAL=N to program a whole crate in one run.")
+@click.option("--chassis-serial-number", required=True,
+              help="Serial number of the crate being commissioned.")
+@click.option("--board-serial-number", default="",
+              help="Serial number of the backplane PCB, if tracked.")
+@click.pass_context
+def write_backplane_eeprom_cmd(ctx, backplane, slots, chassis_serial_number,
+                               board_serial_number):
+    """Commission crate backplane EEPROM(s) with IPMI FRU descriptors.
+
+    The design-dependent FRU content (manufacturer, part numbers, EEPROM
+    geometry) comes from the named --backplane; only per-crate data (slot
+    mapping and serial numbers) is given here. Each written image is read
+    back and verified before the board reports success.
+
+    With a repeated "--slot SERIAL=N" mapping, every mapped board is
+    programmed in a single run (one crate power-cycle), each receiving the
+    shared fields plus its own slot.
+    """
+    mapping = parse_slot_map(slots, ctx.obj["serials"])
+    reconcile_slot_serials(ctx.obj, mapping)
+
+    design = BACKPLANES[backplane]
+    eeprom_size = design["eeprom"]["size"]
+    mfg_date_time = int(
+        (datetime.datetime.now(datetime.timezone.utc) - FRU_EPOCH)
+        .total_seconds() // 60)
+
+    def build_image(slot):
+        data = {
+            "common": {"format_version": 1, "size": eeprom_size},
+            "chassis": dict(design["chassis"],
+                            serial_number=chassis_serial_number,
+                            custom_fields=[f"slot={slot}"]),
+            "board": dict(design["board"],
+                          serial_number=board_serial_number,
+                          mfg_date_time=mfg_date_time),
+        }
+        try:
+            return fru.dump(data)
+        except ValueError as e:
+            raise click.ClickException(f"cannot encode FRU image: {e}")
+
+    alen = 1 if eeprom_size <= 256 else 2
+    with tempfile.TemporaryDirectory(prefix="backplane-fru-") as tmpdir:
+        images = {}
+        for serial, slot in sorted(mapping.items()):
+            blob = build_image(slot)
+            path = os.path.join(tmpdir, f"{serial}.bin")
+            with open(path, "wb") as fh:
+                fh.write(blob)
+            images[serial] = (path, hashlib.md5(blob).hexdigest(), slot)
+            log.info("Backplane EEPROM write: %s -> slot %d (md5 %s)",
+                     serial, slot, images[serial][1])
+        # The backplane hangs off the CRS board's I2C0 - board wiring, not a
+        # design parameter.
+        run(ctx.obj, functools.partial(write_backplane_eeprom, images=images,
+                                       size=eeprom_size, bus=0,
+                                       chip=design["eeprom"]["address"],
+                                       alen=alen))
+
+
+@cli.command(name="read-backplane-eeprom")
+@backplane_option
+@click.option("--slot", "slots", multiple=True, metavar="[SERIAL=]N",
+              help="Expected slot number: the board fails unless its EEPROM "
+                   "agrees. Give a bare N with a single --serial, or repeat "
+                   "SERIAL=N to verify a whole crate in one run.")
+@click.pass_context
+def read_backplane_eeprom_cmd(ctx, backplane, slots):
+    """Read and decode the backplane EEPROM's IPMI FRU descriptor.
+
+    Reports the decoded FRU areas, including the crate slot number carried
+    in the "slot=N" chassis-area custom field. With --slot, also verifies
+    the stored slot number(s) against the expected value(s) - the readback
+    counterpart to a whole-crate write-backplane-eeprom run.
+    """
+    expected = {}
+    if slots:
+        expected = parse_slot_map(slots, ctx.obj["serials"])
+        reconcile_slot_serials(ctx.obj, expected)
+    design = BACKPLANES[backplane]
+    eeprom_size = design["eeprom"]["size"]
+    alen = 1 if eeprom_size <= 256 else 2
+    run(ctx.obj, functools.partial(read_backplane_eeprom, size=eeprom_size,
+                                   bus=0, chip=design["eeprom"]["address"],
+                                   alen=alen, expected=expected))
 
 
 def run(opts, action):

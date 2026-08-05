@@ -8,6 +8,10 @@ Unified API for CRS packet streaming, including:
 - Protocol constants
 """
 
+# Aliased: `from .socket import ...` below rebinds the name `socket` in this
+# namespace to the rfmux submodule, shadowing the stdlib one.
+import socket as _socket
+
 # Import C++ packet receiver and structures, and ensure version parity
 _PY_API_VERSION = 1  # must match _SO_API_VERSION in bindings.cpp
 try:
@@ -101,6 +105,66 @@ def ts_to_seconds(ts):
 		return None
 	return ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / SS_PER_SECOND
 
+
+def find_streamer_conflict(host: str = "127.0.0.1", *,
+                           port: int | None = None,
+                           timeout: float = 0.05) -> str | None:
+	"""Describe whatever is already using the streamer port, or None if free.
+
+	For callers about to stand up a *second* source of packets — chiefly
+	``create_mock_crs()`` in a demo — where doing so silently corrupts the
+	data. Mock streamers send to a fixed port, so two simulations reach one
+	receiver interleaved: no exception, no dropped connection, just samples
+	from two unrelated detectors in one trace.
+
+	Two probes, because neither sees everything:
+
+	1. A PLAIN bind, no socket options, which fails if anyone is RECEIVING.
+	   The streamer's readers set ``SO_REUSEPORT``, so a probe that also set
+	   it would bind happily alongside them and report the port free — which
+	   is exactly the condition being looked for. Costs microseconds and
+	   consumes nothing.
+	2. A short read, which sees anyone SENDING even with no receiver
+	   attached — a mock server outliving the kernel that made it, say. This
+	   one does consume a datagram; at the default 596 Hz that is one packet
+	   in six hundred.
+
+	``timeout`` bounds only the second probe. Packets arrive every ~1.9 ms at
+	the slowest decimation, so the 50 ms default has ~26x of margin.
+
+	Checks the slow readout port, which every stream uses; pass ``port`` for
+	the PFB one, which is only busy when PFB streaming is switched on.
+
+	This is advice about the machine, not proof: a real board multicasting to
+	this host trips probe 2 as well. That is still the right answer for the
+	question being asked, since adding a simulation alongside real data
+	interleaves it just the same — but say "something is streaming", not
+	"Periscope is running".
+	"""
+	if port is None:
+		port = STREAMER_PORT
+
+	probe = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+	try:
+		probe.bind(("", port))
+	except OSError as exc:
+		return (f"another process is already receiving on port {port} "
+		        f"({exc.strerror or exc})")
+	finally:
+		probe.close()
+
+	try:
+		with get_multicast_socket(host, port=port) as sock:
+			sock.settimeout(timeout)
+			try:
+				sock.recv(65535)
+			except (_socket.timeout, TimeoutError):
+				return None
+			return f"packets are already arriving on port {port}"
+	except OSError as exc:
+		return f"port {port} could not be probed ({exc.strerror or exc})"
+
+
 # Backwards compatibility aliases
 DfmuxPacket = ReadoutPacket
 STREAMER_MAGIC = READOUT_PACKET_MAGIC
@@ -129,6 +193,7 @@ __all__ = [
 	'get_multicast_socket',
 	'get_local_ip',
 	'ip_mreq_source',
+	'find_streamer_conflict',
 
 	# Timestamp helpers
 	'ts_to_seconds',

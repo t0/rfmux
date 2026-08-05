@@ -40,6 +40,7 @@ from rfmux.algorithms.measurement.streamer_config import (
     slow_sample_rate,
     validate,
 )
+from rfmux.streamer import find_streamer_conflict
 
 # ── What to capture ───────────────────────────────────────────────
 MODULE = 1
@@ -75,6 +76,18 @@ MOCK_CONFIG = {
 async def connect(serial: str):
     """Return (crs, host, is_mock) for a serial or "MOCK"."""
     if serial.upper() == "MOCK":
+        # Refuse to be the second simulation on the port. Mock streamers all
+        # send to 127.0.0.1:9876, so a reader gets both interleaved and every
+        # pulse count below is quietly wrong. Cheap to check, and the
+        # alternative is noticing it in the numbers days later.
+        conflict = find_streamer_conflict()
+        if conflict:
+            raise RuntimeError(
+                f"refusing to start a simulation — {conflict}. "
+                "Stop whatever is streaming (a Periscope in mock mode, "
+                "another run of this script, a mock server left behind by a "
+                "crashed process) and try again.")
+
         from rfmux.mock.helpers import create_mock_crs
         crs = await create_mock_crs(module=MODULE, config=MOCK_CONFIG,
                                     verbose=False)

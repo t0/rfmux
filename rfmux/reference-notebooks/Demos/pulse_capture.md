@@ -205,10 +205,12 @@ failure mode is why the rolling median and edge gate exist, and it is exactly
 the kind of thing that stays invisible in simulation and then bites on
 hardware.
 
-> ⚠️ **Only run this if nothing else is already streaming.** If Periscope is in
-> mock mode, attach to its simulation with option 1A instead — creating a second
-> one here would put two unrelated simulations on the same UDP port, and a
-> receiver would get them interleaved with no error to tell you so.
+> ⚠️ **This cell refuses to run if something is already streaming.** Two
+> simulations send to the same UDP port, so a receiver gets both interleaved —
+> no exception, no dropped packets, just samples from two unrelated detectors in
+> one trace. Rather than leave that to be noticed later, the cell checks and
+> stops, and the message says which case you are in. If Periscope is in mock
+> mode, attach to *its* simulation with option 1A instead.
 
 ```python
 MOCK_CONFIG = {
@@ -239,6 +241,24 @@ MOCK_CONFIG = {
 if crs is not None:
     print("already connected — skip this cell")
 else:
+    from rfmux.streamer import find_streamer_conflict
+
+    if os.environ.get("RFMUX_CRS_HOSTNAME"):
+        raise RuntimeError(
+            "Periscope launched this notebook and is already driving a CRS.\n"
+            "Run option 1A above to attach to that one. Creating a second "
+            "simulation here would stream to the same UDP port as Periscope's, "
+            "and every reader would see the two interleaved.")
+
+    conflict = find_streamer_conflict()
+    if conflict:
+        raise RuntimeError(
+            f"Something is already using the streamer port — {conflict}.\n"
+            "A second simulation would send to that same port, and a reader "
+            "would get both streams interleaved with nothing to say so.\n"
+            "Attach to what is running with option 1A, or stop it, then re-run "
+            "this cell.")
+
     from rfmux.mock.helpers import create_mock_crs
     crs = await create_mock_crs(module=MODULE, config=MOCK_CONFIG,
                                 verbose=False)

@@ -106,7 +106,8 @@ async def main(serial="MOCK"):
     print(f"Serial: {serial}")
     print(f"Started at: {datetime.now()}")
     print("="*60)
-    
+
+    crs = None
     try:
         # Step 1: Initialize CRS connection
         print("\n1. Initializing CRS...")
@@ -162,7 +163,19 @@ async def main(serial="MOCK"):
         import traceback
         traceback.print_exc()
         return 1
-    
+    finally:
+        # Stop the simulation this script started. Irrelevant when it is run
+        # as a script — the process exits and takes the streamer with it —
+        # but main() is also awaited in-process by the test suite, and a mock
+        # left streaming to 127.0.0.1:9876 then interleaves with whatever
+        # simulation the next test creates. Both send valid packets to the
+        # same port, so the reader mixes two detectors with nothing raised.
+        if is_mock and crs is not None:
+            try:
+                await crs.stop_udp_streaming()
+            except Exception:
+                pass
+
     return 0
 
 

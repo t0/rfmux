@@ -94,7 +94,7 @@ class PulseHDF5Writer:
             "sample_rate_slow", "sample_rate_fast",
         )
         _int_keys = ("min_pulse_samples", "module")
-        _bool_keys = ("enable_pileup",)
+        _bool_keys = ("enable_pileup", "save_to_end_confirmed")
 
         for k in _str_keys:
             if k in capture_params:
@@ -298,9 +298,9 @@ class DualPulseHDF5Writer:
                 meta.attrs[k] = float(capture_params[k])
         if "module" in capture_params:
             meta.attrs["module"] = int(capture_params["module"])
-        if "enable_pileup" in capture_params:
-            meta.attrs["enable_pileup"] = bool(
-                capture_params["enable_pileup"])
+        for k in ("enable_pileup", "save_to_end_confirmed"):
+            if k in capture_params:
+                meta.attrs[k] = bool(capture_params[k])
         meta.attrs["channels"] = channels
 
         for stream in self.STREAMS:

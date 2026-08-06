@@ -158,10 +158,16 @@ class PulseCapture:
     a configurable time duration, or unconditionally at
     ``max_capture_samples``.  A mean estimate lagging 1/f can therefore
     delay nothing: the pulse ends when the signal is back where it
-    started.  The hard stop bounds the STATE MACHINE only: the saved
-    window ends at the below-threshold instant plus a
-    ``margin_fraction`` tail, which is where the eye puts the end of
-    the pulse, not where the confirmation finished.
+    started.
+
+    How much of that is SAVED is ``save_to_end_confirmed``.  On (the
+    default) keeps every sample the state machine saw.  Off ends the
+    window at the below-threshold instant plus a ``margin_fraction``
+    tail — where the eye puts the end of the pulse, rather than where
+    the confirmation finished — which keeps window length a property
+    of the pulse instead of the baseline, at the cost of the tail.
+    Either way ``duration_ms`` is measured from the threshold
+    crossings, so it does not move with this setting.
 
     Parameters
     ----------
@@ -260,6 +266,7 @@ class PulseCapture:
         min_pulse_samples: int = 0,
         trigger_samples: int = 2,
         enable_pileup: bool = True,
+        save_to_end_confirmed: bool = True,
         on_pulse: Optional[Callable[[int, int, dict], None]] = None,
         baseline_window: int = 0,
         edge_lookback: Optional[int] = None,
@@ -274,6 +281,7 @@ class PulseCapture:
         self.min_pulse_samples = min_pulse_samples
         self.trigger_samples = max(1, int(trigger_samples))
         self.enable_pileup = enable_pileup
+        self.save_to_end_confirmed = save_to_end_confirmed
 
         if edge_lookback is None:
             edge_lookback = self.default_edge_lookback(buf_size,
@@ -715,6 +723,24 @@ class PulseCapture:
             # ends near where the signal settled, not where the bucket
             # finished counting.
             post = raw_post - max(0, st.end_ptr_count - 5)
+        elif self.save_to_end_confirmed:
+            # Keep everything the state machine saw, confirmation tail
+            # included.  Those samples are already in the ring, so this
+            # trades disk for a decay tail that is otherwise discarded
+            # at the below-threshold instant plus a small margin.
+            #
+            # It does make the window length depend on how long the
+            # leaky bucket took, which is a baseline property rather
+            # than a pulse property.  That is why duration is measured
+            # from the threshold crossings (below_threshold_time -
+            # trigger_time) and not from the length of this window.
+            #
+            # +1 because the window end is exclusive and raw_post counts
+            # samples SINCE the trigger: without it the sample the end
+            # was confirmed on — the whole point of the policy — is the
+            # one sample left out.
+            post = raw_post + 1
+            truncated = False
         else:
             # The pulse visibly ended at below-threshold (core samples
             # after the trigger).  Save margin_fraction of it as tail
@@ -762,8 +788,9 @@ class PulseCapture:
         # Where the state machine actually acted, so a capture can be
         # read back against the decisions that produced it.
         #
-        # The end index is normally PAST the last saved sample: the
-        # window ends at below-threshold plus the tail margin, while
+        # Under save_to_end_confirmed the end index is the last saved
+        # sample.  Without it the index is normally PAST the window:
+        # the data stops at below-threshold plus the tail margin while
         # the state machine keeps running until the leaky bucket (or
         # the hard stop) releases it.  Times are carried alongside the
         # indices for exactly that reason.

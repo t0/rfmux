@@ -106,6 +106,25 @@ class PulseCaptureConfig:
     #: derives it from the pulse length — see noise_train_span_ms().
     noise_train_ms: float = 0.0
     enable_pileup: bool = True
+    #: Keep samples all the way to the end-of-pulse CONFIRMATION rather
+    #: than stopping a ``margin_fraction`` tail past the below-threshold
+    #: instant.  The extra samples are already in the ring, so this
+    #: costs disk, not acquisition.
+    #:
+    #: Off gives windows whose length tracks the pulse; on gives windows
+    #: whose length also tracks how long the leaky bucket took to be
+    #: satisfied, which depends on where the baseline was wandering.
+    #: Measured on the mock at 19 kHz, tau=1 ms, 238 pulses: the pulse
+    #: core spans 3.04-4.04 ms (1.3x), while end-confirmed windows span
+    #: 3.2-17.8 ms (5.6x) for the same injected pulse.
+    #:
+    #: Default on, because that variability is a property of the saved
+    #: TAIL and no longer leaks into ``duration_ms`` (measured from the
+    #: threshold crossings since this option existed).  Turn it off when
+    #: the tail costs more than it is worth: PFB captures, where windows
+    #: already carry 64x the samples, or high count rates, where longer
+    #: windows overlap and raise the pileup fraction.
+    save_to_end_confirmed: bool = True
 
     #: buffer headroom over max_pulse_ms (pre-trigger margin +
     #: end-confirmation tail both live in the same ring)
@@ -241,6 +260,7 @@ class PulseCaptureConfig:
             "min_pulse_samples": self.min_pulse_samples(sample_rate),
             "trigger_samples": self.trigger_samples_for(sample_rate),
             "enable_pileup": self.enable_pileup,
+            "save_to_end_confirmed": self.save_to_end_confirmed,
             "buf_size": self.buf_size(sample_rate),
             "noise_samples": self.noise_samples(sample_rate),
             "baseline_window": self.baseline_window_samples(sample_rate),
@@ -412,6 +432,7 @@ class PulseCaptureSession:
         min_pulse_samples: int = 0,
         trigger_samples: int = 2,
         enable_pileup: bool = True,
+        save_to_end_confirmed: bool = True,
         buf_size: int = 5000,
         sample_rate: Optional[float] = None,
         noise_samples: int = 1000,
@@ -440,6 +461,7 @@ class PulseCaptureSession:
         self.min_pulse_samples = min_pulse_samples
         self.trigger_samples = max(1, int(trigger_samples))
         self.enable_pileup = enable_pileup
+        self.save_to_end_confirmed = save_to_end_confirmed
         self.buf_size = buf_size
         self.sample_rate = sample_rate
         self.noise_samples = int(noise_samples)
@@ -667,6 +689,7 @@ class PulseCaptureSession:
             min_pulse_samples=self.min_pulse_samples,
             trigger_samples=self.trigger_samples,
             enable_pileup=self.enable_pileup,
+            save_to_end_confirmed=self.save_to_end_confirmed,
             baseline_window=self.baseline_window,
             edge_lookback=self.edge_lookback,
             max_capture_samples=self.max_capture_samples,
@@ -685,6 +708,7 @@ class PulseCaptureSession:
                 "min_pulse_samples": self.min_pulse_samples,
                 "trigger_samples": self.trigger_samples,
                 "enable_pileup": self.enable_pileup,
+                "save_to_end_confirmed": self.save_to_end_confirmed,
                 "module": self.module,
                 "baseline_window": self.baseline_window,
                 "edge_lookback": self.edge_lookback,

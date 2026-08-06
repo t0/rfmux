@@ -52,15 +52,30 @@ def capture_window_anatomy(path):
     end = t[back[0]] if len(back) else t[-1]
 
     margin = 0.1 * (end - trig)
+    # The bucket needs a stretch of samples inside the band before it calls
+    # the pulse over.  Drawn generously here; in a capture it is
+    # max(10 samples, margin_fraction x core).
+    confirmed = end + 0.45 * (end - trig)
+
+    # Default policy keeps everything to the confirmation.  The lighter
+    # band is the stretch save_to_end_confirmed=False would drop.
     ax.axvspan(trig - margin, end + margin, color="#3366CC", alpha=0.10,
+               zorder=0)
+    ax.axvspan(end + margin, confirmed, color="#3366CC", alpha=0.045,
                zorder=0)
     ax.axvline(trig, color="#CC6633", lw=1.6, zorder=4)
     ax.axvline(end, color="#33884D", lw=1.6, ls=":", zorder=4)
+    ax.axvline(confirmed, color="#33884D", lw=1.2, ls="--", zorder=4)
 
     # Labels are kept sparse on purpose: margin_fraction is 10% of an 18 ms
     # window here, far too small to annotate legibly, so the prose covers it.
     ax.text((trig + end) / 2, -3.4, "saved window", ha="center",
             fontsize=9, color="#3366CC", weight="bold")
+    ax.annotate("end confirmed — saved by default,\n"
+                "dropped by save_to_end_confirmed=False",
+                xy=(confirmed, -2.2), xytext=(confirmed + 2.5, -3.4),
+                fontsize=7.5, color="#33884D", va="center",
+                arrowprops=dict(arrowstyle="->", color="#33884D", lw=1))
 
     ax.annotate("trigger", xy=(trig, THRESH), xytext=(trig + 7, 9.2),
                 fontsize=9, color="#CC6633",

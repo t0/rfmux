@@ -252,6 +252,8 @@ class DualPulseCaptureSession:
                             "end_sigma": self.config.end_sigma,
                             "margin_fraction": self.config.margin_fraction,
                             "enable_pileup": self.config.enable_pileup,
+                            "save_to_end_confirmed":
+                                self.config.save_to_end_confirmed,
                             "module": module,
                             "sample_rate_slow": slow_rate,
                             "sample_rate_fast": fast_rate,

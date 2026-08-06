@@ -141,9 +141,11 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.margin_spin.setSingleStep(0.05)
         self.margin_spin.setValue(config.margin_fraction)
         self.margin_spin.setToolTip(
-            "Fraction of the pulse length kept before the trigger and "
-            "after the pulse drops below threshold (the saved tail), "
-            "and the adaptive end-confirmation count")
+            "Fraction of the pulse length kept before the trigger, and "
+            "the adaptive end-confirmation count.\n"
+            "Also sets the saved tail after the pulse drops below "
+            "threshold — but only when 'Save the full tail' is off, "
+            "which is what that tail is a substitute for.")
         adv.addRow("Margin fraction:", self.margin_spin)
 
         self.min_pulse_spin = QtWidgets.QDoubleSpinBox()
@@ -163,6 +165,24 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "edge detector as the trigger.")
         self.pileup_check.setChecked(config.enable_pileup)
         adv.addRow(self.pileup_check)
+
+        self.end_confirmed_check = QtWidgets.QCheckBox(
+            "Save the full tail (to end-of-pulse confirmation)")
+        self.end_confirmed_check.setToolTip(
+            "On: keep every sample the detector saw, so the decay runs "
+            "to where the end condition was confirmed.  Off: stop a "
+            "margin past the point the pulse fell below threshold, "
+            "which keeps window length a property of the pulse rather "
+            "than of the baseline.\n\n"
+            "The samples are already buffered either way, so this costs "
+            "disk, not acquisition.  Turn it off for PFB captures "
+            "(windows already carry ~64x the samples) or at high count "
+            "rates (longer windows overlap and raise the pileup "
+            "fraction).\n\n"
+            "Reported pulse duration is measured from the threshold "
+            "crossings and does not change with this setting.")
+        self.end_confirmed_check.setChecked(config.save_to_end_confirmed)
+        adv.addRow(self.end_confirmed_check)
 
         # What each primary knob drives, at the actual stream rate —
         # the derivations live in PulseCaptureConfig, this only renders
@@ -198,7 +218,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
                   self.min_pulse_spin, self.max_pulse_spin,
                   self.trigger_spin):
             w.valueChanged.connect(self._update_dependent_values)
-        for c in (self.pileup_check,):
+        for c in (self.pileup_check, self.end_confirmed_check):
             c.toggled.connect(self._update_dependent_values)
         adv_box.setChecked(False)
         adv_box.toggled.emit(False)
@@ -214,6 +234,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             min_pulse_ms=float(self.min_pulse_spin.value()),
             max_pulse_ms=float(self.max_pulse_spin.value()),
             enable_pileup=self.pileup_check.isChecked(),
+            save_to_end_confirmed=self.end_confirmed_check.isChecked(),
         )
 
     def _update_dependent_values(self):

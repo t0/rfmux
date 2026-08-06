@@ -1496,14 +1496,15 @@ class TestHardStop:
 
     def test_stalled_confirmation_is_not_flagged_truncated(self):
         """A hard stop reached because the end confirmation stalled —
-        the pulse itself long over — saved a COMPLETE pulse: the window
-        ends at below-threshold + tail and the truncated flag stays
-        off.  Truncated is reserved for pulses still above threshold
-        when the stop fired."""
+        the pulse itself long over — saved a COMPLETE pulse: with
+        save_to_end_confirmed off the window ends at below-threshold +
+        tail and the truncated flag stays off.  Truncated is reserved
+        for pulses still above threshold when the stop fired."""
         ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
                                    mean_Q=0.0, std_Q=1.0)}
         pcap = _collecting_capture(buf_size=2000, channels=[1], noise_stats=ns,
-                            threshold_sigma=5.0, end_sigma=1.5)
+                            threshold_sigma=5.0, end_sigma=1.5,
+                            save_to_end_confirmed=False)
         rng = np.random.default_rng(5)
         # Pulse decays to a 3σ plateau: below threshold (so the pulse
         # "ends"), but never inside the 1.5σ end band — the bucket can
@@ -1522,6 +1523,33 @@ class TestHardStop:
         assert (len(d["Amp_I"]) - 1) - below <= \
             max(10, int(0.1 * (below - d["trigger_index"]))) + 2, \
             "the stalled confirmation stretch must not be saved"
+
+    def test_stalled_confirmation_is_kept_when_saving_to_confirmed(self):
+        """Same stall, default save policy: the stretch IS saved, and
+        the pulse is still not truncated.  This is the case the option
+        exists for — the samples are in the ring either way, and which
+        of them reach disk is a policy choice, not a detection one."""
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=2000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.5)
+        rng = np.random.default_rng(5)
+        for k in range(3000):
+            v = rng.normal(0, 1.0)
+            if k >= 200:
+                v += max(3.0, 60.0 * np.exp(-(k - 200) / 40.0))
+            pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
+                                k * 1e-3)
+        assert pcap.pulse_count["Channel 1"] == 1
+        d = pcap.pulses["Channel 1"][1]
+        assert d["truncated"] is False, \
+            "the save policy must not change what counts as truncated"
+        below = d["below_threshold_index"]
+        tail = (len(d["Amp_I"]) - 1) - below
+        assert tail > max(10, int(0.1 * (below - d["trigger_index"]))) + 2, \
+            "the confirmation stretch should be saved under this policy"
+        # The window now runs to where the state machine stopped.
+        assert d["end_index"] == len(d["Amp_I"]) - 1
 
     @requires_h5py
     def test_truncated_flag_survives_hdf5(self, tmp_path):
@@ -1672,12 +1700,14 @@ class TestDecisionMarks:
     produced it, not just its samples."""
 
     def _run(self, trigger_samples=2, start=800, tau=40.0, amp=60.0,
-             n=3000, seed=3):
+             n=3000, seed=3, save_to_end_confirmed=True):
         ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
                                    mean_Q=0.0, std_Q=1.0)}
         pcap = _collecting_capture(
             buf_size=4000, channels=[1], noise_stats=ns,
-            threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1, trigger_samples=trigger_samples)
+            threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1,
+            trigger_samples=trigger_samples,
+            save_to_end_confirmed=save_to_end_confirmed)
         rng = np.random.default_rng(seed)
         for k in range(n):
             v = rng.normal(0, 1.0)
@@ -1698,11 +1728,12 @@ class TestDecisionMarks:
         assert abs(d["Amp_I"][d["trigger_index"]]) > 20
 
     def test_window_ends_at_below_threshold_plus_tail(self):
-        """The saved window ends where the eye puts the end of the
-        pulse — the below-threshold instant plus a margin_fraction
-        tail.  The leaky bucket only bounds the state machine, so the
-        end-confirmed mark sits well past the last saved sample."""
-        d = self._run()
+        """With save_to_end_confirmed off, the saved window ends where
+        the eye puts the end of the pulse — the below-threshold instant
+        plus a margin_fraction tail.  The leaky bucket only bounds the
+        state machine, so the end-confirmed mark sits well past the
+        last saved sample."""
+        d = self._run(save_to_end_confirmed=False)
         n = len(d["Amp_I"])
         below = d["below_threshold_index"]
         core = below - d["trigger_index"]
@@ -1712,6 +1743,40 @@ class TestDecisionMarks:
             f"tail {tail} vs margin-derived {expected}"
         assert d["end_index"] > n - 1
         assert d["end_time"] > d["Time"][-1]
+
+    def test_window_runs_to_confirmation_by_default(self):
+        """Default policy: the window ends exactly where the state
+        machine did, so the end mark is the last sample rather than a
+        pointer past the data."""
+        d = self._run()
+        n = len(d["Amp_I"])
+        assert d["end_index"] == n - 1
+        assert d["end_time"] == pytest.approx(d["Time"][-1])
+        assert d["below_threshold_index"] < n - 1, \
+            "below-threshold must sit inside the window, not at its edge"
+
+    def test_saved_tail_is_longer_when_saving_to_confirmation(self):
+        """The two policies differ only in how much tail reaches disk —
+        same trigger, same below-threshold instant."""
+        on = self._run()
+        off = self._run(save_to_end_confirmed=False)
+        assert on["trigger_time"] == pytest.approx(off["trigger_time"])
+        assert on["below_threshold_time"] == pytest.approx(
+            off["below_threshold_time"])
+        assert len(on["Amp_I"]) > len(off["Amp_I"])
+
+    def test_duration_does_not_move_with_the_save_policy(self):
+        """The reason the policy can default to on: duration measures
+        the threshold crossings, so it describes the pulse and not how
+        long the leaky bucket took to be satisfied."""
+        ns = ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                               mean_Q=0.0, std_Q=1.0)
+        on = pulse_summary(self._run(), ns, threshold_sigma=5.0)
+        off = pulse_summary(self._run(save_to_end_confirmed=False), ns,
+                            threshold_sigma=5.0)
+        assert on["n_samples"] > off["n_samples"], \
+            "the windows must actually differ, or this proves nothing"
+        assert on["duration_ms"] == pytest.approx(off["duration_ms"])
 
     def test_bucket_count_reaches_its_target(self):
         d = self._run()

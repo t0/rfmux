@@ -166,17 +166,39 @@ def pulse_summary(
         ``peak_amp``, ``snr``, ``duration_s``, ``duration_ms``,
         ``timestamp`` (first valid time), ``tau_s``, ``tau_ms`` (NaN when
         not derivable).
+
+        ``duration`` is the time the pulse spent above threshold
+        (trigger → below-threshold), not the length of the saved
+        window, which also carries the pre-trigger margin and a tail
+        whose length depends on the save policy.  It falls back to the
+        window span only for pileup splits and hard stops, which have
+        no below-threshold instant to measure to.
     """
     peaks = pulse_peaks(pulse_data, noise_stats)
 
     times = np.asarray(pulse_data["Time"], dtype=np.float64)
     valid_times = times[np.isfinite(times)]
-    if len(valid_times) > 1:
+    timestamp = float(np.min(valid_times)) if len(valid_times) else 0.0
+
+    # Duration is trigger → below-threshold, NOT the length of the saved
+    # window.  The window also holds the pre-trigger margin and whatever
+    # tail the save policy kept, and under save_to_end_confirmed that
+    # tail runs until the leaky bucket is satisfied — a baseline
+    # property.  Measured on the mock at 19 kHz with tau=1 ms, identical
+    # injected pulses gave windows spanning 3.2-17.8 ms while the
+    # threshold crossings stayed inside 3.0-4.0 ms.  Deriving duration
+    # from the window would put that 5.6x spread into every histogram.
+    trigger_time = pulse_data.get("trigger_time")
+    below_time = pulse_data.get("below_threshold_time")
+    if trigger_time is not None and below_time is not None:
+        duration_s = float(below_time) - float(trigger_time)
+    elif len(valid_times) > 1:
+        # Pileup splits and hard stops have no below-threshold instant:
+        # the pulse never demonstrably ended, so the window is the only
+        # evidence of how long it lasted.
         duration_s = float(np.max(valid_times) - np.min(valid_times))
-        timestamp = float(np.min(valid_times))
     else:
         duration_s = 0.0
-        timestamp = 0.0
 
     if threshold_sigma is not None:
         tau_s = derive_tau(pulse_data, noise_stats, threshold_sigma)

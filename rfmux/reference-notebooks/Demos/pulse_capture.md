@@ -372,10 +372,28 @@ How the detector works:
 
 ![Anatomy of one capture window](pulse_capture_anatomy.png)
 
-The shaded region is what gets saved. It extends `margin_fraction` of the window
-past the trigger on each side — 10% by default, too small to draw legibly here —
-so the record keeps some pre-trigger baseline to measure against rather than
-starting exactly at the crossing.
+The shaded region is what gets saved. It opens `margin_fraction` of the window
+before the trigger — 10% by default, too small to draw legibly here — so the
+record keeps some pre-trigger baseline to measure against rather than starting
+exactly at the crossing.
+
+Where it *closes* is `save_to_end_confirmed`, on by default: the window runs to
+the end-of-pulse confirmation, keeping the whole decay tail. Those samples are
+already in the ring, so this costs disk rather than acquisition. Turn it off and
+the window stops a `margin_fraction` tail past the below-threshold instant
+instead — shorter files, and window length becomes a property of the pulse rather
+than of the baseline, since how long the end confirmation takes depends on where
+the baseline was wandering. Measured on the mock at 19 kHz with a 1 ms decay,
+identical injected pulses gave a median window of 5.56 ms with the tail and
+3.93 ms without.
+
+Worth turning off for PFB captures, where windows already carry ~64× the samples,
+and at high count rates, where longer windows overlap and more events get flagged
+as pileup.
+
+Note what does *not* change: `duration_ms` is measured from the threshold
+crossings, not from the length of the saved window, so it reports the pulse
+either way — 3.09 ms in both runs above.
 
 `describe()` reports everything derived at a given rate, and `validate()` catches
 inconsistent settings before you spend a capture on them.

@@ -752,6 +752,47 @@ class TestHDF5DerivedAttrs:
             meta = reader.get_pulse_metadata(1, 1)
             assert "tau_s" in meta and "snr" in meta and "peak_amp" in meta
 
+    def test_stored_scalars_are_the_summary(self, tmp_path):
+        """Every scalar in the file must be the one pulse_summary()
+        produced, because that is what the histograms, the live
+        callbacks and the GUI all use.
+
+        Regression: the writer computed duration_s as the span of the
+        saved window while the duration_ms histogram beside it in the
+        same file measured trigger → below-threshold, so one pulse read
+        back as 4.72 ms or 3.09 ms depending on which you asked.  The
+        round-trip test above missed it because its pulse carries no
+        trigger marks, which is precisely the case where the two
+        definitions agree.
+        """
+        ns = {1: ChannelNoiseStats(std_I=1.0, std_Q=1.0)}
+        pulse = _make_decay_pulse(tau_s=1.5e-3, amp_sigma=40.0)
+
+        # Crossings well inside the window, as save_to_end_confirmed
+        # leaves them: the tail runs on past the pulse.
+        t = pulse["Time"]
+        pulse["trigger_time"] = float(t[10])
+        pulse["below_threshold_time"] = float(t[150])
+
+        expected = pulse_summary(pulse, ns[1], 5.0)
+        assert expected["duration_s"] < float(t[-1] - t[0]), \
+            "window and pulse durations must differ, or this proves nothing"
+
+        writer = PulseHDF5Writer(
+            tmp_path / "cap.h5", [1], ns,
+            {"streamer_mode": "slow", "threshold_sigma": 5.0})
+        writer.append_pulse(1, 1, pulse)
+        writer.finalize()
+
+        with PulseHDF5Reader(tmp_path / "cap.h5") as reader:
+            loaded = reader.get_pulse(1, 1)
+            meta = reader.get_pulse_metadata(1, 1)
+            for key in ("peak_I", "peak_Q", "peak_amp", "snr",
+                        "duration_s", "timestamp", "tau_s"):
+                assert loaded[key] == pytest.approx(expected[key], rel=1e-9), \
+                    f"stored {key} is not what pulse_summary computed"
+                assert meta[key] == pytest.approx(expected[key], rel=1e-9)
+
 
 # ───────────────────────── Phase A: PulseCaptureSession ─────────────
 

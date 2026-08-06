@@ -512,7 +512,10 @@ class PulseHDF5Reader:
         Returns a dict with keys: ``Amp_I``, ``Amp_Q``, ``Time``,
         ``pileup``, ``peak_I``, ``peak_Q``, ``peak_snr_I``,
         ``peak_snr_Q``, ``n_samples``, ``duration_s``, ``timestamp``.
-        Returns ``None`` if the pulse doesn't exist.
+        Scalars are as :func:`pulse_summary` computed them at capture
+        time, so ``duration_s`` is the time above threshold rather than
+        the span of the saved window.  Returns ``None`` if the pulse
+        doesn't exist.
         """
         if self.f is None:
             return None
@@ -676,34 +679,30 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
         if key in pulse_data:
             pulse_grp.attrs[key] = float(pulse_data[key])
 
+    # Every scalar below comes from pulse_summary(), the same call the
+    # histograms, the live on_pulse callback and the GUI derive from.
+    # Computing any of them a second time here is how a capture file
+    # ends up disagreeing with itself: duration_s was the span of the
+    # saved window while the duration_ms histogram beside it measured
+    # trigger -> below-threshold, so one pulse read back as 4.72 ms or
+    # 3.09 ms depending on which you asked.  Under save_to_end_confirmed
+    # the window also carries however long the leaky bucket took to be
+    # satisfied, which is a property of the baseline, not the event.
+    summary = pulse_summary(pulse_data, noise_stats, threshold_sigma)
+    for key in ("peak_I", "peak_Q", "peak_amp", "snr", "duration_s",
+                "timestamp", "tau_s"):
+        pulse_grp.attrs[key] = float(summary[key])
+
+    # Per-quadrature SNRs have no summary equivalent - they are for
+    # reviewing a pulse, not for binning it.
     if noise_stats is not None:
-        peak_I = float(np.max(np.abs(amp_I - noise_stats.mean_I)))
-        peak_Q = float(np.max(np.abs(amp_Q - noise_stats.mean_Q)))
-        pulse_grp.attrs["peak_I"] = peak_I
-        pulse_grp.attrs["peak_Q"] = peak_Q
-        pulse_grp.attrs["peak_snr_I"] = peak_I / max(noise_stats.std_I,
-                                                     1e-30)
-        pulse_grp.attrs["peak_snr_Q"] = peak_Q / max(noise_stats.std_Q,
-                                                     1e-30)
+        pulse_grp.attrs["peak_snr_I"] = summary["peak_I"] / max(
+            noise_stats.std_I, 1e-30)
+        pulse_grp.attrs["peak_snr_Q"] = summary["peak_Q"] / max(
+            noise_stats.std_Q, 1e-30)
     else:
-        pulse_grp.attrs["peak_I"] = float(np.max(np.abs(amp_I)))
-        pulse_grp.attrs["peak_Q"] = float(np.max(np.abs(amp_Q)))
         pulse_grp.attrs["peak_snr_I"] = 0.0
         pulse_grp.attrs["peak_snr_Q"] = 0.0
-
-    valid_times = time_arr[np.isfinite(time_arr)]
-    if len(valid_times) > 1:
-        pulse_grp.attrs["duration_s"] = float(
-            np.max(valid_times) - np.min(valid_times))
-        pulse_grp.attrs["timestamp"] = float(np.min(valid_times))
-    else:
-        pulse_grp.attrs["duration_s"] = 0.0
-        pulse_grp.attrs["timestamp"] = 0.0
-
-    summary = pulse_summary(pulse_data, noise_stats, threshold_sigma)
-    pulse_grp.attrs["peak_amp"] = summary["peak_amp"]
-    pulse_grp.attrs["snr"] = summary["snr"]
-    pulse_grp.attrs["tau_s"] = summary["tau_s"]
 
 
 def _pulse_dict_from_group(grp) -> dict:

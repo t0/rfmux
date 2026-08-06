@@ -99,7 +99,8 @@ class PulseHistogramSet:
     Maintains per-channel histograms for:
 
     - **amplitude**: Peak excursion from baseline (max of I and Q)
-    - **duration_ms**: Pulse window duration in milliseconds
+    - **duration_ms**: Time above threshold (trigger → below-threshold)
+      in milliseconds, not the length of the saved window
     - **snr**: Peak signal-to-noise ratio in σ units
     - **tau_ms**: Fit-free decay constant in ms (only binned when
       derivable — requires ``threshold_sigma``)

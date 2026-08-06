@@ -12,6 +12,8 @@ Subcommands:
   reflash-mmc IMAGE    write a WIC image (raw or gzipped) to MMC (whole card,
                        including /home)
   repl [COMMAND]       run one U-Boot command, or open an interactive console
+  mmc-schmoo           sweep the SD0 ITAP/OTAP delay lines and map which
+                       settings move data intact (read-only)
   write-backplane-eeprom
                        program the crate backplane EEPROM behind each board's
                        slot with an IPMI FRU descriptor (a "--slot SERIAL=N"
@@ -340,6 +342,247 @@ def repl(stream, child, serial, position, cmd=None):
 
 
 # ---------------------------------------------------------------------------
+# MMC interface shmoo
+#
+# The SD0 interface has two open-loop delay lines, programmed via IOU_SLCR
+# (outside the SDHCI register block): ITAP delays the receive sampling path
+# (card-to-host data and responses), OTAP shifts the transmit clock against
+# outgoing CMD/DAT. With no-1-8-v the bus tops out at 50 MHz high-speed,
+# where no tuning procedure ever runs, so these delays are fixed constants
+# applied blind. The shmoo sweeps both and maps which settings move data
+# intact for a given board, card, and clock configuration.
+#
+# U-Boot is the runtime deliberately: it lives in QSPI, so the card carries
+# no live filesystem, a wedged card costs a power cycle rather than a
+# deployment, and plain "mmc read" never touches the taps (only a re-init
+# does, which the sweep exploits for recovery).
+# ---------------------------------------------------------------------------
+
+SDIO0_REF_CTRL = 0xFF5E006C   # CRL_APB: ref clock DIVISOR0 in bits [13:8]
+SDHCI0_CLK_CTRL = 0xFF16002C  # SDHCI clock control (divider, for the record)
+SD_ITAPDLY = 0xFF180314       # SD0: sel [7:0], enable bit 8, chg-window bit 9
+SD_OTAPDLYSEL = 0xFF180318    # SD0: sel [5:0]
+SD_DLL_CTRL = 0xFF180358      # SD0: DLL reset bit 2
+
+SD0_ITAP_SEL = 0x0FF
+SD0_ITAP_ENA = 0x100
+SD0_ITAP_CHGWIN = 0x200
+SD0_OTAP_SEL = 0x3F
+SD0_DLL_RST = 0x04
+
+# One word of "md.l" output; won't match the echoed command (no colon there).
+# Both groups demand full fixed width: pexpect matches incrementally on the
+# byte stream, and a shorter group would happily match a half-arrived value.
+MD_WORD = re.compile(r"[0-9a-f]{8}: ([0-9a-f]{8})")
+CRC_OUT = re.compile(r"==> ([0-9a-f]{8})")
+
+
+def read_reg(child, addr):
+    """Read one 32-bit register through U-Boot's md.l."""
+    child.sendline(f"md.l {addr:#x} 1")
+    child.expect(MD_WORD)
+    value = int(child.match.group(1), 16)
+    child.expect(PROMPT)
+    return value
+
+
+def write_reg(child, serial, addr, value, mask=0xFFFFFFFF):
+    """Write a register and insist on readback of the bits named by "mask".
+
+    Writes to protected regions fail silently on this SoC; a sweep whose tap
+    writes didn't land would pass every point and report a perfect (and
+    meaningless) window. Verification is masked because these registers mix
+    in bits we don't own: SD_DLL_CTRL bit 0, for one, is DLL lock status and
+    reads back however it pleases.
+    """
+    child.sendline(f"mw.l {addr:#x} {value:#010x}")
+    child.expect(PROMPT)
+    readback = read_reg(child, addr)
+    if (readback ^ value) & mask:
+        log.error("[%s] register %#x readback %#010x after writing %#010x "
+                  "(mask %#010x)", serial, addr, readback, value, mask)
+        return False
+    return True
+
+
+def set_sd0_taps(child, serial, itap, otap, regs):
+    """Program the SD0 delay lines.
+
+    Follows the sequence the kernel and ATF use: DLL reset asserted across
+    the change, and the ITAP select written inside the change window. "regs"
+    holds pristine register values so SD1's fields in the shared registers
+    are preserved.
+    """
+    itap_bits = SD0_ITAP_SEL | SD0_ITAP_ENA | SD0_ITAP_CHGWIN
+    dll = regs[SD_DLL_CTRL]
+    it = regs[SD_ITAPDLY] & ~itap_bits
+    ot = regs[SD_OTAPDLYSEL] & ~SD0_OTAP_SEL
+    sequence = [
+        (SD_DLL_CTRL, dll | SD0_DLL_RST, SD0_DLL_RST),
+        (SD_ITAPDLY, it | SD0_ITAP_CHGWIN, itap_bits),
+        (SD_ITAPDLY, it | SD0_ITAP_CHGWIN | SD0_ITAP_ENA | itap, itap_bits),
+        (SD_ITAPDLY, it | SD0_ITAP_ENA | itap, itap_bits),
+        (SD_OTAPDLYSEL, ot | otap, SD0_OTAP_SEL),
+        (SD_DLL_CTRL, dll & ~SD0_DLL_RST, SD0_DLL_RST),
+    ]
+    return all(write_reg(child, serial, addr, value, mask)
+               for addr, value, mask in sequence)
+
+
+def mmc_read_crc(child, start_block, count, timeout):
+    """One "mmc read" plus crc32 over the transferred bytes.
+
+    Returns the CRC as an int, or None if the read errored. Timeouts
+    propagate to the caller, which treats them as a possibly-wedged card.
+    """
+    child.sendline(f"mmc read $loadaddr {start_block:#x} {count:#x}")
+    matched = child.expect([r"blocks read: OK", "ERROR", PROMPT],
+                           timeout=timeout)
+    if matched != 0:
+        if matched == 1:
+            child.expect(PROMPT)
+        return None
+    child.expect(PROMPT)
+    child.sendline(f"crc32 $loadaddr {count * 512:#x}")
+    child.expect(CRC_OUT, timeout=30)
+    crc = int(child.match.group(1), 16)
+    child.expect(PROMPT)
+    return crc
+
+
+def render_schmoo(itaps, otaps, results):
+    """Render the results grid as text: rows ITAP, columns OTAP."""
+    lines = ["      otap " + "".join(str(o % 10) for o in otaps),
+             "itap       " + "".join("|" if o % 10 == 0 else " "
+                                     for o in otaps)]
+    for itap in itaps:
+        row = "".join({True: ".", False: "X"}.get(results.get((itap, otap)),
+                                                  "?")
+                      for otap in otaps)
+        lines.append(f"{itap:>4}       {row}")
+    lines.append("('.' pass, 'X' fail, '?' not tested)")
+    return "\n".join(lines)
+
+
+def mmc_schmoo(stream, child, serial, position, itaps, otaps, start_block,
+               count, repeats):
+    """Sweep SD0 ITAP/OTAP and record pass/fail per point. Read-only.
+
+    The clock configuration is left exactly as booted; the operating-point
+    snapshot below records what it was. The OTAP axis is exercised through
+    the outgoing command channel only (reads issue commands but never write
+    data), so a write-path-only OTAP failure will not show here.
+    """
+    child.sendline("mmc dev 0")
+    if child.expect(["is current device", PROMPT], timeout=10) != 0:
+        log.error("[%s] no usable MMC card detected: %s",
+                  serial, child.before.strip())
+        return False
+    child.expect(PROMPT)
+
+    # Record the operating point the whole sweep runs under: without these
+    # the plot can't be compared across boards, cards, or clock configs.
+    regs = {addr: read_reg(child, addr)
+            for addr in (SDIO0_REF_CTRL, SDHCI0_CLK_CTRL, SD_ITAPDLY,
+                         SD_OTAPDLYSEL, SD_DLL_CTRL)}
+    log.info("[%s] operating point: %s", serial,
+             " ".join(f"{addr:#x}={value:#010x}"
+                      for addr, value in regs.items()))
+
+    golden_itap = regs[SD_ITAPDLY] & SD0_ITAP_SEL
+    golden_otap = regs[SD_OTAPDLYSEL] & SD0_OTAP_SEL
+
+    # U-Boot reads are PIO here; budget ~1 MiB/s plus slack so a stalled
+    # card fails the point rather than the whole netconsole conversation.
+    timeout = 30 + (count * 512) // (1 << 20)
+
+    golden_crc = mmc_read_crc(child, start_block, count, timeout)
+    if golden_crc is None:
+        log.error("[%s] reference read failed at driver-default taps "
+                  "(itap=%d otap=%d); card or clock config is not usable",
+                  serial, golden_itap, golden_otap)
+        return False
+    log.info("[%s] reference: blocks %#x+%#x, crc32 %08x, taps itap=%d "
+             "otap=%d", serial, start_block, count, golden_crc,
+             golden_itap, golden_otap)
+
+    def sane():
+        """Re-check the card at known-good taps; re-init once if wedged."""
+        if not set_sd0_taps(child, serial, golden_itap, golden_otap, regs):
+            return False
+        if mmc_read_crc(child, start_block, count, timeout) == golden_crc:
+            return True
+        # A failing card often un-wedges on re-enumeration (CMD0); this
+        # also rewrites the taps to the driver defaults, which is fine.
+        log.warning("[%s] card not responding at known-good taps; "
+                    "re-initializing", serial)
+        child.sendline("mmc dev 0")
+        if child.expect(["is current device", PROMPT], timeout=10) != 0:
+            return False
+        child.expect(PROMPT)
+        return mmc_read_crc(child, start_block, count, timeout) == golden_crc
+
+    results = {}
+    ok = True
+    try:
+        with tqdm.tqdm(total=len(itaps) * len(otaps), unit="pt",
+                       desc=f"[{serial}] schmoo",
+                       position=position, leave=False) as bar:
+            for itap in itaps:
+                for otap in otaps:
+                    try:
+                        passed = set_sd0_taps(child, serial, itap, otap,
+                                              regs)
+                        for _ in range(repeats):
+                            if not passed:
+                                break
+                            passed = (mmc_read_crc(child, start_block,
+                                                   count, timeout)
+                                      == golden_crc)
+                    except pexpect.TIMEOUT:
+                        # Resync the console; if that fails the netconsole
+                        # itself is gone and the worker should report it.
+                        child.sendline("")
+                        child.expect(PROMPT, timeout=10)
+                        passed = False
+                    results[(itap, otap)] = passed
+                    bar.update(1)
+                    if not passed and not sane():
+                        log.error("[%s] card is wedged and did not recover; "
+                                  "aborting sweep (power cycle needed). "
+                                  "Points already measured are reported.",
+                                  serial)
+                        ok = False
+                        raise StopIteration
+    except StopIteration:
+        pass
+    finally:
+        # Restore the driver-default taps, but never at the expense of the
+        # results: if the console died mid-sweep this raises, and the CSV
+        # below is the part worth salvaging.
+        try:
+            set_sd0_taps(child, serial, golden_itap, golden_otap, regs)
+        except (pexpect.TIMEOUT, pexpect.EOF):
+            log.warning("[%s] could not restore taps (console lost); "
+                        "board needs a reset before further MMC use", serial)
+
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        csv_path = f"mmc-schmoo-{serial}-{stamp}.csv"
+        with open(csv_path, "w") as fh:
+            fh.write("# " + " ".join(f"{addr:#x}={value:#010x}"
+                                     for addr, value in regs.items()) + "\n")
+            fh.write("itap,otap,pass\n")
+            for (itap, otap), passed in sorted(results.items()):
+                fh.write(f"{itap},{otap},{int(passed)}\n")
+
+        npass = sum(results.values())
+        log.info("[%s] schmoo: %d/%d points pass, results in %s\n%s",
+                 serial, npass, len(results), csv_path,
+                 render_schmoo(itaps, otaps, results))
+    return ok
+
+
+# ---------------------------------------------------------------------------
 # Backplane EEPROM
 #
 # Each crate slot carries its own EEPROM on the backplane, wired to the i2c0
@@ -657,6 +900,7 @@ def cli(ctx, serials, discovery_port, bind, verbose, then):
         rfmux firmware --serial 0110 write-backplane-eeprom --backplane 4sbp --chassis-serial-number C0021 --slot 3
         rfmux firmware --serial any  write-backplane-eeprom --backplane 4sbp --chassis-serial-number C0021 --slot 0110=1 --slot 0111=2
         rfmux firmware --serial any  read-backplane-eeprom --backplane 4sbp --slot 0110=1 --slot 0111=2
+        rfmux firmware --serial 0110 mmc-schmoo --itap 0:120:4 --otap 0:30:2
     """
     # Optional dependencies, checked here (the single gateway to every
     # subcommand) so a missing package fails with a remedy now, not mid-flash
@@ -797,6 +1041,67 @@ def repl_cmd(ctx, command):
     if command is None:
         action.then = "prompt"
     return action
+
+
+def parse_sweep(spec, name, limit):
+    """Parse a "MIN:MAX[:STEP]" sweep spec into an inclusive list of taps."""
+    try:
+        parts = [int(p, 0) for p in spec.split(":")]
+        lo, hi = parts[0], parts[1]
+        step = parts[2] if len(parts) > 2 else 1
+    except (ValueError, IndexError):
+        raise click.UsageError(
+            f"--{name} {spec!r}: expected MIN:MAX[:STEP]")
+    if not (0 <= lo <= hi <= limit) or step < 1:
+        raise click.UsageError(
+            f"--{name} {spec!r}: range must lie within 0..{limit} "
+            f"with a positive step")
+    return list(range(lo, hi + 1, step))
+
+
+@cli.command(name="mmc-schmoo")
+@click.option("--itap", "itap_spec", default="0:120:4", show_default=True,
+              metavar="MIN:MAX[:STEP]",
+              help="ITAP (receive path) sweep; ~120 taps span one 50 MHz "
+                   "period, hardware field is 0..255.")
+@click.option("--otap", "otap_spec", default="0:30:1", show_default=True,
+              metavar="MIN:MAX[:STEP]",
+              help="OTAP (transmit clock) sweep; ~30 taps span one 50 MHz "
+                   "period, hardware field is 0..63.")
+@click.option("--start-block", type=str, default="0", show_default=True,
+              help="First 512-byte block of the test region.")
+@click.option("--count", type=str, default="0x4000", show_default=True,
+              help="Blocks per read (0x4000 = 8 MiB per point).")
+@click.option("--repeats", type=int, default=1, show_default=True,
+              help="Reads per sweep point; more repeats catch lower error "
+                   "rates at proportional cost in run time.")
+@click.pass_context
+def mmc_schmoo_cmd(ctx, itap_spec, otap_spec, start_block, count, repeats):
+    """Sweep the SD0 ITAP/OTAP delay lines and map pass/fail per point.
+
+    Read-only: each point re-reads the same block range and compares its
+    CRC against a reference taken at the driver-default taps, so the card's
+    contents are never modified. Results are logged as a text plot and
+    written to mmc-schmoo-SERIAL-TIMESTAMP.csv, together with the register
+    snapshot (clock divider, SDHCI divisor, DLL state) the sweep ran under.
+
+    Note the OTAP axis is exercised only through the outgoing command
+    channel; a failure mode confined to the data write path will not show
+    in a read-only sweep.
+
+    The default grid (31x31 points, 8 MiB per point) takes roughly half an
+    hour per board.
+    """
+    itaps = parse_sweep(itap_spec, "itap", 255)
+    otaps = parse_sweep(otap_spec, "otap", 63)
+    try:
+        start = int(start_block, 0)
+        blocks = int(count, 0)
+    except ValueError:
+        raise click.UsageError("--start-block and --count must be integers")
+    return functools.partial(mmc_schmoo, itaps=itaps, otaps=otaps,
+                             start_block=start, count=blocks,
+                             repeats=repeats)
 
 
 def parse_slot_map(slots, serials):

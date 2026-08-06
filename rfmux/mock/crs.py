@@ -589,7 +589,12 @@ class ServerMockCRS:
             max_val = 2 ** 23 - 1
             i_vals = np.random.randint(-max_val - 1, max_val + 1, num_samples).tolist()
             q_vals = np.random.randint(-max_val - 1, max_val + 1, num_samples).tolist()
-        return list(zip(i_vals, q_vals))
+        # Separate i/q lists, like get_fast_samples below: tuber turns the
+        # dict into an attribute-access result, which is the shape every
+        # caller reaches this through (py_get_pfb_samples reads .i/.q).
+        # Zipped (i, q) pairs raised AttributeError instead, so the mock
+        # had no working PFB path at all.
+        return {"i": i_vals, "q": q_vals}
 
     async def get_fast_samples(self, num_samples, units=Units.NORMALIZED, module=1):
         assert isinstance(num_samples, int) and num_samples > 0

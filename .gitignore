@@ -6,6 +6,12 @@ rfmux/_version.py
 .ipynb_checkpoints/
 .pytest_cache/
 
+# Virtualenvs. `uv venv` puts one here by default, and README/CLAUDE.md tell
+# you to make one — so without this a `git add -A` commits it.
+.venv
+.venv/
+venv/
+
 # Periscope session output — captures, screenshots, exported .h5/.pkl. This is
 # run data, not source: it is large (GBs) and never belongs in the repo.
 #

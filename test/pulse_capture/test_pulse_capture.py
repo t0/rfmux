@@ -1068,6 +1068,69 @@ class TestPulseCaptureConfig:
             cfg.threshold_sigma * np.sqrt(2.0))
 
 
+class TestHotLoopCost:
+    """process_sample runs once per sample per channel — 1.22 MHz on the
+    PFB stream — so work done on samples that cannot trigger is work the
+    detector cannot afford.  Measured as a rate rather than asserted
+    here: skipping the edge block on non-eligible samples took a single
+    channel from 220k to 483k samples/s.
+    """
+
+    def test_edge_taps_are_not_read_on_quiet_samples(self, monkeypatch):
+        """The edge detector reads the ring through Circular.recent().
+        On a stream that never crosses threshold nothing can trigger, so
+        it must never be consulted at all."""
+        calls = []
+        original = Circular.recent
+        monkeypatch.setattr(
+            Circular, "recent",
+            lambda self, k: (calls.append(k), original(self, k))[1])
+
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0,
+                                   jump_std_I=1.4, jump_std_Q=1.4)}
+        pcap = PulseCapture(buf_size=5000, channels=[1], noise_stats=ns,
+                            threshold_sigma=5.0, baseline_window=20000)
+        rng = np.random.default_rng(0)
+        for k in range(20000):
+            # +-3 sigma at most: never reaches the 5 sigma threshold.
+            pcap.process_sample(1, float(np.clip(rng.normal(), -3, 3)),
+                                float(np.clip(rng.normal(), -3, 3)),
+                                k * 1e-4)
+
+        assert pcap.pulse_count["Channel 1"] == 0
+        assert not calls, (
+            f"edge taps read {len(calls)} times on a stream that can "
+            "never trigger — the hot-loop guard has regressed")
+
+    def test_edge_taps_are_still_read_when_a_pulse_arrives(self,
+                                                           monkeypatch):
+        """The other half: the guard must not have disabled the edge
+        test, or the trigger would lose its 1/f-immune half."""
+        calls = []
+        original = Circular.recent
+        monkeypatch.setattr(
+            Circular, "recent",
+            lambda self, k: (calls.append(k), original(self, k))[1])
+
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0,
+                                   jump_std_I=1.4, jump_std_Q=1.4)}
+        pcap = _collecting_capture(buf_size=5000, channels=[1],
+                                   noise_stats=ns, threshold_sigma=5.0,
+                                   end_sigma=1.5, baseline_window=20000)
+        rng = np.random.default_rng(1)
+        for k in range(6000):
+            v = rng.normal(0, 1.0)
+            if k >= 3000:
+                v += 60.0 * np.exp(-(k - 3000) / 40.0)
+            pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
+                                k * 1e-4)
+
+        assert pcap.pulse_count["Channel 1"] == 1
+        assert calls, "the edge detector never ran"
+
+
 # ──────────────── Detection parameters travel intact ────────────────
 
 class TestDetectionParamsPlumbing:

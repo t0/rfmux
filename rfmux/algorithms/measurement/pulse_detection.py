@@ -428,10 +428,16 @@ class PulseCapture:
 
         self.abs_n += 1
 
-        # Update circular buffers
-        self.buf[channel]["I"].add(i_val)
-        self.buf[channel]["Q"].add(q_val)
-        self.buf[channel]["ts"].add(timestamp)
+        # Update circular buffers.  Bound to locals because this method
+        # runs once per sample per channel — 1.22 MHz on the PFB stream
+        # — and repeated self.buf[channel][...] lookups are a
+        # measurable fraction of that budget.
+        bufs = self.buf[channel]
+        bI = bufs["I"]
+        bQ = bufs["Q"]
+        bI.add(i_val)
+        bQ.add(q_val)
+        bufs["ts"].add(timestamp)
 
         # Get noise stats for this channel
         ns = self.noise_stats.get(channel, ChannelNoiseStats())
@@ -492,17 +498,22 @@ class PulseCapture:
         # cannot re-fire it.
         edge_ok = False
         edge_taps = None
-        if self.edge_lookback > 0:
+        # Only evaluated when it can matter.  Both results are read in
+        # exactly one place — the "not capturing and trigger_ok" branch
+        # below — and trigger_ok needs `eligible`, so on any sample that
+        # is neither above threshold nor mid-capture the whole block was
+        # computed and thrown away.  That is nearly every sample of a
+        # quiet stream, and it was the single largest cost in the
+        # detector's hot loop.
+        if self.edge_lookback > 0 and eligible and not st.capturing:
             # The usable lag shortens near the start of the stream and
             # after a statistics epoch reset — a reference from before
             # either would difference across a mean shift and read as
             # a jump.
             lmax = min(self.edge_lookback,
-                       self.buf[channel]["I"].count - 1,
+                       bI.count - 1,
                        st.ch_sample_n - st.epoch_start - 1)
             if lmax >= 1:
-                bI = self.buf[channel]["I"]
-                bQ = self.buf[channel]["Q"]
                 # Three taps across the lookback (K, K/2, K/4), judged
                 # against the MEDIAN.  A single reference K back is
                 # blind to pulse trains whose period matches K — it
@@ -621,11 +632,9 @@ class PulseCapture:
             near_vals = None
             if self.edge_lookback > 0 and since_fire >= 1:
                 span = min(self.edge_lookback, since_fire,
-                           self.buf[channel]["I"].count - 1,
+                           bI.count - 1,
                            st.ch_sample_n - st.epoch_start - 1)
                 if span >= 1:
-                    bI = self.buf[channel]["I"]
-                    bQ = self.buf[channel]["Q"]
                     hi_I = hi_Q = 0.0
                     for tap in (span, span // 2, span // 4):
                         if tap >= 1:

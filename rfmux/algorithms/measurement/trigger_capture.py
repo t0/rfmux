@@ -48,6 +48,7 @@ from typing import Dict, List, Optional, Union
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
+from ... import streamer
 
 from .pulse_capture_dual import DualPulseCaptureSession
 from .pulse_capture_session import PulseCaptureConfig, PulseCaptureSession
@@ -175,15 +176,6 @@ def _collector(stream: StreamResult):
     return _on_pulse
 
 
-def _resolve_host(crs: CRS) -> str:
-    host = crs.tuber_hostname
-    if host and ":" in host:
-        host = host.split(":")[0]
-    if host in ("rfmux0000.local",):
-        host = "127.0.0.1"
-    return host
-
-
 def _training_seconds(config: PulseCaptureConfig, rate: float) -> float:
     return config.noise_samples(rate) / rate
 
@@ -254,7 +246,7 @@ async def trigger_capture(
             threshold_sigma=threshold_sigma, end_sigma=end_sigma,
             max_pulse_ms=max_pulse_ms)
 
-    host = _resolve_host(crs)
+    host = streamer.resolve_host(crs.tuber_hostname)
     dec = await crs.get_decimation()
     if dec is None:
         dec = 6

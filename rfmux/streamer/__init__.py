@@ -90,6 +90,29 @@ from .socket import (
 )
 
 
+def resolve_host(hostname):
+	"""Map a CRS hostname to the address its packets actually arrive on.
+
+	A mock CRS created from a serial number alone gets the synthesized
+	hostname ``rfmux0000.local`` (see ``CRS.tuber_hostname``), which
+	resolves nowhere — the mock streamer sends to loopback.  Callers
+	that opened a socket on the unmapped name simply received nothing.
+
+	This rule had three copies with two behaviours: py_get_samples and
+	trigger_capture mapped it, py_run_pfb_streamer did not.  It lives
+	here now, next to ``get_multicast_socket``, which is the only thing
+	the answer is ever used for.
+	"""
+	if not hostname:
+		return hostname
+	# get_multicast_socket strips the port itself; do it here too so the
+	# comparison sees a bare hostname.
+	host = hostname.split(":")[0] if ":" in hostname else hostname
+	if host == "rfmux0000.local":
+		return "127.0.0.1"
+	return host
+
+
 def ts_to_seconds(ts):
 	"""Convert a packet Timestamp to seconds-of-day, or None if not recent.
 

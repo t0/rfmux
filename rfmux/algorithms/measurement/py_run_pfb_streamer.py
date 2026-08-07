@@ -129,7 +129,10 @@ async def py_run_pfb_streamer(crs : CRS,
             print(f"[Pfb streaming]: No active PFB streaming found")
     
         #### Opening the socket #####
-        host = crs.tuber_hostname
+        # resolve_host, not the raw hostname: a mock CRS built from a
+        # serial alone reports rfmux0000.local, which resolves nowhere,
+        # and this was the one caller of the three not mapping it.
+        host = streamer.resolve_host(crs.tuber_hostname)
         port = streamer.PFB_STREAMER_PORT
         
         channels = channel if isinstance(channel, list) else [channel]

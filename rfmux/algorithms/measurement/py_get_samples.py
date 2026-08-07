@@ -164,10 +164,7 @@ async def py_get_samples(crs: CRS,
     ts.ss += np.uint32(.02 * streamer.SS_PER_SECOND) # 20ms, per experiments at FIR6
     ts.renormalize()
 
-    if crs.tuber_hostname == "rfmux0000.local":
-        host = '127.0.0.1'
-    else:
-        host = crs.tuber_hostname
+    host = streamer.resolve_host(crs.tuber_hostname)
 
     with streamer.get_multicast_socket(host) as sock:
 

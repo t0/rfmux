@@ -25,13 +25,16 @@ task and headless scripts drive it identically.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
 from .pulse_capture_session import (
     CaptureState,
     PulseCaptureConfig,
     PulseCaptureSession,
+    _CallbackHost,
 )
 from .streamer_config import PFB_SAMPLE_RATE
 
@@ -170,26 +173,9 @@ class IncrementalPulseMatcher:
             self.on_pair(pair)
 
 
-class _StreamFeed:
-    """Source-compatible facade: run_slow_source/run_pfb_source call
-    ``feed_sample`` and read ``channels`` — this routes them through the
-    dual session so stream time drives matcher expiry."""
-
-    def __init__(self, dual: "DualPulseCaptureSession", feed):
-        self._dual = dual
-        self._feed = feed
-
-    @property
-    def channels(self):
-        return self._dual.channels
-
-    def feed_sample(self, ch: int, i: float, q: float, t) -> None:
-        self._feed(ch, i, q, t)
-
-
 # ───────────────────────── Dual session ─────────────────────────────
 
-class DualPulseCaptureSession:
+class DualPulseCaptureSession(_CallbackHost):
     """Slow + fast capture with live matching and one dual HDF5 file.
 
     Callbacks (all optional):
@@ -228,7 +214,6 @@ class DualPulseCaptureSession:
         self.module = module
         self.config = config or PulseCaptureConfig()
         # Parity with PulseCaptureSession (panel/task read this)
-        from pathlib import Path
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
         self.on_noise = on_noise
         self.on_pulse = on_pulse
@@ -270,10 +255,14 @@ class DualPulseCaptureSession:
 
         self.slow = self._make_stream("slow", slow_rate)
         self.fast = self._make_stream("fast", fast_rate)
-        #: source-compatible facades (feed_sample + channels) that route
-        #: through feed_slow/feed_fast so stream time advances the matcher
-        self.slow_feed = _StreamFeed(self, self.feed_slow)
-        self.fast_feed = _StreamFeed(self, self.feed_fast)
+        #: Source-compatible facades: run_slow_source/run_pfb_source read
+        #: ``channels`` and call ``feed_sample``, so routing those two
+        #: names through feed_slow/feed_fast is all it takes for stream
+        #: time to drive matcher expiry.
+        self.slow_feed = SimpleNamespace(channels=self.channels,
+                                         feed_sample=self.feed_slow)
+        self.fast_feed = SimpleNamespace(channels=self.channels,
+                                         feed_sample=self.feed_fast)
 
     def _make_stream(self, stream: str,
                      sample_rate: float) -> PulseCaptureSession:
@@ -440,6 +429,7 @@ class DualPulseCaptureSession:
         self._callback(self.on_pair, pair)
         self._emit_stats()
 
+
     @staticmethod
     def _union_window(pair: dict) -> Optional[tuple]:
         """[t0, t1] spanning every available trigger window + 10% margin."""
@@ -461,18 +451,3 @@ class DualPulseCaptureSession:
 
     def _emit_stats(self) -> None:
         self._callback(self.on_stats, self.stats())
-
-    def _callback(self, cb: Optional[Callable], *args) -> None:
-        if cb is None:
-            return
-        try:
-            cb(*args)
-        except Exception as e:
-            self._error(f"Callback raised: {e}")
-
-    def _error(self, message: str) -> None:
-        if self.on_error is not None:
-            try:
-                self.on_error(message)
-            except Exception:
-                pass

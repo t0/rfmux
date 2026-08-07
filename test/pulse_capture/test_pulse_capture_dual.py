@@ -320,3 +320,28 @@ def test_streams_start_capturing_together():
     assert not dual.fast.pcap.freeze_triggers
     assert not dual.slow.pcap.freeze_triggers
     dual.stop()
+
+
+def test_stream_feeds_present_the_source_facade():
+    """run_slow_source/run_pfb_source read ``channels`` and call
+    ``feed_sample``; the dual session's facades must satisfy exactly
+    that, and must route through feed_slow/feed_fast so stream time
+    advances the matcher.  Only the socket sources exercise this path,
+    and those need the acquisition tier — so pin the contract here."""
+    dual = DualPulseCaptureSession(
+        channels=[1, 2], slow_rate=1000.0, fast_rate=10000.0,
+        config=PulseCaptureConfig(max_pulse_ms=20.0, noise_train_ms=100.0))
+    dual.start()
+
+    for feed, session in ((dual.slow_feed, dual.slow),
+                          (dual.fast_feed, dual.fast)):
+        assert feed.channels == [1, 2]
+        before = session._noise_n[1]
+        feed.feed_sample(1, 0.5, -0.5, 1.0)
+        assert session._noise_n[1] == before + 1, \
+            "the facade must reach the underlying session"
+
+    # ...and through feed_slow/feed_fast, so the matcher clock moved.
+    assert dual._last_advance["slow"] == 1.0
+    assert dual._last_advance["fast"] == 1.0
+    dual.stop()

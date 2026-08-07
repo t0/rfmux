@@ -74,6 +74,38 @@ class CaptureState(Enum):
     STOPPED = "stopped"
 
 
+class _CallbackHost:
+    """Callback dispatch shared by the single- and dual-stream sessions.
+
+    Every result leaves a session through a plain callback, and a
+    callback that raises must not take the capture down with it: a GUI
+    repaint failing is no reason to stop writing pulses to disk.  So
+    exceptions are caught and reported through ``on_error`` — which is
+    itself allowed to fail silently, because at that point there is
+    nowhere left to report to.
+    """
+
+    #: Class-level default so _error() is safe before __init__ has run
+    #: far enough to assign the instance attribute.
+    on_error: Optional[Callable] = None
+
+    def _callback(self, cb: Optional[Callable], *args) -> None:
+        if cb is None:
+            return
+        try:
+            cb(*args)
+        except Exception as e:
+            self._error(f"Callback {getattr(cb, '__name__', cb)!r} "
+                        f"raised: {e}")
+
+    def _error(self, message: str) -> None:
+        if self.on_error is not None:
+            try:
+                self.on_error(message)
+            except Exception:
+                pass
+
+
 @dataclass
 class PulseCaptureConfig:
     """User-facing pulse-capture parameters, in physical units.
@@ -378,7 +410,7 @@ class PulseCaptureConfig:
         return issues
 
 
-class PulseCaptureSession:
+class PulseCaptureSession(_CallbackHost):
     """Callback-driven live pulse capture (noise → detect → HDF5 → histograms).
 
     Parameters
@@ -781,19 +813,3 @@ class PulseCaptureSession:
                 except Exception as e:
                     self._error(f"HDF5 template update failed: {e}")
             self._callback(self.on_templates, tmpl)
-
-    def _callback(self, cb: Optional[Callable], *args) -> None:
-        if cb is None:
-            return
-        try:
-            cb(*args)
-        except Exception as e:
-            self._error(f"Callback {getattr(cb, '__name__', cb)!r} "
-                        f"raised: {e}")
-
-    def _error(self, message: str) -> None:
-        if self.on_error is not None:
-            try:
-                self.on_error(message)
-            except Exception:
-                pass

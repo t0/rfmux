@@ -1068,6 +1068,173 @@ class TestPulseCaptureConfig:
             cfg.threshold_sigma * np.sqrt(2.0))
 
 
+class TestBlockIngestion:
+    """process_block exists purely for speed, so the only thing that
+    makes it safe is being indistinguishable from the per-sample path.
+    These compare the two directly rather than asserting on pulses.
+    """
+
+    @staticmethod
+    def _stream(seed, n, duty=0.0, amp=60.0, tau=40, drift=0.0):
+        rng = np.random.default_rng(seed)
+        I = rng.normal(0, 1, n)
+        Q = rng.normal(0, 1, n)
+        if duty:
+            for s in range(0, n, max(1, int(1 / duty))):
+                k = np.arange(s, min(s + 6 * tau, n))
+                I[k] += amp * np.exp(-(k - s) / tau)
+                Q[k] += 0.3 * amp * np.exp(-(k - s) / tau)
+        if drift:
+            I += drift * np.sin(2 * np.pi * np.arange(n) / (n / 3.0))
+        return I, Q, np.arange(n) / 1e4
+
+    @staticmethod
+    def _run(stream, block, **kw):
+        ns = {1: ChannelNoiseStats(mean_I=0, std_I=1, mean_Q=0, std_Q=1,
+                                   jump_std_I=1.4, jump_std_Q=1.4)}
+        got = []
+        pc = PulseCapture(channels=[1], noise_stats=ns, sample_rate=1e4,
+                          on_pulse=lambda c, i, d: got.append((c, i, d)),
+                          **kw)
+        I, Q, T = stream
+        if block is None:
+            for k in range(len(I)):
+                pc.process_sample(1, float(I[k]), float(Q[k]), float(T[k]))
+        else:
+            for s in range(0, len(I), block):
+                pc.process_block(1, I[s:s + block], Q[s:s + block],
+                                 T[s:s + block])
+        return pc, got
+
+    @pytest.mark.parametrize("block", [1, 7, 512, 4096])
+    @pytest.mark.parametrize("case,ckw", [
+        ("quiet", dict(seed=1, n=8000)),
+        ("sparse", dict(seed=2, n=12000, duty=1/1500)),
+        ("pileup-dense", dict(seed=3, n=12000, duty=1/150)),
+        ("1/f drift", dict(seed=4, n=12000, duty=1/1200, drift=6.0)),
+    ])
+    def test_block_matches_per_sample(self, case, ckw, block):
+        stream = self._stream(**ckw)
+        kw = dict(buf_size=5000, threshold_sigma=5.0, end_sigma=1.5,
+                  baseline_window=20000)
+        ref_pc, ref = self._run(stream, None, **kw)
+        pc, got = self._run(stream, block, **kw)
+
+        assert pc.pulse_count == ref_pc.pulse_count
+        assert pc.abs_n == ref_pc.abs_n
+        assert len(got) == len(ref)
+        for (ca, ia, da), (cb, ib, db) in zip(ref, got):
+            assert (ca, ia) == (cb, ib)
+            for key in ("Amp_I", "Amp_Q", "Time"):
+                assert np.array_equal(da[key], db[key]), f"{case}: {key}"
+            for key in ("pileup", "truncated", "trigger_index",
+                        "end_index", "trigger_time", "end_time"):
+                assert da.get(key) == db.get(key), f"{case}: {key}"
+
+    def test_block_splits_at_a_baseline_refresh(self):
+        """The bulk path cannot re-centre the band, so the sample that
+        moves the mean has to go through process_sample.  A short
+        baseline window makes refreshes frequent enough that getting
+        this wrong shows up immediately."""
+        stream = self._stream(seed=9, n=6000, duty=1/800)
+        kw = dict(buf_size=2000, threshold_sigma=5.0, end_sigma=1.5,
+                  baseline_window=600)
+        ref_pc, ref = self._run(stream, None, **kw)
+        pc, got = self._run(stream, 1000, **kw)
+        assert len(got) == len(ref) and len(ref) > 0
+        assert (pc.noise_stats[1].mean_I
+                == pytest.approx(ref_pc.noise_stats[1].mean_I))
+
+
+class TestSessionFeedBlock:
+    """feed_block must also survive the seam it is most likely to break
+    on: a block that starts during noise training and ends after it."""
+
+    @staticmethod
+    def _feed(mode, n=9000, noise_train=2000, block=700):
+        from rfmux.algorithms.measurement.pulse_capture_session import (
+            PulseCaptureSession,
+        )
+        rng = np.random.default_rng(3)
+        I = rng.normal(0, 1, n)
+        Q = rng.normal(0, 1, n)
+        for s in range(noise_train + 300, n, 1200):
+            k = np.arange(s, min(s + 240, n))
+            I[k] += 60.0 * np.exp(-(k - s) / 40.0)
+        T = np.arange(n) / 1e4
+
+        got = []
+        session = PulseCaptureSession(
+            channels=[1], sample_rate=1e4, noise_samples=noise_train,
+            buf_size=3000, threshold_sigma=5.0, end_sigma=1.5,
+            baseline_window=20000,
+            on_pulse=lambda ch, i, s_, d: got.append((ch, i, d)))
+        session.start()
+        if mode == "sample":
+            for k in range(n):
+                session.feed_sample(1, float(I[k]), float(Q[k]),
+                                    float(T[k]))
+        else:
+            for s in range(0, n, block):
+                session.feed_block(1, I[s:s + block], Q[s:s + block],
+                                   T[s:s + block])
+        session.stop()
+        return session, got
+
+    def test_feed_block_matches_feed_sample_across_the_transition(self):
+        ref_s, ref = self._feed("sample")
+        blk_s, got = self._feed("block")
+
+        assert len(ref) > 0, "the fixture must actually produce pulses"
+        assert blk_s.total_pulses == ref_s.total_pulses
+        assert len(got) == len(ref)
+        for (ca, ia, da), (cb, ib, db) in zip(ref, got):
+            assert (ca, ia) == (cb, ib)
+            for key in ("Amp_I", "Amp_Q", "Time"):
+                assert np.array_equal(da[key], db[key])
+        # The noise fit saw the same training record either way.
+        assert (blk_s.noise_stats[1].std_I
+                == pytest.approx(ref_s.noise_stats[1].std_I))
+
+    def test_feed_block_drops_unusable_timestamps(self):
+        """Same rule as feed_sample: no timestamp, no sample — every
+        duration and tau is measured from these."""
+        from rfmux.algorithms.measurement.pulse_capture_session import (
+            PulseCaptureSession,
+        )
+        session = PulseCaptureSession(
+            channels=[1], sample_rate=1e4, noise_samples=200,
+            buf_size=1000)
+        session.start()
+        rng = np.random.default_rng(0)
+        session.feed_block(1, rng.normal(size=200), rng.normal(size=200),
+                           np.arange(200) / 1e4)
+        assert session.state.name == "CAPTURING"
+
+        t = np.arange(10) / 1e4
+        t[3] = np.nan
+        t[7] = np.inf
+        session.feed_block(1, rng.normal(size=10), rng.normal(size=10), t)
+        assert session.dropped_invalid_ts == 2
+
+
+class TestCircularExtend:
+    def test_extend_matches_repeated_add(self):
+        for size in (4, 16, 50):
+            for chunks in ([1], [size - 1], [size], [size + 1],
+                           [2 * size + 3], [3, 5, 7], [size, 1, size]):
+                rng = np.random.default_rng(0)
+                a, b = Circular(size), Circular(size)
+                for m in chunks:
+                    v = rng.normal(size=m)
+                    for x in v:
+                        a.add(float(x))
+                    b.extend(v)
+                assert a.ptr == b.ptr, (size, chunks)
+                assert a.count == b.count, (size, chunks)
+                assert np.array_equal(a.data(), b.data()), (size, chunks)
+
+
 class TestHotLoopCost:
     """process_sample runs once per sample per channel — 1.22 MHz on the
     PFB stream — so work done on samples that cannot trigger is work the

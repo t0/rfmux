@@ -83,6 +83,34 @@ class Circular:
         self.ptr = (self.ptr + 1) % self.N
         self.count = min(self.count + 1, self.N)
 
+    def extend(self, values) -> None:
+        """Append many values at once, as ``add`` would one at a time.
+
+        Leaves ``ptr`` and ``count`` exactly where the equivalent run of
+        ``add`` calls would, including when *values* is longer than the
+        ring: only the last N survive, but they land at the position the
+        full sequence would have left them at.
+        """
+        v = np.asarray(values)
+        m = v.shape[0]
+        if m == 0:
+            return
+        keep = v[-self.N:] if m > self.N else v
+        k = keep.shape[0]
+        # Where the surviving values begin once all m have gone by.
+        start = (self.ptr + m - k) % self.N
+        head = min(k, self.N - start)
+        # Both halves of the doubled buffer, so data() stays a contiguous
+        # view no matter where the write wrapped.
+        self.buf[start:start + head] = keep[:head]
+        self.buf[start + self.N:start + self.N + head] = keep[:head]
+        if head < k:
+            tail = k - head
+            self.buf[:tail] = keep[head:]
+            self.buf[self.N:self.N + tail] = keep[head:]
+        self.ptr = (self.ptr + m) % self.N
+        self.count = min(self.count + m, self.N)
+
     def data(self) -> np.ndarray:
         """Return FIFO-ordered view (oldest → newest), length = count."""
         if self.count < self.N:
@@ -410,6 +438,148 @@ class PulseCapture:
         ns.mean_I = float(np.median(bl["I"].data()))
         ns.mean_Q = float(np.median(bl["Q"].data()))
 
+    # ── Block ingestion ───────────────────────────────────────────
+
+    def _samples_until_refresh(self, st: "_ChState") -> int:
+        """Samples from now until a rolling-baseline refresh moves the
+        mean.  ``0`` when the baseline is frozen (no refresh ever)."""
+        if self.baseline_window <= 0:
+            return 0
+        to_insert = self._bl_decim - st.decim_n
+        inserts_left = self._bl_refresh - st.since_refresh - 1
+        return inserts_left * self._bl_decim + to_insert
+
+    def _bulk_quiet(self, channel: int, st: "_ChState", I: np.ndarray,
+                    Q: np.ndarray, T: np.ndarray) -> None:
+        """Absorb a run of samples that provably cannot do anything.
+
+        Valid only when the detector is not capturing, no sample in the
+        run reaches ``threshold_sigma``, and the baseline mean does not
+        move within it.  Under those three conditions process_sample's
+        entire body reduces to: append to the ring, feed the decimated
+        baseline reservoir, and advance the counters.  No trigger can
+        fire, no capture can end, and the edge detector — which only
+        runs on eligible samples — never looks.
+        """
+        n = I.shape[0]
+        bufs = self.buf[channel]
+        bufs["I"].extend(I)
+        bufs["Q"].extend(Q)
+        bufs["ts"].extend(T)
+
+        if self.baseline_window > 0:
+            # First insertion lands where decim_n would have wrapped.
+            first = self._bl_decim - 1 - st.decim_n
+            if first < n:
+                idx = np.arange(first, n, self._bl_decim)
+                self._bl[channel]["I"].extend(I[idx])
+                self._bl[channel]["Q"].extend(Q[idx])
+                st.since_refresh += idx.shape[0]
+            st.decim_n = (st.decim_n + n) % self._bl_decim
+
+        self.abs_n += n
+        st.ch_sample_n += n
+        # Nothing in the run was above threshold, by precondition.
+        st.above_run = 0
+
+    def process_block(
+        self,
+        channel: int,
+        i_vals,
+        q_vals,
+        timestamps,
+    ) -> None:
+        """Ingest many samples at once, identically to calling
+        :meth:`process_sample` on each in turn.
+
+        Exists because process_sample costs ~2.3 us of interpreter time
+        per sample however tightly it is written, and the PFB stream
+        delivers 1.22 MHz per channel — about 2.5x more than one Python
+        loop can absorb.  There is no hot spot left to shave; the fix
+        has to be doing less Python per sample, not faster Python.
+
+        So the work is split by what a sample can possibly do.  A sample
+        that does not reach ``threshold_sigma``, arriving while no
+        capture is open, cannot trigger, cannot end anything, and is
+        never looked at by the edge detector: all it does is enter the
+        ring and the baseline reservoir.  Whole runs of those are
+        absorbed with numpy in :meth:`_bulk_quiet`.  Everything else
+        still goes through process_sample, one sample at a time, with
+        exactly the semantics it always had.
+
+        At 5 sigma on Gaussian noise, 99.9% of 1000-sample packets
+        contain no crossing at all, so the sequential path runs almost
+        only where the interesting samples are.
+        """
+        if channel not in self._ch_set:
+            return
+
+        I = np.ascontiguousarray(i_vals, dtype=np.float64)
+        Q = np.ascontiguousarray(q_vals, dtype=np.float64)
+        T = np.ascontiguousarray(timestamps, dtype=np.float64)
+        n = I.shape[0]
+        if not (n == Q.shape[0] == T.shape[0]):
+            raise ValueError("process_block needs equal-length arrays")
+
+        st = self.state[channel]
+        pos = 0
+        while pos < n:
+            if st.capturing:
+                # Mid-pulse: every sample can end the capture, split it,
+                # or hit the hard stop.  Sequential, and worth it — this
+                # is the part of the stream we are here for.
+                self.process_sample(channel, I[pos], Q[pos], T[pos])
+                pos += 1
+                continue
+
+            # How far ahead the current baseline mean is still the one
+            # the deviations will be measured against.  _bulk_quiet
+            # cannot re-centre the band, so the sample that moves the
+            # mean has to go through process_sample.
+            until = self._samples_until_refresh(st)
+            if until == 1:
+                self.process_sample(channel, I[pos], Q[pos], T[pos])
+                pos += 1
+                continue
+            end = n if until <= 0 else min(n, pos + until - 1)
+
+            ns = self.noise_stats.get(channel)
+            if ns is None:
+                ns = ChannelNoiseStats()
+            si = max(ns.std_I, 1e-30)
+            sq = max(ns.std_Q, 1e-30)
+            seg_I = I[pos:end]
+            seg_Q = Q[pos:end]
+            above = ((np.abs(seg_I - ns.mean_I) / si > self.threshold_sigma)
+                     | (np.abs(seg_Q - ns.mean_Q) / sq
+                        > self.threshold_sigma))
+
+            hits = np.flatnonzero(above)
+            if hits.shape[0] == 0:
+                self._bulk_quiet(channel, st, seg_I, seg_Q, T[pos:end])
+                pos = end
+                continue
+
+            # Absorb the quiet lead-in, hand the state machine the span
+            # that actually contains crossings, and leave the quiet tail
+            # for the next pass to bulk.  Sequential work is bounded by
+            # where the signal is, not by where the block happens to
+            # end — which matters at high count rates, where blocks
+            # holding the last of a decay would otherwise be walked
+            # sample by sample to their end.
+            seg = pos
+            first = int(hits[0])
+            if first > 0:
+                self._bulk_quiet(channel, st, I[seg:seg + first],
+                                 Q[seg:seg + first], T[seg:seg + first])
+                pos = seg + first
+            stop = seg + int(hits[-1]) + 1
+            while pos < stop:
+                self.process_sample(channel, I[pos], Q[pos], T[pos])
+                pos += 1
+                if st.capturing:
+                    break  # let the capturing branch take over
+
     def process_sample(
         self,
         channel: int,
@@ -630,7 +800,11 @@ class PulseCapture:
             decaying_now = False
             rising_above_self = False
             near_vals = None
-            if self.edge_lookback > 0 and since_fire >= 1:
+            # Both results, and near_vals with them, feed nothing but
+            # the pileup split below — so with splitting off this is
+            # six ring reads per sample of every capture, discarded.
+            if (self.enable_pileup and self.edge_lookback > 0
+                    and since_fire >= 1):
                 span = min(self.edge_lookback, since_fire,
                            bI.count - 1,
                            st.ch_sample_n - st.epoch_start - 1)

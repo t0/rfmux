@@ -673,6 +673,89 @@ class PulseCaptureSession(_CallbackHost):
         self.pcap.process_sample(channel, float(i_val), float(q_val),
                                  float(timestamp))
 
+    def feed_block(
+        self,
+        channel: int,
+        i_vals,
+        q_vals,
+        timestamps,
+    ) -> None:
+        """Ingest many samples of one channel at once.
+
+        Equivalent to :meth:`feed_sample` per element, but hands whole
+        arrays to :meth:`PulseCapture.process_block`, which absorbs
+        quiet stretches with numpy instead of a Python loop.  That is
+        what makes the 1.22 MHz PFB stream tractable — see
+        process_block for why the per-sample path cannot get there.
+
+        A block may straddle the end of noise training, so it is split
+        at the transition and each part dispatched on the state it
+        belongs to.
+        """
+        I = np.asarray(i_vals, dtype=np.float64)
+        Q = np.asarray(q_vals, dtype=np.float64)
+        T = np.asarray(timestamps, dtype=np.float64)
+        n = I.shape[0]
+        if not (n == Q.shape[0] == T.shape[0]):
+            raise ValueError("feed_block needs equal-length arrays")
+
+        pos = 0
+        while pos < n:
+            if self.state is CaptureState.ESTIMATING:
+                taken = self._absorb_noise(channel, I[pos:], Q[pos:])
+                if taken == 0:
+                    return  # unknown channel, or state did not advance
+                pos += taken
+                continue
+
+            if self.state is not CaptureState.CAPTURING or self.pcap is None:
+                return
+
+            seg_I, seg_Q, seg_T = I[pos:], Q[pos:], T[pos:]
+            # Same rule as feed_sample: a sample with no usable
+            # timestamp is dropped and counted, because every pulse
+            # duration and tau is measured from these.
+            good = np.isfinite(seg_T)
+            if not good.all():
+                self.dropped_invalid_ts += int((~good).sum())
+                seg_I, seg_Q, seg_T = seg_I[good], seg_Q[good], seg_T[good]
+            if seg_T.shape[0]:
+                if self._first_ts is None:
+                    self._first_ts = float(seg_T[0])
+                self._last_ts = float(seg_T[-1])
+                self.pcap.process_block(channel, seg_I, seg_Q, seg_T)
+            return
+
+    def _absorb_noise(self, channel: int, I: np.ndarray,
+                      Q: np.ndarray) -> int:
+        """Take as much of a block as the training record still wants.
+
+        Returns how many samples were consumed — the caller re-dispatches
+        the remainder, which by then belongs to the capturing state.
+        """
+        buf = self._noise_buf.get(channel)
+        n = self._noise_n.get(channel, 0)
+        if buf is None or n >= self.noise_samples:
+            self._maybe_finish_estimation()
+            return 0
+
+        take = min(self.noise_samples - n, I.shape[0])
+        buf[n:n + take] = I[:take] + 1j * Q[:take]
+        n += take
+        self._noise_n[channel] = n
+
+        # One progress callback per block rather than one per
+        # progress_every samples: same information, no longer at the
+        # mercy of how the packets happen to be sliced.
+        self._callback(self.on_progress, {
+            "state": self.state.value,
+            "collected": dict(self._noise_n),
+            "target": self.noise_samples,
+        })
+        if n >= self.noise_samples:
+            self._maybe_finish_estimation()
+        return take
+
     # ── Stats ─────────────────────────────────────────────────────
 
     def stats(self) -> Dict[str, Any]:

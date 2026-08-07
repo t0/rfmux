@@ -155,14 +155,30 @@ async def run_pfb_source(
             raw = np.array(pkt) / 256.0
             ts = streamer.ts_to_seconds(pkt.ts)
             time_samples = pkt.num_samples // n_groups
-            for si in range(time_samples):
-                t = (ts + si / sample_rate) if ts is not None else None
-                for slot, ch in enumerate(channels):
-                    fi = si * n_groups + slot
-                    if fi < len(raw):
-                        v = raw[fi]
-                        session.feed_sample(ch, float(v.real),
-                                            float(v.imag), t)
+            # A whole packet per channel per call.  The packet
+            # interleaves the streamed channels round-robin, so one
+            # channel is a strided slice; feeding those arrays straight
+            # through is what lets the detector absorb quiet stretches
+            # with numpy rather than 1.22 million Python calls a second.
+            # NaN where the packet has no usable timestamp — the session
+            # drops and counts those, exactly as the per-sample path did
+            # with None.
+            t0 = ts if ts is not None else float("nan")
+            times = t0 + np.arange(time_samples) / sample_rate
+            for slot, ch in enumerate(channels):
+                v = raw[slot:time_samples * n_groups:n_groups]
+                if v.shape[0] == 0:
+                    continue
+                n_ok = min(v.shape[0], times.shape[0])
+                feed = getattr(session, "feed_block", None)
+                if feed is None:
+                    for si in range(n_ok):
+                        session.feed_sample(ch, float(v[si].real),
+                                            float(v[si].imag),
+                                            None if ts is None
+                                            else float(times[si]))
+                else:
+                    feed(ch, v[:n_ok].real, v[:n_ok].imag, times[:n_ok])
             # Exact per-packet span — independent of timestamp
             # discontinuities across rate changes.
             elapsed += time_samples / sample_rate

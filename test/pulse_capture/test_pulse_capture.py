@@ -1489,7 +1489,27 @@ class TestHardStop:
         ns = {1: ChannelNoiseStats(std_I=1.0, std_Q=1.0)}
         pcap = _collecting_capture(buf_size=5000, channels=[1], noise_stats=ns)
         assert pcap.max_capture_samples == 4000  # 0.8 x ring
-        assert pcap.edge_lookback == 400         # 0.1 x 0.8 x ring
+        # 10% of the pulse the ring was sized for (ring / 1.5), NOT 10%
+        # of the ring: the config derives the lag from the pulse, and a
+        # bare PulseCapture must land on the same lag from the same
+        # intent — see test_bare_engine_defaults_match_the_config.
+        assert pcap.edge_lookback == 333
+
+    def test_bare_engine_defaults_match_the_config(self):
+        """A PulseCapture built straight from a ring size must resolve
+        the same lag and hard stop as one configured through
+        PulseCaptureConfig.  These were two independent formulas that
+        disagreed by 1.2x; they now share the ring-geometry constants."""
+        cfg = PulseCaptureConfig(max_pulse_ms=250.0)
+        for rate in (19073.486328125, 1220703.125):
+            buf = cfg.buf_size(rate)
+            assert (PulseCapture.default_edge_lookback(
+                buf, cfg.margin_fraction)
+                == cfg.edge_lookback_samples(rate))
+            # buf_size rounds up where max_capture rounds to nearest,
+            # so allow the one sample that costs.
+            assert abs(PulseCapture.default_max_capture_samples(buf)
+                       - cfg.max_capture_samples(rate)) <= 1
 
     def test_a_normal_pulse_is_not_truncated(self):
         ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,

@@ -48,6 +48,23 @@ from typing import Callable, Dict, List, Optional
 
 _SQRT2 = math.sqrt(2.0)
 
+# ── Ring geometry ───────────────────────────────────────────────────
+# Every time scale in the detector is a fraction of the longest pulse
+# the ring was sized for, so ONE user-facing number (max_pulse_ms) sets
+# them all.  The two constants live here, in the layer that owns the
+# ring, and PulseCaptureConfig derives from them — otherwise a bare
+# PulseCapture(buf_size=...) and a config-driven one resolve different
+# lags from the same intent, which is exactly what they used to do.
+
+#: Ring headroom over the longest expected pulse.  The pre-trigger
+#: margin and the end-confirmation tail share the ring with the pulse.
+BUFFER_SAFETY: float = 1.5
+
+#: Fraction of the ring a capture may fill before the hard stop.  With
+#: the ring at 1.5x the max expected pulse, 0.8 puts the stop at 1.2x
+#: that pulse, leaving room for the pre-trigger margin in the same ring.
+HARD_STOP_RING_FRACTION: float = 0.8
+
 
 # ───────────────────────── Circular Buffer ──────────────────────────
 
@@ -238,21 +255,27 @@ class PulseCapture:
     #: the full-stream median to ~0.01 sigma.
     _BASELINE_RESERVOIR: int = 4096
 
-    #: Fraction of the ring a capture may fill before the hard stop.
-    #: With the ring sized at 1.5x the max expected pulse, 0.8 puts the
-    #: stop at 1.2x the max pulse, leaving room for the pre-trigger
-    #: margin in the same ring.
-    HARD_STOP_RING_FRACTION: float = 0.8
+    #: Module constant, re-exported for callers that reach for it here.
+    HARD_STOP_RING_FRACTION: float = HARD_STOP_RING_FRACTION
 
     @staticmethod
     def default_edge_lookback(buf_size: int,
                               margin_fraction: float = 0.1) -> int:
-        """Edge-detector lag derived from the ring: ~margin_fraction of
-        the longest recordable pulse.  Shared with noise estimation so
-        the measured jump-σ is taken at the same lag the detector uses."""
+        """Edge-detector lag derived from the ring: ``margin_fraction``
+        of the longest pulse the ring was sized for (the ring is
+        ``BUFFER_SAFETY`` times that pulse).  Shared with noise
+        estimation so the measured jump-σ is taken at the same lag the
+        detector uses, and equal by construction to
+        ``PulseCaptureConfig.edge_lookback_samples`` for the same
+        intent."""
         return max(1, int(round(
-            margin_fraction * PulseCapture.HARD_STOP_RING_FRACTION
-            * buf_size)))
+            margin_fraction * buf_size / BUFFER_SAFETY)))
+
+    @staticmethod
+    def default_max_capture_samples(buf_size: int) -> int:
+        """Hard stop derived from the ring, so a capture can never
+        outlive the buffer and silently lose its rising edge."""
+        return max(0, int(round(HARD_STOP_RING_FRACTION * buf_size)))
 
     def __init__(
         self,
@@ -288,8 +311,7 @@ class PulseCapture:
                                                        margin_fraction)
         self.edge_lookback = max(0, int(edge_lookback))
         if max_capture_samples is None:
-            max_capture_samples = int(round(
-                self.HARD_STOP_RING_FRACTION * buf_size))
+            max_capture_samples = self.default_max_capture_samples(buf_size)
         self.max_capture_samples = max(0, int(max_capture_samples))
 
         # Callback for streaming consumers (HDF5, GUI, etc.)

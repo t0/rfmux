@@ -51,6 +51,8 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 
 from .pulse_detection import (
+    BUFFER_SAFETY,
+    HARD_STOP_RING_FRACTION,
     ChannelNoiseStats,
     PulseCapture,
     estimate_noise_stats,
@@ -126,9 +128,9 @@ class PulseCaptureConfig:
     #: windows overlap and raise the pileup fraction.
     save_to_end_confirmed: bool = True
 
-    #: buffer headroom over max_pulse_ms (pre-trigger margin +
-    #: end-confirmation tail both live in the same ring)
-    BUFFER_SAFETY = 1.5
+    #: Ring geometry, owned by pulse_detection so the engine's bare
+    #: defaults and these derivations cannot disagree.
+    BUFFER_SAFETY = BUFFER_SAFETY
     _MIN_BUF = 1000
     _MIN_NOISE = 200
     #: Ceiling on the held training record, per channel.  complex128, so
@@ -143,11 +145,13 @@ class PulseCaptureConfig:
     #: pulse (so the fit sees baseline, not signal), and that ratio —
     #: not any absolute duration — is the thing that matters.
     NOISE_TRAIN_PULSES = 20
-    #: Hard stop on a capture, as a multiple of the max pulse length.
+    #: Hard stop on a capture, as a multiple of the max pulse length —
+    #: the ring fraction expressed against the pulse rather than the
+    #: ring, so it is the same stop the engine's own default computes.
     #: The ring (1.5x) still has room for the pre-trigger margin, and a
     #: baseline that drifted mid-capture can delay the end condition but
     #: never wedge the detector.
-    HARD_STOP_FACTOR = 1.2
+    HARD_STOP_FACTOR = HARD_STOP_RING_FRACTION * BUFFER_SAFETY
 
     # ── ms → samples (per stream rate) ────────────────────────────
 
@@ -467,14 +471,16 @@ class PulseCaptureSession:
         self.noise_samples = int(noise_samples)
         self.baseline_window = int(baseline_window)
         # Resolved here (not in the engine) so noise estimation measures
-        # the jump-σ at exactly the lag the edge detector will use.
+        # the jump-σ at exactly the lag the edge detector will use — but
+        # through the engine's own resolvers, so there is one definition
+        # of each default rather than a copy that can drift.
         if edge_lookback is None:
             edge_lookback = PulseCapture.default_edge_lookback(
                 buf_size, margin_fraction)
         self.edge_lookback = max(0, int(edge_lookback))
         if max_capture_samples is None:
-            max_capture_samples = int(round(
-                PulseCapture.HARD_STOP_RING_FRACTION * buf_size))
+            max_capture_samples = PulseCapture.default_max_capture_samples(
+                buf_size)
         self.max_capture_samples = max(0, int(max_capture_samples))
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
         self.df_calibrations = df_calibrations

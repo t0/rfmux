@@ -24,7 +24,7 @@ against real hardware, and the noise-dialog advisories):
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...core.hardware_map import macro

@@ -25,7 +25,6 @@ which is what live cross-stream pulse matching needs.
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Awaitable, Callable, List, Optional, Tuple
 
 import numpy as np

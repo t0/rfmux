@@ -1,11 +1,25 @@
-"""Utility functions and helpers for the Periscope viewer."""
+"""Utility functions and helpers for the Periscope viewer.
 
-import argparse, textwrap
-import math
+**This module is also Periscope's shared import surface.**  Eight panels
+do ``from .utils import *`` and a dozen more pull names out of it
+explicitly, so most of the imports below are re-exports rather than
+things this file uses itself.  A linter will call them unused; deleting
+them breaks the GUI at startup with an ImportError, and no unit test
+imports enough of the package to notice.
+
+Before removing any import here, check that nothing else reads it
+through this module::
+
+    grep -rn 'from .utils import' rfmux/tools/periscope/
+
+``test/periscope/test_module_imports.py`` imports every panel, which is
+what turns that kind of breakage into a test failure instead of a
+crash on the user's next launch.
+"""
+
 import os
 import threading
 import queue
-import socket
 import sys, warnings, ctypes.util, ctypes, platform
 import time
 import random
@@ -14,9 +28,8 @@ import traceback
 import csv
 import datetime
 import weakref
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional
 import numpy as np
-import concurrent.futures
 
 # Create session
 import asyncio
@@ -191,7 +204,6 @@ from rfmux.core.transferfunctions import ( # Adjusted import
     fit_cable_delay,
     calculate_new_cable_length,
     recalculate_displayed_phase,
-    EFFECTIVE_PROPAGATION_SPEED, 
 )
 from rfmux.algorithms.measurement import fitting # Adjusted import
 from rfmux.core.hardware_map import macro # Adjusted import

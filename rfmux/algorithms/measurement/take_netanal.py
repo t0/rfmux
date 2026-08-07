@@ -6,7 +6,6 @@ pairings in order to measure the complex S21 across a large bandwidth. Often use
 import warnings
 import asyncio
 import numpy as np
-import scipy.signal as signal
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 

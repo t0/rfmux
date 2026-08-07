@@ -5,16 +5,14 @@ Optionally fits resonances and centers IQ data.
 """
 
 import numpy as np
-import time
 import asyncio
 import warnings
-from collections import defaultdict
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.transferfunctions import convert_roc_to_volts, convert_iq_to_df
 from .fitting import center_resonance_iq_circle
-from typing import Optional, Tuple, Dict, Any # Added for type hinting
+from typing import Optional, Tuple # Added for type hinting
 
 def _get_recalculated_center_freq(
     original_cf_hz: float,

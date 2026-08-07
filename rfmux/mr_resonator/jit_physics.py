@@ -46,9 +46,7 @@ def _serial_twin(dispatcher, name, **jit_kwargs):
                                py.__defaults__, py.__closure__)
     twin.__qualname__ = name
     return jit(nopython=True, parallel=False, cache=True, **jit_kwargs)(twin)
-import os
 import platform
-import subprocess
 import numba
 
 # Physical constants

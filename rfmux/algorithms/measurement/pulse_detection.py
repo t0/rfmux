@@ -43,7 +43,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
 _SQRT2 = math.sqrt(2.0)

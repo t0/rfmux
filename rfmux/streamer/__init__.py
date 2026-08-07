@@ -27,7 +27,7 @@ except ModuleNotFoundError as e:
         Try `pip install -e .` from the repository root, or see README.md for
         details.
         ''')) from e
-except ImportError as e:
+except ImportError:
     _SO_API_VERSION = 0
 
 if _SO_API_VERSION != _PY_API_VERSION:

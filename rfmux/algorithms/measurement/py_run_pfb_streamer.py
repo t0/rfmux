@@ -13,10 +13,8 @@ for i in range(len(channel)):
 '''
 
 from typing import Union, List, Optional
-import asyncio, inspect
-import enum
+import asyncio
 import numpy as np
-import socket
 import time
 import traceback
 import warnings
@@ -27,7 +25,7 @@ from tuber.codecs import TuberResult
 from ...core.transferfunctions import VOLTS_PER_ROC
 from ... import streamer
 
-from .py_get_pfb_samples import separate_iq_fft_to_i_and_q_linear, apply_pfb_correction
+from .py_get_pfb_samples import apply_pfb_correction
 
 
 # ── Timestamp → absolute seconds-of-day ───────────────────────────

@@ -5,7 +5,6 @@ Notebooks are opened in the system browser and saved to the active session folde
 """
 
 import subprocess
-import time
 import socket
 import os
 import json
@@ -152,7 +151,6 @@ class JupyterServerManager(QtCore.QObject):
         """Check if server is ready and emit signal."""
         import urllib.request
         import urllib.error
-        import traceback
     
         self._check_attempts += 1
     
@@ -176,7 +174,7 @@ class JupyterServerManager(QtCore.QObject):
                 urllib.request.urlopen(self.url, timeout=1)
                 self.server_ready.emit(self.url)
     
-        except Exception as e:
+        except Exception:
             # Print full diagnostics
             # print("[Notebook] Server not ready yet")
             # print(f"  Attempt: {self._check_attempts}")

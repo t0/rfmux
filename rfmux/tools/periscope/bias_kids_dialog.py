@@ -2,10 +2,8 @@
 
 from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout, QFormLayout,
                              QSpinBox, QDoubleSpinBox, QCheckBox, QGroupBox, QLabel)
-from PyQt6.QtCore import Qt
-import numpy as np
 
-from .utils import (QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator, QDoubleValidator, QIntValidator)
+from .utils import (QtWidgets, QtCore)
 import pickle
 
 def load_bias_payload(parent: QtWidgets.QWidget, file_path: str | None = None):

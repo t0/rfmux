@@ -18,8 +18,7 @@ from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential
 # Additional imports for async fitting with ThreadPoolExecutor
 import os
 import concurrent.futures
-from typing import Dict, Any, Optional, Callable
-import platform
+from typing import Dict, Any, Optional
 
 class UDPReceiver(QtCore.QThread):
     """

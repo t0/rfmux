@@ -7,11 +7,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, AsyncMock
 from contextlib import contextmanager
-import inspect
-import ast
 from .extract_params import ParamKeyExtractor
 from PyQt6 import sip
-from PyQt6.QtCore import QUrl
 import numpy as np
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 from ... import streamer as _streamer

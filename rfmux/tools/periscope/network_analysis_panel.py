@@ -1,8 +1,4 @@
 """Panel class for network analysis results (dockable)."""
-import datetime # Added for MultisweepWindow export
-import pickle   # Added for MultisweepWindow export
-import os 
-import csv
 
 # Imports from within the 'periscope' subpackage
 from .utils import *
@@ -10,7 +6,7 @@ from .tasks import SetCableLengthSignals # Added import
 # from .tasks import * # Not directly used by this class, dialogs will import what they need.
 
 # Dialogs are now imported from .dialogs within the same package
-from .dialogs import NetworkAnalysisParamsDialog, FindResonancesDialog, MultisweepDialog
+from .dialogs import NetworkAnalysisParamsDialog, FindResonancesDialog
 from .network_analysis_export import NetworkAnalysisExportMixin
 
 class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, ScreenshotMixin):

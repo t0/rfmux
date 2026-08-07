@@ -2,13 +2,9 @@
 
 from typing import Optional # Import Optional
 from .utils import (
-    QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator,
-    QDoubleValidator, QIntValidator,
-    DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
-    DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
-    DEFAULT_EXPECTED_RESONANCES, DEFAULT_MIN_DIP_DEPTH_DB, DEFAULT_MIN_Q,
-    DEFAULT_MAX_Q, DEFAULT_MIN_RESONANCE_SEPARATION_HZ, DEFAULT_DATA_EXPONENT,
-    UnitConverter, traceback
+    QtWidgets, QRegularExpression, QRegularExpressionValidator,
+    QDoubleValidator, DEFAULT_EXPECTED_RESONANCES, DEFAULT_MIN_DIP_DEPTH_DB, DEFAULT_MIN_Q,
+    DEFAULT_MAX_Q, DEFAULT_MIN_RESONANCE_SEPARATION_HZ, DEFAULT_DATA_EXPONENT
 )
 
 class FindResonancesDialog(QtWidgets.QDialog):

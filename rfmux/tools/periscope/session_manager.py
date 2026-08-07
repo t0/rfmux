@@ -26,8 +26,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PyQt6 import QtCore
-from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtCore import QUrl
 
 
 class SessionManager(QtCore.QObject):

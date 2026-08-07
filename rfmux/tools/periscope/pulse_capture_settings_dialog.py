@@ -10,7 +10,6 @@ at the stream rate the capture will actually run at.
 
 from __future__ import annotations
 
-from dataclasses import replace
 
 from PyQt6 import QtWidgets
 

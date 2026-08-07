@@ -17,7 +17,7 @@ Groups:
   - Convergence: convergence_tolerance
 """
 
-from .utils import QtWidgets, QtCore, QtGui
+from .utils import QtWidgets, QtGui
 import re
 import math
 import numpy as np
@@ -25,7 +25,7 @@ from rfmux.mock import config as mc
 from rfmux.mr_resonator.mr_complex_resonator import MR_complex_resonator
 from rfmux.mr_resonator.mr_lekid import MR_LEKID
 from . import settings
-from .custom_material_dialog import CustomMaterialDialog, ManageCustomMaterialsDialog
+from .custom_material_dialog import ManageCustomMaterialsDialog
 
 
 class ScientificDoubleValidator(QtGui.QDoubleValidator):

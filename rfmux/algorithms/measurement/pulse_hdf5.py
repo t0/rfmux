@@ -38,9 +38,129 @@ from .pulse_detection import ChannelNoiseStats
 from .pulse_analysis import pulse_summary
 
 
+# ───────────────────────── Shared writer plumbing ───────────────────
+
+class _PulseFileWriter:
+    """What the single- and dual-stream writers do identically.
+
+    Both hold one open file, write a ``metadata`` group of capture
+    parameters, stamp noise statistics onto channel groups, replace
+    histogram/template datasets wholesale on every flush, and flush
+    after each write for crash safety.  Only the LAYOUT differs —
+    where a channel group lives, and whether there are two sets of
+    them — so that is all the subclasses carry.
+    """
+
+    #: capture_params written to ``metadata``, grouped by attribute type
+    _META = (
+        (str, ("streamer_mode",)),
+        (float, ("threshold_sigma", "end_sigma", "margin_fraction",
+                 "sample_rate_slow", "sample_rate_fast")),
+        (int, ("min_pulse_samples", "module")),
+        (bool, ("enable_pileup", "save_to_end_confirmed")),
+    )
+
+    def __init__(self, path: str | Path, channels: List[int],
+                 capture_params: Dict[str, Any]):
+        if h5py is None:
+            raise ImportError(
+                "h5py is required for HDF5 pulse capture storage. "
+                "Install it with: pip install h5py"
+            )
+
+        self.path = Path(path)
+        self._channels = list(channels)
+        self._threshold_sigma = capture_params.get("threshold_sigma")
+        self.f: Optional[h5py.File] = h5py.File(self.path, "w")
+
+        meta = self.f.create_group("metadata")
+        meta.attrs["capture_start"] = time.time()
+        meta.attrs["format_version"] = 1
+        for cast, keys in self._META:
+            for k in keys:
+                if k in capture_params:
+                    meta.attrs[k] = cast(capture_params[k])
+        meta.attrs["channels"] = channels
+
+    # ── Shared helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _write_noise_attrs(grp, ns: ChannelNoiseStats) -> None:
+        grp.attrs["noise_mean_I"] = ns.mean_I
+        grp.attrs["noise_std_I"] = ns.std_I
+        grp.attrs["noise_mean_Q"] = ns.mean_Q
+        grp.attrs["noise_std_Q"] = ns.std_Q
+        grp.attrs["noise_jump_std_I"] = ns.jump_std_I
+        grp.attrs["noise_jump_std_Q"] = ns.jump_std_Q
+
+    def _set_noise_stats(self, key_for,
+                         noise_stats: Dict[int, ChannelNoiseStats]) -> None:
+        """Stamp per-channel noise attrs; *key_for* maps channel → group."""
+        if not self.is_open:
+            return
+        for ch, ns in noise_stats.items():
+            key = key_for(ch)
+            if key in self.f:
+                self._write_noise_attrs(self.f[key], ns)
+        self.f.flush()
+
+    def _append_pulse_to(self, key: str, pulse_idx: int, pulse_data: dict,
+                         noise_stats: Optional[ChannelNoiseStats]) -> None:
+        if not self.is_open or key not in self.f:
+            return
+        grp = self.f[key]
+        _write_pulse(grp, pulse_idx, pulse_data, noise_stats,
+                     self._threshold_sigma)
+        grp.attrs["pulse_count"] = pulse_idx
+        self.f.flush()
+
+    def _read_pulse_at(self, key: str) -> Optional[dict]:
+        if not self.is_open or key not in self.f:
+            return None
+        return _pulse_dict_from_group(self.f[key])
+
+    def _replace_datasets(self, group_key: str,
+                          data: Dict[str, np.ndarray]) -> None:
+        """Overwrite a group's datasets wholesale (histograms/templates).
+
+        Running accumulators are rewritten in full on every flush rather
+        than appended to, so the file always holds one self-consistent
+        snapshot however the capture ends.
+        """
+        if not self.is_open:
+            return
+        grp = self.f.require_group(group_key)
+        for key, arr in data.items():
+            if key in grp:
+                del grp[key]
+            grp.create_dataset(key, data=np.asarray(arr))
+        self.f.flush()
+
+    # ── Lifecycle ─────────────────────────────────────────────────
+
+    def finalize(self) -> None:
+        """Write final metadata and close the HDF5 file."""
+        if self.is_open:
+            self.f["metadata"].attrs["capture_end"] = time.time()
+            self.f.flush()
+            self.f.close()
+        self.f = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.f is not None and self.f.id.valid
+
+    def __del__(self):
+        try:
+            if self.is_open:
+                self.finalize()
+        except Exception:
+            pass
+
+
 # ───────────────────────── Writer ───────────────────────────────────
 
-class PulseHDF5Writer:
+class PulseHDF5Writer(_PulseFileWriter):
     """Streaming HDF5 writer — appends pulses as detected.
 
     Opens the file at construction and writes capture metadata and
@@ -71,56 +191,14 @@ class PulseHDF5Writer:
         capture_params: Dict[str, Any],
         df_calibrations: Optional[Dict[int, float]] = None,
     ):
-        if h5py is None:
-            raise ImportError(
-                "h5py is required for HDF5 pulse capture storage. "
-                "Install it with: pip install h5py"
-            )
-
-        self.path = Path(path)
-        self._channels = list(channels)
+        super().__init__(path, channels, capture_params)
         self._noise_stats = dict(noise_stats)
-        self._threshold_sigma = capture_params.get("threshold_sigma")
-        self.f: Optional[h5py.File] = h5py.File(self.path, "w")
-
-        # ── Capture metadata ──────────────────────────────────────
-        meta = self.f.create_group("metadata")
-        meta.attrs["capture_start"] = time.time()
-        meta.attrs["format_version"] = 1
-
-        _str_keys = ("streamer_mode",)
-        _float_keys = (
-            "threshold_sigma", "end_sigma", "margin_fraction",
-            "sample_rate_slow", "sample_rate_fast",
-        )
-        _int_keys = ("min_pulse_samples", "module")
-        _bool_keys = ("enable_pileup", "save_to_end_confirmed")
-
-        for k in _str_keys:
-            if k in capture_params:
-                meta.attrs[k] = str(capture_params[k])
-        for k in _float_keys:
-            if k in capture_params:
-                meta.attrs[k] = float(capture_params[k])
-        for k in _int_keys:
-            if k in capture_params:
-                meta.attrs[k] = int(capture_params[k])
-        for k in _bool_keys:
-            if k in capture_params:
-                meta.attrs[k] = bool(capture_params[k])
-
-        meta.attrs["channels"] = channels
 
         # ── Per-channel groups ────────────────────────────────────
         for ch in channels:
             grp = self.f.create_group(f"channel_{ch}")
-            ns = noise_stats.get(ch, ChannelNoiseStats())
-            grp.attrs["noise_mean_I"] = ns.mean_I
-            grp.attrs["noise_std_I"] = ns.std_I
-            grp.attrs["noise_mean_Q"] = ns.mean_Q
-            grp.attrs["noise_std_Q"] = ns.std_Q
-            grp.attrs["noise_jump_std_I"] = ns.jump_std_I
-            grp.attrs["noise_jump_std_Q"] = ns.jump_std_Q
+            self._write_noise_attrs(grp, noise_stats.get(
+                ch, ChannelNoiseStats()))
             grp.attrs["pulse_count"] = 0
             if df_calibrations and ch in df_calibrations:
                 grp.attrs["df_calibration"] = df_calibrations[ch]
@@ -154,20 +232,10 @@ class PulseHDF5Writer:
             If provided, peak amplitude and SNR are computed relative
             to the noise baseline.
         """
-        if self.f is None or not self.f.id.valid:
-            return
-
-        ch_key = f"channel_{channel}"
-        if ch_key not in self.f:
-            return
-
-        grp = self.f[ch_key]
         if noise_stats is None:
             noise_stats = self._noise_stats.get(channel)
-        _write_pulse(grp, pulse_idx, pulse_data, noise_stats,
-                     self._threshold_sigma)
-        grp.attrs["pulse_count"] = pulse_idx
-        self.f.flush()
+        self._append_pulse_to(f"channel_{channel}", pulse_idx, pulse_data,
+                              noise_stats)
 
     def read_pulse(self, channel: int, pulse_idx: int) -> Optional[dict]:
         """Read back a previously appended pulse through the open write
@@ -178,12 +246,7 @@ class PulseHDF5Writer:
         involves no file locking.  Must be called from the same thread
         that writes (the h5py single-thread rule).
         """
-        if self.f is None or not self.f.id.valid:
-            return None
-        key = f"channel_{channel}/pulse_{pulse_idx:06d}"
-        if key not in self.f:
-            return None
-        return _pulse_dict_from_group(self.f[key])
+        return self._read_pulse_at(f"channel_{channel}/pulse_{pulse_idx:06d}")
 
     def update_noise_stats(
         self, noise_stats: Dict[int, ChannelNoiseStats],
@@ -193,20 +256,8 @@ class PulseHDF5Writer:
         Later pulses' derived attrs use the new statistics; the channel
         group attrs always reflect the most recent estimate.
         """
-        if self.f is None or not self.f.id.valid:
-            return
         self._noise_stats.update(noise_stats)
-        for ch, ns in noise_stats.items():
-            key = f"channel_{ch}"
-            if key in self.f:
-                grp = self.f[key]
-                grp.attrs["noise_mean_I"] = ns.mean_I
-                grp.attrs["noise_std_I"] = ns.std_I
-                grp.attrs["noise_mean_Q"] = ns.mean_Q
-                grp.attrs["noise_std_Q"] = ns.std_Q
-                grp.attrs["noise_jump_std_I"] = ns.jump_std_I
-                grp.attrs["noise_jump_std_Q"] = ns.jump_std_Q
-        self.f.flush()
+        self._set_noise_stats(lambda ch: f"channel_{ch}", noise_stats)
 
     def update_histograms(self, histogram_data: Dict[str, np.ndarray]) -> None:
         """Overwrite histogram datasets with current running histograms.
@@ -217,50 +268,16 @@ class PulseHDF5Writer:
             Flat dict of histogram arrays keyed by descriptive names
             (e.g. ``"amplitude_bins"``, ``"amplitude_counts_ch1"``).
         """
-        if self.f is None or not self.f.id.valid:
-            return
-
-        hist_grp = self.f["histograms"]
-        for key, data in histogram_data.items():
-            if key in hist_grp:
-                del hist_grp[key]
-            hist_grp.create_dataset(key, data=np.asarray(data))
-        self.f.flush()
+        self._replace_datasets("histograms", histogram_data)
 
     def update_templates(self, template_data: Dict[str, np.ndarray]) -> None:
         """Overwrite the trigger-aligned template datasets."""
-        if self.f is None or not self.f.id.valid:
-            return
-        grp = self.f.require_group("templates")
-        for key, data in template_data.items():
-            if key in grp:
-                del grp[key]
-            grp.create_dataset(key, data=np.asarray(data))
-        self.f.flush()
-
-    def finalize(self) -> None:
-        """Write final metadata and close the HDF5 file."""
-        if self.f is not None and self.f.id.valid:
-            self.f["metadata"].attrs["capture_end"] = time.time()
-            self.f.flush()
-            self.f.close()
-        self.f = None
-
-    @property
-    def is_open(self) -> bool:
-        return self.f is not None and self.f.id.valid
-
-    def __del__(self):
-        try:
-            if self.is_open:
-                self.finalize()
-        except Exception:
-            pass
+        self._replace_datasets("templates", template_data)
 
 
 # ───────────────────────── Dual-stream writer ───────────────────────
 
-class DualPulseHDF5Writer:
+class DualPulseHDF5Writer(_PulseFileWriter):
     """One HDF5 file for a concurrent slow+fast ("both") capture.
 
     Layout::
@@ -277,31 +294,13 @@ class DualPulseHDF5Writer:
     def __init__(self, path, channels: List[int],
                  capture_params: Dict[str, Any],
                  df_calibrations: Optional[Dict[int, float]] = None):
-        if h5py is None:
-            raise ImportError(
-                "h5py is required for HDF5 pulse capture storage.")
-        self.path = Path(path)
-        self._channels = list(channels)
-        self._threshold_sigma = capture_params.get("threshold_sigma")
+        super().__init__(path, channels, capture_params)
         self._noise: Dict[str, Dict[int, ChannelNoiseStats]] = {
             s: {} for s in self.STREAMS}
-        self.f: Optional[h5py.File] = h5py.File(self.path, "w")
-
-        meta = self.f.create_group("metadata")
-        meta.attrs["capture_start"] = time.time()
-        meta.attrs["format_version"] = 1
-        meta.attrs["layout"] = "dual"
-        meta.attrs["streamer_mode"] = "both"
-        for k in ("threshold_sigma", "end_sigma", "margin_fraction",
-                  "sample_rate_slow", "sample_rate_fast"):
-            if k in capture_params:
-                meta.attrs[k] = float(capture_params[k])
-        if "module" in capture_params:
-            meta.attrs["module"] = int(capture_params["module"])
-        for k in ("enable_pileup", "save_to_end_confirmed"):
-            if k in capture_params:
-                meta.attrs[k] = bool(capture_params[k])
-        meta.attrs["channels"] = channels
+        # Layout invariants, not capture parameters: this file holds two
+        # streams however it was configured.
+        self.f["metadata"].attrs["layout"] = "dual"
+        self.f["metadata"].attrs["streamer_mode"] = "both"
 
         for stream in self.STREAMS:
             sgrp = self.f.create_group(stream)
@@ -320,37 +319,17 @@ class DualPulseHDF5Writer:
 
     def set_noise_stats(self, stream: str,
                         noise_stats: Dict[int, ChannelNoiseStats]) -> None:
-        if self.f is None or not self.f.id.valid:
-            return
         self._noise[stream].update(noise_stats)
-        for ch, ns in noise_stats.items():
-            key = f"{stream}/channel_{ch}"
-            if key in self.f:
-                grp = self.f[key]
-                grp.attrs["noise_mean_I"] = ns.mean_I
-                grp.attrs["noise_std_I"] = ns.std_I
-                grp.attrs["noise_mean_Q"] = ns.mean_Q
-                grp.attrs["noise_std_Q"] = ns.std_Q
-                grp.attrs["noise_jump_std_I"] = ns.jump_std_I
-                grp.attrs["noise_jump_std_Q"] = ns.jump_std_Q
-        self.f.flush()
+        self._set_noise_stats(lambda ch: f"{stream}/channel_{ch}",
+                              noise_stats)
 
     def append_pulse(self, stream: str, channel: int, pulse_idx: int,
                      pulse_data: dict) -> None:
-        if self.f is None or not self.f.id.valid:
-            return
-        key = f"{stream}/channel_{channel}"
-        if key not in self.f:
-            return
-        grp = self.f[key]
-        _write_pulse(grp, pulse_idx, pulse_data,
-                     self._noise[stream].get(channel),
-                     self._threshold_sigma)
-        grp.attrs["pulse_count"] = pulse_idx
-        self.f.flush()
+        self._append_pulse_to(f"{stream}/channel_{channel}", pulse_idx,
+                              pulse_data, self._noise[stream].get(channel))
 
     def append_match(self, channel: int, pair: dict) -> None:
-        if self.f is None or not self.f.id.valid:
+        if not self.is_open:
             return
         key = f"matched/channel_{channel}"
         if key not in self.f:
@@ -380,52 +359,16 @@ class DualPulseHDF5Writer:
     def read_pulse(self, stream: str, channel: int,
                    pulse_idx: int) -> Optional[dict]:
         """Live read-back through the open write handle (writer thread)."""
-        if self.f is None or not self.f.id.valid:
-            return None
-        key = f"{stream}/channel_{channel}/pulse_{pulse_idx:06d}"
-        if key not in self.f:
-            return None
-        return _pulse_dict_from_group(self.f[key])
+        return self._read_pulse_at(
+            f"{stream}/channel_{channel}/pulse_{pulse_idx:06d}")
 
     def update_histograms(self, stream: str,
                           histogram_data: Dict[str, np.ndarray]) -> None:
-        if self.f is None or not self.f.id.valid:
-            return
-        hist_grp = self.f[f"histograms/{stream}"]
-        for key, data in histogram_data.items():
-            if key in hist_grp:
-                del hist_grp[key]
-            hist_grp.create_dataset(key, data=np.asarray(data))
-        self.f.flush()
+        self._replace_datasets(f"histograms/{stream}", histogram_data)
 
     def update_templates(self, stream: str,
                          template_data: Dict[str, np.ndarray]) -> None:
-        if self.f is None or not self.f.id.valid:
-            return
-        grp = self.f.require_group(f"templates/{stream}")
-        for key, data in template_data.items():
-            if key in grp:
-                del grp[key]
-            grp.create_dataset(key, data=np.asarray(data))
-        self.f.flush()
-
-    def finalize(self) -> None:
-        if self.f is not None and self.f.id.valid:
-            self.f["metadata"].attrs["capture_end"] = time.time()
-            self.f.flush()
-            self.f.close()
-        self.f = None
-
-    @property
-    def is_open(self) -> bool:
-        return self.f is not None and self.f.id.valid
-
-    def __del__(self):
-        try:
-            if self.is_open:
-                self.finalize()
-        except Exception:
-            pass
+        self._replace_datasets(f"templates/{stream}", template_data)
 
 
 # ───────────────────────── Reader ───────────────────────────────────

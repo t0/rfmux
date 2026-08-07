@@ -1068,6 +1068,67 @@ class TestPulseCaptureConfig:
             cfg.threshold_sigma * np.sqrt(2.0))
 
 
+# ──────────────── Detection parameters travel intact ────────────────
+
+class TestDetectionParamsPlumbing:
+    """The detection knobs pass through four hands — config, session,
+    engine, capture file — and each used to keep its own list of them.
+    These tests pin the joins so a knob added in one place cannot go
+    missing in another.
+    """
+
+    def test_session_kwargs_covers_exactly_the_detection_params(self):
+        from rfmux.algorithms.measurement.pulse_capture_session import (
+            DETECTION_PARAMS,
+        )
+        kw = PulseCaptureConfig().session_kwargs(19073.486328125)
+        # session_kwargs also carries the two sizing quantities, which
+        # are not detection knobs but are needed to build the session.
+        assert set(kw) == set(DETECTION_PARAMS) | {"buf_size",
+                                                   "noise_samples"}
+
+    def test_every_detection_param_is_a_pulse_capture_argument(self):
+        import inspect
+        from rfmux.algorithms.measurement.pulse_capture_session import (
+            DETECTION_PARAMS,
+        )
+        accepted = set(inspect.signature(PulseCapture).parameters)
+        assert set(DETECTION_PARAMS) <= accepted
+
+    def test_every_detection_param_reaches_the_file(self, tmp_path):
+        """The regression this list exists for: trigger_samples,
+        baseline_window, edge_lookback and max_capture_samples were
+        handed to the writer and silently dropped, so a capture file
+        recorded neither what confirmed a trigger nor over what lag."""
+        import h5py
+        from rfmux.algorithms.measurement.pulse_capture_session import (
+            DETECTION_PARAMS,
+            PulseCaptureSession,
+        )
+
+        fs = 19073.486328125
+        cfg = PulseCaptureConfig(max_pulse_ms=20.0, noise_train_ms=50.0)
+        path = tmp_path / "capture.h5"
+        session = PulseCaptureSession(
+            channels=[1], sample_rate=fs, hdf5_path=path,
+            **cfg.session_kwargs(fs))
+        session.start()
+
+        rng = np.random.default_rng(0)
+        for k in range(cfg.noise_samples(fs) + 10):
+            session.feed_sample(1, float(rng.normal()),
+                                float(rng.normal()), k / fs)
+        session.stop()
+
+        with h5py.File(path, "r") as f:
+            attrs = dict(f["metadata"].attrs)
+
+        missing = [p for p in DETECTION_PARAMS if p not in attrs]
+        assert not missing, f"dropped on the way to the file: {missing}"
+        for name in DETECTION_PARAMS:
+            assert attrs[name] == pytest.approx(getattr(session, name))
+
+
 # ───────────────────────── Template stacking ────────────────────────
 
 from rfmux.algorithms.measurement.pulse_templates import (

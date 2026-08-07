@@ -67,6 +67,30 @@ except ImportError:  # pragma: no cover - h5py missing
     PulseHDF5Writer = None  # type: ignore[assignment]
 
 
+#: The detection knobs, named once.
+#:
+#: They travel together: PulseCaptureConfig.session_kwargs() produces
+#: them, the session holds them, PulseCapture consumes them, and the
+#: HDF5 file records them.  Every hand-maintained copy of the list is a
+#: chance for those to disagree — and they did.  The session passed
+#: trigger_samples, baseline_window, edge_lookback and
+#: max_capture_samples to the writer, whose own list knew about none of
+#: them, so no capture file recorded the trigger confirmation length or
+#: the edge lookback: the two numbers that define what triggered.
+DETECTION_PARAMS = (
+    "threshold_sigma",
+    "end_sigma",
+    "margin_fraction",
+    "min_pulse_samples",
+    "trigger_samples",
+    "enable_pileup",
+    "save_to_end_confirmed",
+    "baseline_window",
+    "edge_lookback",
+    "max_capture_samples",
+)
+
+
 class CaptureState(Enum):
     IDLE = "idle"
     ESTIMATING = "estimating"
@@ -716,22 +740,17 @@ class PulseCaptureSession(_CallbackHost):
         self._callback(self.on_noise, self.noise_stats)
 
     def _build_engine_and_writer(self) -> None:
+        # One dict, two consumers: what the engine runs on is what the
+        # file records, with no second list to keep in step.
+        detection = {name: getattr(self, name) for name in DETECTION_PARAMS}
+
         self.pcap = PulseCapture(
             buf_size=self.buf_size,
             channels=self.channels,
             noise_stats=self.noise_stats,
-            threshold_sigma=self.threshold_sigma,
-            end_sigma=self.end_sigma,
             sample_rate=self.sample_rate or 0.0,
-            margin_fraction=self.margin_fraction,
-            min_pulse_samples=self.min_pulse_samples,
-            trigger_samples=self.trigger_samples,
-            enable_pileup=self.enable_pileup,
-            save_to_end_confirmed=self.save_to_end_confirmed,
-            baseline_window=self.baseline_window,
-            edge_lookback=self.edge_lookback,
-            max_capture_samples=self.max_capture_samples,
             on_pulse=self._on_engine_pulse,
+            **detection,
         )
 
         if self.hdf5_path is not None:
@@ -739,18 +758,9 @@ class PulseCaptureSession(_CallbackHost):
                 self._error("h5py not available — capturing without HDF5")
                 return
             capture_params = {
+                **detection,
                 "streamer_mode": self.streamer_mode,
-                "threshold_sigma": self.threshold_sigma,
-                "end_sigma": self.end_sigma,
-                "margin_fraction": self.margin_fraction,
-                "min_pulse_samples": self.min_pulse_samples,
-                "trigger_samples": self.trigger_samples,
-                "enable_pileup": self.enable_pileup,
-                "save_to_end_confirmed": self.save_to_end_confirmed,
                 "module": self.module,
-                "baseline_window": self.baseline_window,
-                "edge_lookback": self.edge_lookback,
-                "max_capture_samples": self.max_capture_samples,
             }
             if self.sample_rate:
                 key = ("sample_rate_fast" if self.streamer_mode == "fast"

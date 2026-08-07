@@ -51,12 +51,18 @@ class _PulseFileWriter:
     them — so that is all the subclasses carry.
     """
 
-    #: capture_params written to ``metadata``, grouped by attribute type
+    #: capture_params written to ``metadata``, grouped by attribute type.
+    #: Must cover everything in
+    #: :data:`~.pulse_capture_session.DETECTION_PARAMS` — a parameter
+    #: missing here is silently dropped, which is how capture files came
+    #: to record neither the trigger confirmation length nor the edge
+    #: lookback.  test_every_detection_param_reaches_the_file pins it.
     _META = (
         (str, ("streamer_mode",)),
         (float, ("threshold_sigma", "end_sigma", "margin_fraction",
                  "sample_rate_slow", "sample_rate_fast")),
-        (int, ("min_pulse_samples", "module")),
+        (int, ("min_pulse_samples", "module", "trigger_samples",
+               "baseline_window", "edge_lookback", "max_capture_samples")),
         (bool, ("enable_pileup", "save_to_end_confirmed")),
     )
 

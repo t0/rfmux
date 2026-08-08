@@ -21,15 +21,43 @@ import concurrent.futures
 from typing import Dict, Any, Optional, Callable
 import platform
 
+def select_queue(queues, module_idx, expected_serial=None):
+    """Pick the packet queue for our module, pinned to the expected CRS serial.
+
+    Without serial pinning, the first queue matching the module wins. The
+    receiver socket is bound to the streamer port on all interfaces, so on
+    machines where more than one CRS is multicasting (or where a burst of
+    stale packets from another source is buffered at startup), the receiver
+    can latch onto the wrong board's queue — the UI then reports 0 packets/s
+    even though the stream we want is arriving fine.
+
+    Returns (serial, queue) or None if no acceptable queue exists yet.
+    """
+    for serial, module, q in queues:
+        if module != module_idx:
+            continue
+        if expected_serial is None or serial == expected_serial:
+            return serial, q
+    return None
+
+
 class UDPReceiver(QtCore.QThread):
     """
     Receives multicast packets in a dedicated QThread using the C++ ReadoutPacketReceiver.
     The C++ receiver handles packet reordering.
     """
-    def __init__(self, host: str, module: int) -> None:
+    def __init__(self, host: str, module: int, expected_serial=None) -> None:
         super().__init__()
         self.module_id = module  # 1-indexed module ID (for Periscope)
         self.module_idx = module - 1  # 0-indexed (for packet filtering)
+
+        # Serial we expect packets from (as an int, matching the parsed
+        # packet header); None accepts the first serial seen on our module.
+        try:
+            self.expected_serial = None if expected_serial is None else int(expected_serial)
+        except (TypeError, ValueError):
+            self.expected_serial = None
+        self._reported_foreign = set()  # serials we've warned about
 
         # Create socket and C++ receiver
         # reorder_window=256: Maintain good packet reordering capability
@@ -70,15 +98,24 @@ class UDPReceiver(QtCore.QThread):
                 # Call C++ receiver to read and process packets
                 self.receiver.receive_batch(batch_size=16, timeout_ms=50)
 
-                # Find our module's queue
+                # Find our module's queue (pinned to the expected serial so a
+                # second CRS multicasting on the same network cannot steal it)
                 if self.queue is None:
-                    # Look for a queue matching our module
-                    for serial, module, q in self.receiver.get_all_queues():
-                        if module == self.module_idx:
-                            self.queue = q
-                            self.serial = serial
-                            print(f"[UDP] Found queue for serial={serial}, module={self.module_id}")
-                            break
+                    selection = select_queue(self.receiver.get_all_queues(),
+                                             self.module_idx,
+                                             self.expected_serial)
+                    if selection is not None:
+                        self.serial, self.queue = selection
+                        print(f"[UDP] Found queue for serial={self.serial}, module={self.module_id}")
+                    elif self.expected_serial is not None:
+                        # Diagnose instead of silently showing 0 packets/s:
+                        # report any foreign streams we are ignoring.
+                        for serial, module, _q in self.receiver.get_all_queues():
+                            if serial != self.expected_serial and serial not in self._reported_foreign:
+                                self._reported_foreign.add(serial)
+                                print(f"[UDP] Ignoring stream from serial={serial} (module {module + 1}): "
+                                      f"expecting serial={self.expected_serial}. Another CRS may be "
+                                      f"multicasting on this network.")
 
             except Exception as e:
                 if self.isInterruptionRequested():

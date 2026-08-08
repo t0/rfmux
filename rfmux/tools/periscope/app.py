@@ -444,7 +444,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if self.host == "OFFLINE":
             self.receiver = DummyReceiver()
         else:
-            self.receiver = UDPReceiver(self.host, self.module) # Instantiate the receiver
+            # Pin the receiver to this CRS's serial (when known) so packets
+            # from any other CRS multicasting on the network cannot capture
+            # the queue selection (issue #98: 0 packets/s in mock mode).
+            expected_serial = getattr(self.crs, "serial", None) if self.crs is not None else None
+            self.receiver = UDPReceiver(self.host, self.module,
+                                        expected_serial=expected_serial) # Instantiate the receiver
             self.receiver.start()  # Start the receiver thread
 
     def _start_timer(self):

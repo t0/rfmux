@@ -620,10 +620,31 @@ class PeriscopeRuntime:
             return
         self.receiver.queue.clear()
 
+    #: Share of the GUI refresh interval the packet drain may consume.
+    #: The remainder belongs to plotting and event handling.
+    _DRAIN_BUDGET_FRACTION = 0.5
+
     def _process_incoming_packets(self):
-        """Process all packets currently in the receiver queue."""
+        """Process queued packets, within a slice of the frame budget.
+
+        Draining until the queue is empty looks right and is a trap: it
+        is only bounded if processing outruns arrival.  Widen a pulse
+        capture to a few hundred channels and the per-channel work in
+        _update_buffers costs more than the packet interval, so the
+        queue never empties, this call never returns, and the GUI
+        freezes -- Qt cannot repaint or handle input while it is stuck
+        here.
+
+        Stopping at a deadline instead leaves the backlog in the C++
+        queue, which is bounded (queue_max_size) and drops from the far
+        end.  A sustained overrun then shows up as packet loss in the
+        status bar, which is already instrumented, instead of a hang.
+        """
         if self.receiver.queue is None:
             return
+
+        deadline = time.monotonic() + (self.refresh_ms * 1e-3
+                                       * self._DRAIN_BUDGET_FRACTION)
 
         while not self.receiver.queue.empty():
             # Get packet from C++ queue (returns type-erased Packet)
@@ -647,6 +668,10 @@ class PeriscopeRuntime:
             # Track simulation time for speed calculation (mock mode only)
             if self.is_mock_mode and t_rel is not None:
                 self._update_sim_time_tracking(t_rel)
+
+            if time.monotonic() >= deadline:
+                self.drain_overruns += 1
+                break
 
     def _calculate_relative_timestamp(self, pkt) -> float | None:
         """

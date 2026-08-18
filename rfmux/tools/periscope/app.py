@@ -161,6 +161,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.t_last: float = time.time()        # Timestamp of the last performance update (time from .utils)
         self.prev_receive = 0
         self.prev_drop = 0
+        self.drain_overruns: int = 0            # GUI frames that ran out of drain budget
 
         # Decimation stage, dynamically updated based on inferred sample rate.
         # This is used for PSD calculations.

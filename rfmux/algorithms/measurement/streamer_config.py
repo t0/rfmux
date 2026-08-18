@@ -173,14 +173,11 @@ async def apply_streamer_config(crs, cfg: StreamerConfig) -> Dict[str, Any]:
         raise ValueError("Invalid streamer configuration:\n- "
                          + "\n- ".join(errors))
 
-    # 'modules' is the firmware-documented spelling; fall back to
-    # 'module' for older firmware / callers.
-    try:
-        await crs.set_decimation(cfg.dec_stage, short=cfg.short_packets,
-                                 modules=cfg.modules)
-    except TypeError:
-        await crs.set_decimation(cfg.dec_stage, short=cfg.short_packets,
-                                 module=cfg.modules)
+    # 'module' (singular) is the firmware spelling as of r1.6.0; it takes
+    # None, an int, or a list.  r1.5.6 spelled it 'modules' -- see the
+    # firmware/CHANGES entry for r1.6.0.
+    await crs.set_decimation(cfg.dec_stage, short=cfg.short_packets,
+                             module=cfg.modules)
 
     if cfg.pfb_channels is not None:
         if cfg.pfb_channels:

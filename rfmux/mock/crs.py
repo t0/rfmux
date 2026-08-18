@@ -527,13 +527,12 @@ class ServerMockCRS:
 
     async def set_decimation(self, stage: int = 6, short: bool = False,
                              module: int | list[int] | None = None,
-                             modules: int | list[int] | None = None):
-        # Firmware documents/tests the 'modules' spelling (see
-        # firmware/CHANGES and test_spotcheck.py); 'module' is kept as an
-        # alias for backward compatibility with existing callers.
+                             *, _bandwidth_derating: float = 0.8):
+        # Signature mirrors firmware r1.6.x exactly.  r1.5.6 spelled the
+        # third argument 'modules'; accepting both here is what let the
+        # old spelling survive in callers that only ever ran against the
+        # mock, so don't add the alias back.
         assert isinstance(stage, int) and 0 <= stage <= 6
-        if modules is not None:
-            module = modules
         if module is None:
             module = list(self._active_modules)
         if isinstance(module, int):
@@ -555,8 +554,10 @@ class ServerMockCRS:
     async def get_decimation(self):
         return None if len(self._streamed_modules) == 0 else self._fir_stage
 
-    async def set_analog_bank(self, high_bank: bool):
-        self._high_bank = bool(high_bank)
+    async def set_analog_bank(self, high: bool):
+        # Firmware spells this 'high' (see test/core/test_spotcheck.py and
+        # rfmux/tools/qc/, both of which only ever run against a board).
+        self._high_bank = bool(high)
 
     async def get_analog_bank(self):
         return bool(self.__dict__.get("_high_bank", False))

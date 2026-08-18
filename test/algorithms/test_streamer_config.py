@@ -2,7 +2,7 @@
 Tests for the headless streamer-configuration layer and packet sources.
 
 Pure-math tests for describe()/validate(); MockCRS integration for
-apply/read (including the modules= spelling and the relaxed stage-3
+apply/read (including the module= spelling and the relaxed stage-3
 long-packet rule); live-socket tests feeding a PulseCaptureSession
 through run_slow_source / run_pfb_source.
 """
@@ -11,6 +11,8 @@ import asyncio
 
 import numpy as np
 import pytest
+
+import rfmux
 
 from rfmux.algorithms.measurement.streamer_config import (
     DERATED_LINK_MBPS,
@@ -118,10 +120,16 @@ class TestApplyOnMock:
         state = loop.run_until_complete(read_streamer_config(crs))
         assert state["dec_stage"] == 1
 
-    def test_modules_spelling_accepted_by_mock(self, mock_crs):
+    def test_old_modules_spelling_rejected(self, mock_crs):
+        # Firmware r1.6.0 renamed this argument 'modules' -> 'module'.
+        # The mock used to accept both, which let callers keep the old
+        # spelling and only fail against a real board.  Calls travel over
+        # tuber, so the server-side TypeError arrives as TuberRemoteError
+        # -- exactly as it does from a real CRS.
         loop, crs = mock_crs
-        loop.run_until_complete(crs.set_decimation(6, short=False,
-                                                   modules=[1, 2]))
+        with pytest.raises((TypeError, rfmux.TuberRemoteError)):
+            loop.run_until_complete(crs.set_decimation(6, short=False,
+                                                       modules=[1, 2]))
 
     def test_stage3_long_now_allowed(self, mock_crs):
         loop, crs = mock_crs
@@ -164,7 +172,7 @@ class TestSources:
 
         loop, crs = mock_crs
         loop.run_until_complete(crs.set_decimation(6, short=False,
-                                                   modules=[1]))
+                                                   module=[1]))
         # Let in-flight packets from earlier decimation settings drain
         loop.run_until_complete(asyncio.sleep(0.3))
         session = PulseCaptureSession(channels=[1], noise_samples=50,

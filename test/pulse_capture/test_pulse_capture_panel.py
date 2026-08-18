@@ -924,3 +924,80 @@ def test_both_mode_noise_segment_is_plotted(qt_app):
     panel.task = None
     panel.close()
     _spin(qt_app)
+
+
+# ── "all" channel selection ───────────────────────────────────────
+
+
+class _BiasedCRS:
+    """CRS stub exposing just the get_biased_channels macro surface."""
+
+    def __init__(self, biased):
+        self._biased = list(biased)
+        self.calls = []
+
+    async def get_biased_channels(self, module, *, max_channels=None,
+                                  threshold=0.0):
+        self.calls.append((module, max_channels, threshold))
+        return [c for c in self._biased
+                if max_channels is None or c <= max_channels]
+
+
+class _RuntimeWithCRS(_FakeRuntime):
+    def __init__(self, crs, is_short_packet=False):
+        super().__init__()
+        self.crs = crs
+        self.is_short_packet = is_short_packet
+
+
+def _panel_with(qt_app, crs, *, short=False, text="all"):
+    runtime = _RuntimeWithCRS(crs, is_short_packet=short)
+    panel = PulseCapturePanel(periscope=runtime, dark_mode=False)
+    panel.channels_edit.setText(text)
+    return panel, runtime
+
+
+def test_all_resolves_to_biased_channels(qt_app):
+    crs = _BiasedCRS([1, 4, 17])
+    panel, runtime = _panel_with(qt_app, crs)
+    assert panel._parse_channels(runtime=runtime) == [1, 4, 17]
+    # Long packets by default, so the whole width is in play.
+    module, max_channels, _ = crs.calls[-1]
+    assert module == int(panel.module_spin.value())
+    assert max_channels == 1024
+
+
+def test_all_is_bounded_by_short_packet_width(qt_app):
+    # 200 is biased but unreachable in short-packet mode.
+    crs = _BiasedCRS([1, 200])
+    panel, runtime = _panel_with(qt_app, crs, short=True)
+    assert panel._parse_channels(runtime=runtime) == [1]
+    assert crs.calls[-1][1] == 128
+
+
+@pytest.mark.parametrize("text", ["all", "ALL", "  All  ", "*"])
+def test_all_spellings_accepted(qt_app, text):
+    crs = _BiasedCRS([2, 3])
+    panel, runtime = _panel_with(qt_app, crs, text=text)
+    assert panel._parse_channels(runtime=runtime) == [2, 3]
+
+
+def test_all_without_a_crs_declines(qt_app):
+    panel = PulseCapturePanel(periscope=_FakeRuntime(), dark_mode=False)
+    panel.channels_edit.setText("all")
+    # quiet: the settings dialog must never pop a modal just to size a
+    # buffer estimate.
+    assert panel._parse_channels(quiet=True) is None
+
+
+def test_all_with_nothing_biased_declines(qt_app):
+    crs = _BiasedCRS([])
+    panel, runtime = _panel_with(qt_app, crs)
+    assert panel._parse_channels(runtime=runtime, quiet=True) is None
+
+
+def test_explicit_channel_list_is_unaffected(qt_app):
+    crs = _BiasedCRS([9])
+    panel, runtime = _panel_with(qt_app, crs, text="1,2")
+    assert panel._parse_channels(runtime=runtime) == [1, 2]
+    assert crs.calls == []  # no board round trip for an explicit list

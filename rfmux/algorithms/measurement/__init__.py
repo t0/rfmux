@@ -14,6 +14,7 @@ from . import take_netanal
 from . import py_get_pfb_samples
 from . import multisweep
 from . import bias_kids
+from . import channel_selection
 from . import pulse_detection
 from . import pulse_hdf5
 from . import pulse_histograms
@@ -32,6 +33,7 @@ __all__ = [
     "py_get_pfb_samples",
     "multisweep",
     "bias_kids",
+    "channel_selection",
     "pulse_detection",
     "pulse_hdf5",
     "pulse_histograms",

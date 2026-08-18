@@ -16,6 +16,7 @@ and draws.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import datetime
 import time
@@ -132,9 +133,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.apply_theme(dark_mode)
         self.module_spin.setValue(module)
 
-        # Default the channel list to what Periscope is actually
-        # streaming — the tap only ever sees displayed channels, so any
-        # other request would wait forever in noise estimation.
+        # Prefill with what Periscope is displaying: a useful starting
+        # point, not a limit.  The slow packet carries every streamed
+        # channel, so the tap can capture any of them (see
+        # register_pulse_tap) -- and "all" selects by bias, not display.
         streamed = getattr(periscope, "all_chs", None)
         if streamed:
             self.channels_edit.setText(
@@ -210,7 +212,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         h.addWidget(QtWidgets.QLabel("Channels:"))
         self.channels_edit = QtWidgets.QLineEdit("1,2")
         self.channels_edit.setFixedWidth(70)
-        self.channels_edit.setToolTip("Comma-separated 1-indexed channels")
+        self.channels_edit.setToolTip(
+            "Comma-separated 1-indexed channels, or \"all\" for every\n"
+            "channel on this module that has a bias set")
         h.addWidget(self.channels_edit)
 
         h.addWidget(QtWidgets.QLabel("Module:"))
@@ -650,7 +654,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     # ── Capture lifecycle ─────────────────────────────────────────
 
-    def _parse_channels(self) -> Optional[List[int]]:
+    #: Typed into the Channels field to mean "every biased channel".
+    _ALL_CHANNELS_TOKENS = ("all", "*")
+
+    def _channels_field_is_all(self) -> bool:
+        return (self.channels_edit.text().strip().lower()
+                in self._ALL_CHANNELS_TOKENS)
+
+    def _parse_channels(self, *, runtime=None,
+                        quiet: bool = False) -> Optional[List[int]]:
+        if self._channels_field_is_all():
+            return self._resolve_biased_channels(runtime, quiet=quiet)
         try:
             channels = sorted({int(tok) for tok in
                                self.channels_edit.text().replace(" ", "")
@@ -658,10 +672,54 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         except ValueError:
             channels = []
         if not channels or any(c < 1 for c in channels):
-            QtWidgets.QMessageBox.warning(
-                self, "Pulse Capture",
-                "Channels must be a comma-separated list of 1-indexed "
-                "channel numbers (e.g. \"1,2\").")
+            if not quiet:
+                QtWidgets.QMessageBox.warning(
+                    self, "Pulse Capture",
+                    "Channels must be a comma-separated list of 1-indexed "
+                    "channel numbers (e.g. \"1,2\"), or \"all\" for every "
+                    "channel with a bias set.")
+            return None
+        return channels
+
+    def _resolve_biased_channels(self, runtime=None, *, quiet: bool = False
+                                 ) -> Optional[List[int]]:
+        """Channels on the current module that are carrying a tone.
+
+        Read off the board rather than remembered, so "all" tracks
+        whatever is biased at the moment Start is pressed.
+        """
+        def warn(text: str) -> None:
+            if not quiet:
+                QtWidgets.QMessageBox.warning(self, "Pulse Capture", text)
+
+        if runtime is None:
+            runtime = self._resolve_runtime()
+        crs = getattr(runtime, "crs", None)
+        if crs is None:
+            warn('"all" reads bias amplitudes off the board, which needs '
+                 "a CRS connection. Enter explicit channel numbers "
+                 "instead.")
+            return None
+
+        module = int(self.module_spin.value())
+        # A channel the slow packet cannot carry cannot be captured,
+        # however it is biased — so don't offer them.
+        max_ch = 128 if getattr(runtime, "is_short_packet", False) else 1024
+
+        QtWidgets.QApplication.setOverrideCursor(
+            QtGui.QCursor(QtCore.Qt.CursorShape.WaitCursor))
+        try:
+            channels = asyncio.run(
+                crs.get_biased_channels(module, max_channels=max_ch))
+        except Exception as e:
+            warn(f"Could not read bias amplitudes from module {module}:\n{e}")
+            return None
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+        if not channels:
+            warn(f"No channel on module {module} has a bias set, so "
+                 '"all" selects nothing. Bias some channels first.')
             return None
         return channels
 
@@ -829,7 +887,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def _on_capture_settings(self) -> None:
         self._sync_config_from_toolbar()
         mode = self.mode_combo.currentText()
-        channels = self._parse_channels() or [1]
+        channels = self._parse_channels(quiet=True) or [1]
         dlg = PulseCaptureSettingsDialog(
             self,
             config=self.capture_config,
@@ -877,14 +935,16 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             self._on_start()
 
     def _on_start(self) -> None:
-        channels = self._parse_channels()
-        if channels is None:
-            return
+        # Runtime first: "all" needs the CRS handle and the packet width
+        # it carries to know which channels are even reachable.
         runtime = self._resolve_runtime()
         if runtime is None:
             QtWidgets.QMessageBox.warning(
                 self, "Pulse Capture",
                 "No running Periscope stream found to tap.")
+            return
+        channels = self._parse_channels(runtime=runtime)
+        if channels is None:
             return
         mode = self.mode_combo.currentText()
         crs = getattr(runtime, "crs", None)

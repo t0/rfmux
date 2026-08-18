@@ -1085,3 +1085,40 @@ def test_status_labels_do_not_drive_panel_width(qt_app):
     for label in (panel.status_label, panel.noise_label):
         assert (label.sizePolicy().horizontalPolicy()
                 is QtWidgets.QSizePolicy.Policy.Ignored)
+
+
+def test_capturing_status_summarises_many_channels(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._both_mode = False
+    per_ch = {c: 0 for c in range(1, 201)}
+    per_ch[42] = 9
+    per_ch[7] = 3
+    panel._last_stats = {"total_pulses": 12, "rate_per_min": 4.0,
+                         "per_channel": per_ch, "elapsed_s": 65}
+    panel._refresh_status_line()
+
+    text = panel.status_label.text()
+    assert len(text) < 160, f"{len(text)} chars: {text!r}"
+    assert "2/200 ch firing" in text
+    assert "Ch42: 9" in text, "the busiest channel is the useful one"
+    assert panel.status_label.toolTip().count("\n") == 199
+
+
+def test_capturing_status_before_any_pulse(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._both_mode = False
+    panel._last_stats = {"total_pulses": 0, "rate_per_min": 0.0,
+                         "per_channel": {c: 0 for c in range(1, 201)},
+                         "elapsed_s": 3}
+    panel._refresh_status_line()
+    assert "none firing yet" in panel.status_label.text()
+
+
+def test_capturing_status_still_lists_a_few_channels(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._both_mode = False
+    panel._last_stats = {"total_pulses": 5, "rate_per_min": 1.0,
+                         "per_channel": {1: 2, 2: 3}, "elapsed_s": 10}
+    panel._refresh_status_line()
+    text = panel.status_label.text()
+    assert "Ch1: 2" in text and "Ch2: 3" in text

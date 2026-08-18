@@ -43,6 +43,7 @@ thread).
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -465,6 +466,12 @@ class PulseCaptureSession(_CallbackHost):
     histogram_flush_every : int
         Flush histograms to HDF5 and fire ``on_histograms`` every N
         pulses (and once at stop).  Default 50.
+    histogram_flush_interval_s : float
+        Also flush when this long has passed since the last one, so the
+        live view keeps up at low count rates instead of waiting for
+        the 50th pulse.  The pulse count still bounds the work at high
+        rates; this only bounds the WAIT at low ones.  Default 0.5, so
+        a quiet capture costs at most two flushes a second.
 
     Callbacks (all optional; exceptions are caught and routed to
     ``on_error``):
@@ -503,6 +510,7 @@ class PulseCaptureSession(_CallbackHost):
         df_calibrations: Optional[Dict[int, float]] = None,
         histogram_config: Optional[Dict[str, Any]] = None,
         histogram_flush_every: int = 50,
+        histogram_flush_interval_s: float = 0.5,
         progress_every: int = 100,
         on_noise: Optional[Callable] = None,
         on_pulse: Optional[Callable] = None,
@@ -541,6 +549,8 @@ class PulseCaptureSession(_CallbackHost):
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
         self.df_calibrations = df_calibrations
         self.histogram_flush_every = int(histogram_flush_every)
+        self.histogram_flush_interval_s = float(histogram_flush_interval_s)
+        self._last_flush_t = 0.0
 
         self.on_noise = on_noise
         self.on_pulse = on_pulse
@@ -919,11 +929,18 @@ class PulseCaptureSession(_CallbackHost):
         self._callback(self.on_pulse, channel, pulse_idx, summary, pulse_data)
         self._callback(self.on_stats, self.stats())
 
-        if self._pulses_since_flush >= self.histogram_flush_every:
+        # Count OR clock: the count keeps a busy capture from flushing
+        # on every pulse, the clock keeps a quiet one from looking dead
+        # until the 50th arrives.
+        if self._pulses_since_flush and (
+                self._pulses_since_flush >= self.histogram_flush_every
+                or (time.monotonic() - self._last_flush_t
+                    >= self.histogram_flush_interval_s)):
             self._flush_histograms()
 
     def _flush_histograms(self) -> None:
         self._pulses_since_flush = 0
+        self._last_flush_t = time.monotonic()
         if self.histograms.total_pulses() == 0:
             return
         data = self.histograms.get_histogram_data()

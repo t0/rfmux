@@ -1566,7 +1566,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         total = s.get("total_pulses", 0)
         rate = s.get("rate_per_min", 0.0)
         per_ch = s.get("per_channel", {})
-        ch_str = " | ".join(f"Ch{c}: {n}" for c, n in sorted(per_ch.items()))
+        if len(per_ch) <= MAX_LISTED_CHANNELS:
+            ch_str = " | ".join(f"Ch{c}: {n}"
+                                for c, n in sorted(per_ch.items()))
+        else:
+            firing = {c: n for c, n in per_ch.items() if n}
+            if firing:
+                busiest = max(firing.items(), key=lambda kv: (kv[1], -kv[0]))
+                ch_str = (f"{len(firing)}/{len(per_ch)} ch firing, "
+                          f"busiest Ch{busiest[0]}: {busiest[1]}")
+            else:
+                ch_str = f"{len(per_ch)} ch, none firing yet"
+        self.status_label.setToolTip(
+            "\n".join(f"Ch{c}  {n}" for c, n in sorted(per_ch.items())))
         elapsed = int(s.get("elapsed_s", 0))
         hh, rem = divmod(elapsed, 3600)
         mm, ss = divmod(rem, 60)

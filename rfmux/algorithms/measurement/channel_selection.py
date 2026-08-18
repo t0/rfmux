@@ -20,6 +20,56 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ... import streamer
 
+#: Spellings of the "every biased channel" wildcard.
+ALL_CHANNELS_TOKENS = ("all", "*")
+
+
+def parse_channel_spec(text: str) -> Optional[List[int]]:
+    """Parse a channel spec into a sorted, de-duplicated channel list.
+
+    Accepts single channels and inclusive ranges, in any mix::
+
+        "1,2"        -> [1, 2]
+        "2-19"       -> [2, 3, ..., 19]
+        "1,5-8,20"   -> [1, 5, 6, 7, 8, 20]
+
+    Returns ``None`` for the wildcard (``all`` / ``*``), which the
+    caller resolves against the board -- see :func:`get_biased_channels`.
+    Whitespace is ignored anywhere.
+
+    Raises ValueError with a message naming the offending token, since
+    the immediate caller is a GUI field showing it back to a human.
+    """
+    cleaned = "".join(text.split())
+    if not cleaned:
+        raise ValueError("No channels given.")
+    if cleaned.lower() in ALL_CHANNELS_TOKENS:
+        return None
+
+    channels = set()
+    for token in cleaned.split(","):
+        if not token:
+            continue  # tolerate "1,,2" and a trailing comma
+        lo, sep, hi = token.partition("-")
+        try:
+            start = int(lo)
+            stop = int(hi) if sep else start
+        except ValueError:
+            raise ValueError(
+                f"Could not read {token!r}. Use channel numbers like "
+                f"\"1,2\", ranges like \"2-19\", or \"all\".") from None
+        if start < 1 or stop < 1:
+            raise ValueError(
+                f"Channels are 1-indexed, so {token!r} is out of range.")
+        if stop < start:
+            raise ValueError(
+                f"Range {token!r} runs backwards -- write "
+                f"\"{stop}-{start}\".")
+        channels.update(range(start, stop + 1))
+    if not channels:
+        raise ValueError("No channels given.")
+    return sorted(channels)
+
 
 @macro(CRS, register=True)
 async def get_biased_channels(

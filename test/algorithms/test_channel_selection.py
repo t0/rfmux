@@ -11,6 +11,9 @@ import asyncio
 import pytest
 
 import rfmux
+from rfmux.algorithms.measurement.channel_selection import (
+    parse_channel_spec,
+)
 
 SESSION = """
 !HardwareMap
@@ -84,3 +87,50 @@ def test_zero_width_is_empty(mock_crs):
     loop, crs = mock_crs
     assert loop.run_until_complete(
         crs.get_biased_channels(1, max_channels=0)) == []
+
+
+# ── channel spec parsing ──────────────────────────────────────────
+
+@pytest.mark.parametrize("text,expected", [
+    ("1", [1]),
+    ("1,2", [1, 2]),
+    ("2-19", list(range(2, 20))),
+    ("1,5-8,20", [1, 5, 6, 7, 8, 20]),
+    ("5-5", [5]),                       # degenerate range is just the one
+    (" 1 , 5 - 7 ", [1, 5, 6, 7]),      # whitespace anywhere
+    ("3,1,2", [1, 2, 3]),               # sorted
+    ("1-3,2-4", [1, 2, 3, 4]),          # overlapping ranges merge
+    ("1,,2,", [1, 2]),                  # tolerate stray commas
+])
+def test_spec_parses(text, expected):
+    assert parse_channel_spec(text) == expected
+
+
+@pytest.mark.parametrize("text", ["all", "ALL", "  All  ", "*"])
+def test_spec_wildcard_is_none(text):
+    # None means "ask the board", not "no channels".
+    assert parse_channel_spec(text) is None
+
+
+@pytest.mark.parametrize("text,fragment", [
+    ("", "No channels"),
+    ("   ", "No channels"),
+    ("abc", "'abc'"),
+    ("1,abc", "'abc'"),
+    ("1-", "'1-'"),
+    ("2-x", "'2-x'"),
+    ("0", "1-indexed"),
+    ("0-4", "1-indexed"),
+    ("-3", "'-3'"),                     # empty range start, not a negative
+    ("19-2", "backwards"),
+])
+def test_spec_rejects(text, fragment):
+    with pytest.raises(ValueError) as e:
+        parse_channel_spec(text)
+    assert fragment in str(e.value)
+
+
+def test_spec_reversed_range_suggests_the_fix():
+    with pytest.raises(ValueError) as e:
+        parse_channel_spec("19-2")
+    assert '"2-19"' in str(e.value)

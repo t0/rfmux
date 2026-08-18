@@ -38,6 +38,9 @@ from .utils import (
 )
 from .pulse_capture_task import PulseCaptureSignals, PulseCaptureTask
 from .pulse_capture_settings_dialog import PulseCaptureSettingsDialog
+from ...algorithms.measurement.channel_selection import (
+    parse_channel_spec,
+)
 from ...algorithms.measurement.pulse_capture_session import (
     PulseCaptureConfig,
     PulseCaptureSession,
@@ -211,10 +214,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         h.addWidget(QtWidgets.QLabel("Channels:"))
         self.channels_edit = QtWidgets.QLineEdit("1,2")
-        self.channels_edit.setFixedWidth(70)
+        self.channels_edit.setFixedWidth(90)
         self.channels_edit.setToolTip(
-            "Comma-separated 1-indexed channels, or \"all\" for every\n"
-            "channel on this module that has a bias set")
+            "1-indexed channels: \"1,2\", ranges \"2-19\", or a mix\n"
+            "\"1,5-8,20\".  \"all\" takes every channel on this module\n"
+            "that has a bias set.")
         h.addWidget(self.channels_edit)
 
         h.addWidget(QtWidgets.QLabel("Module:"))
@@ -654,31 +658,22 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     # ── Capture lifecycle ─────────────────────────────────────────
 
-    #: Typed into the Channels field to mean "every biased channel".
-    _ALL_CHANNELS_TOKENS = ("all", "*")
-
-    def _channels_field_is_all(self) -> bool:
-        return (self.channels_edit.text().strip().lower()
-                in self._ALL_CHANNELS_TOKENS)
-
     def _parse_channels(self, *, runtime=None,
                         quiet: bool = False) -> Optional[List[int]]:
-        if self._channels_field_is_all():
-            return self._resolve_biased_channels(runtime, quiet=quiet)
+        """Channels named by the toolbar field, or None if unusable.
+
+        The syntax itself lives in the algorithms layer so notebooks
+        accept the same strings; this only decides what to do with the
+        wildcard and how to report a bad spec.
+        """
         try:
-            channels = sorted({int(tok) for tok in
-                               self.channels_edit.text().replace(" ", "")
-                               .split(",") if tok})
-        except ValueError:
-            channels = []
-        if not channels or any(c < 1 for c in channels):
+            channels = parse_channel_spec(self.channels_edit.text())
+        except ValueError as e:
             if not quiet:
-                QtWidgets.QMessageBox.warning(
-                    self, "Pulse Capture",
-                    "Channels must be a comma-separated list of 1-indexed "
-                    "channel numbers (e.g. \"1,2\"), or \"all\" for every "
-                    "channel with a bias set.")
+                QtWidgets.QMessageBox.warning(self, "Pulse Capture", str(e))
             return None
+        if channels is None:  # the "all" wildcard
+            return self._resolve_biased_channels(runtime, quiet=quiet)
         return channels
 
     def _resolve_biased_channels(self, runtime=None, *, quiet: bool = False

@@ -1012,3 +1012,20 @@ def test_explicit_channel_list_is_unaffected(qt_app):
     panel, runtime = _panel_with(qt_app, crs, text="1,2")
     assert panel._parse_channels(runtime=runtime) == [1, 2]
     assert crs.calls == []  # no board round trip for an explicit list
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("2-19", list(range(2, 20))),
+    ("1,5-8,20", [1, 5, 6, 7, 8, 20]),
+    ("1, 3 - 5", [1, 3, 4, 5]),
+])
+def test_range_syntax_in_the_channels_field(qt_app, text, expected):
+    crs = _BiasedCRS([9])
+    panel, runtime = _panel_with(qt_app, crs, text=text)
+    assert panel._parse_channels(runtime=runtime) == expected
+    assert crs.calls == []  # an explicit spec needs no board round trip
+
+
+def test_bad_spec_is_reported_not_silently_empty(qt_app):
+    panel, runtime = _panel_with(qt_app, _BiasedCRS([1]), text="19-2")
+    assert panel._parse_channels(runtime=runtime, quiet=True) is None

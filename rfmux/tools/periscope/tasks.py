@@ -48,12 +48,41 @@ class UDPReceiver(QtCore.QThread):
         self.packets_received = 0
         self.packets_dropped = 0
 
-    def get_dropped_packets(self):
-        """Get cumulative dropped packet count from C++ queue statistics."""
+    def get_missing_packets(self):
+        """Packets that never arrived (wire or kernel socket buffer).
+
+        Counted individually, not per discontinuity: one burst of a
+        thousand lost packets is a thousand here and one in
+        ``sequence_gaps``.
+        """
         if self.queue is not None:
-            stats = self.queue.get_stats()
-            return stats.sequence_gaps + stats.packets_dropped
+            return self.queue.get_stats().packets_missing
+        return 0
+
+    def get_queue_drops(self):
+        """Packets the receiver got but the GUI never consumed.
+
+        Queue overflow: Periscope is behind, not the network.
+        """
+        if self.queue is not None:
+            return self.queue.get_stats().packets_dropped
         return self.packets_dropped
+
+    def get_loss_bursts(self):
+        """Discontinuity events — how bursty the missing packets were."""
+        if self.queue is not None:
+            return self.queue.get_stats().sequence_gaps
+        return 0
+
+    def get_dropped_packets(self):
+        """Everything lost, however it was lost.
+
+        Kept for callers that just want one number; anything
+        diagnosing a problem wants the two apart, because the fixes are
+        unrelated -- one is a network or kernel buffer, the other is
+        Periscope being too slow.
+        """
+        return self.get_missing_packets() + self.get_queue_drops()
 
     def get_received_packets(self):
         """Get cumulative received packet count from C++ queue statistics."""

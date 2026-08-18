@@ -74,6 +74,12 @@ class PeriscopeRuntime:
             self.buf[ch_val] = {k: Circular(self.N) for k in ("I", "Q", "M")} # Circular from .utils
             self.tbuf[ch_val] = Circular(self.N)
         
+        # Display batch: packets accumulated this frame, written to the
+        # ring buffers in one go.  See _flush_display_batch.
+        self._display_values: list = []
+        self._display_times: list = []
+        self._display_width: int = -1
+
         # Pulse capture tap callback (registered by PulseCapturePanel)
         if not hasattr(self, '_pulse_tap'):
             self._pulse_tap = None
@@ -658,12 +664,19 @@ class PeriscopeRuntime:
             return
         self.receiver.queue.clear()
 
-    #: Share of the GUI refresh interval the packet drain may consume.
-    #: The remainder belongs to plotting and event handling.
-    _DRAIN_BUDGET_FRACTION = 0.5
+    #: Hard ceiling on one drain pass.  This is a backstop against the
+    #: unbounded loop that used to freeze the window, NOT a throughput
+    #: budget: it must sit far above the time an honest frame's worth of
+    #: packets takes, or it invents packet loss at rates the GUI could
+    #: otherwise sustain.  An earlier version capped the drain at half
+    #: the refresh interval and did exactly that -- 32% loss at stage 0
+    #: with 8 channels displayed, on a stream the receiver handles with
+    #: zero loss.  A quarter second still bounds the freeze to something
+    #: a user reads as a stutter.
+    _DRAIN_DEADLINE_S = 0.25
 
     def _process_incoming_packets(self):
-        """Process queued packets, within a slice of the frame budget.
+        """Process queued packets, stopping only if the drain runs long.
 
         Draining until the queue is empty looks right and is a trap: it
         is only bounded if processing outruns arrival.  Widen a pulse
@@ -673,16 +686,15 @@ class PeriscopeRuntime:
         freezes -- Qt cannot repaint or handle input while it is stuck
         here.
 
-        Stopping at a deadline instead leaves the backlog in the C++
-        queue, which is bounded (queue_max_size) and drops from the far
-        end.  A sustained overrun then shows up as packet loss in the
-        status bar, which is already instrumented, instead of a hang.
+        Stopping at a deadline leaves the backlog in the C++ queue,
+        which is bounded (queue_max_size) and drops from the far end, so
+        a genuine sustained overrun surfaces as packet loss in the
+        status bar rather than a hang.
         """
         if self.receiver.queue is None:
             return
 
-        deadline = time.monotonic() + (self.refresh_ms * 1e-3
-                                       * self._DRAIN_BUDGET_FRACTION)
+        deadline = time.monotonic() + self._DRAIN_DEADLINE_S
 
         while not self.receiver.queue.empty():
             # Get packet from C++ queue (returns type-erased Packet)
@@ -710,6 +722,10 @@ class PeriscopeRuntime:
             if time.monotonic() >= deadline:
                 self.drain_overruns += 1
                 break
+
+        # Before _update_plot_data reads them, and before all_chs can
+        # change under a half-written batch.
+        self._flush_display_batch()
 
     def _calculate_relative_timestamp(self, pkt) -> float | None:
         """
@@ -747,16 +763,21 @@ class PeriscopeRuntime:
         # the second /256 brings 24-bit values down to 16-bit ADC scale.
         samples = np.array(pkt) / 256
 
-        for ch_val in self.all_chs: # Renamed ch
-            if len(pkt) <= ch_val-1:
-                continue # don't plot channels that aren't streamed
-
-            sample = samples[ch_val-1]
-
-            self.buf[ch_val]["I"].add(sample.real)
-            self.buf[ch_val]["Q"].add(sample.imag)
-            self.buf[ch_val]["M"].add(np.abs(sample))
-            self.tbuf[ch_val].add(t_rel)
+        # Buffer for the frame rather than writing per channel now.
+        # Four Circular.add calls per displayed channel per packet was
+        # the dominant per-packet cost at stage 0, and it scaled with
+        # the number of channels on screen; a frame at a time it is a
+        # couple of numpy copies per channel.  The packet width is part
+        # of the batch, so a decimation or packet-mode change flushes
+        # rather than trying to stack ragged rows.
+        width = len(pkt)
+        if width != self._display_width:
+            self._flush_display_batch()
+            self._display_width = width
+        self._display_values.append(samples)
+        self._display_times.append(t_rel)
+        if len(self._display_values) >= self._DISPLAY_BATCH_MAX:
+            self._flush_display_batch()
 
         # Pulse capture tap: forward the requested channels' raw I/Q.
         # The packet carries every streamed channel, so capture is
@@ -773,6 +794,33 @@ class PeriscopeRuntime:
             if channels:
                 self._pulse_tap(channels, samples[idx], ts_abs)
 
+
+    #: Cap on packets held before writing them into the rings.  Bounds
+    #: the transient memory (packets x channels complex128) without
+    #: giving back the batching win: at stage 0 a frame is ~1270
+    #: packets, so this flushes a few times per frame at worst.
+    _DISPLAY_BATCH_MAX = 512
+
+    def _flush_display_batch(self) -> None:
+        """Write the buffered packets into the per-channel rings."""
+        if not self._display_values:
+            return
+        values = np.stack(self._display_values)       # (packets, width)
+        # None means "no recent timestamp"; float64 turns that into NaN,
+        # exactly as Circular.add did with it one at a time.
+        times = np.asarray(self._display_times, dtype=float)
+        self._display_values = []
+        self._display_times = []
+
+        width = values.shape[1]
+        for ch_val in self.all_chs:
+            if width <= ch_val - 1:
+                continue          # don't plot channels that aren't streamed
+            column = values[:, ch_val - 1]
+            self.buf[ch_val]["I"].extend(column.real)
+            self.buf[ch_val]["Q"].extend(column.imag)
+            self.buf[ch_val]["M"].extend(np.abs(column))
+            self.tbuf[ch_val].extend(times)
 
     def reset_histogram_channel(self, ch_val: int) -> None:
         """Clear persistent histogram state for one channel (I and Q)."""
@@ -1044,18 +1092,24 @@ class PeriscopeRuntime:
         """Update FPS and PPS display in the status bar approximately once per second."""
         if (now - self.t_last) >= 1.0:
             #### Getting packet counts ###
-            dropped = self.receiver.get_dropped_packets()
+            # Two unrelated failures, reported apart because they have
+            # unrelated fixes: 'net' never reached us (wire or kernel
+            # socket buffer), 'gui' reached the receiver and was thrown
+            # away because this thread could not keep up.
+            missing = self.receiver.get_missing_packets()
+            qdrops = self.receiver.get_queue_drops()
             received = self.receiver.get_received_packets()
-            
-            ##### Percent calculation #####
-            drop_lastsec = dropped - self.prev_drop
+
+            missing_lastsec = missing - self.prev_missing
+            qdrops_lastsec = qdrops - self.prev_qdrops
             receive_lastsec = received - self.prev_receive
-            # Check for zero denominator to avoid division by zero
-            total_packets = drop_lastsec + receive_lastsec
-            if total_packets > 0:
-                percent = (drop_lastsec / total_packets) * 100
-            else:
-                percent = 0.0  # No packets = no loss
+
+            sent_lastsec = receive_lastsec + missing_lastsec
+            net_percent = (100.0 * missing_lastsec / sent_lastsec
+                           if sent_lastsec > 0 else 0.0)
+            # Queue drops are a share of what actually arrived.
+            gui_percent = (100.0 * qdrops_lastsec / receive_lastsec
+                           if receive_lastsec > 0 else 0.0)
             
             #### Per second metrics #####
             fps = self.frame_cnt / (now - self.t_last)
@@ -1082,26 +1136,38 @@ class PeriscopeRuntime:
                     else:
                         self.sim_speed_label.setStyleSheet("")  # Normal (near real-time)
 
-            # Color packet loss red if > 1%
-            if percent > 1:
+            # Red above 1%, and say WHICH — the two have different fixes.
+            if net_percent > 1 or gui_percent > 1:
                 self.packet_loss_label.setStyleSheet("color: red;")
-                self.info_text.setText("PACKET LOSS HIGH - CONSULT HELP FOR NETWORKING SUGGESTIONS")
+                if gui_percent > net_percent:
+                    self.info_text.setText(
+                        "PERISCOPE IS BEHIND THE STREAM - show fewer "
+                        "channels or increase decimation")
+                else:
+                    self.info_text.setText(
+                        "PACKET LOSS HIGH - CONSULT HELP FOR NETWORKING "
+                        "SUGGESTIONS")
                 self.info_text.setStyleSheet("color: red;")
-            else: 
-                self.packet_loss_label.setStyleSheet(f"color: {self.default_packet_loss_color};")
+            else:
+                self.packet_loss_label.setStyleSheet(
+                    f"color: {self.default_packet_loss_color};")
                 self.info_text.clear()
                 self.info_text.setStyleSheet("")
-                
-            self.packet_loss_label.setText(f"| Packet Loss: {percent:.1f}%")
 
-            self.dropped_label.setText(f"| Dropped: {dropped}")
+            self.packet_loss_label.setText(
+                f"| Loss: {net_percent:.1f}% net, {gui_percent:.1f}% gui")
+
+            self.dropped_label.setText(
+                f"| Lost: {missing:,} net / {qdrops:,} gui")
             
             #### Showing on status bar ####
             # self.statusBar().showMessage(f"FPS {fps:.1f} | Packets/s {pps:.1f} | Packet Loss : {percent_x}% | Dropped : {dropped}") 
             
             #### Initializing ####
             self.frame_cnt = 0; self.pkt_cnt = 0; self.t_last = now
-            self.prev_drop = dropped
+            self.prev_missing = missing
+            self.prev_qdrops = qdrops
+            self.prev_drop = missing + qdrops
             self.prev_receive = received
             
 

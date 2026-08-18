@@ -23,6 +23,9 @@ from PyQt6 import QtWidgets  # noqa: E402
 from rfmux.tools.periscope.app import Periscope  # noqa: E402
 
 REFRESH_MS = 33
+#: Must exceed PeriscopeRuntime._DRAIN_DEADLINE_S; the point of the
+#: backstop is that it is generous, not tight.
+DEADLINE_S = 0.25
 
 
 @pytest.fixture(scope="module")
@@ -69,6 +72,13 @@ def _runtime(qt_app, queue, per_packet_s=0.0):
     p.receiver = SimpleNamespace(queue=queue)
     p._calculate_relative_timestamp = lambda pkt: 0.0
     p.processed = 0
+    # The drain flushes the display batch on its way out.
+    p._display_values = []
+    p._display_times = []
+    p._display_width = -1
+    p.all_chs = []
+    p.buf = {}
+    p.tbuf = {}
 
     def _update_buffers(pkt, t_rel):
         p.processed += 1
@@ -104,10 +114,21 @@ def test_drain_returns_under_sustained_overload(qt_app):
     elapsed = _drain(p)
 
     assert p.drain_overruns == 1, "overrun should be counted"
-    # Budget is half the refresh interval; allow a packet of overshoot
-    # plus scheduling noise.
-    assert elapsed < REFRESH_MS / 1000.0, f"took {elapsed*1e3:.1f} ms"
+    # Bounded by the backstop, with room for a packet of overshoot and
+    # scheduling noise.
+    assert elapsed < DEADLINE_S * 2, f"took {elapsed*1e3:.1f} ms"
     assert p.processed > 0, "should still make progress each frame"
+
+
+def test_backstop_is_not_a_throughput_budget(qt_app):
+    # A frame's worth of packets must never be cut short.  At stage 0
+    # that is ~1270 packets per 33 ms frame; the drain has to swallow
+    # them without tripping the backstop.
+    p = _runtime(qt_app, _FiniteQueue(1270), per_packet_s=0.0)
+    _drain(p)
+    assert p.processed == 1270
+    assert p.drain_overruns == 0, \
+        "the backstop fired on an ordinary frame — it is too tight"
 
 
 def test_drain_makes_progress_across_frames(qt_app):

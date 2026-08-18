@@ -185,8 +185,15 @@ namespace packets {
 
 		struct Stats {
 			uint64_t packets_received = 0;
+			// Queue overflow: the consumer could not keep up.
 			uint64_t packets_dropped = 0;
+			// Discontinuity EVENTS in the sequence numbers. One burst
+			// of a thousand lost packets counts once, so this measures
+			// how bursty the loss is, not how much of it there is.
 			uint64_t sequence_gaps = 0;
+			// Packets that never arrived, counted individually. This is
+			// the one to compare against packets_received.
+			uint64_t packets_missing = 0;
 			uint32_t last_seq = 0;
 		};
 

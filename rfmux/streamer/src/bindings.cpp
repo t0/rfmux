@@ -449,6 +449,7 @@ PYBIND11_MODULE(_receiver, m) {
 		.def_readonly("packets_received", &PacketQueue::Stats::packets_received)
 		.def_readonly("packets_dropped", &PacketQueue::Stats::packets_dropped)
 		.def_readonly("sequence_gaps", &PacketQueue::Stats::sequence_gaps)
+		.def_readonly("packets_missing", &PacketQueue::Stats::packets_missing)
 		.def_readonly("last_seq", &PacketQueue::Stats::last_seq);
 
 	py::class_<PacketQueue, std::shared_ptr<PacketQueue>>(m, "PacketQueue")

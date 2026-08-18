@@ -268,8 +268,18 @@ namespace packets {
 		uint32_t seq = packet.seq();
 		if (stats_.packets_received > 0 && stats_.last_seq != 0) {
 			uint32_t expected_seq = stats_.last_seq + 1;
-			if (seq != expected_seq)
+			if (seq != expected_seq) {
 				stats_.sequence_gaps++;
+				// Unsigned subtraction wraps, so a counter rollover
+				// still yields the true distance. A reordered or
+				// duplicated packet looks like a gap of nearly 2^32
+				// instead; the reorder window already handles ordering,
+				// so treat anything in the top half as "not a loss"
+				// rather than adding billions to the tally.
+				uint32_t missing = seq - expected_seq;
+				if (missing < (1u << 31))
+					stats_.packets_missing += missing;
+			}
 		}
 		stats_.last_seq = seq;
 		stats_.packets_received++;

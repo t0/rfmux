@@ -35,6 +35,7 @@ from ...algorithms.measurement.pulse_capture_session import (
     CaptureState,
     PulseCaptureSession,
 )
+from ...algorithms.measurement.pulse_sources import SlowBlockAccumulator
 
 
 class PulseCaptureSignals(QtCore.QObject):
@@ -135,14 +136,6 @@ class PulseCaptureTask(QtCore.QThread):
 
     # ── GUI-thread API ────────────────────────────────────────────
 
-    #: Slow packets carry one sample per channel, so a block has to be
-    #: built ACROSS packets rather than within one (the PFB path blocks
-    #: within a packet, which is why it needs neither of these).  256
-    #: packets is 6.7 ms at decimation stage 0 but 430 ms at stage 6, so
-    #: a wall-clock cap bounds the added latency at low rates.
-    _BLOCK_PACKETS = 256
-    _BLOCK_MAX_S = 0.05
-
     def enqueue_packet(self, channels, values, timestamp) -> None:
         """Tap callback — called from the GUI thread once per packet.
 
@@ -209,50 +202,14 @@ class PulseCaptureTask(QtCore.QThread):
                 self.signals.error.emit(f"Session stop failed: {e}")
             self.signals.finished.emit()
 
-    class _BlockBuilder:
-        """Accumulates tap packets into per-channel blocks."""
-
-        def __init__(self, task, feed):
-            self._task = task
-            self._feed = feed
-            self.channels = None
-            self._vals = []
-            self._stamps = []
-            self._t_first = 0.0
-
-        def add(self, channels, values, timestamp) -> None:
-            if channels != self.channels:
-                self.flush()
-                self.channels = channels
-            if not self._vals:
-                self._t_first = time.monotonic()
-            self._vals.append(values)
-            # A packet with no usable timestamp becomes NaN; feed_block
-            # drops and counts those exactly as feed_sample did.
-            self._stamps.append(np.nan if timestamp is None
-                                else float(timestamp))
-
-        @property
-        def ready(self) -> bool:
-            return bool(self._vals) and (
-                len(self._vals) >= self._task._BLOCK_PACKETS
-                or time.monotonic() - self._t_first
-                >= self._task._BLOCK_MAX_S)
-
-        def flush(self) -> None:
-            if not self._vals:
-                return
-            values = np.stack(self._vals)          # (packets, channels)
-            stamps = np.asarray(self._stamps, dtype=np.float64)
-            self._vals = []
-            self._stamps = []
-            for column, channel in enumerate(self.channels):
-                samples = values[:, column]
-                self._feed(channel, samples.real, samples.imag, stamps)
-
     def _run_slow_loop(self) -> None:
-        """Drain the tap-fed queue (slow mode) into per-channel blocks."""
-        blocks = self._BlockBuilder(self, self.session.feed_block)
+        """Drain the tap-fed queue (slow mode) into per-channel blocks.
+
+        The blocking itself is SlowBlockAccumulator, shared with the
+        headless socket source, so the GUI is a caller rather than a
+        second implementation.
+        """
+        blocks = SlowBlockAccumulator(self.session.feed_block)
         while not (self._stop_requested or self.isInterruptionRequested()):
             try:
                 item = self.sample_queue.get(timeout=0.02)
@@ -261,9 +218,7 @@ class PulseCaptureTask(QtCore.QThread):
                 continue
             if self._handle_control(item):
                 continue
-            blocks.add(*item)
-            if blocks.ready:
-                blocks.flush()
+            blocks.add_and_flush_if_ready(*item)
         blocks.flush()
 
     async def _run_fast(self) -> None:
@@ -340,7 +295,7 @@ class PulseCaptureTask(QtCore.QThread):
         fed = 0
         warned = False
         t_start = time.monotonic()
-        blocks = self._BlockBuilder(self, self.session.feed_slow_block)
+        blocks = SlowBlockAccumulator(self.session.feed_slow_block)
         while not stop():
             try:
                 item = self.sample_queue.get_nowait()
@@ -356,10 +311,8 @@ class PulseCaptureTask(QtCore.QThread):
                 continue
             if self._handle_control(item):
                 continue
-            blocks.add(*item)
+            blocks.add_and_flush_if_ready(*item)
             fed += 1
-            if blocks.ready:
-                blocks.flush()
         blocks.flush()
         return 0.0
 

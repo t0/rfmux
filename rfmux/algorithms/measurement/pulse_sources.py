@@ -1,11 +1,17 @@
 """
 Async packet sources that feed a PulseCaptureSession from the streamers.
 
-These are the headless counterparts of Periscope's slow-stream tap: an
-asyncio receive loop per stream that parses packets and calls
-:meth:`PulseCaptureSession.feed_sample`.  The Periscope pulse-capture
-task and the reference demo scripts share these functions — the GUI
-adds only Qt signal plumbing on top.
+An asyncio receive loop per stream that parses packets and feeds a
+session in blocks.  The Periscope pulse-capture task and the reference
+demo scripts share this code — the GUI adds only Qt signal plumbing on
+top.
+
+Periscope cannot use :func:`run_slow_source` itself (its own receiver
+already owns the socket, and with ``SO_REUSEPORT`` a second listener
+would starve), so it feeds :class:`SlowBlockAccumulator` from its GUI
+tap instead.  That class is the shared part: both routes turn packets
+into per-channel blocks identically, and neither can quietly become
+slower than the other.
 
 Usage (fast/PFB capture, headless)::
 
@@ -25,12 +31,105 @@ which is what live cross-stream pulse matching needs.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Awaitable, Callable, List, Optional, Tuple
 
 import numpy as np
 
 from ... import streamer
 from .streamer_config import PFB_SAMPLE_RATE
+
+
+def columns_for_width(channels, width: int):
+    """``(channels, index array)`` for a packet carrying `width` channels.
+
+    Channels past the packet width are dropped rather than skipped one
+    at a time: a short packet carries 128, and column 200 of it does not
+    exist however the channel is biased.
+    """
+    kept = tuple(c for c in channels if 0 < c <= width)
+    return kept, np.fromiter((c - 1 for c in kept), dtype=np.intp,
+                             count=len(kept))
+
+
+class SlowBlockAccumulator:
+    """Turns slow-stream packets into per-channel blocks.
+
+    A slow packet carries one sample of *each* channel, so a block has
+    to be built ACROSS packets -- unlike a PFB packet, which is already
+    a block of one channel.  That difference is the whole reason this
+    class exists.
+
+    Feeding sample-at-a-time costs ~2.3 us of interpreter time per
+    sample (see :meth:`PulseCapture.process_sample`), which at 200
+    channels caps ingest near 1.8k packets/s -- decimation stage 5.
+    Going through blocks lifts that to ~65k packets/s, past stage 0.
+
+    Both the headless socket source and Periscope's GUI tap drive this,
+    so the two cannot drift apart: the GUI is a caller, not a second
+    implementation.
+
+    ``feed`` is called as ``feed(channel, I, Q, timestamps)`` -- pass
+    ``session.feed_block``, or a stream-specific variant such as
+    ``DualPulseCaptureSession.feed_slow_block``.
+    """
+
+    #: 256 packets is 6.7 ms at decimation stage 0 but 430 ms at stage
+    #: 6, so a wall-clock cap keeps latency bounded at low rates.
+    DEFAULT_MAX_PACKETS = 256
+    DEFAULT_MAX_AGE_S = 0.05
+
+    def __init__(self, feed, *, max_packets: int = DEFAULT_MAX_PACKETS,
+                 max_age_s: float = DEFAULT_MAX_AGE_S):
+        self._feed = feed
+        self.max_packets = max_packets
+        self.max_age_s = max_age_s
+        self.channels: Optional[Tuple[int, ...]] = None
+        self._values: List[np.ndarray] = []
+        self._stamps: List[float] = []
+        self._opened = 0.0
+
+    def add(self, channels, values, timestamp) -> None:
+        """Buffer one packet's worth of samples.
+
+        A change of channel set flushes what came before, so columns
+        never straddle two different layouts.
+        """
+        channels = tuple(channels)
+        if channels != self.channels:
+            self.flush()
+            self.channels = channels
+        if not self._values:
+            self._opened = time.monotonic()
+        self._values.append(values)
+        # No usable timestamp becomes NaN; feed_block drops and counts
+        # those exactly as feed_sample did.
+        self._stamps.append(float("nan") if timestamp is None
+                            else float(timestamp))
+
+    @property
+    def ready(self) -> bool:
+        return bool(self._values) and (
+            len(self._values) >= self.max_packets
+            or time.monotonic() - self._opened >= self.max_age_s)
+
+    def add_and_flush_if_ready(self, channels, values, timestamp) -> None:
+        """The whole per-packet duty of a caller, in one call."""
+        self.add(channels, values, timestamp)
+        if self.ready:
+            self.flush()
+
+    def flush(self) -> None:
+        """Hand everything buffered to the session, one block per channel."""
+        if not self._values:
+            return
+        values = np.stack(self._values)          # (packets, channels)
+        stamps = np.asarray(self._stamps, dtype=np.float64)
+        self._values = []
+        self._stamps = []
+        for column, channel in enumerate(self.channels):
+            samples = values[:, column]
+            self._feed(channel, samples.real, samples.imag, stamps)
 
 
 def _flush(sock) -> None:
@@ -69,7 +168,10 @@ async def run_slow_source(
     Returns the sample time covered (seconds).
     """
     loop = asyncio.get_running_loop()
-    channels = list(session.channels)
+    requested = list(session.channels)
+    blocks = SlowBlockAccumulator(session.feed_block)
+    columns: Optional[Tuple[Tuple[int, ...], np.ndarray]] = None
+    width = -1
     prev_ts: Optional[float] = None
     elapsed = 0.0
 
@@ -91,11 +193,14 @@ async def run_slow_source(
                 continue
             raw = np.array(pkt) / 256.0
             ts = streamer.ts_to_seconds(pkt.ts)
-            for ch in channels:
-                if len(pkt) <= ch - 1:
-                    continue
-                s = raw[ch - 1]
-                session.feed_sample(ch, float(s.real), float(s.imag), ts)
+            if len(pkt) != width:
+                # Recomputed only when the packet mode changes, not per
+                # packet -- that would undo the point of blocking.
+                width = len(pkt)
+                columns = columns_for_width(requested, width)
+            if columns[0]:
+                blocks.add_and_flush_if_ready(columns[0], raw[columns[1]],
+                                              ts)
             if ts is not None:
                 # Monotone accumulation, clamped per packet: immune to
                 # timestamp discontinuities (decimation changes, clock
@@ -108,6 +213,7 @@ async def run_slow_source(
                 prev_ts = ts
                 if duration_s is not None and elapsed >= duration_s:
                     break
+        blocks.flush()   # don't strand the tail of the capture
     return elapsed
 
 
@@ -170,15 +276,12 @@ async def run_pfb_source(
                 if v.shape[0] == 0:
                     continue
                 n_ok = min(v.shape[0], times.shape[0])
-                feed = getattr(session, "feed_block", None)
-                if feed is None:
-                    for si in range(n_ok):
-                        session.feed_sample(ch, float(v[si].real),
-                                            float(v[si].imag),
-                                            None if ts is None
-                                            else float(times[si]))
-                else:
-                    feed(ch, v[:n_ok].real, v[:n_ok].imag, times[:n_ok])
+                # Every session and facade exposes feed_block.  This
+                # used to fall back to a per-sample loop when it did
+                # not, which is how both-mode quietly ran the fast
+                # stream on the path this function exists to avoid.
+                session.feed_block(ch, v[:n_ok].real, v[:n_ok].imag,
+                                   times[:n_ok])
             # Exact per-packet span — independent of timestamp
             # discontinuities across rate changes.
             elapsed += time_samples / sample_rate

@@ -264,10 +264,17 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     class _TapShim:
         pass
 
+    def _shim_feed_block(ch, i_vals, q_vals, stamps):
+        # run_slow_source hands over per-channel blocks; the real tap
+        # hands the task one packet at a time, so unpack back into
+        # packets rather than short-circuiting the queue under test.
+        for n in range(len(i_vals)):
+            task.enqueue_packet(
+                (ch,), np.array([complex(i_vals[n], q_vals[n])]),
+                float(stamps[n]))
+
     _TapShim.channels = channels
-    _TapShim.feed_sample = staticmethod(
-        lambda ch, i, q, t: task.enqueue_packet(
-            (ch,), np.array([complex(i, q)]), t))
+    _TapShim.feed_block = staticmethod(_shim_feed_block)
 
     # Both registered: the flag lets run_slow_source leave its socket block,
     # the join makes sure it actually did. Without this the thread outlives a

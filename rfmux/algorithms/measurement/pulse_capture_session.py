@@ -572,6 +572,10 @@ class PulseCaptureSession(_CallbackHost):
         # on a fast stream would not fit.
         self._noise_buf: Dict[int, np.ndarray] = {}
         self._noise_n: Dict[int, int] = {}
+        #: Samples that arrived after a channel filled its training
+        #: quota but before the SESSION left ESTIMATING (other channels
+        #: still training).  Held rather than dropped -- see feed_block.
+        self._pending_post_noise: Dict[int, tuple] = {}
 
         # Counters / timing (sample time, from fed timestamps)
         self.pulse_counts: Dict[int, int] = {c: 0 for c in self.channels}
@@ -704,6 +708,15 @@ class PulseCaptureSession(_CallbackHost):
             if self.state is CaptureState.ESTIMATING:
                 taken = self._absorb_noise(channel, I[pos:], Q[pos:])
                 if taken == 0:
+                    if pos < n and channel in self._noise_buf:
+                        # This channel has its quota but the session is
+                        # still ESTIMATING because another channel has
+                        # not.  Dropping here would cost up to a whole
+                        # block -- 1000 samples on the PFB stream --
+                        # where per-sample feeding loses at most one.
+                        # Hold it for the transition instead.
+                        self._hold_post_noise(channel, I[pos:], Q[pos:],
+                                              T[pos:])
                     return  # unknown channel, or state did not advance
                 pos += taken
                 continue
@@ -725,6 +738,25 @@ class PulseCaptureSession(_CallbackHost):
                 self._last_ts = float(seg_T[-1])
                 self.pcap.process_block(channel, seg_I, seg_Q, seg_T)
             return
+
+    def _hold_post_noise(self, channel: int, I: np.ndarray, Q: np.ndarray,
+                         T: np.ndarray) -> None:
+        """Stash a block tail until the session starts capturing."""
+        held = self._pending_post_noise.get(channel)
+        if held is None:
+            self._pending_post_noise[channel] = (I.copy(), Q.copy(),
+                                                 T.copy())
+        else:
+            self._pending_post_noise[channel] = (
+                np.concatenate((held[0], I)),
+                np.concatenate((held[1], Q)),
+                np.concatenate((held[2], T)))
+
+    def _drain_post_noise(self) -> None:
+        """Feed everything held during training, now that we capture."""
+        pending, self._pending_post_noise = self._pending_post_noise, {}
+        for channel, (I, Q, T) in pending.items():
+            self.feed_block(channel, I, Q, T)
 
     def _absorb_noise(self, channel: int, I: np.ndarray,
                       Q: np.ndarray) -> int:
@@ -795,6 +827,7 @@ class PulseCaptureSession(_CallbackHost):
                                        dtype=np.complex128)
                            for c in self.channels}
         self._noise_n = {c: 0 for c in self.channels}
+        self._pending_post_noise = {}
 
     def _maybe_finish_estimation(self) -> None:
         if any(self._noise_n.get(c, 0) < self.noise_samples
@@ -821,6 +854,9 @@ class PulseCaptureSession(_CallbackHost):
 
         self.state = CaptureState.CAPTURING
         self._callback(self.on_noise, self.noise_stats)
+        # Only now: a listener must hear "noise estimated" before it
+        # hears about a pulse found in the samples we held back.
+        self._drain_post_noise()
 
     def _build_engine_and_writer(self) -> None:
         # One dict, two consumers: what the engine runs on is what the

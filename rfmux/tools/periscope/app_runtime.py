@@ -12,6 +12,9 @@ from PyQt6 import sip
 import numpy as np
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 from ... import streamer as _streamer
+from ...algorithms.measurement.pulse_sources import (
+    columns_for_width,
+)
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
@@ -138,9 +141,7 @@ class PeriscopeRuntime:
                 return cache[1], cache[2]
             wanted = tuple(src)
 
-        chans = tuple(c for c in wanted if 0 < c <= width)
-        idx = np.fromiter((c - 1 for c in chans), dtype=np.intp,
-                          count=len(chans))
+        chans, idx = columns_for_width(wanted, width)
         if src is not None:
             self._pulse_tap_cache = (width, chans, idx)
         return chans, idx

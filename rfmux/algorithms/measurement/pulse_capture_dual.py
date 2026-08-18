@@ -257,14 +257,17 @@ class DualPulseCaptureSession(_CallbackHost):
 
         self.slow = self._make_stream("slow", slow_rate)
         self.fast = self._make_stream("fast", fast_rate)
-        #: Source-compatible facades: run_slow_source/run_pfb_source read
-        #: ``channels`` and call ``feed_sample``, so routing those two
-        #: names through feed_slow/feed_fast is all it takes for stream
-        #: time to drive matcher expiry.
+        #: Source-compatible facades: run_slow_source/run_pfb_source
+        #: read ``channels`` and call ``feed_block``, so routing those
+        #: names through the per-stream feeds is all it takes for
+        #: stream time to drive matcher expiry.  ``feed_sample`` stays
+        #: for callers that genuinely have one sample at a time.
         self.slow_feed = SimpleNamespace(channels=self.channels,
-                                         feed_sample=self.feed_slow)
+                                         feed_sample=self.feed_slow,
+                                         feed_block=self.feed_slow_block)
         self.fast_feed = SimpleNamespace(channels=self.channels,
-                                         feed_sample=self.feed_fast)
+                                         feed_sample=self.feed_fast,
+                                         feed_block=self.feed_fast_block)
 
     def _make_stream(self, stream: str,
                      sample_rate: float) -> PulseCaptureSession:
@@ -309,18 +312,27 @@ class DualPulseCaptureSession(_CallbackHost):
         self._advance_matcher("fast", t)
 
     def feed_slow_block(self, ch: int, i_vals, q_vals, timestamps) -> None:
-        """Block form of :meth:`feed_slow`, for Periscope's packet tap.
+        """Block form of :meth:`feed_slow`."""
+        self._feed_block("slow", self.slow, ch, i_vals, q_vals, timestamps)
 
-        Matcher time advances once per block off the last usable
-        timestamp rather than per sample.  _advance_matcher is throttled
-        to 20 ms of stream time anyway, so the per-sample calls bought
+    def feed_fast_block(self, ch: int, i_vals, q_vals, timestamps) -> None:
+        """Block form of :meth:`feed_fast`."""
+        self._feed_block("fast", self.fast, ch, i_vals, q_vals, timestamps)
+
+    def _feed_block(self, stream: str, session, ch: int, i_vals, q_vals,
+                    timestamps) -> None:
+        """Feed one stream a block and advance its clock once.
+
+        Matcher time advances off the last usable timestamp in the
+        block rather than per sample -- _advance_matcher is throttled to
+        20 ms of stream time anyway, so the per-sample calls bought
         nothing.
         """
-        self.slow.feed_block(ch, i_vals, q_vals, timestamps)
+        session.feed_block(ch, i_vals, q_vals, timestamps)
         stamps = np.asarray(timestamps, dtype=np.float64)
         usable = stamps[np.isfinite(stamps)]
         if usable.size:
-            self._advance_matcher("slow", float(usable[-1]))
+            self._advance_matcher(stream, float(usable[-1]))
 
     def _advance_matcher(self, stream: str, t) -> None:
         # Throttled: expiry sweep at most every 20 ms of stream time

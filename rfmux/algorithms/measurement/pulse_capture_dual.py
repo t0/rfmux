@@ -30,6 +30,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
+import numpy as np
+
 from .pulse_capture_session import (
     CaptureState,
     PulseCaptureConfig,
@@ -305,6 +307,20 @@ class DualPulseCaptureSession(_CallbackHost):
     def feed_fast(self, ch: int, i: float, q: float, t) -> None:
         self.fast.feed_sample(ch, i, q, t)
         self._advance_matcher("fast", t)
+
+    def feed_slow_block(self, ch: int, i_vals, q_vals, timestamps) -> None:
+        """Block form of :meth:`feed_slow`, for Periscope's packet tap.
+
+        Matcher time advances once per block off the last usable
+        timestamp rather than per sample.  _advance_matcher is throttled
+        to 20 ms of stream time anyway, so the per-sample calls bought
+        nothing.
+        """
+        self.slow.feed_block(ch, i_vals, q_vals, timestamps)
+        stamps = np.asarray(timestamps, dtype=np.float64)
+        usable = stamps[np.isfinite(stamps)]
+        if usable.size:
+            self._advance_matcher("slow", float(usable[-1]))
 
     def _advance_matcher(self, stream: str, t) -> None:
         # Throttled: expiry sweep at most every 20 ms of stream time

@@ -1057,7 +1057,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self.task.start()
         if mode in ("slow", "both"):
-            runtime.register_pulse_tap(self.task.enqueue, channels)
+            runtime.register_pulse_tap(self.task.enqueue_packet,
+                                       channels)
             self._tap_registered = True
         self._set_run_state(True)
         self._set_status("● Estimating noise…", "#FFCC33")

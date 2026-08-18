@@ -84,6 +84,16 @@ def _make_panel(qt_app, tmp_path, runtime):
     return panel
 
 
+def _tap1(tap, ch, i, q, t):
+    """Feed one sample through the packet-shaped tap.
+
+    The tap takes a whole packet (channels, values, timestamp); a slow
+    packet carries one sample per channel, so a single sample is just a
+    one-entry packet.
+    """
+    tap((ch,), np.array([complex(i, q)]), t)
+
+
 def _feed_capture(tap, rng, n=3000, pulse_starts=(100, 900, 1700),
                   tau_samples=40, amp=60.0):
     signal = rng.normal(0, 1.0, n)
@@ -92,7 +102,8 @@ def _feed_capture(tap, rng, n=3000, pulse_starts=(100, 900, 1700),
         m = k >= k0
         signal[m] += amp * np.exp(-(k[m] - k0) / tau_samples)
     for i in range(n):
-        tap(1, float(signal[i]), float(rng.normal(0, 1.0)), i * DT)
+        _tap1(tap, 1, float(signal[i]), float(rng.normal(0, 1.0)),
+              i * DT)
 
 
 def test_live_capture_end_to_end(qt_app, tmp_path):
@@ -108,8 +119,8 @@ def test_live_capture_end_to_end(qt_app, tmp_path):
 
     # Noise estimation: 1000 samples (session default), timestamps unused
     for _ in range(1000):
-        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
-                           float(rng.normal(0, 1.0)), None)
+        _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
+              float(rng.normal(0, 1.0)), None)
     assert _spin_until(qt_app, lambda: panel.noise_stats), \
         "noise_estimated signal never arrived"
     assert "Noise:" in panel.noise_label.text()
@@ -300,8 +311,8 @@ def test_noise_progress_stall_visibility(qt_app, tmp_path):
     target = panel.task.session.noise_samples
     n_fed = target // 2  # partial fill on ch1 only — channel 2 starves
     for _ in range(n_fed):
-        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
-                           float(rng.normal(0, 1.0)), None)
+        _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
+              float(rng.normal(0, 1.0)), None)
 
     assert _spin_until(
         qt_app,
@@ -367,8 +378,8 @@ def test_waveform_fetch_after_eviction_and_stop(qt_app, tmp_path):
     # deterministic for this test.
     panel.follow_check.setChecked(False)
     for _ in range(1000):
-        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
-                           float(rng.normal(0, 1.0)), None)
+        _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
+              float(rng.normal(0, 1.0)), None)
     assert _spin_until(qt_app, lambda: panel.noise_stats)
     _feed_capture(runtime._pulse_tap, rng)
     assert _spin_until(qt_app, lambda: len(panel._pulse_order) == 3)
@@ -494,8 +505,8 @@ def test_follow_latest_coalesces_bursts(qt_app, tmp_path):
     panel.task._cache_size = 2  # aggressive eviction
     assert panel.follow_check.isChecked()
     for _ in range(1000):
-        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
-                           float(rng.normal(0, 1.0)), None)
+        _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
+              float(rng.normal(0, 1.0)), None)
     assert _spin_until(qt_app, lambda: panel.noise_stats)
 
     _feed_capture(runtime._pulse_tap, rng, n=8000,
@@ -562,8 +573,8 @@ def test_template_tab_renders(qt_app, tmp_path):
     panel._on_start()
     hdf5_path = panel.task.session.hdf5_path
     for _ in range(1000):
-        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
-                           float(rng.normal(0, 1.0)), None)
+        _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
+              float(rng.normal(0, 1.0)), None)
     assert _spin_until(qt_app, lambda: panel.noise_stats)
 
     _feed_capture(runtime._pulse_tap, rng, n=8000,
@@ -773,8 +784,8 @@ def test_single_pulse_bands_are_drawn_and_named(qt_app, tmp_path):
     rng = np.random.default_rng(7)
     panel._on_start()
     for _ in range(1000):
-        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
-                           float(rng.normal(0, 1.0)), None)
+        _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
+              float(rng.normal(0, 1.0)), None)
     assert _spin_until(qt_app, lambda: panel.noise_stats)
     _feed_capture(runtime._pulse_tap, rng)
     assert _spin_until(qt_app, lambda: len(panel._pulse_order) >= 1)
@@ -828,8 +839,8 @@ def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
     rng = np.random.default_rng(42)
     panel._on_start()
     for _ in range(1000):
-        runtime._pulse_tap(1, float(rng.normal(0, 1.0)),
-                           float(rng.normal(0, 1.0)), None)
+        _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
+              float(rng.normal(0, 1.0)), None)
     assert _spin_until(qt_app, lambda: panel.noise_stats)
     _feed_capture(runtime._pulse_tap, rng)
     assert _spin_until(qt_app, lambda: len(panel._pulse_order) >= 1)

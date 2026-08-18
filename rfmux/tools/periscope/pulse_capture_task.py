@@ -6,8 +6,9 @@ Architecture: all capture logic (noise estimation, detection, HDF5,
 histograms) lives in the algorithms layer.  This QThread only
 
 1. drains a thread-safe queue that the GUI-thread tap fills
-   (:meth:`PulseCaptureTask.enqueue`),
-2. feeds :meth:`PulseCaptureSession.feed_sample` from its own thread
+   (:meth:`PulseCaptureTask.enqueue_packet`),
+2. assembles those packets into per-channel blocks and feeds
+   :meth:`PulseCaptureSession.feed_block` from its own thread
    (h5py writes must stay on one thread), and
 3. re-emits the session callbacks as Qt signals.
 
@@ -26,6 +27,7 @@ import time
 from collections import OrderedDict
 from typing import Any, Dict, Optional, Tuple
 
+import numpy as np
 from PyQt6 import QtCore
 from PyQt6.QtCore import pyqtSignal
 
@@ -74,7 +76,7 @@ class PulseCaptureTask(QtCore.QThread):
         self,
         session: PulseCaptureSession,
         signals: PulseCaptureSignals,
-        queue_size: int = 100_000,
+        queue_size: int = 8_192,
         waveform_cache: int = 200,
         parent: Optional[QtCore.QObject] = None,
         mode: str = "slow",
@@ -132,13 +134,23 @@ class PulseCaptureTask(QtCore.QThread):
 
     # ── GUI-thread API ────────────────────────────────────────────
 
-    def enqueue(self, channel: int, i_val: float, q_val: float,
-                timestamp) -> None:
-        """Tap callback — called from the GUI thread for every sample."""
+    #: Slow packets carry one sample per channel, so a block has to be
+    #: built ACROSS packets rather than within one (the PFB path blocks
+    #: within a packet, which is why it needs neither of these).  256
+    #: packets is 6.7 ms at decimation stage 0 but 430 ms at stage 6, so
+    #: a wall-clock cap bounds the added latency at low rates.
+    _BLOCK_PACKETS = 256
+    _BLOCK_MAX_S = 0.05
+
+    def enqueue_packet(self, channels, values, timestamp) -> None:
+        """Tap callback — called from the GUI thread once per packet.
+
+        ``values`` holds one complex sample per entry of ``channels``.
+        """
         try:
-            self.sample_queue.put_nowait((channel, i_val, q_val, timestamp))
+            self.sample_queue.put_nowait((channels, values, timestamp))
         except queue.Full:
-            self.dropped_overflow += 1
+            self.dropped_overflow += len(channels)
 
     def request_stop(self) -> None:
         """Ask the worker to finish; session.stop() runs in the worker."""
@@ -196,17 +208,62 @@ class PulseCaptureTask(QtCore.QThread):
                 self.signals.error.emit(f"Session stop failed: {e}")
             self.signals.finished.emit()
 
+    class _BlockBuilder:
+        """Accumulates tap packets into per-channel blocks."""
+
+        def __init__(self, task, feed):
+            self._task = task
+            self._feed = feed
+            self.channels = None
+            self._vals = []
+            self._stamps = []
+            self._t_first = 0.0
+
+        def add(self, channels, values, timestamp) -> None:
+            if channels != self.channels:
+                self.flush()
+                self.channels = channels
+            if not self._vals:
+                self._t_first = time.monotonic()
+            self._vals.append(values)
+            # A packet with no usable timestamp becomes NaN; feed_block
+            # drops and counts those exactly as feed_sample did.
+            self._stamps.append(np.nan if timestamp is None
+                                else float(timestamp))
+
+        @property
+        def ready(self) -> bool:
+            return bool(self._vals) and (
+                len(self._vals) >= self._task._BLOCK_PACKETS
+                or time.monotonic() - self._t_first
+                >= self._task._BLOCK_MAX_S)
+
+        def flush(self) -> None:
+            if not self._vals:
+                return
+            values = np.stack(self._vals)          # (packets, channels)
+            stamps = np.asarray(self._stamps, dtype=np.float64)
+            self._vals = []
+            self._stamps = []
+            for column, channel in enumerate(self.channels):
+                samples = values[:, column]
+                self._feed(channel, samples.real, samples.imag, stamps)
+
     def _run_slow_loop(self) -> None:
-        """Drain the tap-fed queue (slow mode)."""
+        """Drain the tap-fed queue (slow mode) into per-channel blocks."""
+        blocks = self._BlockBuilder(self, self.session.feed_block)
         while not (self._stop_requested or self.isInterruptionRequested()):
             try:
-                item = self.sample_queue.get(timeout=0.1)
+                item = self.sample_queue.get(timeout=0.02)
             except queue.Empty:
+                blocks.flush()   # don't strand a partial block when idle
                 continue
             if self._handle_control(item):
                 continue
-            ch, i_val, q_val, ts = item
-            self.session.feed_sample(ch, i_val, q_val, ts)
+            blocks.add(*item)
+            if blocks.ready:
+                blocks.flush()
+        blocks.flush()
 
     async def _run_fast(self) -> None:
         """PFB capture: configure the fast streamer, run the shared
@@ -282,10 +339,12 @@ class PulseCaptureTask(QtCore.QThread):
         fed = 0
         warned = False
         t_start = time.monotonic()
+        blocks = self._BlockBuilder(self, self.session.feed_slow_block)
         while not stop():
             try:
                 item = self.sample_queue.get_nowait()
             except queue.Empty:
+                blocks.flush()
                 if (not warned and fed == 0
                         and time.monotonic() - t_start > 5.0):
                     warned = True
@@ -296,9 +355,11 @@ class PulseCaptureTask(QtCore.QThread):
                 continue
             if self._handle_control(item):
                 continue
-            ch, i_val, q_val, ts = item
-            self.session.feed_slow(ch, i_val, q_val, ts)
+            blocks.add(*item)
             fed += 1
+            if blocks.ready:
+                blocks.flush()
+        blocks.flush()
         return 0.0
 
     async def _control_pump(self) -> None:

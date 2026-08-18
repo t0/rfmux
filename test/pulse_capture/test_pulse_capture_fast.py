@@ -12,6 +12,7 @@ import asyncio
 import os
 import time
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -265,7 +266,8 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
 
     _TapShim.channels = channels
     _TapShim.feed_sample = staticmethod(
-        lambda ch, i, q, t: task.enqueue(ch, i, q, t))
+        lambda ch, i, q, t: task.enqueue_packet(
+            (ch,), np.array([complex(i, q)]), t))
 
     # Both registered: the flag lets run_slow_source leave its socket block,
     # the join makes sure it actually did. Without this the thread outlives a

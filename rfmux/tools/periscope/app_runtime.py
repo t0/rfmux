@@ -76,6 +76,8 @@ class PeriscopeRuntime:
             self._pulse_tap = None
         if not hasattr(self, '_pulse_tap_channels'):
             self._pulse_tap_channels = None
+        if not hasattr(self, '_pulse_tap_cache'):
+            self._pulse_tap_cache = None
 
         # Initialize simulation speed tracking for mock mode
         if self.is_mock_mode:
@@ -86,10 +88,17 @@ class PeriscopeRuntime:
     def register_pulse_tap(self, callback, channels=None):
         """Register a callback to receive slow stream samples for pulse capture.
 
-        The callback is invoked from the GUI timer thread for every sample
-        in every packet, so it must be fast (e.g. put into a queue).
+        Invoked from the GUI timer thread once per PACKET, not once per
+        sample, so it must be fast (e.g. put into a queue).
 
-        Signature: ``callback(channel: int, i_val: float, q_val: float, timestamp: float | None)``
+        Signature: ``callback(channels: tuple[int, ...], values: np.ndarray,
+        timestamp: float | None)`` -- ``values`` holds one complex sample
+        per entry of ``channels``, in that order.
+
+        Handing over whole packets keeps the per-packet cost flat in the
+        channel count.  The per-sample callback this replaced cost one
+        Python call and one queue put per channel per packet, which is
+        what made a 200-channel capture outrun the frame budget.
 
         Parameters
         ----------
@@ -101,12 +110,40 @@ class PeriscopeRuntime:
         """
         self._pulse_tap_channels = (
             sorted(set(int(c) for c in channels)) if channels else None)
+        self._pulse_tap_cache = None
         self._pulse_tap = callback
 
     def unregister_pulse_tap(self):
         """Remove the pulse capture tap callback."""
         self._pulse_tap = None
         self._pulse_tap_channels = None
+        self._pulse_tap_cache = None
+
+    def _pulse_tap_columns(self, width: int):
+        """``(channels, index array)`` for a packet carrying `width` channels.
+
+        Channels beyond the packet width are dropped: a short packet
+        carries 128, and asking for column 200 of it is meaningless.
+        Cached against the width, which only moves when the decimation
+        stage or packet mode does -- rebuilding this per packet would
+        undo the point of handing over whole packets.
+        """
+        src = self._pulse_tap_channels
+        if src is None:
+            # Displayed channels can change under us, so don't cache.
+            wanted = tuple(self.all_chs)
+        else:
+            cache = self._pulse_tap_cache
+            if cache is not None and cache[0] == width:
+                return cache[1], cache[2]
+            wanted = tuple(src)
+
+        chans = tuple(c for c in wanted if 0 < c <= width)
+        idx = np.fromiter((c - 1 for c in chans), dtype=np.intp,
+                          count=len(chans))
+        if src is not None:
+            self._pulse_tap_cache = (width, chans, idx)
+        return chans, idx
 
     def _build_layout(self):
         """
@@ -731,12 +768,9 @@ class PeriscopeRuntime:
             ts_abs = (ts.h * 3600 + ts.m * 60 + ts.s
                       + ts.ss / _streamer.SS_PER_SECOND) \
                 if ts.recent else None
-            for ch_val in (self._pulse_tap_channels or self.all_chs):
-                if len(pkt) <= ch_val - 1:
-                    continue
-                s = samples[ch_val - 1]
-                self._pulse_tap(ch_val, float(s.real), float(s.imag),
-                                ts_abs)
+            channels, idx = self._pulse_tap_columns(len(pkt))
+            if channels:
+                self._pulse_tap(channels, samples[idx], ts_abs)
 
 
     def reset_histogram_channel(self, ch_val: int) -> None:

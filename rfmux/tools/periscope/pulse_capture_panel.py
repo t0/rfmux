@@ -57,6 +57,60 @@ FAST_IQ_COLORS = {"I": "#24478F", "Q": "#8F4724"}
 
 # Channel plot colors: ch1 = I-blue, ch2 = Q-orange (HUD convention),
 # further channels from Tableau10.
+#: Above this many channels the status strip summarises instead of
+#: naming every channel.  200 channels of "Ch12 I=1.0±2.34, Q=…" is
+#: several thousand characters on one line, and a QLabel that wide
+#: drags the whole dock out with it.
+MAX_LISTED_CHANNELS = 4
+
+
+def _summarize(stats: dict, per_channel, summary) -> str:
+    """List every channel while there are few, else summarise.
+
+    ``per_channel(channel, ns)`` renders one entry; ``summary(stats)``
+    renders the condensed form.
+    """
+    if not stats:
+        return "—"
+    if len(stats) <= MAX_LISTED_CHANNELS:
+        return "   |   ".join(per_channel(c, ns)
+                              for c, ns in sorted(stats.items()))
+    return summary(stats)
+
+
+def _spread(values) -> str:
+    """min–max (median) for a run of numbers."""
+    ordered = sorted(float(v) for v in values)
+    return (f"{ordered[0]:.2f}–{ordered[-1]:.2f} "
+            f"(median {ordered[len(ordered) // 2]:.2f})")
+
+
+def _noise_line(stats: dict) -> str:
+    """Noise strip text for one stream."""
+    return _summarize(
+        stats,
+        lambda c, ns: (f"Ch{c} I={ns.mean_I:.1f}±{ns.std_I:.2f}, "
+                       f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}"),
+        lambda st: (f"{len(st)} ch — σI {_spread(n.std_I for n in st.values())}"
+                    f", σQ {_spread(n.std_Q for n in st.values())}"))
+
+
+def _noise_line_sigma(stats: dict) -> str:
+    """Compact per-stream variant used in both-mode."""
+    return _summarize(
+        stats,
+        lambda c, ns: f"Ch{c} σI={ns.std_I:.2f}",
+        lambda st: f"{len(st)} ch — σI {_spread(n.std_I for n in st.values())}")
+
+
+def _noise_detail(stats: dict) -> str:
+    """Full per-channel listing, for the tooltip."""
+    return "\n".join(
+        f"Ch{c}  I={ns.mean_I:.1f}±{ns.std_I:.2f}   "
+        f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}"
+        for c, ns in sorted(stats.items()))
+
+
 def _channel_color(channel: int) -> str:
     if channel == 1:
         return IQ_COLORS["I"]
@@ -298,6 +352,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         f = self.noise_label.font()
         f.setPointSizeF(f.pointSizeF() * 0.9)
         self.noise_label.setFont(f)
+        # Belt and braces with the summarising above: a label's size
+        # hint otherwise becomes the dock's minimum width, so one long
+        # line is enough to make the panel unusable.
+        for label in (self.status_label, self.noise_label):
+            label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                QtWidgets.QSizePolicy.Policy.Preferred)
         v.addWidget(self.status_label)
         v.addWidget(self.noise_label)
         layout.addWidget(strip)
@@ -1142,10 +1202,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         self.noise_stats = {c: self.reader.noise_stats(c) for c in channels}
-        parts = [f"Ch{c} I={ns.mean_I:.1f}±{ns.std_I:.2f}, "
-                 f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}"
-                 for c, ns in sorted(self.noise_stats.items())]
-        self.noise_label.setText("Noise:  " + "   |   ".join(parts))
+        self.noise_label.setText("Noise:  " + _noise_line(self.noise_stats))
+        self.noise_label.setToolTip(_noise_detail(self.noise_stats))
 
         # Tree from lazy per-pulse metadata (ascending insert at row 0
         # → newest first), with fallbacks for files written before the
@@ -1207,10 +1265,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             stats = {c: self.reader.noise_stats(c, stream)
                      for c in channels}
             self._noise_by_stream[stream] = stats
-            parts.append(f"{stream}: " + " | ".join(
-                f"Ch{c} σI={ns.std_I:.2f}"
-                for c, ns in sorted(stats.items())))
+            parts.append(f"{stream}: " + _noise_line_sigma(stats))
         self.noise_label.setText("Noise:  " + "   —   ".join(parts))
+        self.noise_label.setToolTip("\n\n".join(
+            f"{stream}\n" + _noise_detail(st)
+            for stream, st in sorted(self._noise_by_stream.items())))
 
         self.follow_check.setChecked(False)
         for c in channels:
@@ -1325,10 +1384,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         target = progress.get("target", 0)
         prefix = (f"[{progress['stream']}] "
                   if progress.get("stream") else "")
-        parts = [f"Ch{c} {collected[c]}/{target}"
-                 for c in sorted(collected)]
-        self._set_status(f"● Estimating noise — {prefix}"
-                         + " | ".join(parts), "#FFCC33")
+        if len(collected) <= MAX_LISTED_CHANNELS:
+            body = " | ".join(f"Ch{c} {collected[c]}/{target}"
+                              for c in sorted(collected))
+        else:
+            done = sum(1 for n in collected.values() if n >= target)
+            body = (f"{len(collected)} ch, {done} done, slowest "
+                    f"{min(collected.values())}/{target}")
+        self._set_status(f"● Estimating noise — {prefix}{body}", "#FFCC33")
+        self.status_label.setToolTip(
+            "\n".join(f"Ch{c}  {collected[c]}/{target}"
+                       for c in sorted(collected)))
 
     def _baseline_summary(self) -> str:
         """The span the rolling baseline median covers."""
@@ -1356,12 +1422,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             self._noise_by_stream[stream] = stats
             if stream == "slow":
                 self.noise_stats = stats
-            parts = [f"{s}: " + " | ".join(
-                f"Ch{c} σI={ns.std_I:.2f}"
-                for c, ns in sorted(st.items()))
-                for s, st in sorted(self._noise_by_stream.items())]
+            parts = [f"{s}: " + _noise_line_sigma(st)
+                     for s, st in sorted(self._noise_by_stream.items())]
             self.noise_label.setText("Noise:  " + "   —   ".join(parts)
                                      + self._baseline_summary())
+            self.noise_label.setToolTip("\n\n".join(
+                f"{s}\n" + _noise_detail(st)
+                for s, st in sorted(self._noise_by_stream.items())))
             print(f"[PulseCapture] Noise estimated ({stream})"
                   f"{self._baseline_summary()}")
             self._refresh_status_line()
@@ -1372,14 +1439,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         self.noise_stats = noise_stats
-        parts = []
-        for c in sorted(noise_stats):
-            ns = noise_stats[c]
-            parts.append(f"Ch{c} I={ns.mean_I:.1f}±{ns.std_I:.2f}, "
-                         f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}")
-        self.noise_label.setText("Noise:  " + "   |   ".join(parts)
+        self.noise_label.setText("Noise:  " + _noise_line(noise_stats)
                                  + self._baseline_summary())
-        print("[PulseCapture] Noise estimated: " + " | ".join(parts)
+        self.noise_label.setToolTip(_noise_detail(noise_stats))
+        print("[PulseCapture] Noise estimated: " + _noise_line(noise_stats)
               + self._baseline_summary())
         self._refresh_status_line()
         # Show what the estimator saw (until the first pulse replaces it)

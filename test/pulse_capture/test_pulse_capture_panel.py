@@ -1029,3 +1029,59 @@ def test_range_syntax_in_the_channels_field(qt_app, text, expected):
 def test_bad_spec_is_reported_not_silently_empty(qt_app):
     panel, runtime = _panel_with(qt_app, _BiasedCRS([1]), text="19-2")
     assert panel._parse_channels(runtime=runtime, quiet=True) is None
+
+
+# ── status strip stays narrow at high channel counts ──────────────
+
+def _noise(std_i, std_q=None):
+    from types import SimpleNamespace
+    return SimpleNamespace(mean_I=1.0, std_I=std_i,
+                           mean_Q=-1.0, std_Q=std_q if std_q else std_i)
+
+
+def test_noise_progress_summarises_many_channels(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    wide = {c: 500 for c in range(1, 201)}
+    wide[7] = 120                                    # one straggler
+    panel._on_noise_progress({"collected": wide, "target": 1000})
+
+    text = panel.status_label.text()
+    assert len(text) < 120, f"{len(text)} chars: {text!r}"
+    assert "200 ch" in text
+    assert "120/1000" in text, "the slowest channel is the useful number"
+    # Nothing is lost — the full listing moves to the tooltip.
+    assert panel.status_label.toolTip().count("\n") == 199
+
+
+def test_noise_progress_still_names_a_few_channels(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._on_noise_progress({"collected": {1: 10, 2: 20}, "target": 100})
+    text = panel.status_label.text()
+    assert "Ch1" in text and "Ch2" in text
+
+
+def test_noise_label_summarises_many_channels(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    stats = {c: _noise(1.0 + c / 100.0) for c in range(1, 201)}
+    panel._on_noise_estimated(stats)
+
+    text = panel.noise_label.text()
+    assert len(text) < 160, f"{len(text)} chars: {text!r}"
+    assert "200 ch" in text
+    assert panel.noise_label.toolTip().count("\n") == 199
+
+
+def test_noise_label_still_lists_a_few_channels(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._on_noise_estimated({1: _noise(1.0), 2: _noise(2.0)})
+    text = panel.noise_label.text()
+    assert "Ch1" in text and "Ch2" in text
+
+
+def test_status_labels_do_not_drive_panel_width(qt_app):
+    # Even if some future message is long, the label's size hint must
+    # not become the dock's minimum width.
+    panel = PulseCapturePanel(dark_mode=False)
+    for label in (panel.status_label, panel.noise_label):
+        assert (label.sizePolicy().horizontalPolicy()
+                is QtWidgets.QSizePolicy.Policy.Ignored)

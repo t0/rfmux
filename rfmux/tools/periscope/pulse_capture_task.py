@@ -65,9 +65,10 @@ class PulseCaptureTask(QtCore.QThread):
     signals : PulseCaptureSignals
         Signal bundle constructed by the caller.
     queue_size : int
-        Bounded sample queue capacity.  At the slow rate (~600 Hz per
-        channel after periscope decimation) 100k covers minutes of
-        backlog; overflow drops samples and counts them.
+        Bounded queue capacity, counted in PACKETS -- one entry holds a
+        whole packet's worth of channels, so this is not the sample
+        count it used to be.  8k is ~0.2 s of backlog at decimation
+        stage 0; overflow drops packets and counts the samples lost.
     waveform_cache : int
         Number of recent pulse waveforms kept for :meth:`get_pulse`.
     """

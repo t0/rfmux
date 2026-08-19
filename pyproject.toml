@@ -91,6 +91,10 @@ periscope = "rfmux.tools.periscope.__main__:main"
 # the Windows and macOS runners, and a test run should not depend on
 # them building.
 test = [
+  # Pulse capture writes HDF5, and without this ~20 tests covering the
+  # writer and reader skip themselves -- a green run that never touched
+  # the persistence layer.
+  "h5py",
   "nbclient",
   "nbformat",
   "pytest_check",

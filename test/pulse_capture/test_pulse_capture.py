@@ -1300,6 +1300,7 @@ class TestDetectionParamsPlumbing:
         accepted = set(inspect.signature(PulseCapture).parameters)
         assert set(DETECTION_PARAMS) <= accepted
 
+    @requires_h5py
     def test_every_detection_param_reaches_the_file(self, tmp_path):
         """The regression this list exists for: trigger_samples,
         baseline_window, edge_lookback and max_capture_samples were
@@ -2116,6 +2117,7 @@ class TestDecisionMarks:
         # 60σ decaying with τ=40 crosses 5σ after τ·ln(12) ≈ 99 samples.
         assert below - d["trigger_index"] == pytest.approx(99, abs=20)
 
+    @requires_h5py
     def test_marks_survive_a_round_trip_through_hdf5(self):
         import tempfile
         from rfmux.pulse_capture.hdf5 import (

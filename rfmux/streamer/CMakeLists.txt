@@ -163,7 +163,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
     target_compile_definitions(fastrxd PRIVATE FASTRXD_ABI_VERSION=0x${FASTRX_ABI_HASH}u)
     target_compile_options(fastrxd PRIVATE
         -Wall -Wextra -Wshadow -Wcast-qual -Wcast-align
-        -Wnon-virtual-dtor -Wextra-semi
+        -Wnon-virtual-dtor -Wextra-semi -Werror
     )
     target_link_libraries(fastrxd PRIVATE
         PkgConfig::FASTRX_LIBXDP PkgConfig::FASTRX_LIBBPF elf z
@@ -177,7 +177,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
     target_compile_definitions(_fastrx PRIVATE FASTRXD_ABI_VERSION=0x${FASTRX_ABI_HASH}u)
     target_compile_options(_fastrx PRIVATE
         -Wall -Wextra -Wshadow -Wcast-qual -Wcast-align
-        -Wnon-virtual-dtor -Wextra-semi
+        -Wnon-virtual-dtor -Wextra-semi -Werror
     )
     target_link_libraries(_fastrx PRIVATE atomic Threads::Threads)
     install(TARGETS _fastrx LIBRARY DESTINATION rfmux/streamer)

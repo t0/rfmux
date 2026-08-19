@@ -103,6 +103,19 @@ def _noise_line_sigma(stats: dict) -> str:
         lambda st: f"{len(st)} ch — σI {_spread(n.std_I for n in st.values())}")
 
 
+def _legend_name(channel: int, count, n_channels: int):
+    """Curve name, or None to keep it out of the legend.
+
+    pyqtgraph draws one legend row per named curve, so a 128-channel
+    capture buries the plot under its own key.  Past
+    MAX_LISTED_CHANNELS the curves stay unnamed and the channel count
+    goes in the title instead.
+    """
+    if n_channels > MAX_LISTED_CHANNELS:
+        return None
+    return f"Ch {channel} (n={count})"
+
+
 def _noise_detail(stats: dict) -> str:
     """Full per-channel listing, for the tooltip."""
     return "\n".join(
@@ -643,7 +656,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 continue
             counts = np.asarray(counts)
             n_pulses = int(np.max(counts)) if len(counts) else 0
-            totals.append(f"Ch{ch}: {n_pulses}")
+            totals.append((ch, n_pulses))
             t_arr = np.asarray(t, dtype=np.float64)
             populated = np.nonzero(counts > 0)[0]
             if len(populated):
@@ -665,7 +678,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 plot.plot(np.asarray(t, float), mean,
                           pen=pg.mkPen(color, width=2.2),
                           connect="finite",
-                          name=f"Ch {ch} (n={n_pulses})")
+                          name=_legend_name(ch, n_pulses,
+                                            len(self._counts)))
                 finite = np.isfinite(mean)
                 if np.any(finite):
                     lo, hi = float(np.min(mean[finite])), \
@@ -712,9 +726,21 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     item.vb.setYRange(lo, hi, padding=0.08)
                 else:  # flat trace — keep it visible, not a zero-height box
                     item.vb.setYRange(lo - 1.0, hi + 1.0, padding=0.0)
-        self.template_info.setText(
-            "Trigger-aligned stack — " + ", ".join(totals)
-            if totals else "No pulses stacked yet")
+        if not totals:
+            self.template_info.setText("No pulses stacked yet")
+        elif len(totals) <= MAX_LISTED_CHANNELS:
+            self.template_info.setText(
+                "Trigger-aligned stack — "
+                + ", ".join(f"Ch{c}: {n}" for c, n in totals))
+        else:
+            stacked = sum(n for _, n in totals)
+            busiest = max(totals, key=lambda cn: (cn[1], -cn[0]))
+            self.template_info.setText(
+                f"Trigger-aligned stack — {len(totals)} ch, "
+                f"{stacked:,} pulses stacked, "
+                f"deepest Ch{busiest[0]}: {busiest[1]}")
+        self.template_info.setToolTip(
+            "\n".join(f"Ch{c}  {n}" for c, n in totals))
 
     # ── Capture lifecycle ─────────────────────────────────────────
 
@@ -1980,7 +2006,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             plot = self.hist_plots[metric]
             item = plot.getPlotItem()
             plot.clear()
-            item.setTitle(title)
+            item.setTitle(
+                title if len(self._counts) <= MAX_LISTED_CHANNELS
+                else f"{title} — {len(self._counts)} ch")
             item.setLogMode(y=log_y)
 
             edges = self._hist_data.get(f"{metric}_edges")
@@ -2021,7 +2049,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     fillLevel=0 if not log_y else None,
                     brush=brush,
                     pen=pg.mkPen(color, width=1.2),
-                    name=f"Ch {ch} (n={int(np.nansum(counts))})",
+                    name=_legend_name(ch, int(np.nansum(counts)),
+                                      len(self._counts)),
                     connect="finite",
                 )
             if metric == "amplitude":

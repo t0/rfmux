@@ -699,6 +699,16 @@ class PeriscopeRuntime:
         which is bounded (queue_max_size) and drops from the far end, so
         a genuine sustained overrun surfaces as packet loss in the
         status bar rather than a hang.
+
+        KNOWN LIMIT (measured on a board, 2026-08-19): a 128-channel
+        pulse capture at decimation stage 0 with the viewer also drawing
+        still loses roughly 0.5-10%, and clicking around the GUI adds a
+        little.  Everything cheap has been done -- batched display
+        writes, a batched tap, a 2048-packet receive ceiling -- so what
+        is left is the GIL: three Python threads (drain, capture worker,
+        receive loop) taking turns on one interpreter.  Getting to zero
+        means moving per-packet work out of Python, not tuning these
+        constants.
         """
         if self.receiver.queue is None:
             return

@@ -1132,3 +1132,75 @@ def test_capturing_status_still_lists_a_few_channels(qt_app):
     panel._refresh_status_line()
     text = panel.status_label.text()
     assert "Ch1: 2" in text and "Ch2: 3" in text
+
+
+# ── plot legends and summaries stay bounded ───────────────────────
+
+def _hist_data(channels, bins=8):
+    data = {}
+    for metric in ("snr", "amplitude", "duration_ms", "tau_ms"):
+        data[f"{metric}_edges"] = np.arange(bins + 1, dtype=float)
+        for c in channels:
+            data[f"{metric}_counts_ch{c}"] = np.full(bins, 3.0)
+    return data
+
+
+def _template_data(channels, n=16):
+    data = {}
+    for c in channels:
+        data[f"time_s_ch{c}"] = np.arange(n) * 1e-3
+        data[f"mean_I_ch{c}"] = np.linspace(1.0, 0.0, n)
+        data[f"mean_Q_ch{c}"] = np.zeros(n)
+        data[f"counts_ch{c}"] = np.full(n, 5)
+    return data
+
+
+def _legend_rows(plot):
+    legend = plot.getPlotItem().legend
+    return 0 if legend is None else len(legend.items)
+
+
+def test_histogram_legend_does_not_grow_without_bound(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    channels = list(range(1, 129))
+    panel._counts = {c: 3 for c in channels}
+    panel._hist_data = _hist_data(channels)
+    panel._render_histograms()
+
+    for metric in ("snr", "amplitude", "duration_ms", "tau_ms"):
+        assert _legend_rows(panel.hist_plots[metric]) == 0, \
+            f"{metric} legend has a row per channel"
+        title = panel.hist_plots[metric].getPlotItem().titleLabel.text
+        assert "128 ch" in title, f"{metric} title should say how many"
+
+
+def test_histogram_legend_kept_for_a_few_channels(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    channels = [1, 2]
+    panel._counts = {c: 3 for c in channels}
+    panel._hist_data = _hist_data(channels)
+    panel._render_histograms()
+    assert _legend_rows(panel.hist_plots["snr"]) == 2
+
+
+def test_template_summary_and_legend_stay_short(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    channels = list(range(1, 129))
+    panel._counts = {c: 5 for c in channels}
+    panel._template_data = _template_data(channels)
+    panel._render_templates()
+
+    text = panel.template_info.text()
+    assert len(text) < 140, f"{len(text)} chars: {text!r}"
+    assert "128 ch" in text
+    assert _legend_rows(panel.template_plot_i) == 0
+    assert panel.template_info.toolTip().count("\n") == 127
+
+
+def test_template_summary_lists_a_few_channels(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._counts = {1: 5, 2: 5}
+    panel._template_data = _template_data([1, 2])
+    panel._render_templates()
+    text = panel.template_info.text()
+    assert "Ch1:" in text and "Ch2:" in text

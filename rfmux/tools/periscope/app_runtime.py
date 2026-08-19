@@ -1156,7 +1156,8 @@ class PeriscopeRuntime:
             # below it: those all read through the receiver's queue, so
             # an unmatched module pins them to zero and the percentages
             # are meaningless rather than good.
-            mismatch = self.receiver.get_module_mismatch()
+            mismatch = (self.receiver.get_module_mismatch()
+                        or self.receiver.get_port_conflict())
 
             # Red above 1%, and say WHICH — the two have different fixes.
             if mismatch:

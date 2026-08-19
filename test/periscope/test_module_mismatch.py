@@ -49,6 +49,7 @@ def _receiver_watching(module, streaming):
     rx.queue = None
     rx.serial = None
     rx._module_mismatch = None
+    rx._port_conflict = None
     rx.packets_received = 0
     rx.packets_dropped = 0
     rx.receiver = _stub_queues(streaming)
@@ -109,3 +110,18 @@ def test_counters_are_flat_zero_during_a_mismatch():
     assert rx.get_module_mismatch(), \
         "zero packets and zero loss is indistinguishable from a dead " \
         "stream unless the receiver says which module it is watching"
+
+
+def test_a_competing_receiver_is_reported_while_we_have_no_queue():
+    rx = _receiver_watching(module=1, streaming=[])
+    rx._port_conflict = "Another process is already receiving on port 9876"
+    assert rx.get_port_conflict()
+
+
+def test_a_competing_receiver_is_forgotten_once_packets_arrive():
+    """It evidently did not take them; a stale warning is worse than none."""
+    rx = _receiver_watching(module=1, streaming=[1])
+    rx._port_conflict = "Another process is already receiving on port 9876"
+    rx._discover_queue()
+    assert rx.queue is not None
+    assert rx.get_port_conflict() is None

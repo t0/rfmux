@@ -7,9 +7,10 @@ demo scripts share this code — the GUI adds only Qt signal plumbing on
 top.
 
 Periscope cannot use :func:`run_slow_source` itself (its own receiver
-already owns the socket, and with ``SO_REUSEPORT`` a second listener
-would starve), so it feeds :class:`SlowBlockAccumulator` from its GUI
-tap instead.  That class is the shared part: both routes turn packets
+already owns the socket, and against the mock's unicast stream a second
+``SO_REUSEPORT`` listener does not share it but starves -- the kernel
+gives each datagram to exactly one of them), so it feeds
+:class:`SlowBlockAccumulator` from its GUI tap instead.  That class is the shared part: both routes turn packets
 into per-channel blocks identically, and neither can quietly become
 slower than the other.
 

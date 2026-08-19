@@ -136,6 +136,65 @@ def ts_to_seconds(ts):
 	return ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / SS_PER_SECOND
 
 
+def _is_loopback(host: str) -> bool:
+	"""True if *host* names this machine, port suffix and all."""
+	if not host:
+		return False
+	name = host.split(':')[0] if ':' in host else host
+	return name in ("127.0.0.1", "localhost", "::1")
+
+
+def _port_has_receiver(port: int) -> str | None:
+	"""Why a plain bind to *port* failed, or None if nobody is receiving.
+
+	No socket options on purpose: the streamer's readers set
+	``SO_REUSEPORT``, so a probe that also set it would bind happily
+	alongside them and report the port free -- exactly the condition
+	being looked for.
+	"""
+	probe = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+	try:
+		probe.bind(("", port))
+	except OSError as exc:
+		return exc.strerror or str(exc)
+	finally:
+		probe.close()
+	return None
+
+
+def find_competing_receiver(host: str = "127.0.0.1", *,
+                            port: int | None = None) -> str | None:
+	"""Another receiver that would take our packets, or None.
+
+	Reported only where it actually costs data, which is the loopback
+	(mock) case, because the two transports behave differently:
+
+	The mock sends UNICAST to 127.0.0.1 -- ``sendto((self.host, port))``
+	in rfmux/mock/udp_streamer.py, whatever its "(multicast)" log line
+	says. The kernel hands each unicast datagram to exactly ONE of the
+	sockets bound with ``SO_REUSEPORT``, picked by hash of the sender's
+	4-tuple. Measured over 20 sender ports: 6 to the first listener, 14
+	to the second, never once split. So a second receiver does not share
+	the stream, it takes all of it, and the loser sees nothing at all --
+	no packets, no loss, no error.
+
+	A real board MULTICASTS to the group, and every socket joined to it
+	gets its own copy: measured 200 of 200 to both of two listeners.
+	Multiple readers are fine and expected there, so this returns None
+	for a non-loopback host rather than crying wolf on every launch.
+	"""
+	if not _is_loopback(host):
+		return None
+	if port is None:
+		port = STREAMER_PORT
+	why = _port_has_receiver(port)
+	if why is None:
+		return None
+	return (f"Another process is already receiving on port {port} ({why}). "
+	        f"The mock stream is unicast, so the kernel gives every packet "
+	        f"to just one receiver -- this one may see nothing.")
+
+
 def find_streamer_conflict(host: str = "127.0.0.1", *,
                            port: int | None = None,
                            timeout: float = 0.05) -> str | None:
@@ -174,14 +233,9 @@ def find_streamer_conflict(host: str = "127.0.0.1", *,
 	if port is None:
 		port = STREAMER_PORT
 
-	probe = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-	try:
-		probe.bind(("", port))
-	except OSError as exc:
-		return (f"another process is already receiving on port {port} "
-		        f"({exc.strerror or exc})")
-	finally:
-		probe.close()
+	why = _port_has_receiver(port)
+	if why is not None:
+		return f"another process is already receiving on port {port} ({why})"
 
 	try:
 		with get_multicast_socket(host, port=port) as sock:
@@ -224,6 +278,7 @@ __all__ = [
 	'get_local_ip',
 	'ip_mreq_source',
 	'find_streamer_conflict',
+	'find_competing_receiver',
 
 	# Timestamp helpers
 	'ts_to_seconds',

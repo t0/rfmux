@@ -93,12 +93,19 @@ def _streamer_ports_free(request):
     """Refuse to start the acquisition tier if the streamer ports are taken.
 
     The mock streamer binds fixed ports (9876 slow, 9877 PFB) with
-    ``SO_REUSEPORT``, so a second listener does not collide — it joins the same
-    multicast group, and the two readers split the packet stream. Neither errors.
-    Both silently see partial data, and the tests report it as a pulse-detector
-    fault: "no matched pairs", thousands of phantom pulses, nonsensical elapsed
-    times. That misdirection cost two full investigations on this branch, so the
-    condition is now named at the point it can still be explained.
+    ``SO_REUSEPORT``, so a second listener does not collide — the bind just
+    succeeds. What happens next is decided by the transport, and the mock's is
+    unicast to loopback: the kernel hands each datagram to exactly ONE of the
+    bound sockets, chosen by hash of the sender's 4-tuple. Measured over 20
+    sender ports: 6 went to the first listener, 14 to the second, never once
+    split. So one run takes the entire stream and the other sees nothing, and
+    which one wins flips between launches. (A real board multicasts instead,
+    and every socket joined to the group gets its own copy — that is why
+    multiple readers are fine on hardware and fatal here.) Neither errors. The
+    starved run reports it as a pulse-detector fault: "no matched pairs",
+    thousands of phantom pulses, nonsensical elapsed times. That misdirection
+    cost two full investigations on this branch, so the condition is now named
+    at the point it can still be explained.
 
     The usual cause is a previous run that has not finished dying — its servers
     are still being reaped, or a test leaked a reader thread. A live Periscope

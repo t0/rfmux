@@ -34,6 +34,14 @@ class UDPReceiver(QtCore.QThread):
         # reorder_window=256: Maintain good packet reordering capability
         # queue_max_size=50000: Handle high data rates at FIR stage 0 (~38kHz)
         # flush_threshold=16: Flush every 16 packets for smooth updates
+        # Ask BEFORE binding: the probe is a plain bind, which our own
+        # socket would then fail. Loopback only -- see
+        # find_competing_receiver for why a second reader is fatal for
+        # the mock's unicast stream and harmless for a board's multicast.
+        self._port_conflict = streamer.find_competing_receiver(host)
+        if self._port_conflict:
+            print(f"[UDP] {self._port_conflict}")
+
         self.sock = streamer.get_multicast_socket(host)
         # A receive timeout on the SOCKET, because receive_batch's own
         # timeout_ms cannot be relied on: recvmmsg runs with
@@ -98,6 +106,17 @@ class UDPReceiver(QtCore.QThread):
         if msg != self._module_mismatch:
             self._module_mismatch = msg
             print(f"[UDP] {msg}")
+
+    def get_port_conflict(self):
+        """A competing receiver that may be taking our packets, or None.
+
+        Only while we have no queue: once packets arrive, whatever else
+        is bound evidently did not take them, and a stale warning would
+        be worse than none.
+        """
+        if self.queue is not None:
+            return None
+        return self._port_conflict
 
     def get_module_mismatch(self):
         """The mismatch message, or None while healthy.

@@ -35,6 +35,18 @@ class UDPReceiver(QtCore.QThread):
         # queue_max_size=50000: Handle high data rates at FIR stage 0 (~38kHz)
         # flush_threshold=16: Flush every 16 packets for smooth updates
         self.sock = streamer.get_multicast_socket(host)
+        # A receive timeout on the SOCKET, because receive_batch's own
+        # timeout_ms cannot be relied on: recvmmsg runs with
+        # MSG_WAITFORONE, and the kernel only consults that timeout
+        # BETWEEN datagrams. On a socket that receives nothing at all --
+        # a board that is not streaming yet, a mistyped host, or another
+        # process on 9876 taking the datagrams via SO_REUSEPORT -- the
+        # call blocks forever. The thread then never reaches the
+        # queue-discovery loop below, so Periscope draws nothing and
+        # reports "0 packets received" with no error to explain it.
+        # With SO_RCVTIMEO the call returns EAGAIN, which receive_batch
+        # already treats as "no packets this time".
+        self.sock.settimeout(0.5)
         self.receiver = streamer.ReadoutPacketReceiver(self.sock,
                                                        reorder_window=256,
                                                        queue_max_size=50000,

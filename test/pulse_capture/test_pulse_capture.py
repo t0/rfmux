@@ -44,20 +44,8 @@ from rfmux.pulse_capture.accumulators import (
     PulseHistogramSet,
 )
 
-# HDF5 imports are deferred — tests that need them use the
-# requires_h5py marker or skip individually.
-try:
-    import h5py
-    from rfmux.pulse_capture.hdf5 import (
-        PulseHDF5Writer,
-        PulseHDF5Reader,
-    )
-    HAS_H5PY = True
-except ImportError:
-    HAS_H5PY = False
-
-requires_h5py = pytest.mark.skipif(
-    not HAS_H5PY, reason="h5py not installed")
+import h5py
+from rfmux.pulse_capture.hdf5 import PulseHDF5Writer, PulseHDF5Reader
 
 
 # ───────────────────────── Helpers ──────────────────────────────────
@@ -339,7 +327,6 @@ class TestPulseHistogramSet:
 #  HDF5 Writer/Reader Tests
 # ═══════════════════════════════════════════════════════════════════
 
-@requires_h5py
 class TestPulseHDF5:
     def _make_writer(self, path, channels=None, capture_params=None):
         if channels is None:
@@ -514,7 +501,6 @@ class TestPulseHDF5:
 #  Integration: PulseCapture → on_pulse → HDF5 → Reader
 # ═══════════════════════════════════════════════════════════════════
 
-@requires_h5py
 class TestIntegration:
     """End-to-end: synthetic pulses → PulseCapture with callback →
     HDF5 writer → reader verification."""
@@ -707,7 +693,6 @@ class TestTauHistogram:
 
 # ───────────────────────── Phase A: HDF5 derived attrs ──────────────
 
-@requires_h5py
 class TestHDF5DerivedAttrs:
     def test_roundtrip_unified_attrs(self, tmp_path):
         ns = {1: ChannelNoiseStats(std_I=1.0, std_Q=1.0)}
@@ -793,7 +778,6 @@ def _feed_capture_stream(session, n, pulse_starts, rng, *, tau_samples=40,
     return t_offset + n * dt
 
 
-@requires_h5py
 class TestPulseCaptureSession:
     def _make_session(self, tmp_path, **overrides):
         events = {"noise": [], "pulses": [], "stats": [], "hists": [],
@@ -1300,7 +1284,6 @@ class TestDetectionParamsPlumbing:
         accepted = set(inspect.signature(PulseCapture).parameters)
         assert set(DETECTION_PARAMS) <= accepted
 
-    @requires_h5py
     def test_every_detection_param_reaches_the_file(self, tmp_path):
         """The regression this list exists for: trigger_samples,
         baseline_window, edge_lookback and max_capture_samples were
@@ -1879,7 +1862,6 @@ class TestHardStop:
         # The window now runs to where the state machine stopped.
         assert d["end_index"] == len(d["Amp_I"]) - 1
 
-    @requires_h5py
     def test_truncated_flag_survives_hdf5(self, tmp_path):
         d = _make_pulse_data()
         d["truncated"] = True
@@ -2117,7 +2099,6 @@ class TestDecisionMarks:
         # 60σ decaying with τ=40 crosses 5σ after τ·ln(12) ≈ 99 samples.
         assert below - d["trigger_index"] == pytest.approx(99, abs=20)
 
-    @requires_h5py
     def test_marks_survive_a_round_trip_through_hdf5(self):
         import tempfile
         from rfmux.pulse_capture.hdf5 import (

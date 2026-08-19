@@ -18,14 +18,7 @@ from rfmux.pulse_capture.session import (
     PulseCaptureConfig,
 )
 
-try:
-    import h5py  # noqa: F401
-    from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
-    HAS_H5PY = True
-except ImportError:
-    HAS_H5PY = False
-
-requires_h5py = pytest.mark.skipif(not HAS_H5PY, reason="h5py not installed")
+from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
 
 
 def _summary(t, dur=0.001):
@@ -118,7 +111,6 @@ def _feed_span(feed, fs, t0, t1, rng, pulse_starts=(), amp=50.0,
         feed(1, float(sig[i]), float(rng.normal(0, 1.0)), float(t[i]))
 
 
-@requires_h5py
 def test_dual_session_end_to_end(tmp_path):
     events = {"pairs": [], "pulses": [], "errors": []}
     # max_pulse_ms also sizes the rings — the fast ring must still
@@ -247,7 +239,6 @@ class TestAdvanceTime:
         assert pairs == []
 
 
-@requires_h5py
 def test_one_sided_emits_live_with_cross_tod(tmp_path):
     """A one-sided pulse must surface ~grace after the event from
     baseline stream time alone (no later pulse, no stop) — with the

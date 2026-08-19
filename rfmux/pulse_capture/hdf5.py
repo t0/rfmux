@@ -29,10 +29,7 @@ import numpy as np
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-try:
-    import h5py
-except ImportError:
-    h5py = None  # type: ignore[assignment]
+import h5py
 
 from .detection import ChannelNoiseStats
 from .analysis import pulse_summary
@@ -68,12 +65,6 @@ class _PulseFileWriter:
 
     def __init__(self, path: str | Path, channels: List[int],
                  capture_params: Dict[str, Any]):
-        if h5py is None:
-            raise ImportError(
-                "h5py is required for HDF5 pulse capture storage. "
-                "Install it with: pip install h5py"
-            )
-
         self.path = Path(path)
         self._channels = list(channels)
         self._threshold_sigma = capture_params.get("threshold_sigma")
@@ -393,12 +384,6 @@ class PulseHDF5Reader:
     """
 
     def __init__(self, path: str | Path):
-        if h5py is None:
-            raise ImportError(
-                "h5py is required for HDF5 pulse capture storage. "
-                "Install it with: pip install h5py"
-            )
-
         self.path = Path(path)
         self.f: Optional[h5py.File] = h5py.File(self.path, "r")
 

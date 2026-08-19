@@ -80,13 +80,7 @@ from .sources import (
     run_slow_source,
 )
 
-# h5py is optional: importing the package must not require it.
-try:
-    from .hdf5 import DualPulseHDF5Writer, PulseHDF5Reader, PulseHDF5Writer
-except ImportError:  # pragma: no cover - h5py missing
-    DualPulseHDF5Writer = None  # type: ignore[assignment]
-    PulseHDF5Reader = None  # type: ignore[assignment]
-    PulseHDF5Writer = None  # type: ignore[assignment]
+from .hdf5 import DualPulseHDF5Writer, PulseHDF5Reader, PulseHDF5Writer
 
 __all__ = [
     # detection

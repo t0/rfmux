@@ -73,11 +73,7 @@ from .detection import (
 from .analysis import pulse_summary
 from .accumulators import PulseHistogramSet, PulseTemplateSet
 
-try:
-    from .hdf5 import DualPulseHDF5Writer, PulseHDF5Writer
-except ImportError:  # pragma: no cover - h5py missing
-    PulseHDF5Writer = None  # type: ignore[assignment]
-    DualPulseHDF5Writer = None  # type: ignore[assignment]
+from .hdf5 import DualPulseHDF5Writer, PulseHDF5Writer
 
 
 #: The detection knobs, named once.
@@ -938,9 +934,6 @@ class PulseCaptureSession(_CallbackHost):
         )
 
         if self.hdf5_path is not None:
-            if PulseHDF5Writer is None:
-                self._error("h5py not available — capturing without HDF5")
-                return
             capture_params = {
                 **detection,
                 "streamer_mode": self.streamer_mode,
@@ -1186,28 +1179,25 @@ class DualPulseCaptureSession(_CallbackHost):
 
         self.writer = None
         if hdf5_path is not None:
-            if DualPulseHDF5Writer is None:
-                self._error("h5py not available — capturing without HDF5")
-            else:
-                try:
-                    self.writer = DualPulseHDF5Writer(
-                        hdf5_path, self.channels,
-                        capture_params={
-                            "streamer_mode": "both",
-                            "threshold_sigma": self.config.threshold_sigma,
-                            "end_sigma": self.config.end_sigma,
-                            "margin_fraction": self.config.margin_fraction,
-                            "enable_pileup": self.config.enable_pileup,
-                            "save_to_end_confirmed":
-                                self.config.save_to_end_confirmed,
-                            "module": module,
-                            "sample_rate_slow": slow_rate,
-                            "sample_rate_fast": fast_rate,
-                        },
-                        df_calibrations=df_calibrations)
-                except Exception as e:
-                    self._error(f"Could not open HDF5 file "
-                                f"{hdf5_path}: {e}")
+            try:
+                self.writer = DualPulseHDF5Writer(
+                    hdf5_path, self.channels,
+                    capture_params={
+                        "streamer_mode": "both",
+                        "threshold_sigma": self.config.threshold_sigma,
+                        "end_sigma": self.config.end_sigma,
+                        "margin_fraction": self.config.margin_fraction,
+                        "enable_pileup": self.config.enable_pileup,
+                        "save_to_end_confirmed":
+                            self.config.save_to_end_confirmed,
+                        "module": module,
+                        "sample_rate_slow": slow_rate,
+                        "sample_rate_fast": fast_rate,
+                    },
+                    df_calibrations=df_calibrations)
+            except Exception as e:
+                self._error(f"Could not open HDF5 file "
+                            f"{hdf5_path}: {e}")
 
         self.matcher = IncrementalPulseMatcher(
             window_s=match_window_s, grace_s=match_grace_s,

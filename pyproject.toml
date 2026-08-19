@@ -16,6 +16,11 @@ dependencies = [
   "aiohttp",
   "awaitless",
   "click>=8.0",
+  # Pulse capture writes its captures as HDF5, and Periscope does so by
+  # default, so this is reached by ordinary use rather than an exotic
+  # path.  It was optional for a while and the import guards in
+  # rfmux/pulse_capture/hdf5.py are left from that.
+  "h5py",
   # Pin to 6.x for qtconsole in-process kernel compatibility: ipykernel 7.x
   # do_execute dereferences shell_channel_thread.parent_thread, which the
   # in-process kernel (embedded Periscope console) never creates ->
@@ -91,10 +96,6 @@ periscope = "rfmux.tools.periscope.__main__:main"
 # the Windows and macOS runners, and a test run should not depend on
 # them building.
 test = [
-  # Pulse capture writes HDF5, and without this ~20 tests covering the
-  # writer and reader skip themselves -- a green run that never touched
-  # the persistence layer.
-  "h5py",
   "nbclient",
   "nbformat",
   "pytest_check",

@@ -20,7 +20,7 @@ pytest.importorskip("h5py")
 
 from PyQt6 import QtWidgets  # noqa: E402
 
-from rfmux.algorithms.measurement.pulse_hdf5 import PulseHDF5Reader  # noqa: E402
+from rfmux.pulse_capture.hdf5 import PulseHDF5Reader  # noqa: E402
 from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel  # noqa: E402
 
 SAMPLE_RATE = 38147.0
@@ -211,7 +211,7 @@ def test_tap_exclusivity(qt_app, tmp_path, monkeypatch):
 
 # ───────────────────────── Phase C: review mode + session ───────────
 
-from rfmux.algorithms.measurement.pulse_capture_session import (  # noqa: E402
+from rfmux.pulse_capture.session import (  # noqa: E402
     PulseCaptureSession,
 )
 
@@ -428,10 +428,10 @@ def test_channel_default_follows_stream(qt_app, tmp_path):
 
 
 def _build_dual_file(tmp_path):
-    from rfmux.algorithms.measurement.pulse_capture_session import (
+    from rfmux.pulse_capture.session import (
         DualPulseCaptureSession,
     )
-    from rfmux.algorithms.measurement.pulse_capture_session import (
+    from rfmux.pulse_capture.session import (
         PulseCaptureConfig,
     )
     path = tmp_path / "dual_review.h5"
@@ -491,7 +491,7 @@ def test_dual_review_mode(qt_app, tmp_path):
 def test_dual_session_hdf5_path_parity(tmp_path):
     """Panel/task read session.hdf5_path on finish — the dual session
     must expose it like the single session (stop-crash regression)."""
-    from rfmux.algorithms.measurement.pulse_capture_session import (
+    from rfmux.pulse_capture.session import (
         DualPulseCaptureSession,
     )
     path = tmp_path / "parity.h5"
@@ -706,10 +706,10 @@ def test_template_view_fits_data_and_uses_zoombox(qt_app, tmp_path):
     Periscope."""
     import pyqtgraph as pg
 
-    from rfmux.algorithms.measurement.pulse_accumulators import (
+    from rfmux.pulse_capture.accumulators import (
         PulseTemplateSet,
     )
-    from rfmux.algorithms.measurement.pulse_detection import (
+    from rfmux.pulse_capture.detection import (
         ChannelNoiseStats,
     )
 
@@ -915,7 +915,7 @@ def test_both_mode_noise_segment_is_plotted(qt_app):
     inner stream session (regression: the both-mode branch returned
     before plotting, and the dual session has no top-level noise_data)."""
     from types import SimpleNamespace
-    from rfmux.algorithms.measurement.pulse_detection import (
+    from rfmux.pulse_capture.detection import (
         ChannelNoiseStats,
     )
 

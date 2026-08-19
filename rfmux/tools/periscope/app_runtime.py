@@ -12,7 +12,7 @@ from PyQt6 import sip
 import numpy as np
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 from ... import streamer as _streamer
-from ...algorithms.measurement.pulse_sources import (
+from ...pulse_capture.sources import (
     columns_for_width,
 )
 

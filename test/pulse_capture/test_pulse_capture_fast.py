@@ -24,11 +24,11 @@ pytestmark = pytest.mark.slow_acquisition
 
 from PyQt6 import QtWidgets  # noqa: E402
 
-from rfmux.algorithms.measurement.pulse_capture_session import (  # noqa: E402
+from rfmux.pulse_capture.session import (  # noqa: E402
     CaptureState,
     PulseCaptureSession,
 )
-from rfmux.algorithms.measurement.pulse_hdf5 import PulseHDF5Reader  # noqa: E402
+from rfmux.pulse_capture.hdf5 import PulseHDF5Reader  # noqa: E402
 from rfmux.algorithms.measurement.streamer_config import (  # noqa: E402
     PFB_SAMPLE_RATE,
 )
@@ -212,10 +212,10 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
 
 def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     """Both-mode task: dual sockets, live matching, dual file, teardown."""
-    from rfmux.algorithms.measurement.pulse_capture_session import (
+    from rfmux.pulse_capture.session import (
         DualPulseCaptureSession,
     )
-    from rfmux.algorithms.measurement.pulse_capture_session import (
+    from rfmux.pulse_capture.session import (
         PulseCaptureConfig,
     )
     from rfmux.algorithms.measurement.streamer_config import (
@@ -257,7 +257,7 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     # background thread pumping slow packets into task.enqueue.
     import threading
 
-    from rfmux.algorithms.measurement.pulse_sources import (
+    from rfmux.pulse_capture.sources import (
         run_slow_source,
     )
 

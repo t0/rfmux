@@ -32,7 +32,8 @@ from ...core.schema import CRS
 from ...core.transferfunctions import decimation_to_sampling
 from ... import streamer
 
-PFB_SAMPLE_RATE = 625e6 / 512  # ~1.2207 MHz per streamed PFB channel
+#: Re-exported from rfmux.streamer, which owns the stream constants.
+PFB_SAMPLE_RATE = streamer.PFB_SAMPLE_RATE
 
 # Link budget (1 GbE), with the firmware's ~0.8 bandwidth derating
 LINK_MBPS = 1000.0

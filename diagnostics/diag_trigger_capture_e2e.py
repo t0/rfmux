@@ -18,7 +18,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import numpy as np
 import rfmux
 
-from rfmux.algorithms.measurement.pulse_hdf5 import PulseHDF5Reader
+from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
 
 
 # ── Plotting ──────────────────────────────────────────────────────

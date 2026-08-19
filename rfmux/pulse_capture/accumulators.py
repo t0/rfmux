@@ -4,7 +4,7 @@ Running accumulations over detected pulses: histograms and templates.
 Both structures here follow the same pattern -- a per-channel
 ``*Accumulator`` holding running sums, and a ``*Set`` that owns one per
 channel -- and both are driven the same way: a
-:class:`~.pulse_capture_session.PulseCaptureSession` calls ``add_pulse``
+:class:`~.session.PulseCaptureSession` calls ``add_pulse``
 for every pulse it detects and flushes them together to HDF5 and to the
 live view.  They are two products of one stream, so they live in one
 module.
@@ -35,7 +35,7 @@ genuine pulse-to-pulse variation from measurement noise::
 
 Template alignment is on the **trigger crossing** -- the first sample
 whose deviation exceeds ``threshold_sigma`` in either quadrature, which
-is exactly the condition :class:`~.pulse_detection.PulseCapture`
+is exactly the condition :class:`~.detection.PulseCapture`
 triggers on.  Aligning on the window start instead would smear the
 stack, because the pre-trigger margin is a fraction of each pulse's own
 length; aligning on the peak would bias the rise.
@@ -48,8 +48,8 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from .pulse_detection import ChannelNoiseStats
-from .pulse_analysis import pulse_summary
+from .detection import ChannelNoiseStats
+from .analysis import pulse_summary
 
 
 # ═══════════════════════════ Histograms ═════════════════════════

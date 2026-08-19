@@ -165,9 +165,9 @@ class TestApplyOnMock:
 class TestSources:
     pytestmark = pytest.mark.slow_acquisition
     def test_slow_source_feeds_session(self, mock_crs):
-        from rfmux.algorithms.measurement.pulse_capture_session import (
+        from rfmux.pulse_capture.session import (
             CaptureState, PulseCaptureSession)
-        from rfmux.algorithms.measurement.pulse_sources import (
+        from rfmux.pulse_capture.sources import (
             run_slow_source)
 
         loop, crs = mock_crs
@@ -186,9 +186,9 @@ class TestSources:
         session.stop()
 
     def test_pfb_source_feeds_session(self, mock_crs):
-        from rfmux.algorithms.measurement.pulse_capture_session import (
+        from rfmux.pulse_capture.session import (
             CaptureState, PulseCaptureSession)
-        from rfmux.algorithms.measurement.pulse_sources import (
+        from rfmux.pulse_capture.sources import (
             run_pfb_source)
 
         loop, crs = mock_crs

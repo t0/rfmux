@@ -6,12 +6,12 @@ session lifecycle to manage, everything handed back in memory.  It is a
 thin caller over the same machinery Periscope and the reference notebook
 drive:
 
-- :class:`~rfmux.algorithms.measurement.pulse_capture_session.PulseCaptureConfig`
+- :class:`~rfmux.pulse_capture.session.PulseCaptureConfig`
   for the parameters, in physical units;
-- :class:`~rfmux.algorithms.measurement.pulse_capture_session.PulseCaptureSession`
-  (or :class:`~rfmux.algorithms.measurement.pulse_capture_session.DualPulseCaptureSession`)
+- :class:`~rfmux.pulse_capture.session.PulseCaptureSession`
+  (or :class:`~rfmux.pulse_capture.session.DualPulseCaptureSession`)
   for detection, persistence, histograms and templates;
-- :mod:`~rfmux.algorithms.measurement.pulse_sources` for the sockets.
+- :mod:`~rfmux.pulse_capture.sources` for the sockets.
 
 Because it is a session underneath, passing ``hdf5_path=`` writes a real
 capture file — pulses, histograms and trigger-aligned templates — that
@@ -50,13 +50,13 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ... import streamer
 
-from .pulse_capture_session import (
+from ...pulse_capture.session import (
     DualPulseCaptureSession,
     PulseCaptureConfig,
     PulseCaptureSession,
 )
-from .pulse_detection import ChannelNoiseStats
-from .pulse_sources import run_dual_source, run_pfb_source, run_slow_source
+from ...pulse_capture.detection import ChannelNoiseStats
+from ...pulse_capture.sources import run_dual_source, run_pfb_source, run_slow_source
 from .streamer_config import PFB_SAMPLE_RATE, slow_sample_rate
 
 #: Default longest-pulse estimate for a one-shot capture.  Deliberately

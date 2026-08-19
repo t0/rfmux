@@ -60,19 +60,20 @@ from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
-from .pulse_detection import (
+from .. import streamer
+
+from .detection import (
     BUFFER_SAFETY,
     HARD_STOP_RING_FRACTION,
     ChannelNoiseStats,
     PulseCapture,
     estimate_noise_stats,
 )
-from .pulse_analysis import pulse_summary
-from .pulse_accumulators import PulseHistogramSet, PulseTemplateSet
-from .streamer_config import PFB_SAMPLE_RATE
+from .analysis import pulse_summary
+from .accumulators import PulseHistogramSet, PulseTemplateSet
 
 try:
-    from .pulse_hdf5 import DualPulseHDF5Writer, PulseHDF5Writer
+    from .hdf5 import DualPulseHDF5Writer, PulseHDF5Writer
 except ImportError:  # pragma: no cover - h5py missing
     PulseHDF5Writer = None  # type: ignore[assignment]
     DualPulseHDF5Writer = None  # type: ignore[assignment]
@@ -1157,7 +1158,7 @@ class DualPulseCaptureSession(_CallbackHost):
         *,
         module: int = 1,
         slow_rate: float,
-        fast_rate: float = PFB_SAMPLE_RATE,
+        fast_rate: float = streamer.PFB_SAMPLE_RATE,
         config: Optional[PulseCaptureConfig] = None,
         hdf5_path=None,
         df_calibrations: Optional[Dict[int, float]] = None,

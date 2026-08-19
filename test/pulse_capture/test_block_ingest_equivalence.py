@@ -10,9 +10,9 @@ synthetic packets down each path and compare what the sessions saw.
 import numpy as np
 import pytest
 
-from rfmux.algorithms.measurement.pulse_capture_session import (
+from rfmux.pulse_capture.session import (
     CaptureState, PulseCaptureSession)
-from rfmux.algorithms.measurement.pulse_sources import (
+from rfmux.pulse_capture.sources import (
     SlowBlockAccumulator, columns_for_width)
 
 FS = 1000.0

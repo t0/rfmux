@@ -29,7 +29,7 @@ import sys
 
 import numpy as np
 
-from rfmux.algorithms.measurement.pulse_detection import (
+from rfmux.pulse_capture.detection import (
     ChannelNoiseStats,
     PulseCapture,
 )

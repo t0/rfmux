@@ -8,7 +8,7 @@ the right (single-pulse I/Q waveform with threshold bands, and a 2×2
 grid of running histograms — SNR, peak amplitude, duration, derived τ).
 
 All capture logic lives in
-:class:`~rfmux.algorithms.measurement.pulse_capture_session.PulseCaptureSession`;
+:class:`~rfmux.pulse_capture.session.PulseCaptureSession`;
 this panel only configures a session, bridges it through
 :class:`~rfmux.tools.periscope.pulse_capture_task.PulseCaptureTask`,
 and draws.
@@ -41,16 +41,16 @@ from .pulse_capture_settings_dialog import PulseCaptureSettingsDialog
 from ...algorithms.measurement.channel_selection import (
     parse_channel_spec,
 )
-from ...algorithms.measurement.pulse_capture_session import (
+from ...pulse_capture.session import (
     PulseCaptureConfig,
     PulseCaptureSession,
 )
-from ...algorithms.measurement.pulse_hdf5 import PulseHDF5Reader
+from ...pulse_capture.hdf5 import PulseHDF5Reader
 from ...algorithms.measurement.streamer_config import (
     PFB_SAMPLE_RATE,
     slow_sample_rate,
 )
-from ...algorithms.measurement.pulse_analysis import counts_to_hz_scale
+from ...pulse_capture.analysis import counts_to_hz_scale
 
 # Fast/PFB stream overlay colors (darker variants, HUD convention)
 FAST_IQ_COLORS = {"I": "#24478F", "Q": "#8F4724"}
@@ -1088,7 +1088,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         if mode == "both":
-            from ...algorithms.measurement.pulse_capture_session import (
+            from ...pulse_capture.session import (
                 DualPulseCaptureSession,
             )
             session = DualPulseCaptureSession(

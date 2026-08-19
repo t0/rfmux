@@ -11,7 +11,7 @@ The canonical SNR is::
 
     snr = max(peak_I, peak_Q) / max(std_I, std_Q)
 
-matching :class:`~rfmux.algorithms.measurement.pulse_accumulators.PulseHistogramSet`.
+matching :class:`~rfmux.pulse_capture.accumulators.PulseHistogramSet`.
 
 The decay constant is recovered without curve fitting from two
 well-measured points on the falling edge — the peak and the moment the
@@ -31,8 +31,8 @@ from __future__ import annotations
 import numpy as np
 from typing import Dict, Optional
 
-from .pulse_detection import ChannelNoiseStats
-from ...core.transferfunctions import VOLTS_PER_ROC
+from .detection import ChannelNoiseStats
+from ..core.transferfunctions import VOLTS_PER_ROC
 
 
 def pulse_peaks(

@@ -11,7 +11,7 @@ import pytest
 import tempfile
 from pathlib import Path
 
-from rfmux.algorithms.measurement.pulse_detection import (
+from rfmux.pulse_capture.detection import (
     PulseCapture,
     ChannelNoiseStats,
     Circular,
@@ -40,7 +40,7 @@ def _collecting_capture(*args, **kwargs):
     return pcap
 
 
-from rfmux.algorithms.measurement.pulse_accumulators import (
+from rfmux.pulse_capture.accumulators import (
     HistogramAccumulator,
     PulseHistogramSet,
 )
@@ -49,7 +49,7 @@ from rfmux.algorithms.measurement.pulse_accumulators import (
 # requires_h5py marker or skip individually.
 try:
     import h5py
-    from rfmux.algorithms.measurement.pulse_hdf5 import (
+    from rfmux.pulse_capture.hdf5 import (
         PulseHDF5Writer,
         PulseHDF5Reader,
     )
@@ -613,12 +613,12 @@ class TestIntegration:
 
 # ───────────────────────── Phase A: pulse_analysis ──────────────────
 
-from rfmux.algorithms.measurement.pulse_analysis import (
+from rfmux.pulse_capture.analysis import (
     derive_tau,
     pulse_peaks,
     pulse_summary,
 )
-from rfmux.algorithms.measurement.pulse_capture_session import (
+from rfmux.pulse_capture.session import (
     CaptureState,
     PulseCaptureSession,
 )
@@ -993,7 +993,7 @@ class TestHistogramAutoExpand:
 
 # ───────────────────────── PulseCaptureConfig ───────────────────────
 
-from rfmux.algorithms.measurement.pulse_capture_session import (
+from rfmux.pulse_capture.session import (
     PulseCaptureConfig,
 )
 
@@ -1014,7 +1014,7 @@ class TestPulseCaptureConfig:
     def test_session_kwargs_match_session_signature(self):
         cfg = PulseCaptureConfig(min_pulse_ms=0.5, max_pulse_ms=100.0)
         kwargs = cfg.session_kwargs(19073.486328125)
-        from rfmux.algorithms.measurement.pulse_capture_session import (
+        from rfmux.pulse_capture.session import (
             PulseCaptureSession,
         )
         session = PulseCaptureSession(channels=[1], **kwargs)
@@ -1152,7 +1152,7 @@ class TestSessionFeedBlock:
 
     @staticmethod
     def _feed(mode, n=9000, noise_train=2000, block=700):
-        from rfmux.algorithms.measurement.pulse_capture_session import (
+        from rfmux.pulse_capture.session import (
             PulseCaptureSession,
         )
         rng = np.random.default_rng(3)
@@ -1199,7 +1199,7 @@ class TestSessionFeedBlock:
     def test_feed_block_drops_unusable_timestamps(self):
         """Same rule as feed_sample: no timestamp, no sample — every
         duration and tau is measured from these."""
-        from rfmux.algorithms.measurement.pulse_capture_session import (
+        from rfmux.pulse_capture.session import (
             PulseCaptureSession,
         )
         session = PulseCaptureSession(
@@ -1308,7 +1308,7 @@ class TestDetectionParamsPlumbing:
     """
 
     def test_session_kwargs_covers_exactly_the_detection_params(self):
-        from rfmux.algorithms.measurement.pulse_capture_session import (
+        from rfmux.pulse_capture.session import (
             DETECTION_PARAMS,
         )
         kw = PulseCaptureConfig().session_kwargs(19073.486328125)
@@ -1319,7 +1319,7 @@ class TestDetectionParamsPlumbing:
 
     def test_every_detection_param_is_a_pulse_capture_argument(self):
         import inspect
-        from rfmux.algorithms.measurement.pulse_capture_session import (
+        from rfmux.pulse_capture.session import (
             DETECTION_PARAMS,
         )
         accepted = set(inspect.signature(PulseCapture).parameters)
@@ -1331,7 +1331,7 @@ class TestDetectionParamsPlumbing:
         handed to the writer and silently dropped, so a capture file
         recorded neither what confirmed a trigger nor over what lag."""
         import h5py
-        from rfmux.algorithms.measurement.pulse_capture_session import (
+        from rfmux.pulse_capture.session import (
             DETECTION_PARAMS,
             PulseCaptureSession,
         )
@@ -1361,7 +1361,7 @@ class TestDetectionParamsPlumbing:
 
 # ───────────────────────── Template stacking ────────────────────────
 
-from rfmux.algorithms.measurement.pulse_accumulators import (
+from rfmux.pulse_capture.accumulators import (
     PulseTemplateAccumulator,
     PulseTemplateSet,
     find_trigger_index,
@@ -2143,7 +2143,7 @@ class TestDecisionMarks:
 
     def test_marks_survive_a_round_trip_through_hdf5(self):
         import tempfile
-        from rfmux.algorithms.measurement.pulse_hdf5 import (
+        from rfmux.pulse_capture.hdf5 import (
             PulseHDF5Reader, PulseHDF5Writer)
 
         d = self._run()

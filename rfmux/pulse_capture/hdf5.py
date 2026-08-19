@@ -34,8 +34,8 @@ try:
 except ImportError:
     h5py = None  # type: ignore[assignment]
 
-from .pulse_detection import ChannelNoiseStats
-from .pulse_analysis import pulse_summary
+from .detection import ChannelNoiseStats
+from .analysis import pulse_summary
 
 
 # ───────────────────────── Shared writer plumbing ───────────────────
@@ -53,7 +53,7 @@ class _PulseFileWriter:
 
     #: capture_params written to ``metadata``, grouped by attribute type.
     #: Must cover everything in
-    #: :data:`~.pulse_capture_session.DETECTION_PARAMS` — a parameter
+    #: :data:`~.session.DETECTION_PARAMS` — a parameter
     #: missing here is silently dropped, which is how capture files came
     #: to record neither the trigger confirmation length nor the edge
     #: lookback.  test_every_detection_param_reaches_the_file pins it.

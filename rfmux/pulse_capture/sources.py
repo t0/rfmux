@@ -17,14 +17,14 @@ Usage (fast/PFB capture, headless)::
 
     await crs.configure_streamer(6, pfb_channels=[1, 2])
     session = PulseCaptureSession(channels=[1, 2], streamer_mode="fast",
-                                  sample_rate=PFB_SAMPLE_RATE, ...)
+                                  sample_rate=streamer.PFB_SAMPLE_RATE, ...)
     session.start()
     await run_pfb_source(session, crs.tuber_hostname, [1, 2],
                          duration_s=10.0)
     session.stop()
 
 :func:`run_dual_source` drives both streams at once for a
-:class:`~rfmux.algorithms.measurement.pulse_capture_session.DualPulseCaptureSession`,
+:class:`~rfmux.pulse_capture.session.DualPulseCaptureSession`,
 which is what live cross-stream pulse matching needs.
 """
 
@@ -36,8 +36,7 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 
 import numpy as np
 
-from ... import streamer
-from .streamer_config import PFB_SAMPLE_RATE
+from .. import streamer
 
 
 def columns_for_width(channels, width: int):
@@ -224,7 +223,7 @@ async def run_pfb_source(
     *,
     duration_s: Optional[float] = None,
     should_stop: Optional[Callable[[], bool]] = None,
-    sample_rate: float = PFB_SAMPLE_RATE,
+    sample_rate: float = streamer.PFB_SAMPLE_RATE,
 ) -> float:
     """Feed *session* from the fast/PFB stream until stopped.
 

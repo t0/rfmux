@@ -10,7 +10,7 @@ every pulse.
 import numpy as np
 import pytest
 
-from rfmux.algorithms.measurement.pulse_capture_session import (
+from rfmux.pulse_capture.session import (
     CaptureState, PulseCaptureSession)
 
 FS = 1000.0

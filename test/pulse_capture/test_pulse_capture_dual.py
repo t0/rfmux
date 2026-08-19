@@ -9,18 +9,18 @@ session's two streams with a shared clock.
 import numpy as np
 import pytest
 
-from rfmux.algorithms.measurement.pulse_capture_session import (
+from rfmux.pulse_capture.session import (
     DualPulseCaptureSession,
     IncrementalPulseMatcher,
 )
-from rfmux.algorithms.measurement.pulse_capture_session import (
+from rfmux.pulse_capture.session import (
     CaptureState,
     PulseCaptureConfig,
 )
 
 try:
     import h5py  # noqa: F401
-    from rfmux.algorithms.measurement.pulse_hdf5 import PulseHDF5Reader
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
     HAS_H5PY = True
 except ImportError:
     HAS_H5PY = False
@@ -289,7 +289,7 @@ def test_streams_start_capturing_together():
     into a partner with no ring yet and every pair comes out one-sided
     with 'window unavailable'."""
     import numpy as np
-    from rfmux.algorithms.measurement.pulse_capture_session import (
+    from rfmux.pulse_capture.session import (
         CaptureState)
 
     dual = DualPulseCaptureSession(

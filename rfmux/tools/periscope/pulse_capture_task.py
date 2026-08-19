@@ -1,6 +1,6 @@
 """
 Background worker bridging the Periscope slow-stream tap to a
-:class:`~rfmux.algorithms.measurement.pulse_capture_session.PulseCaptureSession`.
+:class:`~rfmux.pulse_capture.session.PulseCaptureSession`.
 
 Architecture: all capture logic (noise estimation, detection, HDF5,
 histograms) lives in the algorithms layer.  This QThread only
@@ -31,11 +31,11 @@ import numpy as np
 from PyQt6 import QtCore
 from PyQt6.QtCore import pyqtSignal
 
-from ...algorithms.measurement.pulse_capture_session import (
+from ...pulse_capture.session import (
     CaptureState,
     PulseCaptureSession,
 )
-from ...algorithms.measurement.pulse_sources import SlowBlockAccumulator
+from ...pulse_capture.sources import SlowBlockAccumulator
 
 
 class PulseCaptureSignals(QtCore.QObject):
@@ -272,7 +272,7 @@ class PulseCaptureTask(QtCore.QThread):
     async def _run_fast(self) -> None:
         """PFB capture: configure the fast streamer, run the shared
         source, keep servicing control requests, always tear down."""
-        from ...algorithms.measurement.pulse_sources import run_pfb_source
+        from ...pulse_capture.sources import run_pfb_source
 
         channels = list(self.session.channels)
         await self.crs.set_pfb_streamer(channel=channels,
@@ -310,7 +310,7 @@ class PulseCaptureTask(QtCore.QThread):
         listener silently starves.  (Real hardware multicasts, but the
         tap works for both and costs nothing.)
         """
-        from ...algorithms.measurement.pulse_sources import (
+        from ...pulse_capture.sources import (
             run_dual_source,
         )
 

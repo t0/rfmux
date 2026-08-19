@@ -22,15 +22,19 @@ the callbacks; this notebook builds the same session, feeds it with the same
 source functions, and prints or plots instead. There is no capability in the GUI
 that is unavailable here.
 
+Everything under `rfmux.pulse_capture` is also re-exported from the package
+itself, so `from rfmux.pulse_capture import PulseCaptureSession` works and is
+what the import cell below uses. The per-module paths are listed for orientation.
+
 | Piece | Module |
 |---|---|
 | Streamer setup + link-budget math | `rfmux.algorithms.measurement.streamer_config` |
-| Detection engine (ring buffer, triggering) | `rfmux.algorithms.measurement.pulse_detection` |
-| Live capture orchestration | `rfmux.algorithms.measurement.pulse_capture_session` |
-| Concurrent slow+fast with matching | `rfmux.algorithms.measurement.pulse_capture_session` |
-| Packet sources that feed a session | `rfmux.algorithms.measurement.pulse_sources` |
-| Per-pulse metrics (SNR, derived τ) | `rfmux.algorithms.measurement.pulse_analysis` |
-| Streaming HDF5 persistence | `rfmux.algorithms.measurement.pulse_hdf5` |
+| Detection engine (ring buffer, triggering) | `rfmux.pulse_capture.detection` |
+| Live capture orchestration | `rfmux.pulse_capture.session` |
+| Concurrent slow+fast with matching | `rfmux.pulse_capture.session` |
+| Packet sources that feed a session | `rfmux.pulse_capture.sources` |
+| Per-pulse metrics (SNR, derived τ) | `rfmux.pulse_capture.analysis` |
+| Streaming HDF5 persistence | `rfmux.pulse_capture.hdf5` |
 
 ## How to use this document
 
@@ -66,15 +70,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import rfmux
-from rfmux.algorithms.measurement.pulse_analysis import counts_to_hz_scale
-from rfmux.algorithms.measurement.pulse_capture_session import (
-    DualPulseCaptureSession,
-)
-from rfmux.algorithms.measurement.pulse_capture_session import (
-    PulseCaptureConfig, PulseCaptureSession,
-)
-from rfmux.algorithms.measurement.pulse_hdf5 import PulseHDF5Reader
-from rfmux.algorithms.measurement.pulse_sources import (
+from rfmux.pulse_capture import (
+    DualPulseCaptureSession, PulseCaptureConfig, PulseCaptureSession,
+    PulseHDF5Reader, counts_to_hz_scale,
     run_dual_source, run_pfb_source, run_slow_source,
 )
 from rfmux.algorithms.measurement.streamer_config import (

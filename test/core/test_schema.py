@@ -139,7 +139,7 @@ def test_hardware_map_with_wafer_and_resonator_csv(tmp_path):
         !HardwareMap
         - !Wafer
           name: some_wafer
-          resonators: !Resonators "{str(csvfile)}"
+          resonators: !Resonators "{csvfile.as_posix()}"
         """
     )
 
@@ -211,7 +211,7 @@ def test_hardware_map_with_channel_mappings(tmp_path):
 
         - !Wafer
           name: some_wafer
-          resonators: !Resonators "{str(resonators)}"
+          resonators: !Resonators "{resonators.as_posix()}"
 
         - !ChannelMappings "{str(mapping)}"
         """

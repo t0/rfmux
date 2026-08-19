@@ -112,7 +112,8 @@ def test_the_probe_does_not_eat_the_real_stream():
     """It runs on an ephemeral port, so a live capture is untouched."""
     listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    if hasattr(socket, "SO_REUSEPORT"):   # POSIX-only
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     listener.bind(("", 9876))
     listener.setblocking(False)
     try:

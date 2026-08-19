@@ -23,6 +23,14 @@ from rfmux.streamer import (MULTICAST_GROUP, find_competing_receiver,
                             find_streamer_conflict)
 
 
+#: The starvation these tests describe is a property of SO_REUSEPORT,
+#: which Windows does not have.  Skipping is the honest outcome there:
+#: the option is absent, so the behaviour it produces cannot arise.
+requires_reuseport = pytest.mark.skipif(
+    not hasattr(socket, "SO_REUSEPORT"),
+    reason="SO_REUSEPORT is POSIX-only; Windows has no equivalent")
+
+
 @pytest.fixture
 def free_port():
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -35,7 +43,8 @@ def free_port():
 def _reuse_socket(port, join_group=False):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     s.bind(("", port))
     if join_group:
         s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
@@ -54,6 +63,7 @@ def test_quiet_when_the_port_is_free(free_port):
 
 
 @pytest.mark.portable
+@requires_reuseport
 def test_reports_a_receiver_that_would_take_our_packets(free_port):
     holder = _reuse_socket(free_port)
     try:
@@ -65,6 +75,7 @@ def test_reports_a_receiver_that_would_take_our_packets(free_port):
 
 
 @pytest.mark.portable
+@requires_reuseport
 def test_silent_for_a_real_board(free_port):
     """A board multicasts, so other readers cost nothing -- do not warn."""
     holder = _reuse_socket(free_port)
@@ -78,6 +89,7 @@ def test_silent_for_a_real_board(free_port):
 
 
 @pytest.mark.portable
+@requires_reuseport
 def test_the_probe_sees_past_so_reuseport(free_port):
     """The holder sets SO_REUSEPORT; a probe that did too would miss it."""
     holder = _reuse_socket(free_port)
@@ -89,6 +101,7 @@ def test_the_probe_sees_past_so_reuseport(free_port):
 
 
 @pytest.mark.portable
+@requires_reuseport
 def test_conflict_check_still_sees_a_receiver(free_port):
     """find_streamer_conflict shares the probe; keep its half working."""
     holder = _reuse_socket(free_port)
@@ -110,6 +123,7 @@ def _drain(s):
 
 
 @pytest.mark.portable
+@requires_reuseport
 def test_unicast_starves_the_second_listener(free_port):
     """Why the warning exists at all -- this is the mock's transport."""
     a, b = _reuse_socket(free_port), _reuse_socket(free_port)
@@ -129,6 +143,7 @@ def test_unicast_starves_the_second_listener(free_port):
 
 
 @pytest.mark.portable
+@requires_reuseport
 def test_multicast_feeds_every_listener(free_port):
     """Why the warning is scoped to loopback -- this is a board."""
     a = _reuse_socket(free_port, join_group=True)

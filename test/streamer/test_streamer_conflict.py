@@ -100,6 +100,9 @@ def test_the_read_probe_is_bounded_when_nothing_is_sending(free_port):
     assert elapsed < 0.5, f"idle probe took {elapsed*1000:.0f} ms"
 
 
+@pytest.mark.skipif(
+    not hasattr(socket, "SO_REUSEPORT"),
+    reason="SO_REUSEPORT is POSIX-only; Windows has no equivalent")
 def test_the_probe_refuses_reuseport(free_port):
     """The bind probe sets no socket options, and that is load-bearing.
 

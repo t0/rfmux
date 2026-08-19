@@ -10,6 +10,7 @@ is exactly what a user saw, and what took a while to explain.
 """
 
 import socket
+import sys
 import threading
 import time
 
@@ -36,11 +37,21 @@ def _blocking_call_returns(sock, timeout_s=8.0):
     return done.wait(timeout=timeout_s)
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="recvmmsg with MSG_WAITFORONE is the Linux path; elsewhere the "
+           "call returns on its own and there is no blocking to document")
 def test_receive_batch_alone_blocks_on_a_silent_socket():
     """Documents WHY the timeout below is needed — not a bug to fix here.
 
-    If this ever starts returning, recvmmsg's timeout semantics changed
-    and the socket timeout could in principle go away.
+    Linux only. The receiver reaches recvmmsg there, and the kernel
+    consults timeout_ms only BETWEEN datagrams, so a silent socket
+    blocks forever. macOS and Windows return without help, which is why
+    they skip rather than assert the opposite: the socket timeout is
+    still set on every platform, it simply has nothing to rescue.
+
+    If this starts returning ON LINUX, recvmmsg's timeout semantics
+    changed and the socket timeout could in principle go away.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", 0))

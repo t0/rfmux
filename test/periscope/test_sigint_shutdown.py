@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -107,6 +108,11 @@ _CHILD = textwrap.dedent(
 
 
 @pytest.mark.portable
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows has no SIGINT to send: Ctrl+C arrives as a "
+           "CTRL_C_EVENT delivered to a process group, so this would "
+           "test the harness rather than the handler")
 def test_sigint_actually_ends_the_event_loop(tmp_path):
     script = tmp_path / "child.py"
     script.write_text(_CHILD)
@@ -116,7 +122,19 @@ def test_sigint_actually_ends_the_event_loop(tmp_path):
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     try:
-        assert child.stdout.readline().strip() == "ready"
+        # Read until the marker rather than taking the first line:
+        # importing rfmux prints a numba banner on macOS, and asserting
+        # on line one tests the banner, not the shutdown.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            line = child.stdout.readline()
+            if not line:
+                pytest.fail("child exited before it was ready")
+            if line.strip() == "ready":
+                break
+        else:
+            pytest.fail("child never reported ready")
+
         child.send_signal(signal.SIGINT)
         try:
             child.wait(timeout=15)

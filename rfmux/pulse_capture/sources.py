@@ -6,13 +6,13 @@ session in blocks.  The Periscope pulse-capture task and the reference
 demo scripts share this code — the GUI adds only Qt signal plumbing on
 top.
 
-Periscope cannot use :func:`run_slow_source` itself (its own receiver
-already owns the socket, and against the mock's unicast stream a second
-``SO_REUSEPORT`` listener does not share it but starves -- the kernel
-gives each datagram to exactly one of them), so it feeds
-:class:`SlowBlockAccumulator` from its GUI tap instead.  That class is the shared part: both routes turn packets
-into per-channel blocks identically, and neither can quietly become
-slower than the other.
+Periscope drives :class:`SlowIngest` from its GUI tap rather than
+calling :func:`run_slow_source`, because its process already holds
+every slow packet and a second socket would cost kernel copies and
+another drain thread in a GUI that is GIL-bound at stage 0.  Only the
+transport differs: blocking, sample-time accounting and the duration
+stop all live in :class:`SlowIngest`, so the GUI is a caller rather
+than a second implementation.
 
 Usage (fast/PFB capture, headless)::
 
@@ -52,22 +52,29 @@ def columns_for_width(channels, width: int):
                              count=len(kept))
 
 
-class SlowBlockAccumulator:
-    """Turns slow-stream packets into per-channel blocks.
+class SlowIngest:
+    """Turns slow-stream samples into a fed session.
+
+    Everything a caller must do per packet: build blocks, keep sample
+    time, and decide when a requested duration is covered.  It has no
+    opinion about where the samples came from, which is the point --
+    :func:`run_slow_source` drives it from a socket, and Periscope
+    drives it from the receiver it already has.
+
+    The transports differ deliberately.  Periscope's process already
+    holds every packet, and a second receive path there costs kernel
+    copies and a drain thread in a GUI that is GIL-bound at stage 0.
+    The *interpretation* is what must not differ, so it lives here once.
+
+    Blocks, rather than samples, because feeding sample-at-a-time costs
+    ~2.3 us of interpreter time per sample (see
+    :meth:`PulseCapture.process_sample`), which at 200 channels caps
+    ingest near 1.8k packets/s -- decimation stage 5.  Going through
+    blocks lifts that to ~65k packets/s, past stage 0.
 
     A slow packet carries one sample of *each* channel, so a block has
     to be built ACROSS packets -- unlike a PFB packet, which is already
-    a block of one channel.  That difference is the whole reason this
-    class exists.
-
-    Feeding sample-at-a-time costs ~2.3 us of interpreter time per
-    sample (see :meth:`PulseCapture.process_sample`), which at 200
-    channels caps ingest near 1.8k packets/s -- decimation stage 5.
-    Going through blocks lifts that to ~65k packets/s, past stage 0.
-
-    Both the headless socket source and Periscope's GUI tap drive this,
-    so the two cannot drift apart: the GUI is a caller, not a second
-    implementation.
+    a block of one channel.
 
     ``feed`` is called as ``feed(channel, I, Q, timestamps)`` -- pass
     ``session.feed_block``, or a stream-specific variant such as
@@ -79,23 +86,66 @@ class SlowBlockAccumulator:
     DEFAULT_MAX_PACKETS = 256
     DEFAULT_MAX_AGE_S = 0.05
 
-    def __init__(self, feed, *, max_packets: int = DEFAULT_MAX_PACKETS,
+    #: Timestamp steps outside this are treated as discontinuities
+    #: rather than elapsed time.  See :meth:`advance`.
+    MAX_PLAUSIBLE_STEP_S = 5.0
+
+    def __init__(self, feed, *, duration_s: Optional[float] = None,
+                 max_packets: int = DEFAULT_MAX_PACKETS,
                  max_age_s: float = DEFAULT_MAX_AGE_S):
         self._feed = feed
+        self.duration_s = duration_s
         self.max_packets = max_packets
         self.max_age_s = max_age_s
         self.channels: Optional[Tuple[int, ...]] = None
+        self.elapsed = 0.0
         self._values: List[np.ndarray] = []
         self._stamps: List[float] = []
         self._opened = 0.0
+        self._prev_ts: Optional[float] = None
+
+    # ── sample time ───────────────────────────────────────────────
+
+    def advance(self, timestamp) -> None:
+        """Accumulate sample time from a packet timestamp.
+
+        Monotone and clamped per packet, so it is immune to the
+        discontinuities a plain last-minus-first would turn into a
+        nonsense duration: a decimation change restarts the clock, and
+        the day boundary wraps it to zero.  Both are invisible in mock
+        runs -- simulated captures are short and never cross midnight --
+        which is exactly why this is a plain method with its own tests
+        rather than something only a live socket can reach.
+
+        Call this for packets that carry none of the wanted channels
+        too: they are still time passing.  :meth:`add` calls it for you.
+        """
+        if timestamp is None:
+            return
+        if self._prev_ts is not None:
+            delta = timestamp - self._prev_ts
+            if 0.0 < delta < self.MAX_PLAUSIBLE_STEP_S:
+                self.elapsed += delta
+        self._prev_ts = timestamp
+
+    @property
+    def complete(self) -> bool:
+        """True once ``duration_s`` of sample time has been covered."""
+        return (self.duration_s is not None
+                and self.elapsed >= self.duration_s)
+
+    # ── blocking ──────────────────────────────────────────────────
 
     def add(self, channels, values, timestamp) -> None:
-        """Buffer one packet's worth of samples.
+        """The whole per-packet duty: buffer, flush if ready, keep time.
 
         A change of channel set flushes what came before, so columns
         never straddle two different layouts.
         """
+        self.advance(timestamp)
         channels = tuple(channels)
+        if not channels:
+            return
         if channels != self.channels:
             self.flush()
             self.channels = channels
@@ -106,18 +156,14 @@ class SlowBlockAccumulator:
         # those exactly as feed_sample did.
         self._stamps.append(float("nan") if timestamp is None
                             else float(timestamp))
+        if self.ready:
+            self.flush()
 
     @property
     def ready(self) -> bool:
         return bool(self._values) and (
             len(self._values) >= self.max_packets
             or time.monotonic() - self._opened >= self.max_age_s)
-
-    def add_and_flush_if_ready(self, channels, values, timestamp) -> None:
-        """The whole per-packet duty of a caller, in one call."""
-        self.add(channels, values, timestamp)
-        if self.ready:
-            self.flush()
 
     def flush(self) -> None:
         """Hand everything buffered to the session, one block per channel."""
@@ -169,11 +215,9 @@ async def run_slow_source(
     """
     loop = asyncio.get_running_loop()
     requested = list(session.channels)
-    blocks = SlowBlockAccumulator(session.feed_block)
+    ingest = SlowIngest(session.feed_block, duration_s=duration_s)
     columns: Optional[Tuple[Tuple[int, ...], np.ndarray]] = None
     width = -1
-    prev_ts: Optional[float] = None
-    elapsed = 0.0
 
     with streamer.get_multicast_socket(
             host, port=streamer.STREAMER_PORT) as sock:
@@ -199,22 +243,15 @@ async def run_slow_source(
                 width = len(pkt)
                 columns = columns_for_width(requested, width)
             if columns[0]:
-                blocks.add_and_flush_if_ready(columns[0], raw[columns[1]],
-                                              ts)
-            if ts is not None:
-                # Monotone accumulation, clamped per packet: immune to
-                # timestamp discontinuities (decimation changes, clock
-                # wrap at the day boundary) that would blow up a plain
-                # last-minus-first difference.
-                if prev_ts is not None:
-                    delta = ts - prev_ts
-                    if 0.0 < delta < 5.0:
-                        elapsed += delta
-                prev_ts = ts
-                if duration_s is not None and elapsed >= duration_s:
-                    break
-        blocks.flush()   # don't strand the tail of the capture
-    return elapsed
+                ingest.add(columns[0], raw[columns[1]], ts)
+            else:
+                # No wanted channel in this packet, but still time
+                # passing -- the duration must not stall on it.
+                ingest.advance(ts)
+            if ingest.complete:
+                break
+        ingest.flush()   # don't strand the tail of the capture
+    return ingest.elapsed
 
 
 async def run_pfb_source(
@@ -327,11 +364,12 @@ async def run_dual_source(
         facades so stream time advances the matcher.
     slow_source : callable, optional
         Override for the slow side, called with a stop predicate and
-        awaited.  Periscope passes its tap pump here: the mock streamer
-        sends unicast, and with ``SO_REUSEPORT`` the kernel hands each
-        datagram to exactly one socket, so a second listener alongside
-        Periscope's own receiver would silently starve.  Headless there
-        is no competing receiver and the default socket source is right.
+        awaited.  Periscope passes its tap pump here because its
+        process already holds every slow packet: a second socket would
+        cost kernel copies and another drain thread in a GUI that is
+        GIL-bound at stage 0.  Both routes drive :class:`SlowIngest`,
+        so only the transport differs.  Headless there is nothing to
+        reuse and the default socket source is right.
 
     Returns ``(slow_elapsed, fast_elapsed)`` in seconds of sample time.
     """

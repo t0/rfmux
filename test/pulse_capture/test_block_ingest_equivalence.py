@@ -1,7 +1,7 @@
 """
 Headless and GUI must ingest the slow stream identically.
 
-Both routes go through SlowBlockAccumulator now, but the accumulator
+Both routes go through SlowIngest now, but the accumulator
 only earns that trust if a block of samples produces exactly what the
 same samples produce one at a time.  These tests feed identical
 synthetic packets down each path and compare what the sessions saw.
@@ -13,7 +13,7 @@ import pytest
 from rfmux.pulse_capture.session import (
     CaptureState, PulseCaptureSession)
 from rfmux.pulse_capture.sources import (
-    SlowBlockAccumulator, columns_for_width)
+    SlowIngest, columns_for_width)
 
 FS = 1000.0
 DT = 1.0 / FS
@@ -59,10 +59,10 @@ def _run_per_sample(channels, packets, pulses):
 def _run_blocks(channels, packets, pulses, max_packets=256):
     s = _session(channels, pulses)
     s.start()
-    acc = SlowBlockAccumulator(s.feed_block, max_packets=max_packets,
+    acc = SlowIngest(s.feed_block, max_packets=max_packets,
                                max_age_s=1e9)   # size-driven only
     for values, ts in packets:
-        acc.add_and_flush_if_ready(channels, values, ts)
+        acc.add(channels, values, ts)
     acc.flush()
     s.stop()
     return s
@@ -121,7 +121,7 @@ def test_unusable_timestamps_are_dropped_not_poisoned():
     pulses = []
     s = _session(channels, pulses)
     s.start()
-    acc = SlowBlockAccumulator(s.feed_block, max_packets=64, max_age_s=1e9)
+    acc = SlowIngest(s.feed_block, max_packets=64, max_age_s=1e9)
     for n, (values, ts) in enumerate(packets):
         acc.add(channels, values, None if n % 100 == 0 else ts)
         if acc.ready:
@@ -145,7 +145,7 @@ def test_columns_for_width_drops_unreachable_channels():
 
 def test_accumulator_flushes_on_channel_change():
     seen = []
-    acc = SlowBlockAccumulator(
+    acc = SlowIngest(
         lambda ch, i, q, t: seen.append((ch, len(i))),
         max_packets=1000, max_age_s=1e9)
     acc.add((1, 2), np.array([1 + 1j, 2 + 2j]), 0.0)

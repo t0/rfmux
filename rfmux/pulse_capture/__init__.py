@@ -22,7 +22,7 @@ The layers, bottom up::
     hdf5           streaming writer (write-as-you-go, so a crash keeps
                    what it had) and the matching reader
     sources        getting samples in: async socket loops for the slow
-                   and fast streams, and SlowBlockAccumulator, which
+                   and fast streams, and SlowIngest, which
                    Periscope's GUI tap uses too so the two cannot drift
     session        the orchestrator: lifecycle, callbacks, persistence.
                    DualPulseCaptureSession runs slow+fast at once with
@@ -73,7 +73,7 @@ from .session import (
     PulseCaptureSession,
 )
 from .sources import (
-    SlowBlockAccumulator,
+    SlowIngest,
     columns_for_width,
     run_dual_source,
     run_pfb_source,
@@ -115,7 +115,7 @@ __all__ = [
     "PulseCaptureConfig",
     "PulseCaptureSession",
     # sources
-    "SlowBlockAccumulator",
+    "SlowIngest",
     "columns_for_width",
     "run_dual_source",
     "run_pfb_source",

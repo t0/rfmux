@@ -34,7 +34,7 @@ from ...pulse_capture.session import (
     CaptureState,
     PulseCaptureSession,
 )
-from ...pulse_capture.sources import SlowBlockAccumulator
+from ...pulse_capture.sources import SlowIngest
 
 
 class PulseCaptureSignals(QtCore.QObject):
@@ -249,24 +249,25 @@ class PulseCaptureTask(QtCore.QThread):
     def _run_slow_loop(self) -> None:
         """Drain the tap-fed queue (slow mode) into per-channel blocks.
 
-        The blocking itself is SlowBlockAccumulator, shared with the
-        headless socket source, so the GUI is a caller rather than a
-        second implementation.
+        Everything past "here is a packet" is SlowIngest, shared with
+        the headless socket source, so the GUI is a caller rather than
+        a second implementation.  Only the transport differs: this
+        process already holds the packets.
         """
-        blocks = SlowBlockAccumulator(self.session.feed_block)
+        ingest = SlowIngest(self.session.feed_block)
         while not (self._stop_requested or self.isInterruptionRequested()):
             try:
                 item = self.sample_queue.get(timeout=0.02)
             except queue.Empty:
-                blocks.flush()   # don't strand a partial block when idle
+                ingest.flush()   # don't strand a partial block when idle
                 self.session.flush_progress()
                 continue
             if self._handle_control(item):
                 continue
             channels, values, stamps = item
             for packet, stamp in zip(values, stamps):
-                blocks.add_and_flush_if_ready(channels, packet, stamp)
-        blocks.flush()
+                ingest.add(channels, packet, stamp)
+        ingest.flush()
 
     async def _run_fast(self) -> None:
         """PFB capture: configure the fast streamer, run the shared
@@ -302,12 +303,11 @@ class PulseCaptureTask(QtCore.QThread):
 
         The gather, the shared stop and the fast socket all live in
         run_dual_source — this adds only the PFB streamer lifecycle and
-        the tap-fed slow side.  The SLOW side must come from the
-        Periscope tap, not a second socket: the mock streamer sends
-        UNICAST, and with SO_REUSEPORT the kernel hands each datagram
-        to ONE socket — Periscope's own receiver wins and a second
-        listener silently starves.  (Real hardware multicasts, but the
-        tap works for both and costs nothing.)
+        the tap-fed slow side.  The slow side comes from the Periscope
+        tap because this process already holds every slow packet: a
+        second socket would cost kernel copies and another drain thread
+        in a GUI that is GIL-bound at stage 0.  Both routes drive
+        SlowIngest, so only the transport differs.
         """
         from ...pulse_capture.sources import (
             run_dual_source,
@@ -334,20 +334,19 @@ class PulseCaptureTask(QtCore.QThread):
         """Drain tap-fed slow samples + control items into the dual
         session.  Warns once if no slow samples arrive at all.
 
-        Returns 0.0 for run_dual_source's slow_elapsed: the tap hands
-        over samples without the packet timestamps the socket sources
-        accumulate sample time from, and the GUI reads its elapsed time
-        off the session stats instead.
+        Returns the sample time SlowIngest accumulated, on the same
+        clock the socket source uses -- so run_dual_source's
+        ``slow_elapsed`` means one thing whichever route filled it.
         """
         fed = 0
         warned = False
         t_start = time.monotonic()
-        blocks = SlowBlockAccumulator(self.session.feed_slow_block)
+        ingest = SlowIngest(self.session.feed_slow_block)
         while not stop():
             try:
                 item = self.sample_queue.get_nowait()
             except queue.Empty:
-                blocks.flush()
+                ingest.flush()
                 self.session.flush_progress()
                 if (not warned and fed == 0
                         and time.monotonic() - t_start > 5.0):
@@ -361,10 +360,10 @@ class PulseCaptureTask(QtCore.QThread):
                 continue
             channels, values, stamps = item
             for packet, stamp in zip(values, stamps):
-                blocks.add_and_flush_if_ready(channels, packet, stamp)
+                ingest.add(channels, packet, stamp)
             fed += len(values)
-        blocks.flush()
-        return 0.0
+        ingest.flush()
+        return ingest.elapsed
 
     async def _control_pump(self) -> None:
         """Service __reestimate__/__fetch__ requests while a socket

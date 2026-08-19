@@ -809,7 +809,7 @@ objects this notebook does:
 | Threshold σ / End σ / Pileup | `threshold_sigma`, `end_sigma`, `enable_pileup` |
 | Mode: slow / fast / both | `run_slow_source` / `run_pfb_source` / `run_dual_source` |
 | **▶ Start** | `session.start()` + a source coroutine |
-| (how the GUI tap feeds the session) | `SlowBlockAccumulator` — the same class `run_slow_source` uses, so the GUI and this notebook ingest identically |
+| (how the GUI tap feeds the session) | `SlowIngest` — the same class `run_slow_source` uses, so the GUI and this notebook block, keep sample time and stop on duration identically |
 | **⟳ Re-estimate Noise** | `session.re_estimate_noise()` |
 | Live pulse / histogram / template plots | `on_pulse`, `on_histograms`, `on_templates` callbacks |
 | counts / Hz selector | `counts_to_hz_scale(df_calibration)` |

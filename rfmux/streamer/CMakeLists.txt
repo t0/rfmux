@@ -65,3 +65,120 @@ endif()
 
 # Install to rfmux/streamer subdirectory
 install(TARGETS _receiver LIBRARY DESTINATION rfmux/streamer)
+
+#
+# fastrx: Linux-only, AF_XDP-based receiver fastpath for fancy NICs
+#
+# Built only on Linux when clang, libxdp and libbpf are all present. When
+# fastrxd is mandatory (i.e. for wheel builds), use
+#
+#   $ uv pip install . --config-settings=cmake.define.FASTRX_REQUIRED=ON
+#
+# or
+#
+#   $ SKBUILD_CMAKE_DEFINE="FASTRX_REQUIRED=ON" uv pip install .
+#
+# but note that --config-settings don't seem to stick - uv will happily
+# re-install without fastrx during subsequent "uv run" commands.
+
+option(FASTRX_REQUIRED "Fail configure if fastrxd/_fastrx cannot be built" OFF)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_program(FASTRX_CLANG NAMES clang-19 clang)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FASTRX_LIBXDP QUIET IMPORTED_TARGET libxdp>=1.3)
+        pkg_check_modules(FASTRX_LIBBPF QUIET IMPORTED_TARGET libbpf>=1.0)
+    endif()
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+	AND CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64"
+        AND FASTRX_CLANG
+	AND FASTRX_LIBXDP_FOUND
+	AND FASTRX_LIBBPF_FOUND)
+
+    message(STATUS "fastrx: building fastrxd and _fastrx (clang=${FASTRX_CLANG})")
+
+    # ABI hash, used to ensure the shared-memory region between fastrxd and its
+    # clients is interpreted consistently
+    set(FASTRX_ABI_HEADERS
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/fastrx.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/packet.h)
+    set(FASTRX_ABI_HASH "")
+    foreach(hdr ${FASTRX_ABI_HEADERS})
+        file(SHA256 ${hdr} _h)
+        string(APPEND FASTRX_ABI_HASH ${_h})
+    endforeach()
+    string(SHA256 FASTRX_ABI_HASH ${FASTRX_ABI_HASH})
+    string(SUBSTRING ${FASTRX_ABI_HASH} 0 8 FASTRX_ABI_HASH)
+
+    set(FASTRX_BPF_CFLAGS
+        -O2 -g
+        -target bpf
+        -Wall
+        -Wno-unused-value
+        -Wno-pointer-sign
+        -Wno-compare-distinct-pointer-types
+        -Wno-missing-declarations
+    )
+
+    # clang with "-target bpf" does not add the host's arch-specific include
+    # path, so on Debian/Ubuntu multiarch layouts <asm/types.h> (which lives
+    # under /usr/include/<triple>/) is not found.
+    if(CMAKE_LIBRARY_ARCHITECTURE AND
+            EXISTS /usr/include/${CMAKE_LIBRARY_ARCHITECTURE})
+        list(APPEND FASTRX_BPF_CFLAGS -I/usr/include/${CMAKE_LIBRARY_ARCHITECTURE})
+    endif()
+
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fastrx_bpf.o
+        COMMAND ${FASTRX_CLANG} ${FASTRX_BPF_CFLAGS}
+                -I${CMAKE_CURRENT_SOURCE_DIR}/include -c
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/bpf.c
+                -o ${CMAKE_CURRENT_BINARY_DIR}/fastrx_bpf.o
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/bpf.c
+                ${CMAKE_CURRENT_SOURCE_DIR}/include/packet.h
+        COMMENT "fastrx: compiling BPF program"
+    )
+
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fastrx_bpf_embed.o
+        COMMAND ${CMAKE_LINKER} -r -b binary -o fastrx_bpf_embed.o fastrx_bpf.o
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/fastrx_bpf.o
+        COMMENT "fastrx: embedding BPF ELF as linkable object"
+    )
+
+    add_custom_target(fastrx_bpf_embed ALL
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/fastrx_bpf_embed.o
+    )
+
+    add_executable(fastrxd src/fastrxd.cpp)
+    target_include_directories(fastrxd PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(fastrxd PRIVATE FASTRXD_ABI_VERSION=0x${FASTRX_ABI_HASH}u)
+    target_compile_options(fastrxd PRIVATE
+        -Wall -Wextra -Wshadow -Wcast-qual -Wcast-align
+        -Wnon-virtual-dtor -Wextra-semi
+    )
+    target_link_libraries(fastrxd PRIVATE
+        PkgConfig::FASTRX_LIBXDP PkgConfig::FASTRX_LIBBPF elf z)
+    target_link_options(fastrxd PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/fastrx_bpf_embed.o)
+    add_dependencies(fastrxd fastrx_bpf_embed)
+    install(TARGETS fastrxd DESTINATION rfmux/streamer)
+
+    pybind11_add_module(_fastrx src/fastrx_py.cpp)
+    target_include_directories(_fastrx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(_fastrx PRIVATE FASTRXD_ABI_VERSION=0x${FASTRX_ABI_HASH}u)
+    target_compile_options(_fastrx PRIVATE
+        -Wall -Wextra -Wshadow -Wcast-qual -Wcast-align
+        -Wnon-virtual-dtor -Wextra-semi
+    )
+    target_link_libraries(_fastrx PRIVATE atomic Threads::Threads)
+    install(TARGETS _fastrx LIBRARY DESTINATION rfmux/streamer)
+
+elseif(FASTRX_REQUIRED
+	AND CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+
+    message(FATAL_ERROR "fastrx: FASTRX_REQUIRED=ON, but pre-requisites were missing")
+endif()

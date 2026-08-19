@@ -339,6 +339,37 @@ if IS_MOCK:
     await asyncio.sleep(2.0)
 ```
 
+### Choosing channels
+
+Periscope's **Channels** field and this notebook take the same strings, because
+they call the same parser. Single channels, inclusive ranges, or a mix:
+
+```python
+from rfmux.algorithms.measurement.channel_selection import parse_channel_spec
+
+for spec in ("1,2", "2-19", "1,5-8,20"):
+    print(f"{spec!r:12} -> {parse_channel_spec(spec)}")
+```
+
+`all` (or `*`) is deliberately *not* a list — it means "ask the board", which
+only the board can answer, so the parser returns `None` and leaves the question
+to `get_biased_channels`. That reads every channel's amplitude in one batched
+round trip rather than one RPC per channel, and drops any channel the packet
+cannot carry:
+
+```python
+print(f"{'all'!r:12} -> {parse_channel_spec('all')}   (resolve against the board)")
+
+# 128 is the short-packet width: a channel above it is in no packet, however
+# it is biased.  Pass the width you are actually streaming.
+biased = await crs.get_biased_channels(MODULE, max_channels=128)
+print(f"biased on module {MODULE}: {len(biased)} channel(s)")
+print(f"  {biased[:12]}{' ...' if len(biased) > 12 else ''}")
+```
+
+Whatever you choose, `CHANNELS` below is just a list of ints — set it from a
+spec, from `get_biased_channels`, or by hand.
+
 ## 4. Choose the detection parameters
 
 `PulseCaptureConfig` holds every user-facing parameter in **physical units**
@@ -774,10 +805,13 @@ objects this notebook does:
 | Periscope control | API equivalent |
 |---|---|
 | **Streamer…** dialog | `StreamerConfig` + `crs.configure_streamer(...)` |
+| **Channels** field: `1,2`, `2-19`, `1,5-8,20` | `parse_channel_spec(...)` |
+| **Channels** field: `all` / `*` | `crs.get_biased_channels(module)` |
 | **Settings…** dialog | `PulseCaptureConfig` fields |
 | Threshold σ / End σ / Pileup | `threshold_sigma`, `end_sigma`, `enable_pileup` |
 | Mode: slow / fast / both | `run_slow_source` / `run_pfb_source` / `run_dual_source` |
 | **▶ Start** | `session.start()` + a source coroutine |
+| (how the GUI tap feeds the session) | `SlowBlockAccumulator` — the same class `run_slow_source` uses, so the GUI and this notebook ingest identically |
 | **⟳ Re-estimate Noise** | `session.re_estimate_noise()` |
 | Live pulse / histogram / template plots | `on_pulse`, `on_histograms`, `on_templates` callbacks |
 | counts / Hz selector | `counts_to_hz_scale(df_calibration)` |

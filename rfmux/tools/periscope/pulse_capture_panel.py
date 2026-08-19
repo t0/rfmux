@@ -1088,7 +1088,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         if mode == "both":
-            from ...algorithms.measurement.pulse_capture_dual import (
+            from ...algorithms.measurement.pulse_capture_session import (
                 DualPulseCaptureSession,
             )
             session = DualPulseCaptureSession(

@@ -212,7 +212,7 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
 
 def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     """Both-mode task: dual sockets, live matching, dual file, teardown."""
-    from rfmux.algorithms.measurement.pulse_capture_dual import (
+    from rfmux.algorithms.measurement.pulse_capture_session import (
         DualPulseCaptureSession,
     )
     from rfmux.algorithms.measurement.pulse_capture_session import (

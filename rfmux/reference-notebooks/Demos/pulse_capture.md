@@ -27,7 +27,7 @@ that is unavailable here.
 | Streamer setup + link-budget math | `rfmux.algorithms.measurement.streamer_config` |
 | Detection engine (ring buffer, triggering) | `rfmux.algorithms.measurement.pulse_detection` |
 | Live capture orchestration | `rfmux.algorithms.measurement.pulse_capture_session` |
-| Concurrent slow+fast with matching | `rfmux.algorithms.measurement.pulse_capture_dual` |
+| Concurrent slow+fast with matching | `rfmux.algorithms.measurement.pulse_capture_session` |
 | Packet sources that feed a session | `rfmux.algorithms.measurement.pulse_sources` |
 | Per-pulse metrics (SNR, derived τ) | `rfmux.algorithms.measurement.pulse_analysis` |
 | Streaming HDF5 persistence | `rfmux.algorithms.measurement.pulse_hdf5` |
@@ -67,7 +67,7 @@ import matplotlib.pyplot as plt
 
 import rfmux
 from rfmux.algorithms.measurement.pulse_analysis import counts_to_hz_scale
-from rfmux.algorithms.measurement.pulse_capture_dual import (
+from rfmux.algorithms.measurement.pulse_capture_session import (
     DualPulseCaptureSession,
 )
 from rfmux.algorithms.measurement.pulse_capture_session import (

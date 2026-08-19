@@ -9,7 +9,7 @@ drive:
 - :class:`~rfmux.algorithms.measurement.pulse_capture_session.PulseCaptureConfig`
   for the parameters, in physical units;
 - :class:`~rfmux.algorithms.measurement.pulse_capture_session.PulseCaptureSession`
-  (or :class:`~rfmux.algorithms.measurement.pulse_capture_dual.DualPulseCaptureSession`)
+  (or :class:`~rfmux.algorithms.measurement.pulse_capture_session.DualPulseCaptureSession`)
   for detection, persistence, histograms and templates;
 - :mod:`~rfmux.algorithms.measurement.pulse_sources` for the sockets.
 
@@ -50,8 +50,11 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ... import streamer
 
-from .pulse_capture_dual import DualPulseCaptureSession
-from .pulse_capture_session import PulseCaptureConfig, PulseCaptureSession
+from .pulse_capture_session import (
+    DualPulseCaptureSession,
+    PulseCaptureConfig,
+    PulseCaptureSession,
+)
 from .pulse_detection import ChannelNoiseStats
 from .pulse_sources import run_dual_source, run_pfb_source, run_slow_source
 from .streamer_config import PFB_SAMPLE_RATE, slow_sample_rate

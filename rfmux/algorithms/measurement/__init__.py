@@ -17,11 +17,9 @@ from . import bias_kids
 from . import channel_selection
 from . import pulse_detection
 from . import pulse_hdf5
-from . import pulse_histograms
+from . import pulse_accumulators
 from . import pulse_analysis
-from . import pulse_templates
 from . import pulse_capture_session
-from . import pulse_capture_dual
 from . import pulse_sources
 from . import streamer_config
 from . import trigger_capture
@@ -36,11 +34,9 @@ __all__ = [
     "channel_selection",
     "pulse_detection",
     "pulse_hdf5",
-    "pulse_histograms",
+    "pulse_accumulators",
     "pulse_analysis",
-    "pulse_templates",
     "pulse_capture_session",
-    "pulse_capture_dual",
     "pulse_sources",
     "streamer_config",
     "trigger_capture",

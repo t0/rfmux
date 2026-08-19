@@ -24,7 +24,7 @@ Usage (fast/PFB capture, headless)::
     session.stop()
 
 :func:`run_dual_source` drives both streams at once for a
-:class:`~rfmux.algorithms.measurement.pulse_capture_dual.DualPulseCaptureSession`,
+:class:`~rfmux.algorithms.measurement.pulse_capture_session.DualPulseCaptureSession`,
 which is what live cross-stream pulse matching needs.
 """
 

@@ -22,7 +22,7 @@ import asyncio
 import sys
 
 import rfmux
-from rfmux.algorithms.measurement.pulse_capture_dual import (
+from rfmux.algorithms.measurement.pulse_capture_session import (
     DualPulseCaptureSession,
 )
 from rfmux.algorithms.measurement.pulse_capture_session import (

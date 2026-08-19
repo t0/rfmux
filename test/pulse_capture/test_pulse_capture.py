@@ -40,7 +40,7 @@ def _collecting_capture(*args, **kwargs):
     return pcap
 
 
-from rfmux.algorithms.measurement.pulse_histograms import (
+from rfmux.algorithms.measurement.pulse_accumulators import (
     HistogramAccumulator,
     PulseHistogramSet,
 )
@@ -1361,7 +1361,7 @@ class TestDetectionParamsPlumbing:
 
 # ───────────────────────── Template stacking ────────────────────────
 
-from rfmux.algorithms.measurement.pulse_templates import (
+from rfmux.algorithms.measurement.pulse_accumulators import (
     PulseTemplateAccumulator,
     PulseTemplateSet,
     find_trigger_index,

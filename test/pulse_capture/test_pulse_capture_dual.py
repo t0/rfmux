@@ -9,7 +9,7 @@ session's two streams with a shared clock.
 import numpy as np
 import pytest
 
-from rfmux.algorithms.measurement.pulse_capture_dual import (
+from rfmux.algorithms.measurement.pulse_capture_session import (
     DualPulseCaptureSession,
     IncrementalPulseMatcher,
 )

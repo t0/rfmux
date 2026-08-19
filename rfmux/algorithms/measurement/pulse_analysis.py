@@ -11,7 +11,7 @@ The canonical SNR is::
 
     snr = max(peak_I, peak_Q) / max(std_I, std_Q)
 
-matching :class:`~rfmux.algorithms.measurement.pulse_histograms.PulseHistogramSet`.
+matching :class:`~rfmux.algorithms.measurement.pulse_accumulators.PulseHistogramSet`.
 
 The decay constant is recovered without curve fitting from two
 well-measured points on the falling edge — the peak and the moment the

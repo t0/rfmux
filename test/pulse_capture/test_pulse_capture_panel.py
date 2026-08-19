@@ -428,7 +428,7 @@ def test_channel_default_follows_stream(qt_app, tmp_path):
 
 
 def _build_dual_file(tmp_path):
-    from rfmux.algorithms.measurement.pulse_capture_dual import (
+    from rfmux.algorithms.measurement.pulse_capture_session import (
         DualPulseCaptureSession,
     )
     from rfmux.algorithms.measurement.pulse_capture_session import (
@@ -491,7 +491,7 @@ def test_dual_review_mode(qt_app, tmp_path):
 def test_dual_session_hdf5_path_parity(tmp_path):
     """Panel/task read session.hdf5_path on finish — the dual session
     must expose it like the single session (stop-crash regression)."""
-    from rfmux.algorithms.measurement.pulse_capture_dual import (
+    from rfmux.algorithms.measurement.pulse_capture_session import (
         DualPulseCaptureSession,
     )
     path = tmp_path / "parity.h5"
@@ -706,7 +706,7 @@ def test_template_view_fits_data_and_uses_zoombox(qt_app, tmp_path):
     Periscope."""
     import pyqtgraph as pg
 
-    from rfmux.algorithms.measurement.pulse_templates import (
+    from rfmux.algorithms.measurement.pulse_accumulators import (
         PulseTemplateSet,
     )
     from rfmux.algorithms.measurement.pulse_detection import (

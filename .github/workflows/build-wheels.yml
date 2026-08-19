@@ -16,6 +16,9 @@ jobs:
             arch: x86_64
             cibw_archs: "x86_64"
             manylinux_image: manylinux_2_28
+            # Insist on fastrx (x86_64 only -- see CMakeLists.txt): a release
+            # wheel must not silently ship without it.
+            cibw_config_settings: cmake.define.FASTRX_REQUIRED=ON
           - os: ubuntu-latest
             runner: ubuntu-24.04-arm
             arch: aarch64
@@ -49,6 +52,27 @@ jobs:
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
           CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.manylinux_image }}
           CIBW_MANYLINUX_AARCH64_IMAGE: ${{ matrix.manylinux_image }}
+
+          # fastrx (AF_XDP capture) is built opportunistically on x86_64 when
+          # its prerequisites are present. For x86_64 wheel builds, we insist
+          # (via matrix.cibw_config_settings above). manylinux_2_28's XDP
+          # prerequisites are too old, so we need to install a newer copy
+          CIBW_BEFORE_ALL_LINUX: |
+            if [ "$(uname -m)" = "x86_64" ]; then
+                dnf -y install clang llvm m4 libpcap-devel \
+                    elfutils-libelf-devel zlib-devel kernel-headers &&
+                curl -fsSL https://github.com/xdp-project/xdp-tools/releases/download/v1.6.3/xdp-tools-1.6.3.tar.gz \
+                    | tar -xz -C /tmp &&
+                cd /tmp/xdp-tools-1.6.3 &&
+                ./configure &&
+                make -j"$(nproc)" libxdp &&
+                make -C lib/libxdp install PREFIX=/usr LIBDIR=/usr/lib64 &&
+                make -C lib/libbpf/src install install_uapi_headers \
+                    PREFIX=/usr LIBDIR=/usr/lib64 BUILD_STATIC_ONLY=y &&
+                cp headers/linux/if_xdp.h /usr/include/linux/ &&
+                rm -f /usr/lib64/libxdp.so* /usr/lib64/libbpf.so*
+            fi
+          CIBW_CONFIG_SETTINGS_LINUX: ${{ matrix.cibw_config_settings || '' }}
 
       - uses: actions/upload-artifact@v7
         with:

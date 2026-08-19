@@ -21,16 +21,24 @@ developer laptop; treat them as orders of magnitude.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 9 | **~6 s** | Sanity check on an unfamiliar Python. No CRS, no GUI, minimal deps. |
-| `pytest --tier=quick` | 229 | **~20 s** | The normal edit/run loop. |
-| `pytest --tier=acquisition` | 12 | **~1 min** | You touched streaming, decimation, the PFB path, or pulse capture. |
-| `pytest --tier=full` | 241 | **~1 min 40 s** | Everything runnable without a board. Run this before pushing. |
+| `pytest --tier=portable` | 38 | **~9 s** | Sanity check on an unfamiliar Python. No CRS, no GUI, minimal deps. |
+| `pytest --tier=quick` | 462 | **~50 s** | The normal edit/run loop. |
+| `pytest --tier=acquisition` | 13 | **~5 min** | You touched streaming, decimation, the PFB path, or pulse capture. |
+| `pytest --tier=full` | 475 | **~6 min** | Everything runnable without a board. Run this before pushing. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | You have a CRS in front of you. |
-| `pytest --tier=all --serial 0024` | 316 | needs a board | Belt and braces before a release. |
+| `pytest --tier=all --serial 0024` | 550 | needs a board | Belt and braces before a release. |
 
-Every tier except `hardware` and `all` excludes the board tests, so all of the
-above report **zero skips** — a bare pass/fail, rather than a result buried
-under ~75 "no `--serial`" skips.
+The acquisition tier is only thirteen tests but takes minutes: each spawns a
+MockCRS server and streams UDP in real time, so its cost is wall clock, not
+CPU. `full` is `quick` plus that, and is dominated by it.
+
+Every tier except `hardware` and `all` excludes the board tests, so on Linux
+all of the above report **zero skips** — a bare pass/fail, rather than a result
+buried under ~75 "no `--serial`" skips.
+
+On macOS and Windows a handful of tests skip themselves, and that is correct
+rather than a gap: they pin behaviour that only exists on some platforms. See
+*Platform skips* below.
 
 `--tier` is a shorthand for a marker expression, nothing more; `pytest --help`
 lists what each one expands to. Reach for `-m` directly when you want something
@@ -45,7 +53,8 @@ pytest -m "portable or hardware"   # an expression no tier covers
 Passing both `--tier` and `-m` is an error rather than one silently winning.
 
 A bare `pytest` with no arguments still behaves as it always has — the `quick`
-tier plus the hardware tests skipping, so 229 passed and ~75 skipped. That is
+tier plus the hardware tests skipping, so 459 passed, 3 xfailed and ~75
+skipped. That is
 normal, not a problem; use `--tier=quick` when the skip count is drowning out
 the signal.
 
@@ -161,6 +170,51 @@ attribute and signature comparison. Skipped unless you pass `--serial`.
 The QC suite is not here at all: it lives in `rfmux/tools/qc/`, carries the
 `qc_stage1`/`qc_stage2` markers, and runs via `rfmux qc`.
 
+## Test dependencies
+
+The suite imports three things the package itself does not, declared as a
+dependency group so the list cannot drift from what CI installs:
+
+```bash
+pip install --group test      # nbclient, nbformat, pytest_check
+```
+
+Without them, collection *aborts* rather than skipping — pytest imports every
+module before marker deselection applies, so one absent import costs the whole
+run, including tests that were never going to execute. The two modules
+concerned guard their imports for that reason; the group exists so CI runs them
+rather than skipping them quietly.
+
+`--group` needs pip 25.1 or newer. The `dev` group includes this one.
+
+## Platform skips
+
+These are deliberate. Each pins a property of one platform, and asserting it
+everywhere would be asserting something false.
+
+| Skipped on | What | Why |
+| --- | --- | --- |
+| not Linux | `test_receive_batch_alone_blocks_on_a_silent_socket` | recvmmsg with `MSG_WAITFORONE` only consults its timeout between datagrams, so a silent socket blocks. macOS and Windows return on their own; the socket timeout is still set everywhere, it just has nothing to rescue. |
+| Windows | seven `SO_REUSEPORT` tests in `streamer/` | The option does not exist there, so the starvation they describe cannot arise. |
+| Windows | `test_sigint_actually_ends_the_event_loop` | Windows has no SIGINT to send — Ctrl+C arrives as a `CTRL_C_EVENT` to a process group — so the test would exercise the harness, not the handler. |
+
+## What CI runs
+
+`.github/workflows/periscope-tests.yml`, on **ubuntu, windows and macos**, with
+`fail-fast: false` so one platform failing still reports the others:
+
+1. `pytest -v --tier=quick test/`
+2. `pytest -v -s --tier=acquisition test/`
+3. `pytest -v -s test/periscope/test_periscope_flow.py`
+
+It triggers on push and pull request against `main`, plus `workflow_dispatch`.
+A long-lived branch therefore gets **no CI at all** until it opens a PR — run
+the tiers locally, or dispatch the workflow against the branch by hand.
+
+Windows takes roughly twice as long as macOS for the same work, mostly in
+process creation: the acquisition tier spawns six MockCRS servers and two
+Jupyter kernels, and every spawn re-imports the package.
+
 ## Markers
 
 Markers tag *tests*; `--tier` names *invocations*. The tiers above are defined
@@ -182,8 +236,8 @@ passing your own `-m` on the command line replaces that filter entirely.
 ## Layout
 
 Directories mirror the package under test, so a new test goes where its module
-lives. The one exception is `pulse_capture/`, whose subsystem deliberately
-spans `rfmux/algorithms/measurement/` and `rfmux/tools/periscope/`.
+lives. `pulse_capture/` is the one that spans two: the engine is its own
+top-level package, and its GUI half lives under Periscope.
 
 | Directory | Covers |
 | --- | --- |
@@ -192,7 +246,7 @@ spans `rfmux/algorithms/measurement/` and `rfmux/tools/periscope/`.
 | `mock/` | `rfmux/mock/` — simulator fidelity, config plumbing, TLS noise, JIT dispatch |
 | `algorithms/` | `rfmux/algorithms/measurement/` — measurement flows, streamer config |
 | `periscope/` | `rfmux/tools/periscope/` — panels, dialogs, fonts, embedded console |
-| `pulse_capture/` | pulse detection + its Periscope panel and dialog |
+| `pulse_capture/` | `rfmux/pulse_capture/` — detection, session, ingest, HDF5, sources — plus its Periscope panel, task and dialog |
 | `notebooks/` | Jupyter-based quantitative tests (see below) |
 
 `conftest.py` stays at this level for the `live_session` / `crs` fixtures and

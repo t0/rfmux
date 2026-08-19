@@ -32,7 +32,8 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y cmake ninja-build
+        sudo apt-get install -y cmake ninja-build \
+          clang libxdp-dev libbpf-dev libelf-dev zlib1g-dev
 
     - name: Install system dependencies (macOS)
       if: runner.os == 'macOS'
@@ -49,7 +50,16 @@ jobs:
         python -m pip install --upgrade pip
         pip install scikit-build-core pybind11 pytest pytest-asyncio
 
+    # Linux insists on fastrx so a PR that breaks fastrxd/_fastrx fails here
+    # rather than surfacing at release-wheel time (the opportunistic default
+    # would silently skip it; see rfmux/streamer/CMakeLists.txt).
+    - name: Build package (Linux, fastrx required)
+      if: runner.os == 'Linux'
+      run: |
+        pip install -e . -v --config-settings=cmake.define.FASTRX_REQUIRED=ON
+
     - name: Build package
+      if: runner.os != 'Linux'
       run: |
         pip install -e . -v
 

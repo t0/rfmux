@@ -100,6 +100,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
 
     message(STATUS "fastrx: building fastrxd and _fastrx (clang=${FASTRX_CLANG})")
 
+    # pthread must be linked in explicitly on pre-2.34 glibc
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+    find_package(Threads REQUIRED)
+
     # ABI hash, used to ensure the shared-memory region between fastrxd and its
     # clients is interpreted consistently
     set(FASTRX_ABI_HEADERS
@@ -162,7 +166,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
         -Wnon-virtual-dtor -Wextra-semi
     )
     target_link_libraries(fastrxd PRIVATE
-        PkgConfig::FASTRX_LIBXDP PkgConfig::FASTRX_LIBBPF elf z)
+        PkgConfig::FASTRX_LIBXDP PkgConfig::FASTRX_LIBBPF elf z
+        Threads::Threads)
     target_link_options(fastrxd PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/fastrx_bpf_embed.o)
     add_dependencies(fastrxd fastrx_bpf_embed)
     install(TARGETS fastrxd DESTINATION rfmux/streamer)

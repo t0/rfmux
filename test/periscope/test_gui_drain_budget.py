@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
 
@@ -27,11 +26,6 @@ REFRESH_MS = 33
 #: backstop is that it is generous, not tight.
 DEADLINE_S = 0.25
 
-
-@pytest.fixture(scope="module")
-def qt_app():
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    yield app
 
 
 class _NeverEmptyQueue:

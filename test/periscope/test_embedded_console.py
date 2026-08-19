@@ -13,18 +13,12 @@ import time
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
 pytest.importorskip("qtconsole")
 
 from PyQt6 import QtWidgets  # noqa: E402
 
-
-@pytest.fixture(scope="module")
-def qt_app():
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    yield app
 
 
 def test_inprocess_kernel_executes(qt_app):

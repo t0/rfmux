@@ -1,4 +1,5 @@
 import pytest
+import time
 import rfmux
 import os
 import socket
@@ -172,3 +173,32 @@ async def crs(live_session):
     # teardown: restore politeness
     await crs.set_analog_bank(high=False)
     await crs.set_decimation(stage=6, short=False, module=[1,2,3,4])
+
+
+# ── Qt: one fixture and one pair of helpers for the whole suite ──────
+#
+# origin/main had exactly one qt_app fixture. This branch grew twelve more,
+# plus thirteen copies of the offscreen-platform line and four of the spin
+# helpers, because each new GUI test file started from the last one. They
+# were identical apart from scope, so they live here now.
+#
+# QT_QPA_PLATFORM is set at import time rather than in the fixture: conftest
+# is imported before any test module, so this still precedes every
+# QApplication construction, including ones made at module scope.
+
+
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+@pytest.fixture(scope="session")
+def qt_app():
+    """The QApplication every GUI test shares.
+
+    importorskip lives in the BODY, not at module level: test/mock/ has
+    files that are only partly Qt, and skipping the whole module would
+    take their non-Qt tests with it.
+    """
+    QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    yield app

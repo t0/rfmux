@@ -63,6 +63,7 @@ import numpy as np
 from .. import streamer
 
 from .detection import (
+    DEFAULT_END_SIGMA,
     BUFFER_SAFETY,
     HARD_STOP_RING_FRACTION,
     ChannelNoiseStats,
@@ -134,6 +135,26 @@ class _CallbackHost:
             self._error(f"Callback {getattr(cb, '__name__', cb)!r} "
                         f"raised: {e}")
 
+    #: Class-level default so _to_writer() is safe on a host that has not
+    #: opened a writer (hdf5_path=None, or h5py missing).
+    writer = None
+
+    def _to_writer(self, method: str, *args, what: str = "") -> None:
+        """Call *method* on the HDF5 writer, if there is one.
+
+        Ten copies of ``if self.writer is not None: try: ... except:
+        self._error(...)`` said the same thing ten times, and one of the
+        writer calls had been left unguarded.  A failing write must not
+        take the capture down: the samples keep flowing and the error is
+        reported, which is the same rule :meth:`_callback` follows.
+        """
+        if self.writer is None:
+            return
+        try:
+            getattr(self.writer, method)(*args)
+        except Exception as e:
+            self._error(f"HDF5 {what or method} failed: {e}")
+
     def _error(self, message: str) -> None:
         if self.on_error is not None:
             try:
@@ -154,7 +175,7 @@ class PulseCaptureConfig:
     """
 
     threshold_sigma: float = 5.0
-    end_sigma: float = 1.5
+    end_sigma: float = DEFAULT_END_SIGMA
     #: Consecutive samples that must clear the threshold to trigger.
     #: 0 = choose it from the stream rate, which is the right default:
     #: the accidental rate scales with sample rate, so one sample is
@@ -471,9 +492,6 @@ class PulseCaptureSession(_CallbackHost):
         this file; when None, no file is written.
     df_calibrations : dict[int, float], optional
         Per-channel Hz-per-count calibration, stored in the HDF5 file.
-    histogram_config : dict, optional
-        Extra kwargs for :class:`PulseHistogramSet` (ranges and bin
-        counts).  ``threshold_sigma`` is injected automatically.
     histogram_flush_every : int
         Flush histograms to HDF5 and fire ``on_histograms`` every N
         pulses (and once at stop).  Default 50.
@@ -509,7 +527,7 @@ class PulseCaptureSession(_CallbackHost):
         module: int = 1,
         streamer_mode: str = "slow",
         threshold_sigma: float = 5.0,
-        end_sigma: float = 1.0,
+        end_sigma: float = DEFAULT_END_SIGMA,
         margin_fraction: float = 0.1,
         min_pulse_samples: int = 0,
         trigger_samples: int = 2,
@@ -523,11 +541,9 @@ class PulseCaptureSession(_CallbackHost):
         max_capture_samples: Optional[int] = None,
         hdf5_path: Optional[str | Path] = None,
         df_calibrations: Optional[Dict[int, float]] = None,
-        histogram_config: Optional[Dict[str, Any]] = None,
         histogram_flush_every: int = 50,
         histogram_flush_interval_s: float = 0.5,
         progress_interval_s: float = 0.1,
-        progress_every: int = 100,
         on_noise: Optional[Callable] = None,
         on_pulse: Optional[Callable] = None,
         on_stats: Optional[Callable] = None,
@@ -578,11 +594,8 @@ class PulseCaptureSession(_CallbackHost):
         self.on_error = on_error
         self.on_templates = on_templates
         self.on_progress = on_progress
-        self.progress_every = max(1, int(progress_every))
 
-        hist_kwargs = dict(histogram_config or {})
-        hist_kwargs["threshold_sigma"] = threshold_sigma
-        self.histograms = PulseHistogramSet(**hist_kwargs)
+        self.histograms = PulseHistogramSet(threshold_sigma=threshold_sigma)
 
         self.templates: PulseTemplateSet
         self._build_templates()
@@ -649,11 +662,7 @@ class PulseCaptureSession(_CallbackHost):
         if self.pcap is not None:
             self.pcap.freeze_triggers = True
         self._flush_histograms()
-        if self.writer is not None:
-            try:
-                self.writer.finalize()
-            except Exception as e:  # pragma: no cover - defensive
-                self._error(f"HDF5 finalize failed: {e}")
+        self._to_writer("finalize", what="finalize")
         self.state = CaptureState.STOPPED
 
     # ── Sample ingestion ──────────────────────────────────────────
@@ -682,12 +691,14 @@ class PulseCaptureSession(_CallbackHost):
             buf[n] = complex(i_val, q_val)
             n += 1
             self._noise_n[channel] = n
-            if n % self.progress_every == 0 or n == self.noise_samples:
-                self._callback(self.on_progress, {
-                    "state": self.state.value,
-                    "collected": dict(self._noise_n),
-                    "target": self.noise_samples,
-                })
+            # Same rule as _absorb_noise: a channel that has just filled
+            # always reports, otherwise the wall clock decides.  Two
+            # different rate limits for one callback was one too many.
+            self._progress_dirty = True
+            if (n >= self.noise_samples
+                    or time.monotonic() - self._last_progress_t
+                    >= self.progress_interval_s):
+                self._emit_progress()
             if n >= self.noise_samples:
                 self._maybe_finish_estimation()
             return
@@ -922,7 +933,6 @@ class PulseCaptureSession(_CallbackHost):
             buf_size=self.buf_size,
             channels=self.channels,
             noise_stats=self.noise_stats,
-            sample_rate=self.sample_rate or 0.0,
             on_pulse=self._on_engine_pulse,
             **detection,
         )
@@ -961,12 +971,8 @@ class PulseCaptureSession(_CallbackHost):
         self.total_pulses += 1
         self._pulses_since_flush += 1
 
-        if self.writer is not None:
-            try:
-                self.writer.append_pulse(channel, pulse_idx, pulse_data)
-            except Exception as e:
-                self._error(f"HDF5 write failed for pulse "
-                            f"ch{channel}#{pulse_idx}: {e}")
+        self._to_writer("append_pulse", channel, pulse_idx, pulse_data,
+                        what=f"write for pulse ch{channel}#{pulse_idx}")
 
         self.histograms.add_pulse(channel, pulse_data, ns)
         self.templates.add_pulse(channel, pulse_data, ns)
@@ -989,20 +995,13 @@ class PulseCaptureSession(_CallbackHost):
         if self.histograms.total_pulses() == 0:
             return
         data = self.histograms.get_histogram_data()
-        if self.writer is not None:
-            try:
-                self.writer.update_histograms(data)
-            except Exception as e:
-                self._error(f"HDF5 histogram update failed: {e}")
+        self._to_writer("update_histograms", data, what="histogram update")
         self._callback(self.on_histograms, data)
 
         tmpl = self.templates.get_template_data()
         if tmpl:
-            if self.writer is not None:
-                try:
-                    self.writer.update_templates(tmpl)
-                except Exception as e:
-                    self._error(f"HDF5 template update failed: {e}")
+            self._to_writer("update_templates", tmpl,
+                            what="template update")
             self._callback(self.on_templates, tmpl)
 
 
@@ -1316,11 +1315,7 @@ class DualPulseCaptureSession(_CallbackHost):
         self.slow.stop()
         self.fast.stop()
         self.matcher.flush()
-        if self.writer is not None:
-            try:
-                self.writer.finalize()
-            except Exception as e:
-                self._error(f"HDF5 finalize failed: {e}")
+        self._to_writer("finalize", what="finalize")
 
     @property
     def state(self) -> Dict[str, str]:
@@ -1340,11 +1335,8 @@ class DualPulseCaptureSession(_CallbackHost):
     # ── Internal wiring ───────────────────────────────────────────
 
     def _on_stream_noise(self, stream: str, noise_stats: dict) -> None:
-        if self.writer is not None:
-            try:
-                self.writer.set_noise_stats(stream, noise_stats)
-            except Exception as e:
-                self._error(f"HDF5 noise write failed: {e}")
+        self._to_writer("set_noise_stats", stream, noise_stats,
+                        what="noise write")
         self._sync_capture_start()
         self._callback(self.on_noise, stream, noise_stats)
 
@@ -1367,31 +1359,21 @@ class DualPulseCaptureSession(_CallbackHost):
 
     def _on_stream_pulse(self, stream: str, channel: int, pulse_idx: int,
                          summary: dict, pulse_data: dict) -> None:
-        if self.writer is not None:
-            try:
-                self.writer.append_pulse(stream, channel, pulse_idx,
-                                         pulse_data)
-            except Exception as e:
-                self._error(f"HDF5 write failed for {stream} "
-                            f"ch{channel}#{pulse_idx}: {e}")
+        self._to_writer("append_pulse", stream, channel, pulse_idx,
+                        pulse_data,
+                        what=f"write for {stream} ch{channel}#{pulse_idx}")
         self._callback(self.on_pulse, stream, channel, pulse_idx,
                        summary, pulse_data)
         self.matcher.add(stream, channel, pulse_idx, summary)
 
     def _on_stream_histograms(self, stream: str, data: dict) -> None:
-        if self.writer is not None:
-            try:
-                self.writer.update_histograms(stream, data)
-            except Exception as e:
-                self._error(f"HDF5 histogram update failed: {e}")
+        self._to_writer("update_histograms", stream, data,
+                        what="histogram update")
         self._callback(self.on_histograms, stream, data)
 
     def _on_stream_templates(self, stream: str, data: dict) -> None:
-        if self.writer is not None:
-            try:
-                self.writer.update_templates(stream, data)
-            except Exception as e:
-                self._error(f"HDF5 template update failed: {e}")
+        self._to_writer("update_templates", stream, data,
+                        what="template update")
         self._callback(self.on_templates, stream, data)
 
     def _on_matcher_pair(self, pair: dict) -> None:
@@ -1414,11 +1396,8 @@ class DualPulseCaptureSession(_CallbackHost):
         except Exception as e:
             self._error(f"Union-window extraction failed: {e}")
 
-        if self.writer is not None:
-            try:
-                self.writer.append_match(pair["channel"], pair)
-            except Exception as e:
-                self._error(f"HDF5 match write failed: {e}")
+        self._to_writer("append_match", pair["channel"], pair,
+                        what="match write")
         self._callback(self.on_pair, pair)
         self._emit_stats()
 

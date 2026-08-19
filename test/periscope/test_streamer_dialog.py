@@ -10,7 +10,6 @@ import os
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
 
@@ -20,11 +19,6 @@ from rfmux.tools.periscope.streamer_config_dialog import (  # noqa: E402
     StreamerConfigDialog,
 )
 
-
-@pytest.fixture(scope="module")
-def qt_app():
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    yield app
 
 
 def _ok_button(dialog):

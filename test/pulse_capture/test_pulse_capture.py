@@ -8,7 +8,6 @@ Unit tests for Phase 1 pulse capture infrastructure:
 
 import numpy as np
 import pytest
-import tempfile
 from pathlib import Path
 
 from rfmux.pulse_capture.detection import (
@@ -117,7 +116,6 @@ def _generate_synthetic_stream(
 
     # Pulse (exponential rise + decay on I, small perturbation on Q)
     for j in range(n_pulse):
-        frac = j / max(1, n_pulse - 1)
         # Sharp rise then exponential decay
         if j < 5:
             env = j / 5.0
@@ -182,7 +180,6 @@ class TestPulseCaptureCallback:
             noise_stats=noise_stats,
             threshold_sigma=5.0,
             end_sigma=1.5,
-            sample_rate=38147.0,
             on_pulse=on_pulse,
         )
         pcap.start_time = 0.0
@@ -201,7 +198,7 @@ class TestPulseCaptureCallback:
         def on_pulse(channel, pulse_idx, pulse_data):
             captured.append((channel, pulse_idx, pulse_data.copy()))
 
-        pcap = self._run_detection(on_pulse=on_pulse)
+        self._run_detection(on_pulse=on_pulse)
 
         # Should have detected at least one pulse
         assert len(captured) > 0
@@ -223,7 +220,7 @@ class TestPulseCaptureCallback:
         pcap = self._run_detection(on_pulse=on_pulse)
 
         assert len(captured) > 0
-        assert pcap.pulse_count["Channel 1"] == len(captured)
+        assert pcap.pulse_count[1] == len(captured)
         assert captured == sorted(captured), "indices should be monotone"
 
     def test_detector_retains_no_pulses(self):
@@ -242,7 +239,7 @@ class TestPulseCaptureCallback:
             factory=PulseCapture)
 
         assert len(captured) > 0, "no pulses detected — test is vacuous"
-        assert pcap.pulse_count["Channel 1"] == len(captured)
+        assert pcap.pulse_count[1] == len(captured)
         assert not hasattr(pcap, "pulses"), (
             "PulseCapture must not accumulate pulses in memory")
 
@@ -296,17 +293,6 @@ class TestHistogramAccumulator:
         h = HistogramAccumulator(edges)
         np.testing.assert_array_equal(h.bin_centers, [5, 15, 25])
 
-    def test_reset(self):
-        edges = np.array([0, 10, 20])
-        h = HistogramAccumulator(edges)
-        h.add(5.0)
-        h.add(15.0)
-        assert h.total == 2
-        h.reset()
-        assert h.total == 0
-        assert np.all(h.counts == 0)
-
-
 class TestPulseHistogramSet:
     def test_add_pulse(self):
         hs = PulseHistogramSet(
@@ -348,16 +334,6 @@ class TestPulseHistogramSet:
         assert "amplitude_counts_ch1" in data
         assert "snr_bins" in data
         assert "duration_ms_bins" in data
-
-    def test_reset_all(self):
-        hs = PulseHistogramSet(amp_range=(0, 200), amp_bins=10)
-        ns = _make_noise_stats(std_I=10.0, std_Q=10.0)
-        pulse = _make_pulse_data(n_samples=50, peak_I=100.0)
-        hs.add_pulse(1, pulse, ns)
-        assert hs.total_pulses() == 1
-        hs.reset_all()
-        assert hs.total_pulses() == 0
-
 
 # ═══════════════════════════════════════════════════════════════════
 #  HDF5 Writer/Reader Tests
@@ -574,7 +550,6 @@ class TestIntegration:
             noise_stats=noise_stats,
             threshold_sigma=5.0,
             end_sigma=1.5,
-            sample_rate=38147.0,
             on_pulse=on_pulse,
         )
         pcap.start_time = 0.0
@@ -590,7 +565,7 @@ class TestIntegration:
         writer.finalize()
 
         # Verify: HDF5 has the pulses
-        n_detected = pcap.pulse_count["Channel 1"]
+        n_detected = pcap.pulse_count[1]
         assert n_detected > 0
 
         with PulseHDF5Reader(path) as reader:
@@ -1093,7 +1068,7 @@ class TestBlockIngestion:
         ns = {1: ChannelNoiseStats(mean_I=0, std_I=1, mean_Q=0, std_Q=1,
                                    jump_std_I=1.4, jump_std_Q=1.4)}
         got = []
-        pc = PulseCapture(channels=[1], noise_stats=ns, sample_rate=1e4,
+        pc = PulseCapture(channels=[1], noise_stats=ns,
                           on_pulse=lambda c, i, d: got.append((c, i, d)),
                           **kw)
         I, Q, T = stream
@@ -1265,7 +1240,7 @@ class TestHotLoopCost:
                                 float(np.clip(rng.normal(), -3, 3)),
                                 k * 1e-4)
 
-        assert pcap.pulse_count["Channel 1"] == 0
+        assert pcap.pulse_count[1] == 0
         assert not calls, (
             f"edge taps read {len(calls)} times on a stream that can "
             "never trigger — the hot-loop guard has regressed")
@@ -1294,7 +1269,7 @@ class TestHotLoopCost:
             pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
                                 k * 1e-4)
 
-        assert pcap.pulse_count["Channel 1"] == 1
+        assert pcap.pulse_count[1] == 1
         assert calls, "the edge detector never ran"
 
 
@@ -1526,7 +1501,7 @@ class TestRollingBaseline:
         pcap, ns = _run(baseline_window=0, amp=15.0, monotonic=True)
         assert not pcap.state[1].capturing, \
             "the engine must never wedge mid-capture"
-        assert pcap.pulse_count["Channel 1"] == 0, \
+        assert pcap.pulse_count[1] == 0, \
             "slow drift is not a pulse"
         assert ns.mean_I == 0.0, "frozen baseline must not move"
 
@@ -1559,7 +1534,7 @@ class TestRollingBaseline:
 
         stuck, frozen_ns = step(0)
         assert not stuck.state[1].capturing, "hard stop did not fire"
-        assert stuck.pulse_count["Channel 1"] == 1, \
+        assert stuck.pulse_count[1] == 1, \
             "one step, one event — the parked tail must not re-fire"
         d = stuck.pulses["Channel 1"][1]
         assert d["truncated"], "a capture ended by the hard stop is flagged"
@@ -1567,7 +1542,7 @@ class TestRollingBaseline:
 
         freed, ns = step(2000)
         assert not freed.state[1].capturing, "did not recover"
-        assert freed.pulse_count["Channel 1"] == 1, \
+        assert freed.pulse_count[1] == 1, \
             "the stuck capture should close out as one event"
         assert not freed.pulses["Channel 1"][1]["truncated"], \
             "the rolling median should end the capture before the stop"
@@ -1583,25 +1558,25 @@ class TestRollingBaseline:
         keeping up with the drift."""
         for window in (0, 1000, 4000):
             pcap, _ = _run(baseline_window=window, amp=4.0)
-            assert pcap.pulse_count["Channel 1"] == 0, \
+            assert pcap.pulse_count[1] == 0, \
                 f"wander triggered at baseline_window={window}"
 
     def test_edge_gate_off_restores_the_wander_storm(self):
         """Ties the suppression to the gate: amplitude-only triggering
         (edge_lookback=0, debug) still storms on a frozen baseline."""
         legacy, _ = _run(baseline_window=0, amp=4.0, edge_lookback=0)
-        assert legacy.pulse_count["Channel 1"] >= 4
+        assert legacy.pulse_count[1] >= 4
 
     def test_a_pulse_riding_on_wander_still_triggers(self):
         pcap, _ = _run(baseline_window=1000, amp=4.0, pulse_at=8000)
-        assert pcap.pulse_count["Channel 1"] >= 1, \
+        assert pcap.pulse_count[1] >= 1, \
             "the edge gate must not eat real pulses"
 
     def test_a_pulse_does_not_move_the_baseline(self):
         """The median ignores pulses outright rather than bounding their
         pull, so no clamp is needed."""
         pcap, ns = _run(baseline_window=1000, amp=0.0, pulse_at=8000)
-        assert pcap.pulse_count["Channel 1"] >= 1, \
+        assert pcap.pulse_count[1] >= 1, \
             "the baseline swallowed the pulse"
         assert abs(ns.mean_I) < 0.2, \
             f"pulse pulled the baseline to {ns.mean_I:.2f}"
@@ -1712,7 +1687,7 @@ class TestEdgeCalibration:
                 v += 60.0 * np.exp(-(k - 930) / 40.0)
             pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
                                 k * 1e-3)
-        assert pcap.pulse_count["Channel 1"] == 2, \
+        assert pcap.pulse_count[1] == 2, \
             "the overlapped pair should split into two events"
         assert pcap.pulses["Channel 1"][1]["pileup"], \
             "the fragment cut by the split is flagged"
@@ -1736,7 +1711,7 @@ class TestEdgeCalibration:
                     v += 60.0 * np.exp(-(k - 800) / 40.0)
                 pcap.process_sample(1, float(v),
                                     float(rng.normal(0, 1.0)), k * 1e-3)
-            assert pcap.pulse_count["Channel 1"] == 1, f"seed {seed}"
+            assert pcap.pulse_count[1] == 1, f"seed {seed}"
             assert not pcap.pulses["Channel 1"][1]["pileup"], f"seed {seed}"
 
     def test_epoch_reset_blocks_cross_epoch_references(self):
@@ -1763,7 +1738,7 @@ class TestEdgeCalibration:
                 + (60.0 * np.exp(-(j - 500) / 40.0) if j >= 500 else 0.0)
             pcap.process_sample(1, float(v),
                                 5.0 + float(rng.normal(0, 1)), k * 1e-3)
-        assert pcap.pulse_count["Channel 1"] == 1, \
+        assert pcap.pulse_count[1] == 1, \
             "the pulse must arrive whole — no cross-epoch splits"
         assert not pcap.pulses["Channel 1"][1]["pileup"]
 
@@ -1836,7 +1811,7 @@ class TestHardStop:
                 v += 60.0 * np.exp(-(k - 800) / 40.0)
             pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
                                 k * 1e-3)
-        assert pcap.pulse_count["Channel 1"] == 1
+        assert pcap.pulse_count[1] == 1
         d = pcap.pulses["Channel 1"][1]
         assert d["truncated"] is False, \
             "the anchor must end the capture, not the hard stop"
@@ -1867,7 +1842,7 @@ class TestHardStop:
                 v += max(3.0, 60.0 * np.exp(-(k - 200) / 40.0))
             pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
                                 k * 1e-3)
-        assert pcap.pulse_count["Channel 1"] == 1
+        assert pcap.pulse_count[1] == 1
         d = pcap.pulses["Channel 1"][1]
         assert d["truncated"] is False, \
             "a complete pulse with a stalled bucket is not truncated"
@@ -1892,7 +1867,7 @@ class TestHardStop:
                 v += max(3.0, 60.0 * np.exp(-(k - 200) / 40.0))
             pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
                                 k * 1e-3)
-        assert pcap.pulse_count["Channel 1"] == 1
+        assert pcap.pulse_count[1] == 1
         d = pcap.pulses["Channel 1"][1]
         assert d["truncated"] is False, \
             "the save policy must not change what counts as truncated"
@@ -1941,18 +1916,18 @@ class TestTriggerConfirmation:
     def test_single_sample_spike_is_rejected(self):
         pcap = _mk(2)
         _spike_stream(pcap, spike_len=1)
-        assert pcap.pulse_count["Channel 1"] == 0
+        assert pcap.pulse_count[1] == 0
 
     def test_single_sample_spike_triggers_when_disabled(self):
         pcap = _mk(1)
         _spike_stream(pcap, spike_len=1)
-        assert pcap.pulse_count["Channel 1"] == 1, \
+        assert pcap.pulse_count[1] == 1, \
             "trigger_samples=1 must reproduce the old behaviour"
 
     def test_two_sample_excursion_still_triggers(self):
         pcap = _mk(2)
         _spike_stream(pcap, spike_len=2)
-        assert pcap.pulse_count["Channel 1"] == 1
+        assert pcap.pulse_count[1] == 1
 
     def test_longer_confirmation_rejects_shorter_runs(self):
         assert _run_len(3, 2) == 0
@@ -1981,7 +1956,7 @@ class TestTriggerConfirmation:
         for k in range(4000):
             pcap.process_sample(1, 8.0 if k >= 100 else 0.0, 0.0,
                                 k / 1000.0)
-        assert pcap.pulse_count["Channel 1"] <= 1
+        assert pcap.pulse_count[1] <= 1
 
     def test_accidental_rate_matches_the_gaussian_tail(self):
         cfg = PulseCaptureConfig(threshold_sigma=5.0, trigger_samples=1)
@@ -2031,7 +2006,7 @@ class TestTriggerConfirmation:
 def _run_len(trigger_samples, spike_len):
     pcap = _mk(trigger_samples)
     _spike_stream(pcap, spike_len=spike_len)
-    return pcap.pulse_count["Channel 1"]
+    return pcap.pulse_count[1]
 
 
 # ────────────────── Training window is memory-bounded ───────────────

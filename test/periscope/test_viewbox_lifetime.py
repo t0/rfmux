@@ -29,7 +29,6 @@ import weakref
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
@@ -38,11 +37,6 @@ from PyQt6 import QtWidgets  # noqa: E402
 
 from rfmux.tools.periscope.utils import ClickableViewBox  # noqa: E402
 
-
-@pytest.fixture(scope="module")
-def qt_app():
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    yield app
 
 
 def test_parent_window_resolves_while_the_window_lives(qt_app):

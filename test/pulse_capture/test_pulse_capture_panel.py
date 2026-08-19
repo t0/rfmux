@@ -7,13 +7,12 @@ verifies the tree, status, histograms, waveform cache, and the
 finalized HDF5 file.
 """
 
-import os
-import time
 
 import numpy as np
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from test.qt_helpers import spin, spin_until  # noqa: E402
+
 
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
@@ -53,27 +52,7 @@ class _FakeRuntime:
         self.tap_channels = None
 
 
-@pytest.fixture(scope="module")
-def qt_app():
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    yield app
 
-
-def _spin(qt_app, seconds=0.05):
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        qt_app.processEvents()
-        time.sleep(0.005)
-
-
-def _spin_until(qt_app, predicate, timeout=8.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        qt_app.processEvents()
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return False
 
 
 def _make_panel(qt_app, tmp_path, runtime):
@@ -131,7 +110,7 @@ def test_live_capture_end_to_end(qt_app, tmp_path):
     for _ in range(1000):
         _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
               float(rng.normal(0, 1.0)), None)
-    assert _spin_until(qt_app, lambda: panel.noise_stats), \
+    assert spin_until(qt_app, lambda: panel.noise_stats), \
         "noise_estimated signal never arrived"
     assert "Noise:" in panel.noise_label.text()
     # The Pulse View shows the noise-training segment until pulses arrive
@@ -139,7 +118,7 @@ def test_live_capture_end_to_end(qt_app, tmp_path):
 
     # Capture stream with 3 injected pulses
     _feed_capture(runtime._pulse_tap, rng)
-    assert _spin_until(
+    assert spin_until(
         qt_app, lambda: len(panel._pulse_order) == 3), \
         f"expected 3 pulses, saw {len(panel._pulse_order)}"
 
@@ -169,7 +148,7 @@ def test_live_capture_end_to_end(qt_app, tmp_path):
 
     # Stop → task finishes, tap unregistered, file finalized
     panel._on_stop()
-    assert _spin_until(qt_app, lambda: panel.task is None), \
+    assert spin_until(qt_app, lambda: panel.task is None), \
         "task never finished"
     assert runtime._pulse_tap is None
     assert "Stopped" in panel.status_label.text()
@@ -183,7 +162,7 @@ def test_live_capture_end_to_end(qt_app, tmp_path):
         assert np.sum(hists["tau_ms_counts_ch1"]) == 3
 
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_tap_exclusivity(qt_app, tmp_path, monkeypatch):
@@ -203,10 +182,10 @@ def test_tap_exclusivity(qt_app, tmp_path, monkeypatch):
     assert warnings, "second panel should have warned about the busy tap"
 
     panel1._on_stop()
-    assert _spin_until(qt_app, lambda: panel1.task is None)
+    assert spin_until(qt_app, lambda: panel1.task is None)
     panel1.close()
     panel2.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 # ───────────────────────── Phase C: review mode + session ───────────
@@ -274,7 +253,7 @@ def test_review_mode(qt_app, tmp_path):
                    listDataItems()) >= 1, f"no curve in {metric}"
 
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_identify_and_register(qt_app, tmp_path):
@@ -324,16 +303,16 @@ def test_noise_progress_stall_visibility(qt_app, tmp_path):
         _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
               float(rng.normal(0, 1.0)), None)
 
-    assert _spin_until(
+    assert spin_until(
         qt_app,
         lambda: f"Ch1 {n_fed}/{target}" in panel.status_label.text()), \
         f"no progress shown: {panel.status_label.text()!r}"
     assert f"Ch2 0/{target}" in panel.status_label.text()
 
     panel._on_stop()
-    assert _spin_until(qt_app, lambda: panel.task is None)
+    assert spin_until(qt_app, lambda: panel.task is None)
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_non_displayed_channels_start_ok(qt_app, tmp_path):
@@ -350,9 +329,9 @@ def test_non_displayed_channels_start_ok(qt_app, tmp_path):
     assert runtime.tap_channels == [1, 2]
 
     panel._on_stop()
-    assert _spin_until(qt_app, lambda: panel.task is None)
+    assert spin_until(qt_app, lambda: panel.task is None)
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_packet_width_validation(qt_app, tmp_path, monkeypatch):
@@ -371,7 +350,7 @@ def test_packet_width_validation(qt_app, tmp_path, monkeypatch):
     assert panel.task is None
     assert warnings and "200" in warnings[0] and "128" in warnings[0]
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_waveform_fetch_after_eviction_and_stop(qt_app, tmp_path):
@@ -390,14 +369,14 @@ def test_waveform_fetch_after_eviction_and_stop(qt_app, tmp_path):
     for _ in range(1000):
         _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
               float(rng.normal(0, 1.0)), None)
-    assert _spin_until(qt_app, lambda: panel.noise_stats)
+    assert spin_until(qt_app, lambda: panel.noise_stats)
     _feed_capture(runtime._pulse_tap, rng)
-    assert _spin_until(qt_app, lambda: len(panel._pulse_order) == 3)
+    assert spin_until(qt_app, lambda: len(panel._pulse_order) == 3)
 
     # Pulse 1 was evicted (cache holds only the newest)
     assert panel.task.get_pulse(1, 1) is None
     panel._show_pulse(1, 1)  # triggers async fetch from the live file
-    assert _spin_until(
+    assert spin_until(
         qt_app,
         lambda: len(panel.pulse_plot_i.getPlotItem().listDataItems()) >= 1
         and len(panel.pulse_plot_q.getPlotItem().listDataItems()) >= 1), \
@@ -406,7 +385,7 @@ def test_waveform_fetch_after_eviction_and_stop(qt_app, tmp_path):
 
     # After stop: reader auto-opens, everything stays browsable
     panel._on_stop()
-    assert _spin_until(qt_app, lambda: panel.task is None)
+    assert spin_until(qt_app, lambda: panel.task is None)
     assert panel.reader is not None
     for idx in (1, 2, 3):
         wf = panel._get_waveform(1, idx)
@@ -415,7 +394,7 @@ def test_waveform_fetch_after_eviction_and_stop(qt_app, tmp_path):
     assert "Pulse #000002" in panel.pulse_info.text()
 
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_channel_default_follows_stream(qt_app, tmp_path):
@@ -424,7 +403,7 @@ def test_channel_default_follows_stream(qt_app, tmp_path):
     panel = PulseCapturePanel(periscope=runtime, dark_mode=True)
     assert panel.channels_edit.text() == "1,3"
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def _build_dual_file(tmp_path):
@@ -485,7 +464,7 @@ def test_dual_review_mode(qt_app, tmp_path):
     assert any("slow" in t for t in labels), labels
 
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_dual_session_hdf5_path_parity(tmp_path):
@@ -517,28 +496,28 @@ def test_follow_latest_coalesces_bursts(qt_app, tmp_path):
     for _ in range(1000):
         _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
               float(rng.normal(0, 1.0)), None)
-    assert _spin_until(qt_app, lambda: panel.noise_stats)
+    assert spin_until(qt_app, lambda: panel.noise_stats)
 
     _feed_capture(runtime._pulse_tap, rng, n=8000,
                   pulse_starts=tuple(range(200, 7000, 700)))
     n_expected = len(range(200, 7000, 700))
     # This test is about the coalescing timer, not detector tuning, so
     # wait for the burst to land rather than pinning an exact count.
-    assert _spin_until(
+    assert spin_until(
         qt_app, lambda: len(panel._pulse_order) >= n_expected), \
         f"saw {len(panel._pulse_order)}/{n_expected} pulses"
-    _spin(qt_app, 0.3)
+    spin(qt_app, 0.3)
     newest = max(idx for _ch, idx in panel._pulse_order)
-    assert _spin_until(
+    assert spin_until(
         qt_app,
         lambda: f"#{newest:06d}" in panel.pulse_info.text()
         and len(panel.pulse_plot_i.getPlotItem().listDataItems()) >= 1), \
         f"viewer not on latest (#{newest}): {panel.pulse_info.text()!r}"
 
     panel._on_stop()
-    assert _spin_until(qt_app, lambda: panel.task is None)
+    assert spin_until(qt_app, lambda: panel.task is None)
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_stale_dock_entries_are_pruned(qt_app, tmp_path):
@@ -571,7 +550,7 @@ def test_stale_dock_entries_are_pruned(qt_app, tmp_path):
 
     panel_live.close()
     panel_dead.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_template_tab_renders(qt_app, tmp_path):
@@ -585,12 +564,12 @@ def test_template_tab_renders(qt_app, tmp_path):
     for _ in range(1000):
         _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
               float(rng.normal(0, 1.0)), None)
-    assert _spin_until(qt_app, lambda: panel.noise_stats)
+    assert spin_until(qt_app, lambda: panel.noise_stats)
 
     _feed_capture(runtime._pulse_tap, rng, n=8000,
                   pulse_starts=tuple(range(200, 7000, 700)))
     n_expected = len(range(200, 7000, 700))
-    assert _spin_until(
+    assert spin_until(
         qt_app, lambda: len(panel._pulse_order) == n_expected)
 
     # Force a flush so the template payload reaches the GUI
@@ -606,7 +585,7 @@ def test_template_tab_renders(qt_app, tmp_path):
     assert int(np.nanargmax(np.abs(mean))) == acc.pre_samples
 
     panel._on_stop()
-    assert _spin_until(qt_app, lambda: panel.task is None)
+    assert spin_until(qt_app, lambda: panel.task is None)
 
     with PulseHDF5Reader(hdf5_path) as reader:
         tmpl = reader.get_templates()
@@ -614,7 +593,7 @@ def test_template_tab_renders(qt_app, tmp_path):
         assert np.nanmax(np.abs(tmpl["template_I_ch1"])) > 0
 
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_units_toggle_scales_amplitude(qt_app, tmp_path):
@@ -635,7 +614,7 @@ def test_units_toggle_scales_amplitude(qt_app, tmp_path):
     assert plain._df_scale(1) is None
     panel.close()
     plain.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_csv_exports(qt_app, tmp_path):
@@ -672,7 +651,7 @@ def test_csv_exports(qt_app, tmp_path):
     assert len(rows) > 10
 
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_keyboard_navigation(qt_app, tmp_path):
@@ -697,7 +676,7 @@ def test_keyboard_navigation(qt_app, tmp_path):
     assert panel.viewer_tabs.currentIndex() == start_tab
 
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_template_view_fits_data_and_uses_zoombox(qt_app, tmp_path):
@@ -754,7 +733,7 @@ def test_template_view_fits_data_and_uses_zoombox(qt_app, tmp_path):
             pg.ViewBox.RectMode
 
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def _axis_label(plot):
@@ -778,7 +757,7 @@ def test_stacked_plots_share_one_x_axis_label(qt_app, tmp_path):
     assert _axis_label(panel.pulse_plot_i) == _axis_label(panel.pulse_plot_q)
     assert _axis_label(panel.pulse_plot_i) == ("sample", "")
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def _legend_labels(plot):
@@ -796,9 +775,9 @@ def test_single_pulse_bands_are_drawn_and_named(qt_app, tmp_path):
     for _ in range(1000):
         _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
               float(rng.normal(0, 1.0)), None)
-    assert _spin_until(qt_app, lambda: panel.noise_stats)
+    assert spin_until(qt_app, lambda: panel.noise_stats)
     _feed_capture(runtime._pulse_tap, rng)
-    assert _spin_until(qt_app, lambda: len(panel._pulse_order) >= 1)
+    assert spin_until(qt_app, lambda: len(panel._pulse_order) >= 1)
 
     panel._show_pulse(*panel._pulse_order[-1])
     for plot in (panel.pulse_plot_i, panel.pulse_plot_q):
@@ -810,9 +789,9 @@ def test_single_pulse_bands_are_drawn_and_named(qt_app, tmp_path):
         assert sum("trigger" in t for t in labels) == 1, labels
 
     panel._on_stop()
-    _spin(qt_app)
+    spin(qt_app)
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_both_mode_annotates_bands_per_stream(qt_app, tmp_path):
@@ -836,7 +815,7 @@ def test_both_mode_annotates_bands_per_stream(qt_app, tmp_path):
                    for t in labels), labels
 
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
@@ -851,9 +830,9 @@ def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
     for _ in range(1000):
         _tap1(runtime._pulse_tap, 1, float(rng.normal(0, 1.0)),
               float(rng.normal(0, 1.0)), None)
-    assert _spin_until(qt_app, lambda: panel.noise_stats)
+    assert spin_until(qt_app, lambda: panel.noise_stats)
     _feed_capture(runtime._pulse_tap, rng)
-    assert _spin_until(qt_app, lambda: len(panel._pulse_order) >= 1)
+    assert spin_until(qt_app, lambda: len(panel._pulse_order) >= 1)
     panel._show_pulse(*panel._pulse_order[-1])
 
     info = panel.pulse_info.text()
@@ -878,9 +857,9 @@ def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
             assert all(lb is None for lb in labels)
 
     panel._on_stop()
-    _spin(qt_app)
+    spin(qt_app)
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_pair_view_marks_come_from_the_triggered_record(qt_app, tmp_path):
@@ -906,7 +885,7 @@ def test_pair_view_marks_come_from_the_triggered_record(qt_app, tmp_path):
             assert any(t.startswith(("slow ", "fast ")) for t in texts), \
                 texts
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_both_mode_noise_segment_is_plotted(qt_app):
@@ -944,7 +923,7 @@ def test_both_mode_noise_segment_is_plotted(qt_app):
 
     panel.task = None
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 # ── "all" channel selection ───────────────────────────────────────

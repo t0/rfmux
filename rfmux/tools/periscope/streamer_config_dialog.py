@@ -14,6 +14,8 @@ import asyncio
 from typing import Optional
 
 from PyQt6 import QtCore, QtWidgets
+
+from .utils import apply_issue_banner
 from PyQt6.QtCore import pyqtSignal
 
 from ...algorithms.measurement.streamer_config import (
@@ -23,15 +25,6 @@ from ...algorithms.measurement.streamer_config import (
     apply_streamer_config,
     validate,
 )
-
-_BANNER_CSS = {
-    "error": "background-color: #f8d7da; color: #721c24; "
-             "padding: 5px; border-radius: 6px;",
-    "warning": "background-color: #fff3cd; color: #856404; "
-               "padding: 5px; border-radius: 6px;",
-    "info": "background-color: #d1ecf1; color: #0c5460; "
-            "padding: 5px; border-radius: 6px;",
-}
 
 
 class StreamerStateFetcher(QtCore.QThread):
@@ -254,20 +247,10 @@ class StreamerConfigDialog(QtWidgets.QDialog):
                 issues.append(("error",
                                "Modules must be a comma-separated list "
                                "of integers."))
-            errors = [m for s, m in issues if s == "error"]
-            worst = ("error" if errors else
-                     "warning" if any(s == "warning" for s, _ in issues)
-                     else "info" if issues else None)
-            if worst:
-                self.status_label.setText(
-                    "\n".join(m for _, m in issues))
-                self.status_label.setStyleSheet(_BANNER_CSS[worst])
-            else:
-                self.status_label.setText("")
-                self.status_label.setStyleSheet("")
-
-            ok = self.buttons.button(
-                QtWidgets.QDialogButtonBox.StandardButton.Ok)
-            ok.setEnabled(not errors)
+            apply_issue_banner(
+                self.status_label,
+                self.buttons.button(
+                    QtWidgets.QDialogButtonBox.StandardButton.Ok),
+                issues)
         finally:
             self._updating = False

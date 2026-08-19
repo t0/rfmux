@@ -844,14 +844,6 @@ class PeriscopeRuntime:
             self.buf[ch_val]["M"].extend(np.abs(column))
             self.tbuf[ch_val].extend(times)
 
-    def reset_histogram_channel(self, ch_val: int) -> None:
-        """Clear persistent histogram state for one channel (I and Q)."""
-        locker = QtCore.QMutexLocker(self._hist_mutex)
-        for k in list(self._hist_state.keys()):
-            if k[0] == ch_val and k[1] in ("I", "Q"):
-                del self._hist_state[k]
-    
-    
     def _update_plot_data(self):
         """Update all active plots with new data from buffers and dispatch worker tasks."""
         for row_i, group in enumerate(self.channel_list):

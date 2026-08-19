@@ -6,13 +6,11 @@ packet.  It now buffers packets and writes them a frame at a time,
 which is only safe if the ring contents come out identical.
 """
 
-import os
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
 
@@ -24,11 +22,6 @@ from rfmux.tools.periscope.utils import Circular  # noqa: E402
 N = 256
 CHANNELS = [1, 2, 5]
 
-
-@pytest.fixture(scope="module")
-def qt_app():
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    yield app
 
 
 class _Packet:

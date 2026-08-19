@@ -27,7 +27,6 @@ import time
 from collections import OrderedDict
 from typing import Any, Dict, Optional, Tuple
 
-import numpy as np
 from PyQt6 import QtCore
 from PyQt6.QtCore import pyqtSignal
 

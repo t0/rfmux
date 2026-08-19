@@ -8,7 +8,6 @@ every pulse.
 """
 
 import numpy as np
-import pytest
 
 from rfmux.pulse_capture.session import (
     CaptureState, PulseCaptureSession)

@@ -28,7 +28,6 @@ Usage::
         channels=[1, 2, 3],
         noise_stats=noise_stats,       # per-channel {mean_I, std_I, mean_Q, std_Q}
         threshold_sigma=5.0,           # trigger at 5σ on EITHER I or Q
-        sample_rate=38147.0,
     )
 
     # 3. Feed samples.  Completed pulses arrive through on_pulse; the
@@ -58,6 +57,13 @@ _SQRT2 = math.sqrt(2.0)
 
 #: Ring headroom over the longest expected pulse.  The pre-trigger
 #: margin and the end-confirmation tail share the ring with the pulse.
+#: End-of-pulse threshold, in sigma.  Defined here, where the detector
+#: lives, because it was written three times with two different values:
+#: PulseCapture and PulseCaptureSession said 1.0, PulseCaptureConfig
+#: said 1.5, so constructing the engine directly behaved differently
+#: from going through the config.
+DEFAULT_END_SIGMA = 1.5
+
 BUFFER_SAFETY: float = 1.5
 
 #: Fraction of the ring a capture may fill before the hard stop.  With
@@ -90,8 +96,19 @@ class Circular:
         ``add`` calls would, including when *values* is longer than the
         ring: only the last N survive, but they land at the position the
         full sequence would have left them at.
+
+        This is also the GUI's display path, which is why it exists:
+        Periscope writes one sample per channel per packet, and done one
+        ``add`` at a time that was the dominant per-packet cost at
+        decimation stage 0 -- 84% of packets lost at 128 channels
+        displayed, none once batched (see
+        ``PeriscopeRuntime._flush_display_batch``).
+
+        Values are coerced to the buffer's dtype, so a ``None``
+        timestamp becomes NaN exactly as ``add`` leaves it.  Dropping
+        that coercion silently produces an object array instead.
         """
-        v = np.asarray(values)
+        v = np.asarray(values, dtype=self.buf.dtype)
         m = v.shape[0]
         if m == 0:
             return
@@ -227,8 +244,6 @@ class PulseCapture:
     end_sigma : float
         Number of standard deviations — signal must return within this
         to declare pulse end (default 1.0σ).
-    sample_rate : float
-        Expected sample rate (Hz).
     margin_fraction : float
         Fraction of pulse duration kept as pre-trigger margin and as
         post-pulse tail after the below-threshold instant, and the
@@ -311,8 +326,7 @@ class PulseCapture:
         channels: List[int],
         noise_stats: Dict[int, ChannelNoiseStats],
         threshold_sigma: float = 5.0,
-        end_sigma: float = 1.0,
-        sample_rate: float = 38147.0,
+        end_sigma: float = DEFAULT_END_SIGMA,
         margin_fraction: float = 0.1,
         min_pulse_samples: int = 0,
         trigger_samples: int = 2,
@@ -325,7 +339,6 @@ class PulseCapture:
     ):
         self.channels = list(channels)
         self.buf_size = buf_size
-        self.sample_rate = sample_rate
         self.threshold_sigma = threshold_sigma
         self.end_sigma = end_sigma
         self.margin_fraction = margin_fraction
@@ -403,7 +416,10 @@ class PulseCapture:
         # retained here — the detector's memory is the ring buffer and
         # nothing else, so a capture can run for as long as you like.
         self.start_time: Optional[float] = None
-        self.pulse_count: Dict[str, int] = {f"Channel {c}": 0 for c in self.channels}
+        #: Per-channel pulse counter, keyed by channel number.  It
+        #: generates the index that names every HDF5 group, so it is
+        #: not merely a statistic.
+        self.pulse_count: Dict[int, int] = {c: 0 for c in self.channels}
 
         # When True, no new triggers start but in-progress captures complete.
         # Set by the receive loop when time_run is reached.
@@ -1033,9 +1049,8 @@ class PulseCapture:
                 pulse_data["below_threshold_time"] = float(
                     ts_win[below_index])
 
-        ch_key = f"Channel {channel}"
-        self.pulse_count[ch_key] += 1
-        k = self.pulse_count[ch_key]
+        self.pulse_count[channel] += 1
+        k = self.pulse_count[channel]
 
         # The only way a completed pulse leaves the detector.  A consumer
         # that wants them all in memory (trigger_capture) collects them

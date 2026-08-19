@@ -206,6 +206,9 @@ from rfmux.core.transferfunctions import ( # Adjusted import
     recalculate_displayed_phase,
 )
 from rfmux.algorithms.measurement import fitting # Adjusted import
+#: Re-exported: the display path and the pulse detector share one
+#: ring buffer, so extend()'s wrap arithmetic exists in one place.
+from rfmux.pulse_capture.detection import Circular  # noqa: F401
 from rfmux.core.hardware_map import macro # Adjusted import
 # CRS is already imported from rfmux.core.schema
 
@@ -506,50 +509,41 @@ class UnitConverter:
         else:
             return f"{volts:.3f} V"
 
-# ───────────────────────── Lock‑Free Ring Buffer ─────────────────────────
-class Circular:
-    """Ring buffer that keeps a contiguous view.
+# ───────────────────────── Validation banner ─────────────────────────
+#: Severity colours for the dialog issue banner.  Fixed light-mode by
+#: intent, matching what both dialogs shipped with; theming it is
+#: separate work.
+_BANNER_CSS = {
+    "error": "background-color: #f8d7da; color: #721c24; "
+             "padding: 5px; border-radius: 6px;",
+    "warning": "background-color: #fff3cd; color: #856404; "
+               "padding: 5px; border-radius: 6px;",
+    "info": "background-color: #d1ecf1; color: #0c5460; "
+            "padding: 5px; border-radius: 6px;",
+}
 
-    Every value is written twice, N apart, so ``data()`` can return a
-    plain slice instead of two pieces to concatenate.
+
+def apply_issue_banner(label, ok_button, issues) -> bool:
+    """Render ``validate()`` output into *label*; gate *ok_button* on errors.
+
+    ``issues`` is the ``[(severity, message), ...]`` list the config
+    validators return.  Returns True when there were no errors, which is
+    also what the OK button ends up enabled to.
     """
-    def __init__(self, size: int, dtype=float) -> None:
-        self.N = size; self.buf = np.zeros(size * 2, dtype=dtype)
-        self.ptr = 0; self.count = 0
-    def add(self, value):
-        self.buf[self.ptr] = value; self.buf[self.ptr + self.N] = value
-        self.ptr = (self.ptr + 1) % self.N; self.count = min(self.count + 1, self.N)
-    def extend(self, values) -> None:
-        """Append many values at once, as repeated :meth:`add` would.
+    errors = [m for s, m in issues if s == "error"]
+    worst = ("error" if errors else
+             "warning" if any(s == "warning" for s, _ in issues)
+             else "info" if issues else None)
+    if worst:
+        label.setText("\n".join(m for _, m in issues))
+        label.setStyleSheet(_BANNER_CSS[worst])
+    else:
+        label.setText("")
+        label.setStyleSheet("")
+    if ok_button is not None:
+        ok_button.setEnabled(not errors)
+    return not errors
 
-        The GUI writes one sample per channel per packet.  Done one
-        call at a time that is the dominant per-packet cost at stage 0,
-        and it scales with the number of channels on screen; done a
-        frame at a time it is a couple of numpy copies.
-        """
-        v = np.asarray(values, dtype=self.buf.dtype)
-        total = v.shape[0]
-        if total == 0:
-            return
-        n = total
-        if n > self.N:
-            v = v[-self.N:]          # only the last N could survive anyway
-            n = self.N
-        # Where those surviving values would have landed had they been
-        # added one at a time: the write head advances by `total`, so
-        # the kept tail ends at ptr+total-1 and therefore starts here.
-        start = (self.ptr + total - n) % self.N
-        first = min(n, self.N - start)
-        self.buf[start:start + first] = v[:first]
-        self.buf[start + self.N:start + self.N + first] = v[:first]
-        rest = n - first
-        if rest:
-            self.buf[:rest] = v[first:]
-            self.buf[self.N:self.N + rest] = v[first:]
-        self.ptr = (self.ptr + total) % self.N
-        self.count = min(self.count + total, self.N)
-    def data(self) -> np.ndarray:
-        return self.buf[: self.count] if self.count < self.N else self.buf[self.ptr : self.ptr + self.N]
 
 # ───────────────────────── Custom Plot Controls ─────────────────────────
 class ClickableViewBox(pg.ViewBox):

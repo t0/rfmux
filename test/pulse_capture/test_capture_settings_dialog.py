@@ -1,10 +1,8 @@
 """Offscreen tests for the Pulse Capture Settings dialog."""
 
-import os
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
 
@@ -17,11 +15,6 @@ from rfmux.tools.periscope.pulse_capture_settings_dialog import (  # noqa: E402
     PulseCaptureSettingsDialog,
 )
 
-
-@pytest.fixture(scope="module")
-def qt_app():
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    yield app
 
 
 def _ok(dlg):

@@ -13,7 +13,8 @@ import time
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from test.qt_helpers import spin, spin_until  # noqa: E402
+
 
 pytest.importorskip("PyQt6")
 
@@ -24,13 +25,8 @@ from rfmux.tools.periscope.noise_spectrum_panel import (  # noqa: E402
 )
 
 
-@pytest.fixture
-def qt_app():
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    yield app
 
-
-def _spin(qt_app, seconds=0.05):
+def spin(qt_app, seconds=0.05):
     """Let Qt drain deferred deletions after closing a panel."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -58,7 +54,7 @@ def test_panel_builds_with_multiple_detectors(qt_app):
     assert panel.prev_button.isEnabled()
     assert panel.next_button.isEnabled()
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_navigation_is_disabled_for_a_lone_detector(qt_app):
@@ -73,7 +69,7 @@ def test_navigation_is_disabled_for_a_lone_detector(qt_app):
     assert not panel.prev_button.isEnabled()
     assert not panel.next_button.isEnabled()
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_navigation_wraps_and_retitles(qt_app):
@@ -99,7 +95,7 @@ def test_navigation_wraps_and_retitles(qt_app):
     panel._navigate_previous()
     assert panel.detector_id == 2
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)
 
 
 def test_initial_detector_falls_back_when_unknown(qt_app):
@@ -113,4 +109,4 @@ def test_initial_detector_falls_back_when_unknown(qt_app):
     )
     assert panel.current_detector_index_in_list == 0
     panel.close()
-    _spin(qt_app)
+    spin(qt_app)

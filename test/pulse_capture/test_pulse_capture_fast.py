@@ -9,20 +9,18 @@ streamer down on stop.
 """
 
 import asyncio
-import os
-import time
 
 import numpy as np
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from test.qt_helpers import spin_until  # noqa: E402
+
 
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
 pytestmark = pytest.mark.slow_acquisition
 
-from PyQt6 import QtWidgets  # noqa: E402
 
 from rfmux.pulse_capture.session import (  # noqa: E402
     CaptureState,
@@ -37,11 +35,6 @@ from rfmux.tools.periscope.pulse_capture_task import (  # noqa: E402
     PulseCaptureTask,
 )
 
-
-@pytest.fixture(scope="module")
-def qt_app():
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    yield app
 
 
 @pytest.fixture(scope="module")
@@ -145,15 +138,6 @@ def stream_guard(qt_app):
         thread.join(timeout=10)
 
 
-def _spin_until(qt_app, predicate, timeout):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        qt_app.processEvents()
-        if predicate():
-            return True
-        time.sleep(0.02)
-    return False
-
 
 def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     loop, crs = mock_crs
@@ -180,7 +164,7 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
                          host="127.0.0.1", module=1))
     task.start()
 
-    assert _spin_until(
+    assert spin_until(
         qt_app, lambda: session.state is CaptureState.CAPTURING, 30), \
         f"never reached CAPTURING (state={session.state}, " \
         f"errors={events['errors']})"
@@ -189,11 +173,11 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     assert loop.run_until_complete(
         crs.get_pfb_streamer(module=1)) == channels
 
-    assert _spin_until(qt_app, lambda: session.total_pulses >= 2, 60), \
+    assert spin_until(qt_app, lambda: session.total_pulses >= 2, 60), \
         f"no pulses detected (errors={events['errors']})"
 
     task.request_stop()
-    assert _spin_until(qt_app, lambda: events["finished"], 30), \
+    assert spin_until(qt_app, lambda: events["finished"], 30), \
         "task never finished"
     task.wait(5000)
 
@@ -293,13 +277,13 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     # and tap thread however this test exits. The version that guarded only
     # this first assertion is what leaked the sockets when the second one
     # failed.
-    assert _spin_until(
+    assert spin_until(
         qt_app,
         lambda: dual.slow.state is CaptureState.CAPTURING
         and dual.fast.state is CaptureState.CAPTURING, 60), \
         f"states={dual.state}, errors={events['errors']}"
 
-    assert _spin_until(
+    assert spin_until(
         qt_app,
         lambda: any(p["slow_idx"] and p["fast_idx"]
                     for p in events["pairs"]), 90), \
@@ -308,7 +292,7 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
 
     task.request_stop()
     tap_stop["stop"] = True
-    assert _spin_until(qt_app, lambda: events["finished"], 30)
+    assert spin_until(qt_app, lambda: events["finished"], 30)
     task.wait(5000)
     tap_thread.join(timeout=10)
 

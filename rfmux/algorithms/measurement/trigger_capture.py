@@ -41,6 +41,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -192,9 +193,9 @@ async def trigger_capture(
     streamer_mode: str = "slow",
     time_run: float = 10.0,
     config: Optional[PulseCaptureConfig] = None,
-    threshold_sigma: float = 5.0,
-    end_sigma: float = 1.5,
-    max_pulse_ms: float = DEFAULT_MAX_PULSE_MS,
+    threshold_sigma: Optional[float] = None,
+    end_sigma: Optional[float] = None,
+    max_pulse_ms: Optional[float] = None,
     hdf5_path: Optional[Union[str, Path]] = None,
     verbose: bool = True,
 ) -> PulseCaptureResult:
@@ -215,9 +216,11 @@ async def trigger_capture(
         Capture duration in seconds of **sample time**, excluding noise
         training.
     config : PulseCaptureConfig, optional
-        Full detection configuration.  When omitted one is built from
-        ``threshold_sigma``, ``end_sigma`` and ``max_pulse_ms``; when
-        given, those three are ignored.
+        Full detection configuration.  ``threshold_sigma`` (5.0),
+        ``end_sigma`` (1.5) and ``max_pulse_ms`` override individual
+        fields of it, so passing a config and one shortcut does what it
+        looks like.  Previously the shortcuts were silently ignored
+        whenever a config was given.
     max_pulse_ms : float
         Longest pulse to expect.  Sizes the ring buffer and, through it,
         the noise-training and baseline windows — so it also determines
@@ -244,10 +247,14 @@ async def trigger_capture(
             f"the PFB streamer carries at most 4 channels, got "
             f"{len(channels)}")
 
-    if config is None:
-        config = PulseCaptureConfig(
-            threshold_sigma=threshold_sigma, end_sigma=end_sigma,
-            max_pulse_ms=max_pulse_ms)
+    config = config or PulseCaptureConfig()
+    overrides = {name: value for name, value in (
+        ("threshold_sigma", threshold_sigma),
+        ("end_sigma", end_sigma),
+        ("max_pulse_ms", max_pulse_ms),
+    ) if value is not None}
+    if overrides:
+        config = dataclasses.replace(config, **overrides)
 
     host = streamer.resolve_host(crs.tuber_hostname)
     dec = await crs.get_decimation()

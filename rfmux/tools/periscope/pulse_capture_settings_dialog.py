@@ -13,18 +13,11 @@ from __future__ import annotations
 
 from PyQt6 import QtWidgets
 
+from .utils import apply_issue_banner
+
 from ...pulse_capture.session import (
     PulseCaptureConfig,
 )
-
-_BANNER_CSS = {
-    "error": "background-color: #f8d7da; color: #721c24; "
-             "padding: 5px; border-radius: 6px;",
-    "warning": "background-color: #fff3cd; color: #856404; "
-               "padding: 5px; border-radius: 6px;",
-    "info": "background-color: #d1ecf1; color: #0c5460; "
-            "padding: 5px; border-radius: 6px;",
-}
 
 
 class PulseCaptureSettingsDialog(QtWidgets.QDialog):
@@ -277,18 +270,10 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
                 f"floor in white noise)")
 
             issues = cfg.validate(self.sample_rate)
-            errors = [m for s, m in issues if s == "error"]
-            worst = ("error" if errors else
-                     "warning" if any(s == "warning" for s, _ in issues)
-                     else "info" if issues else None)
-            if worst:
-                self.status_label.setText("\n".join(m for _, m in issues))
-                self.status_label.setStyleSheet(_BANNER_CSS[worst])
-            else:
-                self.status_label.setText("")
-                self.status_label.setStyleSheet("")
-            self.buttons.button(
-                QtWidgets.QDialogButtonBox.StandardButton.Ok
-            ).setEnabled(not errors)
+            apply_issue_banner(
+                self.status_label,
+                self.buttons.button(
+                    QtWidgets.QDialogButtonBox.StandardButton.Ok),
+                issues)
         finally:
             self._updating = False

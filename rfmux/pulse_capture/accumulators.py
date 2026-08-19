@@ -114,11 +114,6 @@ class HistogramAccumulator:
         self.bin_edges = self.bin_edges * 2.0
         return True
 
-    def reset(self) -> None:
-        """Zero all bin counts."""
-        self.counts[:] = 0
-
-
 # ───────────────────────── Pulse Histogram Set ──────────────────────
 
 class PulseHistogramSet:
@@ -294,13 +289,6 @@ class PulseHistogramSet:
         return sum(
             h["amplitude"].total for h in self.histograms.values())
 
-    def reset_all(self) -> None:
-        """Zero all histogram counts across all channels."""
-        for ch_histograms in self.histograms.values():
-            for acc in ch_histograms.values():
-                acc.reset()
-
-
 # ═══════════════════════════ Templates ══════════════════════════
 
 def find_trigger_index(
@@ -432,14 +420,6 @@ class PulseTemplateAccumulator:
             data["time_s"] = self.time_axis(sample_rate)
         return data
 
-    def reset(self) -> None:
-        for quad in ("I", "Q"):
-            self._sum[quad][:] = 0.0
-            self._sumsq[quad][:] = 0.0
-        self.counts[:] = 0
-        self.n_pulses = 0
-        self.n_skipped = 0
-
 
 class PulseTemplateSet:
     """Per-channel trigger-aligned templates."""
@@ -482,6 +462,3 @@ class PulseTemplateSet:
                     else np.asarray(value))
         return result
 
-    def reset_all(self) -> None:
-        for acc in self.templates.values():
-            acc.reset()

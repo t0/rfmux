@@ -16,7 +16,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
 
@@ -24,11 +23,6 @@ from PyQt6 import QtWidgets  # noqa: E402
 
 from rfmux.tools.periscope import settings  # noqa: E402
 
-
-@pytest.fixture(scope="module")
-def qt_app():
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    yield app
 
 
 @pytest.fixture(autouse=True)

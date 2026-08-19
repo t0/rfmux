@@ -811,16 +811,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         return find_parent_with_attr(self, "register_pulse_tap")
 
     def _resolve_hdf5_path(self, module: int) -> Path:
-        stamp = datetime.datetime.now().strftime("%H%M%S")
-        name = f"pulse_module{module}_{stamp}.h5"
+        """Where this capture writes, unless one was set explicitly."""
         if self.hdf5_path is not None:
             return self.hdf5_path
-        sm = self.session_manager
-        if sm is not None and getattr(sm, "is_active", False) \
-                and sm.session_path is not None:
-            return Path(sm.session_path) / name
-        base = Path(self._browse_dir) if self._browse_dir else Path.home()
-        return base / name
+        stamp = datetime.datetime.now().strftime("%H%M%S")
+        return self._export_dir() / f"pulse_module{module}_{stamp}.h5"
 
     def _sync_config_from_toolbar(self) -> None:
         self.capture_config.threshold_sigma = float(
@@ -1254,26 +1249,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 self._pulse_order.append((c, idx))
                 self._pulse_summaries[(c, idx)] = summary
                 self._counts[c] = self._counts.get(c, 0) + 1
-                parent = self._channel_items.get(c)
-                if parent is not None:
-                    label = ("⊘" if summary["truncated"] else
-                             "⚠" if summary["pileup"] else "◆") \
-                        + f" #{idx:06d}"
-                    item = QtWidgets.QTreeWidgetItem(
-                        [label, str(summary["n_samples"]),
-                         f"{snr:.1f}σ"])
-                    item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
-                                 ("pulse", c, idx))
-                    if summary["truncated"]:
-                        for col in range(3):
-                            item.setBackground(col, QtGui.QColor(
-                                "#3a2222" if self.dark_mode else "#ffd9d2"))
-                    elif summary["pileup"]:
-                        for col in range(3):
-                            item.setBackground(col, QtGui.QColor(
-                                "#3a3320" if self.dark_mode else "#fff3c2"))
-                    parent.insertChild(0, item)
-                    parent.setText(0, f"▤ Channel {c} ({self._counts[c]})")
+                self._add_pulse_row(c, idx, summary)
 
         self._hist_data = self.reader.get_histograms()
         self._render_histograms()
@@ -1489,6 +1465,36 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     f"module{self.task.session.module}")
             self._registered_export = True
 
+    def _add_pulse_row(self, channel: int, pulse_idx: int,
+                       summary: dict) -> None:
+        """Insert one pulse into the tree, newest first.
+
+        Shared by the live handler and the review loader: the row looks
+        the same whether the pulse just arrived or came out of a file,
+        and it used to be built twice.
+        """
+        parent = self._channel_items.get(channel)
+        if parent is None:
+            return
+        pileup = bool(summary.get("pileup", False))
+        truncated = bool(summary.get("truncated", False))
+        label = ("\u2298" if truncated else "\u26a0" if pileup else "\u25c6") \
+            + f" #{pulse_idx:06d}"
+        item = QtWidgets.QTreeWidgetItem(
+            [label, str(summary.get("n_samples", "")),
+             f"{summary.get('snr', 0):.1f}\u03c3"])
+        item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
+                     ("pulse", channel, pulse_idx))
+        if truncated or pileup:
+            colour = QtGui.QColor(
+                ("#3a2222" if self.dark_mode else "#ffd9d2") if truncated
+                else ("#3a3320" if self.dark_mode else "#fff3c2"))
+            for col in range(3):
+                item.setBackground(col, colour)
+        parent.insertChild(0, item)
+        parent.setText(0, f"\u25a4 Channel {channel} "
+                          f"({self._counts[channel]})")
+
     def _on_pulse_detected(self, channel: int, pulse_idx: int,
                            summary: dict) -> None:
         if self._both_mode:
@@ -1501,28 +1507,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._pulse_summaries[key] = summary
         self._counts[channel] = self._counts.get(channel, 0) + 1
 
-        parent = self._channel_items.get(channel)
-        if parent is not None:
-            pileup = summary.get("pileup", False)
-            truncated = summary.get("truncated", False)
-            label = ("⊘" if truncated else "⚠" if pileup else "◆") \
-                + f" #{pulse_idx:06d}"
-            item = QtWidgets.QTreeWidgetItem(
-                [label, str(summary.get("n_samples", "")),
-                 f"{summary.get('snr', 0):.1f}σ"])
-            item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
-                         ("pulse", channel, pulse_idx))
-            if truncated:
-                for col in range(3):
-                    item.setBackground(col, QtGui.QColor(
-                        "#3a2222" if self.dark_mode else "#ffd9d2"))
-            elif pileup:
-                for col in range(3):
-                    item.setBackground(col, QtGui.QColor(
-                        "#3a3320" if self.dark_mode else "#fff3c2"))
-            parent.insertChild(0, item)
-            parent.setText(0, f"▤ Channel {channel} "
-                              f"({self._counts[channel]})")
+        self._add_pulse_row(channel, pulse_idx, summary)
 
         if self.follow_check.isChecked() \
                 and not self._follow_timer.isActive():

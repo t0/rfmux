@@ -10,7 +10,6 @@ import os
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from rfmux.mock import config as mock_config  # noqa: E402
 

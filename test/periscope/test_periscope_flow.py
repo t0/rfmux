@@ -6,16 +6,6 @@ from rfmux.tools.periscope.app import Periscope
 from rfmux.tools.periscope.utils import QtWidgets
 
 
-@pytest.fixture(scope="session")
-def qt_app():
-    """
-    Provide a QApplication for all UI smoke tests.
-    Ensures Qt is initialized only once.
-    """
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    yield app
-    app.quit()
-
 
 @pytest.fixture
 def mock_periscope(qt_app):

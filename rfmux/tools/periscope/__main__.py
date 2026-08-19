@@ -22,6 +22,8 @@ and background tasks in `tasks.py`.
 import argparse
 import textwrap
 import sys
+import os
+import signal
 import warnings
 import asyncio
 
@@ -203,17 +205,7 @@ def main():
     # Installs a global exception hook to catch any unhandled exceptions
     # that occur in the main thread, printing them to stderr. This is crucial
     # for GUI applications to provide error feedback instead of silently crashing.
-    def global_exception_hook(exctype, value, tb):
-        # Ensure traceback is imported if not already, to prevent import errors
-        # during exception handling itself.
-        import traceback as tb_module
-        print("Unhandled exception in Periscope (CLI mode):", file=sys.stderr)
-        tb_module.print_exception(exctype, value, tb, file=sys.stderr)
-        # For a GUI app, logging is often preferred over re-raising and crashing.
-        # If default Python behavior is also desired, uncomment:
-        # sys.__excepthook__(exctype, value, tb)
-
-    sys.excepthook = global_exception_hook
+    sys.excepthook = periscope_excepthook
     # --- End Global Exception Hook ---
 
     # --- Performance Optimization ---
@@ -445,6 +437,9 @@ def main():
     # sys.exit(app.exec()) ensures that the application's exit code is propagated.
     viewer.setWindowIcon(app_icon)
     viewer.show()
+    # Held in a local so it outlives this call: a QTimer that goes out
+    # of scope is destroyed and stops firing.
+    _sigint_wake = install_sigint_handler()
     sys.exit(app.exec())
 
 # Note on wildcard imports from .utils:
@@ -563,6 +558,72 @@ async def raise_periscope(
         return viewer
     else:
         return viewer, app
+
+
+def _quit_application():
+    """Close every window, which is what actually stops the receiver.
+
+    Periscope's closeEvent is the only caller of UDPReceiver.stop(), so
+    quitting the event loop without closing the window would leave the
+    receive thread running and its socket bound.
+    """
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return
+    for widget in app.topLevelWidgets():
+        widget.close()
+    app.quit()
+
+
+def periscope_excepthook(exctype, value, tb):
+    """Report unhandled exceptions without taking the window down.
+
+    KeyboardInterrupt is the exception: it is a request to quit, not a
+    fault to log and continue past.  Swallowing it left the window up
+    with the receive thread still holding UDP 9876, and because
+    get_multicast_socket sets SO_REUSEPORT the next launch bound the
+    same port happily and then lost the whole stream to the process the
+    user thought they had killed.
+    """
+    if issubclass(exctype, KeyboardInterrupt):
+        print("\n[Periscope] Interrupted - shutting down", file=sys.stderr)
+        _quit_application()
+        return
+    import traceback as tb_module
+    print("Unhandled exception in Periscope (CLI mode):", file=sys.stderr)
+    tb_module.print_exception(exctype, value, tb, file=sys.stderr)
+
+
+def install_sigint_handler():
+    """Make Ctrl+C stop Periscope, and return the timer that lets it.
+
+    Python runs signal handlers between bytecodes in the main thread,
+    and app.exec() is C++ -- so without a Python callback firing
+    periodically the handler below is never reached.  The GUI's own
+    timer would usually do it, but that timer is stopped during
+    shutdown and by closeEvent, which is exactly when a second Ctrl+C
+    needs to work.
+
+    Returns the timer; the caller must keep it alive for the life of
+    the event loop.
+    """
+    asked_once = []
+
+    def handler(signum, frame):
+        if asked_once:
+            print("\n[Periscope] Forced exit", file=sys.stderr)
+            os._exit(130)
+        asked_once.append(True)
+        print("\n[Periscope] Ctrl+C - shutting down (again to force)",
+              file=sys.stderr)
+        _quit_application()
+
+    signal.signal(signal.SIGINT, handler)
+
+    wake = QtCore.QTimer()
+    wake.timeout.connect(lambda: None)
+    wake.start(200)
+    return wake
 
 
 @click.command(context_settings=dict(

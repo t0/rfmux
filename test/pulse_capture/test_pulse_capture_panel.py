@@ -34,8 +34,18 @@ class _FakeRuntime:
         self._pulse_tap = None
         self.tap_channels = None
 
-    def register_pulse_tap(self, callback, channels=None):
-        self._pulse_tap = callback
+    def register_pulse_tap(self, callback, channels=None,
+                           on_frame_end=None):
+        # The real runtime calls on_frame_end once per drain; these
+        # tests feed a sample at a time, so treat each as its own frame
+        # and the batching tap hands everything straight through.
+        if on_frame_end is not None:
+            def callback_then_flush(*args, **kwargs):
+                callback(*args, **kwargs)
+                on_frame_end()
+            self._pulse_tap = callback_then_flush
+        else:
+            self._pulse_tap = callback
         self.tap_channels = channels
 
     def unregister_pulse_tap(self):

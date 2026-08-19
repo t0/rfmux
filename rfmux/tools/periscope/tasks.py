@@ -33,7 +33,7 @@ class UDPReceiver(QtCore.QThread):
         # Create socket and C++ receiver
         # reorder_window=256: Maintain good packet reordering capability
         # queue_max_size=50000: Handle high data rates at FIR stage 0 (~38kHz)
-        # flush_threshold=32: Flush every 32 packets for smooth updates (~54ms at FIR stage 6)
+        # flush_threshold=16: Flush every 16 packets for smooth updates
         self.sock = streamer.get_multicast_socket(host)
         self.receiver = streamer.ReadoutPacketReceiver(self.sock,
                                                        reorder_window=256,
@@ -96,7 +96,17 @@ class UDPReceiver(QtCore.QThread):
         while not self.isInterruptionRequested():
             try:
                 # Call C++ receiver to read and process packets
-                self.receiver.receive_batch(batch_size=16, timeout_ms=50)
+                # batch_size is a CEILING, not a wait: recvmmsg runs with
+                # MSG_WAITFORONE, so it returns as soon as one packet is
+                # there with whatever else is already queued. A small
+                # ceiling therefore costs nothing at low rates and
+                # everything at high ones -- this thread has to retake
+                # the GIL once per call, and at 16 packets a call that
+                # is 2,400 acquisitions a second at stage 0, competing
+                # with the GUI. Measured on a board at stage 0 with a
+                # 128-channel capture running: 51.8% of the stream lost
+                # to kernel-buffer overflow at 16, none at 2048.
+                self.receiver.receive_batch(batch_size=2048, timeout_ms=50)
 
                 # Find our module's queue
                 if self.queue is None:

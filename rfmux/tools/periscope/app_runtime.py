@@ -87,6 +87,8 @@ class PeriscopeRuntime:
             self._pulse_tap_channels = None
         if not hasattr(self, '_pulse_tap_cache'):
             self._pulse_tap_cache = None
+        if not hasattr(self, '_pulse_tap_frame_end'):
+            self._pulse_tap_frame_end = None
 
         # Initialize simulation speed tracking for mock mode
         if self.is_mock_mode:
@@ -94,7 +96,8 @@ class PeriscopeRuntime:
 
     # ── Pulse capture tap ─────────────────────────────────────────
 
-    def register_pulse_tap(self, callback, channels=None):
+    def register_pulse_tap(self, callback, channels=None,
+                           on_frame_end=None):
         """Register a callback to receive slow stream samples for pulse capture.
 
         Invoked from the GUI timer thread once per PACKET, not once per
@@ -116,10 +119,15 @@ class PeriscopeRuntime:
             channel (128 short / 1024 long), so any of them can be
             captured regardless of what the main window displays.  When
             None, falls back to the displayed channels.
+        on_frame_end : callable, optional
+            Called once after each drain pass.  A tap that batches
+            needs this: without it the tail of a batch waits for a
+            packet that may not come until the stream resumes.
         """
         self._pulse_tap_channels = (
             sorted(set(int(c) for c in channels)) if channels else None)
         self._pulse_tap_cache = None
+        self._pulse_tap_frame_end = on_frame_end
         self._pulse_tap = callback
 
     def unregister_pulse_tap(self):
@@ -127,6 +135,7 @@ class PeriscopeRuntime:
         self._pulse_tap = None
         self._pulse_tap_channels = None
         self._pulse_tap_cache = None
+        self._pulse_tap_frame_end = None
 
     def _pulse_tap_columns(self, width: int):
         """``(channels, index array)`` for a packet carrying `width` channels.
@@ -726,6 +735,9 @@ class PeriscopeRuntime:
         # Before _update_plot_data reads them, and before all_chs can
         # change under a half-written batch.
         self._flush_display_batch()
+        frame_end = getattr(self, "_pulse_tap_frame_end", None)
+        if frame_end is not None:
+            frame_end()
 
     def _calculate_relative_timestamp(self, pkt) -> float | None:
         """
@@ -1093,9 +1105,11 @@ class PeriscopeRuntime:
         if (now - self.t_last) >= 1.0:
             #### Getting packet counts ###
             # Two unrelated failures, reported apart because they have
-            # unrelated fixes: 'net' never reached us (wire or kernel
-            # socket buffer), 'gui' reached the receiver and was thrown
-            # away because this thread could not keep up.
+            # unrelated fixes.  'missed' never reached the receiver at
+            # all -- the wire, the kernel socket buffer, or a receive
+            # thread starved of the GIL, which is a LOCAL fault that
+            # looks exactly like a network one.  'dropped' reached the
+            # receiver and this thread threw it away.
             missing = self.receiver.get_missing_packets()
             qdrops = self.receiver.get_queue_drops()
             received = self.receiver.get_received_packets()
@@ -1145,8 +1159,9 @@ class PeriscopeRuntime:
                         "channels or increase decimation")
                 else:
                     self.info_text.setText(
-                        "PACKET LOSS HIGH - CONSULT HELP FOR NETWORKING "
-                        "SUGGESTIONS")
+                        "PACKETS MISSED BEFORE PERISCOPE - check the "
+                        "network, the UDP buffer, or CPU load on this "
+                        "machine")
                 self.info_text.setStyleSheet("color: red;")
             else:
                 self.packet_loss_label.setStyleSheet(
@@ -1155,10 +1170,17 @@ class PeriscopeRuntime:
                 self.info_text.setStyleSheet("")
 
             self.packet_loss_label.setText(
-                f"| Loss: {net_percent:.1f}% net, {gui_percent:.1f}% gui")
+                f"| Loss: {net_percent:.1f}% missed, "
+                f"{gui_percent:.1f}% dropped")
+            self.packet_loss_label.setToolTip(
+                "missed — never reached the receiver: the network, the "
+                "kernel UDP buffer, or this process starving the "
+                "receive thread\n"
+                "dropped — reached the receiver, discarded because "
+                "Periscope could not draw it fast enough")
 
             self.dropped_label.setText(
-                f"| Lost: {missing:,} net / {qdrops:,} gui")
+                f"| Lost: {missing:,} missed / {qdrops:,} dropped")
             
             #### Showing on status bar ####
             # self.statusBar().showMessage(f"FPS {fps:.1f} | Packets/s {pps:.1f} | Packet Loss : {percent_x}% | Dropped : {dropped}") 

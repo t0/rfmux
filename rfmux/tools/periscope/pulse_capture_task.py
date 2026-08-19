@@ -96,6 +96,12 @@ class PulseCaptureTask(QtCore.QThread):
         self.sample_queue: "queue.Queue" = queue.Queue(maxsize=queue_size)
         self.dropped_overflow = 0
 
+        # Tap batch, filled on the GUI thread (see enqueue_packet).
+        self._tap_channels = None
+        self._tap_values: list = []
+        self._tap_stamps: list = []
+        self._tap_opened = 0.0
+
         self._cache_size = waveform_cache
         self._cache: "OrderedDict[Tuple[int, int], dict]" = OrderedDict()
         self._cache_lock = threading.Lock()
@@ -136,18 +142,57 @@ class PulseCaptureTask(QtCore.QThread):
 
     # ── GUI-thread API ────────────────────────────────────────────
 
+    #: Packets gathered before one hand-off to the worker.  A queue
+    #: put and a matching get per PACKET is 38k of each per second at
+    #: decimation stage 0, and the two threads then spend their time
+    #: taking the lock from each other rather than working: measured on
+    #: a board with 128 channels captured, 302,908 of 481,852 packets
+    #: were lost to this queue filling.  Batched, none were.
+    _TAP_BATCH_PACKETS = 256
+    #: ...but 256 packets is 430 ms at stage 6, so cap the wait too.
+    _TAP_BATCH_MAX_S = 0.05
+
     def enqueue_packet(self, channels, values, timestamp) -> None:
         """Tap callback — called from the GUI thread once per packet.
 
         ``values`` holds one complex sample per entry of ``channels``.
+        Packets are gathered here and handed over in batches.
         """
+        if channels != self._tap_channels:
+            self.flush_tap()
+            self._tap_channels = channels
+        if not self._tap_values:
+            self._tap_opened = time.monotonic()
+        self._tap_values.append(values)
+        self._tap_stamps.append(timestamp)
+        if (len(self._tap_values) >= self._TAP_BATCH_PACKETS
+                or (time.monotonic() - self._tap_opened
+                    >= self._TAP_BATCH_MAX_S)):
+            self.flush_tap()
+
+    def flush_tap(self) -> None:
+        """Hand over whatever is gathered, however little.
+
+        The runtime calls this at the end of every frame: the
+        batch size alone would strand the tail of a capture
+        whenever the stream pauses, because the age check only
+        runs when the NEXT packet arrives.
+        """
+        if not self._tap_values:
+            return
+        item = (self._tap_channels, self._tap_values, self._tap_stamps)
+        self._tap_values = []
+        self._tap_stamps = []
         try:
-            self.sample_queue.put_nowait((channels, values, timestamp))
+            self.sample_queue.put_nowait(item)
         except queue.Full:
-            self.dropped_overflow += len(channels)
+            self.dropped_overflow += len(item[1]) * len(item[0])
 
     def request_stop(self) -> None:
         """Ask the worker to finish; session.stop() runs in the worker."""
+        # Whatever is still gathered belongs to the capture; the worker
+        # is about to stop reading, so hand it over first.
+        self.flush_tap()
         self._stop_requested = True
         self.requestInterruption()
 
@@ -215,10 +260,13 @@ class PulseCaptureTask(QtCore.QThread):
                 item = self.sample_queue.get(timeout=0.02)
             except queue.Empty:
                 blocks.flush()   # don't strand a partial block when idle
+                self.session.flush_progress()
                 continue
             if self._handle_control(item):
                 continue
-            blocks.add_and_flush_if_ready(*item)
+            channels, values, stamps = item
+            for packet, stamp in zip(values, stamps):
+                blocks.add_and_flush_if_ready(channels, packet, stamp)
         blocks.flush()
 
     async def _run_fast(self) -> None:
@@ -301,6 +349,7 @@ class PulseCaptureTask(QtCore.QThread):
                 item = self.sample_queue.get_nowait()
             except queue.Empty:
                 blocks.flush()
+                self.session.flush_progress()
                 if (not warned and fed == 0
                         and time.monotonic() - t_start > 5.0):
                     warned = True
@@ -311,8 +360,10 @@ class PulseCaptureTask(QtCore.QThread):
                 continue
             if self._handle_control(item):
                 continue
-            blocks.add_and_flush_if_ready(*item)
-            fed += 1
+            channels, values, stamps = item
+            for packet, stamp in zip(values, stamps):
+                blocks.add_and_flush_if_ready(channels, packet, stamp)
+            fed += len(values)
         blocks.flush()
         return 0.0
 

@@ -466,6 +466,10 @@ class PulseCaptureSession(_CallbackHost):
     histogram_flush_every : int
         Flush histograms to HDF5 and fire ``on_histograms`` every N
         pulses (and once at stop).  Default 50.
+    progress_interval_s : float
+        Floor on the wall time between noise-training progress
+        callbacks.  They fire per channel per block, so a wide capture
+        emits thousands a second without this.  Default 0.1.
     histogram_flush_interval_s : float
         Also flush when this long has passed since the last one, so the
         live view keeps up at low count rates instead of waiting for
@@ -511,6 +515,7 @@ class PulseCaptureSession(_CallbackHost):
         histogram_config: Optional[Dict[str, Any]] = None,
         histogram_flush_every: int = 50,
         histogram_flush_interval_s: float = 0.5,
+        progress_interval_s: float = 0.1,
         progress_every: int = 100,
         on_noise: Optional[Callable] = None,
         on_pulse: Optional[Callable] = None,
@@ -551,6 +556,9 @@ class PulseCaptureSession(_CallbackHost):
         self.histogram_flush_every = int(histogram_flush_every)
         self.histogram_flush_interval_s = float(histogram_flush_interval_s)
         self._last_flush_t = 0.0
+        self.progress_interval_s = float(progress_interval_s)
+        self._last_progress_t = 0.0
+        self._progress_dirty = False
 
         self.on_noise = on_noise
         self.on_pulse = on_pulse
@@ -768,6 +776,27 @@ class PulseCaptureSession(_CallbackHost):
         for channel, (I, Q, T) in pending.items():
             self.feed_block(channel, I, Q, T)
 
+    def _emit_progress(self) -> None:
+        self._progress_dirty = False
+        self._last_progress_t = time.monotonic()
+        self._callback(self.on_progress, {
+            "state": self.state.value,
+            "collected": dict(self._noise_n),
+            "target": self.noise_samples,
+        })
+
+    def flush_progress(self) -> None:
+        """Report training counts that the rate limit is still holding.
+
+        Call when the sample flow pauses.  The limit exists to stop a
+        fast stream from flooding the listener, not to hide the latest
+        state -- and a channel the stream never delivers is only
+        visible as one that stopped advancing, which needs the last
+        update to actually arrive.
+        """
+        if self.state is CaptureState.ESTIMATING and self._progress_dirty:
+            self._emit_progress()
+
     def _absorb_noise(self, channel: int, I: np.ndarray,
                       Q: np.ndarray) -> int:
         """Take as much of a block as the training record still wants.
@@ -786,14 +815,19 @@ class PulseCaptureSession(_CallbackHost):
         n += take
         self._noise_n[channel] = n
 
-        # One progress callback per block rather than one per
-        # progress_every samples: same information, no longer at the
-        # mercy of how the packets happen to be sliced.
-        self._callback(self.on_progress, {
-            "state": self.state.value,
-            "collected": dict(self._noise_n),
-            "target": self.noise_samples,
-        })
+        # Rate-limited, because this fires per CHANNEL per block: 128
+        # channels training at stage 0 is ~15,500 callbacks a second,
+        # each copying a 128-entry dict and, in Periscope, crossing a
+        # Qt queued connection to a handler that rebuilds a
+        # 128-line label.  That storm is itself enough to make the GUI
+        # miss packets, which then slows the very training it reports.
+        # A channel that has just finished always reports, so the
+        # display still settles on the final counts.
+        self._progress_dirty = True
+        now = time.monotonic()
+        if (n >= self.noise_samples
+                or now - self._last_progress_t >= self.progress_interval_s):
+            self._emit_progress()
         if n >= self.noise_samples:
             self._maybe_finish_estimation()
         return take

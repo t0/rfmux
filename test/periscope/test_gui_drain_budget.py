@@ -76,6 +76,7 @@ def _runtime(qt_app, queue, per_packet_s=0.0):
     p._display_values = []
     p._display_times = []
     p._display_width = -1
+    p._pulse_tap_frame_end = None
     p.all_chs = []
     p.buf = {}
     p.tbuf = {}

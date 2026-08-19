@@ -341,6 +341,11 @@ class DualPulseCaptureSession(_CallbackHost):
             self._last_advance[stream] = t
             self.matcher.advance_time(stream, t)
 
+    def flush_progress(self) -> None:
+        """Release held training progress on both streams."""
+        for session in (self.slow, self.fast):
+            session.flush_progress()
+
     def re_estimate_noise(self) -> None:
         """Freeze both streams and retrain their noise statistics."""
         for session in (self.slow, self.fast):

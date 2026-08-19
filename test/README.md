@@ -48,8 +48,41 @@ effect, the slow (~38 kHz) and PFB (~1.22 MHz) sources feeding a session,
 decimation constraints, and end-to-end pulse capture in slow, fast and both
 modes.
 
-**hardware** — the same API against a real CRS, plus mock-vs-real attribute and
-signature comparison. Skipped unless you pass `--serial`.
+**hardware** — the same API against a real CRS. Skipped unless you pass
+`--serial`. See *Hardware tests* below for what it does and does not need.
+
+## Hardware tests
+
+`--tier=hardware --serial 0024` needs **a board on the network and nothing
+else** — no cryostat, no detectors, nothing connected to the RF ports. It
+checks plumbing, not physics: NCO round-trips (64 of the 75 tests, eight
+modules by eight frequencies), decimation round-trip, sample array shapes,
+sequence continuity, packet reception, and mock-vs-real API comparison. No
+assertion touches signal content, so whatever the ADC happens to see is fine.
+
+It is **not read-only.** The tests write NCO frequencies across all eight
+modules, and the `crs` fixture resets the analog bank and forces decimation to
+stage 6 long packets on teardown. Don't point it at a board mid-experiment.
+
+`test_high_sampling_rate` is the one that fails for environmental reasons: it
+streams at stage 0 (~38 kHz) and demands zero sequence gaps across 1000
+samples. A slow machine or an undersized UDP buffer fails it, and the failure
+reads as a code bug — set `net.core.rmem_max` first.
+
+Run `test/mock/test_mock_vs_real.py --serial <n>` on its own after changing the
+mock's API surface, or when board firmware changes. It compares every mock
+attribute and signature against the real board, and it is the only thing that
+catches the two drifting apart — a drift whose symptom is code written against
+the mock failing only once it reaches hardware. It needs a board purely to
+introspect, so it is cheap and safe to run alone.
+
+The measurement algorithms — network analysis, multisweep, fitting,
+`bias_kids` — are **not** covered here, or anywhere against real hardware. They
+run against the mock only. Testing them for real needs resonators and a cold
+stage, which is out of scope for this suite; the mock is the arbiter, and
+`test_mock_vs_real` is what keeps that arbiter honest.
+
+## One acquisition run at a time
 
 Run acquisition tiers **one at a time**: the mock binds fixed ports 9876/9877,
 and a second reader silently takes the whole stream. A session guard in

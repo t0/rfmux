@@ -42,6 +42,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install scikit-build-core pybind11
+          # The suite imports these; without them collection aborts and
+          # every test in the run is lost, not just the ones that need
+          # them.  Declared in pyproject so this list cannot drift.
+          # --group needs pip >= 25.1, which is why pip is upgraded above.
+          pip install --group test
 
       - name: Build package
         run: |

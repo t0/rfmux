@@ -85,11 +85,19 @@ parser = "rfmux.tools.parser:main"
 periscope = "rfmux.tools.periscope.__main__:main"
 
 [dependency-groups]
-dev = [
-  "rfmux[qc]",  # run the QC suite from a checkout
+# Exactly what the test suite imports beyond the runtime dependencies.
+# Kept separate from `dev` so CI can install this and nothing else: the
+# qc extra pulls weasyprint, whose native libraries are a liability on
+# the Windows and macOS runners, and a test run should not depend on
+# them building.
+test = [
   "nbclient",
   "nbformat",
   "pytest_check",
+]
+dev = [
+  "rfmux[qc]",  # run the QC suite from a checkout
+  {include-group = "test"},
 ]
 
 # The dev group needs python 3.10+ (htpy, match syntax)

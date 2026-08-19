@@ -63,8 +63,11 @@ import pathlib
 
 import pytest
 import jupytext
-import nbformat
-import nbclient
+
+# Guarded so a checkout without the test group skips the notebook tests
+# instead of aborting collection for the whole suite.
+nbformat = pytest.importorskip("nbformat")
+nbclient = pytest.importorskip("nbclient")
 
 import rfmux
 

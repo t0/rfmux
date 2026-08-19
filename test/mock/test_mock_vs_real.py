@@ -12,7 +12,10 @@ import inspect
 import asyncio
 import pytest
 import rfmux
-import pytest_check as check
+# Skips this module rather than aborting collection for the entire
+# suite, which is what an unguarded import does: one absent extra
+# cost every other test in the run.
+check = pytest.importorskip("pytest_check")
 
 
 def compare_attributes(attr_mock, attr_real):

@@ -39,6 +39,11 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
     SESS_NEW = 1
     SESS_LOAD = 2
     SESS_NONE = 3
+
+    #: The only module the mock ever streams -- _auto_bias_kids in
+    #: rfmux/mock/crs.py hardcodes it, and the mock streamer emits just
+    #: the modules that have configured channels.
+    MOCK_MODULE = 1
     
     def __init__(self, parent=None, prefill: dict | None = None):
         """
@@ -343,7 +348,12 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             self.connection_mode = self.CONN_MOCK
             # Mock mode defaults
             self.crs_serial = None  # Mock doesn't need serial
-            self.module = self.module_input.value() if hasattr(self, 'module_input') else 1
+            # NOT module_input: that spinbox is hidden in mock mode, so
+            # whatever it holds is a leftover from hardware use that the
+            # user cannot see or correct.  Restoring a module the mock
+            # never streams gives a permanently blank viewer reporting
+            # zero packets and zero loss, with no error anywhere.
+            self.module = self.MOCK_MODULE
             
         elif self.rb_offline.isChecked():
             self.connection_mode = self.CONN_OFFLINE
@@ -462,8 +472,9 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
                 settings.set_last_module(self.module)
         elif self.connection_mode == self.CONN_MOCK:
             settings.set_last_connection_mode("mock")
-            if self.module:
-                settings.set_last_module(self.module)
+            # Deliberately NOT set_last_module: the module was not the
+            # user's choice here, it is fixed by the mock.  Saving it
+            # would overwrite the module they picked for their board.
         elif self.connection_mode == self.CONN_OFFLINE:
             settings.set_last_connection_mode("offline")
         

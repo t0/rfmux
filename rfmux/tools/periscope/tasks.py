@@ -56,9 +56,55 @@ class UDPReceiver(QtCore.QThread):
         self.queue = None
         self.serial = None
 
+        # Set while packets are arriving for some OTHER module.  See
+        # _note_module_mismatch: without this the GUI cannot tell that
+        # case apart from a dead stream.
+        self._module_mismatch = None
+
         # Statistics
         self.packets_received = 0
         self.packets_dropped = 0
+
+    def _discover_queue(self):
+        """Adopt the queue for our module, or note that there isn't one."""
+        streaming = []
+        for serial, module, q in self.receiver.get_all_queues():
+            streaming.append(module + 1)
+            if module == self.module_idx:
+                self.queue = q
+                self.serial = serial
+                self._module_mismatch = None
+                print(f"[UDP] Found queue for serial={serial}, module={self.module_id}")
+                return
+        self._note_module_mismatch(streaming)
+
+    def _note_module_mismatch(self, streaming_modules):
+        """Record that packets are arriving, but for nobody's module.
+
+        Every counter this class exposes reads through ``self.queue``, so
+        a module that never matches reports a flat zero -- no packets, no
+        loss, no error -- while the receiver is in fact working
+        perfectly.  That is indistinguishable from a dead stream unless
+        something says otherwise, and it is not a rare mistake: the
+        startup dialog restores the last-used module, and the mock only
+        ever streams module 1, so going from hardware to mock lands here.
+        """
+        if not streaming_modules:
+            self._module_mismatch = None   # nothing streaming yet
+            return
+        modules = ", ".join(str(m) for m in sorted(set(streaming_modules)))
+        msg = (f"Module {self.module_id} is not streaming - packets are "
+               f"arriving for module {modules}. No data will appear.")
+        if msg != self._module_mismatch:
+            self._module_mismatch = msg
+            print(f"[UDP] {msg}")
+
+    def get_module_mismatch(self):
+        """The mismatch message, or None while healthy.
+
+        Polled by the GUI status bar; printed once for headless callers.
+        """
+        return self._module_mismatch
 
     def get_missing_packets(self):
         """Packets that never arrived (wire or kernel socket buffer).
@@ -122,13 +168,7 @@ class UDPReceiver(QtCore.QThread):
 
                 # Find our module's queue
                 if self.queue is None:
-                    # Look for a queue matching our module
-                    for serial, module, q in self.receiver.get_all_queues():
-                        if module == self.module_idx:
-                            self.queue = q
-                            self.serial = serial
-                            print(f"[UDP] Found queue for serial={serial}, module={self.module_id}")
-                            break
+                    self._discover_queue()
 
             except Exception as e:
                 if self.isInterruptionRequested():

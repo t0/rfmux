@@ -1152,8 +1152,18 @@ class PeriscopeRuntime:
                     else:
                         self.sim_speed_label.setStyleSheet("")  # Normal (near real-time)
 
+            # A module nobody is streaming outranks every loss number
+            # below it: those all read through the receiver's queue, so
+            # an unmatched module pins them to zero and the percentages
+            # are meaningless rather than good.
+            mismatch = self.receiver.get_module_mismatch()
+
             # Red above 1%, and say WHICH — the two have different fixes.
-            if net_percent > 1 or gui_percent > 1:
+            if mismatch:
+                self.packet_loss_label.setStyleSheet("color: red;")
+                self.info_text.setText(mismatch)
+                self.info_text.setStyleSheet("color: red;")
+            elif net_percent > 1 or gui_percent > 1:
                 self.packet_loss_label.setStyleSheet("color: red;")
                 if gui_percent > net_percent:
                     self.info_text.setText(

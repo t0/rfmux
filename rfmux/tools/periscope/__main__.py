@@ -253,7 +253,9 @@ def main():
             
             # Start UDP streaming automatically
             print("Starting MockCRS UDP streaming...")
-            loop.run_until_complete(crs_obj.start_udp_streaming(host='127.0.0.1', port=9876))
+            # No host: the mock multicasts like real hardware when
+            # this machine can, and says why when it cannot.
+            loop.run_until_complete(crs_obj.start_udp_streaming(port=9876))
             
             initial_mock_config = None  # Store for later
             

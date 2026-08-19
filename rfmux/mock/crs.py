@@ -859,7 +859,9 @@ class ServerMockCRS:
             streamer.get_local_ip = original_get_local_ip
 
     # --- UDP Streaming Control ---
-    async def start_udp_streaming(self, host='127.0.0.1', port=9876):
+    async def start_udp_streaming(self, host=None, port=9876):
+        # host=None: multicast if this machine can, loopback unicast
+        # if it cannot. See select_stream_destination.
         return await self._udp_manager.start_udp_streaming(host, port)
 
     async def stop_udp_streaming(self):

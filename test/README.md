@@ -56,10 +56,20 @@ touching version-sensitive code, not in the edit loop.
 ### One acquisition run at a time
 
 The mock streamer binds fixed ports — 9876 slow, 9877 PFB — and
-`get_multicast_socket()` sets `SO_REUSEPORT`. A second listener therefore does
-*not* collide: it joins the same multicast group and the two readers split the
-packet stream. Neither errors, both see partial data, and the tests report it as
-a pulse-detector fault (`no matched pairs`, thousands of phantom pulses,
+`get_multicast_socket()` sets `SO_REUSEPORT`, so a second run does *not* fail to
+bind. What that costs you depends on which half collides.
+
+Two **readers** are now harmless. The mock multicasts to the same group real
+hardware uses, and every socket joined to that group gets its own copy. It used
+to send unicast to loopback, where the kernel hands each datagram to exactly one
+socket — measured over 20 sender ports: 6 to the first listener, 14 to the
+second, never once split — so one run silently took the entire stream and the
+other saw nothing at all.
+
+Two **writers** still collide, and that is the one to avoid: two mock servers on
+one group interleave into every receiver. Neither errors, both traces carry
+samples from two unrelated simulations, and the tests report it as a
+pulse-detector fault (`no matched pairs`, thousands of phantom pulses,
 nonsensical elapsed times) with nothing pointing at the real cause. Two
 investigations on this branch were lost to that misdirection.
 

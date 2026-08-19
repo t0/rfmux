@@ -129,11 +129,15 @@ class MockCRSStreamer(threading.Thread):
         """Create a UDP socket configured for multicast on loopback."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        # TTL 0 means "never leaves this host". The mock streams to the
+        # same group real boards use, so an escaped packet would reach
+        # colleagues' receivers -- and at stage 0 that is tens of MB/s of
+        # simulated detectors on the lab network.
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 0)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
 
         if platform.system() == "Windows":
             try:
-                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
                                 socket.inet_aton("127.0.0.1"))
             except Exception:
@@ -481,6 +485,42 @@ class MockCRSStreamer(threading.Thread):
 
 # ── Manager ───────────────────────────────────────────────────────
 
+LOOPBACK_UNICAST = "127.0.0.1"
+
+
+def select_stream_destination(port, *, use_multicast=True):
+    """Multicast if this machine can, loopback unicast if it cannot.
+
+    Real hardware always multicasts. Mock mode streams the same way so
+    that the transport under test is the transport people actually run,
+    and so that a machine whose multicast is broken says so here --
+    where it is cheap to debug -- rather than the first time a board is
+    plugged in.
+
+    Falling back is not silent: multicast trouble is common and easy to
+    mistake for "the mock is broken", so the failing step and how to fix
+    it are printed, along with the fact that the fallback is available
+    to the mock and not to a CRS.
+    """
+    if not use_multicast:
+        print(f"[Streamer] Multicast disabled; using unicast on "
+              f"{LOOPBACK_UNICAST}")
+        return LOOPBACK_UNICAST
+
+    from ..streamer import MULTICAST_GROUP, check_multicast_loopback
+
+    check = check_multicast_loopback()
+    if check.ok:
+        return MULTICAST_GROUP
+
+    print("[Streamer] Multicast does not work on this machine; falling "
+          "back to unicast on " + LOOPBACK_UNICAST + ".")
+    print("[Streamer] The mock will run normally, but a real CRS "
+          "multicasts and has no fallback:")
+    print(check.report())
+    return LOOPBACK_UNICAST
+
+
 class MockUDPManager:
     """Manages the lifecycle of the unified MockCRSStreamer.
 
@@ -494,12 +534,21 @@ class MockUDPManager:
         self._streamer = None
         self._streaming_active = False
 
-    async def start_udp_streaming(self, host='239.192.0.2', port=STREAMER_PORT,
+    async def start_udp_streaming(self, host=None, port=STREAMER_PORT,
                                    use_multicast=True):
-        """Start the unified streamer thread (slow packets begin immediately)."""
+        """Start the unified streamer thread (slow packets begin immediately).
+
+        ``host=None`` picks the destination: the multicast group if
+        multicast works on this machine, loopback unicast if it does
+        not. Pass a host explicitly to override, or
+        ``use_multicast=False`` to skip the check entirely.
+        """
         if self._streaming_active:
             print("[Manager] Streaming already active")
             return False
+
+        if host is None:
+            host = select_stream_destination(port, use_multicast=use_multicast)
 
         try:
             self._streaming_active = True

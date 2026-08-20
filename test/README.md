@@ -7,11 +7,11 @@ developer laptop.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 38 | ~9 s | Sanity check on an unfamiliar Python. No CRS, no GUI. |
-| `pytest --tier=quick` | 462 | ~50 s | The normal edit/run loop. |
-| `pytest --tier=acquisition` | 13 | ~5 min | You touched streaming, decimation, the PFB path, or pulse capture. |
-| `pytest --tier=full` | 475 | ~6 min | Everything runnable without a board. Before pushing. |
-| `pytest --tier=hardware --serial 0024` | 75 | needs a board | A CRS is in front of you. |
+| `pytest --tier=portable` | 37 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.9-3.12. |
+| `pytest --tier=quick` | 462 | ~50 s | Default while editing. |
+| `pytest --tier=acquisition` | 13 | ~5 min | After changing streaming, decimation, the PFB path, or pulse capture. |
+| `pytest --tier=full` | 475 | ~6 min | Before pushing. Everything that runs without a board. |
+| `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
 | `pytest --tier=all --serial 0024` | 550 | needs a board | Before a release. |
 
 Thirteen acquisition tests take five minutes because each spawns a MockCRS
@@ -35,7 +35,12 @@ the whole run.
 ## What each tier covers
 
 **portable** — hardware-map YAML/CSV parsing, schema validation, session
-threading. No I/O, which is why tox can run it on Python 3.9–3.12.
+threading, and a few pure-logic units. It exists for the `tox` matrix:
+`./test.sh` installs the package under Python 3.9, 3.10, 3.11 and 3.12 and runs
+`-m portable` in each, which is what keeps `requires-python = ">=3.9"` honest.
+A test belongs here only if it imports on a bare install — no PyQt6, no board.
+Marking one that needs either does not fail there, it *skips*, so the matrix
+goes green having tested nothing.
 
 **quick** — the bulk: packet decode, mock config plumbing, TLS noise, JIT
 dispatch, Periscope panels and dialogs, pulse detection and analysis. Fast
@@ -93,7 +98,8 @@ and a second reader silently takes the whole stream. A session guard in
 Declared in `pyproject.toml`; the default run applies `-m "not
 slow_acquisition"`.
 
-- `portable` — needs no CRS and no GUI.
+- `portable` — imports on a bare install: no board, no PyQt6. This is the
+  subset `tox` runs across the supported Python range.
 - `slow_acquisition` — spawns a MockCRS server and streams UDP.
 - `hardware` — needs a board. **Applied automatically** to any test whose
   fixtures include `live_session`, `crs` or `serial`. Don't add it by hand.

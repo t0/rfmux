@@ -114,7 +114,7 @@ __all__ = [
     "run_dual_source",
     "run_pfb_source",
     "run_slow_source",
-    # hdf5 (None when h5py is unavailable)
+    # hdf5
     "DualPulseHDF5Writer",
     "PulseHDF5Reader",
     "PulseHDF5Writer",

@@ -8,12 +8,15 @@ engine, the streaming :class:`PulseHDF5Writer`, and the running
 lifecycle that a GUI (or script) can drive by feeding it samples.
 
 The session is deliberately free of Qt, sockets, and threads: samples
-arrive through :meth:`feed_sample` from whatever source the caller has
-(the Periscope slow-stream tap, a PFB receive loop, a synthetic stream
-in tests), and results leave through plain callbacks.  The Periscope
-``PulseCaptureTask`` is expected to be a thin adapter that pumps a
-thread-safe queue into :meth:`feed_sample` and re-emits the callbacks
-as Qt signals.
+arrive through :meth:`feed_sample`, or a whole block at a time through
+:meth:`feed_block`, from whatever source the caller has (the Periscope
+slow-stream tap, a PFB receive loop, a synthetic stream in tests), and
+results leave through plain callbacks.  The Periscope
+``PulseCaptureTask`` is that adapter on the GUI side: it drives
+:class:`~.sources.SlowIngest` into :meth:`feed_block` from its own
+thread and re-emits the callbacks as Qt signals.  ``SlowIngest`` is the
+same class :func:`~.sources.run_slow_source` uses, so the GUI and a
+headless script cannot interpret a stream differently.
 
 Lifecycle::
 

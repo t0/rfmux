@@ -3,7 +3,8 @@ Background worker bridging the Periscope slow-stream tap to a
 :class:`~rfmux.pulse_capture.session.PulseCaptureSession`.
 
 Architecture: all capture logic (noise estimation, detection, HDF5,
-histograms) lives in the algorithms layer.  This QThread only
+histograms) lives in :mod:`rfmux.pulse_capture`, which knows nothing
+about Qt.  This QThread only
 
 1. drains a thread-safe queue that the GUI-thread tap fills
    (:meth:`PulseCaptureTask.enqueue_packet`),

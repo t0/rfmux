@@ -23,11 +23,6 @@ venv/
 outputs/
 test/session_testing/
 
-# Diagnostics write their plots and captures next to themselves; the scripts
-# are tracked, their output is not.
-diagnostics/*.png
-diagnostics/*.h5
-
 # Untracked scratch from ad-hoc debugging sessions. Anything here worth
-# keeping belongs in test/ as a real test, or in diagnostics/ as a diag_*.py.
+# keeping belongs in test/ as a real test.
 test_debug_scripts/

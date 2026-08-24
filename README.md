@@ -94,17 +94,21 @@ have an `.ipynb`.
 
 ```
 rfmux/
-├── docs/                # Documentation
-├── firmware/            # Firmware binaries (Git LFS)
-├── home/                # Jupyter Hub content (demos, docs)
-├── rfmux/               # Main Python package
-│   ├── algorithms/      # Network analysis, fitting, biasing
-│   ├── core/            # Hardware schema, sessions, mock infrastructure
-│   ├── packets/         # C++ packet receiver library
-│   ├── tools/           # Periscope GUI and other tools
-│   └── tuber/           # RPC/remote-object communication
-└── test/                # Test suite (unit, integration, QC)
+├── docs/                    # Documentation
+├── firmware/                # Firmware binaries (Git LFS)
+├── rfmux/                   # Main Python package
+│   ├── algorithms/          # Network analysis, fitting, biasing
+│   ├── core/                # Hardware schema, sessions, transfer functions
+│   ├── mock/                # Physics-based CRS simulator
+│   ├── pulse_capture/       # Pulse detection, HDF5 capture, histograms
+│   ├── reference-notebooks/ # Runnable demos, shipped with the package
+│   ├── streamer/            # C++ packet receiver library
+│   └── tools/               # Periscope GUI, CLI, firmware, QC suite
+└── test/                    # Test suite
 ```
+
+RPC to the board is provided by the separate
+[tuber](https://pypi.org/project/tuber-client/) package.
 
 ## Contributing & Feedback
 

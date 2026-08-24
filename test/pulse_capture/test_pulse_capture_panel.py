@@ -1028,69 +1028,81 @@ def _noise(std_i, std_q=None):
                            mean_Q=-1.0, std_Q=std_q if std_q else std_i)
 
 
-def test_noise_progress_summarises_many_channels(qt_app):
-    panel = PulseCapturePanel(dark_mode=False)
-    wide = {c: 500 for c in range(1, 201)}
-    wide[7] = 120                                    # one straggler
-    panel._on_noise_progress({"collected": wide, "target": 1000})
-
-    text = panel.status_label.text()
-    assert len(text) < 120, f"{len(text)} chars: {text!r}"
-    assert "200 ch" in text
-    assert "120/1000" in text, "the slowest channel is the useful number"
-    # Nothing is lost — the full listing moves to the tooltip.
-    assert panel.status_label.toolTip().count("\n") == 199
+# ── one rule, four status surfaces ────────────────────────────────
+#
+# Past a handful of channels every status line summarises and moves the
+# full listing to its tooltip; at a handful it names them. A 200-channel
+# capture used to blow the dock out to the width of the longest line.
+#
+# One budget rather than a per-surface number: the requirement is "fits
+# on a line", not a particular wording, so a reworded label should not
+# need a new constant.
+MAX_LABEL_CHARS = 160
 
 
-def test_noise_progress_still_names_a_few_channels(qt_app):
-    panel = PulseCapturePanel(dark_mode=False)
-    panel._on_noise_progress({"collected": {1: 10, 2: 20}, "target": 100})
-    text = panel.status_label.text()
-    assert "Ch1" in text and "Ch2" in text
+def _drive_noise_progress(panel, channels):
+    collected = {c: 500 for c in channels}
+    collected[channels[0]] = 120                     # one straggler
+    panel._on_noise_progress({"collected": collected, "target": 1000})
+    return panel.status_label
 
 
-def test_noise_label_summarises_many_channels(qt_app):
-    panel = PulseCapturePanel(dark_mode=False)
-    stats = {c: _noise(1.0 + c / 100.0) for c in range(1, 201)}
-    panel._on_noise_estimated(stats)
-
-    text = panel.noise_label.text()
-    assert len(text) < 160, f"{len(text)} chars: {text!r}"
-    assert "200 ch" in text
-    assert panel.noise_label.toolTip().count("\n") == 199
+def _drive_noise_estimated(panel, channels):
+    panel._on_noise_estimated({c: _noise(1.0 + c / 100.0) for c in channels})
+    return panel.noise_label
 
 
-def test_noise_label_still_lists_a_few_channels(qt_app):
-    panel = PulseCapturePanel(dark_mode=False)
-    panel._on_noise_estimated({1: _noise(1.0), 2: _noise(2.0)})
-    text = panel.noise_label.text()
-    assert "Ch1" in text and "Ch2" in text
-
-
-def test_status_labels_do_not_drive_panel_width(qt_app):
-    # Even if some future message is long, the label's size hint must
-    # not become the dock's minimum width.
-    panel = PulseCapturePanel(dark_mode=False)
-    for label in (panel.status_label, panel.noise_label):
-        assert (label.sizePolicy().horizontalPolicy()
-                is QtWidgets.QSizePolicy.Policy.Ignored)
-
-
-def test_capturing_status_summarises_many_channels(qt_app):
-    panel = PulseCapturePanel(dark_mode=False)
+def _drive_capturing_status(panel, channels):
     panel._both_mode = False
-    per_ch = {c: 0 for c in range(1, 201)}
-    per_ch[42] = 9
-    per_ch[7] = 3
+    per_ch = {c: 0 for c in channels}
+    per_ch[channels[-1]] = 9                         # the busiest
+    per_ch[channels[0]] = 3
     panel._last_stats = {"total_pulses": 12, "rate_per_min": 4.0,
                          "per_channel": per_ch, "elapsed_s": 65}
     panel._refresh_status_line()
+    return panel.status_label
 
-    text = panel.status_label.text()
-    assert len(text) < 160, f"{len(text)} chars: {text!r}"
-    assert "2/200 ch firing" in text
-    assert "Ch42: 9" in text, "the busiest channel is the useful one"
-    assert panel.status_label.toolTip().count("\n") == 199
+
+def _drive_templates(panel, channels):
+    panel._counts = {c: 5 for c in channels}
+    panel._template_data = _template_data(channels)
+    panel._render_templates()
+    return panel.template_info
+
+
+# (id, driver, how many is "many", substrings the summary must keep)
+STATUS_SURFACES = [
+    ("noise_progress", _drive_noise_progress, 200,
+     ["120/1000"]),           # the slowest channel is the useful number
+    ("noise_estimated", _drive_noise_estimated, 200, []),
+    ("capturing_status", _drive_capturing_status, 200,
+     ["2/200 ch firing", "Ch200: 9"]),   # the busiest channel is the useful one
+    ("templates", _drive_templates, 128, []),
+]
+
+
+@pytest.mark.parametrize("_id,drive,many,must_contain", STATUS_SURFACES,
+                         ids=[s[0] for s in STATUS_SURFACES])
+def test_many_channels_are_summarised(qt_app, _id, drive, many, must_contain):
+    panel = PulseCapturePanel(dark_mode=False)
+    label = drive(panel, list(range(1, many + 1)))
+
+    text = label.text()
+    assert len(text) < MAX_LABEL_CHARS, f"{len(text)} chars: {text!r}"
+    assert f"{many} ch" in text, text
+    for fragment in must_contain:
+        assert fragment in text, f"{fragment!r} missing from {text!r}"
+    # Nothing is lost — the full listing moves to the tooltip.
+    assert label.toolTip().count("\n") == many - 1
+
+
+@pytest.mark.parametrize("_id,drive,many,must_contain", STATUS_SURFACES,
+                         ids=[s[0] for s in STATUS_SURFACES])
+def test_a_few_channels_are_named(qt_app, _id, drive, many, must_contain):
+    panel = PulseCapturePanel(dark_mode=False)
+    label = drive(panel, [1, 2])
+    text = label.text()
+    assert "Ch1" in text and "Ch2" in text, text
 
 
 def test_capturing_status_before_any_pulse(qt_app):
@@ -1103,14 +1115,13 @@ def test_capturing_status_before_any_pulse(qt_app):
     assert "none firing yet" in panel.status_label.text()
 
 
-def test_capturing_status_still_lists_a_few_channels(qt_app):
+def test_status_labels_do_not_drive_panel_width(qt_app):
+    # Even if some future message is long, the label's size hint must
+    # not become the dock's minimum width.
     panel = PulseCapturePanel(dark_mode=False)
-    panel._both_mode = False
-    panel._last_stats = {"total_pulses": 5, "rate_per_min": 1.0,
-                         "per_channel": {1: 2, 2: 3}, "elapsed_s": 10}
-    panel._refresh_status_line()
-    text = panel.status_label.text()
-    assert "Ch1: 2" in text and "Ch2: 3" in text
+    for label in (panel.status_label, panel.noise_label):
+        assert (label.sizePolicy().horizontalPolicy()
+                is QtWidgets.QSizePolicy.Policy.Ignored)
 
 
 # ── plot legends and summaries stay bounded ───────────────────────
@@ -1162,24 +1173,12 @@ def test_histogram_legend_kept_for_a_few_channels(qt_app):
     assert _legend_rows(panel.hist_plots["snr"]) == 2
 
 
-def test_template_summary_and_legend_stay_short(qt_app):
+def test_template_legend_does_not_grow_without_bound(qt_app):
+    # The summary text itself is covered by test_many_channels_are_
+    # summarised; this is the plot-side half of the same rule.
     panel = PulseCapturePanel(dark_mode=False)
     channels = list(range(1, 129))
     panel._counts = {c: 5 for c in channels}
     panel._template_data = _template_data(channels)
     panel._render_templates()
-
-    text = panel.template_info.text()
-    assert len(text) < 140, f"{len(text)} chars: {text!r}"
-    assert "128 ch" in text
     assert _legend_rows(panel.template_plot_i) == 0
-    assert panel.template_info.toolTip().count("\n") == 127
-
-
-def test_template_summary_lists_a_few_channels(qt_app):
-    panel = PulseCapturePanel(dark_mode=False)
-    panel._counts = {1: 5, 2: 5}
-    panel._template_data = _template_data([1, 2])
-    panel._render_templates()
-    text = panel.template_info.text()
-    assert "Ch1:" in text and "Ch2:" in text

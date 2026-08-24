@@ -95,8 +95,8 @@ channels = s.query(rfmux.ReadoutChannel).filter(
 
 ### Network Analysis
 
-Measurement algorithms are registered on the CRS object itself, so you call them
-as methods rather than importing them — `module` is keyword-only:
+Most measurement algorithms are registered on the CRS object itself, so you call
+them as methods rather than importing them — `module` is keyword-only:
 
 ```python
 # Sweep 600 MHz - 1.1 GHz and return frequencies, iq_complex, phase_degrees
@@ -120,14 +120,17 @@ samples = await crs.py_get_samples(num_samples=1000, channel=1, module=1)
 `bias_kids` picks an operating point per detector and programs the hardware. It
 works from multisweep results — it needs each resonator characterised before it
 can choose where to park a carrier — so it is the last step of the tuning
-sequence, not a standalone call:
+sequence, not a standalone call.
+
+It is one of the algorithms that is *not* registered on `CRS`, so unlike the
+calls above it is imported and takes `crs` as an argument:
 
 ```python
 from rfmux.algorithms.measurement.bias_kids import bias_kids
 
 sweeps = await crs.multisweep(
     center_frequencies=resonance_frequencies,
-    span_hz=500e3, npoints_per_sweep=50, amp=0.001, module=1,
+    span_hz=500e3, npoints_per_sweep=500, amp=0.001, module=1,
 )
 bias_results = await bias_kids(crs=crs, multisweep_results=sweeps, module=1)
 

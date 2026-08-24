@@ -438,9 +438,14 @@ across 500 MHz you get one point every 10 kHz, and a Q of 10⁵ at 1 GHz has a
 linewidth of 10 kHz — the whole resonance is a couple of samples.
 
 `multisweep` fixes that by giving **one channel per resonator** and sweeping them
-all simultaneously over a narrow span. Fifty points across 500 kHz is 10 kHz
-resolution per detector, and because the tones are simultaneous it costs about
-the same wall-clock time as sweeping one.
+all simultaneously over a narrow span. Five hundred points across 500 kHz is
+1 kHz per point — ten samples across that 10 kHz linewidth instead of one — and
+because the tones are simultaneous it costs about the same wall-clock time as
+sweeping one.
+
+The span and the point count are a pair, and it is the *ratio* that matters.
+Widen the span without adding points and you are back to the resolution you
+started with; the useful check is points-per-linewidth, not points.
 
 `bias_frequency_method` decides where the carrier will eventually be parked:
 
@@ -454,7 +459,7 @@ the same wall-clock time as sweeping one.
 ```python
 MULTISWEEP_PARAMS = {
     "span_hz": 500e3,
-    "npoints_per_sweep": 50,
+    "npoints_per_sweep": 500,   # 1 kHz per point across a 10 kHz linewidth
     "amp": 0.001,
     "nsamps": 10,
     "module": MODULE,

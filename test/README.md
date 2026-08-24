@@ -7,16 +7,17 @@ developer laptop.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 37 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.9-3.12. |
-| `pytest --tier=quick` | 462 | ~50 s | Default while editing. |
-| `pytest --tier=acquisition` | 13 | ~5 min | After changing streaming, decimation, the PFB path, or pulse capture. |
-| `pytest --tier=full` | 475 | ~6 min | Before pushing. Everything that runs without a board. |
+| `pytest --tier=portable` | 37 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 461 | ~50 s | Default while editing. |
+| `pytest --tier=acquisition` | 13 | ~6 min | After changing streaming, decimation, the PFB path, or pulse capture. |
+| `pytest --tier=full` | 474 | ~7 min | Before pushing. Everything that runs without a board. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 550 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 549 | needs a board | Before a release. |
 
-Thirteen acquisition tests take five minutes because each spawns a MockCRS
-server and streams UDP in real time — the cost is wall clock, not CPU, and
-`full` is dominated by it.
+Thirteen acquisition tests take minutes because each spawns a MockCRS server
+and streams UDP in real time — the cost is wall clock, not CPU, and `full` is
+dominated by it. The two reference-notebook demos are the largest single
+contributors.
 
 `--tier` is shorthand for a marker expression. Use `-m` directly for anything
 the tiers don't cover; passing both is an error rather than one silently
@@ -28,16 +29,20 @@ pytest --tier=quick -k baseline    # narrow within a tier
 pip install --group test           # nbclient, nbformat, pytest_check
 ```
 
-Without the test group, collection *aborts* rather than skipping: pytest
-imports every module before deselection applies, so one absent import costs
-the whole run.
+The tests that need those three guard the import, so a checkout without them
+*skips* the notebook and mock-vs-real tests rather than failing. That is the
+safe behaviour and the dangerous one: nothing goes red, so a CI runner missing
+the group silently stops covering them. Install it and the tiers report the
+counts above.
 
 ## What each tier covers
 
 **portable** — hardware-map YAML/CSV parsing, schema validation, session
 threading, and a few pure-logic units. It exists for the `tox` matrix:
-`./test.sh` installs the package under Python 3.9, 3.10, 3.11 and 3.12 and runs
-`-m portable` in each, which is what keeps `requires-python = ">=3.9"` honest.
+`./test.sh` installs the package under Python 3.10, 3.11 and 3.12 and runs
+`-m portable` in each, which is what keeps `requires-python = ">=3.10"` honest.
+The floor is 3.10 rather than 3.9 because `rfmux/core/crs.py` uses `match`,
+so 3.9 cannot import the package at all.
 A test belongs here only if it imports on a bare install — no PyQt6, no board.
 Marking one that needs either does not fail there, it *skips*, so the matrix
 goes green having tested nothing.
@@ -90,7 +95,11 @@ stage, which is out of scope for this suite; the mock is the arbiter, and
 ## One acquisition run at a time
 
 Run acquisition tiers **one at a time**: the mock binds fixed ports 9876/9877,
-and a second reader silently takes the whole stream. A session guard in
+and `SO_REUSEPORT` means a second run binds them too without complaint. What
+happens next depends on the transport, and neither case raises — on the unicast
+loopback fallback one reader is starved outright, and where multicast works
+both readers receive both simulations interleaved. Either way the symptom is a
+pulse-detection failure that looks like a detector bug. A session guard in
 `conftest.py` refuses to start if the ports are held.
 
 ## Markers

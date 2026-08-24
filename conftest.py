@@ -63,9 +63,11 @@ def pytest_addoption(parser):
         action="store_true",
         default=False,
         help="Run the acquisition tests even if UDP 9876/9877 are already "
-             "bound. They would be shared via SO_REUSEPORT and each reader "
-             "would see only part of the stream, so expect spurious "
-             "pulse-detection failures.",
+             "bound. SO_REUSEPORT lets the second bind succeed and then "
+             "nothing raises: on the mock's unicast loopback fallback one "
+             "reader is starved outright, and where multicast works both "
+             "readers see both simulations interleaved. Expect spurious "
+             "pulse-detection failures either way.",
     )
 
 

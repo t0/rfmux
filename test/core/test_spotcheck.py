@@ -78,7 +78,7 @@ async def test_set_get_decimation(crs):
     """
 
     # clearly this should fail - requesting absurd amounts of bandwidth
-    with pytest.raises(rfmux.tuber.TuberRemoteError):
+    with pytest.raises(rfmux.TuberRemoteError):
         await crs.set_decimation(stage=0, short=False, module=[1, 2, 3, 4])
 
     # we should be able to stream nothing, but can't get a value from get_decimation like this

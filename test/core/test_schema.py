@@ -47,12 +47,13 @@ def test_hardware_map_with_single_crate():
 
 @pytest.mark.xfail(
     strict=True,
-    reason="Crate slot indexing is unsupported. The tuber client's "
-           "__getattr__ intercepts _items, so len() and iteration on a Dfmux "
-           "proxy raise instead of reaching the mapping "
-           "(tuber/client.py:792,798). A settled limitation, not a flake — "
-           "strict=True so that fixing it fails here instead of quietly "
-           "becoming an XPASS nobody notices.")
+    reason="Crate slot indexing is unsupported. "
+           "SimpleTuberObject.__getattr__ in the tuber-client package "
+           "intercepts _items, so len() and "
+           "iteration on a Dfmux proxy raise instead of reaching the "
+           "mapping. A settled limitation, not a flake — strict=True so "
+           "that fixing it fails here instead of quietly becoming an XPASS "
+           "nobody notices.")
 @pytest.mark.portable
 def test_hardware_map_with_crate_slots_indexed_by_list():
     s = rfmux.load_session(
@@ -89,12 +90,13 @@ def test_hardware_map_with_crate_slots_indexed_by_list():
 
 @pytest.mark.xfail(
     strict=True,
-    reason="Crate slot indexing is unsupported. The tuber client's "
-           "__getattr__ intercepts _items, so len() and iteration on a Dfmux "
-           "proxy raise instead of reaching the mapping "
-           "(tuber/client.py:792,798). A settled limitation, not a flake — "
-           "strict=True so that fixing it fails here instead of quietly "
-           "becoming an XPASS nobody notices.")
+    reason="Crate slot indexing is unsupported. "
+           "SimpleTuberObject.__getattr__ in the tuber-client package "
+           "intercepts _items, so len() and "
+           "iteration on a Dfmux proxy raise instead of reaching the "
+           "mapping. A settled limitation, not a flake — strict=True so "
+           "that fixing it fails here instead of quietly becoming an XPASS "
+           "nobody notices.")
 @pytest.mark.portable
 def test_hardware_map_with_crate_slots_indexed_by_dictionary():
     s = rfmux.load_session(
@@ -161,12 +163,13 @@ def test_hardware_map_with_wafer_and_resonator_csv(tmp_path):
 
 @pytest.mark.xfail(
     strict=True,
-    reason="Crate slot indexing is unsupported. The tuber client's "
-           "__getattr__ intercepts _items, so len() and iteration on a Dfmux "
-           "proxy raise instead of reaching the mapping "
-           "(tuber/client.py:792,798). A settled limitation, not a flake — "
-           "strict=True so that fixing it fails here instead of quietly "
-           "becoming an XPASS nobody notices.")
+    reason="Crate slot indexing is unsupported. "
+           "SimpleTuberObject.__getattr__ in the tuber-client package "
+           "intercepts _items, so len() and "
+           "iteration on a Dfmux proxy raise instead of reaching the "
+           "mapping. A settled limitation, not a flake — strict=True so "
+           "that fixing it fails here instead of quietly becoming an XPASS "
+           "nobody notices.")
 @pytest.mark.portable
 def test_hardware_map_with_channel_mappings(tmp_path):
 

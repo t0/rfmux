@@ -18,8 +18,7 @@ dependencies = [
   "click>=8.0",
   # Pulse capture writes its captures as HDF5, and Periscope does so by
   # default, so this is reached by ordinary use rather than an exotic
-  # path.  It was optional for a while and the import guards in
-  # rfmux/pulse_capture/hdf5.py are left from that.
+  # path.
   "h5py",
   # Pin to 6.x for qtconsole in-process kernel compatibility: ipykernel 7.x
   # do_execute dereferences shell_channel_thread.parent_thread, which the
@@ -53,7 +52,11 @@ dependencies = [
   "tbb; sys_platform != 'darwin'",
 ]
 
-requires-python = ">=3.9"
+# 3.10, not 3.9: rfmux/core/crs.py and test/core/test_spotcheck.py both use
+# match/case, so 3.9 cannot even import the package. The floor said ">=3.9"
+# for a long time while that was already true — the tox matrix below is what
+# keeps this honest, so it must not list a version the code cannot load.
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
 
@@ -61,11 +64,10 @@ requires-python = ">=3.9"
 # Debian/Ubuntu: apt-get install python3-pygetdata
 dirfile = []
 
-# Dependencies for "rfmux qc" (also requires Python 3.10+; the htpy marker
-# keeps this extra resolvable under our 3.9 floor)
+# Dependencies for "rfmux qc".
 qc = [
   "beautifulsoup4",
-  "htpy; python_version >= '3.10'",
+  "htpy",
   "markdown",
   "markupsafe",
   "pytest_check",
@@ -104,10 +106,6 @@ dev = [
   "rfmux[qc]",  # run the QC suite from a checkout
   {include-group = "test"},
 ]
-
-# The dev group needs python 3.10+ (htpy, match syntax)
-[tool.uv.dependency-groups]
-dev = { requires-python = ">=3.10" }
 
 [project.urls]
 homepage = "https://github.com/t0/rfmux"

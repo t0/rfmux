@@ -1,14 +1,17 @@
 """
 Circular.extend must be indistinguishable from repeated add.
 
-The display path switched to it for throughput; if the two disagree the
-plotted trace silently stops matching the samples that arrived.
+One class, two consumers: it is the detector's ring buffer, and Periscope
+re-exports it for the display path, which switched to extend() for
+throughput. If the two disagree, a captured pulse loses its own rising
+edge and the plotted trace silently stops matching the samples that
+arrived -- with nothing raised in either case.
 """
 
 import numpy as np
 import pytest
 
-from rfmux.tools.periscope.utils import Circular
+from rfmux.pulse_capture.detection import Circular
 
 SIZE = 64
 

@@ -6,16 +6,24 @@ Unit tests for Phase 1 pulse capture infrastructure:
 - Integration: PulseCapture → on_pulse → HDF5Writer → Reader
 """
 
+import h5py
 import numpy as np
 import pytest
 from pathlib import Path
 
+from rfmux.pulse_capture.accumulators import (
+    HistogramAccumulator,
+    PulseHistogramSet,
+)
 from rfmux.pulse_capture.detection import (
     PulseCapture,
     ChannelNoiseStats,
     Circular,
     estimate_noise_stats,
 )
+from rfmux.pulse_capture.hdf5 import PulseHDF5Writer, PulseHDF5Reader
+
+
 def _collecting_capture(*args, **kwargs):
     """A PulseCapture that also keeps every pulse in ``.pulses``.
 
@@ -37,15 +45,6 @@ def _collecting_capture(*args, **kwargs):
 
     pcap.on_pulse = _collect
     return pcap
-
-
-from rfmux.pulse_capture.accumulators import (
-    HistogramAccumulator,
-    PulseHistogramSet,
-)
-
-import h5py
-from rfmux.pulse_capture.hdf5 import PulseHDF5Writer, PulseHDF5Reader
 
 
 # ───────────────────────── Helpers ──────────────────────────────────
@@ -231,8 +230,9 @@ class TestPulseCaptureCallback:
         assert not hasattr(pcap, "pulses"), (
             "PulseCapture must not accumulate pulses in memory")
 
-    def test_backward_compat_no_callback(self):
-        """Without on_pulse, behavior is identical to original code."""
+    def test_pulses_are_complete_without_a_callback(self):
+        """on_pulse is optional: with none supplied, detection still runs
+        and every pulse still carries its full waveform payload."""
         pcap = self._run_detection(on_pulse=None)
 
         total = sum(len(v) for v in pcap.pulses.values())
@@ -675,20 +675,20 @@ class TestTauHistogram:
         assert np.isnan(summary["tau_ms"])
         assert hist.get_channel_histograms(1)["tau_ms"].total == 0
 
-    def test_backward_compat_positional_args(self):
-        hist = PulseHistogramSet((0, 1000), 50, (0, 10), 50, (0, 20), 50)
-        ns = _make_noise_stats()
-        hist.add_pulse(1, _make_pulse_data(), ns)
-        metrics = hist.get_channel_histograms(1)
-        assert set(metrics.keys()) == {
-            "amplitude", "duration_ms", "snr", "tau_ms"}
-
     def test_add_pulse_returns_full_summary(self):
         hist = PulseHistogramSet(threshold_sigma=5.0)
         ns = _make_noise_stats()
         summary = hist.add_pulse(1, _make_pulse_data(), ns)
         for key in ("peak_amp", "snr", "duration_ms", "tau_ms", "peak_I"):
             assert key in summary
+
+    def test_binned_metrics_are_exactly_these_four(self):
+        """Exact, not a subset: a metric quietly added or dropped here
+        changes what every capture file and live histogram contains."""
+        hist = PulseHistogramSet(threshold_sigma=5.0)
+        hist.add_pulse(1, _make_pulse_data(), _make_noise_stats())
+        assert set(hist.get_channel_histograms(1)) == {
+            "amplitude", "duration_ms", "snr", "tau_ms"}
 
 
 # ───────────────────────── Phase A: HDF5 derived attrs ──────────────
@@ -1177,21 +1177,8 @@ class TestSessionFeedBlock:
         assert session.dropped_invalid_ts == 2
 
 
-class TestCircularExtend:
-    def test_extend_matches_repeated_add(self):
-        for size in (4, 16, 50):
-            for chunks in ([1], [size - 1], [size], [size + 1],
-                           [2 * size + 3], [3, 5, 7], [size, 1, size]):
-                rng = np.random.default_rng(0)
-                a, b = Circular(size), Circular(size)
-                for m in chunks:
-                    v = rng.normal(size=m)
-                    for x in v:
-                        a.add(float(x))
-                    b.extend(v)
-                assert a.ptr == b.ptr, (size, chunks)
-                assert a.count == b.count, (size, chunks)
-                assert np.array_equal(a.data(), b.data()), (size, chunks)
+# Circular.extend is covered by test_circular_extend.py in this directory,
+# parametrized over sizes and chunk boundaries.
 
 
 class TestHotLoopCost:

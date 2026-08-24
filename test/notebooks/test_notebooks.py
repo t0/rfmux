@@ -41,22 +41,11 @@ Modifying Tests
 ---------------
 
 Test notebooks are stored as .md files and converted into .ipynb files
-automatically using jupytext. They can be converted to .ipynb files as follows:
+automatically using jupytext. Only the .md version belongs in version
+control, so editing one is a round trip:
 
-$ jupytext -o filename.ipynb filename.md
-
-You can then start a JupyterLab instance and mofiy the .ipynb file. This file
-must be re-converted to Markdown in order to be used as a test case. Only .md
-versions of jupyterlab notebooks should be stored in version control.
-
-You can convert a notebook stored in .md format to .ipynb as follows:
-
-$ jupytext -o filename.ipynb filename.md
-
-...and you can convert an .ipynb file back to its .md representation as
-follows:
-
-$ jupytext -o filename.md filename.ipynb
+$ jupytext -o filename.ipynb filename.md    # to edit in JupyterLab
+$ jupytext -o filename.md filename.ipynb    # to convert back before committing
 """
 
 import pathlib

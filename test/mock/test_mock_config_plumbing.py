@@ -6,7 +6,10 @@ Two bugs found while designing the TLS/1-f noise model:
 1. Several sites read ``mock_crs.physics_config`` (no underscore) — an
    attribute that does not exist — so the dialog's cache-tuning
    settings and ``get_samples``' scale factor were silently ignored and
-   the hardcoded fallbacks always won.
+   the hardcoded fallbacks always won. Tested by observing that a
+   setting reaches the value it drives, rather than by grepping the
+   source for the spelling: the failure mode is a silent default, and
+   that is visible in behaviour whatever the lookup looks like.
 2. ``update_qp_densities_for_time`` is a monotonic ratchet, and with PFB
    enabled its batches advance the clock past the slow frame — so the
    slow emitter must pass ``pulse_time`` explicitly or its samples get
@@ -17,57 +20,98 @@ Two bugs found while designing the TLS/1-f noise model:
    "operands could not be broadcast together with shapes (4,) (3,)".
 """
 
-import inspect
+import types
 
 import pytest
 
 
-def test_no_dead_physics_config_references():
-    """The attribute is _physics_config; a bare 'physics_config' lookup
-    silently returns the default forever."""
-    from rfmux.mock import crs as crs_mod
-    from rfmux.mock import resonator_model as model_mod
+def test_cache_tuning_takes_effect():
+    """A dialog setting must reach the convergence-cache key.
 
-    for module in (crs_mod, model_mod):
-        src = inspect.getsource(module)
-        for pattern in ("'physics_config'", '"physics_config"'):
-            for line in src.splitlines():
-                if pattern in line and "_physics_config" not in line:
-                    pytest.fail(f"{module.__name__}: dead lookup: "
-                                f"{line.strip()}")
-
-
-def test_cache_tuning_reads_the_real_attribute():
-    """The convergence-cache steps come from _compute_cache_key_params;
-    they must read _physics_config so dialog settings take effect."""
+    The original bug was a lookup of ``physics_config`` (no underscore),
+    which ``getattr(..., default)`` turned into a silent fallback: the
+    tuning controls appeared to work and changed nothing. Asserting on
+    the returned step, rather than on the source, catches that however
+    it is spelled.
+    """
     from rfmux.mock.resonator_model import MockResonatorModel
 
-    src = inspect.getsource(
-        MockResonatorModel._compute_cache_key_params)
-    assert "_physics_config" in src
-    assert "cache_freq_step" in src
-    for line in src.splitlines():
-        if "physics_config" in line:
-            assert "_physics_config" in line, line.strip()
+    model = MockResonatorModel.__new__(MockResonatorModel)
+    model.mr_lekids = []
+    model.base_nqp_values = []
+    model.mock_crs = types.SimpleNamespace(_physics_config={})
+
+    _, _, default_step, _, _ = (0,) + model._compute_cache_key_params(1e9)
+    assert default_step == pytest.approx(0.0001)
+
+    model.mock_crs._physics_config = {"cache_freq_step": 5.0}
+    _, _, tuned_step, _, _ = (0,) + model._compute_cache_key_params(1e9)
+    assert tuned_step == pytest.approx(5.0), \
+        "cache_freq_step did not reach the cache key — the config is " \
+        "being read from somewhere that does not exist"
 
 
-def test_slow_emitter_passes_explicit_pulse_time():
-    """Otherwise the slow stream inherits the PFB batches' later clock."""
-    from rfmux.mock import udp_streamer
+def test_slow_emitter_evaluates_at_its_own_frame_time():
+    """Otherwise the slow stream inherits the PFB batches' later clock.
 
-    src = inspect.getsource(udp_streamer.MockCRSStreamer._emit_slow_packet)
-    assert "pulse_time=t_frame" in src, \
-        "slow emitter must pin pulse_time to its own frame time"
+    ``update_qp_densities_for_time`` is a monotonic ratchet, so once a
+    PFB batch has advanced it past ``t_frame`` the slow frame would be
+    evaluated at the PFB's time unless it pins ``pulse_time`` itself.
+    """
+    from rfmux.mock.udp_streamer import MockCRSStreamer
+
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _record(*args, **kwargs):
+        seen.update(kwargs)
+        raise _Stop
+
+    streamer = MockCRSStreamer.__new__(MockCRSStreamer)
+    streamer.mock_crs = types.SimpleNamespace(
+        _short_packets=True,
+        _physics_config={},
+        _resonator_model=types.SimpleNamespace(
+            calculate_module_response_coupled=_record),
+    )
+    streamer.seq_counters = {1: 0}
+
+    t_frame = 12.5
+    with pytest.raises(_Stop):
+        streamer._emit_slow_packet(1, t_frame, dec=6)
+
+    assert seen.get("pulse_time") == t_frame, \
+        f"slow emitter must pin pulse_time to its own frame time, got {seen}"
+    assert seen.get("start_time") == t_frame
 
 
 def test_ratchet_still_guards_pulse_generation():
-    """The monotonic guard stays — it protects the Poisson dt draw from
-    being double-counted by out-of-order calls."""
+    """The monotonic guard protects the Poisson dt draw from being
+    double-counted by out-of-order calls: a time at or before the last
+    update must be a no-op, not a second draw."""
     from rfmux.mock.resonator_model import MockResonatorModel
 
-    src = inspect.getsource(
-        MockResonatorModel.update_qp_densities_for_time)
-    assert "<= self.last_update_time" in src
+    model = MockResonatorModel.__new__(MockResonatorModel)
+    model.last_update_time = 10.0
+    model._nqp_state_t = "untouched"
+
+    # The model is deliberately bare: nothing past the guard can run on
+    # it, so falling through raises instead of quietly doing the wrong
+    # thing. Report that as the guard failing, not as a missing stub.
+    for backwards in (10.0, 9.5, 0.0):
+        try:
+            model.update_qp_densities_for_time(backwards)
+        except Exception as exc:  # pragma: no cover - only on regression
+            pytest.fail(
+                f"update_qp_densities_for_time({backwards}) ran past the "
+                f"monotonic guard with last_update_time=10.0 ({exc!r}). "
+                f"An out-of-order call must be a no-op.")
+        assert model.last_update_time == 10.0, \
+            f"clock moved backwards on {backwards}"
+        assert model._nqp_state_t == "untouched", \
+            f"memo dropped for a non-advancing time ({backwards})"
 
 
 def test_qp_noise_does_not_defeat_the_convergence_cache():

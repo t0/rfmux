@@ -21,9 +21,11 @@ Subcommands:
                        optionally verifying slot numbers against a mapping
 
 The target board(s) are selected with --serial on the group (repeatable, or
-"any"). Multiple boards are handled concurrently: each beaconing board that
-matches gets its own worker thread. A targeted run exits once every named
-serial is done; otherwise it listens until --timeout (default: never).
+"any"). --crate (repeatable) further restricts to boards that are within
+a particular crate and can be paired with --serial any to target an entire
+crate at once. Multiple boards are handled concurrently: each beaconing
+board that matches gets its own worker thread. A targeted run exits once
+every named serial is done; otherwise it listens until --timeout (default: never).
 
 Every board ends up in the state named by --then (default: reset, i.e. the
 board reboots). Subcommands may be chained in a single invocation; boards
@@ -641,8 +643,10 @@ def handle_board(crs_ip, crs_port, beacon_version, serial, action, position,
               help="Board state after the final command: reboot, or sitting "
                    "at the U-Boot prompt. Chained commands always reboot in "
                    "between.")
+@click.option("--crate", "crates", type=str, multiple=True, required=False,
+              help='Crate serial number to restrict to (repeatable),')
 @click.pass_context
-def cli(ctx, serials, discovery_port, bind, verbose, then):
+def cli(ctx, serials, discovery_port, bind, verbose, then, crates):
     """Firmware maintenance for CRS boards over netconsole + xmodem.
 
     Commands may be chained in one invocation; each board reboots between
@@ -654,8 +658,8 @@ def cli(ctx, serials, discovery_port, bind, verbose, then):
         rfmux firmware --serial 0110 reflash-spi boot.bin
         rfmux firmware --serial 0110 reflash-spi boot.bin --md5sum $(md5sum boot.bin | cut -d' ' -f1)
         rfmux firmware --serial 0110 reflash-spi boot.bin reflash-mmc t0-crs-image.wic.gz
-        rfmux firmware --serial 0110 write-backplane-eeprom --backplane 4sbp --crate-serial 123 --backplane-serial 456 --slot 3
-        rfmux firmware --serial any  write-backplane-eeprom --backplane 4sbp --crate-serial 123 --backplane-serial 456 --slot 0110=1 --slot 0111=2
+        rfmux firmware --serial 0110 write-backplane-eeprom --backplane 4sbp --chassis-serial-number C0021 --slot 3
+        rfmux firmware --serial any  write-backplane-eeprom --backplane 4sbp --chassis-serial-number C0021 --slot 0110=1 --slot 0111=2
         rfmux firmware --serial any  read-backplane-eeprom --backplane 4sbp --slot 0110=1 --slot 0111=2
     """
     # Optional dependencies, checked here (the single gateway to every
@@ -678,7 +682,7 @@ def cli(ctx, serials, discovery_port, bind, verbose, then):
     logging.getLogger("xmodem.XMODEM").setLevel(logging.CRITICAL)
 
     ctx.obj = dict(serials=serials, discovery_port=discovery_port,
-                   bind=bind, verbose=verbose, then=then)
+                   bind=bind, verbose=verbose, then=then, crate=crates)
 
 
 @cli.result_callback()
@@ -983,6 +987,7 @@ def run(opts, actions):
     stage abandons that board's remaining stages.
     """
     serials = opts["serials"]
+    crates = opts["crate"]
     serve_any = "any" in serials
     target_serials = set() if serve_any else set(serials)
 
@@ -1037,10 +1042,13 @@ def run(opts, actions):
             continue
 
         serial = headers.get("Serial")
+        crate_serial = headers.get("Crate Serial")
         if serial not in seen:
             seen.add(serial)
             log.info("Found CRS board %s at %s:%d", serial, ip, port)
 
+        if crates and crate_serial not in crates:
+            continue
         if not serve_any and serial not in target_serials:
             continue
         if serial in threads and threads[serial].is_alive():

@@ -153,9 +153,9 @@ reports zero skips.
 
 ## CI
 
-`.github/workflows/periscope-tests.yml` runs the quick tier, the acquisition
-tier, and `test_periscope_flow.py` on ubuntu, windows and macos, with
-`fail-fast: false`.
+`.github/workflows/periscope-tests.yml` runs the quick tier and the acquisition
+tier on ubuntu, windows and macos, with `fail-fast: false`. Between them that is
+every test that does not need a board.
 
 It triggers on push and pull request against `main`, plus `workflow_dispatch`.
 A long-lived branch gets **no CI until it opens a PR** — run the tiers locally,

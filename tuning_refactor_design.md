@@ -10,6 +10,48 @@ the layering the `buffer_exploration` branch uses for pulse capture.
 
 ---
 
+## 0. Status — where the code has overtaken this document
+
+The data model is built, in `rfmux/core/resonators.py` with tests in
+`test/core/test_resonators.py`. It departs from the sketch below in ways worth
+reading before the rest of this document:
+
+* **Location and names.** The types are `BiasPoint`, `Resonator` and
+  `ResonatorMap`, in `rfmux/core/`, not `Catalog` in `rfmux/tuning/` as §2 and
+  §3 propose. The data model is useful beyond tuning, so it belongs in `core`;
+  `rfmux/tuning/` is still where the *functions* that operate on it will live.
+  Note `rfmux.core.schema.Resonator` already exists as the hardware-map ORM
+  row, so the new type is not re-exported from `rfmux/core/__init__.py`.
+* **Identity is a `name`, not a random code.** Resonators are `R0001…` in
+  frequency order, so §3's "the 4-letter code is random and regenerated" problem
+  does not arise. `Catalog.rekey()` is therefore not implemented.
+* **`BiasPoint` is a real type, and it is frozen.** The operating point and the
+  calibration measured at it are one object, so §3's list of loose per-detector
+  calibration fields is now a single `Resonator.bias`. Stale calibration is
+  unrepresentable rather than merely avoided.
+* **No sweep storage at all.** §4's `SweepSet` / `SweepEntry` are not built and
+  are not planned in this form. Analysis reduces a sweep to the scalars that
+  belong on a `BiasPoint`; the traces stay with the caller. This keeps the map
+  cheap to copy — the threading rule in §9 depends on that.
+* **The map is module-scoped**, which resolves §13's open question: one
+  `ResonatorMap` per module, rather than a module-agnostic catalog or an
+  optional per-`Resonator` module field. Today's `multisweep` shares one
+  registry across modules, so that is an interface change still to make.
+* **Provenance deferred.** A `source` field recording how a bias was arrived at
+  was considered and left out until there is a caller that needs it.
+
+§10's table of fixed bugs describes the state of `mr_multisweep_section_amplitudes`.
+Those defects are not present on this branch — the registry layer never existed
+here — so they are avoided by construction rather than repaired.
+
+Still open: whether the tone grid is `COMB_SAMPLING_FREQ / 256 / 2**13`
+(≈298.023 Hz, what every quantizing path uses today) or
+`transferfunctions.BASE_FREQUENCY` (≈596.046 Hz, twice that, used for
+quantization nowhere and marked "verify still appropriate"). `TONE_GRID_HZ` is
+one line if the firmware says otherwise.
+
+---
+
 ## 1. The pattern we are emulating
 
 From `buffer_exploration`, pulse capture is split into:

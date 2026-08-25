@@ -654,8 +654,8 @@ def cli(ctx, serials, discovery_port, bind, verbose, then):
         rfmux firmware --serial 0110 reflash-spi boot.bin
         rfmux firmware --serial 0110 reflash-spi boot.bin --md5sum $(md5sum boot.bin | cut -d' ' -f1)
         rfmux firmware --serial 0110 reflash-spi boot.bin reflash-mmc t0-crs-image.wic.gz
-        rfmux firmware --serial 0110 write-backplane-eeprom --backplane 4sbp --chassis-serial-number C0021 --slot 3
-        rfmux firmware --serial any  write-backplane-eeprom --backplane 4sbp --chassis-serial-number C0021 --slot 0110=1 --slot 0111=2
+        rfmux firmware --serial 0110 write-backplane-eeprom --backplane 4sbp --crate-serial 123 --backplane-serial 456 --slot 3
+        rfmux firmware --serial any  write-backplane-eeprom --backplane 4sbp --crate-serial 123 --backplane-serial 456 --slot 0110=1 --slot 0111=2
         rfmux firmware --serial any  read-backplane-eeprom --backplane 4sbp --slot 0110=1 --slot 0111=2
     """
     # Optional dependencies, checked here (the single gateway to every
@@ -883,13 +883,13 @@ backplane_option = click.option(
                    "its position, so this is how boards learn their slot. "
                    "Give a bare N with a single --serial, or repeat "
                    "SERIAL=N to program a whole crate in one run.")
-@click.option("--chassis-serial-number", required=True,
+@click.option("--crate-serial", required=True,
               help="Serial number of the crate being commissioned.")
-@click.option("--board-serial-number", default="",
+@click.option("--backplane-serial", default="",
               help="Serial number of the backplane PCB, if tracked.")
 @click.pass_context
-def write_backplane_eeprom_cmd(ctx, backplane, slots, chassis_serial_number,
-                               board_serial_number):
+def write_backplane_eeprom_cmd(ctx, backplane, slots, crate_serial,
+                               backplane_serial):
     """Commission crate backplane EEPROM(s) with IPMI FRU descriptors.
 
     The design-dependent FRU content (manufacturer, part numbers, EEPROM
@@ -914,10 +914,10 @@ def write_backplane_eeprom_cmd(ctx, backplane, slots, chassis_serial_number,
         data = {
             "common": {"format_version": 1, "size": eeprom_size},
             "chassis": dict(design["chassis"],
-                            serial_number=chassis_serial_number,
+                            serial_number=crate_serial,
                             custom_fields=[f"slot={slot}"]),
             "board": dict(design["board"],
-                          serial_number=board_serial_number,
+                          serial_number=backplane_serial,
                           mfg_date_time=mfg_date_time),
         }
         try:

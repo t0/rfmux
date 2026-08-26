@@ -16,25 +16,43 @@ The data model is built, in `rfmux/core/resonators.py` with tests in
 `test/core/test_resonators.py`. It departs from the sketch below in ways worth
 reading before the rest of this document:
 
-* **Location and names.** The types are `BiasPoint`, `Resonator` and
-  `ResonatorMap`, in `rfmux/core/`, not `Catalog` in `rfmux/tuning/` as §2 and
-  §3 propose. The data model is useful beyond tuning, so it belongs in `core`;
-  `rfmux/tuning/` is still where the *functions* that operate on it will live.
-  Note `rfmux.core.schema.Resonator` already exists as the hardware-map ORM
-  row, so the new type is not re-exported from `rfmux/core/__init__.py`.
+* **Location.** The types are `BiasPoint`, `Resonator` and `ResonatorCatalog`,
+  in `rfmux/core/`, not in `rfmux/tuning/` as §2 and §3 propose. The data model
+  is useful beyond tuning, so it belongs in `core`; `rfmux/tuning/` is still
+  where the *functions* that operate on it will live. The hardware-map ORM row
+  that used to be called `rfmux.core.schema.Resonator` is now
+  `HWMResonator` — renamed so the two are visibly different things, and
+  because it may be removed outright later. Everything named after it moved
+  with it: the YAML tag is `!HWMResonators`, the wafer key is
+  `hwm_resonators:`, the ChannelMappings CSV column is `hwm_resonator`, the
+  relationship attributes are `hwm_resonator` / `hwm_resonators`, and the table
+  is `hwm_resonators`. Existing hardware maps need those four edits. The name
+  `Resonator` in `rfmux/core/__init__.py` is consequently free; the new type is
+  still not re-exported there, so that `rfmux.Resonator` fails loudly rather
+  than silently resolving to a different class than a caller expects.
 * **Identity is a `name`, not a random code.** Resonators are `R0001…` in
   frequency order, so §3's "the 4-letter code is random and regenerated" problem
-  does not arise. `Catalog.rekey()` is therefore not implemented.
+  does not arise. `ResonatorCatalog.rekey()` is therefore not implemented.
 * **`BiasPoint` is a real type, and it is frozen.** The operating point and the
   calibration measured at it are one object, so §3's list of loose per-detector
   calibration fields is now a single `Resonator.bias`. Stale calibration is
   unrepresentable rather than merely avoided.
+* **One frequency per resonator, and it lives on the bias point.** §3's
+  `bias_frequency` *and* a separate sweep centre have collapsed into
+  `Resonator.bias.frequency_hz`. `from_frequencies(freqs, module, amplitude)`
+  seeds it from `find_resonances`; multisweep and bias finding refine it;
+  apply-bias quantizes it. There is no `center_frequency_hz` field, because the
+  sweep centre is multisweep's decision and a second frequency is a second
+  thing to keep in agreement. Two consequences: `amplitude` is required at
+  construction — a probe power is a measurement choice with no safe default —
+  and `clear_biases()` now discards the seed too, so the catalog is re-seeded
+  from `find_resonances` rather than resumed.
 * **No sweep storage at all.** §4's `SweepSet` / `SweepEntry` are not built and
   are not planned in this form. Analysis reduces a sweep to the scalars that
-  belong on a `BiasPoint`; the traces stay with the caller. This keeps the map
-  cheap to copy — the threading rule in §9 depends on that.
-* **The map is module-scoped**, which resolves §13's open question: one
-  `ResonatorMap` per module, rather than a module-agnostic catalog or an
+  belong on a `BiasPoint`; the traces stay with the caller. This keeps the
+  catalog cheap to copy — the threading rule in §9 depends on that.
+* **The catalog is module-scoped**, which resolves §13's open question: one
+  `ResonatorCatalog` per module, rather than a module-agnostic catalog or an
   optional per-`Resonator` module field. Today's `multisweep` shares one
   registry across modules, so that is an interface change still to make.
 * **Provenance deferred.** A `source` field recording how a bias was arrived at
@@ -44,11 +62,15 @@ reading before the rest of this document:
 Those defects are not present on this branch — the registry layer never existed
 here — so they are avoided by construction rather than repaired.
 
-Still open: whether the tone grid is `COMB_SAMPLING_FREQ / 256 / 2**13`
-(≈298.023 Hz, what every quantizing path uses today) or
-`transferfunctions.BASE_FREQUENCY` (≈596.046 Hz, twice that, used for
-quantization nowhere and marked "verify still appropriate"). `TONE_GRID_HZ` is
-one line if the firmware says otherwise.
+**Settled: the tone grid is `transferfunctions.BASE_FREQUENCY`** (≈596.046 Hz).
+There is now one definition, and `BiasPoint.quantized()`, `bias_kids.py` and
+Periscope's `apply_bias_output` all use it. The three sites previously carried
+their own copy of the literal `298.0232238769531` — half of `BASE_FREQUENCY` —
+so quantization is a factor of two coarser than it was, and the maximum shift
+from the requested frequency rises from ≈149 Hz to ≈298 Hz. `BASE_FREQUENCY`
+still carries a "TODO: verify still appropriate" comment in
+`transferfunctions.py`; it is now the single line to change if the firmware
+says otherwise.
 
 ---
 

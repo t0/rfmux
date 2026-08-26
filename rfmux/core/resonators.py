@@ -7,14 +7,14 @@ Three types, in order of containment:
   that tone. Frozen, because the tone and its calibration are one fact.
 * ``Resonator`` — identity, hardware binding, and current tuning state for one
   resonator.
-* ``ResonatorMap`` — the per-module collection that algorithms accept and
+* ``ResonatorCatalog`` — the per-module collection that algorithms accept and
   return.
 
-The map holds only what is small and canonical: identity, the operating point,
-and the calibrations downstream measurements need. Sweep data is *not* stored
-here. Analysis reduces a sweep to the handful of scalars that belong on a
-``BiasPoint`` and the traces themselves stay with the caller, so the map is
-cheap to copy, cheap to save, and cannot disagree with itself.
+The catalog holds only what is small and canonical: identity, the operating
+point, and the calibrations downstream measurements need. Sweep data is *not*
+stored here. Analysis reduces a sweep to the handful of scalars that belong on
+a ``BiasPoint`` and the traces themselves stay with the caller, so the catalog
+is cheap to copy, cheap to save, and cannot disagree with itself.
 
 Nothing in this module imports Qt or CRS. It is a data model, and the
 algorithms and GUI layers are both callers.
@@ -30,19 +30,7 @@ from dataclasses import dataclass, field, replace, asdict
 
 from typing import Iterable, Iterator, Literal
 
-from .transferfunctions import COMB_SAMPLING_FREQ
-
-# The hardware tone grid. Bias frequencies are programmed as multiples of this.
-#
-# NOTE: this deliberately does not use transferfunctions.BASE_FREQUENCY, which
-# is COMB_SAMPLING_FREQ / 256 / 2**12 — twice this value — and carries a
-# "TODO: verify still appropriate" comment. Every code path that actually
-# quantizes a bias frequency uses the value below: bias_kids.py hardcodes it as
-# the literal 298.0232238769531. Expressed here as a derivation rather than a
-# literal so the relationship to the sampling frequency is visible. If the
-# firmware's grid is ever confirmed to be BASE_FREQUENCY, this is the one line
-# to change.
-TONE_GRID_HZ = COMB_SAMPLING_FREQ / 256 / 2**13  # ≈ 298.023 Hz
+from .transferfunctions import BASE_FREQUENCY
 
 
 # ─── BiasPoint ────────────────────────────────────────────────────────────────
@@ -97,11 +85,13 @@ class BiasPoint:
     def quantized(self) -> BiasPoint:
         """Round the frequency onto the hardware tone grid.
 
-        Calibration is kept: the shift is under half a grid step
-        (≈ 149 Hz), which is small compared to a resonator's width.
+        The grid is ``transferfunctions.BASE_FREQUENCY``, the single definition
+        every quantizing path in the tree uses. Calibration is kept: the shift
+        is under half a grid step, which is small compared to a resonator's
+        width.
         """
         return replace(
-            self, frequency_hz=round(self.frequency_hz / TONE_GRID_HZ) * TONE_GRID_HZ
+            self, frequency_hz=round(self.frequency_hz / BASE_FREQUENCY) * BASE_FREQUENCY
         )
 
 
@@ -112,15 +102,21 @@ class BiasPoint:
 class Resonator:
     """Identity, hardware binding and tuning state for one resonator.
 
-    Note this is distinct from ``rfmux.core.schema.Resonator``, which is the
+    There is exactly one frequency per resonator and it lives on ``bias``: the
+    current best estimate of where this resonator's tone belongs. It is seeded
+    from ``find_resonances``, refined by multisweep and by bias finding, and
+    quantized by apply-bias. There is deliberately no separate sweep-centre
+    field — the sweep centre is multisweep's business, and a second frequency
+    is a second thing to keep in agreement.
+
+    Note this is distinct from ``rfmux.core.schema.HWMResonator``, which is the
     hardware-map ORM row. This one is a plain value object that measurement
     code passes around.
     """
 
     name: str
     channel: int  # 1-based hardware channel; permanent binding
-    center_frequency_hz: float  # sweep seed; always present
-    bias: BiasPoint | None = None  # None until found or assigned
+    bias: BiasPoint | None = None  # None until seeded or found
     notes: dict = field(default_factory=dict)  # explicitly the junk drawer
 
     def set_bias(self, **changes) -> BiasPoint:
@@ -148,20 +144,26 @@ class Resonator:
         return self.bias
 
 
-# ─── ResonatorMap ─────────────────────────────────────────────────────────────
+# ─── ResonatorCatalog ─────────────────────────────────────────────────────────
 
 
-class ResonatorMap:
+class ResonatorCatalog:
     """Per-module, ordered, dict-like collection of Resonators.
 
     The object algorithms accept and return::
 
-        rmap = ResonatorMap.from_frequencies(found, module=2)
-        await crs.multisweep(rmap, span_hz=200e3, npoints_per_sweep=101)
-        find_bias_points(rmap, sweeps)
-        await crs.apply_bias(rmap)
+        catalog = ResonatorCatalog.from_frequencies(found, module=2, amplitude=0.01)
+        await crs.multisweep(catalog, span_hz=200e3, npoints_per_sweep=101)
+        find_bias_points(catalog, sweeps)
+        await crs.apply_bias(catalog)
 
     Iteration is in channel order. Lookup is by name.
+
+    Frequency collisions are checked when a resonator joins the catalog, which
+    is where a duplicate from ``find_resonances`` shows up. Retuning through
+    ``Resonator.set_bias`` is not re-checked — two tones can be walked onto one
+    frequency after the fact. Worth a ``validate()`` pass once there is a
+    caller that retunes in bulk.
     """
 
     SCHEMA_VERSION = 1
@@ -178,7 +180,7 @@ class ResonatorMap:
             resonators: the members; names and channels must be unique.
             module: the readout module these channel numbers refer to.
             nco_frequency_hz: NCO the channel frequencies are offset from.
-            min_separation_hz: if given, reject center frequencies closer
+            min_separation_hz: if given, reject bias frequencies closer
                 together than this. The default (None) rejects only exactly
                 equal frequencies — see ``_check_frequency``.
         """
@@ -193,7 +195,11 @@ class ResonatorMap:
     # -- invariants -----------------------------------------------------------
 
     def _check_frequency(self, r: Resonator):
-        """Reject a center frequency that collides with one already present.
+        """Reject a bias frequency that collides with one already present.
+
+        Two tones on one frequency is a hardware conflict, not a bookkeeping
+        nicety. An unbiased resonator has no frequency yet, so there is
+        nothing to check and it is admitted.
 
         With ``min_separation_hz`` unset this catches only exactly equal
         floats, which is a weak check: two peaks a microhertz apart are the
@@ -201,15 +207,19 @@ class ResonatorMap:
         they pass. Set ``min_separation_hz`` to something physically motivated
         to catch that.
         """
+        if r.bias is None:
+            return
         threshold = self.min_separation_hz
         for other in self._by_name.values():
-            gap = abs(other.center_frequency_hz - r.center_frequency_hz)
+            if other.bias is None:
+                continue
+            gap = abs(other.bias.frequency_hz - r.bias.frequency_hz)
             collides = gap == 0 if threshold is None else gap < threshold
             if collides:
                 raise ValueError(
-                    f"Center frequency {r.center_frequency_hz / 1e6:.6f} MHz "
+                    f"Bias frequency {r.bias.frequency_hz / 1e6:.6f} MHz "
                     f"({r.name!r}) collides with {other.name!r} at "
-                    f"{other.center_frequency_hz / 1e6:.6f} MHz. "
+                    f"{other.bias.frequency_hz / 1e6:.6f} MHz. "
                     f"Each resonator needs a distinct frequency."
                 )
 
@@ -236,10 +246,19 @@ class ResonatorMap:
         cls,
         frequencies_hz: Iterable[float],
         module: int,
+        amplitude: float,
         names: list[str] | None = None,
         **kwargs,
-    ) -> ResonatorMap:
-        """Sorted ascending; channels 1..N in frequency order.
+    ) -> ResonatorCatalog:
+        """Seed a catalog from found resonances. Channels 1..N in frequency order.
+
+        Each resonator gets a ``BiasPoint`` at its found frequency, carrying no
+        calibration — the operating point as first guessed. Multisweep and bias
+        finding move it from there.
+
+        ``amplitude`` is required rather than defaulted: the probe amplitude is
+        a real measurement choice, and there is no value that is right for an
+        arbitrary array.
 
         Supplied ``names`` are paired with ``frequencies_hz`` positionally
         *before* sorting, so parallel lists stay associated no matter what
@@ -256,7 +275,11 @@ class ResonatorMap:
             paired = sorted(zip(freqs, names), key=lambda p: p[0])
         return cls(
             [
-                Resonator(name=n, channel=i + 1, center_frequency_hz=f)
+                Resonator(
+                    name=n,
+                    channel=i + 1,
+                    bias=BiasPoint(frequency_hz=f, amplitude=amplitude),
+                )
                 for i, (f, n) in enumerate(paired)
             ],
             module=module,
@@ -289,14 +312,22 @@ class ResonatorMap:
         return [r for r in self if r.bias is not None]
 
     def clear_biases(self):
+        """Drop every operating point, returning the catalog to identity only.
+
+        Note this now discards the *only* frequency a resonator has, seed
+        included — after it, the catalog knows which detectors exist and what
+        channel each is on, and nothing about where they are. Re-seed from
+        ``find_resonances`` rather than expecting a sweep to resume.
+        """
         for r in self:
             r.bias = None
 
-    def copy(self) -> ResonatorMap:
-        """Deep copy. THE threading rule: workers operate on ``rmap.copy()``;
+    def copy(self) -> ResonatorCatalog:
+        """Deep copy. THE threading rule: workers operate on ``catalog.copy()``;
         the GUI swaps its reference when the worker's completed signal fires.
 
-        Cheap because the map holds no sweep data — only scalars per resonator.
+        Cheap because the catalog holds no sweep data — only scalars per
+        resonator.
         """
         return _copy.deepcopy(self)
 
@@ -304,16 +335,14 @@ class ResonatorMap:
 
     def __repr__(self) -> str:
         head = (
-            f"ResonatorMap(module={self.module}, {len(self)} resonators, "
+            f"ResonatorCatalog(module={self.module}, {len(self)} resonators, "
             f"{len(self.biased())} biased)"
         )
-        rows = [
-            f"  {'name':<7}{'ch':>3}  {'center MHz':>12}  {'bias MHz':>12}  {'amp':>7}"
-        ]
+        rows = [f"  {'name':<7}{'ch':>3}  {'bias MHz':>12}  {'amp':>7}"]
         for r in self:
             b = r.bias
             rows.append(
-                f"  {r.name:<7}{r.channel:>3}  {r.center_frequency_hz / 1e6:>12.6f}  "
+                f"  {r.name:<7}{r.channel:>3}  "
                 + (
                     f"{b.frequency_hz / 1e6:>12.6f}  {b.amplitude:>7.4f}"
                     if b
@@ -334,7 +363,6 @@ class ResonatorMap:
                 {
                     "name": r.name,
                     "channel": r.channel,
-                    "center_frequency_hz": r.center_frequency_hz,
                     "bias": asdict(r.bias) if r.bias else None,
                     "notes": dict(r.notes),
                 }
@@ -343,7 +371,7 @@ class ResonatorMap:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> ResonatorMap:
+    def from_dict(cls, d: dict) -> ResonatorCatalog:
         if d.get("schema_version") != cls.SCHEMA_VERSION:
             raise ValueError(
                 f"Unsupported schema_version {d.get('schema_version')!r}; "
@@ -353,7 +381,6 @@ class ResonatorMap:
             Resonator(
                 name=rd["name"],
                 channel=rd["channel"],
-                center_frequency_hz=rd["center_frequency_hz"],
                 bias=BiasPoint(**rd["bias"]) if rd["bias"] else None,
                 notes=rd.get("notes", {}),
             )
@@ -375,7 +402,6 @@ class ResonatorMap:
     CSV_COLUMNS = (
         "name",
         "channel",
-        "center_frequency_hz",
         "bias_frequency_hz",
         "bias_amplitude",
     )
@@ -390,7 +416,6 @@ class ResonatorMap:
                 {
                     "name": r.name,
                     "channel": r.channel,
-                    "center_frequency_hz": f"{r.center_frequency_hz:.6f}",
                     "bias_frequency_hz": f"{b.frequency_hz:.6f}" if b else "",
                     "bias_amplitude": f"{b.amplitude:.6f}" if b else "",
                 }
@@ -398,7 +423,7 @@ class ResonatorMap:
         return buf.getvalue()
 
     @classmethod
-    def from_csv(cls, text: str, module: int, **kwargs) -> ResonatorMap:
+    def from_csv(cls, text: str, module: int, **kwargs) -> ResonatorCatalog:
         """Read a bias table. Columns are matched by header name, so they may
         appear in any order.
         """
@@ -424,7 +449,6 @@ class ResonatorMap:
                     Resonator(
                         name=row["name"],
                         channel=int(row["channel"]),
-                        center_frequency_hz=float(row["center_frequency_hz"]),
                         bias=(
                             BiasPoint(
                                 frequency_hz=float(bias_freq),

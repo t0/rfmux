@@ -38,25 +38,15 @@ what the import cell below uses. The per-module paths are listed for orientation
 
 ## How to use this document
 
-**This is a runnable notebook, not a web page.** Every grey block below is a live
-code cell: put the cursor in it and press **Shift+Enter** to execute it. The
-output — numbers, tables, plots — appears underneath the cell as it runs.
+Run the cells in order; later ones use variables the earlier ones defined.
+Section 1 is the exception: it offers three ways to get a CRS, and you run only
+the one that fits.
 
-- **Run the cells in order, top to bottom.** Later cells use variables the
-  earlier ones defined, so skipping ahead will fail with a `NameError`. If you
-  lose your place, *Kernel → Restart Kernel and Run All Cells* starts clean.
-- **The outputs you see are the ones you just produced.** This file is stored as
-  jupytext markdown, which keeps no saved outputs, so a cell is blank until you
-  run it. Nothing here can show you a stale number from someone else's run.
-- **Editing is encouraged.** Change a threshold, a channel list, a capture
-  length, and re-run — that is what this document is for. The shipped copy is
-  read-only, so *File → Save Notebook As…* to keep your changes.
-- **Section 1 is the one exception to running everything.** It offers three ways
-  to get a CRS — attach to a running one, use your own board, or simulate one —
-  and you run only the one that fits. Everything after it is identical whichever
-  you chose.
-- **Captures are written to disk** in `OUTPUT_DIR` (printed by the next cell).
-  Section 7 reads them back, and Periscope can open them in review mode.
+This format saves no outputs, so every number you see is one you just produced.
+The shipped copy is read-only: *File → Save Notebook As…* to keep changes.
+
+Captures are written to `OUTPUT_DIR`, printed by the next cell. Section 7 reads
+them back, and Periscope can open them in review mode.
 
 ```python
 %matplotlib inline
@@ -117,14 +107,13 @@ Use this when Periscope is driving a board — real or simulated — and you wan
 work with *that* one rather than starting your own.
 
 Periscope sets `RFMUX_CRS_HOSTNAME` when it launches this notebook, which is how
-the cell finds the board with no configuration from you. It is not magic and not
-required: paste an address into `HOSTNAME` and this works from any kernel.
+the cell finds the board with no configuration from you. It is not required:
+paste an address into `HOSTNAME` and this works from any kernel.
 
-Attaching matters most in mock mode. A simulated CRS is created, not discovered
-— its RPC port is assigned by the OS at startup — so there is no address to look
-up, and a second `create_mock_crs()` gives you a *second, unrelated* simulation
-streaming to the same UDP port as the first. A receiver then sees both
-interleaved, with no error anywhere.
+Attaching matters most in mock mode. A simulated CRS is created, not discovered:
+its RPC port is assigned by the OS at startup, so there is no address to look up.
+A second `create_mock_crs()` gives you a *second, unrelated* simulation on the
+same UDP port, and a receiver then sees both interleaved with no error.
 
 ```python
 HOSTNAME = os.environ.get("RFMUX_CRS_HOSTNAME")   # or paste "127.0.0.1:43431"
@@ -163,45 +152,23 @@ If you have no hardware, this stands up a simulated CRS: a couple of resonators
 with carriers parked on them, and periodic quasiparticle pulses to detect.
 
 Pulse heights are drawn uniformly between `pulse_random_amp_min` and
-`..._max` rather than repeating one value, so the amplitude histogram in
-section 7 shows a distribution instead of a single spike — which is the whole
-point of plotting one.
+`pulse_random_amp_max`, so the amplitude histogram in section 7 shows a
+distribution rather than a single spike.
 
-The noise is deliberately not idealised either, because a detector that only
-works on white noise is not worth testing:
+The noise is deliberately not idealised, because a detector that only works on
+white noise is not worth testing:
 
-- **White readout noise** (`udp_noise_level`) — the flat floor the σ thresholds
+- **White readout noise** (`udp_noise_level`): the flat floor the σ thresholds
   are measured against.
-- **Quasiparticle number fluctuations** (`nqp_noise_enabled`) — physical
-  generation–recombination noise in the resonator itself.
-- **TLS 1/f frequency noise** (`tls_noise_enabled`) — two-level systems in the
+- **Quasiparticle number fluctuations** (`nqp_noise_enabled`): physical
+  generation–recombination noise in the resonator itself. It dominates the
+  slow-stream floor at these settings, so `threshold_sigma` is measured against
+  real detector noise rather than a readout artefact.
+- **TLS 1/f frequency noise** (`tls_noise_enabled`): two-level systems in the
   substrate make the resonant frequency wander with a `1/f**alpha` spectrum.
-  This is the interesting one: it is exactly what a naive fixed-baseline
-  detector triggers on endlessly. It is what the rolling-median baseline and the
-  edge gate in section 4 exist to survive, so leaving it off would let this
-  notebook demonstrate a detector that cannot handle a real detector.
-
-At these settings the quasiparticle term dominates the slow-stream noise floor:
-σ ≈ 8.6 counts at stage 1, against ≈ 1 count when it is set ten times lower.
-That is worth knowing, because it means the σ your thresholds are quoted in is a
-*physical* quantity here, not a readout artefact — and it is what makes the
-pulse SNRs below look like real detector numbers rather than the enormous ones a
-noiseless simulation produces.
-
-The 1/f on top of it is correlated rather than white, so it moves the baseline
-instead of scattering it: about 2.8 σ of wander over a three-second capture,
-against 2.2 σ with TLS off. The detector absorbs that without complaint — same
-59 pulses either way, no over-long windows.
-
-**Which is the point, and also the trap.** Turn the quasiparticle noise back
-down and the same absolute drift becomes 14 σ, and roughly one window in seven
-stays open until the hard stop, because a pulse riding a drifting baseline is
-slow to fall back inside `end_sigma`. Those windows still measure the right τ —
-the decay is derived from the peak and the threshold crossing, not the window
-length — but their `duration_ms` describes the baseline, not the event. That
-failure mode is why the rolling median and edge gate exist, and it is exactly
-the kind of thing that stays invisible in simulation and then bites on
-hardware.
+  Being correlated rather than white, it moves the baseline slowly instead of
+  scattering samples around it. That slow movement is what the trigger in
+  section 4 has to cope with; a fixed baseline would trigger on it endlessly.
 
 > ⚠️ **This cell refuses to run if something is already streaming.** Two
 > simulations send to the same UDP port, so a receiver gets both interleaved —
@@ -377,27 +344,30 @@ span of rates from the decimated slow stream to the PFB stream.
 
 How the detector works:
 
-- **Triggering is two-sided with hysteresis.** A capture opens when *either* I or
-  Q leaves the ±`threshold_sigma` noise band, and closes only when *both* have
-  returned inside ±`end_sigma`. `end_sigma` must sit below `threshold_sigma`, or
-  captures would end the instant they began.
+- **A capture opens on either I or Q, and closes only when both have settled.**
+  It opens when either leaves ±`threshold_sigma`, and closes when both are back
+  inside ±`end_sigma`. `end_sigma` must sit below `threshold_sigma`, or a
+  capture would end where it began.
 - **Triggers must be confirmed.** `trigger_samples` consecutive samples have to
   clear the threshold. Left at 0 it is *derived from the stream rate* to hold
   accidental triggers under `max_accidental_per_min`: at 596 Hz one sample is
   ample evidence, at 1.22 MHz it is not.
-- **An edge gate suppresses drift.** A real pulse rises; 1/f wander does not.
-  The detector also demands a rise of `threshold_sigma` jump-σ within
-  `edge_lookback` samples, with the baseline cancelled — so slow drift cannot
-  trigger even when the baseline estimate lags behind it.
+- **A trigger also needs a fast rise.** As well as crossing the threshold, the
+  signal must be higher than it was `edge_lookback` samples ago. That compares
+  two raw samples instead of measuring against the baseline, so a slow drift
+  cancels out of it: only a fast rise can trigger, however far behind the
+  baseline estimate has fallen.
 - **The baseline is a rolling median**, re-estimated continuously over
   `baseline_window` samples. A median rather than a mean because it ignores
   pulses as long as they stay a minority of the window.
-- **`max_pulse_ms` is the primary control.** It sizes the ring buffer (×1.5 for
-  pre-trigger margin and the end-confirmation tail) and sets the floor under the
-  baseline window and the noise training length. Estimate it *generously*: a
+- **`max_pulse_ms` is the primary control.** It sizes the ring buffer at 1.5× the
+  longest pulse, leaving room for the samples before the trigger and the tail
+  after it, and sets the floor under the baseline window and the noise training
+  length. Estimate it *generously*: a
   capture that outlasts the ring silently loses its own rising edge.
-- **Captures cannot wedge.** One that never satisfies its end condition is
-  force-closed at a hard stop of 1.2 × `max_pulse_ms` and flagged `truncated`.
+- **A capture that never ends is cut off.** If the signal never comes back
+  below `end_sigma`, the capture stops at 1.2 × `max_pulse_ms` and is flagged
+  `truncated`.
 
 ![Anatomy of one capture window](pulse_capture_anatomy.png)
 
@@ -410,19 +380,17 @@ Where it *closes* is `save_to_end_confirmed`, on by default: the window runs to
 the end-of-pulse confirmation, keeping the whole decay tail. Those samples are
 already in the ring, so this costs disk rather than acquisition. Turn it off and
 the window stops a `margin_fraction` tail past the below-threshold instant
-instead — shorter files, and window length becomes a property of the pulse rather
-than of the baseline, since how long the end confirmation takes depends on where
-the baseline was wandering. Measured on the mock at 19 kHz with a 1 ms decay,
-identical injected pulses gave a median window of 5.56 ms with the tail and
-3.93 ms without.
+instead: shorter files, and window length becomes a property of the pulse rather
+than of the baseline, since how long the confirmation takes depends on where the
+baseline was wandering. On the mock at 19 kHz with a 1 ms decay, keeping the tail
+makes windows about 40% longer.
 
 Worth turning off for PFB captures, where windows already carry ~64× the samples,
 and at high count rates, where longer windows overlap and more events get flagged
 as pileup.
 
-Note what does *not* change: `duration_ms` is measured from the threshold
-crossings, not from the length of the saved window, so it reports the pulse
-either way — 3.09 ms in both runs above.
+`duration_ms` does not change either way: it is measured from the threshold
+crossings, not from the length of the saved window.
 
 `describe()` reports everything derived at a given rate, and `validate()` catches
 inconsistent settings before you spend a capture on them.
@@ -454,7 +422,7 @@ print(f"  trigger confirm {d['trigger_samples']} sample(s) → "
       f"{d['accidental_per_min']:.2e} accidentals/min/channel")
 print(f"  edge lookback   {d['edge_lookback']} samples "
       f"({d['edge_lookback_ms']:.1f} ms)")
-print(f"  hard stop       {d['max_capture_ms']:.0f} ms")
+print(f"  capture limit   {d['max_capture_ms']:.0f} ms")
 ```
 
 Note how the confirmation length changes on its own with the rate — this is the
@@ -716,11 +684,11 @@ pulses by trigger time. `run_dual_source` drives both sockets concurrently;
 whichever side finishes first stops the other, since a matcher fed by one stream
 alone just accumulates one-sided pulses.
 
-Every matched pair also carries a **union time window**: the widest interval
-spanned by either trigger, extracted from *both* ring buffers. So a pair gives
-you the same event at 19 kHz and at 1.22 MHz over a common span — which is what
-makes cross-stream comparison meaningful. Metrics stay computed on each stream's
-own triggered core, so the union windows never contaminate the statistics.
+Each matched pair also stores a common time span: the widest interval either
+trigger covers, taken from both ring buffers. That gives you the same event at
+19 kHz and at 1.22 MHz over the same interval, which is what makes the two
+comparable. Metrics are still computed from each stream's own triggered samples,
+so the wider span does not affect them.
 
 ```python
 pairs = []
@@ -777,7 +745,7 @@ if two_sided:
     plt.legend(); plt.show()
 ```
 
-Budget for the file size: every pair stores its union window from *both* rings,
+Budget for the file size: every pair stores that common span from *both* rings,
 and at 1.22 MHz that window is thousands of samples. The capture above averages
 roughly 200 kB per pair — about 16 MB for two seconds at this (very high) mock
 pulse rate. Real detector rates are far lower, but on a long run the union

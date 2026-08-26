@@ -17,20 +17,28 @@ jupyter:
 These ship with the `rfmux` package and are provisioned **read-only**, so save
 your own copies elsewhere (*File → Save Notebook As…*) before editing.
 
+## Opening them
+
 They are jupytext markdown rather than `.ipynb`. In the Jupyter session
-Periscope launches they open as notebooks on double-click; in a JupyterLab you
-started yourself, right-click → *Open With* → *Notebook*.
+Periscope launches they open as notebooks on double-click. In a JupyterLab you
+started yourself, right-click → *Open With* → *Notebook*, or set
+*Settings → Document Manager → Default Viewers* to `markdown: Jupytext
+Notebook`. To convert one instead:
+
+```bash
+jupytext -o pulse_capture.ipynb pulse_capture.md
+```
 
 ## Where to start
 
-- **`Demos/simplified_tuning_flow.md`** — sweep the band, find and fit the
+- **`Demos/simplified_tuning_flow.md`**: sweep the band, find and fit the
   resonators, park the carriers, measure the noise. Everything else assumes
   you have done this first.
-- **`Demos/pulse_capture.md`** — detect and record detector pulses, with
+- **`Demos/pulse_capture.md`**: detect and record detector pulses, with
   streaming HDF5, histograms and matched slow+fast capture.
 
-Each has an unattended `.py` counterpart beside it for cron jobs and
-smoke tests; the notebook is the documentation, the script is the runner.
+Each has an unattended `.py` counterpart beside it for cron jobs and smoke
+tests: the notebook is the documentation, the script is the runner.
 
 ## Connecting
 
@@ -45,5 +53,5 @@ await crs.resolve()
 await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)
 ```
 
-No hardware? Both demos above stand up a simulated CRS instead — see their
+With no hardware, both demos stand up a simulated CRS instead. See their
 mock-mode sections.

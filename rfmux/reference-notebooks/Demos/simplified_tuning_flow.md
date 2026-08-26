@@ -38,26 +38,15 @@ calls them directly and plots instead.
 
 ## How to use this document
 
-**This is a runnable notebook, not a web page.** Every grey block below is a live
-code cell: put the cursor in it and press **Shift+Enter** to execute it. The
-output — numbers, tables, plots — appears underneath the cell as it runs.
+Run the cells in order; later ones use variables the earlier ones defined.
+Section 1 is the exception: it offers three ways to get a CRS, and you run only
+the one that fits.
 
-- **Run the cells in order, top to bottom.** Later cells use variables the
-  earlier ones defined, so skipping ahead will fail with a `NameError`. If you
-  lose your place, *Kernel → Restart Kernel and Run All Cells* starts clean.
-- **The outputs you see are the ones you just produced.** This file is stored as
-  jupytext markdown, which keeps no saved outputs, so a cell is blank until you
-  run it. Nothing here can show you a stale number from someone else's run.
-- **Editing is encouraged.** Change a sweep range, a threshold, a span, and
-  re-run — that is what this document is for. The shipped copy is read-only, so
-  *File → Save Notebook As…* to keep your changes.
-- **Section 1 is the one exception to running everything.** It offers three ways
-  to get a CRS — attach to a running one, use your own board, or simulate one —
-  and you run only the one that fits. Everything after it is identical whichever
-  you chose.
-- **This notebook changes the board's state.** It sets the cable length and
-  programs channels. On a shared board that is not a private setting — see the
-  note in section 3.
+This format saves no outputs, so every number you see is one you just produced.
+The shipped copy is read-only: *File → Save Notebook As…* to keep changes.
+
+**This notebook changes the board's state.** It sets the cable length and
+programs channels, which on a shared board is not a private setting.
 
 ```python
 %matplotlib inline
@@ -114,13 +103,13 @@ Use this when Periscope is driving a board — real or simulated — and you wan
 work with *that* one rather than starting your own.
 
 Periscope sets `RFMUX_CRS_HOSTNAME` when it launches this notebook, which is how
-the cell finds the board with no configuration from you. It is not magic and not
-required: paste an address into `HOSTNAME` and this works from any kernel.
+the cell finds the board with no configuration from you. It is not required:
+paste an address into `HOSTNAME` and this works from any kernel.
 
-Attaching matters most in mock mode. A simulated CRS is created, not discovered
-— its RPC port is assigned by the OS at startup — so there is no address to look
-up, and a second `create_mock_crs()` gives you a *second, unrelated* simulation
-whose detectors are not the ones Periscope is showing you.
+Attaching matters most in mock mode. A simulated CRS is created, not discovered:
+its RPC port is assigned by the OS at startup, so there is no address to look up.
+A second `create_mock_crs()` gives you a *second, unrelated* simulation, whose
+detectors are not the ones Periscope is showing you.
 
 ```python
 HOSTNAME = os.environ.get("RFMUX_CRS_HOSTNAME")   # or paste "127.0.0.1:43431"

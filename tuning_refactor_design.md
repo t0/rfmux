@@ -43,10 +43,13 @@ reading before the rest of this document:
   seeds it from `find_resonances`; multisweep and bias finding refine it;
   apply-bias quantizes it. There is no `center_frequency_hz` field, because the
   sweep centre is multisweep's decision and a second frequency is a second
-  thing to keep in agreement. Two consequences: `amplitude` is required at
-  construction — a probe power is a measurement choice with no safe default —
-  and `clear_biases()` now discards the seed too, so the catalog is re-seeded
-  from `find_resonances` rather than resumed.
+  thing to keep in agreement. A consequence: `amplitude` is required at
+  construction — a probe power is a measurement choice with no safe default.
+* **`Resonator.bias` is required, so there is no unbiased state.** A resonator
+  we cannot name a frequency for is not a resonator we know about. §3's
+  `biased()` filter and `clear_biases()` are therefore not implemented, and
+  neither `to_dict` nor the CSV has a null-bias branch. To forget the tuning
+  you re-seed from `find_resonances`; there is nothing to clear to.
 * **No sweep storage at all.** §4's `SweepSet` / `SweepEntry` are not built and
   are not planned in this form. Analysis reduces a sweep to the scalars that
   belong on a `BiasPoint`; the traces stay with the caller. This keeps the

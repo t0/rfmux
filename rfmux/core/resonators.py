@@ -28,7 +28,7 @@ import io
 import math
 from dataclasses import dataclass, field, replace, asdict
 
-from typing import Iterable, Iterator, Literal
+from typing import Iterable, Iterator
 
 from .transferfunctions import BASE_FREQUENCY
 
@@ -109,6 +109,11 @@ class Resonator:
     field — the sweep centre is multisweep's business, and a second frequency
     is a second thing to keep in agreement.
 
+    ``bias`` is required. A resonator we cannot say a frequency for is not a
+    resonator we know about, so there is no unbiased state to test for, clear
+    to, or round-trip. Seeding a catalog from ``find_resonances`` gives every
+    member an operating point immediately; everything after that moves it.
+
     Note this is distinct from ``rfmux.core.schema.HWMResonator``, which is the
     hardware-map ORM row. This one is a plain value object that measurement
     code passes around.
@@ -116,31 +121,21 @@ class Resonator:
 
     name: str
     channel: int  # 1-based hardware channel; permanent binding
-    bias: BiasPoint | None = None  # None until seeded or found
+    bias: BiasPoint
     notes: dict = field(default_factory=dict)  # explicitly the junk drawer
 
     def set_bias(self, **changes) -> BiasPoint:
-        """Build or amend this resonator's ``BiasPoint``.
+        """Amend this resonator's ``BiasPoint``.
 
         Moving the tone (``frequency_hz`` or ``amplitude``) drops calibration
         fields unless new values are passed explicitly, so stale calibration
         stays structurally impossible even through this convenience path.
         Changing only calibration leaves the tone alone.
         """
-        if self.bias is None:
-            missing = {"frequency_hz", "amplitude"} - changes.keys()
-            if missing:
-                raise TypeError(
-                    f"{self.name} has no bias yet, so set_bias needs "
-                    f"{' and '.join(sorted(missing))}. "
-                    f"Pass frequency_hz and amplitude to establish the tone."
-                )
-            self.bias = BiasPoint(**changes)
-        else:
-            if "frequency_hz" in changes or "amplitude" in changes:
-                for f in BiasPoint._CAL_FIELDS:
-                    changes.setdefault(f, None)
-            self.bias = replace(self.bias, **changes)
+        if "frequency_hz" in changes or "amplitude" in changes:
+            for f in BiasPoint._CAL_FIELDS:
+                changes.setdefault(f, None)
+        self.bias = replace(self.bias, **changes)
         return self.bias
 
 
@@ -166,6 +161,10 @@ class ResonatorCatalog:
     caller that retunes in bulk.
     """
 
+    # Stamped into to_dict output and required exactly by from_dict, so a file
+    # written by a future (or past) version of this module fails loudly instead
+    # of being half-understood. Bump it whenever the dict shape changes in a
+    # way from_dict cannot absorb.
     SCHEMA_VERSION = 1
 
     def __init__(
@@ -187,8 +186,9 @@ class ResonatorCatalog:
         self.module = module
         self.nco_frequency_hz = nco_frequency_hz
         self.min_separation_hz = min_separation_hz
+        # The one store. Channel is read off the resonators themselves rather
+        # than mirrored into a second index that could fall out of step.
         self._by_name: dict[str, Resonator] = {}
-        self._by_channel: dict[int, str] = {}
         for r in resonators:
             self._add(r)
 
@@ -198,21 +198,15 @@ class ResonatorCatalog:
         """Reject a bias frequency that collides with one already present.
 
         Two tones on one frequency is a hardware conflict, not a bookkeeping
-        nicety. An unbiased resonator has no frequency yet, so there is
-        nothing to check and it is admitted.
+        nicety.
 
-        With ``min_separation_hz`` unset this catches only exactly equal
-        floats, which is a weak check: two peaks a microhertz apart are the
-        realistic symptom of ``find_resonances`` splitting one resonator, and
-        they pass. Set ``min_separation_hz`` to something physically motivated
-        to catch that.
+        With ``min_separation_hz`` unset this catches only exactly equal floats,
+        which is a weak check: two peaks a microhertz apart are the realistic
+        symptom of ``find_resonances`` splitting one resonator, and they pass.
+        Set ``min_separation_hz`` to something physically motivated to catch that.
         """
-        if r.bias is None:
-            return
         threshold = self.min_separation_hz
         for other in self._by_name.values():
-            if other.bias is None:
-                continue
             gap = abs(other.bias.frequency_hz - r.bias.frequency_hz)
             collides = gap == 0 if threshold is None else gap < threshold
             if collides:
@@ -226,18 +220,18 @@ class ResonatorCatalog:
     def _add(self, r: Resonator):
         if r.name in self._by_name:
             raise ValueError(f"Duplicate resonator name {r.name!r}.")
-        if r.channel in self._by_channel:
-            raise ValueError(
-                f"Duplicate channel {r.channel} ({r.name!r}); already held by "
-                f"{self._by_channel[r.channel]!r}."
-            )
         if r.channel < 1:
             raise ValueError(
                 f"channel={r.channel} ({r.name!r}): hardware channels are 1-based."
             )
+        for other in self._by_name.values():
+            if other.channel == r.channel:
+                raise ValueError(
+                    f"Duplicate channel {r.channel} ({r.name!r}); already held by "
+                    f"{other.name!r}."
+                )
         self._check_frequency(r)
         self._by_name[r.name] = r
-        self._by_channel[r.channel] = r.name
 
     # -- construction ---------------------------------------------------------
 
@@ -292,9 +286,7 @@ class ResonatorCatalog:
         return self._by_name[name]
 
     def __iter__(self) -> Iterator[Resonator]:
-        return iter(
-            [self._by_name[self._by_channel[ch]] for ch in sorted(self._by_channel)]
-        )
+        return iter(sorted(self._by_name.values(), key=lambda r: r.channel))
 
     def __len__(self) -> int:
         return len(self._by_name)
@@ -303,24 +295,10 @@ class ResonatorCatalog:
         return name in self._by_name
 
     def by_channel(self, channel: int) -> Resonator:
-        try:
-            return self._by_name[self._by_channel[channel]]
-        except KeyError:
-            raise KeyError(f"No resonator on channel {channel}.") from None
-
-    def biased(self) -> list[Resonator]:
-        return [r for r in self if r.bias is not None]
-
-    def clear_biases(self):
-        """Drop every operating point, returning the catalog to identity only.
-
-        Note this now discards the *only* frequency a resonator has, seed
-        included — after it, the catalog knows which detectors exist and what
-        channel each is on, and nothing about where they are. Re-seed from
-        ``find_resonances`` rather than expecting a sweep to resume.
-        """
-        for r in self:
-            r.bias = None
+        for r in self._by_name.values():
+            if r.channel == channel:
+                return r
+        raise KeyError(f"No resonator on channel {channel}.")
 
     def copy(self) -> ResonatorCatalog:
         """Deep copy. THE threading rule: workers operate on ``catalog.copy()``;
@@ -334,20 +312,12 @@ class ResonatorCatalog:
     # -- display --------------------------------------------------------------
 
     def __repr__(self) -> str:
-        head = (
-            f"ResonatorCatalog(module={self.module}, {len(self)} resonators, "
-            f"{len(self.biased())} biased)"
-        )
+        head = f"ResonatorCatalog(module={self.module}, {len(self)} resonators)"
         rows = [f"  {'name':<7}{'ch':>3}  {'bias MHz':>12}  {'amp':>7}"]
         for r in self:
-            b = r.bias
             rows.append(
                 f"  {r.name:<7}{r.channel:>3}  "
-                + (
-                    f"{b.frequency_hz / 1e6:>12.6f}  {b.amplitude:>7.4f}"
-                    if b
-                    else f"{'—':>12}  {'—':>7}"
-                )
+                f"{r.bias.frequency_hz / 1e6:>12.6f}  {r.bias.amplitude:>7.4f}"
             )
         return "\n".join([head] + rows)
 
@@ -363,7 +333,7 @@ class ResonatorCatalog:
                 {
                     "name": r.name,
                     "channel": r.channel,
-                    "bias": asdict(r.bias) if r.bias else None,
+                    "bias": asdict(r.bias),
                     "notes": dict(r.notes),
                 }
                 for r in self
@@ -381,7 +351,7 @@ class ResonatorCatalog:
             Resonator(
                 name=rd["name"],
                 channel=rd["channel"],
-                bias=BiasPoint(**rd["bias"]) if rd["bias"] else None,
+                bias=BiasPoint(**rd["bias"]),
                 notes=rd.get("notes", {}),
             )
             for rd in d["resonators"]
@@ -411,13 +381,12 @@ class ResonatorCatalog:
         w = csv.DictWriter(buf, fieldnames=self.CSV_COLUMNS, lineterminator="\n")
         w.writeheader()
         for r in self:
-            b = r.bias
             w.writerow(
                 {
                     "name": r.name,
                     "channel": r.channel,
-                    "bias_frequency_hz": f"{b.frequency_hz:.6f}" if b else "",
-                    "bias_amplitude": f"{b.amplitude:.6f}" if b else "",
+                    "bias_frequency_hz": f"{r.bias.frequency_hz:.6f}",
+                    "bias_amplitude": f"{r.bias.amplitude:.6f}",
                 }
             )
         return buf.getvalue()
@@ -439,23 +408,19 @@ class ResonatorCatalog:
         for lineno, row in enumerate(reader, start=2):
             bias_freq = (row["bias_frequency_hz"] or "").strip()
             bias_amp = (row["bias_amplitude"] or "").strip()
-            if bool(bias_freq) != bool(bias_amp):
+            if not bias_freq or not bias_amp:
                 raise ValueError(
-                    f"line {lineno}: bias_frequency_hz and bias_amplitude must "
-                    f"either both be given or both be blank."
+                    f"line {lineno}: bias_frequency_hz and bias_amplitude are both "
+                    f"required — every resonator has an operating point."
                 )
             try:
                 resonators.append(
                     Resonator(
                         name=row["name"],
                         channel=int(row["channel"]),
-                        bias=(
-                            BiasPoint(
-                                frequency_hz=float(bias_freq),
-                                amplitude=float(bias_amp),
-                            )
-                            if bias_freq
-                            else None
+                        bias=BiasPoint(
+                            frequency_hz=float(bias_freq),
+                            amplitude=float(bias_amp),
                         ),
                     )
                 )

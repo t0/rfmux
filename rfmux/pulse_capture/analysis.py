@@ -183,7 +183,7 @@ def pulse_summary(
     # Duration is trigger → below-threshold, NOT the length of the saved
     # window.  The window also holds the pre-trigger margin and whatever
     # tail the save policy kept, and under save_to_end_confirmed that
-    # tail runs until the leaky bucket is satisfied — a baseline
+    # tail runs until the end condition is confirmed: a baseline
     # property.  Measured on the mock at 19 kHz with tau=1 ms, identical
     # injected pulses gave windows spanning 3.2-17.8 ms while the
     # threshold crossings stayed inside 3.0-4.0 ms.  Deriving duration

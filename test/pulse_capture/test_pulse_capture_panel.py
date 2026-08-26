@@ -819,7 +819,7 @@ def test_both_mode_annotates_bands_per_stream(qt_app, tmp_path):
 
 
 def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
-    """Trigger and leaky-bucket points, so a wrong-looking capture can
+    """Trigger and end-confirmation points, so a wrong-looking capture can
     be read against the decisions that produced it."""
     import pyqtgraph as pg
 

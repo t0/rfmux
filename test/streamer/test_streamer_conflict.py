@@ -104,7 +104,7 @@ def test_the_read_probe_is_bounded_when_nothing_is_sending(free_port):
     not hasattr(socket, "SO_REUSEPORT"),
     reason="SO_REUSEPORT is POSIX-only; Windows has no equivalent")
 def test_the_probe_refuses_reuseport(free_port):
-    """The bind probe sets no socket options, and that is load-bearing.
+    """The bind probe deliberately sets no socket options.
 
     The streamer's own readers set SO_REUSEPORT. A probe that did the same
     would bind cheerfully alongside one and report the port free — the exact

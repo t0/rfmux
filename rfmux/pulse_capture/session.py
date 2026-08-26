@@ -202,11 +202,10 @@ class PulseCaptureConfig:
     #: costs disk, not acquisition.
     #:
     #: Off gives windows whose length tracks the pulse; on gives windows
-    #: whose length also tracks how long the leaky bucket took to be
-    #: satisfied, which depends on where the baseline was wandering.
-    #: Measured on the mock at 19 kHz, tau=1 ms, 238 pulses: the pulse
-    #: core spans 3.04-4.04 ms (1.3x), while end-confirmed windows span
-    #: 3.2-17.8 ms (5.6x) for the same injected pulse.
+    #: whose length also tracks how long the end confirmation took to be
+    #: satisfied, which depends on where the baseline was wandering.  On
+    #: the mock that widens the spread across identical injected pulses
+    #: from roughly 1.3x to 5.6x.
     #:
     #: Default on, because that variability is a property of the saved
     #: TAIL and no longer leaks into ``duration_ms`` (measured from the

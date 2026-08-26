@@ -785,7 +785,7 @@ class TestPulseCaptureSession:
         kwargs = dict(
             channels=[1],
             threshold_sigma=5.0,
-            # 1.5σ: the leaky-bucket end condition increments when BOTH
+            # 1.5σ: the end-confirmation count increments when BOTH
             # I and Q are within end_sigma.  At 1.0σ that probability is
             # ~0.47 on Gaussian noise (negative drift — termination only
             # by lucky random walk); at 1.5σ it is ~0.75 (prompt).
@@ -1466,9 +1466,9 @@ class TestRollingBaseline:
 
     def test_slow_drift_cannot_trigger_even_a_frozen_baseline(self):
         """Monotonic drift used to park the signal past threshold and
-        deadlock the engine mid-capture.  The edge gate now vetoes the
-        trigger outright — over one lookback the drift moves a fraction
-        of a σ — so nothing fires at all, stale baseline or not."""
+        deadlock the engine mid-capture.  The edge test now vetoes the
+        trigger: over one lookback the drift moves a fraction of a σ, so
+        nothing fires at all, stale baseline or not."""
         pcap, ns = _run(baseline_window=0, amp=15.0, monotonic=True)
         assert not pcap.state[1].capturing, \
             "the engine must never wedge mid-capture"
@@ -1488,7 +1488,7 @@ class TestRollingBaseline:
         stop truncates the capture at the ring's capacity and the edge
         gate keeps the parked signal from re-firing — exactly one
         flagged event.  Rolling baseline: the median walks to the new
-        level and the leaky bucket ends the capture normally, sooner."""
+        level and the end confirmation ends the capture normally, sooner."""
         def step(window):
             ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
                                        mean_Q=0.0, std_Q=1.0)}
@@ -1521,9 +1521,9 @@ class TestRollingBaseline:
             len(d["Amp_I"]), "baseline recovery should beat the hard stop"
         assert ns.mean_I == pytest.approx(15.0, abs=0.2)
 
-    def test_wander_never_triggers_with_the_edge_gate(self):
+    def test_wander_never_triggers_with_the_edge_test(self):
         """4σ wander crosses the threshold band repeatedly, but over one
-        edge lookback it moves ~0.2σ — the edge gate vetoes it at ANY
+        edge lookback it moves ~0.2σ, so the edge test vetoes it at ANY
         baseline window, including the frozen and too-slow ones that
         used to storm.  Suppression no longer depends on the median
         keeping up with the drift."""
@@ -1532,7 +1532,7 @@ class TestRollingBaseline:
             assert pcap.pulse_count[1] == 0, \
                 f"wander triggered at baseline_window={window}"
 
-    def test_edge_gate_off_restores_the_wander_storm(self):
+    def test_edge_test_off_restores_the_wander_storm(self):
         """Ties the suppression to the gate: amplitude-only triggering
         (edge_lookback=0, debug) still storms on a frozen baseline."""
         legacy, _ = _run(baseline_window=0, amp=4.0, edge_lookback=0)
@@ -1541,7 +1541,7 @@ class TestRollingBaseline:
     def test_a_pulse_riding_on_wander_still_triggers(self):
         pcap, _ = _run(baseline_window=1000, amp=4.0, pulse_at=8000)
         assert pcap.pulse_count[1] >= 1, \
-            "the edge gate must not eat real pulses"
+            "the edge test must not eat real pulses"
 
     def test_a_pulse_does_not_move_the_baseline(self):
         """The median ignores pulses outright rather than bounding their
@@ -2027,7 +2027,7 @@ class TestDecisionMarks:
     def test_window_ends_at_below_threshold_plus_tail(self):
         """With save_to_end_confirmed off, the saved window ends where
         the eye puts the end of the pulse — the below-threshold instant
-        plus a margin_fraction tail.  The leaky bucket only bounds the
+        plus a margin_fraction tail.  The end confirmation only bounds the
         state machine, so the end-confirmed mark sits well past the
         last saved sample."""
         d = self._run(save_to_end_confirmed=False)
@@ -2065,7 +2065,7 @@ class TestDecisionMarks:
     def test_duration_does_not_move_with_the_save_policy(self):
         """The reason the policy can default to on: duration measures
         the threshold crossings, so it describes the pulse and not how
-        long the leaky bucket took to be satisfied."""
+        long the end confirmation took to be satisfied."""
         ns = ChannelNoiseStats(mean_I=0.0, std_I=1.0,
                                mean_Q=0.0, std_Q=1.0)
         on = pulse_summary(self._run(), ns, threshold_sigma=5.0)

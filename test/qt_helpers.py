@@ -21,7 +21,7 @@ def spin(qt_app, seconds=0.05):
 def spin_until(qt_app, predicate, timeout=8.0):
     """Pump the event loop until *predicate* holds; True if it did.
 
-    The default timeout is load-bearing — several call sites rely on it,
+    Several call sites rely on the default timeout rather than passing one,
     and one passes it positionally.
     """
     deadline = time.monotonic() + timeout

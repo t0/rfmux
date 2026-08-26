@@ -277,7 +277,7 @@ class PulseCapture:
         Lag K of the edge detector, in samples.  None (the default)
         derives it from the ring: ~10% of the longest recordable pulse,
         far longer than any physical rise and far shorter than 1/f
-        wander.  0 disables the edge gate — amplitude-only triggering,
+        wander.  0 disables the edge test: amplitude-only triggering,
         for A/B debugging only.
     max_capture_samples : int, optional
         Hard stop: any capture reaching this length is saved as-is.  It
@@ -289,8 +289,11 @@ class PulseCapture:
         silently lose its rising edge.  0 disables the stop.
     """
 
-    # Minimum leaky-bucket end confirmation count — prevents premature
-    # termination on very short pulses or when margin_fraction is tiny.
+    # Floor under the end-confirmation count.  ``end_ptr_count`` counts up
+    # while both quadratures are settled and down when they are not, so an
+    # isolated noisy sample does not restart the confirmation.  Without a
+    # floor, a very short pulse or a tiny margin_fraction would end a
+    # capture almost as soon as it began.
     _MIN_END_SAMPLES: int = 10
 
     #: Entries kept for the rolling-baseline median.  Fixed, so cost and
@@ -363,27 +366,17 @@ class PulseCapture:
         self.noise_stats = noise_stats
 
         # ── Rolling baseline ──────────────────────────────────────
-        # Under 1/f the true baseline wanders away from the value fixed
-        # at training while sigma stays put, so deviations grow with no
-        # signal: triggers fire on drift, and the end condition can
-        # become unsatisfiable because the signal never comes back
-        # inside a band centred on a stale mean.
+        # 1/f drift moves the true baseline while sigma stays put, so a
+        # mean fixed at training turns quiet samples into deviations:
+        # triggers fire on the drift, and the end condition can become
+        # unsatisfiable because the signal never returns inside a band
+        # centred on a stale mean.
         #
-        # sigma and the mean want different things.  sigma is
-        # stationary and is measured from the long training record by a
-        # high-pass (diff/MAD) estimator that drift cannot corrupt.
-        # The mean is the part that moves, so it is re-estimated
-        # continuously as the MEDIAN of a window long compared with a
-        # pulse.
-        #
-        # The median, not a mean or a clamped average: it IGNORES
-        # pulses rather than merely bounding their pull, holding to
-        # ~0.15 sigma at 10% pulse duty and only breaking down near
-        # 50%.  Excluding flagged-pulse samples instead would be worse,
-        # not better — drift can park the signal outside the band, and
-        # a capture that can then never end would gate the update off
-        # permanently.  A plain median over everything has no such
-        # state and walks out of that on its own.
+        # sigma comes from the training record, via a diff/MAD estimator
+        # that drift cannot corrupt.  The mean is re-estimated as a
+        # running median over a window long compared with a pulse: a
+        # median because it ignores pulses rather than being pulled by
+        # them, holding to ~0.15 sigma at 10% pulse duty.
         self.baseline_window = max(0, int(baseline_window))
         # A fixed-size decimated reservoir keeps memory and refresh cost
         # constant however long the window is; every M-th sample
@@ -731,7 +724,7 @@ class PulseCapture:
                 edge_taps = (tap_vals_I, tap_vals_Q)
 
         # ── Trigger: amplitude AND edge ───────────────────────────
-        # With the edge gate the trigger can fire at any point in the
+        # With the edge test the trigger can fire at any point in the
         # above-threshold run, not only the sample that completed the
         # confirmation — a rise spread over several samples earns its
         # jump as it grows.  Without the edge detector (edge_lookback
@@ -775,7 +768,7 @@ class PulseCapture:
         # (A) **Return to baseline**: BOTH I and Q stay within end_sigma
         #     — of the tracked mean, or of the pre-pulse ANCHOR (the
         #     level this pulse rose from, baseline-free) — for
-        #     end_samples leaky-bucket counts.  Normal single-pulse.
+        #     end_samples confirmation counts.  Normal single-pulse.
         #
         # (B) **Pileup re-trigger**: the current pulse was seen decaying
         #     (below threshold, or a strong inward lag-K jump), and a
@@ -789,11 +782,10 @@ class PulseCapture:
         #     run forever while the ring silently wraps over the rising
         #     edge.  Worst case is now one max-pulse of dead time.
         #
-        # The leaky-bucket counter is robust to individual noisy samples
-        # that would otherwise reset the counter — critical for
-        # high-rate PFB data where Gaussian noise fluctuations frequently
-        # exceed 1.5σ on individual samples even during quiet inter-pulse
-        # periods.
+        # Counting down rather than resetting is what makes an isolated
+        # noisy sample harmless.  That matters most on the PFB stream,
+        # where Gaussian noise exceeds 1.5σ on individual samples even
+        # between pulses.
         if st.capturing:
             since_trig = st.ch_sample_n - (st.trig_abs or st.ch_sample_n)
             since_fire = st.ch_sample_n - st.fire_abs
@@ -902,7 +894,7 @@ class PulseCapture:
                     st.pileup_child = True
                 return
 
-            # ── Normal end: leaky-bucket baseline confirmation ────
+            # ── Normal end: baseline confirmation ─────────────────
             # Fed by either test: inside the end band of the tracked
             # mean, or back at the pre-pulse anchor.
             if returned or (dev_I < self.end_sigma
@@ -939,10 +931,9 @@ class PulseCapture:
         if pileup or core is None:
             # No below-threshold instant to anchor on: a split ends at
             # the split sample, and a hard stop that never saw the pulse
-            # end keeps everything it has.  Trim off the leaky-bucket
-            # confirmation count (less a 5-sample margin) so the window
-            # ends near where the signal settled, not where the bucket
-            # finished counting.
+            # end keeps everything it has.  Trim off the confirmation
+            # count (less a 5-sample margin) so the window ends near
+            # where the signal settled, not where the counter finished.
             post = raw_post - max(0, st.end_ptr_count - 5)
         elif self.save_to_end_confirmed:
             # Keep everything the state machine saw, confirmation tail
@@ -951,7 +942,7 @@ class PulseCapture:
             # at the below-threshold instant plus a small margin.
             #
             # It does make the window length depend on how long the
-            # leaky bucket took, which is a baseline property rather
+            # confirmation took, which is a baseline property rather
             # than a pulse property.  That is why duration is measured
             # from the threshold crossings (below_threshold_time -
             # trigger_time) and not from the length of this window.
@@ -965,10 +956,10 @@ class PulseCapture:
         else:
             # The pulse visibly ended at below-threshold (core samples
             # after the trigger).  Save margin_fraction of it as tail
-            # and drop the slow confirmation stretch — the leaky bucket
-            # (or the hard stop) only bounds the STATE MACHINE, it no
-            # longer stretches the data.  In particular a hard stop
-            # reached because drift stalled the bucket still saved a
+            # and drop the slow confirmation stretch: the confirmation
+            # count (or max_capture_samples) bounds the STATE MACHINE
+            # only, and no longer stretches the data.  A capture stopped
+            # because drift stalled the confirmation still holds a
             # complete pulse, so it is NOT flagged truncated.
             tail = max(self._MIN_END_SAMPLES,
                        int(self.margin_fraction * core))
@@ -1012,8 +1003,8 @@ class PulseCapture:
         # Under save_to_end_confirmed the end index is the last saved
         # sample.  Without it the index is normally PAST the window:
         # the data stops at below-threshold plus the tail margin while
-        # the state machine keeps running until the leaky bucket (or
-        # the hard stop) releases it.  Times are carried alongside the
+        # the state machine keeps running until the confirmation count
+        # (or max_capture_samples) releases it.  Times are carried alongside the
         # indices for exactly that reason.
         ts_all = self.buf[channel]["ts"].data()
         trigger_index = trig_fifo - start

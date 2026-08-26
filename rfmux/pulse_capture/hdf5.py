@@ -602,7 +602,7 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
     pulse_grp.attrs["truncated"] = bool(pulse_data.get("truncated", False))
     pulse_grp.attrs["n_samples"] = len(amp_I)
 
-    # Where the detector triggered and where the leaky bucket confirmed
+    # Where the detector triggered and where the end condition confirmed
     # the end — kept so a saved capture can be reviewed against the
     # decisions that produced it, not just its samples.
     for key in ("trigger_index", "end_index", "below_threshold_index",
@@ -620,7 +620,7 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
     # saved window while the duration_ms histogram beside it measured
     # trigger -> below-threshold, so one pulse read back as 4.72 ms or
     # 3.09 ms depending on which you asked.  Under save_to_end_confirmed
-    # the window also carries however long the leaky bucket took to be
+    # the window also carries however long the end confirmation took to be
     # satisfied, which is a property of the baseline, not the event.
     summary = pulse_summary(pulse_data, noise_stats, threshold_sigma)
     for key in ("peak_I", "peak_Q", "peak_amp", "snr", "duration_s",

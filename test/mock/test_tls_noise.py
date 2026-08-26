@@ -1,7 +1,7 @@
 """
 TLS 1/f noise generator: spectrum, common-mode behaviour, determinism.
 
-The common-mode test is the load-bearing one — the slow and PFB streams
+The common-mode test is the one that matters most: the slow and PFB streams
 must see the SAME wander at the same absolute time, since physically it
 is one resonator moving.
 """

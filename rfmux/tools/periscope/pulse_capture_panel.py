@@ -484,7 +484,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _annotate_decisions(self, plot, wf, t0, quad,
                             prefix="") -> None:
-        """Mark where the detector triggered and where the leaky bucket
+        """Mark where the detector triggered and where the end condition
         confirmed the end.
 
         Vertical lines rather than markers on the trace: the end point

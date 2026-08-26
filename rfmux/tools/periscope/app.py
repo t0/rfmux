@@ -65,7 +65,7 @@ from .main_plot_panel import MainPlotPanel
 from .session_manager import SessionManager
 from .session_browser_panel import SessionBrowserPanel
 from .session_startup_dialog import UnifiedStartupDialog
-from rfmux.core.transferfunctions import convert_roc_to_volts
+from rfmux.core.transferfunctions import convert_roc_to_volts, BASE_FREQUENCY
 from rfmux.mock import config as mc
 import datetime
 import time
@@ -1589,14 +1589,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     async def apply_bias_output(self, crs, module: int, amplitudes: list, bias_freqs : list,
                                 channels : list, phases : list) -> None:
     
-        BASE_BAND_STEP_HZ = 298.0232238769531 #### Taken from bias_kids.py
         if not bias_freqs:
             return
         nco_freq = await crs.get_nco_frequency(module=module)
         async with crs.tuber_context() as ctx:
             for i in range(len(amplitudes)):
 
-                quantized_bias = round(bias_freqs[i] / BASE_BAND_STEP_HZ) * BASE_BAND_STEP_HZ
+                quantized_bias = round(bias_freqs[i] / BASE_FREQUENCY) * BASE_FREQUENCY
 
                 ctx.set_frequency(quantized_bias - nco_freq, channel=channels[i], module=module)
                 

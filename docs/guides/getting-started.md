@@ -67,7 +67,7 @@ Crate                    # Physical crate containing CRS boards
         └── ReadoutChannel  # Individual channel (1-1024 per module)
 
 Wafer                    # Detector wafer
-└── Resonator            # Individual KID resonator
+└── HWMResonator         # Individual KID resonator (hardware-map row)
     └── ChannelMapping   # Maps resonators to readout channels
 ```
 
@@ -167,7 +167,7 @@ Custom YAML tags define hardware:
 
 - !Wafer
   name: "test_wafer"
-  resonators: !Resonators
+  hwm_resonators: !HWMResonators
     csv_file: "resonators.csv"
 
 - !ChannelMappings
@@ -178,8 +178,7 @@ Common tags:
 - `!HardwareMap` - Top-level hardware configuration
 - `!CRS` - CRS board definition
 - `!Wafer` - Detector wafer
-- `!Resonator` - Individual resonator
-- `!Resonators` - Bulk import from CSV
+- `!HWMResonators` - Bulk import of resonators from CSV
 - `!ChannelMappings` - Channel-to-resonator mappings from CSV
 - `!flavour "rfmux.mock"` - Enable mock mode
 

@@ -296,15 +296,15 @@ class ReadoutChannel(HWMResource):
         doc="Shortcut back to the CRS board",
     )
 
-    resonator = relationship(
-        "Resonator",
+    hwm_resonator = relationship(
+        "HWMResonator",
         secondary="channel_mappings",
         primaryjoin="ReadoutChannel._pk == ChannelMapping._readout_channel_pk",
-        secondaryjoin="ChannelMapping._resonator_pk == Resonator._pk",
+        secondaryjoin="ChannelMapping._hwm_resonator_pk == HWMResonator._pk",
         uselist=False,
         lazy="joined",
-        doc="Shortcut through channelmapping to associated resonator obj.",
-        overlaps="resonator,readout_channel",
+        doc="Shortcut through channelmapping to associated HWMResonator.",
+        overlaps="hwm_resonator,readout_channel",
     )
 
 
@@ -324,26 +324,36 @@ class Wafer(HWMResource):
 
     name = Column(String, nullable=False)  # eg DrkC
 
-    resonator = relationship(
-        "Resonator",
-        backref=backref("wafer", overlaps="resonators"),
+    hwm_resonator = relationship(
+        "HWMResonator",
+        backref=backref("wafer", overlaps="hwm_resonators"),
         collection_class=attribute_mapped_collection("name"),
         doc="""doc.""",
     )
 
-    resonators = relationship(
-        "Resonator",
+    hwm_resonators = relationship(
+        "HWMResonator",
         lazy="dynamic",
         query_class=HWMQuery,
-        doc="This is a SQLAlchemy subquery; you probably want 'resonator'",
-        overlaps="resonator",
+        doc="This is a SQLAlchemy subquery; you probably want 'hwm_resonator'",
+        overlaps="hwm_resonator",
     )
 
 
-class Resonator(HWMResource):
-    """Resonator keeps tabs on individual MKID resonators and their properties"""
+class HWMResonator(HWMResource):
+    """Hardware-map ORM row for an individual MKID resonator.
 
-    __tablename__ = "resonators"
+    Named ``HWMResonator`` to keep it distinct from
+    ``rfmux.core.resonators.Resonator``, the plain value object measurement
+    code passes around. This one is a database row: it is loaded from a
+    hardware-map YAML/CSV, lives in a session, and is joined to a
+    ``ReadoutChannel`` through ``ChannelMapping``. Everything named after the
+    class follows it: the ``!HWMResonators`` YAML tag, the ``hwm_resonators``
+    wafer key, the ``hwm_resonator`` column in a ChannelMappings CSV, and the
+    ``hwm_resonators`` table.
+    """
+
+    __tablename__ = "hwm_resonators"
     __mapper_args__ = {"polymorphic_identity": __package__, "polymorphic_on": "_cls"}
 
     def __repr__(self):
@@ -360,23 +370,23 @@ class Resonator(HWMResource):
     readout_channel = relationship(
         "ReadoutChannel",
         secondary="channel_mappings",
-        primaryjoin="ChannelMapping._resonator_pk == Resonator._pk",
+        primaryjoin="ChannelMapping._hwm_resonator_pk == HWMResonator._pk",
         secondaryjoin="ReadoutChannel._pk == ChannelMapping._readout_channel_pk",
         uselist=False,
         lazy="joined",
-        overlaps="resonator,readout_channel",
+        overlaps="hwm_resonator,readout_channel",
     )
 
 
 class ChannelMapping(HWMResource):
-    """ChannelMappings associate ReadoutChannels with Resonators"""
+    """ChannelMappings associate ReadoutChannels with HWMResonators"""
 
     __tablename__ = "channel_mappings"
     __table_args__ = ()
     __mapper_args__ = {"polymorphic_identity": __package__, "polymorphic_on": "_cls"}
 
     # def __repr__(self):
-    #     return "%s: ReadoutChannel: %r, Resonator: %r" % (self.__class__.__name__, self.readout_channel, self.resonator)
+    #     return "%s: ReadoutChannel: %r, HWMResonator: %r" % (self.__class__.__name__, self.readout_channel, self.hwm_resonator)
 
     _cls = Column(String)
     _pk = Column(Integer, primary_key=True)
@@ -384,24 +394,24 @@ class ChannelMapping(HWMResource):
     _readout_channel_pk = Column(
         Integer, ForeignKey("readout_channels._pk"), index=True
     )
-    _resonator_pk = Column(Integer, ForeignKey("resonators._pk"), index=True)
+    _hwm_resonator_pk = Column(Integer, ForeignKey("hwm_resonators._pk"), index=True)
 
     def __repr__(self):
         return f"""{self.__class__.__name__}:
             ReadoutChannel: {self.readout_channel}
-            Resonator:      {self.resonator}"""
+            HWMResonator:   {self.hwm_resonator}"""
 
     readout_channel = relationship(
         "ReadoutChannel",
         backref=backref(
-            "channel_map", uselist=False, overlaps="resonator,readout_channel"
+            "channel_map", uselist=False, overlaps="hwm_resonator,readout_channel"
         ),
     )
 
-    resonator = relationship(
-        "Resonator",
+    hwm_resonator = relationship(
+        "HWMResonator",
         backref=backref(
-            "channel_map", uselist=False, overlaps="resonator,readout_channel"
+            "channel_map", uselist=False, overlaps="hwm_resonator,readout_channel"
         ),
     )
 

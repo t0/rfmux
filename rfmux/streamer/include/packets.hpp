@@ -185,8 +185,15 @@ namespace packets {
 
 		struct Stats {
 			uint64_t packets_received = 0;
+			// Queue overflow: the consumer could not keep up.
 			uint64_t packets_dropped = 0;
+			// Discontinuity EVENTS in the sequence numbers. One burst
+			// of a thousand lost packets counts once, so this measures
+			// how bursty the loss is, not how much of it there is.
 			uint64_t sequence_gaps = 0;
+			// Packets that never arrived, counted individually. This is
+			// the one to compare against packets_received.
+			uint64_t packets_missing = 0;
 			uint32_t last_seq = 0;
 		};
 
@@ -238,6 +245,20 @@ namespace packets {
 		size_t reorder_window_;
 		size_t queue_max_size_;
 		size_t flush_threshold_;
+
+		// recvmmsg scratch, allocated once and reused. Built per call
+		// it cost batch_size * max_packet_size of allocation EVERY
+		// call -- 17 MB at batch_size 2048 -- which is what kept the
+		// batch small, which in turn made the receive thread reacquire
+		// the GIL every few packets and lose half the stream under
+		// load. Only ever touched by the single thread that calls
+		// receive_batch.
+#ifdef __linux__
+		std::vector<struct mmsghdr> rx_msgs_;
+		std::vector<struct iovec> rx_iovecs_;
+		std::vector<std::vector<char>> rx_buffers_;
+		size_t rx_capacity_ = 0;
+#endif
 
 		using QueueKey = std::tuple<uint16_t, uint8_t>;
 

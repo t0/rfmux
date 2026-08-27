@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Simple script demonstrating the periscope algorithm control flow.
-This script executes the complete measurement sequence:
+Unattended tuning run: bias a set of KIDs and measure their noise.
+
+Executes the complete measurement sequence:
 1. Initialize
 2. Network analysis
 3. Unwrap cable delay
@@ -10,7 +11,13 @@ This script executes the complete measurement sequence:
 6. Do fitting
 7. Bias the kids
 8. Get slow samples
-9. Get PFB samples (only for real boards)
+9. Get PFB samples
+
+For what any of these steps mean, what the parameters do and what the
+data looks like at each stage, open simplified_tuning_flow.md in this
+folder as a notebook (double-click it in the Jupyter panel Periscope
+launches; in your own JupyterLab, right-click -> Open With -> Notebook).
+It is the documentation; this is the runner.
 
 Usage:
     python simplified_tuning_flow.py MOCK         # Run with mock CRS
@@ -29,6 +36,7 @@ from rfmux.core.transferfunctions import fit_cable_delay, calculate_new_cable_le
 from rfmux.algorithms.measurement.fitting import find_resonances, fit_skewed_multisweep
 from rfmux.algorithms.measurement.fitting_nonlinear import fit_nonlinear_iq_multisweep
 from rfmux.algorithms.measurement.bias_kids import bias_kids
+from rfmux.streamer import find_streamer_conflict
 
 # Import mock mode support
 from rfmux.mock.helpers import create_mock_crs
@@ -97,7 +105,16 @@ async def main(serial="MOCK"):
         'channel': None,
         'module': MODULE
     }
-    
+
+    # Simulated detectors, used only when serial is "MOCK".  Placed in the
+    # network-analysis band above so the sweep can actually find them.
+    MOCK_CONFIG = {
+        'num_resonances': 10,
+        'freq_start': 0.6e9,  # 600 MHz - within network analysis range
+        'freq_end': 1.0e9,    # 1 GHz - within network analysis range
+        'resonator_random_seed': 42,  # same resonators every run
+    }
+
     is_mock = serial.upper() == "MOCK"
     
     print("="*60)
@@ -106,35 +123,46 @@ async def main(serial="MOCK"):
     print(f"Serial: {serial}")
     print(f"Started at: {datetime.now()}")
     print("="*60)
-    
+
+    crs = None
     try:
         # Step 1: Initialize CRS connection
         print("\n1. Initializing CRS...")
         
         if is_mock:
-            # Use mock CRS with simulated resonators
+            # Refuse to be the second simulation on the port. Mock streamers
+            # all send to 127.0.0.1:9876, so a reader gets both interleaved
+            # and every number below is quietly wrong.
+            conflict = find_streamer_conflict()
+            if conflict:
+                raise RuntimeError(
+                    f"refusing to start a simulation — {conflict}. "
+                    "Stop whatever is streaming (a Periscope in mock mode, "
+                    "another run of this script, a mock server left behind "
+                    "by a crashed process) and try again.")
+
+            # Use mock CRS with simulated resonators.  Only keys that exist
+            # in rfmux.mock.config.MOCK_DEFAULTS do anything — apply_overrides
+            # accepts unknown ones silently, so a typo or a parameter that
+            # was never implemented reads as configuration and is not.
             crs = await create_mock_crs(
                 module=MODULE,
-                config={
-                    'num_resonances': 10,  # More resonances for testing
-                    'freq_start': 0.6e9,  # 600 MHz - within network analysis range
-                    'freq_end': 1.0e9,    # 1 GHz - within network analysis range
-                    'enable_bifurcation': False,  # Disable for simpler testing
-                    'q_min': 5e3,  # Lower Q for easier detection
-                    'q_max': 5e4,
-                    'resonator_random_seed': 42 # making sure it is the same resonantor everytime
-                },
+                config=MOCK_CONFIG,
                 verbose=True
             )
-            
+
             # For mock mode, we don't need to set timestamp port
             await crs.clear_channels(module=MODULE)
             print("   ✓ Mock CRS initialized with simulated resonators")
-            
-            # Run the algorithm flow with mock CRS
+
+            # Run the algorithm flow with mock CRS.  The resonator count is
+            # known here, so the run can check its own findings.
             await run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
-                                   MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS)
-            
+                                   MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS,
+                                   expected_resonances=MOCK_CONFIG['num_resonances'],
+                                   collect_pfb=True, pfb_samples=20_000,
+                                   is_mock=True)
+
         else:
             # Use real hardware - load session with serial number
             session = rfmux.load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')
@@ -152,23 +180,52 @@ async def main(serial="MOCK"):
             # Clear channels
             await crs.clear_channels(module=MODULE)
             print("   ✓ Channels cleared")
-            
-            # Run the algorithm flow
+
+            # Run the algorithm flow.  No expected_resonances: how many a
+            # real array has is what the sweep is there to find out.
             await run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
-                                   MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS)
+                                   MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS,
+                                   collect_pfb=True)
             
     except Exception as e:
         print(f"\n❌ Error occurred: {type(e).__name__}: {str(e)}")
         import traceback
         traceback.print_exc()
         return 1
-    
+    finally:
+        # Stop the simulation this script started. Irrelevant when it is run
+        # as a script — the process exits and takes the streamer with it —
+        # but main() is also awaited in-process by the test suite, and a mock
+        # left streaming to 127.0.0.1:9876 then interleaves with whatever
+        # simulation the next test creates. Both send valid packets to the
+        # same port, so the reader mixes two detectors with nothing raised.
+        if is_mock and crs is not None:
+            try:
+                await crs.stop_udp_streaming()
+            except Exception:
+                pass
+
     return 0
 
 
-async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS, 
-                           MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS, full_run = True):
-    """Run the complete algorithm flow with the given CRS instance."""
+async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
+                           MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS, full_run = True,
+                           *, expected_resonances=None, collect_pfb=False,
+                           pfb_samples=100_000, is_mock=False):
+    """Run the complete algorithm flow with the given CRS instance.
+
+    expected_resonances : int, optional
+        Number of resonances the array is known to have — only true of a
+        simulation, where it is the whole point of checking. Left None on
+        real hardware, where the count is the measurement, not a given.
+    collect_pfb : bool
+        Run step 9. Off by default so partial flows (and tests driving
+        this with mocks) stop after the slow-stream noise.
+    is_mock : bool
+        Label the PFB numbers as synthetic. MockCRS.get_pfb_samples
+        returns uniform noise rather than simulated detector output, so
+        the step exercises the call and nothing more.
+    """
     
     # Step 2: Network Analysis
     print("\n2. Performing network analysis...")
@@ -217,9 +274,12 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     resonance_frequencies = resonance_result['resonance_frequencies']
     resonance_details = resonance_result['resonances_details']
 
-    if full_run:
-        assert len(resonance_frequencies) == 10
-    
+    if full_run and expected_resonances is not None:
+        assert len(resonance_frequencies) == expected_resonances, (
+            f"found {len(resonance_frequencies)} resonances, expected "
+            f"{expected_resonances} — the sweep or the detection "
+            f"parameters have drifted")
+
     print(f"   ✓ Found {len(resonance_frequencies)} resonances:")
     for i, (freq, details) in enumerate(zip(resonance_frequencies, resonance_details)):
         print(f"     {i+1}: {freq/1e6:.3f} MHz, Q≈{details['q_estimated']:.0f}, depth={details['prominence_db']:.1f} dB")
@@ -338,16 +398,19 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
         print(f"   Channel {i+1}: Frequency Bandwidth = {max(freq_iq):.3f} Hz, Min dsb frequency = {min(freq_dsb):.3f} Hz, Max dsb frequency = {max(freq_dsb):.3f} Hz")
         print(f"                  Mean I spectrum power = {mean_psd_i:.3f} dBm/Hz, Mean Q spectrum power = {mean_psd_q:.3f} dBm/Hz\n")
 
-    #### Step 9. PFB noise spectrum 
-    if crs.serial == "0000":
-        print("\nSkipping PFB noise samples for the mock mode")
+    #### Step 9. PFB noise spectrum
+    if not collect_pfb:
+        print("\nSkipping PFB noise samples (collect_pfb=False)")
     else:
-        print("\n9. Collecting 100000 PFB noise samples....")
+        print(f"\n9. Collecting {pfb_samples} PFB noise samples....")
+        if is_mock:
+            print("   ! Simulated PFB samples are uniform noise, not detector"
+                  " output — the spectra below measure nothing physical.")
 
         for i in range(num_res):
-            pfb_data = await crs.py_get_pfb_samples(100_000,
+            pfb_data = await crs.py_get_pfb_samples(pfb_samples,
                                                     channel = i + 1,
-                                                    module = 1,
+                                                    module = MODULE,
                                                     binlim = 1e6,
                                                     trim = False,
                                                     nsegments = 5,

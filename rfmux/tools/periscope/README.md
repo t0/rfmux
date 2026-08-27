@@ -163,5 +163,3 @@ When extending or modifying Periscope:
 3. Keep UI operations on the main thread
 4. Implement proper error handling and user feedback
 5. Maintain consistent documentation and type annotations
-
-See the Memory Bank system patterns documentation for detailed coding guidelines.

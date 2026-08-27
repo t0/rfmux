@@ -1,14 +1,15 @@
 from importlib import util
 from pathlib import Path
 import pytest
+
 import asyncio
 import numpy as np
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 import sys
 import os
 
-# point to the repo root if your test lives elsewhere
-demo_path = Path(__file__).resolve().parents[1] / "rfmux" / "reference-notebooks" / "Demos" / "simplified_tuning_flow.py"
+# parents[2] is the repo root: test/algorithms/<this file>
+demo_path = Path(__file__).resolve().parents[2] / "rfmux" / "reference-notebooks" / "Demos" / "simplified_tuning_flow.py"
 
 spec = util.spec_from_file_location("simplified_tuning_flow", demo_path)
 simplified_tuning_flow = util.module_from_spec(spec)
@@ -19,10 +20,16 @@ run_algorithm_flow = simplified_tuning_flow.run_algorithm_flow
 sys.modules["simplified_tuning_flow"] = simplified_tuning_flow
 
 class TestIntegration:
-    """Full integration tests."""
-    
+    """Full integration tests.
+
+    Only this class spawns a MockCRS server (~21 s), so slow_acquisition
+    belongs here rather than at module scope: TestSimpleTuningFlow below
+    drives the flow with AsyncMock and runs in single-digit milliseconds.
+    """
+
+    pytestmark = pytest.mark.slow_acquisition
+
     @pytest.mark.asyncio
-    @pytest.mark.integration
     async def test_mock_mode_execution(self):
         """Test that mock mode executes without errors."""
         print("\n=== Testing mock mode execution ===")

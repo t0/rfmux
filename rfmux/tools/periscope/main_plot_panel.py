@@ -71,7 +71,7 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Add plot type checkboxes
         for cb in (self.periscope.cb_time, self.periscope.cb_iq, self.periscope.cb_fft, 
-                   self.periscope.cb_ssb, self.periscope.cb_dsb):
+                   self.periscope.cb_ssb, self.periscope.cb_dsb, self.periscope.cb_hist):
             toolbar_layout.addWidget(cb)
         toolbar_layout.addStretch(1)
         
@@ -90,6 +90,8 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
         action_buttons_layout.addWidget(self.periscope.btn_load_multi)
         action_buttons_layout.addWidget(self.periscope.btn_load_bias)
         action_buttons_layout.addWidget(self.periscope.btn_noise_spec)
+        action_buttons_layout.addWidget(self.periscope.btn_pulse_capture)
+        action_buttons_layout.addWidget(self.periscope.btn_streamer_cfg)
         action_buttons_layout.addWidget(self.periscope.btn_toggle_cfg)
         
         # Add mock-specific buttons if in mock mode

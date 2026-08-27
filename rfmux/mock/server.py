@@ -4,7 +4,9 @@ Handles the mock server setup, process management, and request handling for Tube
 """
 import asyncio
 import json
+import os
 import socket
+import time
 import multiprocessing
 from aiohttp import web
 import atexit
@@ -15,12 +17,83 @@ import numpy as np
 from .crs import ServerMockCRS
 # Import BaseCRS for type hinting or direct use if necessary
 from ..core.schema import CRS as BaseCRS
-import sys
 
 # DO NOT import algorithms on the server side
 # Algorithms should only run on the client side
 
 mp_ctx = multiprocessing.get_context()
+
+# Every mock session started in this interpreter, so they can be shut down
+# together at exit rather than one handler at a time.
+#
+# The per-session version of this registered its own atexit hook doing
+# terminate() + join(2.0) and possibly kill() + join(2.0). That is bounded per
+# server but not in aggregate: atexit runs handlers sequentially, so a pytest
+# session with ~20 mock sessions could spend well over a minute exiting, all of
+# it after the last test reported. The process holds its streamer sockets for
+# that whole stretch, and because get_multicast_socket() sets SO_REUSEPORT the
+# next run joins the same multicast group instead of failing to bind — so a slow
+# exit silently corrupts whatever starts next.
+#
+# Terminating every server first and only then waiting turns N x timeout into
+# one timeout, because the waits overlap.
+_server_processes: "list" = []
+_shutdown_done = False
+
+# Per-server grace period for a clean exit before SIGKILL. Applied to the whole
+# fleet as one deadline, not per process.
+_SHUTDOWN_GRACE_S = 2.0
+
+
+def _shutdown_all_servers():
+    """Terminate every mock server process, then wait against one deadline."""
+    global _shutdown_done
+    if _shutdown_done:
+        return
+    _shutdown_done = True
+
+    alive = [p for p in _server_processes if p.is_alive()]
+    if not alive:
+        return
+
+    print(f"[MockCRS] Shutting down {len(alive)} server process(es)...")
+
+    # Ask them all to stop before waiting on any of them; the grace periods
+    # then run concurrently instead of stacking up.
+    for p in alive:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+    deadline = time.monotonic() + _SHUTDOWN_GRACE_S
+    for p in alive:
+        try:
+            p.join(timeout=max(0.0, deadline - time.monotonic()))
+        except Exception:
+            pass
+
+    # Anything still up after the shared grace period gets killed, again
+    # all-then-wait.
+    stubborn = [p for p in alive if p.is_alive()]
+    if stubborn:
+        print(f"[MockCRS] Force killing {len(stubborn)} server process(es)...")
+        for p in stubborn:
+            try:
+                p.kill()
+            except Exception:
+                pass
+        deadline = time.monotonic() + _SHUTDOWN_GRACE_S
+        for p in stubborn:
+            try:
+                p.join(timeout=max(0.0, deadline - time.monotonic()))
+            except Exception:
+                pass
+
+    print("[MockCRS] Server shutdown complete")
+
+
+atexit.register(_shutdown_all_servers)
 
 
 def yaml_hook(hwm):
@@ -64,30 +137,11 @@ def yaml_hook(hwm):
     p.start()
     l.acquire()
 
-    def cleanup_server_process():
-        """Properly shutdown the MockCRS server process"""
-        if p.is_alive():
-            print("[MockCRS] Shutting down server process...")
-            # First try graceful termination
-            p.terminate()
-            try:
-                # Wait up to 5 seconds for graceful shutdown
-                p.join(timeout=2.0)
-            except:
-                pass
-
-            # If still alive, force kill
-            if p.is_alive():
-                print("[MockCRS] Force killing server process...")
-                p.kill()
-                try:
-                    p.join(timeout=2.0)
-                except:
-                    pass
-
-            print("[MockCRS] Server process shutdown complete")
-
-    atexit.register(cleanup_server_process)
+    # Shutdown is handled by the single _shutdown_all_servers() hook registered
+    # at import, not by a per-session atexit handler: see the note there for why
+    # N sequential handlers made the interpreter linger with its streamer
+    # sockets open.
+    _server_processes.append(p)
 
     # In the client process, we do not need the sockets -- in fact, we don't
     # want a reference hanging around.
@@ -106,6 +160,19 @@ class ServerProcess(mp_ctx.Process):
         super().__init__()
 
     def run(self):
+        # Undo any CPU pinning inherited across fork().  Periscope pins
+        # its GUI thread to a single core (periscope/utils.py
+        # pin_current_thread_to_core) BEFORE this process is forked, and
+        # fork inherits the affinity mask — which would confine the
+        # whole simulation, streamer thread and every numba worker, to
+        # one core.  The pin is meant for the Qt event loop, not for a
+        # compute-bound child.
+        try:
+            n_cpus = os.cpu_count() or 1
+            os.sched_setaffinity(0, set(range(n_cpus)))
+        except (AttributeError, OSError):
+            pass  # not Linux, or not permitted — harmless
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 

@@ -268,8 +268,18 @@ namespace packets {
 		uint32_t seq = packet.seq();
 		if (stats_.packets_received > 0 && stats_.last_seq != 0) {
 			uint32_t expected_seq = stats_.last_seq + 1;
-			if (seq != expected_seq)
+			if (seq != expected_seq) {
 				stats_.sequence_gaps++;
+				// Unsigned subtraction wraps, so a counter rollover
+				// still yields the true distance. A reordered or
+				// duplicated packet looks like a gap of nearly 2^32
+				// instead; the reorder window already handles ordering,
+				// so treat anything in the top half as "not a loss"
+				// rather than adding billions to the tally.
+				uint32_t missing = seq - expected_seq;
+				if (missing < (1u << 31))
+					stats_.packets_missing += missing;
+			}
 		}
 		stats_.last_seq = seq;
 		stats_.packets_received++;
@@ -321,24 +331,30 @@ namespace packets {
 		const size_t MAX_PACKET_SIZE = type_->max_size();
 		size_t packets_received = 0;
 #ifdef __linux__
-		// Linux: use recvmmsg for batch reception
-		std::vector<struct mmsghdr> msgs(batch_size);
-		std::vector<struct iovec> iovecs(batch_size);
-		std::vector<std::vector<char>> buffers(batch_size);
-
-		// Setup buffers
-		for (size_t i = 0; i < batch_size; i++) {
-			buffers[i].resize(MAX_PACKET_SIZE);
-			iovecs[i].iov_base = buffers[i].data();
-			iovecs[i].iov_len = MAX_PACKET_SIZE;
-			msgs[i].msg_hdr.msg_iov = &iovecs[i];
-			msgs[i].msg_hdr.msg_iovlen = 1;
-			msgs[i].msg_hdr.msg_name = nullptr;
-			msgs[i].msg_hdr.msg_namelen = 0;
-			msgs[i].msg_hdr.msg_control = nullptr;
-			msgs[i].msg_hdr.msg_controllen = 0;
-			msgs[i].msg_hdr.msg_flags = 0;
+		// Linux: use recvmmsg for batch reception. The scratch grows
+		// to the largest batch ever asked for and is then reused;
+		// rebuilding it per call is pure allocation, and it dominates
+		// at low packet rates where each call returns one packet.
+		if (batch_size > rx_capacity_) {
+			rx_msgs_.resize(batch_size);
+			rx_iovecs_.resize(batch_size);
+			rx_buffers_.resize(batch_size);
+			for (size_t i = 0; i < batch_size; i++) {
+				rx_buffers_[i].resize(MAX_PACKET_SIZE);
+				rx_iovecs_[i].iov_base = rx_buffers_[i].data();
+				rx_iovecs_[i].iov_len = MAX_PACKET_SIZE;
+				rx_msgs_[i].msg_hdr.msg_iov = &rx_iovecs_[i];
+				rx_msgs_[i].msg_hdr.msg_iovlen = 1;
+				rx_msgs_[i].msg_hdr.msg_name = nullptr;
+				rx_msgs_[i].msg_hdr.msg_namelen = 0;
+				rx_msgs_[i].msg_hdr.msg_control = nullptr;
+				rx_msgs_[i].msg_hdr.msg_controllen = 0;
+				rx_msgs_[i].msg_hdr.msg_flags = 0;
+			}
+			rx_capacity_ = batch_size;
 		}
+		auto& msgs = rx_msgs_;
+		auto& buffers = rx_buffers_;
 
 		// Receive batch
 		struct timespec *timeout_ptr = nullptr;

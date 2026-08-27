@@ -4,11 +4,8 @@ Mock CRS Device - Core MockCRS class definition, state, and methods.
 import asyncio
 import numpy as np
 from enum import Enum
-from datetime import datetime
-import contextlib
 import atexit
 import weakref
-import dataclasses
 import time
 import threading
 
@@ -19,7 +16,6 @@ from ..core.schema import CRS as BaseCRS
 from .resonator_model import MockResonatorModel
 from .udp_streamer import MockUDPManager
 
-from tuber.codecs import TuberResult
 from ..streamer import LONG_PACKET_CHANNELS, SHORT_PACKET_CHANNELS, Timestamp, TimestampSource
 
 _mock_crs_instances = weakref.WeakSet()
@@ -249,6 +245,11 @@ class ServerMockCRS:
         self._hmc7044_registers = {}
         self._cable_lengths = {}
 
+        # PFB streaming state (independent of slow readout streamer)
+        self._pfb_streaming_enabled = False
+        self._pfb_channels = []   # Up to 4 channel numbers
+        self._pfb_module = None   # Module being PFB-streamed
+
         # Store physics configuration
         from .config import defaults
         self._physics_config = defaults()
@@ -273,19 +274,6 @@ class ServerMockCRS:
             for key in [k for k in store.keys() if k[1] > max_channels]:
                 store.pop(key, None)
 
-    def channels_per_module(self):
-        if self._short_packets:
-            return SHORT_PACKET_CHANNELS
-        else:
-            return LONG_PACKET_CHANNELS
-
-
-    def _prune_channels_over_limit(self):
-        max_channels = self.channels_per_module()
-        for store in (self._frequencies, self._amplitudes, self._phases):
-            for key in [k for k in store.keys() if k[1] > max_channel]:
-                store.pop(key, None)
-    
     async def generate_resonators(self, config=None):
         """Generate/regenerate resonators with current or provided parameters."""
         try:
@@ -318,9 +306,54 @@ class ServerMockCRS:
             traceback.print_exc()
             raise
 
+    def _find_s21_dip_frequency(self, nominal_freq, amplitude=0.01, search_width=10e6, n_points=2000):
+        """Find the actual S21 transmission minimum near a nominal resonance frequency.
+
+        ``compute_fr()`` returns the impedance resonance (where Im(Z_total) = 0),
+        but the S21 *transmission minimum* is shifted from that by the coupling
+        to the external circuit (attenuator, feedline, LNA).  This method sweeps
+        |S21(f)| over a window around ``nominal_freq`` and returns the frequency
+        of the deepest dip.
+
+        Parameters
+        ----------
+        nominal_freq : float
+            Center of the search window (Hz) — typically ``compute_fr()``.
+        amplitude : float
+            Probe amplitude for S21 evaluation.
+        search_width : float
+            Half-width of the search window (Hz).  Default ±10 MHz.
+        n_points : int
+            Number of frequency points to sweep.
+
+        Returns
+        -------
+        float
+            Frequency (Hz) of the S21 transmission minimum.
+        """
+        from .resonator_model import MockResonatorModel
+        import numpy as _np
+
+        model: MockResonatorModel = self._resonator_model
+        freqs = _np.linspace(nominal_freq - search_width, nominal_freq + search_width, n_points)
+        s21_mag = _np.zeros(n_points)
+
+        for idx, f in enumerate(freqs):
+            s21_val = model.s21_lc_response(f, amplitude)
+            s21_mag[idx] = abs(s21_val)
+
+        min_idx = _np.argmin(s21_mag)
+        dip_freq = freqs[min_idx]
+        return float(dip_freq)
+
     async def _auto_bias_kids(self, config, resonance_frequencies, amplitude=None):
         """Automatically configure channels at resonator frequencies (bias KIDs).
-        
+
+        For each resonator the bias frequency is set to the actual S21
+        transmission minimum rather than the impedance resonance returned by
+        ``compute_fr()``.  The two can differ by ~1 MHz due to the coupling
+        geometry (Cc, attenuator, LNA impedance).
+
         Parameters
         ----------
         config : dict
@@ -347,8 +380,16 @@ class ServerMockCRS:
             for i, freq_Hz in enumerate(resonance_frequencies[:chan_limit]):
                 channel = i + 1  # Channels are 1-indexed
                 
-                # Set frequency relative to NCO
-                relative_freq = freq_Hz - nco_freq
+                # Find the actual S21 dip frequency (may differ from compute_fr()
+                # by ~1 MHz due to coupling-induced shift)
+                dip_freq = self._find_s21_dip_frequency(freq_Hz, amplitude)
+                offset = dip_freq - freq_Hz
+                if abs(offset) > 1e3:  # Only log if shift > 1 kHz
+                    print(f"[MockCRS]   Ch {channel}: compute_fr={freq_Hz/1e9:.6f} GHz, "
+                          f"S21 dip={dip_freq/1e9:.6f} GHz (Δ={offset/1e6:+.3f} MHz)")
+
+                # Set frequency relative to NCO using the actual S21 dip
+                relative_freq = dip_freq - nco_freq
                 
                 # Configure the channel
                 await self.set_frequency(relative_freq, channel=channel, module=module)
@@ -484,7 +525,13 @@ class ServerMockCRS:
             raise ValueError(f"Invalid rail '{rail}'. Must be one of {list(self.RAIL_DICT.values())}")
         return self._rails.get(rail, {}).get("current")
 
-    async def set_decimation(self, stage: int = 6, short: bool = False, module: int | list[int] | None = None):
+    async def set_decimation(self, stage: int = 6, short: bool = False,
+                             module: int | list[int] | None = None,
+                             *, _bandwidth_derating: float = 0.8):
+        # Signature mirrors firmware r1.6.x exactly.  r1.5.6 spelled the
+        # third argument 'modules'; accepting both here is what let the
+        # old spelling survive in callers that only ever ran against the
+        # mock, so don't add the alias back.
         assert isinstance(stage, int) and 0 <= stage <= 6
         if module is None:
             module = list(self._active_modules)
@@ -493,10 +540,12 @@ class ServerMockCRS:
         if (not isinstance(module, list) or not all(isinstance(m, int) for m in module)
                 or not set(module) <= set(self._active_modules)):
             raise ValueError("Invalid 'module' argument to set_decimation!")
-        if (stage <= 3) and (short == False):
+        # Real hardware accepts long packets from stage 3 up
+        # (test_spotcheck.py exercises short=False for stages 3-6).
+        if (stage <= 2) and (short == False):
             raise ValueError(
                 f"Decimation stage {stage} requires short=True (128 channels). "
-                f"Long packets (1024 channels) are only supported for decimation stages >= 4."
+                f"Long packets (1024 channels) are only supported for decimation stages >= 3."
             )
         self._fir_stage = stage
         self._short_packets = short
@@ -505,8 +554,10 @@ class ServerMockCRS:
     async def get_decimation(self):
         return None if len(self._streamed_modules) == 0 else self._fir_stage
 
-    async def set_analog_bank(self, high_bank: bool):
-        self._high_bank = bool(high_bank)
+    async def set_analog_bank(self, high: bool):
+        # Firmware spells this 'high' (see test/core/test_spotcheck.py and
+        # rfmux/tools/qc/, both of which only ever run against a board).
+        self._high_bank = bool(high)
 
     async def get_analog_bank(self):
         return bool(self.__dict__.get("_high_bank", False))
@@ -535,7 +586,12 @@ class ServerMockCRS:
             max_val = 2 ** 23 - 1
             i_vals = np.random.randint(-max_val - 1, max_val + 1, num_samples).tolist()
             q_vals = np.random.randint(-max_val - 1, max_val + 1, num_samples).tolist()
-        return list(zip(i_vals, q_vals))
+        # Separate i/q lists, like get_fast_samples below: tuber turns the
+        # dict into an attribute-access result, which is the shape every
+        # caller reaches this through (py_get_pfb_samples reads .i/.q).
+        # Zipped (i, q) pairs raised AttributeError instead, so the mock
+        # had no working PFB path at all.
+        return {"i": i_vals, "q": q_vals}
 
     async def get_fast_samples(self, num_samples, units=Units.NORMALIZED, module=1):
         assert isinstance(num_samples, int) and num_samples > 0
@@ -666,7 +722,7 @@ class ServerMockCRS:
         fs = 625e6 / 256 / 64 / (2 ** fir_stage)
         t_list = (np.arange(num_samples) / fs).tolist()
 
-        cfg = self._physics_config if hasattr(self, 'physics_config') else {}
+        cfg = getattr(self, '_physics_config', {}) or {}
         scale_factor = cfg.get('scale_factor', 2 ** 21)
         noise_level = cfg.get('udp_noise_level', 10.0)
         current_time = time.time() - self.mock_start_time
@@ -803,7 +859,9 @@ class ServerMockCRS:
             streamer.get_local_ip = original_get_local_ip
 
     # --- UDP Streaming Control ---
-    async def start_udp_streaming(self, host='127.0.0.1', port=9876):
+    async def start_udp_streaming(self, host=None, port=9876):
+        # host=None: multicast if this machine can, loopback unicast
+        # if it cannot. See select_stream_destination.
         return await self._udp_manager.start_udp_streaming(host, port)
 
     async def stop_udp_streaming(self):
@@ -812,9 +870,47 @@ class ServerMockCRS:
     async def get_udp_streaming_status(self):
         return self._udp_manager.get_udp_streaming_status()
 
+    # --- PFB Streaming Control (independent of slow readout streamer) ---
+    async def set_pfb_streamer(self, channel=None, module=1):
+        """Enable or disable PFB streaming for up to 4 channels.
+
+        This is independent of the slow readout streamer — both can run
+        simultaneously, mirroring real hardware capabilities.
+
+        Parameters
+        ----------
+        channel : None | int | list[int]
+            Channel(s) to stream via PFB. Pass ``None`` to disable.
+            Maximum of 4 channels.
+        module : int
+            Module index (1-based).
+        """
+        if channel is None:
+            # Disable PFB streaming
+            self._pfb_streaming_enabled = False
+            self._pfb_channels = []
+            self._pfb_module = None
+            await self._udp_manager.stop_pfb_streaming()
+            print(f"[PFB] PFB streaming disabled")
+        else:
+            channels = channel if isinstance(channel, list) else [channel]
+            if len(channels) > 4:
+                raise ValueError("PFB streamer supports a maximum of 4 channels")
+            self._pfb_streaming_enabled = True
+            self._pfb_channels = channels[:4]
+            self._pfb_module = module
+            await self._udp_manager.start_pfb_streaming(channels[:4], module)
+            print(f"[PFB] PFB streaming enabled on channels {self._pfb_channels}, module {module}")
+
+    async def get_pfb_streamer(self, module=1):
+        """Return active PFB channels for the given module, or None if inactive."""
+        if self._pfb_streaming_enabled and self._pfb_module == module:
+            return self._pfb_channels
+        return None
+
     # --- Quasiparticle Pulse Control ---
     async def set_pulse_mode(self, mode, **kwargs):
-        if not hasattr(self, 'resonator_model') or self._resonator_model is None:
+        if not hasattr(self, '_resonator_model') or self._resonator_model is None:
             raise RuntimeError("Resonator model not available.")
         if not hasattr(self._resonator_model, 'set_pulse_mode'):
             raise RuntimeError("Resonator model does not support pulse functionality.")
@@ -822,7 +918,7 @@ class ServerMockCRS:
         return self._resonator_model.set_pulse_mode(mode, **kwargs)
 
     async def add_pulse_event(self, resonator_index, start_time, amplitude=None):
-        if not hasattr(self, 'resonator_model') or self._resonator_model is None:
+        if not hasattr(self, '_resonator_model') or self._resonator_model is None:
             raise RuntimeError("Resonator model not available.")
         if not hasattr(self._resonator_model, 'add_pulse_event'):
             raise RuntimeError("Resonator model does not support pulse functionality.")
@@ -830,7 +926,7 @@ class ServerMockCRS:
         return self._resonator_model.add_pulse_event(resonator_index, start_time, amplitude)
 
     async def get_pulse_status(self):
-        if not hasattr(self, 'resonator_model') or self._resonator_model is None:
+        if not hasattr(self, '_resonator_model') or self._resonator_model is None:
             return {'mode': 'unavailable', 'active_pulses': 0, 'error': 'Resonator model not available'}
         if not hasattr(self._resonator_model, 'pulse_config'):
             return {'mode': 'unsupported', 'active_pulses': 0, 'error': 'Pulse functionality not supported'}

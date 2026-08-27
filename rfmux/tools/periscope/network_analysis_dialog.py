@@ -1,11 +1,9 @@
 """Network analysis parameter dialogs."""
 
 from .utils import (
-    QtWidgets, QtCore, QtGui, QRegularExpression, QRegularExpressionValidator,
-    QDoubleValidator, QIntValidator,
-    DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
+    QtWidgets, QtCore, QtGui, DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
     DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
-    UnitConverter, traceback
+    traceback
 )
 import pickle
 from .tasks import DACScaleFetcher

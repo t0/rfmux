@@ -3,3 +3,26 @@ __pycache__/
 rfmux.egg-info/
 *.swp
 rfmux/_version.py
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Virtualenvs. `uv venv` puts one here by default, and README/CLAUDE.md tell
+# you to make one — so without this a `git add -A` commits it.
+.venv
+.venv/
+venv/
+
+# Periscope session output — captures, screenshots, exported .h5/.pkl. This is
+# run data, not source: it is large (GBs) and never belongs in the repo.
+#
+# The session base directory is whatever you last picked in the session dialog,
+# remembered in QSettings, so it can land anywhere. Point it at outputs/.
+# It used to point at test/session_testing/, which put a gigabyte of captures
+# inside the test suite; that path stays ignored below in case any older
+# QSettings still references it.
+outputs/
+test/session_testing/
+
+# Untracked scratch from ad-hoc debugging sessions. Anything here worth
+# keeping belongs in test/ as a real test.
+test_debug_scripts/

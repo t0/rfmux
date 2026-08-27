@@ -53,15 +53,22 @@ from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, Initial
                        # (Assumes periscope_ui.py has been refactored into ui.py and exports these).
 from .app_runtime import PeriscopeRuntime
 from PyQt6 import sip  # For checking if Qt C++ objects have been deleted
+from . import settings
 from .mock_configuration_dialog import MockConfigurationDialog
+from .pulse_capture_panel import PulseCapturePanel
+from .streamer_config_dialog import (
+    ApplyStreamerConfigTask,
+    StreamerConfigDialog,
+)
 from .dock_manager import PeriscopeDockManager
 from .main_plot_panel import MainPlotPanel
 from .session_manager import SessionManager
 from .session_browser_panel import SessionBrowserPanel
 from .session_startup_dialog import UnifiedStartupDialog
-from rfmux.core.transferfunctions import convert_roc_to_volts
+from rfmux.core.transferfunctions import convert_roc_to_volts, BASE_FREQUENCY
 from rfmux.mock import config as mc
 import datetime
+import time
 
 
 
@@ -154,6 +161,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.t_last: float = time.time()        # Timestamp of the last performance update (time from .utils)
         self.prev_receive = 0
         self.prev_drop = 0
+        self.prev_missing = 0                   # never arrived (network)
+        self.prev_qdrops = 0                    # arrived, never consumed (GUI)
+        self.drain_overruns: int = 0            # GUI frames that ran out of drain budget
 
         # Decimation stage, dynamically updated based on inferred sample rate.
         # This is used for PSD calculations.
@@ -288,6 +298,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.multisweep_window_count: int = 0        # Counter for unique multisweep window_ids
         self.multisweep_tasks: Dict[str, MultisweepTask] = {} # Stores active Multisweep tasks
 
+        # Pulse capture panels (live pulse detection docks)
+        self.pulse_capture_windows: Dict[str, Dict] = {}
+        self.pulse_capture_window_count: int = 0
+
+        # UI font scale (Ctrl+/Ctrl-/Ctrl+0), restored from settings
+        self.font_scale: float = settings.get_font_scale()
+
         # Attributes for the optional embedded iPython console.
         # QTCONSOLE_AVAILABLE is a boolean constant from .utils.
         self.kernel_manager = None      # Manages the iPython kernel
@@ -343,8 +360,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.cb_fft = QtWidgets.QCheckBox("FFT", checked=self.is_mock_mode)
         self.cb_ssb = QtWidgets.QCheckBox("Single Sideband PSD", checked=not self.is_mock_mode)
         self.cb_dsb = QtWidgets.QCheckBox("Dual Sideband PSD", checked=False)
+        self.cb_hist = QtWidgets.QCheckBox("Amplitude Histogram", checked=False)
         
-        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft):
+        for cb_plot_type in (self.cb_time, self.cb_iq, self.cb_fft, self.cb_hist):
             cb_plot_type.toggled.connect(self._build_layout)
         
         self.cb_ssb.toggled.connect(self._handle_psd_toggle)
@@ -389,6 +407,22 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if self.crs is None and self.host != "OFFLINE":
             self.btn_noise_spec.setEnabled(False)
             self.btn_noise_spec.setToolTip("CRS object not available - noise spectrum disabled.")
+
+        self.btn_pulse_capture = QtWidgets.QPushButton("Pulse Capture")
+        self.btn_pulse_capture.setToolTip(
+            "Open a live pulse capture panel (taps the slow readout stream)")
+        self.btn_pulse_capture.clicked.connect(self._open_pulse_capture_panel)
+
+        self.btn_streamer_cfg = QtWidgets.QPushButton("Streamer Config")
+        self.btn_streamer_cfg.setToolTip(
+            "Configure the slow streamer (decimation, short/long packets, "
+            "modules) and the fast PFB streamer, with live bandwidth math")
+        self.btn_streamer_cfg.clicked.connect(
+            self._show_streamer_config_dialog)
+        if self.crs is None and self.host != "OFFLINE":
+            self.btn_streamer_cfg.setEnabled(False)
+            self.btn_streamer_cfg.setToolTip(
+                "CRS object not available - streamer configuration disabled.")
 
         self.btn_toggle_cfg = QtWidgets.QPushButton("Show Configuration")
         self.btn_toggle_cfg.setCheckable(True)
@@ -510,7 +544,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._create_help_menu()
 
         self.menuBar().setNativeMenuBar(False)
-        
+
+        # Re-apply the remembered UI zoom now that widgets exist
+        if abs(self.font_scale - 1.0) > 1e-6:
+            self._set_font_scale(self.font_scale)
+
         # Note: Session browser dock will be added after Main dock is created
         
         # Connect session manager to status bar
@@ -1387,6 +1425,95 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     self._start_multisweep_analysis(params)
     
     
+    def _adjust_font_scale(self, factor: float) -> None:
+        """Multiply the UI font scale (Ctrl+/Ctrl-)."""
+        self._set_font_scale(
+            getattr(self, "font_scale", settings.DEFAULT_FONT_SCALE)
+            * factor)
+
+    def _set_font_scale(self, scale: float) -> None:
+        """Apply an app-wide font scale and remember it.
+
+        Scaling the QApplication font cascades to every panel, dialog,
+        dock title, menu and pyqtgraph label, so panels need no
+        per-widget handling.
+        """
+        scale = max(settings.FONT_SCALE_MIN,
+                    min(settings.FONT_SCALE_MAX, float(scale)))
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return
+        if not hasattr(self, "_base_font_pt"):
+            # Capture the untouched application font once
+            self._base_font_pt = app.font().pointSizeF()
+        base = self._base_font_pt
+        if base <= 0:
+            base = 10.0
+        font = app.font()
+        font.setPointSizeF(base * scale)
+        app.setFont(font)
+        self.font_scale = scale
+        settings.set_font_scale(scale)
+        # Force a relayout so existing widgets pick up the metrics
+        for widget in app.allWidgets():
+            widget.setFont(widget.font())
+        try:
+            self.statusBar().showMessage(f"UI zoom: {scale*100:.0f}%", 2000)
+        except Exception:
+            pass  # status bar may not exist yet during startup
+
+    def _show_streamer_config_dialog(self) -> None:
+        """Configure the slow/fast streamers (headless layer does the math)."""
+        dialog = StreamerConfigDialog(
+            self,
+            crs=self.crs,
+            current_dec=getattr(self, "actual_dec_stage", None),
+            current_short=getattr(self, "is_short_packet", None),
+            module=getattr(self, "module", 1),
+        )
+        if not dialog.exec():
+            return
+        cfg = dialog.get_config()
+        if self.crs is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Streamer Configuration",
+                "No CRS connection to apply the configuration to.")
+            return
+        task = ApplyStreamerConfigTask(self.crs, cfg, parent=self)
+        task.success.connect(
+            lambda info: print(
+                f"[Periscope] Streamer configured: dec {cfg.dec_stage}, "
+                f"{'short' if cfg.short_packets else 'long'} packets, "
+                f"{info['total_mbps']:.0f} Mbps"))
+        task.error.connect(
+            lambda msg: QtWidgets.QMessageBox.critical(
+                self, "Streamer Configuration",
+                f"Failed to apply configuration:\n{msg}"))
+        self._streamer_apply_task = task  # keep a ref while running
+        task.start()
+
+    def _open_pulse_capture_panel(self) -> None:
+        """Create a Pulse Capture dock (live detection via the slow tap)."""
+        self.pulse_capture_window_count += 1
+        n = self.pulse_capture_window_count
+        panel = PulseCapturePanel(
+            parent=self,
+            periscope=self,
+            session_manager=getattr(self, "session_manager", None),
+            dark_mode=self.dark_mode,
+            df_calibrations=getattr(self, "df_calibrations", None),
+            module=getattr(self, "module", 1),
+        )
+        dock = self.dock_manager.create_dock(
+            panel, f"Pulse Capture #{n}", f"pulse_{n}_{int(time.time())}")
+        main_dock = self.dock_manager.get_dock("main_plots")
+        if main_dock:
+            self.tabifyDockWidget(main_dock, dock)
+        dock.show()
+        dock.raise_()
+        self.pulse_capture_windows[f"pulse_{n}"] = {
+            "window": panel, "dock": dock}
+
     def _get_channel_noise(self) -> None:
         ''' Open Dialog to get noise spectrum dialog '''
 
@@ -1462,14 +1589,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     async def apply_bias_output(self, crs, module: int, amplitudes: list, bias_freqs : list,
                                 channels : list, phases : list) -> None:
     
-        BASE_BAND_STEP_HZ = 298.0232238769531 #### Taken from bias_kids.py
         if not bias_freqs:
             return
         nco_freq = await crs.get_nco_frequency(module=module)
         async with crs.tuber_context() as ctx:
             for i in range(len(amplitudes)):
 
-                quantized_bias = round(bias_freqs[i] / BASE_BAND_STEP_HZ) * BASE_BAND_STEP_HZ
+                quantized_bias = round(bias_freqs[i] / BASE_FREQUENCY) * BASE_FREQUENCY
 
                 ctx.set_frequency(quantized_bias - nco_freq, channel=channels[i], module=module)
                 
@@ -2155,6 +2281,30 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.dark_mode_action.triggered.connect(self._update_console_style)
         view_menu.addAction(self.dark_mode_action)
 
+        view_menu.addSeparator()
+
+        # UI font scaling (Ctrl+ / Ctrl- / Ctrl+0), app-wide
+        zoom_in = QtGui.QAction("Zoom &In", self)
+        zoom_in.setShortcuts([QtGui.QKeySequence.StandardKey.ZoomIn,
+                              QtGui.QKeySequence("Ctrl+=")])
+        zoom_in.triggered.connect(lambda: self._adjust_font_scale(1.1))
+        view_menu.addAction(zoom_in)
+
+        zoom_out = QtGui.QAction("Zoom &Out", self)
+        zoom_out.setShortcuts([QtGui.QKeySequence.StandardKey.ZoomOut])
+        zoom_out.triggered.connect(lambda: self._adjust_font_scale(1 / 1.1))
+        view_menu.addAction(zoom_out)
+
+        zoom_reset = QtGui.QAction("&Reset Zoom", self)
+        zoom_reset.setShortcut(QtGui.QKeySequence("Ctrl+0"))
+        zoom_reset.triggered.connect(lambda: self._set_font_scale(1.0))
+        view_menu.addAction(zoom_reset)
+
+        for action in (zoom_in, zoom_out, zoom_reset):
+            action.setShortcutContext(
+                QtCore.Qt.ShortcutContext.ApplicationShortcut)
+            self.addAction(action)
+
 
     def _create_jupyter_menu(self):
         """
@@ -2490,15 +2640,25 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         # Show folder selection dialog
         # Use Qt dialog (not native) to prevent hanging on some systems
+        #
+        # Start where the user last put a session.  An empty string here does
+        # NOT mean "the current directory" in practice: Qt falls back to its
+        # own process-global last-visited directory, so the dialog silently
+        # followed whatever other file dialog was opened most recently in this
+        # run of Periscope.
         base_path = QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select Session Location",
-            "",  # Start in current directory
+            settings.get_last_session_directory(),
             QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
         )
-        
+
         if not base_path:
             return
+
+        # Remember it, so the next session starts here rather than wherever
+        # the file dialog happened to drift to.
+        settings.set_last_session_directory(base_path)
         
         # Generate default folder name with timestamp
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2533,18 +2693,27 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         Shows a folder selection dialog to choose an existing session folder.
         """
-        # Use Qt dialog (not native) to prevent hanging on some systems
+        # Use Qt dialog (not native) to prevent hanging on some systems.
+        # Start from the last session directory for the same reason as
+        # _start_new_session — see the note there about the empty string.
         session_path = QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select Session Folder",
-            "",
+            settings.get_last_session_directory(),
             QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
         )
-        
+
         if session_path:
             success = self.session_manager.load_session(session_path)
-            
+
             if success:
+                # A loaded session names a session folder, so the base
+                # directory to remember is its parent.
+                from pathlib import Path
+                settings.set_last_session_directory(
+                    str(Path(session_path).parent))
+                settings.set_last_session_path(session_path)
+
                 # Restore mock config if present and in mock mode
                 self._restore_mock_config_from_session()
                 
@@ -2707,7 +2876,28 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if file_path.endswith('.ipynb'):
             self._open_notebook_file(file_path)
             return
-        
+
+        # HDF5 files (streamed pulse captures) never go through pickle
+        if file_path.lower().endswith(('.h5', '.hdf5')):
+            # A panel already capturing to / browsing this file? Focus it
+            # (a live capture holds the file open — don't reopen it).
+            resolved = str(Path(file_path).resolve())
+            for entry in self._live_pulse_capture_windows():
+                panel, dock = entry['window'], entry['dock']
+                try:
+                    match = panel.current_hdf5_path() == resolved
+                except RuntimeError:
+                    continue  # panel deleted between prune and use
+                if match:
+                    dock.show()
+                    dock.raise_()
+                    return
+            if self.session_manager.identify_file_type(file_path) == 'pulse':
+                self._load_pulse_capture_from_session(file_path)
+            else:
+                self._open_file_with_system_default(file_path)
+            return
+
         # Identify file type from filename
         file_type = self.session_manager.identify_file_type(file_path)
         
@@ -2754,6 +2944,55 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             traceback.print_exc()
     
+    def _live_pulse_capture_windows(self):
+        """Registry entries whose panel AND dock are still alive.
+
+        Closing a dock destroys the C++ object while the Python dict
+        entry survives — using such an entry raises 'wrapped C/C++
+        object has been deleted'.  Prune as we go.
+        """
+        registry = getattr(self, 'pulse_capture_windows', {})
+        live = []
+        for key in list(registry.keys()):
+            entry = registry.get(key) or {}
+            panel, dock = entry.get('window'), entry.get('dock')
+            if (panel is None or dock is None
+                    or sip.isdeleted(panel) or sip.isdeleted(dock)):
+                registry.pop(key, None)
+                continue
+            live.append(entry)
+        return live
+
+    def _load_pulse_capture_from_session(self, file_path: str):
+        """Open a pulse-capture HDF5 file in a review-mode panel."""
+        from pathlib import Path
+        self.pulse_capture_window_count += 1
+        n = self.pulse_capture_window_count
+        panel = PulseCapturePanel(
+            parent=self,
+            periscope=self,
+            session_manager=getattr(self, "session_manager", None),
+            dark_mode=self.dark_mode,
+        )
+        try:
+            panel.load_from_hdf5(file_path)
+        except Exception as e:
+            panel.deleteLater()
+            QtWidgets.QMessageBox.critical(
+                self, "Load Error",
+                f"Could not open pulse capture file:\n{file_path}\n\n{e}")
+            return
+        stem = Path(file_path).stem
+        dock = self.dock_manager.create_dock(
+            panel, f"Pulses: {stem}", f"pulse_review_{n}_{int(time.time())}")
+        main_dock = self.dock_manager.get_dock("main_plots")
+        if main_dock:
+            self.tabifyDockWidget(main_dock, dock)
+        dock.show()
+        dock.raise_()
+        self.pulse_capture_windows[f"pulse_review_{n}"] = {
+            "window": panel, "dock": dock}
+
     def _load_netanal_from_session(self, data: dict, file_path: str):
         """Load network analysis data from session file into a new panel."""
         # Check if data has the expected structure

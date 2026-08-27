@@ -16,9 +16,23 @@ dependencies = [
   "aiohttp",
   "awaitless",
   "click>=8.0",
-  "ipykernel<7",  # Pin to 6.x for qtconsole in-process kernel compatibility (ipykernel 7.x has a bug)
+  # Pulse capture writes its captures as HDF5, and Periscope does so by
+  # default, so this is reached by ordinary use rather than an exotic
+  # path.
+  "h5py",
+  # Pin to 6.x for qtconsole in-process kernel compatibility: ipykernel 7.x
+  # do_execute dereferences shell_channel_thread.parent_thread, which the
+  # in-process kernel (embedded Periscope console) never creates ->
+  # AttributeError on every execute. Do NOT let dependabot relax this to <8
+  # until the in-process kernel works (see
+  # test/periscope/test_embedded_console.py).
+  "ipykernel<7",
   "ipython",
   "jupyterlab",
+  # Ships jupyterlab_jupytext, which lets JupyterLab open the .md reference
+  # notebooks (rfmux/reference-notebooks/) as real notebooks. Without it they
+  # are inert markdown, so this is a runtime dependency and not a dev one.
+  "jupytext",
   "matplotlib",
   "numba",  # Required for high-performance physics calculations in MockCRS
   "numpy",
@@ -38,7 +52,11 @@ dependencies = [
   "tbb; sys_platform != 'darwin'",
 ]
 
-requires-python = ">=3.9"
+# 3.10, not 3.9: rfmux/core/crs.py and test/core/test_spotcheck.py both use
+# match/case, so 3.9 cannot even import the package. The floor said ">=3.9"
+# for a long time while that was already true — the tox matrix below is what
+# keeps this honest, so it must not list a version the code cannot load.
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
 
@@ -46,11 +64,10 @@ requires-python = ">=3.9"
 # Debian/Ubuntu: apt-get install python3-pygetdata
 dirfile = []
 
-# Dependencies for "rfmux qc" (also requires Python 3.10+; the htpy marker
-# keeps this extra resolvable under our 3.9 floor)
+# Dependencies for "rfmux qc".
 qc = [
   "beautifulsoup4",
-  "htpy; python_version >= '3.10'",
+  "htpy",
   "markdown",
   "markupsafe",
   "pytest_check",
@@ -76,17 +93,20 @@ parser = "rfmux.tools.parser:main"
 periscope = "rfmux.tools.periscope.__main__:main"
 
 [dependency-groups]
-dev = [
-  "rfmux[qc]",  # run the QC suite from a checkout
-  "jupytext",
+# Exactly what the test suite imports beyond the runtime dependencies.
+# Kept separate from `dev` so CI can install this and nothing else: the
+# qc extra pulls weasyprint, whose native libraries are a liability on
+# the Windows and macOS runners, and a test run should not depend on
+# them building.
+test = [
   "nbclient",
   "nbformat",
   "pytest_check",
 ]
-
-# The dev group needs python 3.10+ (htpy, match syntax)
-[tool.uv.dependency-groups]
-dev = { requires-python = ">=3.10" }
+dev = [
+  "rfmux[qc]",  # run the QC suite from a checkout
+  {include-group = "test"},
+]
 
 [project.urls]
 homepage = "https://github.com/t0/rfmux"
@@ -113,9 +133,18 @@ exclude-newer = "3 weeks"
 testpaths = ["test"]
 
 markers = [
-  "offline",
+  # Tiers, in order of what infrastructure they need. See test/README.md.
+  "portable: needs no CRS at all and no GUI — the subset tox runs on every supported Python",
+  "slow_acquisition: slow (~1 min) because it exercises the data-acquisition path for real — spawns a MockCRS server subprocess and streams UDP over loopback",
+  "hardware: needs a real CRS board; applied automatically to anything using the crs/live_session fixtures, and skipped unless --serial is given",
+
+  # The QC suite lives in rfmux/tools/qc/ and runs via "rfmux qc", not from here.
   "qc_stage1",
   "qc_stage2",
 ]
+
+# Default runs are the fast tier (~20 s). Run the acquisition tier with:
+#   pytest -m slow_acquisition test/
+addopts = '-m "not slow_acquisition"'
 
 asyncio_default_fixture_loop_scope = "session"

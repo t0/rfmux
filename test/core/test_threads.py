@@ -22,7 +22,7 @@ import pytest
 import rfmux
 import threading
 
-@pytest.mark.offline
+@pytest.mark.portable
 def test_are_sessions_distinct_between_threads():
     '''Check that threads each get their own underlying Session / HardwareMap'''
 

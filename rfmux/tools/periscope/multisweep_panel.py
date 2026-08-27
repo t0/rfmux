@@ -12,7 +12,7 @@ import time
 # Imports from within the 'periscope' subpackage
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
-    TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
+    AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
     ScreenshotMixin
 )
 from .detector_digest_panel import DetectorDigestPanel

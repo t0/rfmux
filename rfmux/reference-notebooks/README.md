@@ -12,9 +12,32 @@ jupyter:
     name: python3
 ---
 
-# Welcome to the CRS!
+# Reference notebooks
 
-This is a JupyterLab session running on your CRS board. From here, you can immediately interact with the board:
+These ship with the `rfmux` package and are provisioned **read-only**, so save
+your own copies elsewhere (*File → Save Notebook As…*) before editing.
+
+They are jupytext markdown rather than `.ipynb`. In the Jupyter session
+Periscope launches they open as notebooks on double-click; in a JupyterLab you
+started yourself, right-click → *Open With* → *Notebook*.
+
+## Where to start
+
+- **`Demos/network_analyses_find_resonances_make_resonator_catalog.md`** — the
+  first three steps, one at a time: sweep a band, find the dips, build the
+  resonator catalog everything downstream passes around. Its second half is a
+  tour of the catalog on its own — building one by hand, CSV and dictionary
+  round trips, the invariants — and needs no hardware.
+- **`Demos/simplified_tuning_flow.md`** — the whole chain end to end: sweep,
+  find and fit the resonators, park the carriers, measure the noise. Everything
+  else assumes you have done this first.
+- **`Demos/pulse_capture.md`** — detect and record detector pulses, with
+  streaming HDF5, histograms and matched slow+fast capture.
+
+The last two have an unattended `.py` counterpart beside them for cron jobs and
+smoke tests; the notebook is the documentation, the script is the runner.
+
+## Connecting
 
 ```python
 import rfmux
@@ -27,6 +50,5 @@ await crs.resolve()
 await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)
 ```
 
-Please take the time to browse the documentation tree in the left-hand panel.
-
-Python code you create or modify in Jupyter lives on the CRS's MicroSD card. 
+No hardware? All three demos above stand up a simulated CRS instead — see their
+mock-mode sections.

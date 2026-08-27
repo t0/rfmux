@@ -1,13 +1,11 @@
 """Panel for displaying multisweep parameter histograms (dockable)."""
 import numpy as np
-from PyQt6 import QtCore, QtWidgets
-from PyQt6.QtCore import Qt
+from PyQt6 import QtWidgets
 import pyqtgraph as pg
 
 # Imports from within the 'periscope' subpackage
 from .utils import (
-    ScreenshotMixin, find_parent_with_attr, TABLEAU10_COLORS, LINE_WIDTH,
-    UnitConverter, AMPLITUDE_COLORMAP_THRESHOLD
+    ScreenshotMixin, TABLEAU10_COLORS, UnitConverter, AMPLITUDE_COLORMAP_THRESHOLD
 )
 from .multisweep_grid_helpers import create_amplitude_color_map
 from .amplitude_colorbar import AmplitudeColorBar

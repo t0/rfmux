@@ -9,6 +9,8 @@ import warnings
 from typing import Union, Dict, List, Optional, Any, Tuple, Callable
 from scipy.signal import butter, filtfilt
 
+from ...core.transferfunctions import BASE_FREQUENCY
+
 
 
 def bandpass_filter(data: np.ndarray, fs: float, lowcut: float, highcut: float, order: int = 4) -> np.ndarray:
@@ -287,8 +289,8 @@ async def bias_kids(
     # Get current NCO frequency
     nco_freq = await crs.get_nco_frequency(module=module)
     
-    # Base frequency (Nyquist frequency) for quantization
-    base_freq = 298.0232238769531  # Hz
+    # The hardware tone grid, from the one definition in transferfunctions.
+    base_freq = BASE_FREQUENCY
     
     # Set default bandpass parameters if not provided
     if bandpass_params is None:

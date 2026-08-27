@@ -18,8 +18,7 @@ from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential
 # Additional imports for async fitting with ThreadPoolExecutor
 import os
 import concurrent.futures
-from typing import Dict, Any, Optional, Callable
-import platform
+from typing import Dict, Any, Optional
 
 class UDPReceiver(QtCore.QThread):
     """
@@ -34,8 +33,28 @@ class UDPReceiver(QtCore.QThread):
         # Create socket and C++ receiver
         # reorder_window=256: Maintain good packet reordering capability
         # queue_max_size=50000: Handle high data rates at FIR stage 0 (~38kHz)
-        # flush_threshold=32: Flush every 32 packets for smooth updates (~54ms at FIR stage 6)
+        # flush_threshold=16: Flush every 16 packets for smooth updates
+        # Ask BEFORE binding: the probe is a plain bind, which our own
+        # socket would then fail. Loopback only -- see
+        # find_competing_receiver for why a second reader is fatal for
+        # the mock's unicast stream and harmless for a board's multicast.
+        self._port_conflict = streamer.find_competing_receiver(host)
+        if self._port_conflict:
+            print(f"[UDP] {self._port_conflict}")
+
         self.sock = streamer.get_multicast_socket(host)
+        # A receive timeout on the SOCKET, because receive_batch's own
+        # timeout_ms cannot be relied on: recvmmsg runs with
+        # MSG_WAITFORONE, and the kernel only consults that timeout
+        # BETWEEN datagrams. On a socket that receives nothing at all --
+        # a board that is not streaming yet, a mistyped host, or another
+        # process on 9876 taking the datagrams via SO_REUSEPORT -- the
+        # call blocks forever. The thread then never reaches the
+        # queue-discovery loop below, so Periscope draws nothing and
+        # reports "0 packets received" with no error to explain it.
+        # With SO_RCVTIMEO the call returns EAGAIN, which receive_batch
+        # already treats as "no packets this time".
+        self.sock.settimeout(0.5)
         self.receiver = streamer.ReadoutPacketReceiver(self.sock,
                                                        reorder_window=256,
                                                        queue_max_size=50000,
@@ -45,16 +64,102 @@ class UDPReceiver(QtCore.QThread):
         self.queue = None
         self.serial = None
 
+        # Set while packets are arriving for some OTHER module.  See
+        # _note_module_mismatch: without this the GUI cannot tell that
+        # case apart from a dead stream.
+        self._module_mismatch = None
+
         # Statistics
         self.packets_received = 0
         self.packets_dropped = 0
 
-    def get_dropped_packets(self):
-        """Get cumulative dropped packet count from C++ queue statistics."""
+    def _discover_queue(self):
+        """Adopt the queue for our module, or note that there isn't one."""
+        streaming = []
+        for serial, module, q in self.receiver.get_all_queues():
+            streaming.append(module + 1)
+            if module == self.module_idx:
+                self.queue = q
+                self.serial = serial
+                self._module_mismatch = None
+                print(f"[UDP] Found queue for serial={serial}, module={self.module_id}")
+                return
+        self._note_module_mismatch(streaming)
+
+    def _note_module_mismatch(self, streaming_modules):
+        """Record that packets are arriving, but for nobody's module.
+
+        Every counter this class exposes reads through ``self.queue``, so
+        a module that never matches reports a flat zero -- no packets, no
+        loss, no error -- while the receiver is in fact working
+        perfectly.  That is indistinguishable from a dead stream unless
+        something says otherwise, and it is not a rare mistake: the
+        startup dialog restores the last-used module, and the mock only
+        ever streams module 1, so going from hardware to mock lands here.
+        """
+        if not streaming_modules:
+            self._module_mismatch = None   # nothing streaming yet
+            return
+        modules = ", ".join(str(m) for m in sorted(set(streaming_modules)))
+        msg = (f"Module {self.module_id} is not streaming - packets are "
+               f"arriving for module {modules}. No data will appear.")
+        if msg != self._module_mismatch:
+            self._module_mismatch = msg
+            print(f"[UDP] {msg}")
+
+    def get_port_conflict(self):
+        """A competing receiver that may be taking our packets, or None.
+
+        Only while we have no queue: once packets arrive, whatever else
+        is bound evidently did not take them, and a stale warning would
+        be worse than none.
+        """
         if self.queue is not None:
-            stats = self.queue.get_stats()
-            return stats.sequence_gaps + stats.packets_dropped
+            return None
+        return self._port_conflict
+
+    def get_module_mismatch(self):
+        """The mismatch message, or None while healthy.
+
+        Polled by the GUI status bar; printed once for headless callers.
+        """
+        return self._module_mismatch
+
+    def get_missing_packets(self):
+        """Packets that never arrived (wire or kernel socket buffer).
+
+        Counted individually, not per discontinuity: one burst of a
+        thousand lost packets is a thousand here and one in
+        ``sequence_gaps``.
+        """
+        if self.queue is not None:
+            return self.queue.get_stats().packets_missing
+        return 0
+
+    def get_queue_drops(self):
+        """Packets the receiver got but the GUI never consumed.
+
+        Queue overflow: Periscope is behind, not the network.
+        """
+        if self.queue is not None:
+            return self.queue.get_stats().packets_dropped
         return self.packets_dropped
+
+    def get_loss_bursts(self):
+        """Discontinuity events — how bursty the missing packets were."""
+        if self.queue is not None:
+            return self.queue.get_stats().sequence_gaps
+        return 0
+
+    def get_dropped_packets(self):
+        """Everything lost, however it was lost.
+
+        Kept for callers that just want one number; anything
+        diagnosing a problem wants the two apart, because the fixes are
+        unrelated -- one is a network or kernel buffer, the other is
+        Periscope being too slow.
+        """
+        return self.get_missing_packets() + self.get_queue_drops()
 
     def get_received_packets(self):
         """Get cumulative received packet count from C++ queue statistics."""
@@ -68,17 +173,21 @@ class UDPReceiver(QtCore.QThread):
         while not self.isInterruptionRequested():
             try:
                 # Call C++ receiver to read and process packets
-                self.receiver.receive_batch(batch_size=16, timeout_ms=50)
+                # batch_size is a CEILING, not a wait: recvmmsg runs with
+                # MSG_WAITFORONE, so it returns as soon as one packet is
+                # there with whatever else is already queued. A small
+                # ceiling therefore costs nothing at low rates and
+                # everything at high ones -- this thread has to retake
+                # the GIL once per call, and at 16 packets a call that
+                # is 2,400 acquisitions a second at stage 0, competing
+                # with the GUI. Measured on a board at stage 0 with a
+                # 128-channel capture running: 51.8% of the stream lost
+                # to kernel-buffer overflow at 16, none at 2048.
+                self.receiver.receive_batch(batch_size=2048, timeout_ms=50)
 
                 # Find our module's queue
                 if self.queue is None:
-                    # Look for a queue matching our module
-                    for serial, module, q in self.receiver.get_all_queues():
-                        if module == self.module_idx:
-                            self.queue = q
-                            self.serial = serial
-                            print(f"[UDP] Found queue for serial={serial}, module={self.module_id}")
-                            break
+                    self._discover_queue()
 
             except Exception as e:
                 if self.isInterruptionRequested():

@@ -29,7 +29,7 @@ from rfmux.mock import config as mc
 
 async def create_mock_crs(
     module: int = 1,
-    udp_host: str = '127.0.0.1',
+    udp_host: str | None = None,
     udp_port: int = 9876,
     config: Optional[Dict[str, Any]] = None,
     verbose: bool = True
@@ -45,7 +45,8 @@ async def create_mock_crs(
     
     Args:
         module: Module number to use (default: 1)
-        udp_host: Host for UDP streaming (default: '127.0.0.1')
+        udp_host: Host for UDP streaming (default: None, meaning
+            multicast if this machine can and loopback unicast if not)
         udp_port: Port for UDP streaming (default: 9876)
         config: Optional custom configuration dict. If None, uses unified defaults.
                 Keys should match rfmux.mock.config.MOCK_DEFAULTS.
@@ -66,7 +67,7 @@ async def create_mock_crs(
         print("Creating Mock CRS")
         print("="*60)
         print(f"Module: {module}")
-        print(f"UDP Streaming: {udp_host}:{udp_port}")
+        print(f"UDP Streaming: {udp_host or 'auto'}:{udp_port}")
         print(f"Resonators: {merged['num_resonances']}")
         print(f"Frequency Range: {merged['freq_start']/1e9:.1f} - {merged['freq_end']/1e9:.1f} GHz")
         print("="*60)
@@ -101,7 +102,7 @@ async def create_mock_crs(
         
         # Start UDP streaming
         if verbose:
-            print(f"4. Starting UDP streaming on {udp_host}:{udp_port}...")
+            print(f"4. Starting UDP streaming on {udp_host or 'auto'}:{udp_port}...")
         
         await crs.start_udp_streaming(host=udp_host, port=udp_port)
         

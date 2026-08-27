@@ -5,7 +5,6 @@ Notebooks are opened in the system browser and saved to the active session folde
 """
 
 import subprocess
-import time
 import socket
 import os
 import json
@@ -16,6 +15,12 @@ from . import settings
 from .utils import find_parent_with_attr
 from ...paths import get_reference_notebook_dir, get_user_notebook_dir
 import sys
+
+
+#: JupyterLab settings shipped with Periscope (overrides.json). Passed as
+#: --LabApp.app_settings_dir so the defaults it sets apply on top of, rather
+#: than in place of, whatever the user has configured for themselves.
+_JUPYTER_SETTINGS_DIR = Path(__file__).parent / "jupyter_settings"
 
 
 class JupyterServerManager(QtCore.QObject):
@@ -42,7 +47,7 @@ class JupyterServerManager(QtCore.QObject):
         self._check_attempts = 0
         self._max_check_attempts = 30  # 30 seconds max wait time
     
-    def start(self, notebook_dir: str, port: int = 8888):
+    def start(self, notebook_dir: str, port: int = 8888, crs=None):
         """
         Start Jupyter Lab server.
         
@@ -73,11 +78,35 @@ class JupyterServerManager(QtCore.QObject):
             '--ServerApp.token=periscope',
             '--ServerApp.disable_check_xsrf=True',
             '--InteractiveShellApp.extensions=awaitless',
+            # Make the shipped .md reference notebooks open as notebooks on
+            # double-click instead of as raw markdown. This is app_settings_dir
+            # (overrides.json), not user_settings_dir, deliberately: overrides
+            # set the schema DEFAULT, so the user's own JupyterLab theme,
+            # fonts and keybindings still apply, and they can still change the
+            # viewer back in Settings -> Document Manager. Pointing
+            # user_settings_dir here instead would silently discard all of it.
+            f'--LabApp.app_settings_dir={_JUPYTER_SETTINGS_DIR}',
         ]
         
+        # Hand the kernel the board Periscope is already talking to, so a
+        # notebook attaches to it instead of standing up its own.  This
+        # matters most in mock mode: a second MockCRS is a second, unrelated
+        # simulation streaming to the same UDP port, and the receiver then
+        # gets the two interleaved with no error anywhere — plausible-looking
+        # data from two different sets of resonators.  Attaching by hostname
+        # reaches the same simulation instead.
+        env = dict(os.environ)
+        if crs is not None:
+            hostname = getattr(crs, "tuber_hostname", None)
+            if hostname:
+                env["RFMUX_CRS_HOSTNAME"] = str(hostname)
+                serial = getattr(crs, "serial", None)
+                if serial:
+                    env["RFMUX_CRS_SERIAL"] = str(serial)
+
         try:
             # Use CREATE_NO_WINDOW on Windows to hide console
-            kwargs = {}
+            kwargs = {'env': env}
             if os.name == 'nt':
                 # Windows: Hide console window and redirect output to DEVNULL
                 # to prevent pipe buffer deadlock from verbose Jupyter startup output
@@ -122,7 +151,6 @@ class JupyterServerManager(QtCore.QObject):
         """Check if server is ready and emit signal."""
         import urllib.request
         import urllib.error
-        import traceback
     
         self._check_attempts += 1
     
@@ -146,7 +174,7 @@ class JupyterServerManager(QtCore.QObject):
                 urllib.request.urlopen(self.url, timeout=1)
                 self.server_ready.emit(self.url)
     
-        except Exception as e:
+        except Exception:
             # Print full diagnostics
             # print("[Notebook] Server not ready yet")
             # print(f"  Attempt: {self._check_attempts}")
@@ -440,7 +468,11 @@ class NotebookPanel(QtWidgets.QWidget):
         else:
             self.user_library_path = None
         
-        self.server.start(self.notebook_dir)
+        # Periscope's own CRS, so the kernel attaches to it rather than
+        # creating a competing one (see JupyterServerManager.start).
+        owner = find_parent_with_attr(self, 'crs')
+        self.server.start(self.notebook_dir,
+                          crs=getattr(owner, 'crs', None))
     
     def _get_parent_app_info(self) -> tuple[str | None, bool]:
         """

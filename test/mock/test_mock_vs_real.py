@@ -12,7 +12,10 @@ import inspect
 import asyncio
 import pytest
 import rfmux
-import pytest_check as check
+# Skips this module rather than aborting collection for the entire
+# suite, which is what an unguarded import does: one absent extra
+# cost every other test in the run.
+check = pytest.importorskip("pytest_check")
 
 
 def compare_attributes(attr_mock, attr_real):
@@ -54,23 +57,23 @@ def load_fresh_rfmux():
     return importlib.import_module("rfmux")
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--serial",
-        action="store",
-        required=True,
-        help="Serial number of the real CRS board."
-    )
-
-
 @pytest.fixture(scope="session")
 def serial(request):
-    return request.config.getoption("--serial")
+    s = request.config.getoption("--serial")
+    if s is None:
+        pytest.skip(
+            "Use the '--serial' argument to specify a running CRS board for this test."
+        )
+    return s
 
 
 @pytest.fixture(scope="session")
-def crs_mock():
-    """Load mock CRS session."""
+def crs_mock(serial):
+    """Load mock CRS session.
+
+    Depends on ``serial`` so the no-board skip fires BEFORE a MockCRS
+    server is pointlessly spawned.
+    """
     s_mock = rfmux.load_session("""
     !HardwareMap
     - !flavour "rfmux.mock"

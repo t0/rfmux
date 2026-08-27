@@ -78,28 +78,28 @@ async def test_set_get_decimation(crs):
     """
 
     # clearly this should fail - requesting absurd amounts of bandwidth
-    with pytest.raises(rfmux.tuber.TuberRemoteError):
-        await crs.set_decimation(stage=0, short=False, modules=[1, 2, 3, 4])
+    with pytest.raises(rfmux.TuberRemoteError):
+        await crs.set_decimation(stage=0, short=False, module=[1, 2, 3, 4])
 
     # we should be able to stream nothing, but can't get a value from get_decimation like this
-    await crs.set_decimation(stage=6, short=False, modules=[])
+    await crs.set_decimation(stage=6, short=False, module=[])
     assert (await crs.get_decimation()) is None
 
     # With short packets, we can go all the way down to FIR stage 0
     # (but only with one module at a time)
     for module in range(1, 5):
         for stage in range(0, 7):
-            await crs.set_decimation(stage=stage, short=True, modules=[module])
+            await crs.set_decimation(stage=stage, short=True, module=[module])
             assert (await crs.get_decimation()) == stage
 
     # With longer packets, we can only do this at FIR stage 3 and up
     for module in range(1, 5):
         for stage in range(3, 7):
-            await crs.set_decimation(stage=stage, short=False, modules=[module])
+            await crs.set_decimation(stage=stage, short=False, module=[module])
             assert (await crs.get_decimation()) == stage
 
     # be polite
-    await crs.set_decimation(stage=6, short=False, modules=[1, 2, 3, 4])
+    await crs.set_decimation(stage=6, short=False, module=[1, 2, 3, 4])
 
 
 @pytest.mark.asyncio
@@ -114,7 +114,7 @@ async def test_high_sampling_rate(crs):
     """
 
     # fastest streaming available for a single module
-    await crs.set_decimation(stage=0, short=True, modules=[1])
+    await crs.set_decimation(stage=0, short=True, module=[1])
 
     # py_get_samples
     x = await crs.py_get_samples(1000, channel=1, module=1, _extra_metadata=True)
@@ -132,7 +132,7 @@ async def test_py_get_samples_long_and_short(crs):
     Does py_get_samples play nice with long and short packets?
     """
 
-    await crs.set_decimation(stage=6, short=True, modules=[1])
+    await crs.set_decimation(stage=6, short=True, module=[1])
 
     # Try with "channel" specified and low
     x = await crs.py_get_samples(10, channel=1, module=1)
@@ -147,7 +147,7 @@ async def test_py_get_samples_long_and_short(crs):
     assert len(x.i) == 128 and len(x.q) == 128
 
     # Back to long packets
-    await crs.set_decimation(stage=6, short=False, modules=[1, 2, 3, 4])
+    await crs.set_decimation(stage=6, short=False, module=[1, 2, 3, 4])
 
     # Try with "channel" specified and low
     x = await crs.py_get_samples(10, channel=1, module=1)

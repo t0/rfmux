@@ -79,22 +79,36 @@ samples = await crs.get_samples(1000, channel=1, module=1)
 - **[Getting Started](docs/guides/getting-started.md)** - Usage patterns, hardware hierarchy, common operations
 - **[Networking Guide](docs/guides/networking.md)** - UDP tuning, multicast configuration, troubleshooting
 - **[Firmware Guide](docs/guides/firmware.md)** - Fetching, managing, and flashing firmware
+- **[Tuning KIDs](rfmux/reference-notebooks/Demos/simplified_tuning_flow.md)** - Network analysis, cable delay, finding and fitting resonances, biasing the detectors, and measuring the noise you are left with
+- **[Pulse Capture](rfmux/reference-notebooks/Demos/pulse_capture.md)** - Detecting and recording detector pulses from the API, with streaming HDF5, histograms and matched slow+fast capture
+
+Reference notebooks ship with the package and are linked into the Jupyter
+session Periscope launches, where they open as notebooks on double-click. They
+are jupytext markdown, so in a JupyterLab you started yourself use right-click →
+*Open With* → *Notebook* (or set *Settings → Document Manager → Default Viewers*
+to `markdown: Jupytext Notebook`, which is the default Periscope ships).
+`jupytext -o pulse_capture.ipynb pulse_capture.md` converts one if you'd rather
+have an `.ipynb`.
 
 ## Repository Structure
 
 ```
 rfmux/
-├── docs/                # Documentation
-├── firmware/            # Firmware binaries (Git LFS)
-├── home/                # Jupyter Hub content (demos, docs)
-├── rfmux/               # Main Python package
-│   ├── algorithms/      # Network analysis, fitting, biasing
-│   ├── core/            # Hardware schema, sessions, mock infrastructure
-│   ├── packets/         # C++ packet receiver library
-│   ├── tools/           # Periscope GUI and other tools
-│   └── tuber/           # RPC/remote-object communication
-└── test/                # Test suite (unit, integration, QC)
+├── docs/                    # Documentation
+├── firmware/                # Firmware binaries (Git LFS)
+├── rfmux/                   # Main Python package
+│   ├── algorithms/          # Network analysis, fitting, biasing
+│   ├── core/                # Hardware schema, sessions, transfer functions
+│   ├── mock/                # Physics-based CRS simulator
+│   ├── pulse_capture/       # Pulse detection, HDF5 capture, histograms
+│   ├── reference-notebooks/ # Runnable demos, shipped with the package
+│   ├── streamer/            # C++ packet receiver library
+│   └── tools/               # Periscope GUI, CLI, firmware, QC suite
+└── test/                    # Test suite
 ```
+
+RPC to the board is provided by the separate
+[tuber](https://pypi.org/project/tuber-client/) package.
 
 ## Contributing & Feedback
 

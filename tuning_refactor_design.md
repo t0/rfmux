@@ -115,6 +115,7 @@ covers what we need, and the user decides when to start a new folder.
 ```
 rfmux/tuning/
     catalog.py      Resonator + Catalog — the array bookkeeping
+    find_resonances.py  netanal sweep → candidate resonances (built)
     sweeps.py       the heavy side: sweep entries and sets
     bias.py         bias-point analysis (pure; lifted from bias_kids.py)
     fits.py         fit dispatch policy
@@ -426,6 +427,14 @@ and `test/algorithms/` for the macros against a MockCRS.
 * **`Catalog` stays module-agnostic** for now, matching `res_info_dict` today:
   one catalog is shared across modules in a multi-module multisweep, and
   `channel_number` is the only per-module field. See the open question below.
+* **Resonance finding moved to `rfmux/tuning/find_resonances.py`**, resolving
+  §13's open question. It is analysis over two arrays, not a board operation, so
+  it belongs with the other pure layers; `algorithms/measurement/fitting.py`
+  keeps a deprecated shim that forwards to it and returns the old dict, so the
+  Periscope panel and `simplified_tuning_flow` still work. The search takes
+  arrays and the `find_resonances_in_netanal` wrapper unpacks a `take_netanal`
+  result for it, which keeps the algorithm usable on any sweep from any source.
+  `ResonanceSearch.to_catalog()` is where anonymous dips become a catalog.
 
 ## 13. Open questions
 
@@ -442,5 +451,3 @@ and `test/algorithms/` for the macros against a MockCRS.
 * Should `Catalog` load and apply a name map (frequency → name)? That is how
   names would first get attached to a freshly found array.
 * Pickle now and HDF5 later, or HDF5 straight away?
-* Where does the netanal → `find_resonances` step sit — `rfmux/tuning/` too, or
-  does it stay in `algorithms/measurement/fitting.py`?

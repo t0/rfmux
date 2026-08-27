@@ -403,140 +403,80 @@ def find_resonances(
     module_identifier: str | int | None = None,
 ):
     """
-    Finds resonances (dips) in network analysis data.
+    Deprecated. Use :func:`rfmux.tuning.find_resonances` instead.
 
-    Parameters
-    ----------
-    frequencies : np.ndarray
-        Sorted frequency points (Hz).
-    iq_complex : np.ndarray
-        Complex I/Q data corresponding to 'frequencies'.
-    expected_resonances : int | None, optional
-        Optional target number of resonances for resilience logic, by default None.
-    min_dip_depth_db : float, optional
-        Minimum depth (prominence) a dip must have in dB to be considered a peak.
-        Corresponds to `prominence` in `scipy.signal.find_peaks`, by default 1.0.
-        Note: For shallow resonances (e.g., overcoupled or low Q), you may need
-        to reduce this to 0.3-0.5 dB.
-    min_Q : float, optional
-        Minimum estimated quality factor. Used to calculate the maximum allowed width
-        of a resonance feature, by default 1e4.
-        Note: For broad resonances, you may need to reduce this to 1000-5000.
-    max_Q : float, optional
-        Maximum estimated quality factor. Used to calculate the minimum allowed width
-        of a resonance feature, by default 1e7.
-    min_resonance_separation_hz : float, optional
-        Minimum frequency separation between identified peaks. Corresponds to `distance`
-        in `scipy.signal.find_peaks`, by default 100e3.
-    data_exponent : float, optional
-        Exponent applied to the magnitude data before dB conversion to potentially
-        enhance peak visibility, by default 2.0.
-    module_identifier : str | int | None, optional
-        An identifier for the module/data source, used for more informative warnings.
+    Kept so existing callers keep working; it forwards to the implementation in
+    ``rfmux/tuning/find_resonances.py`` and converts the result back to the dict
+    this function has always returned. There is only one search algorithm, and
+    it lives there — see that module for the parameters, which are the same ones
+    under slightly tidier names.
+
+    Two things to know if you are reading old output:
+
+    * ``min_resonance_separation_hz`` means something stricter than it used to.
+      It was ``find_peaks(distance=...)``, which counted samples and kept the
+      tallest member of a close group. It is now a collision cut in Hz: any
+      candidate with a neighbour inside the separation is removed *along with
+      that neighbour*, because a tone on either member of a collided pair reads
+      the other one too. Well-separated arrays are unaffected; a collided pair
+      that used to yield one resonance now yields none. Callers that want the
+      old permissiveness should pass a much smaller value — the new default in
+      ``rfmux.tuning`` is 0 Hz, which cuts exact duplicates only.
+    * ``prominence_db`` is now reported in true dB, i.e. divided by
+      ``data_exponent``. With the default exponent of 2 the number is half what
+      this function used to print. The new one is the real dip depth.
 
     Returns
     -------
     dict
-        A dictionary containing:
-        - 'resonance_frequencies': list[float] - Identified resonance peak frequencies (Hz).
-        - 'resonances_details': list[dict] - Detailed information for each resonance.
-                                             Each dict contains: 'frequency', 'prominence_db',
-                                             'width_hz', 'q_estimated'.
-        Returns empty lists if no resonances are found or an error occurs.
-        
-    Notes
-    -----
-    The default parameters are optimized for typical high-Q superconducting resonators
-    with clear dips of several dB. For other resonator types, parameter adjustment
-    may be necessary.
+        - 'resonance_frequencies': list[float] — frequencies (Hz).
+        - 'resonances_details': list[dict] — one dict per resonance, with
+          'frequency', 'prominence_db', 'width_hz' and 'q_estimated'.
     """
-    results = {
-        'resonance_frequencies': [],
-        'resonances_details': []
-    }
-    if len(frequencies) < 2 or len(iq_complex) < 2 or len(frequencies) != len(iq_complex):
-        warnings.warn(f"Resonance finding skipped for {module_identifier or 'data'}: Insufficient or mismatched data points.")
-        return results
+    warnings.warn(
+        "fitting.find_resonances is deprecated; use rfmux.tuning.find_resonances "
+        "(or find_resonances_in_netanal for a netanal result), which returns a "
+        "ResonanceSearch instead of a dict.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
-    try:
-        # a. Preprocessing:
-        magnitude = np.abs(iq_complex)
-        if np.any(magnitude <= 1e-18):
-            min_positive = np.min(magnitude[magnitude > 1e-18]) if np.any(magnitude > 1e-18) else 1e-9
-            magnitude = np.maximum(magnitude, min_positive * 0.1)
+    from ...tuning.find_resonances import find_resonances as _find_resonances
 
-        ref_mag = np.median(magnitude[-min(10, len(magnitude)):])
-        if ref_mag <= 1e-18: ref_mag = 1.0
-
-        shifted_mag = magnitude**data_exponent
-        ref_shifted = ref_mag**data_exponent
-        mag_db = 20 * np.log10(shifted_mag / ref_shifted)
-
-        # b. Calculate find_peaks Parameters:
-        pt_spacing = np.mean(np.diff(frequencies))
-        if not np.isfinite(pt_spacing) or pt_spacing <= 0:
-            pt_spacing = (frequencies[-1] - frequencies[0]) / (len(frequencies) - 1) if len(frequencies) > 1 else 1e6
-
-        median_freq = np.median(frequencies)
-        max_width_hz = median_freq / min_Q if min_Q > 0 else np.inf
-        min_width_hz = median_freq / max_Q if max_Q > 0 else 0
-
-        max_width_pts = np.ceil(max_width_hz / pt_spacing) if pt_spacing > 0 and np.isfinite(max_width_hz) else len(frequencies)
-        min_width_pts = np.ceil(min_width_hz / pt_spacing) if pt_spacing > 0 and np.isfinite(min_width_hz) else 0
-        max_width_pts = max(1, int(max_width_pts))
-        min_width_pts = max(0, int(min(min_width_pts, max_width_pts)))
-
-
-        min_separation_pts = np.ceil(min_resonance_separation_hz / pt_spacing) if pt_spacing > 0 else 1
-        min_separation_pts = max(1, int(min_separation_pts))
-
-        # c. Call find_peaks:
-        # Ensure find_peaks is imported if not already at the top of the file
-        from scipy import signal as sp_signal # Use an alias to avoid conflict if 'signal' is used elsewhere
-        peaks, properties = sp_signal.find_peaks(
-            -mag_db,
-            prominence=min_dip_depth_db,
-            width=(min_width_pts, max_width_pts),
-            distance=min_separation_pts
+    # Preserved from the original: a degenerate trace warns and yields nothing
+    # rather than raising, because callers (the Periscope panel among them) rely
+    # on getting empty lists back.
+    if len(frequencies) < 3 or len(frequencies) != len(iq_complex):
+        warnings.warn(
+            f"Resonance finding skipped for {module_identifier or 'data'}: "
+            f"Insufficient or mismatched data points."
         )
+        return {'resonance_frequencies': [], 'resonances_details': []}
 
-        # d. Apply Resilience Logic:
-        if expected_resonances is not None and len(peaks) != expected_resonances:
-            if len(peaks) > expected_resonances:
-                prominences = properties['prominences']
-                sorted_prominence_indices = np.argsort(prominences)[::-1]
-                top_indices_unsorted = sorted_prominence_indices[:expected_resonances]
-                top_indices_sorted = np.sort(top_indices_unsorted)
-                peaks = peaks[top_indices_sorted]
-                properties = {key: val[top_indices_sorted] for key, val in properties.items()}
-                warnings.warn(f"Found {len(prominences)} peaks for {module_identifier or 'data'}, selected top {expected_resonances} most prominent.")
-            else:
-                warnings.warn(f"Found {len(peaks)} peaks for {module_identifier or 'data'}, expected {expected_resonances}. Consider adjusting parameters.")
+    found = _find_resonances(
+        frequencies,
+        iq_complex,
+        min_dip_depth_db=min_dip_depth_db,
+        min_Q=min_Q,
+        max_Q=max_Q,
+        min_separation_hz=min_resonance_separation_hz,
+        expected_resonances=expected_resonances,
+        data_exponent=data_exponent,
+        label=str(module_identifier) if module_identifier is not None else None,
+    )
 
-        # e. Format Results:
-        found_frequencies = frequencies[peaks]
-        results['resonance_frequencies'] = found_frequencies.tolist()
-
-        resonances_details_list = []
-        for i, peak_idx in enumerate(peaks):
-            freq_hz = found_frequencies[i]
-            width_pts_val = properties['widths'][i]
-            width_hz_val = width_pts_val * pt_spacing
-            q_est_val = freq_hz / width_hz_val if width_hz_val > 0 else np.inf
-            resonances_details_list.append({
-                'frequency': freq_hz,
-                'prominence_db': properties['prominences'][i],
-                'width_hz': width_hz_val,
-                'q_estimated': q_est_val
-            })
-        results['resonances_details'] = resonances_details_list
-
-    except Exception as e:
-        warnings.warn(f"Resonance finding failed for {module_identifier or 'data'}: {type(e).__name__} - {e}. Returning empty lists.")
-        results['resonance_frequencies'] = []
-        results['resonances_details'] = []
-
-    return results
+    return {
+        'resonance_frequencies': found.resonance_frequencies_hz.tolist(),
+        'resonances_details': [
+            {
+                'frequency': c.frequency_hz,
+                'prominence_db': c.depth_db,
+                'width_hz': c.width_hz,
+                'q_estimated': c.q_estimate,
+            }
+            for c in found.candidates
+        ],
+    }
 
 
 def fit_skewed_multisweep(

@@ -254,6 +254,30 @@ def test_min_separation_hz_catches_split_resonances():
         )
 
 
+def test_min_separation_hz_is_inclusive():
+    """A pair exactly min_separation_hz apart collides, as in find_resonances."""
+    with pytest.raises(ValueError, match="collides"):
+        ResonatorCatalog.from_frequencies(
+            [1e9, 1e9 + 1e3], module=1, amplitude=0.01, min_separation_hz=1e3
+        )
+
+
+def test_min_separation_hz_none_allows_identical_frequencies():
+    """The deliberate case: two channels parked on one frequency."""
+    m = ResonatorCatalog.from_frequencies(
+        [1e9, 1e9], module=1, amplitude=0.01, min_separation_hz=None
+    )
+    assert [r.bias.frequency_hz for r in m] == [1e9, 1e9]
+    assert [r.channel for r in m] == [1, 2]
+
+
+def test_min_separation_hz_rejects_negative():
+    with pytest.raises(ValueError, match="min_separation_hz"):
+        ResonatorCatalog.from_frequencies(
+            [1e9, 2e9], module=1, amplitude=0.01, min_separation_hz=-1.0
+        )
+
+
 def test_names_must_match_frequency_count():
     with pytest.raises(ValueError, match="2 names for 3 frequencies"):
         ResonatorCatalog.from_frequencies(
@@ -390,6 +414,22 @@ def test_dict_round_trip_preserves_module_and_nco():
     back = ResonatorCatalog.from_dict(m.to_dict())
     assert back.module == 4
     assert back.nco_frequency_hz == 1.1e9
+
+
+def test_dict_round_trip_preserves_the_separation_rule():
+    """Without this a duplicate-frequency catalog saves but cannot be reloaded."""
+    m = ResonatorCatalog.from_frequencies(
+        [1e9, 1e9], module=1, amplitude=0.01, min_separation_hz=None
+    )
+    back = ResonatorCatalog.from_dict(m.to_dict())
+    assert back.min_separation_hz is None
+    assert [r.bias.frequency_hz for r in back] == [1e9, 1e9]
+
+
+def test_from_dict_defaults_the_separation_rule_for_older_files():
+    d = a_catalog().to_dict()
+    del d["min_separation_hz"]
+    assert ResonatorCatalog.from_dict(d).min_separation_hz == 0.0
 
 
 # ─── CSV ──────────────────────────────────────────────────────────────────────

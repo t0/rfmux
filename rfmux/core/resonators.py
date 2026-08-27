@@ -166,10 +166,12 @@ class ResonatorCatalog:
     Iteration is in channel order. Lookup is by name.
 
     Frequency collisions are checked when a resonator joins the catalog, which
-    is where a duplicate from ``find_resonances`` shows up. Retuning through
-    ``Resonator.set_bias`` is not re-checked — two tones can be walked onto one
-    frequency after the fact. Worth a ``validate()`` pass once there is a
-    caller that retunes in bulk.
+    is where a duplicate from ``find_resonances`` shows up. How close is too
+    close is ``min_separation_hz``, and setting it to ``None`` turns the check
+    off entirely for the deliberate case of two tones on one frequency.
+    Retuning through ``Resonator.set_bias`` is not re-checked — two tones can be
+    walked onto one frequency after the fact. Worth a ``validate()`` pass once
+    there is a caller that retunes in bulk.
     """
 
     # Stamped into to_dict output and required exactly by from_dict, so a file
@@ -183,17 +185,23 @@ class ResonatorCatalog:
         resonators: Iterable[Resonator],
         module: int,
         nco_frequency_hz: float | None = None,
-        min_separation_hz: float | None = None,
+        min_separation_hz: float | None = 0.0,
     ):
         """
         Args:
             resonators: the members; names and channels must be unique.
             module: the readout module these channel numbers refer to.
             nco_frequency_hz: NCO the channel frequencies are offset from.
-            min_separation_hz: if given, reject bias frequencies closer
-                together than this. The default (None) rejects only exactly
-                equal frequencies — see ``_check_frequency``.
+            min_separation_hz: reject bias frequencies this close together or
+                closer. The default, 0.0, rejects only exactly equal
+                frequencies; ``None`` allows any spacing, including none at
+                all. See ``_check_frequency``.
         """
+        if min_separation_hz is not None and min_separation_hz < 0:
+            raise ValueError(
+                f"min_separation_hz={min_separation_hz}: must be a separation in "
+                f"Hz (>= 0), or None to allow any spacing."
+            )
         self.module = module
         self.nco_frequency_hz = nco_frequency_hz
         self.min_separation_hz = min_separation_hz
@@ -208,23 +216,33 @@ class ResonatorCatalog:
     def _check_frequency(self, r: Resonator):
         """Reject a bias frequency that collides with one already present.
 
-        Two tones on one frequency is a hardware conflict, not a bookkeeping
-        nicety.
+        Two tones on one frequency is normally a hardware conflict, not a
+        bookkeeping nicety, so the default threshold of 0.0 Hz still rejects
+        exactly equal floats. It is a weak check: two peaks a microhertz apart
+        are the realistic symptom of ``find_resonances`` splitting one
+        resonator, and they pass. Set ``min_separation_hz`` to something
+        physically motivated to catch that.
 
-        With ``min_separation_hz`` unset this catches only exactly equal floats,
-        which is a weak check: two peaks a microhertz apart are the realistic
-        symptom of ``find_resonances`` splitting one resonator, and they pass.
-        Set ``min_separation_hz`` to something physically motivated to catch that.
+        Comparison is inclusive — a pair exactly ``min_separation_hz`` apart
+        collides — which is what makes 0.0 mean "no two tones share a
+        frequency", and matches ``find_resonances``' separation pass.
+
+        ``min_separation_hz=None`` skips the check altogether, for the caller
+        who means to park two tones on one frequency. Nothing downstream
+        depends on frequencies being distinct; the cost is that the two channels
+        read the same thing, which is only useful if you know that.
         """
         threshold = self.min_separation_hz
+        if threshold is None:
+            return
         for other in self._by_name.values():
             gap = abs(other.bias.frequency_hz - r.bias.frequency_hz)
-            collides = gap == 0 if threshold is None else gap < threshold
-            if collides:
+            if gap <= threshold:
                 rule = (
-                    "Each resonator needs a distinct frequency."
-                    if threshold is None
-                    else f"This catalog requires at least {threshold:g} Hz "
+                    "Each resonator needs a distinct frequency; pass "
+                    "min_separation_hz=None to allow duplicates."
+                    if threshold == 0
+                    else f"This catalog requires more than {threshold:g} Hz "
                     f"between bias frequencies; these are {gap:g} Hz apart."
                 )
                 raise ValueError(
@@ -345,6 +363,7 @@ class ResonatorCatalog:
             "schema_version": self.SCHEMA_VERSION,
             "module": self.module,
             "nco_frequency_hz": self.nco_frequency_hz,
+            "min_separation_hz": self.min_separation_hz,
             "resonators": [
                 {
                     "name": r.name,
@@ -376,14 +395,18 @@ class ResonatorCatalog:
             resonators,
             module=d["module"],
             nco_frequency_hz=d.get("nco_frequency_hz"),
+            # Absent in files written before the rule was persisted; those were
+            # written under the old default, which is this one.
+            min_separation_hz=d.get("min_separation_hz", 0.0),
         )
 
     # -- CSV ------------------------------------------------------------------
     #
     # A spreadsheet-editable bias table. Deliberately lossy: it carries the
-    # operating point and nothing else. `notes`, `nco_frequency_hz` and every
-    # calibration field (and so df_calibration) are dropped. Use to_dict for a
-    # faithful round-trip.
+    # operating point and nothing else. `notes`, `nco_frequency_hz`,
+    # `min_separation_hz` and every calibration field (and so df_calibration)
+    # are dropped — pass the separation rule to `from_csv` if the table needs
+    # it. Use to_dict for a faithful round-trip.
 
     CSV_COLUMNS = (
         "name",

@@ -210,11 +210,16 @@ class ResonatorCatalog:
             gap = abs(other.bias.frequency_hz - r.bias.frequency_hz)
             collides = gap == 0 if threshold is None else gap < threshold
             if collides:
+                rule = (
+                    "Each resonator needs a distinct frequency."
+                    if threshold is None
+                    else f"This catalog requires at least {threshold:g} Hz "
+                    f"between bias frequencies; these are {gap:g} Hz apart."
+                )
                 raise ValueError(
                     f"Bias frequency {r.bias.frequency_hz / 1e6:.6f} MHz "
                     f"({r.name!r}) collides with {other.name!r} at "
-                    f"{other.bias.frequency_hz / 1e6:.6f} MHz. "
-                    f"Each resonator needs a distinct frequency."
+                    f"{other.bias.frequency_hz / 1e6:.6f} MHz. {rule}"
                 )
 
     def _add(self, r: Resonator):

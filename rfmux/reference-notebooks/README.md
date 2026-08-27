@@ -23,13 +23,18 @@ started yourself, right-click → *Open With* → *Notebook*.
 
 ## Where to start
 
-- **`Demos/simplified_tuning_flow.md`** — sweep the band, find and fit the
-  resonators, park the carriers, measure the noise. Everything else assumes
-  you have done this first.
+- **`Demos/network_analyses_find_resonances_make_resonator_catalog.md`** — the
+  first three steps, one at a time: sweep a band, find the dips, build the
+  resonator catalog everything downstream passes around. Its second half is a
+  tour of the catalog on its own — building one by hand, CSV and dictionary
+  round trips, the invariants — and needs no hardware.
+- **`Demos/simplified_tuning_flow.md`** — the whole chain end to end: sweep,
+  find and fit the resonators, park the carriers, measure the noise. Everything
+  else assumes you have done this first.
 - **`Demos/pulse_capture.md`** — detect and record detector pulses, with
   streaming HDF5, histograms and matched slow+fast capture.
 
-Each has an unattended `.py` counterpart beside it for cron jobs and
+The last two have an unattended `.py` counterpart beside them for cron jobs and
 smoke tests; the notebook is the documentation, the script is the runner.
 
 ## Connecting
@@ -45,5 +50,5 @@ await crs.resolve()
 await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)
 ```
 
-No hardware? Both demos above stand up a simulated CRS instead — see their
+No hardware? All three demos above stand up a simulated CRS instead — see their
 mock-mode sections.

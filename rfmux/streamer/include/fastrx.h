@@ -118,3 +118,39 @@ struct fastrxd_setup_reply {
 	uint32_t abi_version;     /* must equal FASTRXD_ABI_VERSION */
 	uint32_t client_id;       /* this client's slot index in fastrxd_ctl */
 };
+
+/* On-disk format for fastrx PacketWriter / PacketFile. Layout:
+ *
+ *   [ file header, FASTRX_FILE_HEADER_BYTES total ]     offset 0
+ *   [ record 0 ][ record 1 ] ...                        fixed stride
+ *   [ zero padding to a 4 KiB boundary ]                O_DIRECT tail
+ *
+ * A record is the wire header as received, followed by one I/Q block per pipe
+ * in pipe_mask, then padding to record_stride.  pipe_mask is the set of pipes
+ * recorded, which may differ from what the transmitter sent: each record's
+ * own pipe_snapshot preserves the wire truth, but the record layout follows
+ * pipe_mask alone.  A recorded pipe absent from a packet's snapshot is
+ * zero-filled; pipe_snapshot disambiguates between real zeros and fill. */
+
+#define FASTRX_FILE_MAGIC        0x58464843u  /* "CHFX" when read as bytes */
+#define FASTRX_FILE_VERSION      1
+#define FASTRX_FILE_HEADER_BYTES 4096
+
+struct fastrx_file_header {
+	uint32_t magic;            /* FASTRX_FILE_MAGIC */
+	uint32_t version;          /* FASTRX_FILE_VERSION */
+
+	uint32_t record_stride;    /* bytes per record, including padding */
+	uint16_t samples_per_pipe; /* I/Q pairs per pipeline block */
+	uint16_t pipe_mask;        /* pipes recorded */
+
+	/* Zero-initialized; rewritten with the true count when it closes
+	 * cleanly. */
+	uint64_t num_records;
+
+	/* The rest of the header block, up to FASTRX_FILE_HEADER_BYTES, is
+	 * reserved and written as zero. */
+} PACKED;
+
+static_assert(sizeof(struct fastrx_file_header) == 24,
+              "file header layout no longer matches the disk format");

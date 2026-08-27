@@ -65,7 +65,7 @@ class HUD(QMainWindow):
         self.channel = channel
         self.pipe = pipe
         self.depth = depth
-        self._consumer = fastrx.Consumer(interface=interface, socket=socket)
+        self._consumer = fastrx.PacketCapture(interface=interface, socket=socket)
         self._n_grabs = 0
 
         self.setWindowTitle("fastrx HUD")

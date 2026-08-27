@@ -69,8 +69,8 @@ install(TARGETS _receiver LIBRARY DESTINATION rfmux/streamer)
 #
 # fastrx: Linux-only, AF_XDP-based receiver fastpath for fancy NICs
 #
-# Built only on Linux when clang, libxdp and libbpf are all present. When
-# fastrxd is mandatory (i.e. for wheel builds), use
+# Built only on Linux when clang, libxdp, libbpf and liburing are all present.
+# When fastrxd is mandatory (i.e. for wheel builds), use
 #
 #   $ uv pip install . --config-settings=cmake.define.FASTRX_REQUIRED=ON
 #
@@ -89,6 +89,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(PkgConfig_FOUND)
         pkg_check_modules(FASTRX_LIBXDP QUIET IMPORTED_TARGET libxdp>=1.3)
         pkg_check_modules(FASTRX_LIBBPF QUIET IMPORTED_TARGET libbpf>=1.0)
+        pkg_check_modules(FASTRX_LIBURING QUIET IMPORTED_TARGET liburing>=2.0)
     endif()
 endif()
 
@@ -96,7 +97,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
 	AND CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64"
         AND FASTRX_CLANG
 	AND FASTRX_LIBXDP_FOUND
-	AND FASTRX_LIBBPF_FOUND)
+	AND FASTRX_LIBBPF_FOUND
+	AND FASTRX_LIBURING_FOUND)
 
     message(STATUS "fastrx: building fastrxd and _fastrx (clang=${FASTRX_CLANG})")
 
@@ -179,7 +181,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
         -Wall -Wextra -Wshadow -Wcast-qual -Wcast-align
         -Wnon-virtual-dtor -Wextra-semi -Werror
     )
-    target_link_libraries(_fastrx PRIVATE atomic Threads::Threads)
+    target_link_libraries(_fastrx
+	    PRIVATE atomic Threads::Threads PkgConfig::FASTRX_LIBURING)
     install(TARGETS _fastrx LIBRARY DESTINATION rfmux/streamer)
 
 elseif(FASTRX_REQUIRED

@@ -342,6 +342,7 @@ class HUD(QMainWindow):
         nperseg = min(self._nperseg_slider.value(), n)
         freq, pxx = welch(cx, fs=PACKET_RATE,
                           window=self._window_combo.currentText(),
+                          detrend=False,
                           nperseg=nperseg, return_onesided=False)
         freq = np.fft.fftshift(freq)
         pxx = np.fft.fftshift(pxx)

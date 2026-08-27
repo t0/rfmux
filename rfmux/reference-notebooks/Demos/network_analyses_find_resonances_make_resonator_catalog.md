@@ -500,14 +500,15 @@ print(f"recalibrated: {r.bias.frequency_hz/1e6:.4f} MHz, "
 
 ### Quantizing onto the tone grid
 
-To avoid seeing in-band intermodulation distortion products, the hardware is only 
-allowed to place a tone on a multiple of `BASE_FREQUENCY`. 
+To avoid seeing in-band intermodulation distortion products, the hardware is only
+allowed to place a tone on a multiple of `BASE_FREQUENCY`.
 
-TODO: revamp the way the quantization is handled. This needs to happen right away, and
-NEVER store the unquantized values, so that the tones that are requested are the tones that are
-set and are also the tones that are recorded.
-TODO: also .quantized() is a confusing name for this function - consider .quantize() instead, 
-and have it be run on any incoming bias point frequency by default.
+A `BiasPoint` does that to itself, at construction, always. Every frequency
+above came out already on the grid, and so does every frequency you set later
+through `set_bias`. The reason for doing it here and not at apply-bias is that
+there is then only one number: what you asked for, what gets recorded, and what
+the hardware plays are the same, and no reader downstream has to work out which
+of the three they are holding.
 
 ```python
 print(f"tone grid: {BASE_FREQUENCY:.6f} Hz")
@@ -516,15 +517,29 @@ print(f"tone grid: {BASE_FREQUENCY:.6f} Hz")
 # (Asking for a round 1.0 GHz would not demonstrate anything: it happens to sit
 # very nearly on the grid already.)
 grid_point = round(1.0e9 / BASE_FREQUENCY) * BASE_FREQUENCY
-off_grid = BiasPoint(grid_point + 0.4 * BASE_FREQUENCY, amplitude=0.01,
-                     iq_rotation_deg=12.0)
+requested = grid_point + 0.4 * BASE_FREQUENCY
+b = BiasPoint(requested, amplitude=0.01, iq_rotation_deg=12.0)
 
-print(f"requested: {off_grid.frequency_hz:.6f} Hz")
-print(f"on grid  : {off_grid.quantized().frequency_hz:.6f} Hz")
-print(f"moved by : "
-      f"{off_grid.quantized().frequency_hz - off_grid.frequency_hz:+.6f} Hz "
-      f"({(off_grid.quantized().frequency_hz - off_grid.frequency_hz)/BASE_FREQUENCY:+.1f} steps)")
-print(f"rotation : {off_grid.quantized().iq_rotation_deg} deg  <- calibration kept")
+print(f"requested: {requested:.6f} Hz")
+print(f"recorded : {b.frequency_hz:.6f} Hz")
+print(f"moved by : {b.frequency_hz - requested:+.6f} Hz "
+      f"({(b.frequency_hz - requested)/BASE_FREQUENCY:+.1f} steps)")
+print(f"rotation : {b.iq_rotation_deg} deg  <- calibration kept")
+```
+
+The shift is under half a step — far smaller than a resonator's width — so
+calibration measured at the requested frequency still holds at the tone that
+actually gets played. That is why quantization is not a tone move in the sense
+`set_bias` cares about, and does not drop the calibration fields.
+
+If you want the exact number you asked for — a sweep centre you are doing
+arithmetic on, say — pass `bias_frequency_quantized=False`, and nothing
+downstream will round it for you. `.quantize()` is the one-shot for those.
+
+```python
+exact = BiasPoint(requested, amplitude=0.01, bias_frequency_quantized=False)
+print(f"kept exact : {exact.frequency_hz:.6f} Hz")
+print(f".quantize(): {exact.quantize().frequency_hz:.6f} Hz")
 ```
 
 ### Invariants, and what they refuse

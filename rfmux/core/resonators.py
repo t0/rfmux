@@ -44,6 +44,14 @@ from typing import Iterable, Iterator
 from .transferfunctions import BASE_FREQUENCY
 
 
+def _on_grid(frequency_hz: float) -> float:
+    """Round onto the hardware tone grid, ``transferfunctions.BASE_FREQUENCY``.
+
+    The single definition every quantizing path in the tree uses.
+    """
+    return round(frequency_hz / BASE_FREQUENCY) * BASE_FREQUENCY
+
+
 # ─── BiasPoint ────────────────────────────────────────────────────────────────
 
 
@@ -55,10 +63,21 @@ class BiasPoint:
     the tone you build a new ``BiasPoint``; calibration fields you don't pass
     are ``None``. A frequency carrying some *other* tone's calibration is
     unrepresentable.
+
+    The frequency is quantized onto the hardware tone grid at construction, so
+    ``frequency_hz`` is what the hardware will actually play. Requested,
+    recorded and set are then the same number, and no later reader has to
+    wonder which of the three it is holding. ``bias_frequency_quantized=False``
+    opts out for the caller who needs the exact number they asked for — a sweep
+    centre they are doing arithmetic on, say — and nothing downstream
+    re-quantizes for them.
     """
 
     frequency_hz: float
     amplitude: float  # normalized DAC units, (0, 1]
+    # Snap frequency_hz onto the tone grid, always. Named for the field it
+    # governs so it does not read as a past tense of `quantize()`.
+    bias_frequency_quantized: bool = True
     dI_df: float | None = None  # V/Hz at this bias point
     dQ_df: float | None = None
     iq_rotation_deg: float | None = None
@@ -81,6 +100,15 @@ class BiasPoint:
             )
         if self.frequency_hz <= 0:
             raise ValueError(f"frequency_hz={self.frequency_hz}: must be positive Hz.")
+        if self.bias_frequency_quantized:
+            snapped = _on_grid(self.frequency_hz)
+            if snapped <= 0:
+                raise ValueError(
+                    f"frequency_hz={self.frequency_hz}: quantizes to 0 Hz — it is "
+                    f"less than half a tone-grid step ({BASE_FREQUENCY / 2:g} Hz), "
+                    f"so the hardware has nowhere to put it."
+                )
+            object.__setattr__(self, "frequency_hz", snapped)
 
     @property
     def df_calibration(self) -> complex | None:
@@ -93,17 +121,17 @@ class BiasPoint:
     def power_dbm(self, dac_scale_dbm: float) -> float:
         return dac_scale_dbm + 20.0 * math.log10(self.amplitude)
 
-    def quantized(self) -> BiasPoint:
+    def quantize(self) -> BiasPoint:
         """Round the frequency onto the hardware tone grid.
 
-        The grid is ``transferfunctions.BASE_FREQUENCY``, the single definition
-        every quantizing path in the tree uses. Calibration is kept: the shift
-        is under half a grid step, which is small compared to a resonator's
-        width.
+        Rarely needed by hand — a bias point quantizes itself at construction
+        unless it was built with ``bias_frequency_quantized=False``. This is the
+        one-shot for those, and a no-op for everything else. Calibration is
+        kept: the shift is under half a grid step, which is small compared to a
+        resonator's width. ``bias_frequency_quantized`` is policy and is left
+        alone, so an opted-out point stays opted out for its next move.
         """
-        return replace(
-            self, frequency_hz=round(self.frequency_hz / BASE_FREQUENCY) * BASE_FREQUENCY
-        )
+        return replace(self, frequency_hz=_on_grid(self.frequency_hz))
 
 
 # ─── Resonator ────────────────────────────────────────────────────────────────
@@ -115,10 +143,11 @@ class Resonator:
 
     There is exactly one frequency per resonator and it lives on ``bias``: the
     current best estimate of where this resonator's tone belongs. It is seeded
-    from ``find_resonances``, refined by multisweep and by bias finding, and
-    quantized by apply-bias. There is deliberately no separate sweep-centre
-    field — the sweep centre is multisweep's business, and a second frequency
-    is a second thing to keep in agreement.
+    from ``find_resonances`` and refined by multisweep and by bias finding; at
+    every one of those steps it lands on the hardware tone grid immediately,
+    because that is where the tone will go. There is deliberately no separate
+    sweep-centre field — the sweep centre is multisweep's business, and a second
+    frequency is a second thing to keep in agreement.
 
     ``bias`` is required. A resonator we cannot say a frequency for is not a
     resonator we know about, so there is no unbiased state to test for, clear
@@ -142,6 +171,10 @@ class Resonator:
         fields unless new values are passed explicitly, so stale calibration
         stays structurally impossible even through this convenience path.
         Changing only calibration leaves the tone alone.
+
+        A new ``frequency_hz`` is quantized on the way in like any other, so
+        what you read back is what the hardware will play, not what you asked
+        for.
         """
         if "frequency_hz" in changes or "amplitude" in changes:
             for f in BiasPoint._CAL_FIELDS:
@@ -218,10 +251,12 @@ class ResonatorCatalog:
 
         Two tones on one frequency is normally a hardware conflict, not a
         bookkeeping nicety, so the default threshold of 0.0 Hz still rejects
-        exactly equal floats. It is a weak check: two peaks a microhertz apart
-        are the realistic symptom of ``find_resonances`` splitting one
-        resonator, and they pass. Set ``min_separation_hz`` to something
-        physically motivated to catch that.
+        exactly equal floats. Because bias frequencies arrive quantized, that
+        now also catches the realistic symptom of ``find_resonances`` splitting
+        one resonator: two peaks a hair apart land on one grid point, which is
+        exactly what the hardware would have done with them. It stays a weak
+        check past one grid step — set ``min_separation_hz`` to something
+        physically motivated for anything wider.
 
         Comparison is inclusive — a pair exactly ``min_separation_hz`` apart
         collides — which is what makes 0.0 mean "no two tones share a
@@ -282,7 +317,9 @@ class ResonatorCatalog:
 
         Each resonator gets a ``BiasPoint`` at its found frequency, carrying no
         calibration — the operating point as first guessed. Multisweep and bias
-        finding move it from there.
+        finding move it from there. Found frequencies come off a sweep grid,
+        not the tone grid, so expect them to shift by up to half a tone-grid
+        step on the way in.
 
         ``amplitude`` is required rather than defaulted: the probe amplitude is
         a real measurement choice, and there is no value that is right for an
@@ -404,9 +441,11 @@ class ResonatorCatalog:
     #
     # A spreadsheet-editable bias table. Deliberately lossy: it carries the
     # operating point and nothing else. `notes`, `nco_frequency_hz`,
-    # `min_separation_hz` and every calibration field (and so df_calibration)
-    # are dropped — pass the separation rule to `from_csv` if the table needs
-    # it. Use to_dict for a faithful round-trip.
+    # `min_separation_hz`, `bias_frequency_quantized` and every calibration field
+    # (and so df_calibration) are dropped — pass the separation rule to
+    # `from_csv` if the table needs it, and note that a row read back comes in
+    # quantized whether or not it was written that way. Use to_dict for a
+    # faithful round-trip.
 
     CSV_COLUMNS = (
         "name",

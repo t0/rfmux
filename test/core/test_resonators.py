@@ -100,31 +100,72 @@ def test_power_dbm():
 # ─── quantization ─────────────────────────────────────────────────────────────
 
 
-def test_quantized_lands_on_the_grid():
-    b = BiasPoint(frequency_hz=1_010_000_123.456, amplitude=0.01)
-    q = b.quantized()
-    assert q.frequency_hz / BASE_FREQUENCY == pytest.approx(
-        round(q.frequency_hz / BASE_FREQUENCY)
+def on_the_grid(frequency_hz: float) -> bool:
+    return frequency_hz / BASE_FREQUENCY == pytest.approx(
+        round(frequency_hz / BASE_FREQUENCY)
     )
 
 
-def test_quantized_moves_less_than_half_a_grid_step():
+def test_a_bias_point_lands_on_the_grid_without_being_asked():
+    """The whole point: what is recorded is what the hardware can play."""
+    b = BiasPoint(frequency_hz=1_010_000_123.456, amplitude=0.01)
+    assert on_the_grid(b.frequency_hz)
+
+
+def test_quantizing_moves_less_than_half_a_grid_step():
     for offset in (0.0, 17.0, 149.0, 1234.5):
-        b = BiasPoint(frequency_hz=1e9 + offset, amplitude=0.01)
-        assert abs(b.quantized().frequency_hz - b.frequency_hz) <= BASE_FREQUENCY / 2
+        requested = 1e9 + offset
+        b = BiasPoint(frequency_hz=requested, amplitude=0.01)
+        assert abs(b.frequency_hz - requested) <= BASE_FREQUENCY / 2
 
 
-def test_quantized_keeps_calibration():
+def test_opting_out_records_exactly_what_was_asked_for():
+    b = BiasPoint(
+        frequency_hz=1_010_000_123.456, amplitude=0.01, bias_frequency_quantized=False
+    )
+    assert b.frequency_hz == 1_010_000_123.456
+
+
+def test_quantize_is_the_one_shot_for_an_opted_out_point():
+    b = BiasPoint(
+        frequency_hz=1_010_000_123.456, amplitude=0.01, bias_frequency_quantized=False
+    )
+    q = b.quantize()
+    assert on_the_grid(q.frequency_hz)
+    # Policy is not silently switched on underneath the caller.
+    assert q.bias_frequency_quantized is False
+
+
+def test_quantize_keeps_calibration():
     """The shift is far smaller than a resonator width, so calibration holds."""
-    b = BiasPoint(frequency_hz=1_010_000_123.456, amplitude=0.01, dI_df=1e-9, dQ_df=2e-9)
-    q = b.quantized()
+    b = BiasPoint(
+        frequency_hz=1_010_000_123.456,
+        amplitude=0.01,
+        bias_frequency_quantized=False,
+        dI_df=1e-9,
+        dQ_df=2e-9,
+    )
+    q = b.quantize()
     assert q.df_calibration == b.df_calibration
     assert q.amplitude == b.amplitude
 
 
-def test_quantized_is_idempotent():
-    b = BiasPoint(frequency_hz=1_010_000_123.456, amplitude=0.01).quantized()
-    assert b.quantized().frequency_hz == pytest.approx(b.frequency_hz)
+def test_quantize_is_idempotent():
+    b = BiasPoint(frequency_hz=1_010_000_123.456, amplitude=0.01)
+    assert b.quantize().frequency_hz == pytest.approx(b.frequency_hz)
+
+
+def test_a_frequency_below_half_a_step_is_refused_not_zeroed():
+    """Quantizing must never turn a positive tone into no tone at all."""
+    with pytest.raises(ValueError, match="quantizes to 0 Hz"):
+        BiasPoint(frequency_hz=BASE_FREQUENCY / 4, amplitude=0.01)
+
+
+def test_set_bias_quantizes_the_new_frequency():
+    """Retuning goes through the same door as construction."""
+    r = a_resonator()
+    r.set_bias(frequency_hz=1_010_000_123.456)
+    assert on_the_grid(r.bias.frequency_hz)
 
 
 def test_the_grid_is_base_frequency_and_nothing_finer():
@@ -135,9 +176,9 @@ def test_the_grid_is_base_frequency_and_nothing_finer():
     be moved. Anything reintroducing a private grid constant fails here.
     """
     n = round(1e9 / BASE_FREQUENCY)
-    b = BiasPoint(frequency_hz=(n + 0.5) * BASE_FREQUENCY, amplitude=0.01)
-    shift = abs(b.quantized().frequency_hz - b.frequency_hz)
-    assert shift == pytest.approx(BASE_FREQUENCY / 2, abs=1e-3)
+    requested = (n + 0.5) * BASE_FREQUENCY
+    b = BiasPoint(frequency_hz=requested, amplitude=0.01)
+    assert abs(b.frequency_hz - requested) == pytest.approx(BASE_FREQUENCY / 2, abs=1e-3)
 
 
 # ─── a Resonator always has a bias ────────────────────────────────────────────
@@ -154,7 +195,7 @@ def test_resonator_cannot_exist_without_a_bias():
 def test_set_bias_moves_the_tone():
     r = a_resonator()
     r.set_bias(frequency_hz=1.0100003e9, amplitude=0.012)
-    assert r.bias.frequency_hz == 1.0100003e9
+    assert r.bias.frequency_hz == pytest.approx(1.0100003e9, abs=BASE_FREQUENCY / 2)
     assert r.bias.amplitude == 0.012
 
 
@@ -168,10 +209,11 @@ def test_moving_the_frequency_drops_calibration():
 
 def test_moving_the_amplitude_drops_calibration():
     r = a_resonator()
+    parked_at = r.bias.frequency_hz
     r.set_bias(iq_rotation_deg=12.0)
     r.set_bias(amplitude=0.02)
     assert r.bias.iq_rotation_deg is None
-    assert r.bias.frequency_hz == 1.01e9
+    assert r.bias.frequency_hz == parked_at
 
 
 def test_moving_the_tone_keeps_calibration_passed_explicitly():
@@ -183,8 +225,9 @@ def test_moving_the_tone_keeps_calibration_passed_explicitly():
 
 def test_amending_only_calibration_leaves_the_tone_alone():
     r = a_resonator()
+    parked_at = r.bias.frequency_hz
     r.set_bias(dI_df=1e-9, dQ_df=2e-9)
-    assert r.bias.frequency_hz == 1.01e9
+    assert r.bias.frequency_hz == parked_at
     assert r.bias.amplitude == 0.01
     assert r.bias.df_calibration is not None
 
@@ -198,7 +241,9 @@ def test_from_frequencies_sorts_and_assigns_channels():
     )
     assert [r.name for r in m] == ["R0001", "R0002", "R0003"]
     assert [r.channel for r in m] == [1, 2, 3]
-    assert [r.bias.frequency_hz for r in m] == [1.01e9, 1.03e9, 1.05e9]
+    assert [r.bias.frequency_hz for r in m] == pytest.approx(
+        [1.01e9, 1.03e9, 1.05e9], abs=BASE_FREQUENCY / 2
+    )
 
 
 def test_from_frequencies_seeds_a_bias_with_no_calibration():
@@ -241,9 +286,23 @@ def test_identical_frequencies_rejected():
         ResonatorCatalog.from_frequencies([1e9, 1e9], module=1, amplitude=0.01)
 
 
-def test_near_duplicate_frequencies_pass_by_default():
-    """Documents the weak default: only exact collisions are caught."""
-    m = ResonatorCatalog.from_frequencies([1e9, 1e9 + 1e-6], module=1, amplitude=0.01)
+def test_sub_grid_duplicates_are_caught_by_default():
+    """Quantizing does what the 0.0 Hz default could not on its own.
+
+    Two peaks a microhertz apart are the realistic symptom of
+    ``find_resonances`` splitting one resonator. They used to slip past the
+    default check as distinct floats; now they land on one grid point, which is
+    the truth of it — the hardware cannot tell them apart either.
+    """
+    with pytest.raises(ValueError, match="collides"):
+        ResonatorCatalog.from_frequencies([1e9, 1e9 + 1e-6], module=1, amplitude=0.01)
+
+
+def test_duplicates_within_a_grid_step_still_pass_by_default():
+    """The default remains weak, just less so: a step apart is still distinct."""
+    m = ResonatorCatalog.from_frequencies(
+        [1e9, 1e9 + BASE_FREQUENCY], module=1, amplitude=0.01
+    )
     assert len(m) == 2
 
 
@@ -267,7 +326,9 @@ def test_min_separation_hz_none_allows_identical_frequencies():
     m = ResonatorCatalog.from_frequencies(
         [1e9, 1e9], module=1, amplitude=0.01, min_separation_hz=None
     )
-    assert [r.bias.frequency_hz for r in m] == [1e9, 1e9]
+    assert [r.bias.frequency_hz for r in m] == pytest.approx(
+        [1e9, 1e9], abs=BASE_FREQUENCY / 2
+    )
     assert [r.channel for r in m] == [1, 2]
 
 
@@ -290,8 +351,8 @@ def test_names_pair_with_their_own_frequency_regardless_of_order():
     m = ResonatorCatalog.from_frequencies(
         [1.03e9, 1.01e9], module=1, amplitude=0.01, names=["upper", "lower"]
     )
-    assert m["upper"].bias.frequency_hz == 1.03e9
-    assert m["lower"].bias.frequency_hz == 1.01e9
+    assert m["upper"].bias.frequency_hz == pytest.approx(1.03e9, abs=BASE_FREQUENCY / 2)
+    assert m["lower"].bias.frequency_hz == pytest.approx(1.01e9, abs=BASE_FREQUENCY / 2)
     # channels still follow ascending frequency
     assert m["lower"].channel == 1
     assert m["upper"].channel == 2
@@ -375,6 +436,31 @@ def test_dict_round_trip():
     assert back["R0003"].notes == {"flagged": "noisy"}
 
 
+def test_dict_round_trip_preserves_an_opted_out_frequency():
+    """Reloading must not quantize a frequency the writer chose to keep exact."""
+    exact = 1_010_000_123.456
+    m = ResonatorCatalog(
+        [
+            Resonator(
+                "R0001",
+                channel=1,
+                bias=BiasPoint(exact, 0.01, bias_frequency_quantized=False),
+            )
+        ],
+        module=2,
+    )
+    back = ResonatorCatalog.from_dict(m.to_dict())
+    assert back["R0001"].bias.bias_frequency_quantized is False
+    assert back["R0001"].bias.frequency_hz == exact
+
+
+def test_from_dict_quantizes_files_written_before_the_flag_existed():
+    d = a_catalog().to_dict()
+    for rd in d["resonators"]:
+        del rd["bias"]["bias_frequency_quantized"]
+    assert ResonatorCatalog.from_dict(d)["R0001"].bias.bias_frequency_quantized is True
+
+
 def test_to_dict_holds_only_builtins():
     m = a_catalog()
     m["R0001"].set_bias(dI_df=1e-9)
@@ -423,7 +509,7 @@ def test_dict_round_trip_preserves_the_separation_rule():
     )
     back = ResonatorCatalog.from_dict(m.to_dict())
     assert back.min_separation_hz is None
-    assert [r.bias.frequency_hz for r in back] == [1e9, 1e9]
+    assert [r.bias.frequency_hz for r in back] == [r.bias.frequency_hz for r in m]
 
 
 def test_from_dict_defaults_the_separation_rule_for_older_files():

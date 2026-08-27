@@ -40,8 +40,9 @@ reading before the rest of this document:
 * **One frequency per resonator, and it lives on the bias point.** §3's
   `bias_frequency` *and* a separate sweep centre have collapsed into
   `Resonator.bias.frequency_hz`. `from_frequencies(freqs, module, amplitude)`
-  seeds it from `find_resonances`; multisweep and bias finding refine it;
-  apply-bias quantizes it. There is no `center_frequency_hz` field, because the
+  seeds it from `find_resonances`; multisweep and bias finding refine it; and
+  every one of those lands on the tone grid as it is set, rather than waiting
+  for apply-bias to quantize. There is no `center_frequency_hz` field, because the
   sweep centre is multisweep's decision and a second frequency is a second
   thing to keep in agreement. A consequence: `amplitude` is required at
   construction — a probe power is a measurement choice with no safe default.
@@ -66,7 +67,7 @@ Those defects are not present on this branch — the registry layer never existe
 here — so they are avoided by construction rather than repaired.
 
 **Settled: the tone grid is `transferfunctions.BASE_FREQUENCY`** (≈596.046 Hz).
-There is now one definition, and `BiasPoint.quantized()`, `bias_kids.py` and
+There is now one definition, and `BiasPoint`, `bias_kids.py` and
 Periscope's `apply_bias_output` all use it. The three sites previously carried
 their own copy of the literal `298.0232238769531` — half of `BASE_FREQUENCY` —
 so quantization is a factor of two coarser than it was, and the maximum shift
@@ -349,8 +350,8 @@ and versioning it, so the format can move later without touching callers.
 * `multisweep` — unchanged in spirit, but takes and returns a `Catalog`. Its
   Option A / Option B split (build a fresh registry vs. re-use one) is exactly
   `Catalog` construction vs. `Catalog` consumption.
-* `apply_bias` — stays as-is. Reads the catalog, programs the tones, writes the
-  quantized frequency back.
+* `apply_bias` — stays as-is, minus the write-back: the catalog's frequencies
+  are already the quantized ones, so it reads them and programs the tones.
 * `tune_resonators` (new) — the `trigger_capture` analogue: one call that runs
   netanal → find resonances → sweep ladder → find bias → apply → rotation, and
   returns a result dataclass with the catalog, the sweeps and the output path.

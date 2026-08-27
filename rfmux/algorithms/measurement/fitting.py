@@ -422,9 +422,16 @@ def find_resonances(
       that used to yield one resonance now yields none. Callers that want the
       old permissiveness should pass a much smaller value — the new default in
       ``rfmux.tuning`` is 0 Hz, which cuts exact duplicates only.
-    * ``prominence_db`` is now reported in true dB, i.e. divided by
-      ``data_exponent``. With the default exponent of 2 the number is half what
-      this function used to print. The new one is the real dip depth.
+    * ``data_exponent`` is accepted and ignored. Raising ``|S21|`` to a power is
+      a multiplier in dB, so it scaled dips and noise together and could not
+      change what was found; its only real effect here was that the prominence
+      threshold was *not* scaled with it, making the exponent a disguised way of
+      dividing ``min_dip_depth_db`` by it. With it gone, a caller that passed the
+      default of 2.0 is effectively asking for twice the dip depth it used to
+      get. Halve ``min_dip_depth_db`` to match the old behaviour.
+    * ``prominence_db`` is the dip depth in dB, where it used to be that depth
+      multiplied by ``data_exponent``. With the old default of 2.0 the number is
+      half what this function printed before.
 
     Returns
     -------
@@ -461,7 +468,6 @@ def find_resonances(
         max_Q=max_Q,
         min_separation_hz=min_resonance_separation_hz,
         expected_resonances=expected_resonances,
-        data_exponent=data_exponent,
         label=str(module_identifier) if module_identifier is not None else None,
     )
 

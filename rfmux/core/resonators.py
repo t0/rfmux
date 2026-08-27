@@ -1,14 +1,22 @@
 """
-Typed resonator model.
+Typed resonator model, and a typed collection of resonator objects.
 
-Three types, in order of containment:
+Three types, outermost first::
 
-* ``BiasPoint`` — a tone parked on a resonator, plus the calibration valid at
-  that tone. Frozen, because the tone and its calibration are one fact.
-* ``Resonator`` — identity, hardware binding, and current tuning state for one
-  resonator.
-* ``ResonatorCatalog`` — the per-module collection that algorithms accept and
-  return.
+    ResonatorCatalog    one per module; holds N Resonators
+    └── Resonator       one per detector; holds exactly one BiasPoint
+        └── BiasPoint   one tone: frequency, amplitude, and the calibration
+                        measured at that tone
+
+``BiasPoint`` is frozen and the other two are not, which is a statement about
+where each one's guarantees hold. A bias point validated at construction stays
+valid for as long as it exists, so a tone can never be carrying a calibration
+that was measured somewhere else. A resonator's guarantee is narrower: its
+identity is meant to be permanent, but its operating point moves
+all through tuning, and ``set_bias`` is the chokepoint that keeps calibration
+from outliving the tone it belongs to. A catalog checks its members as they
+join and does
+not re-check them afterwards.
 
 The catalog holds only what is small and canonical: identity, the operating
 point, and the calibrations downstream measurements need. Sweep data is *not*
@@ -16,8 +24,11 @@ stored here. Analysis reduces a sweep to the handful of scalars that belong on
 a ``BiasPoint`` and the traces themselves stay with the caller, so the catalog
 is cheap to copy, cheap to save, and cannot disagree with itself.
 
-Nothing in this module imports Qt or CRS. It is a data model, and the
-algorithms and GUI layers are both callers.
+``reference-notebooks/Demos/network_analyses_find_resonances_make_resonator_catalog.md``
+works through all of this against a simulated array, including what the frozen
+bias point means the first time you retune a detector and find its calibration
+gone. Read that before relying on the invariants here.
+
 """
 
 from __future__ import annotations

@@ -101,16 +101,13 @@ def test_shallow_dips_need_a_lower_threshold():
     assert len(find_resonances(frequencies, magnitude, min_dip_depth_db=0.2)) == 1
 
 
-def test_depth_is_reported_in_true_db_whatever_the_exponent():
-    """data_exponent sharpens detection; it must not inflate the reported depth."""
+def test_depth_is_the_dip_depth_in_db():
+    """A dip to half the baseline is 6 dB deep, and that is what is reported."""
     frequencies, magnitude = a_sweep(resonances=(1.05e9,), qs=(2e4,), depths=(0.5,))
 
-    plain = find_resonances(frequencies, magnitude, data_exponent=1.0)
-    squared = find_resonances(frequencies, magnitude, data_exponent=2.0)
+    found = find_resonances(frequencies, magnitude)
 
-    assert plain.candidates[0].depth_db == pytest.approx(
-        squared.candidates[0].depth_db, rel=0.02
-    )
+    assert found.candidates[0].depth_db == pytest.approx(6.02, abs=0.1)
 
 
 # ─── the collision cut ────────────────────────────────────────────────────────

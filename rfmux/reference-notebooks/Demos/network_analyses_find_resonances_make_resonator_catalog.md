@@ -1,10 +1,12 @@
 ---
 jupyter:
   jupytext:
+    formats: ipynb,md
     text_representation:
       extension: .md
       format_name: markdown
       format_version: '1.3'
+      jupytext_version: 1.19.5
   kernelspec:
     display_name: Python 3 (ipykernel)
     language: python
@@ -18,14 +20,14 @@ opening Periscope**. Sweep a band, locate the dips, and turn them into the
 bookkeeping object every later step consumes.
 
 The second half of the notebook is about that object on its own: a
-`ResonatorCatalog` does not have to come from a sweep, and you will want to
+`ResonatorCatalog` does not have to come from a sweep, and at some point you will probably want to
 build one by hand, save it, edit it in a spreadsheet, and load it back.
 
 | Piece | Module |
 |---|---|
 | The sweep | `rfmux.algorithms.measurement.take_netanal` (`crs.take_netanal`) |
-| The dip finder | `rfmux.tuning.find_resonances` |
-| The netanal wrapper | `rfmux.tuning.find_resonances_in_netanal` |
+| The resonance finder | `rfmux.tuning.find_resonances` |
+| The convenience function to run the resonance finder on a netanal | `rfmux.tuning.find_resonances_in_netanal` |
 | The array bookkeeping | `rfmux.core.resonators` |
 
 The finder is deliberately two functions. `find_resonances` takes two arrays and
@@ -33,7 +35,7 @@ knows nothing about netanal, files, or the CRS, so it runs on a saved sweep or a
 simulated trace as readily as on a live one;
 `find_resonances_in_netanal` is a thin wrapper that unpacks what
 `crs.take_netanal()` returned and calls it. Section 3 uses the wrapper and
-section 4 uses the array form, on the same data.
+the array form both, on the same data.
 
 ## How to use this document
 
@@ -49,11 +51,28 @@ code cell: put the cursor in it and press **Shift+Enter** to execute it.
 - **Editing is encouraged.** Change the band, the dip-depth threshold, the Q
   limits, and re-run — that is what this document is for. The shipped copy is
   read-only, so *File → Save Notebook As…* to keep your changes.
-- **Section 1 is the one exception to running everything.** It offers three ways
-  to get a CRS and you run only the one that fits. Everything after it is
-  identical whichever you chose.
-- **Sections 6 onward need no hardware at all.** The catalog is a plain data
-  model. If you only came for that, run the imports cell and skip to section 6.
+- **How you open it depends on your editor.** This file is jupytext markdown,
+  not `.ipynb`. In the JupyterLab session Periscope launches it opens as a
+  notebook on double-click; in a JupyterLab you started yourself, right-click →
+  *Open With* → *Notebook*. **In VS Code it opens as plain text**, so pair it
+  instead: with the jupytext extension, *Sync* creates an `.ipynb` beside this
+  file and keeps the two in step — run and edit the notebook, and your changes
+  flow back into the markdown. The `.ipynb` is a local working copy and is
+  gitignored; the markdown is the version that is kept, reviewed and tested.
+- **Check which kernel you are running.** rfmux has to be importable from the
+  interpreter the notebook uses, and if you have more than one checkout, it must
+  be the environment installed against *this* one. Getting that wrong looks like
+  a `ModuleNotFoundError` for a module you can plainly see on disk, because you
+  are importing a different copy of rfmux than the one you are reading. This
+  says which copy you actually got:
+
+  ```python
+  import sys, rfmux; print(sys.executable); print(rfmux.__file__)
+  ```
+
+- **Sections 5 onward need no board at all**, simulated or otherwise. The
+  catalog is a plain data model. If you only came for that, run the imports cell
+  and skip to section 5.
 
 ```python
 %matplotlib inline
@@ -70,7 +89,7 @@ from rfmux.tuning import find_resonances, find_resonances_in_netanal
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import BASE_FREQUENCY
 
-# Files written by section 7. Reference notebooks are provisioned to a
+# Files written by section 6. Reference notebooks are provisioned to a
 # read-only directory, so writing next to the notebook would fail for anyone
 # who opened it from Periscope. Override with RFMUX_DEMO_OUTPUT.
 OUTPUT_DIR = Path(os.environ.get(
@@ -79,84 +98,28 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 MODULE = 1
 
-# The band to sweep. The simulated array in section 2 is placed inside it.
+# The band to sweep. The simulated array in section 1 is placed inside it.
 FMIN, FMAX = 0.6e9, 1.05e9
 PROBE_AMPLITUDE = 0.001   # normalized DAC units, shared by the sweep and the
                           # catalog's bias points
 
-crs = None          # set by whichever cell in section 1 or 2 you run
-IS_MOCK = False     # True only if THIS notebook created the simulation
-
 print(f"files → {OUTPUT_DIR}")
 ```
 
-## 1. Connect
+## 1. Simulate a board
 
-Everything through section 5 needs a CRS. **Run exactly one** of the three
-options:
+We will generate 10 simulated LEKIDs spread across the band using a fixed random seed, so this
+notebook produces the same array and the same numbers every time it is run.
 
-| | When to use it | Where |
-|---|---|---|
-| **A. Attach to a running board** | Periscope launched this notebook, or you know the board's address | below |
-| **B. Your own board** | You have hardware and its serial | below |
-| **C. Simulate one** | No hardware, and nothing already running | section 2 |
+To run the rest of the notebook against real hardware instead, replace this one
+cell with a session on your board — everything after it is unchanged:
 
-A network analysis needs nothing tuned beforehand — finding the resonators *is*
-the first step. It does overwrite every channel's frequency and amplitude on the
-module it sweeps, and zeroes them when it finishes, so do not run it on a module
-someone else is using.
-
-### A. Attach to a board that is already running
-
-Periscope sets `RFMUX_CRS_HOSTNAME` when it launches a notebook, which is how
-this cell finds the board with no configuration from you. It is not magic and
-not required: paste an address into `HOSTNAME` and it works from any kernel.
-
-```python
-HOSTNAME = os.environ.get("RFMUX_CRS_HOSTNAME")   # or paste "127.0.0.1:43431"
-SERIAL = os.environ.get("RFMUX_CRS_SERIAL", "0000")
-
-if HOSTNAME:
-    _s = rfmux.load_session(
-        f'!HardwareMap [ !CRS {{ serial: "{SERIAL}", '
-        f'hostname: "{HOSTNAME}" }} ]')
-    crs = _s.query(rfmux.CRS).one()
+    session = rfmux.load_session('!HardwareMap [ !CRS { serial: "0042" } ]')
+    crs = session.query(rfmux.CRS).one()
     await crs.resolve()
-    print(f"attached to CRS {SERIAL} at {HOSTNAME}")
-else:
-    print("Nothing advertised a board. Set HOSTNAME above, or use option B "
-          "(your own board) or section 2 (simulation).")
-```
 
-### B. Your own board
-
-```python
-# SERIAL = "0042"
-# _s = rfmux.load_session(f'!HardwareMap [ !CRS {{ serial: "{SERIAL}" }} ]')
-# crs = _s.query(rfmux.CRS).one()
-# await crs.resolve()
-# print(f"connected to CRS {SERIAL}")
-```
-
-## 2. Simulate a board
-
-**Skip this section entirely if section 1 already gave you a CRS** — the cell
-below no-ops in that case.
-
-Ten simulated LEKIDs spread across the band, with a fixed random seed so the
-array is the same every run. `auto_bias_kids` is off: parking carriers is what
-tuning does *after* this notebook, and leaving it off means the sweep sees the
-array as it actually arrives — nothing known about it yet.
-
-These are high-Q resonators, a few kHz wide. That matters for section 4, and it
-is realistic: it is the normal condition for a survey sweep to be much coarser
-than the features it is looking for.
-
-> ⚠️ **This cell refuses to run if something is already streaming.** A network
-> analysis does not use the UDP streamers, but the simulator starts them, and two
-> simulations sending to one port give every reader both streams interleaved with
-> nothing to say so. If Periscope is in mock mode, attach to *its* simulation
-> with option 1A instead.
+Note that a network analysis overwrites every channel's frequency and amplitude
+on the module it sweeps, so do not point it at a module someone else is using.
 
 ```python
 MOCK_CONFIG = {
@@ -167,49 +130,21 @@ MOCK_CONFIG = {
     "auto_bias_kids": False,      # nothing is tuned yet — that is the point
 }
 
-if crs is not None:
-    print("already connected — skip this cell")
-else:
-    from rfmux.streamer import find_streamer_conflict
+from rfmux.mock.helpers import create_mock_crs
 
-    if os.environ.get("RFMUX_CRS_HOSTNAME"):
-        raise RuntimeError(
-            "Periscope launched this notebook and is already driving a CRS.\n"
-            "Run option 1A above to attach to that one.")
-
-    conflict = find_streamer_conflict()
-    if conflict:
-        raise RuntimeError(
-            f"Something is already using the streamer port — {conflict}.\n"
-            "Attach to what is running with option 1A, or stop it, then re-run "
-            "this cell.")
-
-    from rfmux.mock.helpers import create_mock_crs
-
-    crs = await create_mock_crs(module=MODULE, config=MOCK_CONFIG, verbose=False)
-    IS_MOCK = True
-    print(f"simulated CRS with {MOCK_CONFIG['num_resonances']} resonators "
-          f"between {MOCK_CONFIG['freq_start']/1e9:.2f} and "
-          f"{MOCK_CONFIG['freq_end']/1e9:.2f} GHz")
+crs = await create_mock_crs(module=MODULE, config=MOCK_CONFIG, verbose=False)
+print(f"simulated CRS with {MOCK_CONFIG['num_resonances']} resonators "
+      f"between {MOCK_CONFIG['freq_start']/1e9:.2f} and "
+      f"{MOCK_CONFIG['freq_end']/1e9:.2f} GHz")
 ```
 
-## 3. Run the network analysis
+## 2. Run the network analysis
 
-`crs.take_netanal()` measures complex S21 across a band. It does the
-book-keeping a wide sweep needs — splitting the span into chunks of at most
-`max_span` so each gets its own NCO setting, measuring up to `max_chans`
-frequencies at a time as a comb, and rotating each chunk onto the previous one
-using the single frequency they share, so the whole trace has one continuous
-phase.
+`crs.take_netanal()` measures complex S21 across a band. 
 
-`npoints` is the parameter that decides what you can find, and the section-4
-heading below is about why. 60,000 points across this 450 MHz band puts a sample
-every 7.5 kHz. Scroll back to the simulator's output above and look at the
-`Linewidth:` lines: 1.7 to 3.6 kHz. **Even this sweep steps over each resonator
-in two or three samples** — and that is the normal condition for a survey sweep,
-not a flaw in the example.
-
-The sweep takes about half a minute against the simulator.
+When searching for resonances, we need to take sufficient measurement points per
+frequency span that we have a good chance that one or more points falls within a 
+resonance's bandwidth. This is decided with the `npoints` parameter.
 
 ```python
 netanal = await crs.take_netanal(
@@ -219,7 +154,6 @@ netanal = await crs.take_netanal(
     npoints=60_000,
     nsamps=10,          # averages per point
     max_chans=1023,     # frequencies measured simultaneously
-    max_span=500e6,     # one NCO setting per 500 MHz of span
     module=MODULE,
 )
 
@@ -232,9 +166,7 @@ print(f"{len(frequencies)} points, "
       f"{np.mean(np.diff(frequencies))/1e3:.2f} kHz spacing")
 ```
 
-The result is three plain arrays. Nothing about it is special — this is what
-every function downstream expects, and a sweep you loaded from a file is
-equally good input.
+Now a quick example plotter to take a look at the data:
 
 ```python
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
@@ -246,23 +178,26 @@ ax1.set_title("network analysis")
 plt.tight_layout(); plt.show()
 ```
 
-## 4. Find the resonances
+## 3. Find the resonances
 
 `find_resonances_in_netanal` unpacks the sweep and searches it. The search
-converts `|S21|` to dB, inverts it, and hands it to
+converts `|S21|` to dB, inverts it (since the peak finder algorithm expects 
+positive peaks), and hands it to
 `scipy.signal.find_peaks` with two physical constraints:
 
 - **`min_dip_depth_db`** — how deep a dip has to be to count, as a prominence
-  against the local baseline. Lower it to 0.3–0.5 dB for shallow (overcoupled or
-  low-Q) resonators.
+  against the local baseline. Lower it for shallower resonators, and
+  increase it to reduce the likelihood of picking up on noise spikes.
+
 - **`min_Q` / `max_Q`** — converted to a width window. `min_Q` sets the *widest*
-  dip accepted and `max_Q` the *narrowest*; the narrow end is what rejects
+  dip accepted and `max_Q` the *narrowest*; the narrow end helps to reject
   single-sample noise spikes.
 
-There is a third, `min_separation_hz`, which defaults to 0 Hz and so does nothing
-here. It is a collision cut: candidates closer together than the threshold are
-**all** removed, not thinned to the deepest one, because a tone parked on either
-member of a collided pair still reads the other's response. Set it when you know
+**Collision mitigation:**
+
+There is a optional parameter, `min_separation_hz`, which defaults to 0 Hz and so does nothing
+here. It is a collision cut: candidate resonances that are closer together than the threshold are
+**all** removed. Set it when you know
 the separation below which your readout cannot operate a detector.
 
 ```python
@@ -277,7 +212,7 @@ found = find_resonances_in_netanal(
 print(found)
 ```
 
-The result is a `ResonanceSearch`, not a bare list. It carries the accepted
+The result is a `ResonanceSearch`. It carries the accepted
 candidates, everything a rejection pass threw out and why, the processed trace
 that was searched, and the settings used:
 
@@ -290,23 +225,16 @@ print(f"\n{len(found)} accepted, {len(found.rejected)} rejected")
 for c in found.rejected:
     print(f"  {c.frequency_hz/1e6:11.4f} MHz — {c.rejected_because}")
 
-if IS_MOCK:
-    print(f"\nthe simulated array has {MOCK_CONFIG['num_resonances']}")
-    assert len(found) > 0, "found nothing — see section 5"
+print(f"\nthe simulated array has {MOCK_CONFIG['num_resonances']}")
+assert len(found) > 0, "found nothing — check the sweep in section 2"
 ```
 
-`q_estimate` is a sorting key, not a measurement. It is `frequency / width`
-where the width is read off the dB trace at half the dip's prominence, which is
-not a half-power width — and `data_exponent` (default 2.0, which raises `|S21|`
-to a power to deepen dips against the noise) shifts it further.
-
-The widths printed above make the sharper point. They cluster around 8–16 kHz,
-which is one to two sample spacings, because a dip narrower than the spacing
-gets smeared to about one sample no matter how narrow it really is. So these
-widths measure the *sweep*, not the resonators — the simulated Qs are near
-3×10⁵ and the finder reports under 10⁵. Read a `q_estimate` as "resolved" or
-"unresolved" and no more; fitting the resonance is what gives you Q, and that is
-multisweep's job. `depth_db` *is* corrected back to true dB.
+`q_estimate` is `frequency / width` — the rough figure the `min_Q` / `max_Q`
+window screens on, which the finder applies as a width bound inside `find_peaks`
+and reports back here as a Q. **It is not a measurement of the resonators' qualtiy factors.**
+Determining a resonator's
+real Q factors is multisweep's job: it revisits each candidate with a narrow, dense
+sweep and fits it. -- we will talk about that in a separate walkthrough notebook. TODO: to be linked here when available.
 
 ```python
 searched_db = found.magnitude_db          # the trace the finder actually saw
@@ -319,18 +247,81 @@ plt.scatter(hits / 1e6, searched_db[[c.index for c in found.candidates]],
 for c in found.rejected:
     plt.axvline(c.frequency_hz / 1e6, color="darkorange", ls="--", alpha=0.6)
 plt.xlabel("frequency [MHz]")
-plt.ylabel(f"|S21|^{found.settings['data_exponent']:g} [dB]")
+plt.ylabel("|S21| [dB, normalized]")
 plt.title(f"{len(found)} resonances")
 plt.legend(); plt.tight_layout(); plt.show()
 ```
+
+### Look at the candidates one at a time
+
+The overview plot shows *where* the finder placed the resonances. To see *what
+it measured*, zoom in on each candidate and draw the two numbers on: the red
+vertical bar is the dip depth (its prominence) and the horizontal bar is the
+width, at half that depth.
+
+This is the plot to reach for when a sweep gives you a count you did not expect.
+The samples are drawn as points, so you can see how much of each dip the sweep
+actually caught.
+
+```python
+def plot_candidate_details(search, ncols=5, span_widths=4.0, limit=25):
+    """One panel per candidate, with the measured depth and width drawn on."""
+    spacing = float(np.mean(np.diff(search.frequencies_hz)))
+    shown = search.candidates[:limit]
+    nrows = int(np.ceil(len(shown) / ncols))
+
+    fig, axes = plt.subplots(nrows, ncols, squeeze=False,
+                             figsize=(3.1 * ncols, 2.7 * nrows))
+    for ax in axes.flat:
+        ax.axis("off")          # panels with no candidate stay blank
+
+    for ax, c in zip(axes.flat, shown):
+        ax.axis("on")
+
+        # A window a few widths wide, but never so few samples that there is
+        # nothing to look at — an unresolved dip is exactly the case this plot
+        # exists to show.
+        half = max(int(np.ceil(span_widths * c.width_hz / spacing)), 8)
+        lo = max(c.index - half, 0)
+        hi = min(c.index + half + 1, len(search.frequencies_hz))
+        ax.plot((search.frequencies_hz[lo:hi] - c.frequency_hz) / 1e3,
+                search.magnitude_db[lo:hi], ".-", ms=4, lw=0.8)
+
+        # Depth and width as the finder measured them. The width bar is drawn
+        # centred; find_peaks' two crossings are usually a little asymmetric.
+        floor = search.magnitude_db[c.index]
+        ax.vlines(0.0, floor, floor + c.depth_db, color="red", lw=1.5)
+        ax.hlines(floor + c.depth_db / 2,
+                  -c.width_hz / 2e3, c.width_hz / 2e3, color="red", lw=1.5)
+
+        ax.set_title(f"{c.frequency_hz / 1e6:.3f} MHz", fontsize=9)
+        ax.text(0.04, 0.06,
+                f"{c.depth_db:.1f} dB deep\n{c.width_hz / 1e3:.1f} kHz wide",
+                transform=ax.transAxes, fontsize=8, va="bottom")
+        ax.tick_params(labelsize=7)
+
+    fig.supxlabel("offset from the candidate [kHz]", fontsize=9)
+    fig.supylabel("|S21| [dB, normalized]", fontsize=9)
+    fig.suptitle(f"{len(shown)} of {len(search)} candidates"
+                 if len(shown) < len(search) else f"{len(shown)} candidates")
+    fig.tight_layout()
+    plt.show()
+
+
+plot_candidate_details(found)
+```
+
+These are clean dips with several points down each side — a comfortable result,
+and a tidier one than a real array usually gives you. On hardware, expect
+shallower dips, a baseline that slopes and ripples, and candidates where the
+sweep caught only a point or two. When that happens, this is the plot that shows
+it, and more `npoints` is the usual answer.
 
 ### Sweep resolution decides what you can find
 
 A survey sweep is usually much coarser than the resonators in it, and the failure
 mode is quiet: the finder returns fewer resonances and nothing reports that the
-sampling is why. Compare the same band at a quarter the resolution — and note
-that `find_resonances` here is called on two bare arrays, no netanal dict
-involved, because that is all it ever needed.
+sampling is why. Compare the same band at a quarter the resolution:
 
 ```python
 coarse = await crs.take_netanal(
@@ -351,60 +342,90 @@ comes back low, the first thing to change is `npoints`, not the thresholds — a
 if you already know roughly where the array is, sweeping a narrower band at the
 same `npoints` buys the same resolution for less time.
 
-## 5. Seed a resonator catalog
+## 4. Seed a resonator catalog
 
 `ResonanceSearch.to_catalog()` is where anonymous dips become tracked
-resonators. Each gets a name, a hardware channel, and a `BiasPoint` at its found
+resonators. Each gets a name (a string of the format of your choosing), a hardware channel, and a `BiasPoint` at its found
 frequency — the operating point as first guessed. Multisweep and bias finding
-move it from there.
+will refine and update this BiasPoint as we progress through the tuning flow.
 
-`amplitude` is required rather than defaulted, because probe power is a real
-measurement choice with no value that is right for an arbitrary array. Channels
-are assigned 1..N in frequency order and are a permanent binding.
+`amplitude` is required, and here is assigned automatically to be the amplitude
+ used for the netanal. Channels
+are assigned 1..N in frequency order.
 
 ```python
 catalog = found.to_catalog(module=MODULE, amplitude=PROBE_AMPLITUDE)
 print(catalog)
 ```
 
+<!-- #region -->
 That object is what the rest of tuning consumes and returns. From here you would
 run a multisweep around each bias frequency, fit, and pick bias points — see
 `simplified_tuning_flow.py` in this folder for the whole chain.
 
-Everything below needs no hardware.
 
-## 6. The catalog on its own
+## 5. The catalog on its own
 
-Three types, in order of containment:
+Three types, nested one inside the next:
 
-| Type | Is | Mutable? |
-|---|---|---|
-| `BiasPoint` | a tone parked on a resonator, plus the calibration valid *at that tone* | frozen |
-| `Resonator` | identity, hardware binding, current tuning state for one resonator | yes |
-| `ResonatorCatalog` | the per-module collection algorithms accept and return | yes |
+    ResonatorCatalog    one per module; holds N Resonators
+    └── Resonator       one per detector; holds exactly one BiasPoint
+        └── BiasPoint   one tone: frequency, amplitude, and the calibration
+                        measured at that tone
 
-The catalog holds only what is small and canonical. **Sweep data is not stored
-in it** — analysis reduces a sweep to the few scalars that belong on a
-`BiasPoint`, and the traces stay with the caller. That is what makes a catalog
-cheap to copy, cheap to save, and unable to disagree with itself.
+**The Catalog is the record of your array.** It is what each tuning step takes
+in and hands back, what you save at the end of a session, and what you load next
+time to pick up where you left off. Everything in it is small — a handful of
+numbers per detector — because **sweep data is deliberately not kept here**.
+Analysis reduces a sweep to the few scalar values that belong on a `BiasPoint` and the
+traces stay separate. This keeps the size of this file small, and prevents mismatches
+between saved fields and extraneous data. 
 
-`BiasPoint` is frozen on purpose: the tone and the calibration measured at it are
-one fact. A frequency carrying some *other* tone's calibration is
-unrepresentable.
+**The Resonator persists.** Its name is fixed the
+moment the catalog is built and is meant never to change again: it will be
+associated with various data products, allowing you to determine which measurement
+pertains to which detector.
 
-### Building one by hand
+**A Resonator has a BiasPoint**, which can be reset as needed during tuning 
+processes.
+`find_resonances` seeds its original values, and bias finding routines refine it.
+It snaps to the hardware tone grid, to avoid in-band IMD products.
+
+**A given BiasPoint is frozen.** A tone
+and the calibration measured at that tone are treated as a single indivisible
+fact, so a `BiasPoint` cannot be edited — you have to replace it. The reason is that the
+df calibration and the IQ rotation are only meaningful at the exact frequency
+and amplitude they were measured at. If you retune the detector to a new bias 
+frequency or amplitude, the bias point's calibration information will be wrong,
+and a df timestream computed with them will therefore also be wrong. To avoid this
+problem, we enforce that you can never modify a `BiasPoint`, only create a new one.
+
+
+The catalog checks its members as they join. It verifies that each has:
+- a unique name
+- a unique channel number
+- a unique frequency (two Resonators may not have exactly the same bias frequency)
+    - TODO: is this check repeated over time? Eg if bias finding going awry, and one 
+    Resonator's bias frequency migrates to its neighbours, is this flagged?
+    - TODO also consider adding a bypass for this, to allow feedback testing shenanigans.
+
+### Building a Catalog by hand
+
+Catalogs are generated automatically by functions like the resonance finder, but can also be constructed
+by hand, which may be instructive as to the layout of the object.
+<!-- #endregion -->
 
 ```python
 by_hand = ResonatorCatalog(
     [
-        Resonator("blue", channel=1, bias=BiasPoint(1.010e9, amplitude=0.01)),
-        Resonator("green", channel=2, bias=BiasPoint(1.030e9, amplitude=0.01)),
+        Resonator(name="blue", channel=1, bias=BiasPoint(1.010e9, amplitude=0.01)),
+        Resonator(name="green", channel=2, bias=BiasPoint(1.030e9, amplitude=0.01)),
         Resonator(
-            "red", channel=3,
+            name="red", channel=3,
             bias=BiasPoint(1.050e9, amplitude=0.005,
                            dI_df=1.2e-6, dQ_df=-3.4e-6,
                            iq_rotation_deg=12.0),
-            notes={"wafer": "W17", "comment": "the junk drawer, explicitly"},
+            notes={"comment": "seems suss, operate with caution"},
         ),
     ],
     module=2,
@@ -416,10 +437,10 @@ print(f"red at a -30 dBm DAC scale: "
       f"{by_hand['red'].bias.power_dbm(-30):.2f} dBm")
 ```
 
-`df_calibration` is a property derived from `dI_df` and `dQ_df` rather than a
+Note: `df_calibration` is a property derived from `dI_df` and `dQ_df` rather than a
 stored field, so it cannot go stale.
 
-### From a list of frequencies
+### Making a Catalog from a list of frequencies
 
 The same constructor the finder used. Names are optional; without them
 resonators are `R0001…` in frequency order. Supplied names are paired with the
@@ -436,7 +457,7 @@ named = ResonatorCatalog.from_frequencies(
 print(named)
 ```
 
-### Reading it
+### Reading from a Catalog
 
 Iteration is in channel order; lookup is by name.
 
@@ -449,13 +470,19 @@ print(f"iteration     : {[r.name for r in named]}  (channel order)")
 print(f"module        : {named.module}")
 ```
 
+<!-- #region -->
 ### Amending a bias point
 
-`Resonator.set_bias()` builds a new `BiasPoint` rather than mutating one. Moving
-the tone — changing `frequency_hz` or `amplitude` — drops the calibration fields
+`Resonator.set_bias()` builds a new `BiasPoint` rather than mutating one.
+
+
+Changing `frequency_hz` or `amplitude` drops the calibration fields
 unless you pass new values explicitly, so stale calibration stays structurally
-impossible even through this convenience path. Changing only calibration leaves
-the tone alone.
+impossible even through this convenience path. 
+
+Changing only calibration leaves
+the tone frequency and amplitude alone.
+<!-- #endregion -->
 
 ```python
 r = by_hand["red"]
@@ -473,10 +500,14 @@ print(f"recalibrated: {r.bias.frequency_hz/1e6:.4f} MHz, "
 
 ### Quantizing onto the tone grid
 
-The hardware can only place a tone on a multiple of `BASE_FREQUENCY`. Applying a
-bias quantizes it; `BiasPoint.quantized()` is that operation, and it keeps the
-calibration, because the shift is under half a grid step and so is tiny compared
-to a resonator's width.
+To avoid seeing in-band intermodulation distortion products, the hardware is only 
+allowed to place a tone on a multiple of `BASE_FREQUENCY`. 
+
+TODO: revamp the way the quantization is handled. This needs to happen right away, and
+NEVER store the unquantized values, so that the tones that are requested are the tones that are
+set and are also the tones that are recorded.
+TODO: also .quantized() is a confusing name for this function - consider .quantize() instead, 
+and have it be run on any incoming bias point frequency by default.
 
 ```python
 print(f"tone grid: {BASE_FREQUENCY:.6f} Hz")
@@ -498,9 +529,9 @@ print(f"rotation : {off_grid.quantized().iq_rotation_deg} deg  <- calibration ke
 
 ### Invariants, and what they refuse
 
-Names and channels must be unique, channels are 1-based, and two resonators may
-not sit on one frequency — two tones on one frequency is a hardware conflict,
-not a bookkeeping nicety. These are checked when a resonator joins the catalog.
+Names and channels must be unique, channels are 1-based, and you probably don't
+want to have two resonators (tones) sitting at exactly the same frequency.
+These are checked when a resonator joins the catalog.
 
 ```python
 def refused(what, thunk):
@@ -525,44 +556,17 @@ refused("amplitude in dBm, not DAC units",
 refused("no such resonator", lambda: named["nope"])
 ```
 
-By default only *exactly* equal frequencies collide, which is a weak check: two
-candidates a hertz apart are the realistic symptom of a split resonance and
-would pass. `min_separation_hz` on the catalog makes it physical:
+## 6. Saving and loading Catalogs
 
-```python
-refused("closer than the catalog's minimum separation", lambda: ResonatorCatalog(
-    [Resonator("a", 1, BiasPoint(1.010000e9, 0.01)),
-     Resonator("b", 2, BiasPoint(1.010002e9, 0.01))],
-    module=2, min_separation_hz=10e3))
-```
-
-This is a different check from the finder's `min_separation_hz`, which cuts
-collided *candidates* — both members, since a tone on either one reads the other
-— before a catalog exists. The catalog's check guards the collection afterwards.
-
-### Copying, and the one threading rule
-
-`copy()` is a deep copy, and cheap, because the catalog holds no sweep data.
-**Workers operate on `catalog.copy()`; the GUI swaps its reference when the
-worker's completed signal fires.** That is the whole concurrency discipline.
-
-```python
-mine = by_hand.copy()
-mine["blue"].set_bias(frequency_hz=1.0111e9)
-print(f"copy     : {mine['blue'].bias.frequency_hz/1e6:.4f} MHz")
-print(f"original : {by_hand['blue'].bias.frequency_hz/1e6:.4f} MHz")
-```
-
-## 7. Saving and loading
-
-Two formats, for two purposes.
+To improve usability and compatibility, rfmux provides helpers to translate
+Catalog objects into other standard classes and file formats.
 
 ### Dictionaries — the faithful round trip
 
-`to_dict()` returns plain builtins only, so a saved file never contains these
-classes and can be read without importing rfmux. It carries everything:
-calibration, `notes`, the NCO. Put it in JSON, pickle, HDF5 attributes,
-wherever.
+`to_dict()` reduces a catalog to plain builtins — dicts, strings and floats —
+and `from_dict` rebuilds it. Nothing is lost on the way: calibration, `notes`
+and the NCO all survive. Being plain builtins, the result will go into a pickle,
+a JSON file or HDF5 attributes equally happily.
 
 ```python
 d = by_hand.to_dict()
@@ -581,16 +585,36 @@ print(f"calibration survived: "
 future (or past) version of the module fails loudly instead of being
 half-understood.
 
+### Pickle — the file on disk
+
+Pickle is the format rfmux tooling reads and writes: Periscope's session exports
+are `.pkl`, and so is everything the multisweep dialog loads. A catalog saved
+this way drops straight into that workflow.
+
+**Pickle the dictionary, not the catalog object.** `pickle.dump(catalog, f)`
+works, and it is a trap. The file would then record the class's import path, so
+moving or renaming `ResonatorCatalog` later makes every old file unreadable; and
+unpickling rebuilds an instance *without* going through the constructor, so the
+duplicate-name, duplicate-channel and frequency-collision checks never run — a
+file could restore into a state the class would have refused to build. Going
+through `to_dict` / `from_dict` avoids both: the file holds only builtins, and
+loading it is a normal construction with every check in place.
+
 ```python
-import json
+import pickle
 
-json_path = OUTPUT_DIR / "catalog.json"
-json_path.write_text(json.dumps(by_hand.to_dict(), indent=2))
-print(f"wrote {json_path} ({json_path.stat().st_size} bytes)")
+pkl_path = OUTPUT_DIR / "catalog.pkl"
+with pkl_path.open("wb") as f:
+    pickle.dump(by_hand.to_dict(), f)
+print(f"wrote {pkl_path} ({pkl_path.stat().st_size} bytes)")
 
-from_disk = ResonatorCatalog.from_dict(json.loads(json_path.read_text()))
+with pkl_path.open("rb") as f:
+    from_disk = ResonatorCatalog.from_dict(pickle.load(f))
 print(from_disk)
 ```
+
+The usual caution applies: unpickling runs code from the file, so load `.pkl`
+files you produced or trust, not ones that arrived from somewhere unknown.
 
 ### CSV — the spreadsheet-editable bias table
 
@@ -637,31 +661,25 @@ refused("a missing bias amplitude", lambda: ResonatorCatalog.from_csv(
 Finally, the catalog the sweep produced, saved both ways:
 
 ```python
-if crs is not None:
-    (OUTPUT_DIR / "found.csv").write_text(catalog.to_csv())
-    (OUTPUT_DIR / "found.json").write_text(json.dumps(catalog.to_dict(), indent=2))
-    print(f"wrote {len(catalog)} resonators to {OUTPUT_DIR}")
-    for p in sorted(OUTPUT_DIR.iterdir()):
-        print(f"  {p.name:<16} {p.stat().st_size:>7} bytes")
+(OUTPUT_DIR / "found.csv").write_text(catalog.to_csv())
+with (OUTPUT_DIR / "found.pkl").open("wb") as f:
+    pickle.dump(catalog.to_dict(), f)
+print(f"wrote {len(catalog)} resonators to {OUTPUT_DIR}")
+for p in sorted(OUTPUT_DIR.iterdir()):
+    print(f"  {p.name:<16} {p.stat().st_size:>7} bytes")
 ```
 
-## 8. Where this maps in Periscope
+## 7. Where this maps in Periscope
+
+TODO: revisit this once we have updated periscope to use the new code architecture
 
 | Periscope control | API equivalent |
 |---|---|
 | *Network Analysis* panel, **Take Netanal** | `crs.take_netanal(...)` |
 | **Find Resonances** button + its dialog | `find_resonances_in_netanal(...)` |
 | Expected / Min Dip Depth / Min Q / Max Q fields | the same-named arguments |
-| Min Separation field | `min_separation_hz` — but see section 4: it is now a collision cut, and the GUI has not caught up |
 | The red dashed markers on the plot | `ResonanceSearch.candidates` |
 | The resonance list the multisweep dialog inherits | `ResonanceSearch.to_catalog(...)` |
 
-```python
-# Only tear down a simulation this notebook created. If section 1 attached to
-# Periscope's CRS, stopping its streamer would kill Periscope's live plots.
-if IS_MOCK:
-    await crs.stop_udp_streaming()
-    print("simulated streamer stopped")
-elif crs is not None:
-    print("left the board alone — it is not ours to stop")
-```
+
+

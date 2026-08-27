@@ -25,15 +25,11 @@ and the notebooks are callers, and plotting belongs to them.
 
 On the reported numbers
 ----------------------
-``data_exponent`` raises ``|S21|`` to a power before the dB conversion, which
-deepens dips relative to the noise and so sharpens the prominence test. The
-cost is that widths — and therefore ``q_estimate`` — are measured on the
-exponentiated trace and drift from the true half-depth width as the exponent
-grows. ``depth_db`` is corrected back to true dB, because raising the magnitude
-to a power scales a dB *difference* exactly; the width is not, because the
-half-prominence crossing does not transform that simply. Treat ``q_estimate``
-as a sorting key rather than a measurement: fitting the resonance is what gives
-you Q.
+``depth_db`` is a prominence in dB and means what it says. ``width_hz`` is the
+width at half that prominence *on the dB trace*, which is not a half-power
+width, so ``q_estimate = frequency / width`` is the rough figure the ``min_Q`` /
+``max_Q`` window screens on and not a measurement. Fitting the resonance is what
+gives you Q, and that is multisweep's business.
 
 Departures from the previous implementation (``algorithms/measurement/fitting.py``)
 ----------------------------------------------------------------------------------
@@ -43,6 +39,12 @@ Departures from the previous implementation (``algorithms/measurement/fitting.py
   instead of being derived once from the median frequency, so a sweep spanning
   an octave no longer applies the wrong width window at its ends.
 * Bad input raises instead of warning and returning empty lists.
+* No ``data_exponent``. Raising ``|S21|`` to a power is a *multiplier* in dB, so
+  it scaled dips and noise together; with the prominence threshold scaled to
+  match, and half-prominence crossings being scale-invariant, it could not
+  change a single candidate, width or depth. It was inert, and inert knobs
+  invite tuning. The previous implementation left the threshold unscaled, which
+  made the exponent a disguised way of dividing ``min_dip_depth_db`` by it.
 """
 
 from __future__ import annotations
@@ -78,8 +80,8 @@ class ResonanceCandidate:
 
     frequency_hz: float
     index: int  # index into the searched trace, for plotting and slicing
-    depth_db: float  # prominence, corrected back to true dB
-    width_hz: float  # width at half prominence of the exponentiated trace
+    depth_db: float  # prominence in dB against the local baseline
+    width_hz: float  # width at half that prominence, on the dB trace
     q_estimate: float  # frequency_hz / width_hz — rough; see module docstring
     rejected_because: str | None = None
 
@@ -97,7 +99,7 @@ class ResonanceSearch:
     """
 
     frequencies_hz: np.ndarray  # the frequency grid that was searched
-    magnitude_db: np.ndarray  # the (exponentiated, normalized) trace searched
+    magnitude_db: np.ndarray  # the normalized dB trace that was searched
     candidates: list[ResonanceCandidate]  # accepted, in frequency order
     rejected: list[ResonanceCandidate]  # every candidate a pass threw out
     settings: dict = field(default_factory=dict)  # how this search was run
@@ -149,18 +151,14 @@ class ResonanceSearch:
 # ─── The search ───────────────────────────────────────────────────────────────
 
 
-def magnitude_db(s21, data_exponent: float = 1.0, reference: float | None = None):
-    """``|S21|`` in dB, optionally raised to a power first.
+def magnitude_db(s21, reference: float | None = None):
+    """``|S21|`` in dB: ``20 * log10(|S21| / reference)``.
 
     ``reference`` is the magnitude that maps to 0 dB; the default is the median
     of the trace, which is a robust stand-in for the off-resonance baseline.
     The choice only shifts the dB axis — prominences and widths are differences
     and so are untouched by it — but a sane 0 dB makes plots and thresholds
     readable.
-
-    Returns ``20 * data_exponent * log10(|S21| / reference)``, which is
-    algebraically the dB of ``|S21|**data_exponent`` and avoids overflowing the
-    power for large exponents.
     """
     magnitude = np.abs(np.asarray(s21))  # no-op for a magnitude, modulus for I/Q
 
@@ -176,7 +174,7 @@ def magnitude_db(s21, data_exponent: float = 1.0, reference: float | None = None
     if reference <= 0:
         raise ValueError(f"reference={reference}: must be a positive magnitude.")
 
-    return 20.0 * data_exponent * np.log10(magnitude / reference)
+    return 20.0 * np.log10(magnitude / reference)
 
 
 def find_resonances(
@@ -188,7 +186,6 @@ def find_resonances(
     max_Q: float | None = 1e7,
     min_separation_hz: float | None = 0.0,
     expected_resonances: int | None = None,
-    data_exponent: float = 2.0,
     label: str | None = None,
 ) -> ResonanceSearch:
     """Find the resonance dips in one swept trace.
@@ -221,10 +218,6 @@ def find_resonances(
         If given and more candidates survive, keep the ``expected_resonances``
         deepest and reject the rest; if fewer survive, warn. For arrays whose
         count you know.
-    data_exponent : float, optional
-        Power applied to ``|S21|`` before the dB conversion, to deepen dips
-        against the noise. Default 2.0. See the module docstring for what it
-        does to the reported width and Q.
     label : str or None, optional
         Name for this trace, used in warnings and in the result's repr.
 
@@ -265,8 +258,6 @@ def find_resonances(
         )
     if min_dip_depth_db <= 0:
         raise ValueError(f"{who}min_dip_depth_db={min_dip_depth_db}: must be positive.")
-    if data_exponent <= 0:
-        raise ValueError(f"{who}data_exponent={data_exponent}: must be positive.")
     for name, q in (("min_Q", min_Q), ("max_Q", max_Q)):
         if q is not None and q <= 0:
             raise ValueError(f"{who}{name}={q}: must be positive or None.")
@@ -292,11 +283,10 @@ def find_resonances(
         "max_Q": max_Q,
         "min_separation_hz": min_separation_hz,
         "expected_resonances": expected_resonances,
-        "data_exponent": data_exponent,
     }
 
     # -- prepare the trace ---------------------------------------------------
-    trace_db = magnitude_db(response, data_exponent=data_exponent)
+    trace_db = magnitude_db(response)
 
     # Mean spacing over the sweep. take_netanal dithers each tone by tens of Hz
     # to break up intermodulation products, so the grid is near-uniform rather
@@ -310,11 +300,9 @@ def find_resonances(
         frequencies, min_Q, point_spacing_hz, floor=float(len(frequencies))
     )
 
-    # The prominence floor is applied on the exponentiated trace, so scale the
-    # caller's true-dB threshold into those units.
     peaks, properties = signal.find_peaks(
         -trace_db,
-        prominence=min_dip_depth_db * data_exponent,
+        prominence=min_dip_depth_db,
         width=(min_width_pts, max_width_pts),
     )
 
@@ -326,7 +314,7 @@ def find_resonances(
             ResonanceCandidate(
                 frequency_hz=frequency_hz,
                 index=int(peak),
-                depth_db=float(properties["prominences"][i]) / data_exponent,
+                depth_db=float(properties["prominences"][i]),
                 width_hz=width_hz,
                 q_estimate=frequency_hz / width_hz if width_hz > 0 else np.inf,
             )

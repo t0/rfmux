@@ -1,0 +1,15 @@
+# Jupytext sync artifacts.
+#
+# Notebooks here are authored as jupytext markdown: the .md is the source of
+# truth, it is what test/notebooks/test_notebooks.py executes in CI, and it
+# carries no saved outputs, so it diffs and reviews like code. Editing one in
+# JupyterLab or VS Code produces a paired .ipynb beside it — that file is a
+# local working copy, and committing it would put a second, divergent version
+# of the same document in the repo along with megabytes of embedded output.
+#
+# The four .ipynb already tracked here predate the convention. Gitignore does
+# not affect tracked files, so they are unaffected; adding a genuinely new
+# .ipynb needs `git add -f` and a moment's thought about whether it should be
+# markdown instead.
+*.ipynb
+.ipynb_*

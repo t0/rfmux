@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.7.0](https://github.com/t0/rfmux/compare/v1.6.0...v1.7.0) (2026-08-27)
+
+
+### Features
+
+* **fastrx:** Adds AF_XDP "very fast" receiver path ([336aa0b](https://github.com/t0/rfmux/commit/336aa0bbe6db5c3f48e33b5dbcf123e423d07c91))
+* **fastrx:** integrate fastrx into CI/CD builds on Linux ([2b2df65](https://github.com/t0/rfmux/commit/2b2df65ea2f3b9d5c49fc3fd8a3baf017cb932e4))
+* **firmware:** add --crate option to target a crate serial number ([5bc1777](https://github.com/t0/rfmux/commit/5bc1777544c15c4973c670f924eacd2727a3f94e))
+* **firmware:** add "firmware write-backplane-eeprom" and "read-backplane-eeprom" commands ([a628e45](https://github.com/t0/rfmux/commit/a628e45834dd36a7e2f92030e637ce3e3f5317f5))
+* **firmware:** allows verbs to be chained ([d05b63c](https://github.com/t0/rfmux/commit/d05b63c9b4798c85798e7fe4525d0d4df90ed105))
+* **parser:** dirfile: demultiplex using PHASE and LINCOM, not MPLEX ([ddd6849](https://github.com/t0/rfmux/commit/ddd6849b8ef8f8b83e5eaf5df6cf3301c8fa204e))
+* **parser:** extend -c option to support per-module channel selection ([fb3b269](https://github.com/t0/rfmux/commit/fb3b269b8cb939ac015d88cf9f43745dac2c0ea2))
+* **qc:** enable QC runs in wheel installs ([cce096a](https://github.com/t0/rfmux/commit/cce096a25a57e9c69a98131b5eb5e740790ee25c))
+
+
+### Bug Fixes
+
+* **fastrx:** HUD: don't detrend spectra ([e46fc41](https://github.com/t0/rfmux/commit/e46fc412761e44b2f4a9bf8fee1d45bbc8b0657c))
+* **qc:** ship missing pytest.ini needed for "rfmux qc" invocation ([22b1d47](https://github.com/t0/rfmux/commit/22b1d47d0f7b262bb93f3adf620c2939b7466a16))
+
 ## [1.6.0](https://github.com/t0/rfmux/compare/v1.5.0...v1.6.0) (2026-07-15)
 
 

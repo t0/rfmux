@@ -55,9 +55,15 @@ code cell: put the cursor in it and press **Shift+Enter** to execute it.
   not `.ipynb`. In the JupyterLab session Periscope launches it opens as a
   notebook on double-click; in a JupyterLab you started yourself, right-click →
   *Open With* → *Notebook*. **In VS Code it opens as plain text**, so pair it
-  instead: with the jupytext extension, *Sync* creates an `.ipynb` beside this
-  file and keeps the two in step — run and edit the notebook, and your changes
-  flow back into the markdown. The `.ipynb` is a local working copy and is
+  instead: with a jupytext extension installed, right-click → *Open Paired
+  Notebook* (the exact wording varies by extension) creates an `.ipynb` beside
+  this file and keeps the two in step — run and edit the notebook, and your
+  changes flow back into the markdown. If that command does nothing, the
+  extension could not find jupytext: it runs whichever interpreter VS Code
+  resolved, which is often the base environment rather than the one rfmux is
+  installed in. Install jupytext there, point the extension at the right
+  interpreter, or skip the extension and run `jupytext --sync <this file>.md`
+  from a shell that has it. The `.ipynb` is a local working copy and is
   gitignored; the markdown is the version that is kept, reviewed and tested.
 - **Check which kernel you are running.** rfmux has to be importable from the
   interpreter the notebook uses, and if you have more than one checkout, it must

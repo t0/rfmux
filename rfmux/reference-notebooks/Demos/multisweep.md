@@ -8,7 +8,7 @@ jupyter:
       format_version: '1.3'
       jupytext_version: 1.19.5
   kernelspec:
-    display_name: Python 3 (ipykernel)
+    display_name: rfmux-tuning
     language: python
     name: python3
 ---
@@ -17,23 +17,22 @@ jupyter:
 
 `crs.multisweep()` measures a narrow, high-resolution sweep around each of many
 frequencies at once — one hardware channel per frequency, all of them swept in
-parallel. It is the step after a network analysis: netanal finds *where* the
+parallel. In a typical array characterization / tuning flow, it is the step after 
+a network analysis: netanal finds roughly where the
 resonators are, multisweep looks at each one closely enough to characterise it.
 
-This notebook is about the front door, not the physics. There are two ways to
+There are two ways to
 tell multisweep what to sweep, and they are identical once the measurement
 starts:
 
 | You have | You pass | Results keyed by |
 |---|---|---|
-| A tuned array | a `ResonatorCatalog` | resonator name (`"R0001"`) |
-| A list of frequencies | `center_frequencies=` + `amp=` | 1-based index (`1`) |
+| Already done a netanal and used `find_resonances` to make a `ResonatorCatalog` | a `ResonatorCatalog` | resonator name (`"R0001"`) |
+| A list of frequencies | `center_frequencies=` + `amp=` | section name (`"S0001"`) |
 
-The catalog form is what the tuning flow uses, because a catalog already knows
-each resonator's frequency, its probe amplitude and its hardware channel. The
-frequency-list form is for everything else: before resonances have been found,
-on a system that has none, or when you simply want to point the instrument at
-some frequencies and look.
+Unless you are starting completely from scratch, or looking at hardware that doesn't
+have resonances, you will likely pass a catalog. A catalog already knows
+each resonator's frequency, its probe amplitude and its hardware channel. 
 
 | Piece | Module |
 |---|---|
@@ -42,8 +41,9 @@ some frequencies and look.
 | Finding resonances first | `rfmux.tuning.find_resonances` |
 
 Seeding a catalog from a network analysis is the subject of
-`network_analyses_find_resonances_make_resonator_catalog.md`, and this notebook
-assumes it. Sweeping the same array at a *ladder* of amplitudes is a separate
+`network_analyses_find_resonances_make_resonator_catalog.md`. If you haven't done
+that yet and are unfamiliar with the workflow, start there, then come back here.
+Sweeping the same array at a *ladder* of amplitudes is a separate
 layer that does not exist yet; this notebook will grow as it lands.
 
 ## How to use this document
@@ -64,9 +64,15 @@ code cell: put the cursor in it and press **Shift+Enter** to execute it.
   not `.ipynb`. In the JupyterLab session Periscope launches it opens as a
   notebook on double-click; in a JupyterLab you started yourself, right-click →
   *Open With* → *Notebook*. **In VS Code it opens as plain text**, so pair it
-  instead: with the jupytext extension, *Sync* creates an `.ipynb` beside this
-  file and keeps the two in step — run and edit the notebook, and your changes
-  flow back into the markdown. The `.ipynb` is a local working copy and is
+  instead: with a jupytext extension installed, right-click → *Open Paired
+  Notebook* (the exact wording varies by extension) creates an `.ipynb` beside
+  this file and keeps the two in step — run and edit the notebook, and your
+  changes flow back into the markdown. If that command does nothing, the
+  extension could not find jupytext: it runs whichever interpreter VS Code
+  resolved, which is often the base environment rather than the one rfmux is
+  installed in. Install jupytext there, point the extension at the right
+  interpreter, or skip the extension and run `jupytext --sync <this file>.md`
+  from a shell that has it. The `.ipynb` is a local working copy and is
   gitignored; the markdown is the version that is kept, reviewed and tested.
 - **Check which kernel you are running.** rfmux has to be importable from the
   interpreter the notebook uses, and if you have more than one checkout, it must
@@ -136,9 +142,13 @@ print(f"simulated CRS with {MOCK_CONFIG['num_resonances']} resonators "
 
 ## 2. Find the resonances, and build a catalog
 
-Compressed to two cells, since it is the previous notebook's whole subject. A
-network analysis across the band, the dips located, and the result seeded into
-a `ResonatorCatalog`.
+The previous notebook's whole subject, in one cell: a network analysis across
+the band, the dips located in it, and the result seeded into a
+`ResonatorCatalog`.
+
+`from_frequencies` sorts by frequency, numbers the resonators `R0001…` in that
+order, assigns channels `1..N`, and parks every bias point at `PROBE_AMPLITUDE`.
+
 
 ```python
 netanal = await crs.take_netanal(
@@ -152,20 +162,14 @@ netanal = await crs.take_netanal(
 )
 
 found = find_resonances_in_netanal(netanal, min_dip_depth_db=1.0)
-print(f"{len(found.candidates)} resonances found")
-```
 
-`from_frequencies` sorts by frequency, numbers the resonators `R0001…` in that
-order, assigns channels `1..N`, and parks every bias point at `PROBE_AMPLITUDE`.
-That amplitude is required rather than defaulted: a probe power is a real
-measurement choice, and there is no value that is right for an arbitrary array.
-
-```python
 catalog = ResonatorCatalog.from_frequencies(
     found.resonance_frequencies_hz,
     module=MODULE,
     amplitude=PROBE_AMPLITUDE,
 )
+
+print(f"{len(found.candidates)} resonances found")
 print(catalog)
 ```
 
@@ -181,26 +185,26 @@ beyond how finely to look:
 The catalog even knows its own module, so `module=` is optional here — pass it
 only if you want the mismatch checked.
 
-**Multisweep does not modify the catalog.** A sweep on its own has not learned
-anything yet; the analyses that do — fitting, bias finding — update the catalog
-themselves. Everything a sweep produces comes back in the returned dict.
+**Multisweep does not modify the catalog.** 
+
+Everything a multisweep produces comes back in the returned dict.
 
 ```python
-sweeps = await crs.multisweep(
+ms = await crs.multisweep(
     catalog,
     span_hz=SPAN_HZ,
     npoints_per_sweep=NPOINTS_PER_SWEEP,
     nsamps=NSAMPS,
 )
 
-print(f"{len(sweeps)} sweeps, keyed by resonator name: {list(sweeps)[:4]} …")
+print(f"{len(ms)} sweep sections, keyed by resonator name: {list(ms)[:4]} …")
 ```
 
-Each entry holds the sweep itself plus the bookkeeping needed to know what it
+Each entry holds the sweep section itself plus the bookkeeping needed to know what it
 is:
 
 ```python
-entry = sweeps["R0001"]
+entry = ms["R0001"]
 for key, value in entry.items():
     if isinstance(value, np.ndarray):
         print(f"{key:<30} ndarray{value.shape} {value.dtype}")
@@ -211,10 +215,10 @@ for key, value in entry.items():
 A look at the first four, in the IQ plane and in magnitude:
 
 ```python
-def plot_sweeps(sweeps, keys, title):
+def plot_ms(ms, keys, title):
     fig, axes = plt.subplots(2, len(keys), figsize=(3.0 * len(keys), 5.5))
     for column, key in enumerate(keys):
-        s = sweeps[key]
+        s = ms[key]
         centre = s["original_center_frequency"]
         offset_khz = (s["frequencies"] - centre) / 1e3
 
@@ -231,22 +235,22 @@ def plot_sweeps(sweeps, keys, title):
     plt.tight_layout()
     plt.show()
 
-plot_sweeps(sweeps, list(sweeps)[:4], "swept from a catalog")
+plot_ms(ms, list(ms)[:4], "multisweep done using a catalog")
 ```
 
 ### Overriding the amplitude
 
-`amp` is optional with a catalog, and defaults to each resonator's own
-`bias.amplitude`. Pass a number to override all of them for this one call, or a
-`{name: amplitude}` mapping to set them individually. The mapping has to name
-every resonator — a half-applied amplitude override is the kind of thing that is
-only noticed after the data is taken.
+By default, multisweep uses each resonator's bias amplitude found in the catalog.
+You can also override these using the `amp` argument. Pass a number to override all
+ of them for this one call, or a
+`{name: amplitude}` mapping to set them individually. Note that the mapping has to name
+every resonator.
 
 The catalog is left alone either way; the amplitude actually used is reported
 per resonator as `sweep_amplitude`.
 
 ```python
-louder = await crs.multisweep(
+ms_louder = await crs.multisweep(
     catalog,
     span_hz=SPAN_HZ,
     npoints_per_sweep=NPOINTS_PER_SWEEP,
@@ -255,34 +259,33 @@ louder = await crs.multisweep(
 )
 
 print(f"catalog bias amplitude   {catalog['R0001'].bias.amplitude}")
-print(f"swept at (default)       {sweeps['R0001']['sweep_amplitude']}")
-print(f"swept at (override)      {louder['R0001']['sweep_amplitude']}")
+print(f"swept at (default)       {ms['R0001']['sweep_amplitude']}")
+print(f"swept at (override)      {ms_louder['R0001']['sweep_amplitude']}")
 print(f"catalog after the sweep  {catalog['R0001'].bias.amplitude}  ← unchanged")
 ```
 
-A per-resonator mapping, for the same reason you would ever want one: two
-detectors that do not want the same probe power.
+Or, using a per-resonator amplitude mapping:
 
 ```python
-per_resonator = {r.name: r.bias.amplitude for r in catalog}
-per_resonator["R0001"] = PROBE_AMPLITUDE * 4
-per_resonator["R0002"] = PROBE_AMPLITUDE / 2
+per_resonator_amplitude_mapping = {r.name: r.bias.amplitude for r in catalog}
+per_resonator_amplitude_mapping["R0001"] = PROBE_AMPLITUDE * 4
+per_resonator_amplitude_mapping["R0002"] = PROBE_AMPLITUDE / 2
 
-mixed = await crs.multisweep(
+mixed_amplitude_ms = await crs.multisweep(
     catalog,
     span_hz=SPAN_HZ,
     npoints_per_sweep=NPOINTS_PER_SWEEP,
     nsamps=NSAMPS,
-    amp=per_resonator,
+    amp=per_resonator_amplitude_mapping,
 )
 
-for name in list(mixed)[:4]:
-    print(f"{name}  swept at {mixed[name]['sweep_amplitude']:.5f}")
+for name in list(mixed_amplitude_ms)[:4]:
+    print(f"{name}  swept at {mixed_amplitude_ms[name]['sweep_amplitude']:.5f}")
 ```
 
-Note that a positional *list* of amplitudes is refused alongside a catalog: it
-would silently depend on catalog ordering, which is not something a caller
-should have to know. Ask by name, or pass one number for everything.
+Note that a positional *list* of amplitudes is refused if provided alongside a catalog: it
+would silently depend on the catalog ordering, which is not meaningful since the resonators
+are in arbitrary order within the catalog.
 
 ```python
 try:
@@ -296,7 +299,7 @@ except TypeError as e:
     print(f"TypeError: {e}")
 ```
 
-## 4. Sweep a bare list of frequencies
+## 4. No catalog? Multisweep using a plain list of frequencies
 
 No catalog required. This is the form to reach for when there is nothing tuned
 yet — you have a few frequencies from somewhere and you want to look at them.
@@ -305,15 +308,17 @@ Two differences from the catalog form, both consequences of the input carrying
 less information:
 
 - **`amp` is required.** There is nothing to fall back to.
-- **`module` is required**, and results are **keyed by 1-based index** rather
-  than by name, in the order you passed the frequencies. That index is also the
-  hardware channel each frequency is swept on.
+- **`module` is required.** There is no catalog to read it from.
+- **The sweeps are named `S0001…`** — S for section — in the order you passed
+  the frequencies. Deliberately not `R0001…`, so a result dict tells you at a
+  glance whether it came from a catalog or a frequency list. The position in
+  the list is also the hardware channel each frequency is swept on.
 
 ```python
-targets = [1.005e9, 1.015e9, 1.025e9]   # nothing in particular is here
+section_center_frequencies = [1.005e9, 1.015e9, 1.025e9]   # nothing in particular is here
 
-blind = await crs.multisweep(
-    center_frequencies=targets,
+no_catalog_ms = await crs.multisweep(
+    center_frequencies=section_center_frequencies,
     amp=PROBE_AMPLITUDE,
     span_hz=SPAN_HZ,
     npoints_per_sweep=NPOINTS_PER_SWEEP,
@@ -321,9 +326,9 @@ blind = await crs.multisweep(
     module=MODULE,
 )
 
-print(f"keys: {list(blind)}")
-for key, s in blind.items():
-    print(f"{key}  ch {s['channel']}  "
+print(f"keys: {list(no_catalog_ms)}")
+for section_name, s in no_catalog_ms.items():
+    print(f"{section_name}  ch {s['channel']}  "
           f"{s['original_center_frequency']/1e6:.3f} MHz  "
           f"amp {s['sweep_amplitude']}")
 ```
@@ -332,7 +337,7 @@ Off-resonance, so these are flat — which is itself the point. The instrument
 does not need to be pointed at a resonator for the sweep to be valid.
 
 ```python
-plot_sweeps(blind, list(blind), "swept from a bare frequency list")
+plot_ms(no_catalog_ms, list(no_catalog_ms), "multisweep done using a plain frequency list")
 ```
 
 ### One amplitude per frequency
@@ -343,8 +348,8 @@ your own — you wrote both lists — which is exactly the thing that is *not* t
 of a catalog.
 
 ```python
-ladder = await crs.multisweep(
-    center_frequencies=targets,
+per_section_amplitude_ms = await crs.multisweep(
+    center_frequencies=section_center_frequencies,
     amp=[PROBE_AMPLITUDE, PROBE_AMPLITUDE * 2, PROBE_AMPLITUDE * 4],
     span_hz=SPAN_HZ,
     npoints_per_sweep=NPOINTS_PER_SWEEP,
@@ -352,8 +357,8 @@ ladder = await crs.multisweep(
     module=MODULE,
 )
 
-for key, s in ladder.items():
-    print(f"{key}  {s['original_center_frequency']/1e6:.3f} MHz  "
+for section_name, s in per_section_amplitude_ms.items():
+    print(f"{section_name}  {s['original_center_frequency']/1e6:.3f} MHz  "
           f"amp {s['sweep_amplitude']:.5f}")
 ```
 
@@ -363,7 +368,7 @@ drifted out of step with its frequencies is caught before the measurement:
 ```python
 try:
     await crs.multisweep(
-        center_frequencies=targets,
+        center_frequencies=section_center_frequencies,
         amp=[PROBE_AMPLITUDE, PROBE_AMPLITUDE * 2],   # two, for three frequencies
         span_hz=SPAN_HZ,
         npoints_per_sweep=NPOINTS_PER_SWEEP,
@@ -373,6 +378,32 @@ except ValueError as e:
     print(f"ValueError: {e}")
 ```
 
+### Naming the sections yourself
+
+`S0001…` is only the default. Pass `names`, one per frequency in the same
+order, when the sections mean something to you — and then you can address their
+amplitudes by name too, exactly as you would a catalog's resonators.
+
+```python
+section_names = ["below_band", "in_band", "above_band"]
+
+named_section_ms = await crs.multisweep(
+    center_frequencies=section_center_frequencies,
+    names=section_names,
+    amp={"below_band": PROBE_AMPLITUDE, "in_band": PROBE_AMPLITUDE * 2,
+         "above_band": PROBE_AMPLITUDE},
+    span_hz=SPAN_HZ,
+    npoints_per_sweep=NPOINTS_PER_SWEEP,
+    nsamps=NSAMPS,
+    module=MODULE,
+)
+
+for section_name, s in named_section_ms.items():
+    print(f"{section_name:<12} ch {s['channel']}  "
+          f"{s['original_center_frequency']/1e6:.3f} MHz  "
+          f"amp {s['sweep_amplitude']:.5f}")
+```
+
 ### The same resonators, both ways
 
 The two forms are the same measurement. Sweeping the catalog's own frequencies
@@ -380,7 +411,7 @@ as a bare list reproduces the catalog run — the results are simply keyed
 differently.
 
 ```python
-as_a_list = await crs.multisweep(
+catalog_frequencies_as_a_list_ms = await crs.multisweep(
     center_frequencies=[r.bias.frequency_hz for r in catalog],
     amp=PROBE_AMPLITUDE,
     span_hz=SPAN_HZ,
@@ -390,16 +421,17 @@ as_a_list = await crs.multisweep(
 )
 
 for index, resonator in enumerate(catalog, start=1):
-    by_name = sweeps[resonator.name]["original_center_frequency"]
-    by_index = as_a_list[index]["original_center_frequency"]
-    print(f"{resonator.name} ↔ {index}   "
-          f"{by_name/1e6:.6f} MHz  vs  {by_index/1e6:.6f} MHz   "
-          f"{'✓' if by_name == by_index else '✗'}")
+    section_name = f"S{index:04d}"
+    from_catalog = ms[resonator.name]["original_center_frequency"]
+    from_list = catalog_frequencies_as_a_list_ms[section_name]["original_center_frequency"]
+    print(f"{resonator.name} ↔ {section_name}   "
+          f"{from_catalog/1e6:.6f} MHz  vs  {from_list/1e6:.6f} MHz   "
+          f"{'✓' if from_catalog == from_list else '✗'}")
 ```
 
 The catalog form is worth the extra step as soon as identity starts to matter.
 `R0003` is the same detector next week, and it carries its own amplitude,
-channel and calibration with it; index `3` is only ever "the third thing in the
+channel and calibration with it; `S0003` is only ever "the third thing in the
 list I happened to pass".
 
 ## 5. What is not here yet

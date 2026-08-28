@@ -15,7 +15,8 @@ There are two ways to say what to sweep, identical once the measurement starts:
   channel.  Results come back keyed by resonator name.
 * a bare list of ``center_frequencies`` plus an ``amp``, for sweeping
   frequencies that are not a tuned array — before resonances have been found,
-  or on a system that has none.  Results come back keyed by 1-based index.
+  or on a system that has none.  Results come back keyed by section name,
+  ``S0001…`` unless ``names`` says otherwise.
 
 Either way multisweep reads its input and never modifies it. Updating a catalog
 from what a sweep reveals belongs to the analysis that learns it — fitting,
@@ -46,98 +47,114 @@ class _SweepTarget:
     of the macro, so the measurement body below has exactly one thing to walk.
     """
 
-    key: str | int  # what this resonator is keyed by in the returned dict
-    name: str | None  # None for a bare frequency list, which has no names
+    name: str  # identity, and the key this sweep comes back under
     channel: int  # 1-based hardware channel
     center_frequency_hz: float
     amplitude: float  # normalized DAC units
 
 
-def _resolve_amplitudes(
-    catalog: ResonatorCatalog,
-    amp: float | Mapping[str, float] | None,
-) -> dict[str, float]:
-    """Decide the probe amplitude for every resonator in *catalog*.
+def _resolve_section_names(
+    center_frequencies: list[float],
+    names: list[str] | None,
+) -> list[str]:
+    """Name every entry of a bare frequency list.
 
-    ``None`` means "whatever each resonator is already biased at"; a number
-    overrides all of them; a mapping overrides them individually and must name
-    every resonator, because a half-applied amplitude override is the kind of
-    thing that is only noticed after the data is taken.
+    Without *names*, sections are called ``S0001…`` in the order they were
+    passed — S for section, and visibly not a catalog's ``R0001…``, so a
+    result dict says which of the two it came from at a glance.
     """
-    names = [r.name for r in catalog]
+    count = len(center_frequencies)
 
+    if names is None:
+        return [f"S{i:04d}" for i in range(1, count + 1)]
+
+    names = list(names)
+    if len(names) != count:
+        raise ValueError(
+            f"{len(names)} names for {count} center_frequencies. Pass one name "
+            f"per frequency, in the same order, or none at all for S0001…"
+        )
+    if not all(isinstance(n, str) for n in names):
+        raise TypeError(
+            "names must be strings — they are the keys the sweeps come back "
+            "under."
+        )
+    duplicates = sorted({n for n in names if names.count(n) > 1})
+    if duplicates:
+        raise ValueError(
+            f"Duplicate section names {duplicates}: each sweep needs its own "
+            f"key, or results would overwrite each other."
+        )
+    return names
+
+
+def _resolve_amplitudes(
+    names: list[str],
+    amp: float | list[float] | Mapping[str, float] | None,
+    *,
+    defaults: dict[str, float] | None,
+    allow_sequence: bool,
+) -> dict[str, float]:
+    """Decide the probe amplitude for every sweep, keyed by name.
+
+    ``None`` falls back to *defaults* (a catalog's own bias amplitudes) and is
+    an error where there are none. A number applies to everything. A mapping
+    sets them individually and must name every sweep, because a half-applied
+    amplitude override is the kind of thing that is only noticed after the data
+    is taken. A positional sequence is only accepted where the caller supplied
+    the ordering — i.e. alongside ``center_frequencies``.
+    """
     if amp is None:
-        return {r.name: float(r.bias.amplitude) for r in catalog}
+        if defaults is None:
+            raise ValueError(
+                "amp is required when sweeping center_frequencies: pass a "
+                "single amplitude for all of them, one per frequency, or a "
+                "{name: amplitude} mapping. (A ResonatorCatalog carries an "
+                "amplitude per resonator, so there amp is optional.)"
+            )
+        return dict(defaults)
 
     if isinstance(amp, Mapping):
         unknown = sorted(set(amp) - set(names))
         if unknown:
             raise ValueError(
-                f"amp names {unknown} are not in the catalog "
-                f"(module {catalog.module})."
+                f"amp names {unknown} are not being swept. The names in play "
+                f"are {names[:4]}{' …' if len(names) > 4 else ''}."
             )
         missing = sorted(set(names) - set(amp))
         if missing:
             raise ValueError(
-                f"amp is missing an amplitude for {missing}. Pass every "
-                f"resonator, a single number for all of them, or None to use "
-                f"each resonator's own bias amplitude."
+                f"amp is missing an amplitude for {missing}. Pass every name, "
+                f"or a single number for all of them."
             )
         return {n: float(amp[n]) for n in names}
 
     if isinstance(amp, (list, tuple, np.ndarray)):
-        raise TypeError(
-            "amp cannot be a positional sequence alongside a catalog — the "
-            "pairing would depend on catalog ordering, which is not something "
-            "a caller should have to know. Pass a {name: amplitude} mapping, a "
-            "single number, or None. (A positional list *is* accepted "
-            "alongside center_frequencies, where the ordering is your own.)"
-        )
+        if not allow_sequence:
+            raise TypeError(
+                "amp cannot be a positional sequence alongside a catalog — the "
+                "pairing would depend on catalog ordering, which is not "
+                "something a caller should have to know. Pass a "
+                "{name: amplitude} mapping, a single number, or None. (A "
+                "positional list *is* accepted alongside center_frequencies, "
+                "where the ordering is your own.)"
+            )
+        values = [float(a) for a in amp]
+        if len(values) != len(names):
+            raise ValueError(
+                f"amp has {len(values)} amplitudes for {len(names)} "
+                f"center_frequencies. Pass one per frequency, in the same "
+                f"order, or a single number for all."
+            )
+        return dict(zip(names, values))
 
     return {n: float(amp) for n in names}
-
-
-def _amplitudes_for_frequencies(
-    center_frequencies: list[float],
-    amp: float | list[float] | None,
-) -> list[float]:
-    """Decide the probe amplitude for every entry of a bare frequency list.
-
-    A number applies to all of them; a sequence pairs off positionally with
-    *center_frequencies* and must be the same length. There is no ``None``
-    here — without a catalog there is nothing to fall back to.
-    """
-    if amp is None:
-        raise ValueError(
-            "amp is required when sweeping center_frequencies: pass a single "
-            "amplitude for all of them, or one per frequency. (A "
-            "ResonatorCatalog carries an amplitude per resonator, so there amp "
-            "is optional.)"
-        )
-
-    if isinstance(amp, Mapping):
-        raise TypeError(
-            "amp cannot be a mapping alongside center_frequencies, which have "
-            "no names to key it by. Pass a single number, a list in the same "
-            "order as center_frequencies, or use a ResonatorCatalog."
-        )
-
-    if isinstance(amp, (list, tuple, np.ndarray)):
-        amplitudes = [float(a) for a in amp]
-        if len(amplitudes) != len(center_frequencies):
-            raise ValueError(
-                f"amp has {len(amplitudes)} amplitudes for "
-                f"{len(center_frequencies)} center_frequencies. Pass one per "
-                f"frequency, in the same order, or a single number for all."
-            )
-        return amplitudes
-
-    return [float(amp)] * len(center_frequencies)
 
 
 def _resolve_sweep_targets(
     catalog: ResonatorCatalog | None,
     center_frequencies: list[float] | None,
+    names: list[str] | None,
     amp: float | list[float] | Mapping[str, float] | None,
 ) -> list[_SweepTarget]:
     """Normalize the catalog and bare-frequency-list forms into one list."""
@@ -149,29 +166,44 @@ def _resolve_sweep_targets(
         )
 
     if catalog is not None:
-        amplitudes = _resolve_amplitudes(catalog, amp)
+        if names is not None:
+            raise ValueError(
+                "names applies to center_frequencies only — a catalog's "
+                "resonators are already named. Rename them in the catalog if "
+                "that is what you meant."
+            )
+        catalog_names = [r.name for r in catalog]  # channel order
+        amplitudes = _resolve_amplitudes(
+            catalog_names,
+            amp,
+            defaults={r.name: float(r.bias.amplitude) for r in catalog},
+            allow_sequence=False,
+        )
         return [
             _SweepTarget(
-                key=r.name,
                 name=r.name,
                 channel=r.channel,
                 center_frequency_hz=float(r.bias.frequency_hz),
                 amplitude=amplitudes[r.name],
             )
-            for r in catalog  # channel order
+            for r in catalog
         ]
 
-    # --- a bare list of frequencies, keyed and channelled by 1-based index ---
-    amplitudes = _amplitudes_for_frequencies(center_frequencies, amp)
+    # --- a bare list of frequencies: named S0001…, channelled by position ---
+    section_names = _resolve_section_names(center_frequencies, names)
+    amplitudes = _resolve_amplitudes(
+        section_names, amp, defaults=None, allow_sequence=True
+    )
     return [
         _SweepTarget(
-            key=idx,
-            name=None,
-            channel=idx,
+            name=name,
+            channel=channel,
             center_frequency_hz=float(cf),
-            amplitude=a,
+            amplitude=amplitudes[name],
         )
-        for idx, (cf, a) in enumerate(zip(center_frequencies, amplitudes), start=1)
+        for channel, (name, cf) in enumerate(
+            zip(section_names, center_frequencies), start=1
+        )
     ]
 
 
@@ -256,6 +288,7 @@ async def multisweep(
     sweep_direction: str = "upward", # Options: "upward", "downward"
     apply_df_calibration: bool = True,  # Enable frequency shift/dissipation calibration
     center_frequencies: list[float] | None = None,
+    names: list[str] | None = None,
     module=None,
     progress_callback=None,
     data_callback=None,
@@ -288,9 +321,10 @@ async def multisweep(
         sweeps = await crs.multisweep(
             center_frequencies=[1.0e9, 1.1e9],
             amp=1e-3,                 # or [1e-3, 2e-3], one per frequency
+            names=["low", "high"],    # optional; default is S0001, S0002
             span_hz=200e3, npoints_per_sweep=101, module=2,
         )
-        sweeps[1]["iq_complex"]
+        sweeps["low"]["iq_complex"]
 
     Args:
         crs (CRS): The CRS object (injected by macro).
@@ -318,6 +352,7 @@ async def multisweep(
 
             - a number: use it for every frequency.
             - a list: one amplitude per frequency, in the same order.
+            - a ``{section_name: amplitude}`` mapping, as above.
 
             Required in that case — there is nothing to fall back to.
         nsamps (int, optional): Number of samples to average per frequency point for the main sweep.
@@ -346,9 +381,15 @@ async def multisweep(
             Defaults to True.
         center_frequencies (list[float], optional): A bare list of sweep
             centres, for sweeping frequencies that are not a tuned array — no
-            resonances found yet, or a system that has none. Channels and result
-            keys are 1-based indices into this list. Pass this or *catalog*,
-            not both.
+            resonances found yet, or a system that has none. Hardware channels
+            are 1-based positions in this list. Pass this or *catalog*, not
+            both.
+        names (list[str], optional): Names for the *center_frequencies*, one
+            each, in the same order — these are the keys the sweeps come back
+            under. Defaults to ``S0001…`` (S for section), which is visibly not
+            a catalog's ``R0001…``, so a result dict says which of the two
+            produced it. Rejected alongside a *catalog*, whose resonators are
+            already named.
         module (int | list[int], optional): The target readout module. Defaults
             to the catalog's own ``module``, and must agree with it when both
             are given; required when sweeping *center_frequencies*. A list of
@@ -361,10 +402,10 @@ async def multisweep(
             sliced to the points measured so far.
 
     Returns:
-        dict: keyed by resonator name with a catalog, or by 1-based index with
+        dict: keyed by resonator name with a catalog, or by section name with
               a bare frequency list. Each value is a dictionary containing:
               {
-                  'name': str | None,             # resonator name; None for a bare frequency list
+                  'name': str,                    # the key this entry is under
                   'channel': int,                 # hardware channel swept on
                   'frequencies': np.ndarray (Hz), # Sweep frequencies
                   'iq_complex': np.ndarray (complex), # Final, possibly rotated, sweep IQ data
@@ -420,6 +461,7 @@ async def multisweep(
             # Call the same macro again, but for a single module=m
             tasks.append(crs.multisweep(
                 center_frequencies=center_frequencies,
+                names=names,
                 span_hz=span_hz,
                 npoints_per_sweep=npoints_per_sweep,
                 amp=amp,
@@ -438,7 +480,7 @@ async def multisweep(
     # --- End parallel execution handling ---
 
     # --- Resolve what to sweep ----------------------------------------------
-    targets = _resolve_sweep_targets(catalog, center_frequencies, amp)
+    targets = _resolve_sweep_targets(catalog, center_frequencies, names, amp)
 
     if not targets:
         warnings.warn("Nothing to sweep. Returning empty dictionary.")
@@ -473,7 +515,7 @@ async def multisweep(
     for t in targets:
         if t.amplitude <= 0:
             warnings.warn(
-                f"Amplitude for {t.key!r} (amp={t.amplitude}) is non-positive. "
+                f"Amplitude for {t.name!r} (amp={t.amplitude}) is non-positive. "
                 f"Results may be invalid."
             )
     # --- End input validation ---
@@ -500,7 +542,7 @@ async def multisweep(
                 endpoint=True
             )
 
-        resonance_data[t.key] = {
+        resonance_data[t.name] = {
             'frequencies': sweep_points,
             'iq_complex': np.zeros(npoints_per_sweep, dtype=np.complex128), # Pre-allocate array
             'original_center_frequency': t.center_frequency_hz,
@@ -549,7 +591,7 @@ async def multisweep(
             async with crs.tuber_context() as ctx:
                 # Set resonance channels
                 for t in region_targets:
-                    freq = resonance_data[t.key]['frequencies'][point_idx]
+                    freq = resonance_data[t.name]['frequencies'][point_idx]
                     freq_rel = freq - current_nco_freq # Use current_nco_freq
                     ctx.set_frequency(freq_rel, channel=t.channel, module=module)
                     if not point_idx: # only set amplitude once per sweep
@@ -574,7 +616,7 @@ async def multisweep(
                 raw_iq_val = i_val + 1j * q_val
 
                 # Store raw IQ value directly
-                resonance_data[t.key]['iq_complex'][point_idx] = raw_iq_val
+                resonance_data[t.name]['iq_complex'][point_idx] = raw_iq_val
 
             # --- Progress update ---
             if progress_callback:
@@ -591,9 +633,9 @@ async def multisweep(
                 # regions not yet started have nothing to send.
                 n = point_idx + 1
                 data_callback(module, {
-                    t.key: {
-                        'frequencies': resonance_data[t.key]['frequencies'][:n],
-                        'iq_complex': resonance_data[t.key]['iq_complex'][:n],
+                    t.name: {
+                        'frequencies': resonance_data[t.name]['frequencies'][:n],
+                        'iq_complex': resonance_data[t.name]['iq_complex'][:n],
                         'original_center_frequency': t.center_frequency_hz,
                     }
                     for t in region_targets
@@ -604,7 +646,7 @@ async def multisweep(
             # Step 1: Determine all bias frequencies and methods for this region
             targets_needing_tod = [] # Resonances needing TOD acquisition
             for t in region_targets:
-                res_data_entry = resonance_data[t.key]
+                res_data_entry = resonance_data[t.name]
                 bias_freq, recalc_method_used = _get_recalculated_center_freq(
                     original_cf_hz=t.center_frequency_hz,
                     sweep_freqs_hz=res_data_entry['frequencies'],
@@ -642,16 +684,16 @@ async def multisweep(
                         channel_idx_0based = t.channel - 1
                         tod_i_channel_data = np.array(all_tod_samples.i[channel_idx_0based])
                         tod_q_channel_data = np.array(all_tod_samples.q[channel_idx_0based])
-                        resonance_data[t.key]['rotation_tod'] = tod_i_channel_data + 1j * tod_q_channel_data
+                        resonance_data[t.name]['rotation_tod'] = tod_i_channel_data + 1j * tod_q_channel_data
                 except Exception as e:
                     warnings.warn(f"Batch TOD acquisition failed for NCO region {region_idx} (module {module}): {e}")
                     # Mark all relevant TODs as None if batch failed
                     for t, _ in targets_needing_tod:
-                        resonance_data[t.key]['rotation_tod'] = None
+                        resonance_data[t.name]['rotation_tod'] = None
 
             # Step 3: Calculate and apply rotations using the (now populated) TODs
             for t in region_targets: # Iterate again to apply rotations
-                res_data_entry = resonance_data[t.key]
+                res_data_entry = resonance_data[t.name]
                 recalc_method_used = res_data_entry['recalculation_method_applied']
 
                 if recalc_method_used not in ["min-s21", "max-diq"] or res_data_entry['rotation_tod'] is None:
@@ -710,7 +752,7 @@ async def multisweep(
     # --- Format final results for each resonance ---
     results = {}
     for t in targets:
-        data_entry = resonance_data[t.key]
+        data_entry = resonance_data[t.name]
         final_iq_complex = data_entry['iq_complex']
         original_cf = data_entry['original_center_frequency']
 
@@ -756,11 +798,11 @@ async def multisweep(
                     )
 
             except Exception as e:
-                warnings.warn(f"Calibration failed for resonance {t.key!r}: {e}")
+                warnings.warn(f"Calibration failed for resonance {t.name!r}: {e}")
                 df_calibration = None
                 calibrated_tod_df = None
 
-        results[t.key] = {
+        results[t.name] = {
             'name': t.name,
             'channel': t.channel,
             'frequencies': data_entry['frequencies'],

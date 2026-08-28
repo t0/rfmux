@@ -69,9 +69,10 @@ Things that are worth *not* carrying over:
   later, and is out of scope here.
 * **A bare frequency list stays a first-class second mode**, with `amp` as one
   value or one per frequency. Not everything worth sweeping is a tuned array:
-  resonances may not have been found yet, or there may be none to find. Results
-  are keyed by 1-based index rather than by name, and the two modes are
-  identical once the measurement starts.
+  resonances may not have been found yet, or there may be none to find. Its
+  sweeps are named `S0001…` (S for section) unless `names` says otherwise —
+  strings either way, so downstream code has one key type, but visibly not a
+  catalog's `R0001…`. The two modes are identical once the measurement starts.
 * **Amplitude and direction are separate labelled axes** in the output, not one
   fused iteration index.
 
@@ -215,7 +216,7 @@ amplitude, and so on — so consumers stop re-deriving them inline.
    rather than a deprecated one: it is how you sweep something that is not a
    tuned array yet, and it keeps Periscope and `simplified_tuning_flow` working
    unchanged. Demonstrated in
-   `reference-notebooks/Demos/multisweep_a_catalog.md`.
+   `reference-notebooks/Demos/multisweep.md`.
 2. **`AmplitudeSchedule`** in `rfmux/tuning/amplitudes.py`, with tests. Pure, no
    hardware, ships on its own.
 3. **`rfmux/tuning/sweeps.py`** — the packer and the accessors over the output

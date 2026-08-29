@@ -43,8 +43,10 @@ each resonator's frequency, its probe amplitude and its hardware channel.
 Seeding a catalog from a network analysis is the subject of
 `network_analyses_find_resonances_make_resonator_catalog.md`. If you haven't done
 that yet and are unfamiliar with the workflow, start there, then come back here.
-Sweeping the same array at a *ladder* of amplitudes is a separate
-layer that does not exist yet; this notebook will grow as it lands.
+
+One `multisweep` call is always *one* sweep, at one amplitude per resonator, in
+one direction. Sweeping the same array at a **ladder** of amplitudes is a layer
+on top, `crs.multiamp_multisweep()`, and it is the subject of sections 5 to 8.
 
 ## How to use this document
 
@@ -437,15 +439,384 @@ The catalog form is worth the extra step as soon as identity starts to matter.
 channel and calibration with it; `S0003` is only ever "the third thing in the
 list I happened to pass".
 
-## 5. What is not here yet
+## 5. A ladder of amplitudes
 
-- **A ladder of amplitudes.** One `multisweep` call is one sweep at one
-  amplitude per resonator. Walking a range of amplitudes — to find where each
-  detector bifurcates, and to pick an operating point below it — is a separate
-  layer being built on top of this one. See
-  `tuning_multisweep_amplitudes_plan.md` in the repository root.
-- **Fitting, and bias finding.** Both consume multisweep output, and both are
-  what will write results back into the catalog.
+How hard you drive a KID changes what you measure. Too quiet and the resonance
+is buried in noise; too loud and it bifurcates, the dip goes asymmetric and
+snaps. Choosing an operating point means sweeping the *same* array several times
+at different amplitudes and comparing.
 
-The module is already quiet: multisweep zeroes every channel on its way out, so
-there is nothing to clean up after it.
+`crs.multiamp_multisweep()` does exactly that: one `multisweep` per amplitude
+step, per direction, all returned together. It decides nothing on its own — the
+amplitudes come from an `AmplitudeSchedule`, which is plain Python you can build,
+print and check with no board in sight.
+
+| Piece | Module |
+|---|---|
+| The ladder driver | `rfmux.algorithms.measurement.multiamp_multisweep` (`crs.multiamp_multisweep`) |
+| The amplitudes, and reading the results | `rfmux.tuning.multisweep_amplitudes` |
+
+A schedule is two things: a **base** — what each resonator would be swept at
+with no ladder at all — and a **ladder** of rungs applied to it.
+
+| You want | You write | Rungs are |
+|---|---|---|
+| The catalog as it stands, once | `AmplitudeSchedule()` | — |
+| One amplitude for everything | `AmplitudeSchedule.fixed(0.005)` | — |
+| Absolute amplitudes, same for all | `AmplitudeSchedule.ramp(1e-4, 4e-3, 5)` | absolute |
+| Multiples of each resonator's own | `AmplitudeSchedule.scaled(0.5, 4.0, 5)` | relative |
+| Multiples of a base you choose | `AmplitudeSchedule.scaled(0.5, 4.0, 5, base=0.002)` | relative |
+| Whatever you like | `AmplitudeSchedule.explicit([1e-4, 3e-4, 2e-3])` | absolute |
+
+Spacing is logarithmic by default — equal ratios, so equal steps in dB, which is
+usually what you want when walking a decade of drive power. Pass
+`spacing="linear"` for evenly spaced amplitudes instead.
+
+An **amplitude step** is one amplitude. Steps are numbered from 0 in the order
+they are measured, and each one can be swept up to twice — once per direction.
+
+```python
+from rfmux.tuning import AmplitudeSchedule
+
+ladder = AmplitudeSchedule.scaled(0.5, 4.0, 4)
+print(ladder)
+
+for step in ladder.steps(catalog):
+    print(step)
+```
+
+### Absolute rungs, or relative ones
+
+The distinction only shows itself on an array whose resonators are *not* all
+biased at the same amplitude — so let's make that true, by moving two of them:
+
+```python
+catalog["R0002"].set_bias(amplitude=PROBE_AMPLITUDE * 4)
+catalog["R0003"].set_bias(amplitude=PROBE_AMPLITUDE / 2)
+
+for r in list(catalog)[:4]:
+    print(f"{r.name}  bias amplitude {r.bias.amplitude:.5f}")
+```
+
+A **relative** ladder multiplies each resonator's own amplitude, so the spread
+you just created is preserved and every detector walks its own range. An
+**absolute** ladder ignores the catalog's amplitudes entirely and puts every
+resonator on the same rung:
+
+```python
+relative = AmplitudeSchedule.scaled(1.0, 2.0, 2)
+absolute = AmplitudeSchedule.ramp(1e-3, 2e-3, 2)
+
+for label, schedule in [("scaled (relative)", relative), ("ramp (absolute)", absolute)]:
+    print(f"\n{label}:  {schedule}")
+    for step in schedule.steps(catalog):
+        shown = {n: f"{a:.5f}" for n, a in list(step.amplitudes.items())[:4]}
+        print(f"  step {step.step}  {shown}")
+```
+
+An absolute ladder takes no `base`, because its rungs already *are* the
+amplitudes — there would be nothing left for a base to contribute:
+
+```python
+try:
+    AmplitudeSchedule(ladder=(1e-3, 2e-3), relative=False, base=0.004)
+except ValueError as e:
+    print(f"ValueError: {e}")
+```
+
+## 6. Checking a schedule before you spend an hour on it
+
+A ladder is a slow measurement, so it is worth knowing what it will do first.
+`describe()` gives the derived numbers, and `validate()` returns
+`(severity, message)` pairs — the same two calls a Periscope dialog renders.
+
+```python
+described = ladder.describe(catalog, n_directions=2)
+
+for key in ("nsteps", "n_directions", "n_sweeps", "n_sweep_targets",
+            "amplitude_min", "amplitude_max", "spacing"):
+    print(f"{key:<18} {described[key]}")
+
+print("\nper resonator (min, max):")
+for name, (lo, hi) in list(described["amplitude_range_by_name"].items())[:4]:
+    print(f"  {name}  {lo:.5f} → {hi:.5f}")
+```
+
+`validate()` is where a ladder that would overshoot full scale gets caught — and
+it is caught *here*, before the first sweep, rather than partway through the
+run. Amplitudes are normalized DAC units in `(0, 1]`:
+
+```python
+for severity, message in ladder.validate(catalog, n_directions=2):
+    print(f"{severity:>7}: {message}")
+
+print()
+too_loud = AmplitudeSchedule.scaled(1.0, 500.0, 3)
+for severity, message in too_loud.validate(catalog):
+    print(f"{severity:>7}: {message}")
+```
+
+Running that one raises rather than measuring anything:
+
+```python
+try:
+    await crs.multiamp_multisweep(
+        catalog,
+        span_hz=SPAN_HZ,
+        npoints_per_sweep=NPOINTS_PER_SWEEP,
+        amp_schedule=too_loud,
+    )
+except ValueError as e:
+    print(f"ValueError: {e}")
+```
+
+## 7. Running the ladder
+
+The call looks like `multisweep`'s, plus `amp_schedule` and `directions`. There
+is no `amp` argument here — amplitude is the schedule's job and nothing else's.
+
+`sweep_callback` fires once per completed sweep, which is what to hook a
+progress bar or a live plot to. It is also why a failure part-way through does
+not lose the sweeps that already finished: they have been handed to you already.
+
+```python
+def report(record):
+    amplitudes = record["amplitudes"]
+    print(f"  [{record['completed']}/{record['total']}] "
+          f"step {record['step']} {record['direction']:<8} "
+          f"R0001 at {amplitudes['R0001']:.5f}")
+
+ladder_results = await crs.multiamp_multisweep(
+    catalog,
+    span_hz=SPAN_HZ,
+    npoints_per_sweep=NPOINTS_PER_SWEEP,
+    nsamps=NSAMPS,
+    amp_schedule=ladder,
+    sweep_callback=report,
+)
+
+print(f"\ntop-level keys: {list(ladder_results)}")
+print(f"amplitude steps: {list(ladder_results['results'])}")
+```
+
+The result is one dict:
+
+- `results` is keyed by **amplitude step**, numbered in the order measured, and
+  each step holds one entry per **direction** swept and nothing else. Under a
+  direction is exactly what a single `multisweep` returns.
+- `call_params` records what the driver was asked for — including the schedule,
+  so a saved result can say what produced it.
+
+```python
+first = ladder_results["results"][0]["upward"]
+print(f"results[0]['upward'] is a normal multisweep return: {list(first)[:4]} …")
+print(f"R0001 swept at {first['R0001']['sweep_amplitude']:.5f}")
+
+print(f"\ncall_params: {list(ladder_results['call_params'])}")
+print(f"schedule as stored: {ladder_results['call_params']['amp_schedule']}")
+```
+
+Note what is *not* in there: no step-level copy of the amplitudes. Each sweep
+already records its own `sweep_amplitude`, so storing it twice would only create
+two things to keep in step. The readers in the next section rebuild it on
+demand.
+
+## 8. Reading a ladder back
+
+Three functions, all plain functions over the returned dict.
+
+**One resonator, across every amplitude.** This is the usual question, and the
+shape you want for plotting:
+
+```python
+from rfmux.tuning import (
+    collect_amplitude_iterations_for,
+    find_iteration_matching_amplitude,
+    get_amplitudes_at_iteration,
+)
+
+iterations = collect_amplitude_iterations_for(ladder_results, "R0001")
+
+for iteration, by_direction in iterations.items():
+    sweep = by_direction["upward"]
+    print(f"iteration {iteration}  {sweep['sweep_amplitude']:.5f}")
+```
+
+**Everything, at one amplitude step.** Rebuilt from each sweep's own
+`sweep_amplitude`:
+
+```python
+for name, amplitude in list(get_amplitudes_at_iteration(ladder_results, 2).items())[:4]:
+    print(f"{name}  {amplitude:.5f}")
+```
+
+**Which step was taken at a given amplitude.** With no amplitude given it finds
+the step nearest that resonator's *bias* amplitude — usually the one you want,
+"where was this thing measured at the power it actually runs at?"
+
+On a relative ladder that comes out the same for everyone, and not by accident:
+`scaled` includes the ×1 rung, and ×1 is each resonator's own bias amplitude
+whatever that happens to be. Every detector is at its operating point on the
+same step.
+
+```python
+for name in ("R0001", "R0002", "R0003"):
+    at_bias = find_iteration_matching_amplitude(ladder_results, name)
+    bias = catalog[name].bias.amplitude
+    print(f"{name}  bias {bias:.5f}  → step {at_bias}")
+```
+
+Ask for a *fixed* amplitude instead and the three part company, which is why the
+function needs a name at all. `R0001`, `R0002` and `R0003` are walking different
+ranges, so the same amplitude sits at a different rung of each:
+
+```python
+print(f"{'':<8}" + "".join(f"{s:>10}" for s in ladder_results["results"]))
+for name in ("R0001", "R0002", "R0003"):
+    amplitudes = [
+        by_direction["upward"]["sweep_amplitude"]
+        for by_direction in collect_amplitude_iterations_for(ladder_results, name).values()
+    ]
+    print(f"{name:<8}" + "".join(f"{a:>10.5f}" for a in amplitudes))
+
+print()
+for name in ("R0001", "R0002", "R0003"):
+    step = find_iteration_matching_amplitude(ladder_results, name, 0.002)
+    got = get_amplitudes_at_iteration(ladder_results, step)[name]
+    print(f"0.00200 for {name}  → step {step}  (actually {got:.5f})")
+```
+
+Matching is on *nearest*, not exact — a ladder's amplitudes are floating point,
+and `0.001 * 4` is not reliably `0.004`. Those three happen to land exactly.
+
+The corollary is that there is *always* a nearest, so the function answers even
+when nothing is remotely close. Ask for an amplitude only `R0002` ever reaches
+and the other two return their top rung regardless:
+
+```python
+for name in ("R0001", "R0002", "R0003"):
+    step = find_iteration_matching_amplitude(ladder_results, name, 0.016)
+    got = get_amplitudes_at_iteration(ladder_results, step)[name]
+    print(f"0.01600 for {name}  → step {step}  (actually {got:.5f})")
+```
+
+So if the match has to be a good one, check it — that last column is how.
+
+And the plot the whole exercise is for — one resonator at every amplitude,
+normalized so the shapes can be compared:
+
+```python
+def plot_ladder(results, name, direction="upward"):
+    iterations = collect_amplitude_iterations_for(results, name)
+    fig, (ax_mag, ax_iq) = plt.subplots(1, 2, figsize=(10, 4))
+
+    for iteration, by_direction in iterations.items():
+        s = by_direction[direction]
+        offset_khz = (s["frequencies"] - s["original_center_frequency"]) / 1e3
+        iq = s["iq_complex"] / s["sweep_amplitude"]   # normalize out the drive
+        label = f"{s['sweep_amplitude']:.5f}"
+
+        ax_mag.plot(offset_khz, 20 * np.log10(np.abs(iq)), lw=1.0, label=label)
+        ax_iq.plot(iq.real, iq.imag, lw=1.0, label=label)
+
+    ax_mag.set_xlabel("offset [kHz]")
+    ax_mag.set_ylabel("|S21| / drive [dB]")
+    ax_iq.set_xlabel("I / drive")
+    ax_iq.set_ylabel("Q / drive")
+    ax_iq.set_aspect("equal", "datalim")
+    ax_mag.legend(title="amplitude", fontsize=8)
+    fig.suptitle(f"{name} swept {direction} at {len(iterations)} amplitudes")
+    plt.tight_layout()
+    plt.show()
+
+plot_ladder(ladder_results, "R0001")
+```
+
+### Both directions
+
+`directions` is an explicit sequence rather than a `"both"` flag, so every sweep
+is labelled with both of its coordinates. Order matters: it is the order they
+are measured in.
+
+Steps are the outer loop and directions the inner one, so each amplitude's
+up-and-down pair is measured together and the amplitude marches monotonically —
+which is what you want when walking up towards bifurcation.
+
+```python
+both_ways = await crs.multiamp_multisweep(
+    catalog,
+    span_hz=SPAN_HZ,
+    npoints_per_sweep=NPOINTS_PER_SWEEP,
+    nsamps=NSAMPS,
+    amp_schedule=AmplitudeSchedule.scaled(1.0, 2.0, 2),
+    directions=("upward", "downward"),
+)
+
+for step, by_direction in both_ways["results"].items():
+    for direction, sweeps in by_direction.items():
+        print(f"step {step}  {direction:<9} "
+              f"R0001 at {sweeps['R0001']['sweep_amplitude']:.5f}")
+```
+
+A step swept once and a step swept twice have the same shape — the directions
+present are simply the ones you asked for:
+
+```python
+one_way = await crs.multiamp_multisweep(
+    catalog,
+    span_hz=SPAN_HZ,
+    npoints_per_sweep=NPOINTS_PER_SWEEP,
+    nsamps=NSAMPS,
+    amp_schedule=AmplitudeSchedule.explicit([PROBE_AMPLITUDE]),
+    directions=("downward",),
+)
+
+print(f"directions present: {list(one_way['results'][0])}")
+```
+
+### A frequency list at several amplitudes
+
+The bare-frequency form works here too — this is how you find a sensible probe
+amplitude *before* anything is tuned. There is no bias amplitude to scale, so
+the schedule has to carry its own: `ramp` and `explicit` do by construction,
+while `fixed` and `scaled` would need an explicit `base`.
+
+```python
+untuned_ladder = await crs.multiamp_multisweep(
+    center_frequencies=section_center_frequencies,
+    module=MODULE,
+    span_hz=SPAN_HZ,
+    npoints_per_sweep=NPOINTS_PER_SWEEP,
+    nsamps=NSAMPS,
+    amp_schedule=AmplitudeSchedule.ramp(PROBE_AMPLITUDE, PROBE_AMPLITUDE * 4, 3),
+)
+
+for step, by_direction in untuned_ladder["results"].items():
+    amplitude = by_direction["upward"]["S0001"]["sweep_amplitude"]
+    print(f"step {step}  every section at {amplitude:.5f}")
+
+try:
+    await crs.multiamp_multisweep(
+        center_frequencies=section_center_frequencies,
+        module=MODULE,
+        span_hz=SPAN_HZ,
+        npoints_per_sweep=NPOINTS_PER_SWEEP,
+        amp_schedule=AmplitudeSchedule.scaled(0.5, 2.0, 3),   # relative to what?
+    )
+except ValueError as e:
+    print(f"\nValueError: {e}")
+```
+
+## 9. What is not here yet
+
+- **Choosing the operating amplitude.** The ladder gives you the data to see
+  where each detector bifurcates; deciding which rung to bias at, and writing
+  that back into the catalog, is `find_bias_points` and is not ported yet.
+- **Fitting.** It consumes multisweep output, and is the other thing that will
+  write results back into the catalog.
+- **Saving to disk.** `pickle.dump` on the returned dict works today — it is
+  plain builtins and ndarrays throughout — but a proper `store.py` with a file
+  layout is still to come.
+
+One cleanup note: multisweep silences the channels it swept, but only those. If
+you parked tones on this module by hand, they are still live.

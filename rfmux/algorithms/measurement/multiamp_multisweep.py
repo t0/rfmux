@@ -1,0 +1,392 @@
+"""multiamp_multisweep: one array, one ladder of probe amplitudes.
+
+The driver over :func:`~rfmux.algorithms.measurement.multisweep.multisweep`.  It
+walks the amplitude steps an
+:class:`~rfmux.tuning.multisweep_amplitudes.AmplitudeSchedule` produces, sweeps
+each one in each requested direction, and returns every sweep in one dict.
+
+Everything it *decides* is computed in :mod:`rfmux.tuning.multisweep_amplitudes`,
+which needs no board; everything it *does* goes through ``crs.multisweep``,
+which is the only hardware call in this module.  What is left here is the loop,
+the packing, and the callbacks — which is the point: a driver that also knew how
+to build a ladder would be two things.
+
+Step outer, direction inner.  Each step's up-and-down pair is measured together
+and the amplitude marches monotonically, which is what a bifurcation walk wants.
+
+It mutates nothing.  Choosing an operating amplitude from the ladder is bias
+finding's job, fitting is the fitters', writing files is ``store.py``'s.
+"""
+
+from collections.abc import Sequence
+
+from ...core.hardware_map import macro
+from ...core.schema import CRS
+from ...core.resonators import ResonatorCatalog
+from ...tuning.multisweep_amplitudes import AmplitudeSchedule
+from .multisweep import _resolve_section_names
+
+DIRECTIONS = ("upward", "downward")
+
+# Bumped when the returned dict changes shape in a way a reader cannot absorb.
+SCHEMA_VERSION = 1
+
+
+def _resolve_directions(directions) -> tuple[str, ...]:
+    """Check the direction axis and freeze it.
+
+    An explicit tuple rather than the magic string ``"both"``, so the product
+    below is honestly a product and each sweep is labelled with both of its
+    coordinates.
+    """
+    if isinstance(directions, str):
+        raise TypeError(
+            f"directions={directions!r}: pass a sequence, not a single string "
+            f"— ({directions!r},) for one direction, {DIRECTIONS} for both. "
+            f"(A bare string would read as a sequence of characters.)"
+        )
+    if not isinstance(directions, Sequence):
+        raise TypeError(
+            f"directions must be a sequence of {DIRECTIONS}, got "
+            f"{type(directions).__name__}."
+        )
+
+    resolved = tuple(directions)
+    if not resolved:
+        raise ValueError(
+            f"directions is empty: nothing would be measured. Pass at least "
+            f"one of {DIRECTIONS}."
+        )
+    unknown = [d for d in resolved if d not in DIRECTIONS]
+    if unknown:
+        raise ValueError(
+            f"Unknown sweep direction(s) {unknown}. Must be one or both of "
+            f"{DIRECTIONS}."
+        )
+    repeated = sorted({d for d in resolved if resolved.count(d) > 1})
+    if repeated:
+        raise ValueError(
+            f"directions repeats {repeated}: each direction is one key in the "
+            f"result, so a repeat would overwrite itself rather than measure "
+            f"twice."
+        )
+    return resolved
+
+
+def _resolve_module(catalog, center_frequencies, module) -> int:
+    """One module per call, and say so.
+
+    ``multisweep`` accepts a list of modules alongside ``center_frequencies``
+    and returns a list of dicts. A ladder over that would be a list of ladders,
+    so this driver stays per-module: a catalog belongs to one module anyway, and
+    four modules is four calls (or one ``asyncio.gather``).
+    """
+    if isinstance(module, (list, tuple)):
+        raise ValueError(
+            f"module={list(module)}: multiamp_multisweep runs one module per "
+            f"call. Sweeping several means one call each — gather them if you "
+            f"want them concurrent."
+        )
+
+    if catalog is not None:
+        if module is None:
+            return catalog.module
+        if module != catalog.module:
+            raise ValueError(
+                f"module={module} does not match the catalog's module "
+                f"({catalog.module})."
+            )
+        return module
+
+    if module is None:
+        raise ValueError(
+            "module is required when sweeping center_frequencies."
+        )
+    return module
+
+
+@macro(CRS, register=True)
+async def multiamp_multisweep(
+    crs: CRS,
+    catalog: ResonatorCatalog | None = None,
+    *,
+    span_hz: float,
+    npoints_per_sweep: int,
+    amp_schedule: AmplitudeSchedule | None = None,
+    directions: Sequence[str] = ("upward",),
+    nsamps: int = 10,
+    bias_frequency_method: str | None = "max-diq",
+    rotate_saved_data: bool = False,
+    apply_df_calibration: bool = True,
+    center_frequencies: list[float] | None = None,
+    names: list[str] | None = None,
+    module: int | None = None,
+    progress_callback=None,
+    data_callback=None,
+    sweep_callback=None,
+):
+    """Sweep one array at a ladder of probe amplitudes.
+
+    One call per amplitude step per direction, all of them through
+    ``crs.multisweep``, returned in a single dict.
+
+    The amplitudes come from *amp_schedule* and nowhere else — there is no
+    ``amp`` argument here, because a ladder and a per-call override would be two
+    ways to say the same thing::
+
+        from rfmux.tuning import AmplitudeSchedule
+
+        results = await crs.multiamp_multisweep(
+            catalog,
+            span_hz=200e3,
+            npoints_per_sweep=101,
+            amp_schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 6),
+            directions=("upward", "downward"),
+        )
+        results["results"][0]["upward"]["R0001"]["iq_complex"]
+
+    Omitting *amp_schedule* sweeps the catalog at its own amplitudes, once — so
+    the useful degenerate call is an up-and-down pair with nothing else said::
+
+        results = await crs.multiamp_multisweep(
+            catalog, span_hz=200e3, npoints_per_sweep=101,
+            directions=("upward", "downward"),
+        )
+
+    A bare frequency list works the same way, for an array that is not tuned
+    yet. It has no bias amplitude to scale, so the schedule has to supply one —
+    ``ramp``/``explicit`` do by construction, and ``fixed``/``scaled`` need an
+    explicit ``base``::
+
+        results = await crs.multiamp_multisweep(
+            center_frequencies=[1.0e9, 1.1e9], module=2,
+            span_hz=200e3, npoints_per_sweep=101,
+            amp_schedule=AmplitudeSchedule.ramp(1e-4, 1e-2, 5),
+        )
+        results["results"][0]["upward"]["S0001"]["iq_complex"]
+
+    Args:
+        crs (CRS): The CRS object (injected by macro).
+        catalog (ResonatorCatalog, optional): What to sweep, as for
+            ``multisweep``. Read, never written. Pass this or
+            *center_frequencies*, not both.
+        span_hz (float): Total frequency width (Hz) of each sweep. The same for
+            every step.
+        npoints_per_sweep (int): Points measured within each sweep's span.
+        amp_schedule (AmplitudeSchedule, optional): The amplitude steps. Defaults
+            to ``AmplitudeSchedule()`` — one step, at whatever amplitude the
+            catalog already carries. Built through
+            ``AmplitudeSchedule.fixed/scaled/ramp/explicit``; see
+            :mod:`rfmux.tuning.multisweep_amplitudes`.
+        directions (Sequence[str], optional): Which directions to sweep each
+            step in — ``("upward",)`` (the default), ``("downward",)``, or both.
+            An explicit sequence rather than a ``"both"`` flag, so each sweep is
+            labelled with both of its coordinates. Order is honoured: it is the
+            order the sweeps are measured in.
+        nsamps (int, optional): Samples averaged per frequency point. Defaults
+            to 10.
+        bias_frequency_method (str | None, optional): Passed to ``multisweep``
+            unchanged — ``"min-s21"``, ``"max-diq"`` or None. Its result is
+            reported per sweep, not written back into the catalog. Defaults to
+            ``"max-diq"``.
+        rotate_saved_data (bool, optional): Passed through. Defaults to False.
+        apply_df_calibration (bool, optional): Passed through. Defaults to True.
+        center_frequencies (list[float], optional): A bare list of sweep
+            centres, for an array that is not tuned yet. Pass this or *catalog*,
+            not both.
+        names (list[str], optional): Names for the *center_frequencies*, one
+            each. Defaults to ``S0001…``. Resolved once, here, and passed
+            explicitly to every sweep, so the schedule's keys and the results'
+            keys are the same strings by construction. Rejected alongside a
+            *catalog*, whose resonators are already named.
+        module (int, optional): The readout module. Defaults to the catalog's
+            own, and must agree with it when both are given; required when
+            sweeping *center_frequencies*. One module per call — a list is
+            refused, because a ladder over several modules would be several
+            ladders.
+        progress_callback (callable, optional): ``(module, pct)``, forwarded to
+            each ``multisweep`` untouched, so it keeps meaning *progress within
+            the current sweep* and resets once per sweep. For progress across
+            the whole ladder use *sweep_callback*, which carries ``completed``
+            and ``total``.
+        data_callback (callable, optional): ``(module, partial_results, step,
+            direction)`` — partial data during acquisition, as ``multisweep``
+            emits it, plus the two coordinates saying which sweep it belongs to.
+
+            .. note::
+               This is two arguments wider than ``multisweep``'s own
+               ``data_callback(module, partial_results)``. Inside a ladder the
+               bare form is ambiguous — a consumer plotting live has no way to
+               tell which step and direction the points belong to. Callers
+               written against the narrow form need updating; Periscope is
+               tracked in ``tuning_revamp_todo.md``.
+        sweep_callback (callable, optional): ``(record)``, called once per
+            completed sweep — not once per step — with a dict of ``step``,
+            ``direction``, ``amplitudes``, ``factor``, ``completed``, ``total``
+            and ``data``. A script ignores it, a notebook prints from it,
+            Periscope re-emits it as the signals it has now. It is also the
+            reason this macro does not need to return partial results on
+            failure: every sweep that finished has already been handed over.
+
+    Returns:
+        dict:
+
+        .. code-block:: python
+
+            {
+                "schema_version": 1,
+                "module": 2,                # resolved, never None
+                "call_params": {...},       # verbatim, as this driver was called
+                "results": {
+                    0: {"upward": {...}, "downward": {...}},   # one multisweep
+                    1: {"upward": {...}, "downward": {...}},   # return each
+                },
+            }
+
+        ``results`` is keyed by amplitude step, numbered from 0 in the order
+        measured, and each step holds one entry per direction swept and nothing
+        else. Under a direction is exactly what ``multisweep`` returns: the
+        sweeps for that step, keyed by resonator or section name.
+
+        Nothing is duplicated into the step level. What each resonator was
+        actually probed at is already in its own entry as ``sweep_amplitude``,
+        and the rung that produced it is
+        ``call_params["amp_schedule"]["ladder"][step]``, so the step's amplitudes
+        are recoverable without being stored twice.  ``tuning/sweeps.py`` will
+        wrap those lookups; until it exists they are the documented route.
+
+        ``call_params`` records the arguments as *given* — including the ``None``
+        s, and ``amp_schedule`` as its dict — so a saved result says what was
+        asked for. Anything resolved from them (the module, the section names)
+        is either top-level or already in the data. Sweep centres are recorded
+        only as passed: a future step may re-centre between amplitudes, and a
+        stale top-level copy would then be a lie, while each sweep's own
+        ``original_center_frequency`` cannot be.
+
+    Raises:
+        ValueError: for an empty or unknown *directions*, a module list, a
+            module that disagrees with the catalog, or an amplitude the schedule
+            cannot resolve — all before the first sweep runs.
+    """
+    if amp_schedule is None:
+        amp_schedule = AmplitudeSchedule()
+    if not isinstance(amp_schedule, AmplitudeSchedule):
+        raise TypeError(
+            f"amp_schedule must be an AmplitudeSchedule, got "
+            f"{type(amp_schedule).__name__}. A bare number or list is not one "
+            f"— AmplitudeSchedule.fixed({amp_schedule!r}) for a single "
+            f"amplitude, or .ramp()/.explicit() for a ladder."
+        )
+
+    if (catalog is None) == (center_frequencies is None):
+        raise ValueError(
+            "Pass a ResonatorCatalog or center_frequencies — exactly one of "
+            "the two."
+        )
+    if catalog is not None and names is not None:
+        raise ValueError(
+            "names applies to center_frequencies only — a catalog's resonators "
+            "are already named. Rename them in the catalog if that is what you "
+            "meant."
+        )
+
+    directions = _resolve_directions(directions)
+    resolved_module = _resolve_module(catalog, center_frequencies, module)
+
+    # A catalog names its own resonators. A bare frequency list does not, so
+    # name it once here rather than letting every multisweep call generate
+    # S0001… for itself: the schedule is keyed by these names, so they have to
+    # be the same strings each time round the loop, not merely equal by
+    # coincidence.
+    if catalog is not None:
+        target = catalog
+        section_names = None
+    else:
+        section_names = _resolve_section_names(center_frequencies, names)
+        target = section_names
+
+    # Resolves the whole ladder up front, so an amplitude that overshoots full
+    # scale on step 5 is a ValueError now rather than after four steps of data.
+    steps = amp_schedule.steps(target)
+
+    call_params = {
+        "catalog": catalog.to_dict() if catalog is not None else None,
+        "center_frequencies": (
+            [float(f) for f in center_frequencies]
+            if center_frequencies is not None
+            else None
+        ),
+        "names": list(names) if names is not None else None,
+        "amp_schedule": amp_schedule.to_dict(),
+        "directions": list(directions),
+        "span_hz": float(span_hz),
+        "npoints_per_sweep": int(npoints_per_sweep),
+        "nsamps": int(nsamps),
+        "bias_frequency_method": bias_frequency_method,
+        "rotate_saved_data": bool(rotate_saved_data),
+        "apply_df_calibration": bool(apply_df_calibration),
+        "module": module,
+    }
+
+    total = len(steps) * len(directions)
+    completed = 0
+    results: dict[int, dict[str, dict]] = {}
+
+    for step in steps:
+        per_direction: dict[str, dict] = {}
+
+        for direction in directions:
+            # Widen multisweep's (module, partial) to carry the coordinates of
+            # the sweep the partial data belongs to.
+            if data_callback is None:
+                inner_data_callback = None
+            else:
+                def inner_data_callback(
+                    module_, partial, _step=step.step, _direction=direction
+                ):
+                    data_callback(module_, partial, _step, _direction)
+
+            sweep_kwargs = dict(
+                span_hz=span_hz,
+                npoints_per_sweep=npoints_per_sweep,
+                amp=step.amplitudes,
+                nsamps=nsamps,
+                bias_frequency_method=bias_frequency_method,
+                rotate_saved_data=rotate_saved_data,
+                sweep_direction=direction,
+                apply_df_calibration=apply_df_calibration,
+                module=resolved_module,
+                progress_callback=progress_callback,
+                data_callback=inner_data_callback,
+            )
+            if catalog is not None:
+                data = await crs.multisweep(catalog, **sweep_kwargs)
+            else:
+                data = await crs.multisweep(
+                    center_frequencies=center_frequencies,
+                    names=section_names,
+                    **sweep_kwargs,
+                )
+
+            per_direction[direction] = data
+            completed += 1
+
+            if sweep_callback is not None:
+                sweep_callback({
+                    "step": step.step,
+                    "direction": direction,
+                    "amplitudes": dict(step.amplitudes),
+                    "factor": step.factor,
+                    "completed": completed,
+                    "total": total,
+                    "data": data,
+                })
+
+        results[step.step] = per_direction
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "module": resolved_module,
+        "call_params": call_params,
+        "results": results,
+    }

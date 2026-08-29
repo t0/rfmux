@@ -43,7 +43,7 @@ from .multisweep_amplitudes import (
     AmplitudeSchedule,
     AmplitudeStep,
     collect_amplitude_iterations_for,
-    find_iteration_number_matching_amplitude,
+    find_iteration_matching_amplitude,
     get_amplitudes_at_iteration,
     pack_results,
 )
@@ -57,7 +57,7 @@ __all__ = [
     "AmplitudeSchedule",
     "AmplitudeStep",
     "collect_amplitude_iterations_for",
-    "find_iteration_number_matching_amplitude",
+    "find_iteration_matching_amplitude",
     "get_amplitudes_at_iteration",
     "pack_results",
 ]

@@ -592,7 +592,7 @@ async def test_the_readers_work_on_what_the_driver_actually_returns():
     hand-built shape has not drifted from the real thing."""
     from rfmux.tuning import (
         collect_amplitude_iterations_for,
-        find_iteration_number_matching_amplitude,
+        find_iteration_matching_amplitude,
         get_amplitudes_at_iteration,
     )
 
@@ -619,15 +619,15 @@ async def test_the_readers_work_on_what_the_driver_actually_returns():
 
     # ×1 sits in the middle of the ladder, so that is where each resonator is
     # at its own bias amplitude.
-    assert find_iteration_number_matching_amplitude(result, "R0002") == 2
-    assert find_iteration_number_matching_amplitude(result, "R0002", 0.008) == 4
+    assert find_iteration_matching_amplitude(result, "R0002") == 2
+    assert find_iteration_matching_amplitude(result, "R0002", 0.008) == 4
 
 
 @pytest.mark.asyncio
 async def test_the_readers_work_on_a_frequency_list_result_too():
     from rfmux.tuning import (
         collect_amplitude_iterations_for,
-        find_iteration_number_matching_amplitude,
+        find_iteration_matching_amplitude,
     )
 
     crs = FakeCRS()
@@ -639,8 +639,8 @@ async def test_the_readers_work_on_a_frequency_list_result_too():
     )
 
     assert list(collect_amplitude_iterations_for(result, "S0002")) == [0, 1, 2]
-    assert find_iteration_number_matching_amplitude(result, "S0002", 1e-2) == 2
+    assert find_iteration_matching_amplitude(result, "S0002", 1e-2) == 2
 
     # No catalog, so no bias amplitude to fall back on.
     with pytest.raises(ValueError, match="no catalog to take one from"):
-        find_iteration_number_matching_amplitude(result, "S0002")
+        find_iteration_matching_amplitude(result, "S0002")

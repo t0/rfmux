@@ -318,7 +318,7 @@ inline:
   from each sweep's own `sweep_amplitude`. This is why the packed dict carries
   no iteration-level copy: it is reconstructed on demand instead of stored
   twice.
-* `find_iteration_number_matching_amplitude(results, name, amplitude=None)` —
+* `find_iteration_matching_amplitude(results, name, amplitude=None)` —
   nearest match, defaulting to that resonator's bias amplitude from the catalog
   snapshot. It takes a *name* because a relative ladder gives every resonator
   its own amplitudes: R0001 walking 1→2→4 µ and R0002 walking 3→6→12 µ share an

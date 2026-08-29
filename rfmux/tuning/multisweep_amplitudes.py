@@ -74,7 +74,7 @@ __all__ = [
     "RESULTS_SCHEMA_VERSION",
     "pack_results",
     "collect_amplitude_iterations_for",
-    "find_iteration_number_matching_amplitude",
+    "find_iteration_matching_amplitude",
     "get_amplitudes_at_iteration",
 ]
 
@@ -835,7 +835,7 @@ def get_amplitudes_at_iteration(results: Mapping, iteration: int) -> dict:
     return {}
 
 
-def find_iteration_number_matching_amplitude(
+def find_iteration_matching_amplitude(
     results: Mapping, name: str, amplitude: float | None = None
 ) -> int:
     """Which amplitude iteration probed *name* closest to *amplitude*.

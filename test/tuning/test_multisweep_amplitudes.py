@@ -20,7 +20,7 @@ from rfmux.tuning.multisweep_amplitudes import (
     AmplitudeSchedule,
     AmplitudeStep,
     collect_amplitude_iterations_for,
-    find_iteration_number_matching_amplitude,
+    find_iteration_matching_amplitude,
     get_amplitudes_at_iteration,
     pack_results,
 )
@@ -659,15 +659,15 @@ def test_asking_for_an_iteration_that_does_not_exist_is_an_error():
         get_amplitudes_at_iteration(result, 5)
 
 
-# ─── find_iteration_number_matching_amplitude ─────────────────────────────────
+# ─── find_iteration_matching_amplitude ─────────────────────────────────
 
 
 def test_the_iteration_nearest_a_given_amplitude():
     result = packed(schedule=AmplitudeSchedule.explicit([1e-3, 1e-2, 1e-1]))
 
-    assert find_iteration_number_matching_amplitude(result, "R0001", 1e-2) == 1
+    assert find_iteration_matching_amplitude(result, "R0001", 1e-2) == 1
     # nearest, not exact — a ladder's floats rarely compare equal
-    assert find_iteration_number_matching_amplitude(result, "R0001", 9.6e-3) == 1
+    assert find_iteration_matching_amplitude(result, "R0001", 9.6e-3) == 1
 
 
 def test_without_an_amplitude_it_finds_where_the_resonator_is_biased():
@@ -680,7 +680,7 @@ def test_without_an_amplitude_it_finds_where_the_resonator_is_biased():
     # scaled() puts ×1 in the middle, so every resonator's bias amplitude is
     # iteration 2 — whatever its own amplitude happens to be.
     for name in ("R0001", "R0002", "R0003"):
-        assert find_iteration_number_matching_amplitude(result, name) == 2
+        assert find_iteration_matching_amplitude(result, name) == 2
 
 
 def test_a_relative_ladder_gives_each_resonator_its_own_answer():
@@ -689,8 +689,8 @@ def test_a_relative_ladder_gives_each_resonator_its_own_answer():
     catalog = a_catalog(amplitudes=(0.001, 0.01))
     result = packed(schedule=AmplitudeSchedule.scaled(1.0, 4.0, 3), catalog=catalog)
 
-    assert find_iteration_number_matching_amplitude(result, "R0001", 0.004) == 2
-    assert find_iteration_number_matching_amplitude(result, "R0002", 0.004) == 0
+    assert find_iteration_matching_amplitude(result, "R0001", 0.004) == 2
+    assert find_iteration_matching_amplitude(result, "R0002", 0.004) == 0
 
 
 def test_a_frequency_list_result_has_no_bias_amplitude_to_fall_back_on():
@@ -703,7 +703,7 @@ def test_a_frequency_list_result_has_no_bias_amplitude_to_fall_back_on():
     )
 
     with pytest.raises(ValueError, match="no catalog to take one from"):
-        find_iteration_number_matching_amplitude(result, "low")
+        find_iteration_matching_amplitude(result, "low")
 
     # but an explicit amplitude still works
-    assert find_iteration_number_matching_amplitude(result, "low", 1e-2) == 1
+    assert find_iteration_matching_amplitude(result, "low", 1e-2) == 1

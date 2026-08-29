@@ -247,7 +247,7 @@ async def multiamp_multisweep(
         :func:`~rfmux.tuning.multisweep_amplitudes.pack_results` owns this shape
         and documents it in full; the readers beside it —
         ``collect_amplitude_iterations_for``,
-        ``find_iteration_number_matching_amplitude`` and
+        ``find_iteration_matching_amplitude`` and
         ``get_amplitudes_at_iteration`` — are the supported way back out, so
         callers need not walk the nesting by hand.
 

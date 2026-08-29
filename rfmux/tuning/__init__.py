@@ -12,7 +12,8 @@ the package sits beside :mod:`rfmux.pulse_capture` rather than under
 
 The layers, in the order a tuning run uses them::
 
-    find_resonances    locate the dips in a network-analysis sweep
+    find_resonances       locate the dips in a network-analysis sweep
+    multisweep_amplitudes decide the amplitude steps of a multi-amplitude sweep
 
 The array bookkeeping those steps pass between each other —
 ``Resonator``, ``BiasPoint``, ``ResonatorCatalog`` — lives in
@@ -38,6 +39,7 @@ from .find_resonances import (
     find_resonances_in_netanal,
     magnitude_db,
 )
+from .multisweep_amplitudes import AmplitudeSchedule, AmplitudeStep
 
 __all__ = [
     "ResonanceCandidate",
@@ -45,4 +47,6 @@ __all__ = [
     "find_resonances",
     "find_resonances_in_netanal",
     "magnitude_db",
+    "AmplitudeSchedule",
+    "AmplitudeStep",
 ]

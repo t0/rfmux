@@ -119,9 +119,12 @@ your board — everything after it is unchanged:
     crs = session.query(rfmux.CRS).one()
     await crs.resolve()
 
-Note that multisweep overwrites every channel's frequency and amplitude on the
-module it sweeps, and zeroes them all when it finishes, so do not point it at a
-module someone else is using.
+Note that multisweep takes over the channels it sweeps — one per resonator,
+overwriting their frequency and amplitude, and zeroing them again when it
+finishes. Other channels on the module are left exactly as they were, so a tone
+you have parked by hand survives the call. The flip side is that multisweep does
+not guarantee a quiet module: if something else is live and would intermodulate
+with the sweep, clear it first with `await crs.clear_channels(module=MODULE)`.
 
 ```python
 MOCK_CONFIG = {

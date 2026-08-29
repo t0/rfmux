@@ -308,6 +308,13 @@ async def multisweep(
     yet, and the analyses that do (fitting, bias finding) update the catalog
     themselves.
 
+    Only the channels this sweep puts a tone on are silenced, on the way in and
+    on the way out. A tone the caller parked elsewhere on the module — by hand,
+    or by another algorithm — survives the call. The corollary is that
+    multisweep does not guarantee a quiet module: if a foreign tone would
+    intermodulate with the sweep or sit inside a span, clear it first with
+    ``crs.clear_channels(module=...)``.
+
     Two ways to say what to sweep, identical once the measurement starts.
     With a catalog, which brings its own frequencies, amplitudes and channels::
 
@@ -520,6 +527,17 @@ async def multisweep(
             )
     # --- End input validation ---
 
+    # The channels this sweep owns, and the only ones it will ever silence.
+    # Everything else on the module is somebody else's: a tone parked by hand,
+    # another algorithm's channel, a bias tone left live on purpose. Zeroing
+    # the whole module would be tidier for us and destructive for them.
+    #
+    # The flip side, and the caller's job now: multisweep no longer guarantees
+    # a quiet module. A foreign tone left live can intermodulate with the sweep
+    # or land inside a span, so a measurement that needs silence has to arrange
+    # it — crs.clear_channels(module=...) before the call.
+    swept_channels = {t.channel for t in targets}
+
     # --- Define Constants ---
     MAX_NCO_SPAN_HZ = 500e6
 
@@ -597,11 +615,13 @@ async def multisweep(
                     if not point_idx: # only set amplitude once per sweep
                         ctx.set_amplitude(t.amplitude, channel=t.channel, module=module)
 
-                # Zero out unused resonance channels
+                # Silence this sweep's *other* NCO regions — their tones would
+                # otherwise sit outside the current NCO's band. Only channels
+                # this sweep owns, so a tone the caller parked elsewhere on the
+                # module survives.
                 if not point_idx: # only need to do this once per sweep
-                    for ch in range(1, max_channels + 1): # max_channels still relevant for general channel count
-                        if ch not in active_res_channels:
-                            ctx.set_amplitude(0, channel=ch, module=module) # Zeros freq implicitly if amp=0
+                    for ch in sorted(swept_channels - active_res_channels):
+                        ctx.set_amplitude(0, channel=ch, module=module) # Zeros freq implicitly if amp=0
                 await ctx()
 
             # Acquire samples for all active resonance channels
@@ -664,8 +684,9 @@ async def multisweep(
             # Step 2: Acquire TODs in batch if any are needed
             if targets_needing_tod:
                 async with crs.tuber_context() as ctx:
-                    # Turn off all channels first
-                    for ch_iter in range(1, max_channels + 1):
+                    # Turn off this sweep's channels first, so only the ones
+                    # being TOD'd are live. Foreign channels are left alone.
+                    for ch_iter in sorted(swept_channels):
                         ctx.set_amplitude(0, channel=ch_iter, module=module)
 
                     # Set up channels that need TOD
@@ -823,8 +844,8 @@ async def multisweep(
     # --- Hardware Cleanup ---
     try:
         async with crs.tuber_context() as ctx:
-            # Zero out all potentially used channels
-            for ch in range(1, max_channels + 1):
+            # Only the channels this sweep put a tone on. See swept_channels.
+            for ch in sorted(swept_channels):
                 ctx.set_amplitude(0, channel=ch, module=module)
             await ctx()
     except Exception as e:

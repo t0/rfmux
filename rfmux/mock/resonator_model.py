@@ -591,7 +591,7 @@ class MockResonatorModel:
                 fractional_rms=self.tls_fractional_rms,
                 alpha=self.tls_alpha,
                 corner_hz=self.tls_corner_hz,
-                seed=(None if seed is None else int(seed) + 9973),
+                seed=seed,
             )
             print(f"TLS 1/f noise: rms={self.tls_fractional_rms:.2e} "
                   f"df/f, alpha={self.tls_alpha}, "

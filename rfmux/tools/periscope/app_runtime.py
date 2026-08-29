@@ -709,6 +709,13 @@ class PeriscopeRuntime:
         receive loop) taking turns on one interpreter.  Getting to zero
         means moving per-packet work out of Python, not tuning these
         constants.
+
+        Concretely: one batched hand-off instead of two boundary
+        crossings per packet -- a C++ call returning a drain's worth
+        already demuxed into (channel x sample) arrays, so Python touches
+        one object per frame rather than 38k a second.  Circular.extend
+        and SlowIngest.feed_block already take blocks, so what is missing
+        is the getter, not the consumers.
         """
         if self.receiver.queue is None:
             return

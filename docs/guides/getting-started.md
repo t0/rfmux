@@ -190,8 +190,8 @@ For reliable data streaming, you may need to increase UDP receive buffer sizes a
 
 ## Next Steps
 
-- Launch Periscope for real-time visualization: `python -m rfmux.tools.periscope`
-  (add `--mock` for a simulated board)
+- Launch Periscope for real-time visualization: `uv run periscope` (or
+  `periscope`; add `--mock` for a simulated board)
 - [Configure networking](networking.md) for optimal data streaming
 - [Flash firmware](firmware.md) to update CRS boards
 - Work through the runnable reference notebooks in

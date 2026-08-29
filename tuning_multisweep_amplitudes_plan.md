@@ -74,18 +74,26 @@ Things that are worth *not* carrying over:
   strings either way, so downstream code has one key type, but visibly not a
   catalog's `R0001…`. The two modes are identical once the measurement starts.
 * **Amplitude and direction are separate labelled axes** in the output, not one
-  fused iteration index.
+  fused iteration index. **A step is one amplitude**, numbered from 0 in the
+  order it was measured; a step is swept once or twice, and direction is a
+  subkey *beneath* a step. So `len(schedule)` counts amplitudes, and the sweep
+  count is that times the number of directions.
+* **Per-resonator *absolute* ladders are not representable.** Proportional
+  per-resonator ladders — what a bifurcation walk wants — are
+  `scaled(base={...})`; non-proportional ones (R0001 goes 1→2→4 µ while R0002
+  goes 3→3.5→4) have yet to find a use that justifies the extra state. Widening
+  `ladder` to hold scalars-or-mappings is additive if one turns up.
 
 ---
 
 ## 3. The layers
 
 ```
-rfmux/tuning/amplitudes.py      AmplitudeSchedule — pure; catalog in, rungs out
-rfmux/tuning/sweeps.py          packs the driver's output dict; accessors over it
+rfmux/tuning/multisweep_amplitudes.py   AmplitudeSchedule — pure; what to sweep in, steps out
+rfmux/tuning/sweeps.py                  accessors over the driver's output dict
 rfmux/algorithms/measurement/
-    multisweep.py               one catalog, one amplitude vector, one direction
-    multisweep_amplitudes.py    the driver: rungs × directions, calls multisweep
+    multisweep.py                       one catalog, one amplitude vector, one direction
+    multiamp_multisweep.py              the driver: steps × directions, calls multisweep
 ```
 
 `rfmux/tuning/` imports no `CRS` and no Qt, which is why the loop that actually
@@ -94,23 +102,49 @@ is computed in `tuning/`.
 
 ### `AmplitudeSchedule`
 
-Splits the GUI's three modes back into their two axes — base amplitudes, and the
-ladder applied to them:
+Splits the GUI's three modes back into their two axes. A schedule is exactly a
+**base** — what each resonator would be swept at with no ladder — and a
+**ladder** of rungs, which either multiply the base (`relative=True`) or *are*
+the amplitude (`relative=False`):
 
 ```python
+AmplitudeSchedule()                                          # base=None, ladder=(1.0,)
 AmplitudeSchedule.fixed()                                    # the catalog's own amplitudes
 AmplitudeSchedule.fixed(0.005)                               # one override for all
 AmplitudeSchedule.fixed({"R0001": 0.004, "R0002": 0.006})    # per-resonator
-AmplitudeSchedule.ramp(1e-3, 1e-2, steps=6, spacing="log")   # absolute ladder
-AmplitudeSchedule.scaled(0.5, 2.0, steps=5)                  # × each resonator's own
+AmplitudeSchedule.scaled(0.5, 2.0, 5)                        # × each resonator's own
+AmplitudeSchedule.scaled(0.5, 2.0, 5, base={"R0001": 0.004}) # × a base you chose
+AmplitudeSchedule.ramp(1e-3, 1e-2, 6)                        # absolute ladder
 AmplitudeSchedule.explicit([0.001, 0.003, 0.01])             # arbitrary rungs
 ```
 
-`schedule.steps(catalog)` returns one record per rung carrying `index`,
-`amplitudes: dict[name, float]` and `factor` (`None` when the rung is absolute).
-`describe(catalog)` and `validate(catalog)` follow the `PulseCaptureConfig`
-idiom, and are what a Periscope dialog renders instead of hand-rolling its own
-status text.
+The four constructors are sugar over that one pair, so there is a single code
+path to test, and the empty constructor is "sweep the catalog as it stands,
+once" — the degenerate case needs no special mode. `spacing` defaults to `"log"`
+(equal ratios, so equal steps in dB) with `"linear"` available; it is recorded
+for provenance only and excluded from equality, so two schedules that measure
+the same amplitudes compare equal however they were spelled.
+
+An **absolute ladder takes no base**: its rungs already are the amplitudes, so
+there is nothing left for a base to contribute. That is the one asymmetry in the
+"two axes" story, and it is enforced rather than papered over.
+
+`schedule.steps(target)` returns one `AmplitudeStep` per amplitude, carrying
+`step` (execution order), `amplitudes: dict[name, float]` and `factor` (`None`
+when the rung is absolute). `amplitudes` drops straight into
+`multisweep(amp=...)` with no adaptation, which is what lets the driver be a
+loop and nothing more. `describe(target, n_directions, dac_scale_dbm)` and
+`validate(target, n_directions)` follow the `PulseCaptureConfig` idiom, and are
+what a Periscope dialog renders instead of hand-rolling its own status text;
+`validate` never raises, so a live preview of a half-entered form gets text
+rather than a traceback.
+
+*target* is a catalog, **or a list of sweep names** for the bare
+`center_frequencies` mode — the same names `multisweep` will key its results by.
+A bare list has no `bias.amplitude` to fall back on, so `base=None` is an error
+there, while `ramp`/`explicit` need no base and work unchanged. As in
+`multisweep`, a *positional* base is accepted alongside names (the caller's own
+ordering) and refused alongside a catalog.
 
 Keying amplitudes by resonator **name** rather than by position retires the
 "must match `res_info_dict.keys()` order" fragility, and makes per-resonator
@@ -118,30 +152,68 @@ amplitudes available in every mode rather than only in the single-sweep one.
 Because `ResonatorCatalog` requires an amplitude at construction, `scaled` has no
 "no registry yet, run a plain sweep first" failure mode.
 
+Two failures are caught here that would otherwise reach the hardware, since
+`multisweep` only rejects non-positive amplitudes and nothing on the `amp` path
+enforces an upper bound: a resolved amplitude outside the `(0, 1]`
+`BiasPoint` requires — reported per step and per name, so the answer is "R0007
+overshoots at step 5" and not a failure twenty minutes into the run — and
+`nsteps=1` between two *different* endpoints, which is the bug at
+`multisweep_dialog.py:1434` restated as a `ValueError`.
+
 ### The driver macro
 
 ```python
-await crs.multisweep_amplitudes(
+await crs.multiamp_multisweep(
     catalog,
     span_hz=200e3,
     npoints_per_sweep=101,
-    schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, steps=6, spacing="log"),
+    amp_schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 6),
     directions=("upward", "downward"),
 )
 ```
 
-Walks rungs × directions, calls `multisweep` once per combination, hands each
-result to `tuning/sweeps.py` to pack, and returns the packed dict. It mutates
-nothing: choosing an operating amplitude is bias finding's job, fitting is
-`fits.py`', writing files is `store.py`'.
+Walks steps × directions, calls `multisweep` once per combination, and returns
+them in one dict. It mutates nothing: choosing an operating amplitude is bias
+finding's job, fitting is `fits.py`', writing files is `store.py`'.
+
+No `amp` argument: amplitude is the schedule's job and nothing else's, so there
+is one way to say it. `amp_schedule` defaults to `AmplitudeSchedule()`, which
+makes the useful degenerate call an up-and-down pair at the catalog's own
+amplitudes with nothing else said. Spelled `amp_schedule` rather than `schedule`
+because a bare `schedule` in a measurement macro reads like a time.
+
+The driver's only contact with the board is `crs.multisweep` — no
+`tuber_context`, no `get_samples`. That keeps hardware knowledge one layer down,
+and means the loop is exercised in full by a fake CRS with a single async
+method.
+
+Step outer, direction inner: each step's up-and-down pair is measured together
+and amplitude marches monotonically, which is what a bifurcation walk wants.
+That is a physical choice, not an implementation accident, so it belongs in the
+docstring — and the deferred early-stop question in §7 depends on it.
 
 `directions` is an explicit tuple rather than the magic string `"both"`, so the
 product is honestly a product and each result is labelled with both coordinates.
 
-Callbacks: `progress_callback(module, pct)` stays as it is for within-a-sweep
-progress, and a step-level `step_callback(step_record)` fires as each rung
-lands. A script ignores it, a notebook prints from it, Periscope re-emits it as
-the signals it has now.
+Callbacks, three of them:
+
+* `progress_callback(module, pct)` is forwarded untouched, so it keeps meaning
+  *progress within the current sweep* and resets once per sweep.
+* `data_callback(module, partial_results, step, direction)` is **two arguments
+  wider than `multisweep`'s**. Inside a ladder the bare `(module, partial)` form
+  is ambiguous — a consumer plotting live cannot tell which sweep the points
+  belong to. Callers written against the narrow form need updating; Periscope is
+  tracked in `tuning_revamp_todo.md`.
+* `sweep_callback(record)` fires once per completed **sweep**, not per step,
+  carrying `step`, `direction`, `amplitudes`, `factor`, `completed`, `total` and
+  `data`. Per-sweep is the finer granularity and a per-step consumer can
+  accumulate; the reverse is not true. A script ignores it, a notebook prints
+  from it, Periscope re-emits it as the signals it has now.
+
+That last one is also why the driver does not try to return partial results when
+a sweep fails: every sweep that finished has already been handed over, so the
+exception can propagate rather than the driver inventing a result dict with
+holes in it that reads as complete.
 
 ---
 
@@ -173,27 +245,52 @@ The driver wraps those:
 ```python
 {
     "schema_version": 1,
-    "module": 2,
-    "catalog": catalog.to_dict(),        # snapshot as swept, for provenance
-    "span_hz": ..., "npoints_per_sweep": ..., "nsamps": ...,
-    "schedule": schedule.to_dict(),
-    "steps": [
-        {
-            "step": 0,
-            "direction": "upward",
-            "amplitudes": {"R0001": 0.004, ...},
-            "factor": 0.5,               # None for an absolute rung
-            "data": { ...one multisweep return... },
+    "module": 2,                          # resolved, never None
+    "call_params": {                      # verbatim, as the driver was called
+        "catalog": catalog.to_dict(),     # or None
+        "center_frequencies": None,       # or the list, in that mode
+        "names": None,                    # as passed, not as resolved
+        "amp_schedule": amp_schedule.to_dict(),
+        "directions": ["upward", "downward"],
+        "span_hz": ..., "npoints_per_sweep": ..., "nsamps": ...,
+        "bias_frequency_method": ..., "rotate_saved_data": ...,
+        "apply_df_calibration": ..., "module": ...,
+    },
+    "results": {
+        0: {                              # the amplitude step, in measured order
+            "upward":   { ...one multisweep return... },
+            "downward": { ...one multisweep return... },
         },
-        ...
-    ],
+        1: {...},
+    },
 }
 ```
 
+Four things this shape is deliberate about:
+
+* **`results`, not `steps`** — it is the main data repository, and the name
+  should say so. Integer keys in measurement order; a step holds one entry per
+  direction swept **and nothing else**, so a step measured once and a step
+  measured twice have the same shape.
+* **Nothing is duplicated into the step level.** What each resonator was probed
+  at is already `sweep_amplitude` in its own entry; the rung that produced it is
+  `call_params["amp_schedule"]["ladder"][step]`. Storing a step-level
+  `amplitudes` too would be a second copy to keep in step. `tuning/sweeps.py`
+  wraps those lookups; until it exists they are the documented route.
+* **`call_params` is verbatim**, including the `None`s — it says what was
+  *asked for*. Anything resolved from it (the module, the section names) is
+  either top-level or already in the data.
+* **Sweep centres are recorded only as passed.** A later step may re-centre
+  between amplitudes, at which point a top-level copy of the centres would be a
+  lie while each sweep's own `original_center_frequency` cannot be.
+
 Plain builtins and ndarrays throughout, so `pickle.dump` is the whole
 persistence story until `store.py` exists. `tuning/sweeps.py` supplies the
-readers — sweeps for one resonator in amplitude order, the rung at a given
+readers — sweeps for one resonator in amplitude order, the step at a given
 amplitude, and so on — so consumers stop re-deriving them inline.
+
+Direction keys are `multisweep`'s own `"upward"`/`"downward"`, so there is one
+vocabulary rather than a mapping at the boundary.
 
 ---
 
@@ -217,15 +314,18 @@ amplitude, and so on — so consumers stop re-deriving them inline.
    tuned array yet, and it keeps Periscope and `simplified_tuning_flow` working
    unchanged. Demonstrated in
    `reference-notebooks/Demos/multisweep.md`.
-2. **`AmplitudeSchedule`** in `rfmux/tuning/amplitudes.py`, with tests. Pure, no
-   hardware, ships on its own.
-3. **`rfmux/tuning/sweeps.py`** — the packer and the accessors over the output
-   dict.
-4. **`multisweep_amplitudes`** macro over 1–3, with the step callback.
-5. **Periscope rewired** to call 4, its dialog reduced to a view over
+2. **`AmplitudeSchedule`** in `rfmux/tuning/multisweep_amplitudes.py`, with
+   tests. Pure, no hardware, ships on its own.
+3. **`multiamp_multisweep`** macro over 1–2, with the sweep callback. Packs its
+   own output, since the shape was easier to settle against a working driver
+   than to guess in advance.
+4. **`rfmux/tuning/sweeps.py`** — the accessors over that output dict.
+5. **Periscope rewired** to call 3, its dialog reduced to a view over
    `AmplitudeSchedule`.
 
-Step 1 is in progress; the rest are not started.
+Steps 1–3 have landed; 3 and 4 swapped places on the way. Steps 4–5 are not
+started, and the pair still owes a notebook: `Demos/multisweep.md` covers one
+sweep, and a multi-amplitude demo belongs beside it.
 
 ---
 

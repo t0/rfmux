@@ -10,6 +10,85 @@ live in `tuning_refactor_design.md` §13 — this file is for work.
 
 ---
 
+## Closing VS Code leaves the mock streamer running, and the notebook tests pay
+
+Editing a `Demos/*.md` by running its paired `.ipynb` in VS Code starts a mock
+CRS that streams to UDP 9876. Closing VS Code does **not** stop it — the kernel
+goes away, the streamer does not. Do that a few times and several orphaned
+streamers are all transmitting to the same port.
+
+What that costs, next time the tests run:
+
+* `test_notebooks.py::test_reference_demo_notebook[pulse_capture.md]` and
+  `[simplified_tuning_flow.md]` fail, along with
+  `test_measurement_flow.py::TestIntegration::test_mock_mode_execution` (in
+  0.2 s — it never starts). All three call `find_streamer_conflict`
+  (`rfmux/streamer.py`), which is working exactly as designed: a second
+  simulation would interleave with the first and corrupt the data silently.
+* The diagnosis is invisible at the pytest level. The failure reads only
+  "Reference notebook X failed! See /tmp/pytest-of-…/….ipynb" — the actual
+  `RuntimeError` about port 9876 is buried in the executed notebook's cell
+  output, which has to be dug out of the JSON. Reproducing the reported
+  failure takes several four-minute runs before it becomes clear the cause is
+  not in the repository at all.
+* `multisweep.md` and
+  `network_analyses_find_resonances_make_resonator_catalog.md` pass throughout,
+  because they do not stand up a streamer. That split — which notebooks call the
+  guard — is the quickest way to recognise this.
+
+Confirm it in one line before hunting anything else:
+
+    python -c "from rfmux.streamer import find_streamer_conflict; print(find_streamer_conflict())"
+
+Note that `ss`/`lsof` show nothing: no socket is *bound* to 9876. The orphans
+are senders, which is what the guard's second probe (a short read) exists to
+catch. So "the port looks free" is not evidence.
+
+Worth fixing at the source rather than documenting forever. Options: have the
+mock streamer die with the kernel that made it (a parent-death watch, or a
+heartbeat the server times out on), and/or surface the conflict as a pytest
+`skip`/`error` with the real message rather than an opaque notebook assertion.
+
+## Periscope's `data_callback` is two arguments too narrow for a ladder
+
+`multiamp_multisweep` calls `data_callback(module, partial_results, step,
+direction)`, where `multisweep` calls it `(module, partial_results)`. The extra
+pair is not decoration: inside a ladder a consumer plotting partial data has no
+way to tell which amplitude step and direction the points belong to, which is
+exactly what the live multisweep grid needs.
+
+`multisweep` itself is unchanged, so nothing is broken today — but a Periscope
+task that passes its narrow callback to the driver will `TypeError` on the first
+partial-data emission. To carry across when Periscope is rewired (step 5 of
+`tuning_multisweep_amplitudes_plan.md`):
+
+* `MultisweepTask.run` (`tools/periscope/tasks.py:508`) is where the loop over
+  amplitude rungs lives today; it goes away in favour of one driver call.
+* Its `data_callback` and the `multisweep_signals` it re-emits need the two new
+  coordinates plumbed through, replacing whatever it currently derives from its
+  own loop counter.
+* `sweep_callback(record)` is the replacement for the task's per-rung
+  bookkeeping — it carries `step`, `direction`, `amplitudes`, `factor`,
+  `completed` and `total`, which is everything the progress UI reads.
+
+## multisweep's measurement loop is nearly untested
+
+`test/algorithms/test_multisweep.py` covers input resolution only, by design —
+"the measurement loop below it needs a board and is not exercised here". The one
+exception is now `test/algorithms/test_multisweep_channels.py`
+(`slow_acquisition`), which drives the loop against a MockCRS to pin down which
+channels the sweep may silence.
+
+That test exists because the behaviour was changed and needed a guard, not
+because the loop is now covered. Still unexercised: NCO region splitting (the
+`MAX_NCO_SPAN_HZ` cut and the no-phase-stitching seam between regions), the
+`min-s21` / `max-diq` recalculation arithmetic, `rotate_saved_data`, and
+`apply_df_calibration`. The MockCRS route is cheap once resonators are generated
+at known frequencies — `crs.generate_resonators({"num_resonances": n,
+"auto_bias_kids": False})` returns the list, and sweeping real dips is what makes
+the recalculation branches run at all (on a flat baseline `max-diq` finds zero
+IQ velocity, gives up, and silently skips the whole TOD path).
+
 ## Retire the legacy resonance finder
 
 `algorithms/measurement/fitting.py:394` `find_resonances` is now a deprecating

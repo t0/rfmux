@@ -39,7 +39,14 @@ from .find_resonances import (
     find_resonances_in_netanal,
     magnitude_db,
 )
-from .multisweep_amplitudes import AmplitudeSchedule, AmplitudeStep
+from .multisweep_amplitudes import (
+    AmplitudeSchedule,
+    AmplitudeStep,
+    collect_amplitude_iterations_for,
+    find_iteration_number_matching_amplitude,
+    get_amplitudes_at_iteration,
+    pack_results,
+)
 
 __all__ = [
     "ResonanceCandidate",
@@ -49,4 +56,8 @@ __all__ = [
     "magnitude_db",
     "AmplitudeSchedule",
     "AmplitudeStep",
+    "collect_amplitude_iterations_for",
+    "find_iteration_number_matching_amplitude",
+    "get_amplitudes_at_iteration",
+    "pack_results",
 ]

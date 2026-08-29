@@ -89,12 +89,28 @@ Things that are worth *not* carrying over:
 ## 3. The layers
 
 ```
-rfmux/tuning/multisweep_amplitudes.py   AmplitudeSchedule — pure; what to sweep in, steps out
-rfmux/tuning/sweeps.py                  accessors over the driver's output dict
+rfmux/tuning/multisweep_amplitudes.py   pure: the amplitudes going in, and the shape coming back
 rfmux/algorithms/measurement/
     multisweep.py                       one catalog, one amplitude vector, one direction
     multiamp_multisweep.py              the driver: steps × directions, calls multisweep
 ```
+
+There is no `sweeps.py`. It was a leftover from `tuning_refactor_design.md` §4,
+where `SweepSet`/`SweepEntry` were classes wrapping *all* sweep data across the
+GUI; once this plan decided measurement outputs stay plain dicts, the file kept
+its name and its slot while losing the reason to be separate. What was left for
+it splits in two, and neither half wants a file of its own:
+
+* **Readers over the driver's dict** live beside `AmplitudeSchedule`, because
+  the schedule's own `to_dict()` is *inside* that dict — a reader resolving
+  `ladder[iteration]` has to agree with the schedule about what a rung means,
+  and two files agreeing about one contract is one file too many.
+* **Readers over a single sweep entry** — the `bias_frequency` →
+  `sweep_center_frequency` → `original_center_frequency` fallback chain,
+  `iq_volts` backfill, legacy flat fit keys — are **not being written**. They
+  exist to read files this revamp is replacing, and carrying compatibility for
+  them costs readability now against a benefit nobody has asked for. If a real
+  caller turns up, that is when it earns a home.
 
 `rfmux/tuning/` imports no `CRS` and no Qt, which is why the loop that actually
 talks to the board is in the algorithms layer even though everything it decides
@@ -285,12 +301,30 @@ Four things this shape is deliberate about:
   lie while each sweep's own `original_center_frequency` cannot be.
 
 Plain builtins and ndarrays throughout, so `pickle.dump` is the whole
-persistence story until `store.py` exists. `tuning/sweeps.py` supplies the
-readers — sweeps for one resonator in amplitude order, the step at a given
-amplitude, and so on — so consumers stop re-deriving them inline.
+persistence story until `store.py` exists.
 
 Direction keys are `multisweep`'s own `"upward"`/`"downward"`, so there is one
 vocabulary rather than a mapping at the boundary.
+
+`pack_results` in `tuning/multisweep_amplitudes.py` writes this, and three
+readers beside it get things back out, so consumers stop re-deriving them
+inline:
+
+* `collect_amplitude_iterations_for(results, name)` — one resonator's sweeps
+  across every iteration, `{iteration: {direction: sweep}}`, in the order
+  measured rather than sorted by amplitude (an `explicit` ladder may run in any
+  order, and re-sorting silently would lose what actually happened).
+* `get_amplitudes_at_iteration(results, iteration)` — `{name: amplitude}`, read
+  from each sweep's own `sweep_amplitude`. This is why the packed dict carries
+  no iteration-level copy: it is reconstructed on demand instead of stored
+  twice.
+* `find_iteration_number_matching_amplitude(results, name, amplitude=None)` —
+  nearest match, defaulting to that resonator's bias amplitude from the catalog
+  snapshot. It takes a *name* because a relative ladder gives every resonator
+  its own amplitudes: R0001 walking 1→2→4 µ and R0002 walking 3→6→12 µ share an
+  iteration number and nothing else, so "the iteration at 4 µ" is only a
+  question about one of them. Nearest rather than exact because a ladder's
+  floats rarely compare equal — `0.001 × 4` is not `0.004`.
 
 ---
 
@@ -316,16 +350,17 @@ vocabulary rather than a mapping at the boundary.
    `reference-notebooks/Demos/multisweep.md`.
 2. **`AmplitudeSchedule`** in `rfmux/tuning/multisweep_amplitudes.py`, with
    tests. Pure, no hardware, ships on its own.
-3. **`multiamp_multisweep`** macro over 1–2, with the sweep callback. Packs its
-   own output, since the shape was easier to settle against a working driver
-   than to guess in advance.
-4. **`rfmux/tuning/sweeps.py`** — the accessors over that output dict.
+3. **`multiamp_multisweep`** macro over 1–2, with the sweep callback.
+4. **`pack_results` and its readers**, in `tuning/multisweep_amplitudes.py`.
+   Written after the driver rather than before it, so the shape was settled
+   against a working call instead of guessed; then the packing moved back here,
+   so one module writes the dict and reads it.
 5. **Periscope rewired** to call 3, its dialog reduced to a view over
    `AmplitudeSchedule`.
 
-Steps 1–3 have landed; 3 and 4 swapped places on the way. Steps 4–5 are not
-started, and the pair still owes a notebook: `Demos/multisweep.md` covers one
-sweep, and a multi-amplitude demo belongs beside it.
+Steps 1–4 have landed; 3 and 4 swapped places on the way. Step 5 is not started,
+and the set still owes a notebook: `Demos/multisweep.md` covers one sweep, and a
+multi-amplitude demo belongs beside it.
 
 ---
 

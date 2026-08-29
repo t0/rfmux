@@ -581,3 +581,66 @@ async def test_no_data_callback_means_none_is_forwarded():
     await drive(crs, a_catalog())
 
     assert crs.calls[0]["data_callback"] is None
+
+
+# ─── the driver's output is what the readers expect ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_readers_work_on_what_the_driver_actually_returns():
+    """The tuning-side tests build a packed dict by hand; this one checks the
+    hand-built shape has not drifted from the real thing."""
+    from rfmux.tuning import (
+        collect_amplitude_iterations_for,
+        find_iteration_number_matching_amplitude,
+        get_amplitudes_at_iteration,
+    )
+
+    crs = FakeCRS()
+    catalog = a_catalog(amplitudes=(0.001, 0.002, 0.004))
+
+    result = await drive(
+        crs,
+        catalog,
+        amp_schedule=AmplitudeSchedule.scaled(0.25, 4.0, 5),
+        directions=("upward", "downward"),
+    )
+
+    collected = collect_amplitude_iterations_for(result, "R0002")
+    assert list(collected) == [0, 1, 2, 3, 4]
+    assert set(collected[0]) == {"upward", "downward"}
+    assert [
+        c["upward"]["sweep_amplitude"] for c in collected.values()
+    ] == pytest.approx([0.0005, 0.001, 0.002, 0.004, 0.008])
+
+    assert get_amplitudes_at_iteration(result, 2) == pytest.approx(
+        {"R0001": 0.001, "R0002": 0.002, "R0003": 0.004}
+    )
+
+    # ×1 sits in the middle of the ladder, so that is where each resonator is
+    # at its own bias amplitude.
+    assert find_iteration_number_matching_amplitude(result, "R0002") == 2
+    assert find_iteration_number_matching_amplitude(result, "R0002", 0.008) == 4
+
+
+@pytest.mark.asyncio
+async def test_the_readers_work_on_a_frequency_list_result_too():
+    from rfmux.tuning import (
+        collect_amplitude_iterations_for,
+        find_iteration_number_matching_amplitude,
+    )
+
+    crs = FakeCRS()
+    result = await drive(
+        crs,
+        center_frequencies=[1.0e9, 1.1e9],
+        module=2,
+        amp_schedule=AmplitudeSchedule.ramp(1e-4, 1e-2, 3),
+    )
+
+    assert list(collect_amplitude_iterations_for(result, "S0002")) == [0, 1, 2]
+    assert find_iteration_number_matching_amplitude(result, "S0002", 1e-2) == 2
+
+    # No catalog, so no bias amplitude to fall back on.
+    with pytest.raises(ValueError, match="no catalog to take one from"):
+        find_iteration_number_matching_amplitude(result, "S0002")

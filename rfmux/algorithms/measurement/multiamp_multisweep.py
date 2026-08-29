@@ -23,13 +23,10 @@ from collections.abc import Sequence
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.resonators import ResonatorCatalog
-from ...tuning.multisweep_amplitudes import AmplitudeSchedule
+from ...tuning.multisweep_amplitudes import AmplitudeSchedule, pack_results
 from .multisweep import _resolve_section_names
 
 DIRECTIONS = ("upward", "downward")
-
-# Bumped when the returned dict changes shape in a way a reader cannot absorb.
-SCHEMA_VERSION = 1
 
 
 def _resolve_directions(directions) -> tuple[str, ...]:
@@ -243,25 +240,16 @@ async def multiamp_multisweep(
                 },
             }
 
-        ``results`` is keyed by amplitude step, numbered from 0 in the order
-        measured, and each step holds one entry per direction swept and nothing
-        else. Under a direction is exactly what ``multisweep`` returns: the
-        sweeps for that step, keyed by resonator or section name.
+        ``results`` is keyed by amplitude iteration, numbered from 0 in the
+        order measured, and an iteration holds one entry per direction swept and
+        nothing else. Under a direction is exactly what ``multisweep`` returns.
 
-        Nothing is duplicated into the step level. What each resonator was
-        actually probed at is already in its own entry as ``sweep_amplitude``,
-        and the rung that produced it is
-        ``call_params["amp_schedule"]["ladder"][step]``, so the step's amplitudes
-        are recoverable without being stored twice.  ``tuning/sweeps.py`` will
-        wrap those lookups; until it exists they are the documented route.
-
-        ``call_params`` records the arguments as *given* — including the ``None``
-        s, and ``amp_schedule`` as its dict — so a saved result says what was
-        asked for. Anything resolved from them (the module, the section names)
-        is either top-level or already in the data. Sweep centres are recorded
-        only as passed: a future step may re-centre between amplitudes, and a
-        stale top-level copy would then be a lie, while each sweep's own
-        ``original_center_frequency`` cannot be.
+        :func:`~rfmux.tuning.multisweep_amplitudes.pack_results` owns this shape
+        and documents it in full; the readers beside it —
+        ``collect_amplitude_iterations_for``,
+        ``find_iteration_number_matching_amplitude`` and
+        ``get_amplitudes_at_iteration`` — are the supported way back out, so
+        callers need not walk the nesting by hand.
 
     Raises:
         ValueError: for an empty or unknown *directions*, a module list, a
@@ -308,25 +296,6 @@ async def multiamp_multisweep(
     # Resolves the whole ladder up front, so an amplitude that overshoots full
     # scale on step 5 is a ValueError now rather than after four steps of data.
     steps = amp_schedule.steps(target)
-
-    call_params = {
-        "catalog": catalog.to_dict() if catalog is not None else None,
-        "center_frequencies": (
-            [float(f) for f in center_frequencies]
-            if center_frequencies is not None
-            else None
-        ),
-        "names": list(names) if names is not None else None,
-        "amp_schedule": amp_schedule.to_dict(),
-        "directions": list(directions),
-        "span_hz": float(span_hz),
-        "npoints_per_sweep": int(npoints_per_sweep),
-        "nsamps": int(nsamps),
-        "bias_frequency_method": bias_frequency_method,
-        "rotate_saved_data": bool(rotate_saved_data),
-        "apply_df_calibration": bool(apply_df_calibration),
-        "module": module,
-    }
 
     total = len(steps) * len(directions)
     completed = 0
@@ -384,9 +353,19 @@ async def multiamp_multisweep(
 
         results[step.step] = per_direction
 
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "module": resolved_module,
-        "call_params": call_params,
-        "results": results,
-    }
+    return pack_results(
+        results,
+        module=resolved_module,
+        amp_schedule=amp_schedule,
+        directions=directions,
+        span_hz=span_hz,
+        npoints_per_sweep=npoints_per_sweep,
+        nsamps=nsamps,
+        bias_frequency_method=bias_frequency_method,
+        rotate_saved_data=rotate_saved_data,
+        apply_df_calibration=apply_df_calibration,
+        catalog=catalog,
+        center_frequencies=center_frequencies,
+        names=names,
+        requested_module=module,
+    )

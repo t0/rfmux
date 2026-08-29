@@ -1,9 +1,11 @@
-"""Behaviour of AmplitudeSchedule: the amplitude steps of a multi-amplitude sweep.
+"""Behaviour of the pure half of the multi-amplitude multisweep.
 
-Pure — no board, no catalog persistence, no driver. The emphasis is on the
-contract the driver and a Periscope dialog rely on: a step is one amplitude,
-amplitudes come back keyed by name, and everything that would fail on the
-hardware fails here instead.
+Two ends of one contract: AmplitudeSchedule deciding what each iteration probes
+at, and the packing and readers deciding what comes back. Pure — no board, no
+driver. The emphasis is on what the driver and a Periscope dialog rely on: a
+step is one amplitude, amplitudes come back keyed by name, everything that would
+fail on the hardware fails here instead, and nothing has to be stored twice to
+be readable.
 """
 
 import math
@@ -13,7 +15,15 @@ import numpy as np
 import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
-from rfmux.tuning.multisweep_amplitudes import AmplitudeSchedule, AmplitudeStep
+from rfmux.tuning.multisweep_amplitudes import (
+    RESULTS_SCHEMA_VERSION,
+    AmplitudeSchedule,
+    AmplitudeStep,
+    collect_amplitude_iterations_for,
+    find_iteration_number_matching_amplitude,
+    get_amplitudes_at_iteration,
+    pack_results,
+)
 
 pytestmark = pytest.mark.portable
 
@@ -481,3 +491,219 @@ def test_a_step_is_accepted_by_multisweeps_own_amplitude_resolution():
         allow_sequence=False,
     )
     assert resolved == pytest.approx({"R0001": 0.002, "R0002": 0.004, "R0003": 0.008})
+
+
+# ─── the driver's output: packing and reading ─────────────────────────────────
+
+
+def a_sweep_entry(name, amplitude, direction):
+    """One resonator's worth of a multisweep return, cut down to what the
+    readers actually touch."""
+    return {
+        "name": name,
+        "sweep_amplitude": amplitude,
+        "sweep_direction": direction,
+        "original_center_frequency": 1.0e9,
+    }
+
+
+# So `catalog=None` can mean "a frequency-list sweep, which has none" rather
+# than "you didn't say".
+_UNSET = object()
+
+
+def packed(
+    schedule=None, catalog=_UNSET, names=None, directions=("upward",), **overrides
+):
+    """A packed result, built the way the driver builds one."""
+    if catalog is _UNSET:
+        catalog = a_catalog()
+    schedule = schedule if schedule is not None else AmplitudeSchedule()
+    target = catalog if catalog is not None else list(names)
+
+    sweeps = {
+        step.step: {
+            direction: {
+                name: a_sweep_entry(name, amplitude, direction)
+                for name, amplitude in step.amplitudes.items()
+            }
+            for direction in directions
+        }
+        for step in schedule.steps(target)
+    }
+
+    kwargs = dict(
+        module=2,
+        amp_schedule=schedule,
+        directions=directions,
+        span_hz=200e3,
+        npoints_per_sweep=101,
+        nsamps=10,
+        bias_frequency_method="max-diq",
+        rotate_saved_data=False,
+        apply_df_calibration=True,
+        catalog=catalog,
+        names=names,
+        requested_module=None,
+    )
+    kwargs.update(overrides)
+    return pack_results(sweeps, **kwargs)
+
+
+def test_pack_results_puts_the_iterations_under_results_keyed_by_number():
+    result = packed(
+        schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 3),
+        directions=("upward", "downward"),
+    )
+
+    assert list(result["results"]) == [0, 1, 2]
+    for iteration in result["results"].values():
+        assert set(iteration) == {"upward", "downward"}
+
+
+def test_pack_results_records_the_call_as_made():
+    schedule = AmplitudeSchedule.ramp(1e-3, 1e-2, 2)
+    catalog = a_catalog()
+    result = packed(schedule=schedule, catalog=catalog, nsamps=7)
+
+    params = result["call_params"]
+    assert params["amp_schedule"] == schedule.to_dict()
+    assert params["catalog"] == catalog.to_dict()
+    assert params["nsamps"] == 7
+    assert params["module"] is None  # as passed, not as resolved
+    assert result["module"] == 2  # resolved, never None
+    assert result["schema_version"] == RESULTS_SCHEMA_VERSION
+
+
+def test_pack_results_is_plain_builtins():
+    result = packed(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 2))
+    assert pickle.loads(pickle.dumps(result)) == result
+
+
+# ─── collect_amplitude_iterations_for ─────────────────────────────────────────
+
+
+def test_one_resonators_sweeps_across_every_iteration():
+    result = packed(
+        schedule=AmplitudeSchedule.scaled(1.0, 4.0, 3),
+        catalog=a_catalog(amplitudes=(0.001, 0.002)),
+        directions=("upward", "downward"),
+    )
+
+    collected = collect_amplitude_iterations_for(result, "R0001")
+
+    assert list(collected) == [0, 1, 2]
+    assert set(collected[0]) == {"upward", "downward"}
+    assert [
+        c["upward"]["sweep_amplitude"] for c in collected.values()
+    ] == pytest.approx([0.001, 0.002, 0.004])
+    # and only that resonator
+    assert all(
+        entry["name"] == "R0001"
+        for by_direction in collected.values()
+        for entry in by_direction.values()
+    )
+
+
+def test_collecting_keeps_the_order_measured_rather_than_sorting():
+    """An explicit ladder may run in any order, and re-sorting would lose the
+    order things actually happened in."""
+    result = packed(schedule=AmplitudeSchedule.explicit([0.01, 0.001, 0.004]))
+
+    collected = collect_amplitude_iterations_for(result, "R0001")
+
+    assert [
+        c["upward"]["sweep_amplitude"] for c in collected.values()
+    ] == pytest.approx([0.01, 0.001, 0.004])
+
+
+def test_collecting_a_resonator_that_was_not_swept_is_an_error():
+    result = packed()
+    with pytest.raises(KeyError, match="was not swept"):
+        collect_amplitude_iterations_for(result, "R9999")
+
+
+def test_a_reader_handed_the_wrong_dict_says_so():
+    result = packed()
+    with pytest.raises(TypeError, match="not one of its parts"):
+        collect_amplitude_iterations_for(result["results"], "R0001")
+
+
+# ─── get_amplitudes_at_iteration ──────────────────────────────────────────────
+
+
+def test_the_amplitudes_of_an_iteration_come_from_the_sweeps_themselves():
+    result = packed(
+        schedule=AmplitudeSchedule.scaled(1.0, 2.0, 2),
+        catalog=a_catalog(amplitudes=(0.001, 0.002, 0.004)),
+    )
+
+    assert get_amplitudes_at_iteration(result, 0) == pytest.approx(
+        {"R0001": 0.001, "R0002": 0.002, "R0003": 0.004}
+    )
+    assert get_amplitudes_at_iteration(result, 1) == pytest.approx(
+        {"R0001": 0.002, "R0002": 0.004, "R0003": 0.008}
+    )
+
+
+def test_an_absolute_ladder_probes_everything_at_the_same_amplitude():
+    result = packed(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 2))
+
+    amplitudes = get_amplitudes_at_iteration(result, 1)
+    assert list(amplitudes.values()) == pytest.approx([1e-2, 1e-2, 1e-2])
+
+
+def test_asking_for_an_iteration_that_does_not_exist_is_an_error():
+    result = packed(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 2))
+    with pytest.raises(KeyError, match=r"No iteration 5"):
+        get_amplitudes_at_iteration(result, 5)
+
+
+# ─── find_iteration_number_matching_amplitude ─────────────────────────────────
+
+
+def test_the_iteration_nearest_a_given_amplitude():
+    result = packed(schedule=AmplitudeSchedule.explicit([1e-3, 1e-2, 1e-1]))
+
+    assert find_iteration_number_matching_amplitude(result, "R0001", 1e-2) == 1
+    # nearest, not exact — a ladder's floats rarely compare equal
+    assert find_iteration_number_matching_amplitude(result, "R0001", 9.6e-3) == 1
+
+
+def test_without_an_amplitude_it_finds_where_the_resonator_is_biased():
+    """The usual question: which iteration was taken at the bias point?"""
+    catalog = a_catalog(amplitudes=(0.001, 0.002, 0.004))
+    result = packed(
+        schedule=AmplitudeSchedule.scaled(0.25, 4.0, 5), catalog=catalog
+    )
+
+    # scaled() puts ×1 in the middle, so every resonator's bias amplitude is
+    # iteration 2 — whatever its own amplitude happens to be.
+    for name in ("R0001", "R0002", "R0003"):
+        assert find_iteration_number_matching_amplitude(result, name) == 2
+
+
+def test_a_relative_ladder_gives_each_resonator_its_own_answer():
+    """Which is why the reader takes a name: R0001 and R0002 share an iteration
+    number and nothing else."""
+    catalog = a_catalog(amplitudes=(0.001, 0.01))
+    result = packed(schedule=AmplitudeSchedule.scaled(1.0, 4.0, 3), catalog=catalog)
+
+    assert find_iteration_number_matching_amplitude(result, "R0001", 0.004) == 2
+    assert find_iteration_number_matching_amplitude(result, "R0002", 0.004) == 0
+
+
+def test_a_frequency_list_result_has_no_bias_amplitude_to_fall_back_on():
+    schedule = AmplitudeSchedule.ramp(1e-3, 1e-2, 2)
+    result = packed(
+        schedule=schedule,
+        catalog=None,
+        center_frequencies=[1.0e9, 1.1e9],
+        names=["low", "high"],
+    )
+
+    with pytest.raises(ValueError, match="no catalog to take one from"):
+        find_iteration_number_matching_amplitude(result, "low")
+
+    # but an explicit amplitude still works
+    assert find_iteration_number_matching_amplitude(result, "low", 1e-2) == 1

@@ -14,13 +14,13 @@ jupyter:
 # Tuning KIDs
 
 End-to-end detector tuning from the Python API: sweep the band, find the
-resonators, characterise each one, park a carrier on it, and measure the noise
+resonators, characterise each one, bias it, and measure the noise
 you are left with — **without opening Periscope**.
 
 This is the sequence every KID measurement starts from. Nothing downstream —
 noise spectra, pulse capture, science data — means anything until the carriers
 are sitting where they belong, because all of it measures *deviation from the
-parked tone*.
+bias tone*.
 
 Everything here is the same code path Periscope's tuning panels drive. The GUI
 runs these functions from `QThread` workers and draws the results; this notebook
@@ -33,7 +33,7 @@ calls them directly and plots instead.
 | Find the resonators | `find_resonances()` |
 | Characterise each one | `crs.multisweep()` |
 | Fit the resonances | `fit_skewed_multisweep`, `fit_nonlinear_iq_multisweep` |
-| Park the carriers | `bias_kids()` |
+| Bias the detectors | `bias_kids()` |
 | Measure the noise | `crs.py_get_samples()`, `crs.py_get_pfb_samples()` |
 
 ## How to use this document
@@ -148,7 +148,7 @@ across 600 MHz–1 GHz, generated from a physical LEKID model rather than drawn 
 Lorentzian shapes, so they respond to drive power and temperature the way real
 ones do.
 
-Note what is **not** set here: `auto_bias_kids`. The simulation *can* park
+Note what is **not** set here: `auto_bias_kids`. The simulation *can* bias
 carriers on its own resonators — it knows where they are — and the pulse-capture
 notebook uses that to skip straight to detection. Here it would defeat the
 purpose. Everything below exists to find those frequencies the way you have to
@@ -201,11 +201,10 @@ else:
           f"{MOCK_CONFIG['freq_end']/1e9:.1f} GHz")
 ```
 
-### Ready?
+### Confirm the connection
 
-Whichever route you took, this is the checkpoint — it confirms what the rest of
-the notebook will be talking to, and clears any channels left programmed by a
-previous run.
+The rest of the notebook uses `crs`; this fails early if section 1 did not set
+it, and clears channels left programmed by an earlier run.
 
 ```python
 if crs is None:
@@ -436,7 +435,7 @@ The span and the point count are a pair, and it is the *ratio* that matters.
 Widen the span without adding points and you are back to the resolution you
 started with; the useful check is points-per-linewidth, not points.
 
-`bias_frequency_method` decides where the carrier will eventually be parked:
+`bias_frequency_method` decides which frequency the carrier is biased at:
 
 - **`"max-diq"`** (default) — the point of steepest IQ motion, |d(I+jQ)/df|. This
   is where a small frequency shift produces the largest change in the signal,
@@ -652,7 +651,7 @@ it.
 
 ## 9. Noise on the biased detectors
 
-With carriers parked, the readout is finally measuring something: the deviation
+With the detectors biased, the readout is finally measuring something: the deviation
 of each tone from where it was put. `py_get_samples` collects a timestream from
 the slow (decimated readout) stream and can return the spectrum with it.
 

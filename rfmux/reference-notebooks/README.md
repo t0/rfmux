@@ -32,7 +32,7 @@ jupytext -o pulse_capture.ipynb pulse_capture.md
 ## Where to start
 
 - **`Demos/simplified_tuning_flow.md`**: sweep the band, find and fit the
-  resonators, park the carriers, measure the noise. Everything else assumes
+  resonators, bias the detectors, measure the noise. Everything else assumes
   you have done this first.
 - **`Demos/pulse_capture.md`**: detect and record detector pulses, with
   streaming HDF5, histograms and matched slow+fast capture.

@@ -120,7 +120,7 @@ samples = await crs.py_get_samples(num_samples=1000, channel=1, module=1)
 
 `bias_kids` picks an operating point per detector and programs the hardware. It
 works from multisweep results, since it needs each resonator characterised
-before it can choose where to park a carrier. It is the last step of the tuning
+before it can choose a bias frequency. It is the last step of the tuning
 sequence, not a standalone call.
 
 It is one of the algorithms that is *not* registered on `CRS`, so unlike the

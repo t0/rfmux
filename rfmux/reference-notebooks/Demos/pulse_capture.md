@@ -101,7 +101,7 @@ Everything below needs a CRS. **Run exactly one** of the three options:
 | **C. Simulate one** | No hardware, and nothing already running | section 2 |
 
 On real hardware the detectors must already be biased, since pulse detection
-works on the deviation of a parked carrier. Run `simplified_tuning_flow.py` (in
+works on the deviation of a biased detector. Run `simplified_tuning_flow.py` (in
 this folder) first, or use the Periscope tuning panels.
 
 ### A. Attach to a board that is already running
@@ -151,8 +151,8 @@ else:
 **Skip this section entirely if section 1 already gave you a CRS** — the cell
 below no-ops in that case.
 
-If you have no hardware, this stands up a simulated CRS: a couple of resonators
-with carriers parked on them, and periodic quasiparticle pulses to detect.
+If you have no hardware, this stands up a simulated CRS: two resonators
+biased and carrying tones, and periodic quasiparticle pulses to detect.
 
 Pulse heights are drawn uniformly between `pulse_random_amp_min` and
 `pulse_random_amp_max`, so the amplitude histogram in section 7 shows a
@@ -184,7 +184,7 @@ white noise is not worth testing:
 MOCK_CONFIG = {
     "num_resonances": 2,
     "resonator_random_seed": 42,
-    "auto_bias_kids": True,        # park carriers on the resonators
+    "auto_bias_kids": True,        # bias the detectors
     "bias_amplitude": 0.001,
 
     # ── Noise (these are the shipped defaults, spelled out) ─────
@@ -236,10 +236,10 @@ else:
           f"1/f on (df/f = {MOCK_CONFIG['tls_fractional_rms']:.0e} rms)")
 ```
 
-### Ready?
+### Confirm the connection
 
-Whichever route you took, this is the checkpoint — it confirms what the rest of
-the notebook will be talking to.
+The rest of the notebook uses `crs`; this fails early if section 1 did not
+set it.
 
 ```python
 if crs is None:
@@ -630,7 +630,7 @@ into the capture file alongside the pulses:
 
     session = PulseCaptureSession(..., df_calibrations=df_cals)
 
-This notebook's mock detectors were parked by `auto_bias_kids`, which skips that
+This notebook's mock detectors were biased by `auto_bias_kids`, which skips that
 sweep-and-fit step, so the channels below are uncalibrated and
 `counts_to_hz_scale` returns `None`. Treat `None` as "show counts" rather than
 substituting 1.0 — unscaled counts mislabelled as Hz are worse than no

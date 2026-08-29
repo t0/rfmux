@@ -39,7 +39,7 @@ from rfmux.tools.periscope.pulse_capture_task import (  # noqa: E402
 def mock_crs():
     from rfmux.mock.helpers import create_mock_crs
     loop = asyncio.new_event_loop()
-    # auto_bias_kids parks carriers on the resonators — without it the
+    # auto_bias_kids biases the detectors — without it the
     # QP pulses modulate resonators no channel is tuned to, and the
     # streams carry pure noise (mirrors e2e setup_mock).
     crs = loop.run_until_complete(create_mock_crs(

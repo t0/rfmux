@@ -770,7 +770,7 @@ functions this notebook does:
 | Parameter histograms panel | the `fit_params` distributions in section 7 |
 | Progress bars | the `progress_callback=` hook on every long call |
 
-For an unattended run with no notebook at all, see `simplified_tuning_flow.py`
+The same sequence as a plain script, for writing your own: `simplified_tuning_flow.py`
 in this folder:
 
     python simplified_tuning_flow.py MOCK      # simulated CRS

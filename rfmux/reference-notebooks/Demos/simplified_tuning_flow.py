@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unattended tuning run: bias a set of KIDs and measure their noise.
+Detector tuning as a plain script: bias a set of KIDs and measure their noise.
 
 Executes the complete measurement sequence:
 1. Initialize

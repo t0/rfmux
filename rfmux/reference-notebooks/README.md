@@ -37,8 +37,10 @@ jupytext -o pulse_capture.ipynb pulse_capture.md
 - **`Demos/pulse_capture.md`**: detect and record detector pulses, with
   streaming HDF5, histograms and matched slow+fast capture.
 
-Each has an unattended `.py` counterpart beside it for cron jobs and smoke
-tests: the notebook is the documentation, the script is the runner.
+Each has a `.py` counterpart beside it showing the same sequence as a plain
+script — a reference for writing your own code against the API, and a quick way
+to smoke-test a change against `MOCK`. The notebook explains why; the script
+shows what to call.
 
 ## Connecting
 

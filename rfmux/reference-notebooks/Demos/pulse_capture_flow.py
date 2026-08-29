@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Unattended pulse-capture acquisition run.
+Pulse capture as a plain script.
 
 Captures the same channels three ways — slow stream, fast (PFB) stream,
 and both at once with cross-stream matching — and writes one HDF5 file
-each.  No plots, no prompts: this is the batch counterpart of the
-Pulse Capture panel, for cron jobs, overnight runs and smoke-testing a
-board from a terminal.
+each.  The same sequence the Pulse Capture panel runs, with no plots and
+no prompts.
 
-For what any of these parameters mean and how the detector works, open
+Read it as a reference for writing your own capture code, or run it
+against MOCK to check a change end to end.
+
+For what the parameters mean and how the detector works, open
 pulse_capture.md in this folder as a notebook (double-click it in the
 Jupyter panel Periscope launches; in your own JupyterLab, right-click →
-Open With → Notebook).  It is the documentation; this is the runner.
+Open With → Notebook).  Steps below cite its sections.
 
 Usage:
   python pulse_capture_flow.py MOCK      # simulated CRS
@@ -98,96 +100,101 @@ async def connect(serial: str):
     return crs, crs.tuber_hostname, False
 
 
-async def capture_slow(host, fs, path):
+async def run_capture_flow(crs, host, is_mock) -> int:
+    """The sequence, in order.  Steps cite pulse_capture.md sections."""
+
+    # ── Step 1. Pick the decimation from the pulse decay constant ──
+    # notebook §3.  Ten or more samples across one tau, or the decay is
+    # too sparsely sampled to fit.
+    needed_fs = 10.0 / PULSE_TAU_S
+    dec = next(d for d in range(6, -1, -1)
+               if decimation_to_sampling(d) >= needed_fs)
+    fs = decimation_to_sampling(dec)
+    cfg = StreamerConfig(dec_stage=dec, short_packets=(dec < 3),
+                         modules=[MODULE])
+
+    # ── Step 2. Check the configuration before spending a capture ──
+    # notebook §3 and §4.  validate() reports the hardware rules and the
+    # link budget; CONFIG.validate() catches inconsistent thresholds.
+    for severity, message in validate(cfg):
+        print(f"[{severity}] {message}")
+    for severity, message in CONFIG.validate(fs):
+        print(f"[{severity}] {message}")
+
+    # ── Step 3. Configure the slow streamer ────────────────────────
+    await crs.configure_streamer(dec, short=cfg.short_packets,
+                                 modules=[MODULE])
+    if is_mock:
+        await crs.start_udp_streaming()
+        await asyncio.sleep(2.0)
+    print(f"slow stream: stage {dec}, {fs:.0f} Hz, "
+          f"channels {CHANNELS} on module {MODULE}")
+
+    # ── Step 4. Capture the slow stream ────────────────────────────
+    # notebook §6.  Build a session, start it, feed it from a source,
+    # stop it.  Every capture below is the same four calls.
     capture_session = PulseCaptureSession(
         channels=CHANNELS, module=MODULE, streamer_mode="slow",
-        sample_rate=fs, hdf5_path=path,
+        sample_rate=fs, hdf5_path="pulse_flow_slow.h5",
         **CONFIG.session_kwargs(fs))
     capture_session.start()
     covered = await run_slow_source(capture_session, host, module=MODULE,
                                     duration_s=SLOW_S)
     capture_session.stop()
-    return capture_session.total_pulses, covered
+    print(f"slow: {capture_session.total_pulses} pulses in {covered:.2f} s "
+          f"→ pulse_flow_slow.h5")
 
+    # ── Step 5. Enable the PFB streamer ────────────────────────────
+    # It stays off unless a capture needs it, and step 8 turns it back
+    # off even if a capture below raises.
+    await crs.configure_streamer(dec, short=cfg.short_packets,
+                                 modules=[MODULE],
+                                 pfb_channels=CHANNELS, pfb_module=MODULE)
+    try:
+        # ── Step 6. Capture the fast (PFB) stream ──────────────────
+        # notebook §8.  Same four calls, at the PFB rate.
+        capture_session = PulseCaptureSession(
+            channels=CHANNELS, module=MODULE, streamer_mode="fast",
+            sample_rate=PFB_SAMPLING_FREQ, hdf5_path="pulse_flow_fast.h5",
+            **CONFIG.session_kwargs(PFB_SAMPLING_FREQ))
+        capture_session.start()
+        covered = await run_pfb_source(capture_session, host, CHANNELS,
+                                       duration_s=FAST_S)
+        capture_session.stop()
+        print(f"fast: {capture_session.total_pulses} pulses in "
+              f"{covered*1e3:.0f} ms → pulse_flow_fast.h5")
 
-async def capture_fast(host, path):
-    capture_session = PulseCaptureSession(
-        channels=CHANNELS, module=MODULE, streamer_mode="fast",
-        sample_rate=PFB_SAMPLING_FREQ, hdf5_path=path,
-        **CONFIG.session_kwargs(PFB_SAMPLING_FREQ))
-    capture_session.start()
-    covered = await run_pfb_source(capture_session, host, CHANNELS,
-                                   duration_s=FAST_S)
-    capture_session.stop()
-    return capture_session.total_pulses, covered
+        # ── Step 7. Capture both at once, with cross-stream matching ─
+        # notebook §9.  A dual session runs two detectors and matches
+        # their pulses by trigger time.
+        capture_session = DualPulseCaptureSession(
+            channels=CHANNELS, module=MODULE, slow_rate=fs,
+            fast_rate=PFB_SAMPLING_FREQ, config=CONFIG,
+            hdf5_path="pulse_flow_dual.h5")
+        capture_session.start()
+        covered, _ = await run_dual_source(capture_session, host, CHANNELS,
+                                           module=MODULE, duration_s=DUAL_S)
+        capture_session.stop()
+        stats = capture_session.stats()
+        print(f"dual: {stats['slow']['total_pulses']} slow + "
+              f"{stats['fast']['total_pulses']} fast in {covered:.2f} s, "
+              f"{stats['pairs_matched']} matched "
+              f"({stats['pairs_unmatched']} unmatched) "
+              f"→ pulse_flow_dual.h5")
+    finally:
+        # ── Step 8. Disable the PFB streamer ───────────────────────
+        await crs.configure_streamer(dec, short=cfg.short_packets,
+                                     modules=[MODULE], pfb_channels=[])
 
-
-async def capture_dual(host, fs, path):
-    capture_session = DualPulseCaptureSession(
-        channels=CHANNELS, module=MODULE, slow_rate=fs,
-        fast_rate=PFB_SAMPLING_FREQ, config=CONFIG, hdf5_path=path)
-    capture_session.start()
-    covered, _ = await run_dual_source(capture_session, host, CHANNELS,
-                                       module=MODULE, duration_s=DUAL_S)
-    capture_session.stop()
-    return capture_session.stats(), covered
+    if is_mock:
+        await crs.stop_udp_streaming()
+    return 0
 
 
 async def main(serial: str = "MOCK") -> int:
     try:
         crs, host, is_mock = await connect(serial)
-
-        # Decimation from the physics: >= 10 samples across one tau.
-        needed_fs = 10.0 / PULSE_TAU_S
-        dec = next(d for d in range(6, -1, -1)
-                   if decimation_to_sampling(d) >= needed_fs)
-        cfg = StreamerConfig(dec_stage=dec, short_packets=(dec < 3),
-                             modules=[MODULE])
-        fs = decimation_to_sampling(dec)
-
-        for severity, message in validate(cfg):
-            print(f"[{severity}] {message}")
-        for severity, message in CONFIG.validate(fs):
-            print(f"[{severity}] {message}")
-
-        await crs.configure_streamer(dec, short=cfg.short_packets,
-                                     modules=[MODULE])
-        if is_mock:
-            await crs.start_udp_streaming()
-            await asyncio.sleep(2.0)
-
-        print(f"slow stream: stage {dec}, {fs:.0f} Hz, "
-              f"channels {CHANNELS} on module {MODULE}")
-
-        n, covered = await capture_slow(host, fs, "pulse_flow_slow.h5")
-        print(f"slow: {n} pulses in {covered:.2f} s → pulse_flow_slow.h5")
-
-        # The PFB streamer stays off unless a capture needs it.
-        await crs.configure_streamer(dec, short=cfg.short_packets,
-                                     modules=[MODULE],
-                                     pfb_channels=CHANNELS,
-                                     pfb_module=MODULE)
-        try:
-            n, covered = await capture_fast(host, "pulse_flow_fast.h5")
-            print(f"fast: {n} pulses in {covered*1e3:.0f} ms "
-                  f"→ pulse_flow_fast.h5")
-
-            stats, covered = await capture_dual(host, fs,
-                                                "pulse_flow_dual.h5")
-            print(f"dual: {stats['slow']['total_pulses']} slow + "
-                  f"{stats['fast']['total_pulses']} fast in "
-                  f"{covered:.2f} s, {stats['pairs_matched']} matched "
-                  f"({stats['pairs_unmatched']} unmatched) "
-                  f"→ pulse_flow_dual.h5")
-        finally:
-            await crs.configure_streamer(dec, short=cfg.short_packets,
-                                         modules=[MODULE],
-                                         pfb_channels=[])
-
-        if is_mock:
-            await crs.stop_udp_streaming()
-        return 0
-
+        return await run_capture_flow(crs, host, is_mock)
     except Exception as e:
         import traceback
         print(f"{type(e).__name__}: {e}", file=sys.stderr)

@@ -787,7 +787,7 @@ objects this notebook does:
 | counts / Hz selector | `counts_to_hz_scale(df_calibration)` |
 | Output `.h5` + Session Browser review | `hdf5_path=` + `PulseHDF5Reader` |
 
-For an unattended acquisition run with no notebook at all, see
+The same sequence as a plain script, for writing your own or smoke-testing against MOCK:
 `pulse_capture_flow.py` in this folder:
 
     python pulse_capture_flow.py MOCK      # simulated CRS

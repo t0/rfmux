@@ -53,7 +53,7 @@ _SQRT2 = math.sqrt(2.0)
 # them all.  The two constants live here, in the layer that owns the
 # ring, and PulseCaptureConfig derives from them — otherwise a bare
 # PulseCapture(buf_size=...) and a config-driven one resolve different
-# lags from the same intent, which is exactly what they used to do.
+# lags from the same intent.
 
 #: Ring headroom over the longest expected pulse.  The pre-trigger
 #: margin and the end-confirmation tail share the ring with the pulse.

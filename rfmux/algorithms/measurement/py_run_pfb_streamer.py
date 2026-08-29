@@ -128,8 +128,7 @@ async def py_run_pfb_streamer(crs : CRS,
     
         #### Opening the socket #####
         # resolve_host, not the raw hostname: a mock CRS built from a
-        # serial alone reports rfmux0000.local, which resolves nowhere,
-        # and this was the one caller of the three not mapping it.
+        # serial alone reports rfmux0000.local, which resolves nowhere.
         host = streamer.resolve_host(crs.tuber_hostname)
         port = streamer.PFB_STREAMER_PORT
         

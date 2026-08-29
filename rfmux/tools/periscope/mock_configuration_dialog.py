@@ -279,14 +279,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         return self._create_physics_driven_page()
 
     def _create_geometry_section(self) -> QtWidgets.QWidget:
-        """Geometry section — was previously inside _create_physics_driven_page."""
-        # Note: Geometry widgets are created inside _create_physics_driven_page.
-        # We keep them there for now; this wrapper exists for the collapsible API.
-        # (The actual geometry widgets are part of the physics page.)
-        # Returning an empty placeholder; geometry is integrated into material section.
-        # Actually, let's just return a label — geometry is already in the physics page.
-        # We need to restructure _create_physics_driven_page to separate these.
-        # For now, return the geometry portion inline.
+        """Geometry inputs: width, thickness, length and derived volume."""
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(6, 2, 6, 2)

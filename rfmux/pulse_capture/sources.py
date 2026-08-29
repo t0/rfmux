@@ -314,10 +314,10 @@ async def run_pfb_source(
                 if v.shape[0] == 0:
                     continue
                 n_ok = min(v.shape[0], times.shape[0])
-                # Every session and facade exposes feed_block.  This
-                # used to fall back to a per-sample loop when it did
-                # not, which is how both-mode quietly ran the fast
-                # stream on the path this function exists to avoid.
+                # Every session and facade exposes feed_block, and
+                # there is deliberately no per-sample fallback: it would
+                # put the fast stream on the path this function exists
+                # to avoid.
                 session.feed_block(ch, v[:n_ok].real, v[:n_ok].imag,
                                    times[:n_ok])
             # Exact per-packet span — independent of timestamp

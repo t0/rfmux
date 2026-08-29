@@ -671,15 +671,16 @@ class MockResonatorModel:
         # Use provided pulse_time or fall back to shared last_update_time
         t_for_pulses = pulse_time if pulse_time is not None else self.last_update_time
         
-        # Per-sample QP state is memoised on time.  The multi-sample
-        # (PFB) loop evaluates every (channel, tone) pair at each
-        # instant, so without this the pulse sum, the nqp -> Lk/R
-        # physics update and the noise draw are all recomputed once per
-        # CHANNEL rather than once per sample — 5x wasted work at the
-        # default 5 resonators.  Sharing across channels at a given
-        # instant is also more physically correct: they observe the
-        # same resonators at the same moment and should see the same
-        # state, not independent noise draws.
+        # The QP state is computed once per instant and reused by every
+        # channel asking at that same timestamp.  The multi-sample (PFB)
+        # loop evaluates every (channel, tone) pair at each instant, so
+        # without this the pulse sum, the nqp -> Lk/R physics update and
+        # the noise draw are all recomputed once per CHANNEL rather than
+        # once per sample — 5x wasted work at the default 5 resonators.
+        # Sharing across channels at a given instant is also more
+        # physically correct: they observe the same resonators at the
+        # same moment and should see the same state, not independent
+        # noise draws.
         if (self._nqp_state_t is not None
                 and t_for_pulses == self._nqp_state_t):
             nqp_noise_frac = self._nqp_state_noise
@@ -717,14 +718,16 @@ class MockResonatorModel:
                     excess_factor = (pulse['amplitude'] - 1.0) * time_factor
                     effective_nqp_array[i] += excess_factor * base_nqp_array[i]
         
-        # White QP noise is deliberately NOT folded into the nqp used
-        # below.  It is a fresh draw every call, so it would miss the
-        # convergence cache every time (measured: 85% hit rate -> 4% at
-        # a 10% noise level, a 12x slowdown) and force a full
-        # self-consistent re-convergence for what is a tiny
-        # perturbation.  Instead it is carried as a FRACTIONAL
-        # deviation and applied to Lk/R after the cache restore, the
-        # same way the TLS wander is.
+        # White QP noise is applied as a FIRST-ORDER perturbation about
+        # the converged operating point, rather than folded into the nqp
+        # below and re-converged.  R is proportional to nqp, so this is
+        # exact for the dominant term; the Lk contribution is smaller by
+        # five orders of magnitude.  See _nqp_sensitivity, and the
+        # application site in _s21_lc_response_internal.
+        #
+        # Folding it in instead would also miss the convergence cache on
+        # every call, since it is a fresh draw (measured: 85% hit rate
+        # -> 4% at a 10% noise level, a 12x slowdown).
         effective_nqp_array = np.maximum(0, effective_nqp_array)
         if self.nqp_noise_enabled and self.nqp_noise_std_factor > 0:
             nqp_noise_frac = np.random.normal(

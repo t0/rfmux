@@ -528,10 +528,10 @@ class ServerMockCRS:
     async def set_decimation(self, stage: int = 6, short: bool = False,
                              module: int | list[int] | None = None,
                              *, _bandwidth_derating: float = 0.8):
-        # Signature mirrors firmware r1.6.x exactly.  r1.5.6 spelled the
-        # third argument 'modules'; accepting both here is what let the
-        # old spelling survive in callers that only ever ran against the
-        # mock, so don't add the alias back.
+        # Don't accept 'modules' as an alias for 'module'.  The firmware
+        # takes 'module'; accepting both lets the wrong spelling survive
+        # in callers that only ever run against the mock, and fail on a
+        # board.
         assert isinstance(stage, int) and 0 <= stage <= 6
         if module is None:
             module = list(self._active_modules)

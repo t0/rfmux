@@ -100,9 +100,7 @@ def resolve_host(hostname):
 	resolves nowhere — the mock streamer sends to loopback.  Callers
 	that opened a socket on the unmapped name simply received nothing.
 
-	This rule had three copies with two behaviours: py_get_samples and
-	trigger_capture mapped it, py_run_pfb_streamer did not.  It lives
-	here now, next to ``get_multicast_socket``, which is the only thing
+	It lives next to ``get_multicast_socket``, which is the only thing
 	the answer is ever used for.
 	"""
 	if not hostname:

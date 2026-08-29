@@ -85,11 +85,7 @@ from .hdf5 import DualPulseHDF5Writer, PulseHDF5Writer
 #: They travel together: PulseCaptureConfig.session_kwargs() produces
 #: them, the session holds them, PulseCapture consumes them, and the
 #: HDF5 file records them.  Every hand-maintained copy of the list is a
-#: chance for those to disagree — and they did.  The session passed
-#: trigger_samples, baseline_window, edge_lookback and
-#: max_capture_samples to the writer, whose own list knew about none of
-#: them, so no capture file recorded the trigger confirmation length or
-#: the edge lookback: the two numbers that define what triggered.
+#: chance for those to disagree.
 DETECTION_PARAMS = (
     "threshold_sigma",
     "end_sigma",
@@ -209,8 +205,8 @@ class PulseCaptureConfig:
     #: from roughly 1.3x to 5.6x.
     #:
     #: Default on, because that variability is a property of the saved
-    #: TAIL and no longer leaks into ``duration_ms`` (measured from the
-    #: threshold crossings since this option existed).  Turn it off when
+    #: TAIL and does not reach ``duration_ms``, which is measured from
+    #: the threshold crossings.  Turn it off when
     #: the tail costs more than it is worth: PFB captures, where windows
     #: already carry 64x the samples, or high count rates, where longer
     #: windows overlap and raise the pileup fraction.

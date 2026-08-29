@@ -220,7 +220,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.batch_size_spin.setValue(self.batch_size)
         self.batch_size_spin.setSingleStep(1)
         self.batch_size_spin.setToolTip("Detectors per batch (press Update to apply)")
-        # Note: No longer connects to immediate redraw
         toolbar_layout.addWidget(self.batch_size_spin)
         
         self.batch_update_btn = QtWidgets.QPushButton("Update")

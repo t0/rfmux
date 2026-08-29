@@ -1846,7 +1846,7 @@ class TestHardStop:
         tail = (len(d["Amp_I"]) - 1) - below
         assert tail > max(10, int(0.1 * (below - d["trigger_index"]))) + 2, \
             "the confirmation stretch should be saved under this policy"
-        # The window now runs to where the state machine stopped.
+        # The window runs to where the state machine stopped.
         assert d["end_index"] == len(d["Amp_I"]) - 1
 
     def test_truncated_flag_survives_hdf5(self, tmp_path):

@@ -46,9 +46,9 @@ from ...pulse_capture.session import (
     PulseCaptureSession,
 )
 from ...pulse_capture.hdf5 import PulseHDF5Reader
-from ...algorithms.measurement.streamer_config import (
-    PFB_SAMPLE_RATE,
-    slow_sample_rate,
+from ...core.transferfunctions import (
+    PFB_SAMPLING_FREQ,
+    decimation_to_sampling,
 )
 from ...pulse_capture.analysis import counts_to_hz_scale
 
@@ -273,7 +273,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.mode_combo.addItems(["slow", "fast", "both"])
         self.mode_combo.setToolTip(
             "slow: ~kHz readout stream (taps the Periscope display "
-            "stream)\nfast: ~1.22 MHz PFB stream (max 4 channels; "
+            "stream)\nfast: ~2.44 MHz PFB stream (max 4 channels; "
             "configures the fast streamer automatically)\n"
             "both: concurrent slow+fast with live pulse matching — the "
             "tree lists matched pairs")
@@ -830,10 +830,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _current_sample_rate(self, mode: str) -> float:
         if mode == "fast":
-            return PFB_SAMPLE_RATE
+            return PFB_SAMPLING_FREQ
         runtime = self._resolve_runtime()
         dec = getattr(runtime, "actual_dec_stage", None)
-        return slow_sample_rate(dec if dec is not None else 6)
+        return decimation_to_sampling(dec if dec is not None else 6)
 
     # ── Export ────────────────────────────────────────────────────
 
@@ -1090,7 +1090,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 channels=channels,
                 module=module,
                 slow_rate=self._current_sample_rate("slow"),
-                fast_rate=PFB_SAMPLE_RATE,
+                fast_rate=PFB_SAMPLING_FREQ,
                 config=self.capture_config,
                 hdf5_path=path,
                 df_calibrations=self.df_calibrations,
@@ -1945,7 +1945,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 plot.plot(t_rel,
                           np.asarray(fast_wf[f"Amp_{quad}"], float),
                           pen=pg.mkPen(FAST_IQ_COLORS[quad], width=2.2),
-                          name="fast (PFB, 1.22 MHz)")
+                          name="fast (PFB, 2.44 MHz)")
             if slow_wf is not None:
                 # Slow stream: dots only — sparse samples, no
                 # interpolating line (Joshua's spec)

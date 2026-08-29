@@ -1182,7 +1182,7 @@ class TestSessionFeedBlock:
 
 
 class TestHotLoopCost:
-    """process_sample runs once per sample per channel — 1.22 MHz on the
+    """process_sample runs once per sample per channel — 2.44 MHz on the
     PFB stream — so work done on samples that cannot trigger is work the
     detector cannot afford.  Measured as a rate rather than asserted
     here: skipping the edge block on non-eligible samples took a single
@@ -1934,7 +1934,7 @@ class TestTriggerConfirmation:
         assert cfg.accidental_rate_hz(1.0) == pytest.approx(1.147e-6,
                                                             rel=1e-2)
         # PFB rate: the number that makes single-sample triggering
-        # unusable at 1.22 MHz.
+        # unusable at 2.44 MHz.
         assert cfg.accidental_rate_hz(1220703.125) == pytest.approx(
             1.4, rel=0.05)
         confirmed = PulseCaptureConfig(threshold_sigma=5.0,
@@ -1943,7 +1943,7 @@ class TestTriggerConfirmation:
 
     def test_confirmation_length_follows_the_stream_rate(self):
         """One sample is ample evidence at 596 Hz and nowhere near
-        enough at 1.22 MHz, so a fixed length cannot serve both: at the
+        enough at 2.44 MHz, so a fixed length cannot serve both: at the
         slow end it would reject real pulses that span less than one
         sample."""
         cfg = PulseCaptureConfig(threshold_sigma=5.0)
@@ -1984,7 +1984,7 @@ def _run_len(trigger_samples, spike_len):
 class TestTrainingWindow:
     def test_training_length_is_memory_bounded(self):
         """Raising the window by hand must stay safe: the record is held
-        whole, and 30 s at 1.22 MHz is 36.6M samples per channel."""
+        whole, and 30 s at 2.44 MHz is 73.2M samples per channel."""
         cfg = PulseCaptureConfig(noise_train_ms=30_000.0)
         assert cfg.noise_samples(19073.486328125) == 572_205
         assert cfg.noise_samples(1220703.125) == cfg._MAX_NOISE

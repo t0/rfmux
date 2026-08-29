@@ -503,7 +503,7 @@ class PulseCapture:
 
         Exists because process_sample costs ~2.3 us of interpreter time
         per sample however tightly it is written, and the PFB stream
-        delivers 1.22 MHz per channel — about 2.5x more than one Python
+        delivers 2.44 MHz per channel — about 5x more than one Python
         loop can absorb.  There is no hot spot left to shave; the fix
         has to be doing less Python per sample, not faster Python.
 
@@ -608,7 +608,7 @@ class PulseCapture:
         self.abs_n += 1
 
         # Update circular buffers.  Bound to locals because this method
-        # runs once per sample per channel — 1.22 MHz on the PFB stream
+        # runs once per sample per channel — 2.44 MHz on the PFB stream
         # — and repeated self.buf[channel][...] lookups are a
         # measurable fraction of that budget.
         bufs = self.buf[channel]

@@ -85,13 +85,6 @@ from ._receiver import (
 	SS_PER_SECOND,
 )
 
-#: Sample rate of ONE streamed PFB channel, in Hz.
-#:
-#: Not the same as core.transferfunctions.PFB_SAMPLING_FREQ, which is the
-#: internal PFB bin rate -- this is half of it, and it is the number that
-#: matters to anything consuming the fast stream.
-PFB_SAMPLE_RATE = 625e6 / 512  # ~1.2207 MHz
-
 # Import socket utilities
 from .socket import (
 	get_multicast_socket,
@@ -463,7 +456,6 @@ __all__ = [
 	'SHORT_PACKET_VERSION',
 	'PFBPACKET_NSAMP_MAX',
 	'SS_PER_SECOND',
-	'PFB_SAMPLE_RATE',
 
 	# Backwards compatibility
 	'DfmuxPacket',

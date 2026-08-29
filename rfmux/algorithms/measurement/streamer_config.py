@@ -4,7 +4,7 @@ Streamer configuration: rates, link-budget math, validation, and apply.
 One headless home for everything about configuring the CRS streamers —
 the slow readout stream (decimation stage, short/long packets, which
 modules are streamed) and the fast PFB stream (up to 4 channels of one
-module at ~1.22 MHz).  The Periscope "Streamer Configuration" dialog is
+module at ~2.44 MHz).  The Periscope "Streamer Configuration" dialog is
 a thin view over :func:`describe` and :func:`validate`; scripts and
 notebooks use :func:`apply_streamer_config` or the registered
 ``crs.configure_streamer(...)`` macro directly.
@@ -29,11 +29,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...core.transferfunctions import decimation_to_sampling
+from ...core.transferfunctions import (
+    PFB_SAMPLING_FREQ,
+    decimation_to_sampling,
+)
 from ... import streamer
-
-#: Re-exported from rfmux.streamer, which owns the stream constants.
-PFB_SAMPLE_RATE = streamer.PFB_SAMPLE_RATE
 
 # Link budget (1 GbE), with the firmware's ~0.8 bandwidth derating
 LINK_MBPS = 1000.0
@@ -58,14 +58,9 @@ class StreamerConfig:
         return len(self.modules) if self.modules else default
 
 
-def slow_sample_rate(dec_stage: int) -> float:
-    """Slow-stream sample rate (Hz) for a decimation stage."""
-    return decimation_to_sampling(dec_stage)
-
-
 def describe(cfg: StreamerConfig) -> Dict[str, Any]:
     """Derived quantities for a configuration (rates, widths, bandwidth)."""
-    fs = slow_sample_rate(cfg.dec_stage)
+    fs = decimation_to_sampling(cfg.dec_stage)
     packet_bytes = (streamer.SHORT_PACKET_SIZE if cfg.short_packets
                     else streamer.LONG_PACKET_SIZE)
     channels = (streamer.SHORT_PACKET_CHANNELS if cfg.short_packets
@@ -75,7 +70,7 @@ def describe(cfg: StreamerConfig) -> Dict[str, Any]:
 
     n_pfb = len(cfg.pfb_channels) if cfg.pfb_channels else 0
     # PFB packets carry 1000 interleaved samples in PFB_PACKET_SIZE bytes
-    pfb_mbps = (streamer.PFB_PACKET_SIZE * 8 * PFB_SAMPLE_RATE * n_pfb
+    pfb_mbps = (streamer.PFB_PACKET_SIZE * 8 * PFB_SAMPLING_FREQ * n_pfb
                 / 1000.0 / 1e6)
 
     return {
@@ -85,7 +80,7 @@ def describe(cfg: StreamerConfig) -> Dict[str, Any]:
         "packet_bytes": packet_bytes,
         "n_modules": n_mod,
         "slow_mbps": slow_mbps,
-        "pfb_sample_rate_hz": PFB_SAMPLE_RATE,
+        "pfb_sample_rate_hz": PFB_SAMPLING_FREQ,
         "n_pfb_channels": n_pfb,
         "pfb_mbps": pfb_mbps,
         "total_mbps": slow_mbps + pfb_mbps,

@@ -3,7 +3,7 @@ Fast (PFB) pulse-capture integration test.
 
 Drives PulseCaptureTask in fast mode against a MockCRS with periodic
 QP pulses: the task must configure the PFB streamer for the capture
-channels, feed the session from the 1.22 MHz stream via the shared
+channels, feed the session from the 2.44 MHz stream via the shared
 run_pfb_source, detect pulses, write the HDF5, and tear the PFB
 streamer down on stop.
 """
@@ -27,9 +27,7 @@ from rfmux.pulse_capture.session import (  # noqa: E402
     PulseCaptureSession,
 )
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader  # noqa: E402
-from rfmux.algorithms.measurement.streamer_config import (  # noqa: E402
-    PFB_SAMPLE_RATE,
-)
+from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ  # noqa: E402
 from rfmux.tools.periscope.pulse_capture_task import (  # noqa: E402
     PulseCaptureSignals,
     PulseCaptureTask,
@@ -147,7 +145,7 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     session = PulseCaptureSession(
         channels=channels, module=1, streamer_mode="fast",
         threshold_sigma=50.0, end_sigma=3.0,
-        sample_rate=PFB_SAMPLE_RATE, buf_size=200_000,
+        sample_rate=PFB_SAMPLING_FREQ, buf_size=200_000,
         noise_samples=50_000, hdf5_path=path,
         histogram_flush_every=2)
     signals = PulseCaptureSignals()
@@ -191,7 +189,7 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
         assert total >= 2
         assert reader.metadata.get("streamer_mode") == "fast"
         assert reader.metadata.get("sample_rate_fast") == pytest.approx(
-            PFB_SAMPLE_RATE)
+            PFB_SAMPLING_FREQ)
 
 
 def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
@@ -202,9 +200,7 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     from rfmux.pulse_capture.session import (
         PulseCaptureConfig,
     )
-    from rfmux.algorithms.measurement.streamer_config import (
-        slow_sample_rate,
-    )
+    from rfmux.core.transferfunctions import decimation_to_sampling
 
     loop, crs = mock_crs
     channels = [1, 2]
@@ -220,7 +216,7 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
         dec = 6
     dual = DualPulseCaptureSession(
         channels=channels, module=1,
-        slow_rate=slow_sample_rate(dec),
+        slow_rate=decimation_to_sampling(dec),
         config=cfg, hdf5_path=path)
 
     signals = PulseCaptureSignals()

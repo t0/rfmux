@@ -22,7 +22,7 @@ import warnings
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from tuber.codecs import TuberResult
-from ...core.transferfunctions import VOLTS_PER_ROC
+from ...core.transferfunctions import PFB_SAMPLING_FREQ, VOLTS_PER_ROC
 from ... import streamer
 
 from .py_get_pfb_samples import apply_pfb_correction
@@ -30,8 +30,6 @@ from .py_get_pfb_samples import apply_pfb_correction
 
 # ── Timestamp → absolute seconds-of-day ───────────────────────────
 
-# PFB bin bandwidth (no CIC decimation chain)
-_PFB_SAMPLE_RATE = 625e6 / 512  # ≈1.22 MHz
 
 @macro(CRS, register=True)
 async def py_run_pfb_streamer(crs : CRS,
@@ -197,7 +195,7 @@ async def py_run_pfb_streamer(crs : CRS,
                         # Account for all time-domain samples in packet
                         time_samples_in_pkt = p.num_samples // max(n_groups, 1)
                         elapsed_sample_time = (ts_sec - _start_time_ref
-                                               + (time_samples_in_pkt - 1) / _PFB_SAMPLE_RATE)
+                                               + (time_samples_in_pkt - 1) / PFB_SAMPLING_FREQ)
 
                     # ── Progress estimation (mock-mode aware) ─────
                     wall_elapsed = time.monotonic() - wall_start

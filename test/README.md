@@ -38,7 +38,7 @@ fail, so a CI runner missing it stops covering them without going red.
   never spawns a server: Qt runs offscreen, detection runs on synthetic arrays.
 - **acquisition:** a MockCRS server subprocess streaming UDP over loopback.
   Covers what no unit test can: streamer config taking effect, the slow
-  (~38 kHz) and PFB (~1.22 MHz) sources feeding a session, decimation
+  (~38 kHz) and PFB (~2.44 MHz) sources feeding a session, decimation
   constraints, and end-to-end pulse capture in slow, fast and both modes.
 - **hardware:** the same API against a real CRS. Skipped unless you pass
   `--serial`.

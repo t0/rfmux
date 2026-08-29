@@ -130,7 +130,7 @@ class StreamerConfigDialog(QtWidgets.QDialog):
         form.addRow("Modules:", self.modules_edit)
 
         self.pfb_check = QtWidgets.QCheckBox(
-            "Enable fast (PFB) streamer — ~1.22 MHz")
+            "Enable fast (PFB) streamer — ~2.44 MHz")
         form.addRow(self.pfb_check)
 
         self.pfb_group = QtWidgets.QWidget()

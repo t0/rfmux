@@ -30,10 +30,12 @@ from rfmux.pulse_capture import (
     run_pfb_source,
     run_slow_source,
 )
+from rfmux.core.transferfunctions import (
+    PFB_SAMPLING_FREQ,
+    decimation_to_sampling,
+)
 from rfmux.algorithms.measurement.streamer_config import (
-    PFB_SAMPLE_RATE,
     StreamerConfig,
-    slow_sample_rate,
     validate,
 )
 from rfmux.streamer import find_streamer_conflict
@@ -111,8 +113,8 @@ async def capture_slow(host, fs, path):
 async def capture_fast(host, path):
     session = PulseCaptureSession(
         channels=CHANNELS, module=MODULE, streamer_mode="fast",
-        sample_rate=PFB_SAMPLE_RATE, hdf5_path=path,
-        **CONFIG.session_kwargs(PFB_SAMPLE_RATE))
+        sample_rate=PFB_SAMPLING_FREQ, hdf5_path=path,
+        **CONFIG.session_kwargs(PFB_SAMPLING_FREQ))
     session.start()
     covered = await run_pfb_source(session, host, CHANNELS,
                                    duration_s=FAST_S)
@@ -123,7 +125,7 @@ async def capture_fast(host, path):
 async def capture_dual(host, fs, path):
     session = DualPulseCaptureSession(
         channels=CHANNELS, module=MODULE, slow_rate=fs,
-        fast_rate=PFB_SAMPLE_RATE, config=CONFIG, hdf5_path=path)
+        fast_rate=PFB_SAMPLING_FREQ, config=CONFIG, hdf5_path=path)
     session.start()
     covered, _ = await run_dual_source(session, host, CHANNELS,
                                        module=MODULE, duration_s=DUAL_S)
@@ -138,10 +140,10 @@ async def main(serial: str = "MOCK") -> int:
         # Decimation from the physics: >= 10 samples across one tau.
         needed_fs = 10.0 / PULSE_TAU_S
         dec = next(d for d in range(6, -1, -1)
-                   if slow_sample_rate(d) >= needed_fs)
+                   if decimation_to_sampling(d) >= needed_fs)
         cfg = StreamerConfig(dec_stage=dec, short_packets=(dec < 3),
                              modules=[MODULE])
-        fs = slow_sample_rate(dec)
+        fs = decimation_to_sampling(dec)
 
         for severity, message in validate(cfg):
             print(f"[{severity}] {message}")

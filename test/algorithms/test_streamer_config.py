@@ -14,14 +14,17 @@ import pytest
 
 import rfmux
 
+from rfmux.core.transferfunctions import (
+    PFB_NYQUIST_FREQ,
+    PFB_SAMPLING_FREQ,
+    decimation_to_sampling,
+)
 from rfmux.algorithms.measurement.streamer_config import (
     DERATED_LINK_MBPS,
-    PFB_SAMPLE_RATE,
     StreamerConfig,
     apply_streamer_config,
     describe,
     read_streamer_config,
-    slow_sample_rate,
     validate,
 )
 
@@ -32,9 +35,13 @@ def _severities(issues):
 
 class TestDescribe:
     def test_rates(self):
-        assert slow_sample_rate(0) == pytest.approx(38146.97265625)
-        assert slow_sample_rate(6) == pytest.approx(596.0464477539062)
-        assert PFB_SAMPLE_RATE == pytest.approx(1220703.125)
+        assert decimation_to_sampling(0) == pytest.approx(38146.97265625)
+        assert decimation_to_sampling(6) == pytest.approx(596.0464477539062)
+        # 625 MHz / 256, complex samples.  The Nyquist -- 625 MHz / 512 --
+        # is the bin spacing, and is NOT the rate; conflating them halves
+        # every duration derived from the fast stream.
+        assert PFB_SAMPLING_FREQ == pytest.approx(2441406.25)
+        assert PFB_NYQUIST_FREQ == pytest.approx(1220703.125)
 
     def test_bandwidth_math(self):
         d = describe(StreamerConfig(dec_stage=6, short_packets=False,
@@ -48,9 +55,12 @@ class TestDescribe:
         assert d["channels_per_module"] == 128
         # 1072 B * 8 * 38147 Hz
         assert d["slow_mbps"] == pytest.approx(327.2, rel=0.01)
-        # 2 ch * 8056 B/1000 samp * 8 * 1.2207 MHz
-        assert d["pfb_mbps"] == pytest.approx(157.4, rel=0.01)
-        assert d["total_mbps"] == pytest.approx(484.5, rel=0.01)
+        # 2 ch * 8056 B/1000 samp * 8 * 2.4414 MHz
+        assert d["pfb_mbps"] == pytest.approx(314.7, rel=0.01)
+        # Two PFB channels alongside stage 0 short packets is 642 Mbps --
+        # past the derated budget, which is the point: at the Nyquist
+        # this configuration looked like it fitted.
+        assert d["total_mbps"] == pytest.approx(641.9, rel=0.01)
 
 
 class TestValidate:
@@ -116,7 +126,7 @@ class TestApplyOnMock:
         info = loop.run_until_complete(apply_streamer_config(
             crs, StreamerConfig(dec_stage=1, short_packets=True,
                                 modules=[1])))
-        assert info["sample_rate_hz"] == pytest.approx(slow_sample_rate(1))
+        assert info["sample_rate_hz"] == pytest.approx(decimation_to_sampling(1))
         state = loop.run_until_complete(read_streamer_config(crs))
         assert state["dec_stage"] == 1
 
@@ -187,7 +197,7 @@ class TestSources:
         try:
             session = PulseCaptureSession(
                 channels=[1, 2], streamer_mode="fast",
-                sample_rate=PFB_SAMPLE_RATE, noise_samples=400,
+                sample_rate=PFB_SAMPLING_FREQ, noise_samples=400,
                 hdf5_path=None)
             session.start()
             elapsed = loop.run_until_complete(run_pfb_source(

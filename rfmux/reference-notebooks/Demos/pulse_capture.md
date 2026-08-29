@@ -65,8 +65,11 @@ from rfmux.pulse_capture import (
     PulseHDF5Reader, counts_to_hz_scale,
     run_dual_source, run_pfb_source, run_slow_source,
 )
+from rfmux.core.transferfunctions import (
+    PFB_SAMPLING_FREQ, decimation_to_sampling,
+)
 from rfmux.algorithms.measurement.streamer_config import (
-    PFB_SAMPLE_RATE, StreamerConfig, describe, slow_sample_rate, validate,
+    StreamerConfig, describe, validate,
 )
 
 # Captures are written here. Reference notebooks are provisioned to a
@@ -257,7 +260,7 @@ Two streams carry samples off the board:
 
 - the **slow** readout stream, decimated in stages from ~38 kHz down to ~596 Hz,
   carrying up to 1024 channels per module (port 9876);
-- the **fast** PFB stream at ~1.22 MHz, limited to 4 channels of one module
+- the **fast** PFB stream at ~2.44 MHz, limited to 4 channels of one module
   (port 9877).
 
 The decimation is a physics choice, not a taste one: you want roughly **10 or
@@ -278,11 +281,11 @@ returns the derived rates and link budget.
 PULSE_TAU_S = 1e-3          # expected decay constant
 
 needed_fs = 10.0 / PULSE_TAU_S
-dec = next(d for d in range(6, -1, -1) if slow_sample_rate(d) >= needed_fs)
+dec = next(d for d in range(6, -1, -1) if decimation_to_sampling(d) >= needed_fs)
 cfg = StreamerConfig(dec_stage=dec, short_packets=(dec < 3), modules=[MODULE])
 
 print(f"τ = {PULSE_TAU_S*1e3:.1f} ms → need ≥ {needed_fs:.0f} Hz "
-      f"→ stage {dec} ({slow_sample_rate(dec):.0f} Hz)")
+      f"→ stage {dec} ({decimation_to_sampling(dec):.0f} Hz)")
 
 # Check the link budget BEFORE touching the board
 budget = describe(cfg)
@@ -339,7 +342,7 @@ spec, from `get_biased_channels`, or by hand.
 
 `PulseCaptureConfig` holds every user-facing parameter in **physical units**
 (σ and milliseconds). It converts them to samples for whatever stream rate you
-hand it, which is what lets one configuration work unchanged across a 2000×
+hand it, which is what lets one configuration work unchanged across a 4000×
 span of rates from the decimated slow stream to the PFB stream.
 
 How the detector works:
@@ -351,7 +354,7 @@ How the detector works:
 - **Triggers must be confirmed.** `trigger_samples` consecutive samples have to
   clear the threshold. Left at 0 it is *derived from the stream rate* to hold
   accidental triggers under `max_accidental_per_min`: at 596 Hz one sample is
-  ample evidence, at 1.22 MHz it is not.
+  ample evidence, at 2.44 MHz it is not.
 - **A trigger also needs a fast rise.** As well as crossing the threshold, the
   signal must be higher than it was `edge_lookback` samples ago. That compares
   two raw samples instead of measuring against the baseline, so a slow drift
@@ -405,7 +408,7 @@ capture_config = PulseCaptureConfig(
     enable_pileup=True,     # split piled-up events on a sharp re-rise
 )
 
-fs = slow_sample_rate(cfg.dec_stage)
+fs = decimation_to_sampling(cfg.dec_stage)
 for severity, message in capture_config.validate(fs):
     print(f"  [{severity}] {message}")
 
@@ -430,7 +433,7 @@ mechanism that makes one config portable across streams:
 
 ```python
 for rate, label in [(596.0, "slow, stage 6"), (fs, f"slow, stage {dec}"),
-                    (PFB_SAMPLE_RATE, "fast (PFB)")]:
+                    (PFB_SAMPLING_FREQ, "fast (PFB)")]:
     dd = capture_config.describe(rate)
     print(f"{label:<18} {rate:>10,.0f} Hz → confirm "
           f"{dd['trigger_samples']} sample(s), "
@@ -647,12 +650,12 @@ reader.close()
 
 ## 8. Fast (PFB) capture
 
-The fast streamer carries up to **4 channels of one module** at ~1.22 MHz —
-about 64× the slow stream here, enough to resolve a rise time the slow stream
+The fast streamer carries up to **4 channels of one module** at ~2.44 MHz —
+about 128× the slow stream here, enough to resolve a rise time the slow stream
 sees as a single sample. Enable it through `configure_streamer`, and always tear
 it down in a `finally` so a failed capture doesn't leave it running.
 
-The same `PulseCaptureConfig` is reused: `session_kwargs(PFB_SAMPLE_RATE)`
+The same `PulseCaptureConfig` is reused: `session_kwargs(PFB_SAMPLING_FREQ)`
 re-derives the buffer, training length and confirmation count for the new rate.
 
 ```python
@@ -662,9 +665,9 @@ await crs.configure_streamer(cfg.dec_stage, short=cfg.short_packets,
 try:
     fast_session = PulseCaptureSession(
         channels=CHANNELS, module=MODULE, streamer_mode="fast",
-        sample_rate=PFB_SAMPLE_RATE,
+        sample_rate=PFB_SAMPLING_FREQ,
         hdf5_path=str(OUTPUT_DIR / "pulse_capture_fast.h5"),
-        **capture_config.session_kwargs(PFB_SAMPLE_RATE),
+        **capture_config.session_kwargs(PFB_SAMPLING_FREQ),
     )
     fast_session.start()
     covered = await run_pfb_source(fast_session, host, CHANNELS,
@@ -686,7 +689,7 @@ alone just accumulates one-sided pulses.
 
 Each matched pair also stores a common time span: the widest interval either
 trigger covers, taken from both ring buffers. That gives you the same event at
-19 kHz and at 1.22 MHz over the same interval, which is what makes the two
+19 kHz and at 2.44 MHz over the same interval, which is what makes the two
 comparable. Metrics are still computed from each stream's own triggered samples,
 so the wider span does not affect them.
 
@@ -695,7 +698,7 @@ pairs = []
 
 dual = DualPulseCaptureSession(
     channels=CHANNELS, module=MODULE,
-    slow_rate=fs, fast_rate=PFB_SAMPLE_RATE,
+    slow_rate=fs, fast_rate=PFB_SAMPLING_FREQ,
     config=capture_config,
     hdf5_path=str(OUTPUT_DIR / "pulse_capture_dual.h5"),
     on_pair=lambda p: pairs.append(p),
@@ -731,7 +734,7 @@ if two_sided:
     p = two_sided[len(two_sided) // 2]
     plt.figure(figsize=(9, 3.5))
     for key, label in (("slow_tod", f"slow ({fs/1e3:.0f} kHz)"),
-                       ("fast_tod", f"fast ({PFB_SAMPLE_RATE/1e6:.2f} MHz)")):
+                       ("fast_tod", f"fast ({PFB_SAMPLING_FREQ/1e6:.2f} MHz)")):
         tod = p.get(key)
         if tod is None:
             continue
@@ -746,7 +749,7 @@ if two_sided:
 ```
 
 Budget for the file size: every pair stores that common span from *both* rings,
-and at 1.22 MHz that window is thousands of samples. The capture above averages
+and at 2.44 MHz that window is thousands of samples. The capture above averages
 roughly 200 kB per pair — about 16 MB for two seconds at this (very high) mock
 pulse rate. Real detector rates are far lower, but on a long run the union
 windows, not the triggered cores, are what fills the disk.

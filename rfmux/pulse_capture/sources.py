@@ -18,7 +18,7 @@ Usage (fast/PFB capture, headless)::
 
     await crs.configure_streamer(6, pfb_channels=[1, 2])
     session = PulseCaptureSession(channels=[1, 2], streamer_mode="fast",
-                                  sample_rate=streamer.PFB_SAMPLE_RATE, ...)
+                                  sample_rate=PFB_SAMPLING_FREQ, ...)
     session.start()
     await run_pfb_source(session, crs.tuber_hostname, [1, 2],
                          duration_s=10.0)
@@ -38,6 +38,7 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 import numpy as np
 
 from .. import streamer
+from ..core.transferfunctions import PFB_SAMPLING_FREQ
 
 
 def columns_for_width(channels, width: int):
@@ -261,7 +262,7 @@ async def run_pfb_source(
     *,
     duration_s: Optional[float] = None,
     should_stop: Optional[Callable[[], bool]] = None,
-    sample_rate: float = streamer.PFB_SAMPLE_RATE,
+    sample_rate: float = PFB_SAMPLING_FREQ,
 ) -> float:
     """Feed *session* from the fast/PFB stream until stopped.
 

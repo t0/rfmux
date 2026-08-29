@@ -21,7 +21,16 @@ CREST_FACTOR = 3.5
 
 TERMINATION = 50.0
 COMB_SAMPLING_FREQ = 625e6
+
+#: Per-channel sample rate of the PFB stream, in Hz.  Samples are
+#: complex, so this is the full complex bandwidth.
 PFB_SAMPLING_FREQ = COMB_SAMPLING_FREQ / 256
+
+#: Nyquist frequency of PFB_SAMPLING_FREQ -- the single-sided bandwidth,
+#: and numerically also the PFB bin spacing (512 bins across
+#: COMB_SAMPLING_FREQ).  NOT a sample rate: dividing a sample count by
+#: this gives twice the true elapsed time.
+PFB_NYQUIST_FREQ = PFB_SAMPLING_FREQ / 2
 
 DDS_PHASE_ACC_NBITS = 32  # bits
 FREQ_QUANTUM = COMB_SAMPLING_FREQ / 256 / 2**DDS_PHASE_ACC_NBITS

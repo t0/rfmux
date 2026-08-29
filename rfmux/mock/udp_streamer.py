@@ -8,15 +8,15 @@ Architecture
 ------------
 The streamer always emits slow ReadoutPackets at the decimation-determined
 cadence.  When PFB is enabled (via ``enable_pfb()``), it also emits
-PFBPackets in fixed batches of ``PFB_BATCH`` = 32 time samples — the
+PFBPackets in fixed batches of ``PFB_BATCH`` = 64 time samples — the
 natural ratio between PFB rate and the dec-0 slow rate.
 
 At decimation stage *d*, there are ``2^d`` PFB batches per slow sample:
 
-    PFB rate:  625 MHz / 512  ≈ 1.22 MHz
+    PFB rate:  625 MHz / 256  ≈ 2.44 MHz  (complex samples)
     Slow rate: 625 MHz / 256 / 64 / 2^d
-    Ratio:     32 × 2^d  PFB samples per slow sample
-    Batches:   2^d  (each of 32 PFB samples)
+    Ratio:     64 × 2^d  PFB samples per slow sample
+    Batches:   2^d  (each of 64 PFB samples)
 
 Both packet types share the same simulation clock, giving perfect
 timestamp synchronization with zero physics-lock contention.
@@ -40,6 +40,7 @@ from ..streamer import (
     SS_PER_SECOND,
     STREAMER_PORT, PFB_STREAMER_PORT,
 )
+from ..core.transferfunctions import PFB_SAMPLING_FREQ
 
 # ── Global cleanup registry ──────────────────────────────────────
 
@@ -71,8 +72,8 @@ def _register_global_cleanup():
 
 # ── Constants ─────────────────────────────────────────────────────
 
-PFB_RATE = 625e6 / 512     # ≈1.22 MHz per PFB bin
-PFB_BATCH = 32              # PFB samples per dec-0 slow sample (fundamental quantum)
+PFB_RATE = PFB_SAMPLING_FREQ   # ≈2.44 MHz per PFB channel
+PFB_BATCH = 64              # PFB samples per dec-0 slow sample (fundamental quantum)
 
 
 class MockCRSStreamer(threading.Thread):
@@ -80,7 +81,7 @@ class MockCRSStreamer(threading.Thread):
 
     Always emits slow ReadoutPackets at the decimation-determined cadence.
     When PFB is enabled (via ``enable_pfb()``), also emits PFBPackets at
-    ``PFB_RATE`` in fixed batches of ``PFB_BATCH`` = 32 samples.
+    ``PFB_RATE`` in fixed batches of ``PFB_BATCH`` = 64 samples.
 
     At decimation stage *d*, there are ``2^d`` PFB batches per slow frame.
     Both packet types share the same simulation clock, giving perfect
@@ -381,10 +382,10 @@ class MockCRSStreamer(threading.Thread):
     # ── PFB packet emission ───────────────────────────────────
 
     def _emit_pfb_packet(self, t_batch, dec):
-        """Generate and send one PFB packet (PFB_BATCH=32 time samples)."""
+        """Generate and send one PFB packet (PFB_BATCH=64 time samples)."""
         channels = self.pfb_channels
         n_groups = len(channels)
-        N = PFB_BATCH  # 32 time samples
+        N = PFB_BATCH  # 64 time samples
 
         # ── Physics ───────────────────────────────────────────
         cfg = getattr(self.mock_crs, '_physics_config', {}) or {}

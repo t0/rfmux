@@ -64,6 +64,7 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 
 from .. import streamer
+from ..core.transferfunctions import PFB_SAMPLING_FREQ
 
 from .detection import (
     DEFAULT_END_SIGMA,
@@ -179,7 +180,7 @@ class PulseCaptureConfig:
     #: 0 = choose it from the stream rate, which is the right default:
     #: the accidental rate scales with sample rate, so one sample is
     #: plenty of evidence at 596 Hz (2.5 accidentals per HOUR) and
-    #: nowhere near enough at 1.22 MHz (1.4 per SECOND).  Demanding two
+    #: nowhere near enough at 2.44 MHz (2.8 per SECOND).  Demanding two
     #: everywhere would reject real pulses on a heavily decimated slow
     #: stream, where a fast pulse spans less than one sample.
     trigger_samples: int = 0
@@ -254,7 +255,7 @@ class PulseCaptureConfig:
 
         The record is held whole (it is fitted, not streamed), so a
         duration that is comfortable on the slow stream is not on the
-        PFB one: 30 s at 1.22 MHz is 36.6M samples per channel.  The cap
+        PFB one: 30 s at 2.44 MHz is 73.2M samples per channel.  The cap
         binds only at fast rates, where a long span is neither needed
         nor achievable — describe() reports the duration actually used.
         """
@@ -727,7 +728,7 @@ class PulseCaptureSession(_CallbackHost):
         Equivalent to :meth:`feed_sample` per element, but hands whole
         arrays to :meth:`PulseCapture.process_block`, which absorbs
         quiet stretches with numpy instead of a Python loop.  That is
-        what makes the 1.22 MHz PFB stream tractable — see
+        what makes the 2.44 MHz PFB stream tractable — see
         process_block for why the per-sample path cannot get there.
 
         A block may straddle the end of noise training, so it is split
@@ -1152,7 +1153,7 @@ class DualPulseCaptureSession(_CallbackHost):
         *,
         module: int = 1,
         slow_rate: float,
-        fast_rate: float = streamer.PFB_SAMPLE_RATE,
+        fast_rate: float = PFB_SAMPLING_FREQ,
         config: Optional[PulseCaptureConfig] = None,
         hdf5_path=None,
         df_calibrations: Optional[Dict[int, float]] = None,

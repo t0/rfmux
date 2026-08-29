@@ -702,7 +702,7 @@ plt.tight_layout(); plt.show()
 ### The fast (PFB) stream
 
 `py_get_pfb_samples` reads one channel at the full polyphase-filterbank rate of
-~1.22 MHz — about 2000× the decimated slow stream — which is what you need to
+~2.44 MHz, about 4000× the decimated slow stream, which is what you need to
 resolve a fast pulse rise. It takes one channel at a time and applies the PFB
 droop correction before computing the spectrum.
 

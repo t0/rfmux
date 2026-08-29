@@ -58,7 +58,7 @@ from ...pulse_capture.session import (
 )
 from ...pulse_capture.detection import ChannelNoiseStats
 from ...pulse_capture.sources import run_dual_source, run_pfb_source, run_slow_source
-from .streamer_config import PFB_SAMPLE_RATE, slow_sample_rate
+from ...core.transferfunctions import PFB_SAMPLING_FREQ, decimation_to_sampling
 
 #: Default longest-pulse estimate for a one-shot capture.  Deliberately
 #: shorter than PulseCaptureConfig's own default: that one is sized for
@@ -209,7 +209,7 @@ async def trigger_capture(
     module : int
         Module index (1-based).
     streamer_mode : str
-        ``"slow"``, ``"fast"`` (PFB, ~1.22 MHz) or ``"both"``.  In
+        ``"slow"``, ``"fast"`` (PFB, ~2.44 MHz) or ``"both"``.  In
         ``"both"`` the two streams are detected independently and their
         pulses matched by trigger time into :attr:`PulseCaptureResult.pairs`.
     time_run : float
@@ -260,11 +260,11 @@ async def trigger_capture(
     dec = await crs.get_decimation()
     if dec is None:
         dec = 6
-    slow_rate = slow_sample_rate(dec)
+    slow_rate = decimation_to_sampling(dec)
 
     rates = ({"slow": slow_rate} if streamer_mode == "slow"
-             else {"fast": PFB_SAMPLE_RATE} if streamer_mode == "fast"
-             else {"slow": slow_rate, "fast": PFB_SAMPLE_RATE})
+             else {"fast": PFB_SAMPLING_FREQ} if streamer_mode == "fast"
+             else {"slow": slow_rate, "fast": PFB_SAMPLING_FREQ})
 
     # Validate against each rate actually in play: most of what the config
     # derives (confirmation length, buffer, training span) is rate
@@ -324,7 +324,7 @@ async def trigger_capture(
 async def _run_single(result, crs, host, channels, module, streamer_mode,
                       slow_rate, duration_s, hdf5_path, verbose) -> None:
     is_fast = streamer_mode == "fast"
-    rate = PFB_SAMPLE_RATE if is_fast else slow_rate
+    rate = PFB_SAMPLING_FREQ if is_fast else slow_rate
     stream = StreamResult(sample_rate=rate)
 
     session = PulseCaptureSession(
@@ -358,12 +358,12 @@ async def _run_single(result, crs, host, channels, module, streamer_mode,
 async def _run_dual(result, crs, host, channels, module, slow_rate,
                     duration_s, hdf5_path, verbose) -> None:
     slow = StreamResult(sample_rate=slow_rate)
-    fast = StreamResult(sample_rate=PFB_SAMPLE_RATE)
+    fast = StreamResult(sample_rate=PFB_SAMPLING_FREQ)
     collectors = {"slow": _collector(slow), "fast": _collector(fast)}
 
     session = DualPulseCaptureSession(
         channels=channels, module=module, slow_rate=slow_rate,
-        fast_rate=PFB_SAMPLE_RATE, config=result.config,
+        fast_rate=PFB_SAMPLING_FREQ, config=result.config,
         hdf5_path=hdf5_path,
         on_pulse=lambda s, ch, idx, summary, wf:
             collectors[s](ch, idx, summary, wf),

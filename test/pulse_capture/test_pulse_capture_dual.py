@@ -9,11 +9,11 @@ session's two streams with a shared clock.
 import numpy as np
 import pytest
 
-from rfmux.pulse_capture.session import (
+from rfmux.pulse_capture.capture_session import (
     DualPulseCaptureSession,
     IncrementalPulseMatcher,
 )
-from rfmux.pulse_capture.session import (
+from rfmux.pulse_capture.capture_session import (
     CaptureState,
     PulseCaptureConfig,
 )
@@ -280,7 +280,7 @@ def test_streams_start_capturing_together():
     into a partner with no ring yet and every pair comes out one-sided
     with 'window unavailable'."""
     import numpy as np
-    from rfmux.pulse_capture.session import (
+    from rfmux.pulse_capture.capture_session import (
         CaptureState)
 
     dual = DualPulseCaptureSession(

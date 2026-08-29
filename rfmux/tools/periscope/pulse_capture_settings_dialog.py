@@ -2,7 +2,7 @@
 Capture Settings dialog for the Pulse Capture panel.
 
 Thin view over
-:class:`rfmux.pulse_capture.session.PulseCaptureConfig`:
+:class:`rfmux.pulse_capture.capture_session.PulseCaptureConfig`:
 every derived number (ms → samples, auto-sized ring buffer, memory) and
 every rule comes from the config object; the dialog renders them live
 at the stream rate the capture will actually run at.
@@ -15,7 +15,7 @@ from PyQt6 import QtWidgets
 
 from .utils import apply_issue_banner
 
-from ...pulse_capture.session import (
+from ...pulse_capture.capture_session import (
     PulseCaptureConfig,
 )
 

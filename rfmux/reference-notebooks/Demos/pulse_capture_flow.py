@@ -99,38 +99,38 @@ async def connect(serial: str):
 
 
 async def capture_slow(host, fs, path):
-    session = PulseCaptureSession(
+    capture_session = PulseCaptureSession(
         channels=CHANNELS, module=MODULE, streamer_mode="slow",
         sample_rate=fs, hdf5_path=path,
         **CONFIG.session_kwargs(fs))
-    session.start()
-    covered = await run_slow_source(session, host, module=MODULE,
+    capture_session.start()
+    covered = await run_slow_source(capture_session, host, module=MODULE,
                                     duration_s=SLOW_S)
-    session.stop()
-    return session.total_pulses, covered
+    capture_session.stop()
+    return capture_session.total_pulses, covered
 
 
 async def capture_fast(host, path):
-    session = PulseCaptureSession(
+    capture_session = PulseCaptureSession(
         channels=CHANNELS, module=MODULE, streamer_mode="fast",
         sample_rate=PFB_SAMPLING_FREQ, hdf5_path=path,
         **CONFIG.session_kwargs(PFB_SAMPLING_FREQ))
-    session.start()
-    covered = await run_pfb_source(session, host, CHANNELS,
+    capture_session.start()
+    covered = await run_pfb_source(capture_session, host, CHANNELS,
                                    duration_s=FAST_S)
-    session.stop()
-    return session.total_pulses, covered
+    capture_session.stop()
+    return capture_session.total_pulses, covered
 
 
 async def capture_dual(host, fs, path):
-    session = DualPulseCaptureSession(
+    capture_session = DualPulseCaptureSession(
         channels=CHANNELS, module=MODULE, slow_rate=fs,
         fast_rate=PFB_SAMPLING_FREQ, config=CONFIG, hdf5_path=path)
-    session.start()
-    covered, _ = await run_dual_source(session, host, CHANNELS,
+    capture_session.start()
+    covered, _ = await run_dual_source(capture_session, host, CHANNELS,
                                        module=MODULE, duration_s=DUAL_S)
-    session.stop()
-    return session.stats(), covered
+    capture_session.stop()
+    return capture_session.stats(), covered
 
 
 async def main(serial: str = "MOCK") -> int:

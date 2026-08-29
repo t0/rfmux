@@ -164,7 +164,7 @@ class TestApplyOnMock:
 class TestSources:
     pytestmark = pytest.mark.slow_acquisition
     def test_slow_source_feeds_session(self, mock_crs):
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             CaptureState, PulseCaptureSession)
         from rfmux.pulse_capture.sources import (
             run_slow_source)
@@ -174,18 +174,18 @@ class TestSources:
                                                    module=[1]))
         # Let in-flight packets from earlier decimation settings drain
         loop.run_until_complete(asyncio.sleep(0.3))
-        session = PulseCaptureSession(channels=[1], noise_samples=50,
+        capture_session = PulseCaptureSession(channels=[1], noise_samples=50,
                                       hdf5_path=None)
-        session.start()
+        capture_session.start()
         elapsed = loop.run_until_complete(run_slow_source(
-            session, "127.0.0.1", module=1, duration_s=0.15))
-        assert session.state is CaptureState.CAPTURING, \
-            f"state={session.state}, elapsed={elapsed}"
-        assert session.noise_stats
-        session.stop()
+            capture_session, "127.0.0.1", module=1, duration_s=0.15))
+        assert capture_session.state is CaptureState.CAPTURING, \
+            f"state={capture_session.state}, elapsed={elapsed}"
+        assert capture_session.noise_stats
+        capture_session.stop()
 
     def test_pfb_source_feeds_session(self, mock_crs):
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             CaptureState, PulseCaptureSession)
         from rfmux.pulse_capture.sources import (
             run_pfb_source)
@@ -195,17 +195,17 @@ class TestSources:
             crs, StreamerConfig(dec_stage=6, short_packets=False,
                                 modules=[1], pfb_channels=[1, 2])))
         try:
-            session = PulseCaptureSession(
+            capture_session = PulseCaptureSession(
                 channels=[1, 2], streamer_mode="fast",
                 sample_rate=PFB_SAMPLING_FREQ, noise_samples=400,
                 hdf5_path=None)
-            session.start()
+            capture_session.start()
             elapsed = loop.run_until_complete(run_pfb_source(
-                session, "127.0.0.1", [1, 2], duration_s=0.01))
-            assert session.state is CaptureState.CAPTURING, \
-                f"state={session.state}, elapsed={elapsed}"
-            assert set(session.noise_stats) == {1, 2}
-            session.stop()
+                capture_session, "127.0.0.1", [1, 2], duration_s=0.01))
+            assert capture_session.state is CaptureState.CAPTURING, \
+                f"state={capture_session.state}, elapsed={elapsed}"
+            assert set(capture_session.noise_stats) == {1, 2}
+            capture_session.stop()
         finally:
             loop.run_until_complete(crs.set_pfb_streamer(channel=None,
                                                          module=1))

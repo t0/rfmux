@@ -8,7 +8,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6 import QtWidgets  # noqa: E402
 
-from rfmux.pulse_capture.session import (  # noqa: E402
+from rfmux.pulse_capture.capture_session import (  # noqa: E402
     PulseCaptureConfig,
 )
 from rfmux.tools.periscope.pulse_capture_settings_dialog import (  # noqa: E402

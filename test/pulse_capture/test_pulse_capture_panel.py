@@ -190,7 +190,7 @@ def test_tap_exclusivity(qt_app, tmp_path, monkeypatch):
 
 # ───────────────────────── Phase C: review mode + session ───────────
 
-from rfmux.pulse_capture.session import (  # noqa: E402
+from rfmux.pulse_capture.capture_session import (  # noqa: E402
     PulseCaptureSession,
 )
 
@@ -198,14 +198,14 @@ from rfmux.pulse_capture.session import (  # noqa: E402
 def _build_capture_file(tmp_path, n_pulses=3):
     """Produce a real capture HDF5 headlessly via PulseCaptureSession."""
     path = tmp_path / "review_source.h5"
-    session = PulseCaptureSession(
+    capture_session = PulseCaptureSession(
         channels=[1], threshold_sigma=5.0, end_sigma=1.5,
         margin_fraction=0.2, noise_samples=200, hdf5_path=path,
         histogram_flush_every=2)
     rng = np.random.default_rng(42)
-    session.start()
+    capture_session.start()
     for _ in range(200):
-        session.feed_sample(1, float(rng.normal(0, 1.0)),
+        capture_session.feed_sample(1, float(rng.normal(0, 1.0)),
                             float(rng.normal(0, 1.0)), None)
     n = 3000
     starts = [100 + 800 * i for i in range(n_pulses)]
@@ -215,10 +215,10 @@ def _build_capture_file(tmp_path, n_pulses=3):
         m = k >= k0
         signal[m] += 60.0 * np.exp(-(k[m] - k0) / 40.0)
     for i in range(n):
-        session.feed_sample(1, float(signal[i]),
+        capture_session.feed_sample(1, float(signal[i]),
                             float(rng.normal(0, 1.0)), i * DT)
-    assert session.total_pulses == n_pulses
-    session.stop()
+    assert capture_session.total_pulses == n_pulses
+    capture_session.stop()
     return path
 
 
@@ -407,10 +407,10 @@ def test_channel_default_follows_stream(qt_app, tmp_path):
 
 
 def _build_dual_file(tmp_path):
-    from rfmux.pulse_capture.session import (
+    from rfmux.pulse_capture.capture_session import (
         DualPulseCaptureSession,
     )
-    from rfmux.pulse_capture.session import (
+    from rfmux.pulse_capture.capture_session import (
         PulseCaptureConfig,
     )
     path = tmp_path / "dual_review.h5"
@@ -470,7 +470,7 @@ def test_dual_review_mode(qt_app, tmp_path):
 def test_dual_session_hdf5_path_parity(tmp_path):
     """Panel/task read session.hdf5_path on finish — the dual session
     must expose it like the single session (stop-crash regression)."""
-    from rfmux.pulse_capture.session import (
+    from rfmux.pulse_capture.capture_session import (
         DualPulseCaptureSession,
     )
     path = tmp_path / "parity.h5"

@@ -20,16 +20,16 @@ headless script cannot interpret a stream differently.
 
 Lifecycle::
 
-    session = PulseCaptureSession(
+    capture_session = PulseCaptureSession(
         channels=[1, 2],
         threshold_sigma=5.0,
         hdf5_path="capture.h5",
         on_pulse=lambda ch, idx, summary, data: ...,
     )
-    session.start()                     # begins noise estimation
+    capture_session.start()             # begins noise estimation
     for ch, i, q, t in sample_stream:
-        session.feed_sample(ch, i, q, t)
-    session.stop()                      # finalizes the HDF5 file
+        capture_session.feed_sample(ch, i, q, t)
+    capture_session.stop()              # finalizes the HDF5 file
 
 State machine::
 

@@ -32,11 +32,11 @@ Typical headless use::
 
     from rfmux.pulse_capture import PulseCaptureSession, run_slow_source
 
-    session = PulseCaptureSession(channels=[1, 2], sample_rate=fs,
-                                  hdf5_path="capture.h5")
-    session.start()
-    await run_slow_source(session, host, module=1, duration_s=10.0)
-    session.stop()
+    capture_session = PulseCaptureSession(channels=[1, 2], sample_rate=fs,
+                                          hdf5_path="capture.h5")
+    capture_session.start()
+    await run_slow_source(capture_session, host, module=1, duration_s=10.0)
+    capture_session.stop()
 
 See ``rfmux/reference-notebooks/Demos/pulse_capture.md`` for the full
 worked example; it is executed against a MockCRS in CI, so it is a test
@@ -64,7 +64,7 @@ from .accumulators import (
     PulseTemplateSet,
     find_trigger_index,
 )
-from .session import (
+from .capture_session import (
     DETECTION_PARAMS,
     CaptureState,
     DualPulseCaptureSession,

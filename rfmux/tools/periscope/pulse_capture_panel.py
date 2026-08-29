@@ -1,14 +1,15 @@
 """
 Dockable live pulse-capture panel.
 
-Layout mirrors the SPIE2026 HUD mockup: a toolbar of capture controls,
-a status strip (state / counts / rate + per-channel noise), a pulse
-tree on the left (newest first, pileup flagged), and a tabbed viewer on
-the right (single-pulse I/Q waveform with threshold bands, and a 2×2
-grid of running histograms — SNR, peak amplitude, duration, derived τ).
+The layout: a toolbar of capture controls, a status strip (state /
+counts / rate + per-channel noise), a pulse tree on the left (newest
+first, pileup flagged), and three tabs on the right — a single-pulse
+I/Q waveform with threshold bands, a 2×2 grid of running histograms
+(SNR, peak amplitude, duration, derived τ), and the trigger-aligned
+template stack.
 
 All capture logic lives in
-:class:`~rfmux.pulse_capture.session.PulseCaptureSession`;
+:class:`~rfmux.pulse_capture.capture_session.PulseCaptureSession`;
 this panel only configures a session, bridges it through
 :class:`~rfmux.tools.periscope.pulse_capture_task.PulseCaptureTask`,
 and draws.
@@ -41,7 +42,7 @@ from .pulse_capture_settings_dialog import PulseCaptureSettingsDialog
 from ...algorithms.measurement.channel_selection import (
     parse_channel_spec,
 )
-from ...pulse_capture.session import (
+from ...pulse_capture.capture_session import (
     PulseCaptureConfig,
     PulseCaptureSession,
 )
@@ -1083,10 +1084,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         if mode == "both":
-            from ...pulse_capture.session import (
+            from ...pulse_capture.capture_session import (
                 DualPulseCaptureSession,
             )
-            session = DualPulseCaptureSession(
+            capture_session = DualPulseCaptureSession(
                 channels=channels,
                 module=module,
                 slow_rate=self._current_sample_rate("slow"),
@@ -1096,7 +1097,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 df_calibrations=self.df_calibrations,
             )
         else:
-            session = PulseCaptureSession(
+            capture_session = PulseCaptureSession(
                 channels=channels,
                 module=module,
                 streamer_mode=mode,
@@ -1106,7 +1107,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 **self.capture_config.session_kwargs(fs),
             )
         self.signals = PulseCaptureSignals()
-        self.task = PulseCaptureTask(session, self.signals, mode=mode,
+        self.task = PulseCaptureTask(capture_session, self.signals, mode=mode,
                                      crs=crs, host=host, module=module)
         conn = QtCore.Qt.ConnectionType.QueuedConnection
         self.signals.noise_estimated.connect(self._on_noise_estimated, conn)

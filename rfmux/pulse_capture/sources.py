@@ -17,15 +17,15 @@ than a second implementation.
 Usage (fast/PFB capture, headless)::
 
     await crs.configure_streamer(6, pfb_channels=[1, 2])
-    session = PulseCaptureSession(channels=[1, 2], streamer_mode="fast",
+    capture_session = PulseCaptureSession(channels=[1, 2], streamer_mode="fast",
                                   sample_rate=PFB_SAMPLING_FREQ, ...)
-    session.start()
-    await run_pfb_source(session, crs.tuber_hostname, [1, 2],
+    capture_session.start()
+    await run_pfb_source(capture_session, crs.tuber_hostname, [1, 2],
                          duration_s=10.0)
-    session.stop()
+    capture_session.stop()
 
 :func:`run_dual_source` drives both streams at once for a
-:class:`~rfmux.pulse_capture.session.DualPulseCaptureSession`,
+:class:`~rfmux.pulse_capture.capture_session.DualPulseCaptureSession`,
 which is what live cross-stream pulse matching needs.
 """
 
@@ -78,7 +78,7 @@ class SlowIngest:
     a block of one channel.
 
     ``feed`` is called as ``feed(channel, I, Q, timestamps)`` -- pass
-    ``session.feed_block``, or a stream-specific variant such as
+    ``capture_session.feed_block``, or a stream-specific variant such as
     ``DualPulseCaptureSession.feed_slow_block``.
     """
 
@@ -189,18 +189,18 @@ def _flush(sock) -> None:
 
 
 async def run_slow_source(
-    session,
+    capture_session,
     host: str,
     module: int = 1,
     *,
     duration_s: Optional[float] = None,
     should_stop: Optional[Callable[[], bool]] = None,
 ) -> float:
-    """Feed *session* from the slow readout stream until stopped.
+    """Feed *capture_session* from the slow readout stream until stopped.
 
     Parameters
     ----------
-    session : PulseCaptureSession
+    capture_session : PulseCaptureSession
         Started session; its ``channels`` are extracted per packet.
     host : str
         CRS hostname (multicast interface selector).
@@ -215,8 +215,8 @@ async def run_slow_source(
     Returns the sample time covered (seconds).
     """
     loop = asyncio.get_running_loop()
-    requested = list(session.channels)
-    ingest = SlowIngest(session.feed_block, duration_s=duration_s)
+    requested = list(capture_session.channels)
+    ingest = SlowIngest(capture_session.feed_block, duration_s=duration_s)
     columns: Optional[Tuple[Tuple[int, ...], np.ndarray]] = None
     width = -1
 
@@ -256,7 +256,7 @@ async def run_slow_source(
 
 
 async def run_pfb_source(
-    session,
+    capture_session,
     host: str,
     channels: List[int],
     *,
@@ -264,7 +264,7 @@ async def run_pfb_source(
     should_stop: Optional[Callable[[], bool]] = None,
     sample_rate: float = PFB_SAMPLING_FREQ,
 ) -> float:
-    """Feed *session* from the fast/PFB stream until stopped.
+    """Feed *capture_session* from the fast/PFB stream until stopped.
 
     ``channels`` must match the order given to ``set_pfb_streamer`` —
     PFB packets interleave the streamed channels round-robin in that
@@ -318,7 +318,7 @@ async def run_pfb_source(
                 # there is deliberately no per-sample fallback: it would
                 # put the fast stream on the path this function exists
                 # to avoid.
-                session.feed_block(ch, v[:n_ok].real, v[:n_ok].imag,
+                capture_session.feed_block(ch, v[:n_ok].real, v[:n_ok].imag,
                                    times[:n_ok])
             # Exact per-packet span — independent of timestamp
             # discontinuities across rate changes.
@@ -329,7 +329,7 @@ async def run_pfb_source(
 
 
 async def run_dual_source(
-    session,
+    capture_session,
     host: str,
     channels: List[int],
     *,
@@ -354,13 +354,13 @@ async def run_dual_source(
         await crs.configure_streamer(dec, modules=[1],
                                      pfb_channels=[1, 2], pfb_module=1)
         try:
-            await run_dual_source(session, host, [1, 2], duration_s=2.0)
+            await run_dual_source(capture_session, host, [1, 2], duration_s=2.0)
         finally:
             await crs.configure_streamer(dec, modules=[1], pfb_channels=[])
 
     Parameters
     ----------
-    session : DualPulseCaptureSession
+    capture_session : DualPulseCaptureSession
         Started session; fed through its ``slow_feed``/``fast_feed``
         facades so stream time advances the matcher.
     slow_source : callable, optional
@@ -385,7 +385,7 @@ async def run_dual_source(
             if slow_source is not None:
                 return await slow_source(_stop)
             return await run_slow_source(
-                session.slow_feed, host, module=module,
+                capture_session.slow_feed, host, module=module,
                 duration_s=duration_s, should_stop=_stop)
         finally:
             finished = True
@@ -394,7 +394,7 @@ async def run_dual_source(
         nonlocal finished
         try:
             return await run_pfb_source(
-                session.fast_feed, host, channels,
+                capture_session.fast_feed, host, channels,
                 duration_s=duration_s, should_stop=_stop)
         finally:
             finished = True

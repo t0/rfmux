@@ -30,8 +30,8 @@ what the import cell below uses. The per-module paths are listed for orientation
 |---|---|
 | Streamer setup + link-budget math | `rfmux.algorithms.measurement.streamer_config` |
 | Detection engine (ring buffer, triggering) | `rfmux.pulse_capture.detection` |
-| Live capture orchestration | `rfmux.pulse_capture.session` |
-| Concurrent slow+fast with matching | `rfmux.pulse_capture.session` |
+| Live capture orchestration | `rfmux.pulse_capture.capture_session` |
+| Concurrent slow+fast with matching | `rfmux.pulse_capture.capture_session` |
 | Packet sources that feed a session | `rfmux.pulse_capture.sources` |
 | Per-pulse metrics (SNR, derived τ) | `rfmux.pulse_capture.analysis` |
 | Streaming HDF5 persistence | `rfmux.pulse_capture.hdf5` |
@@ -520,19 +520,20 @@ def on_pulse(channel, pulse_idx, summary, waveform):
         print(f"  ch{channel} #{pulse_idx}: {summary['snr']:.0f}σ, "
               f"{summary['duration_ms']:.2f} ms, τ={summary['tau_ms']:.2f} ms")
 
-session = PulseCaptureSession(
+capture_session = PulseCaptureSession(
     channels=CHANNELS, module=MODULE, streamer_mode="slow",
     sample_rate=fs, hdf5_path=str(OUTPUT_DIR / "pulse_capture_demo.h5"),
     on_pulse=on_pulse,
     **capture_config.session_kwargs(fs),
 )
-session.start()
-covered = await run_slow_source(session, host, module=MODULE, duration_s=3.0)
-session.stop()
+capture_session.start()
+covered = await run_slow_source(capture_session, host, module=MODULE,
+                               duration_s=3.0)
+capture_session.stop()
 
-print(f"\n{session.total_pulses} pulses over {covered:.2f} s of sample time")
-print(f"rolling baseline median over {session.baseline_window:,} samples "
-      f"({session.baseline_window / fs:.2f} s)")
+print(f"\n{capture_session.total_pulses} pulses over {covered:.2f} s of sample time")
+print(f"rolling baseline median over {capture_session.baseline_window:,} samples "
+      f"({capture_session.baseline_window / fs:.2f} s)")
 ```
 
 `duration_s` counts **sample time** accumulated from packet timestamps, not wall
@@ -628,7 +629,7 @@ into the capture file alongside the pulses:
     df_cals = {ch: d["df_calibration"] for ch, d in bias_results.items()
                if "df_calibration" in d}
 
-    session = PulseCaptureSession(..., df_calibrations=df_cals)
+    capture_session = PulseCaptureSession(..., df_calibrations=df_cals)
 
 This notebook's mock detectors were biased by `auto_bias_kids`, which skips that
 sweep-and-fit step, so the channels below are uncalibrated and
@@ -779,9 +780,9 @@ objects this notebook does:
 | **Settings…** dialog | `PulseCaptureConfig` fields |
 | Threshold σ / End σ / Pileup | `threshold_sigma`, `end_sigma`, `enable_pileup` |
 | Mode: slow / fast / both | `run_slow_source` / `run_pfb_source` / `run_dual_source` |
-| **▶ Start** | `session.start()` + a source coroutine |
+| **▶ Start** | `capture_session.start()` + a source coroutine |
 | (how the GUI tap feeds the session) | `SlowIngest` — the same class `run_slow_source` uses, so the GUI and this notebook block, keep sample time and stop on duration identically |
-| **⟳ Re-estimate Noise** | `session.re_estimate_noise()` |
+| **⟳ Re-estimate Noise** | `capture_session.re_estimate_noise()` |
 | Live pulse / histogram / template plots | `on_pulse`, `on_histograms`, `on_templates` callbacks |
 | counts / Hz selector | `counts_to_hz_scale(df_calibration)` |
 | Output `.h5` + Session Browser review | `hdf5_path=` + `PulseHDF5Reader` |

@@ -579,7 +579,7 @@ from rfmux.pulse_capture.analysis import (
     pulse_peaks,
     pulse_summary,
 )
-from rfmux.pulse_capture.session import (
+from rfmux.pulse_capture.capture_session import (
     CaptureState,
     PulseCaptureSession,
 )
@@ -952,7 +952,7 @@ class TestHistogramAutoExpand:
 
 # ───────────────────────── PulseCaptureConfig ───────────────────────
 
-from rfmux.pulse_capture.session import (
+from rfmux.pulse_capture.capture_session import (
     PulseCaptureConfig,
 )
 
@@ -973,12 +973,12 @@ class TestPulseCaptureConfig:
     def test_session_kwargs_match_session_signature(self):
         cfg = PulseCaptureConfig(min_pulse_ms=0.5, max_pulse_ms=100.0)
         kwargs = cfg.session_kwargs(19073.486328125)
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             PulseCaptureSession,
         )
-        session = PulseCaptureSession(channels=[1], **kwargs)
-        assert session.threshold_sigma == cfg.threshold_sigma
-        assert session.buf_size == cfg.buf_size(19073.486328125)
+        capture_session = PulseCaptureSession(channels=[1], **kwargs)
+        assert capture_session.threshold_sigma == cfg.threshold_sigma
+        assert capture_session.buf_size == cfg.buf_size(19073.486328125)
 
     def test_validate_end_at_or_above_threshold_is_error(self):
         cfg = PulseCaptureConfig(threshold_sigma=3.0, end_sigma=3.0)
@@ -1111,7 +1111,7 @@ class TestSessionFeedBlock:
 
     @staticmethod
     def _feed(mode, n=9000, noise_train=2000, block=700):
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             PulseCaptureSession,
         )
         rng = np.random.default_rng(3)
@@ -1123,22 +1123,22 @@ class TestSessionFeedBlock:
         T = np.arange(n) / 1e4
 
         got = []
-        session = PulseCaptureSession(
+        capture_session = PulseCaptureSession(
             channels=[1], sample_rate=1e4, noise_samples=noise_train,
             buf_size=3000, threshold_sigma=5.0, end_sigma=1.5,
             baseline_window=20000,
             on_pulse=lambda ch, i, s_, d: got.append((ch, i, d)))
-        session.start()
+        capture_session.start()
         if mode == "sample":
             for k in range(n):
-                session.feed_sample(1, float(I[k]), float(Q[k]),
+                capture_session.feed_sample(1, float(I[k]), float(Q[k]),
                                     float(T[k]))
         else:
             for s in range(0, n, block):
-                session.feed_block(1, I[s:s + block], Q[s:s + block],
+                capture_session.feed_block(1, I[s:s + block], Q[s:s + block],
                                    T[s:s + block])
-        session.stop()
-        return session, got
+        capture_session.stop()
+        return capture_session, got
 
     def test_feed_block_matches_feed_sample_across_the_transition(self):
         ref_s, ref = self._feed("sample")
@@ -1158,23 +1158,23 @@ class TestSessionFeedBlock:
     def test_feed_block_drops_unusable_timestamps(self):
         """Same rule as feed_sample: no timestamp, no sample — every
         duration and tau is measured from these."""
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             PulseCaptureSession,
         )
-        session = PulseCaptureSession(
+        capture_session = PulseCaptureSession(
             channels=[1], sample_rate=1e4, noise_samples=200,
             buf_size=1000)
-        session.start()
+        capture_session.start()
         rng = np.random.default_rng(0)
-        session.feed_block(1, rng.normal(size=200), rng.normal(size=200),
+        capture_session.feed_block(1, rng.normal(size=200), rng.normal(size=200),
                            np.arange(200) / 1e4)
-        assert session.state.name == "CAPTURING"
+        assert capture_session.state.name == "CAPTURING"
 
         t = np.arange(10) / 1e4
         t[3] = np.nan
         t[7] = np.inf
-        session.feed_block(1, rng.normal(size=10), rng.normal(size=10), t)
-        assert session.dropped_invalid_ts == 2
+        capture_session.feed_block(1, rng.normal(size=10), rng.normal(size=10), t)
+        assert capture_session.dropped_invalid_ts == 2
 
 
 # Circular.extend is covered by test_circular_extend.py in this directory,
@@ -1254,7 +1254,7 @@ class TestDetectionParamsPlumbing:
     """
 
     def test_session_kwargs_covers_exactly_the_detection_params(self):
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             DETECTION_PARAMS,
         )
         kw = PulseCaptureConfig().session_kwargs(19073.486328125)
@@ -1265,7 +1265,7 @@ class TestDetectionParamsPlumbing:
 
     def test_every_detection_param_is_a_pulse_capture_argument(self):
         import inspect
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             DETECTION_PARAMS,
         )
         accepted = set(inspect.signature(PulseCapture).parameters)
@@ -1277,7 +1277,7 @@ class TestDetectionParamsPlumbing:
         handed to the writer and silently dropped, so a capture file
         recorded neither what confirmed a trigger nor over what lag."""
         import h5py
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             DETECTION_PARAMS,
             PulseCaptureSession,
         )
@@ -1285,16 +1285,16 @@ class TestDetectionParamsPlumbing:
         fs = 19073.486328125
         cfg = PulseCaptureConfig(max_pulse_ms=20.0, noise_train_ms=50.0)
         path = tmp_path / "capture.h5"
-        session = PulseCaptureSession(
+        capture_session = PulseCaptureSession(
             channels=[1], sample_rate=fs, hdf5_path=path,
             **cfg.session_kwargs(fs))
-        session.start()
+        capture_session.start()
 
         rng = np.random.default_rng(0)
         for k in range(cfg.noise_samples(fs) + 10):
-            session.feed_sample(1, float(rng.normal()),
+            capture_session.feed_sample(1, float(rng.normal()),
                                 float(rng.normal()), k / fs)
-        session.stop()
+        capture_session.stop()
 
         with h5py.File(path, "r") as f:
             attrs = dict(f["metadata"].attrs)
@@ -1302,7 +1302,7 @@ class TestDetectionParamsPlumbing:
         missing = [p for p in DETECTION_PARAMS if p not in attrs]
         assert not missing, f"dropped on the way to the file: {missing}"
         for name in DETECTION_PARAMS:
-            assert attrs[name] == pytest.approx(getattr(session, name))
+            assert attrs[name] == pytest.approx(getattr(capture_session, name))
 
 
 # ───────────────────────── Template stacking ────────────────────────

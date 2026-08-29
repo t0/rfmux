@@ -6,10 +6,10 @@ session lifecycle to manage, everything handed back in memory.  It is a
 thin caller over the same machinery Periscope and the reference notebook
 drive:
 
-- :class:`~rfmux.pulse_capture.session.PulseCaptureConfig`
+- :class:`~rfmux.pulse_capture.capture_session.PulseCaptureConfig`
   for the parameters, in physical units;
-- :class:`~rfmux.pulse_capture.session.PulseCaptureSession`
-  (or :class:`~rfmux.pulse_capture.session.DualPulseCaptureSession`)
+- :class:`~rfmux.pulse_capture.capture_session.PulseCaptureSession`
+  (or :class:`~rfmux.pulse_capture.capture_session.DualPulseCaptureSession`)
   for detection, persistence, histograms and templates;
 - :mod:`~rfmux.pulse_capture.sources` for the sockets.
 
@@ -51,7 +51,7 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ... import streamer
 
-from ...pulse_capture.session import (
+from ...pulse_capture.capture_session import (
     DualPulseCaptureSession,
     PulseCaptureConfig,
     PulseCaptureSession,
@@ -327,29 +327,29 @@ async def _run_single(result, crs, host, channels, module, streamer_mode,
     rate = PFB_SAMPLING_FREQ if is_fast else slow_rate
     stream = StreamResult(sample_rate=rate)
 
-    session = PulseCaptureSession(
+    capture_session = PulseCaptureSession(
         channels=channels, module=module, streamer_mode=streamer_mode,
         sample_rate=rate, hdf5_path=hdf5_path,
         on_pulse=_collector(stream),
         on_error=(lambda m: print(f"[trigger_capture] {m}")) if verbose
         else None,
         **result.config.session_kwargs(rate))
-    session.start()
+    capture_session.start()
     result.start_time = time.time()
     try:
         if is_fast:
             stream.elapsed_s = await run_pfb_source(
-                session, host, channels, duration_s=duration_s)
+                capture_session, host, channels, duration_s=duration_s)
         else:
             stream.elapsed_s = await run_slow_source(
-                session, host, module=module, duration_s=duration_s)
+                capture_session, host, module=module, duration_s=duration_s)
     finally:
-        session.stop()
+        capture_session.stop()
 
-    stream.noise = dict(session.noise_stats)
+    stream.noise = dict(capture_session.noise_stats)
     setattr(result, "fast" if is_fast else "slow", stream)
 
-    if session.state.name == "ESTIMATING" and verbose:
+    if capture_session.state.name == "ESTIMATING" and verbose:
         print("[trigger_capture] noise training never completed — the "
               "stream ended first; try a longer time_run or a smaller "
               "max_pulse_ms")
@@ -361,7 +361,7 @@ async def _run_dual(result, crs, host, channels, module, slow_rate,
     fast = StreamResult(sample_rate=PFB_SAMPLING_FREQ)
     collectors = {"slow": _collector(slow), "fast": _collector(fast)}
 
-    session = DualPulseCaptureSession(
+    capture_session = DualPulseCaptureSession(
         channels=channels, module=module, slow_rate=slow_rate,
         fast_rate=PFB_SAMPLING_FREQ, config=result.config,
         hdf5_path=hdf5_path,
@@ -370,15 +370,15 @@ async def _run_dual(result, crs, host, channels, module, slow_rate,
         on_pair=result.pairs.append,
         on_error=(lambda m: print(f"[trigger_capture] {m}")) if verbose
         else None)
-    session.start()
+    capture_session.start()
     result.start_time = time.time()
     try:
         slow.elapsed_s, fast.elapsed_s = await run_dual_source(
-            session, host, channels, module=module, duration_s=duration_s)
+            capture_session, host, channels, module=module, duration_s=duration_s)
     finally:
-        session.stop()
+        capture_session.stop()
 
-    slow.noise = dict(session.slow.noise_stats)
-    fast.noise = dict(session.fast.noise_stats)
+    slow.noise = dict(capture_session.slow.noise_stats)
+    fast.noise = dict(capture_session.fast.noise_stats)
     result.slow = slow
     result.fast = fast

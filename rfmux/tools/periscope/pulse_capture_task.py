@@ -1,6 +1,6 @@
 """
 Background worker bridging the Periscope slow-stream tap to a
-:class:`~rfmux.pulse_capture.session.PulseCaptureSession`.
+:class:`~rfmux.pulse_capture.capture_session.PulseCaptureSession`.
 
 Architecture: all capture logic (noise estimation, detection, HDF5,
 histograms) lives in :mod:`rfmux.pulse_capture`, which knows nothing
@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional, Tuple
 from PyQt6 import QtCore
 from PyQt6.QtCore import pyqtSignal
 
-from ...pulse_capture.session import (
+from ...pulse_capture.capture_session import (
     CaptureState,
     PulseCaptureSession,
 )

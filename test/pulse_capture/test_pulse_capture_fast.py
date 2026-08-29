@@ -22,7 +22,7 @@ pytest.importorskip("h5py")
 pytestmark = pytest.mark.slow_acquisition
 
 
-from rfmux.pulse_capture.session import (  # noqa: E402
+from rfmux.pulse_capture.capture_session import (  # noqa: E402
     CaptureState,
     PulseCaptureSession,
 )
@@ -142,7 +142,7 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     channels = [1, 2]
     path = tmp_path / "fast_capture.h5"
 
-    session = PulseCaptureSession(
+    capture_session = PulseCaptureSession(
         channels=channels, module=1, streamer_mode="fast",
         threshold_sigma=50.0, end_sigma=3.0,
         sample_rate=PFB_SAMPLING_FREQ, buf_size=200_000,
@@ -158,20 +158,20 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     # Registered so the task stops (and releases port 9877) even if an
     # assertion below fails; see stream_guard.
     task = stream_guard.task(
-        PulseCaptureTask(session, signals, mode="fast", crs=crs,
+        PulseCaptureTask(capture_session, signals, mode="fast", crs=crs,
                          host="127.0.0.1", module=1))
     task.start()
 
     assert spin_until(
-        qt_app, lambda: session.state is CaptureState.CAPTURING, 30), \
-        f"never reached CAPTURING (state={session.state}, " \
+        qt_app, lambda: capture_session.state is CaptureState.CAPTURING, 30), \
+        f"never reached CAPTURING (state={capture_session.state}, " \
         f"errors={events['errors']})"
 
     # PFB streamer was configured for our channels by the task
     assert loop.run_until_complete(
         crs.get_pfb_streamer(module=1)) == channels
 
-    assert spin_until(qt_app, lambda: session.total_pulses >= 2, 60), \
+    assert spin_until(qt_app, lambda: capture_session.total_pulses >= 2, 60), \
         f"no pulses detected (errors={events['errors']})"
 
     task.request_stop()
@@ -194,10 +194,10 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
 
 def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     """Both-mode task: dual sockets, live matching, dual file, teardown."""
-    from rfmux.pulse_capture.session import (
+    from rfmux.pulse_capture.capture_session import (
         DualPulseCaptureSession,
     )
-    from rfmux.pulse_capture.session import (
+    from rfmux.pulse_capture.capture_session import (
         PulseCaptureConfig,
     )
     from rfmux.core.transferfunctions import decimation_to_sampling

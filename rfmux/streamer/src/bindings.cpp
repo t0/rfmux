@@ -115,7 +115,7 @@ PYBIND11_MODULE(_receiver, m) {
 	auto raw_to_complex = [](const int32_t* raw, py::ssize_t num_samples) {
 		py::array_t<std::complex<double>> result(num_samples);
 		auto out = result.mutable_unchecked<1>();
-		for (size_t i = 0; i < num_samples; i++)
+		for (py::ssize_t i = 0; i < num_samples; i++)
 			out(i) = std::complex<double>(raw[2*i], raw[2*i+1]) / 256.;
 		return result;
 	};

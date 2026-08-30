@@ -76,6 +76,7 @@ qc = [
 # Dependencies for "rfmux firmware". Optional so the Yocto build (which never
 # needs them) doesn't carry extra pre-requisites.
 firmware = [
+  "fru",
   "pexpect",
   "tqdm",
   "xmodem",

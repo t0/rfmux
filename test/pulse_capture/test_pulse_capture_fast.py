@@ -273,16 +273,22 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     # and tap thread however this test exits. The version that guarded only
     # this first assertion is what leaked the sockets when the second one
     # failed.
+    # Budgets are generous because the mock generates both streams in one
+    # process, and two PFB channels at PFB_SAMPLING_FREQ is 4.9 M complex
+    # samples a second.  It does not keep up with real time on a loaded CI
+    # runner, so the slow stream reaches CAPTURING late.  These are liveness
+    # bounds, not performance assertions -- a healthy run gets here in
+    # seconds and does not spend the budget.
     assert spin_until(
         qt_app,
         lambda: dual.slow.state is CaptureState.CAPTURING
-        and dual.fast.state is CaptureState.CAPTURING, 60), \
+        and dual.fast.state is CaptureState.CAPTURING, 180), \
         f"states={dual.state}, errors={events['errors']}"
 
     assert spin_until(
         qt_app,
         lambda: any(p["slow_idx"] and p["fast_idx"]
-                    for p in events["pairs"]), 90), \
+                    for p in events["pairs"]), 180), \
         f"no matched pairs (pairs={len(events['pairs'])}, " \
         f"stats={dual.stats()}, errors={events['errors']})"
 

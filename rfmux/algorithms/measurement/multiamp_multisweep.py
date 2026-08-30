@@ -152,7 +152,7 @@ async def multiamp_multisweep(
 
     A bare frequency list works the same way, for an array that is not tuned
     yet. It has no bias amplitude to scale, so the schedule has to supply one —
-    ``ramp``/``explicit`` do by construction, and ``fixed``/``scaled`` need an
+    ``ramp``/``explicit`` do by construction, while ``multiplicative`` needs an
     explicit ``base``::
 
         results = await crs.multiamp_multisweep(
@@ -173,7 +173,8 @@ async def multiamp_multisweep(
         amp_schedule (AmplitudeSchedule, optional): The amplitude steps. Defaults
             to ``AmplitudeSchedule()`` — one step, at whatever amplitude the
             catalog already carries. Built through
-            ``AmplitudeSchedule.fixed/scaled/ramp/explicit``; see
+            ``AmplitudeSchedule.multiplicative/ramp/explicit``, or the plain
+            constructor for a single pass; see
             :mod:`rfmux.tuning.multisweep_amplitudes`.
         directions (Sequence[str], optional): Which directions to sweep each
             step in — ``("upward",)`` (the default), ``("downward",)``, or both.
@@ -262,7 +263,7 @@ async def multiamp_multisweep(
         raise TypeError(
             f"amp_schedule must be an AmplitudeSchedule, got "
             f"{type(amp_schedule).__name__}. A bare number or list is not one "
-            f"— AmplitudeSchedule.fixed({amp_schedule!r}) for a single "
+            f"— AmplitudeSchedule({amp_schedule!r}) for a single "
             f"amplitude, or .ramp()/.explicit() for a ladder."
         )
 

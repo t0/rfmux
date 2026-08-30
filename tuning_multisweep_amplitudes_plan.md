@@ -80,9 +80,16 @@ Things that are worth *not* carrying over:
   count is that times the number of directions.
 * **Per-resonator *absolute* ladders are not representable.** Proportional
   per-resonator ladders — what a bifurcation walk wants — are
-  `scaled(base={...})`; non-proportional ones (R0001 goes 1→2→4 µ while R0002
+  `multiplicative(base={...})`; non-proportional ones (R0001 goes 1→2→4 µ while R0002
   goes 3→3.5→4) have yet to find a use that justifies the extra state. Widening
   `ladder` to hold scalars-or-mappings is additive if one turns up.
+* **One "sweep" is a whole multisweep measurement; the per-resonator pieces are
+  "sweep sections", or "sections".** Worth being strict about, because the loose
+  reading actively misleads here: an `AmplitudeStep` repr saying "10 sweeps at
+  0.0005" reads as ten passes at that amplitude, when it means one pass
+  containing ten sections. So `describe()` reports `n_sweeps` (steps ×
+  directions) alongside `n_sections`, and messages counting the per-resonator
+  pieces say "sections".
 
 ---
 
@@ -119,29 +126,43 @@ is computed in `tuning/`.
 ### `AmplitudeSchedule`
 
 Splits the GUI's three modes back into their two axes. A schedule is exactly a
-**base** — what each resonator would be swept at with no ladder — and a
-**ladder** of rungs, which either multiply the base (`relative=True`) or *are*
-the amplitude (`relative=False`):
+**base** — what each resonator would be swept at with no iteration — and the
+**steps** applied to it, which either multiply the base (`relative=True`) or
+*are* the amplitude (`relative=False`).
+
+The forms that do not iterate are the plain constructor, because `base` is the
+first field and the only one a caller sets by hand with any regularity:
 
 ```python
-AmplitudeSchedule()                                          # base=None, ladder=(1.0,)
-AmplitudeSchedule.fixed()                                    # the catalog's own amplitudes
-AmplitudeSchedule.fixed(0.005)                               # one override for all
-AmplitudeSchedule.fixed({"R0001": 0.004, "R0002": 0.006})    # per-resonator
-AmplitudeSchedule.scaled(0.5, 2.0, 5)                        # × each resonator's own
-AmplitudeSchedule.scaled(0.5, 2.0, 5, base={"R0001": 0.004}) # × a base you chose
-AmplitudeSchedule.ramp(1e-3, 1e-2, 6)                        # absolute ladder
-AmplitudeSchedule.explicit([0.001, 0.003, 0.01])             # arbitrary rungs
+AmplitudeSchedule()                                      # each resonator's own amplitude
+AmplitudeSchedule(0.005)                                 # one amplitude for all
+AmplitudeSchedule({"R0001": 0.004, "R0002": 0.006})      # per-resonator
 ```
 
-The four constructors are sugar over that one pair, so there is a single code
-path to test, and the empty constructor is "sweep the catalog as it stands,
-once" — the degenerate case needs no special mode. `spacing` defaults to `"log"`
-(equal ratios, so equal steps in dB) with `"linear"` available; it is recorded
-for provenance only and excluded from equality, so two schedules that measure
-the same amplitudes compare equal however they were spelled.
+The iterating forms are classmethods over the same two fields, so there is a
+single code path to test:
 
-An **absolute ladder takes no base**: its rungs already are the amplitudes, so
+```python
+AmplitudeSchedule.multiplicative(0.5, 2.0, 5)                        # × each resonator's own
+AmplitudeSchedule.multiplicative(0.5, 2.0, 5, base={"R0001": 0.004}) # × a base you chose
+AmplitudeSchedule.ramp(1e-3, 1e-2, 6)                                # absolute, generated
+AmplitudeSchedule.explicit([0.001, 0.003, 0.01])                     # absolute, arbitrary
+```
+
+`multiplicative` rather than `scaled`: it says what the factors *do*, and it
+does not read as a near-synonym of `ramp`.
+
+`spacing` defaults to `"log"` (equal ratios, so equal steps in dB) with
+`"linear"` available; it is recorded for provenance only and excluded from
+equality, so two schedules that measure the same amplitudes compare equal
+however they were spelled. A schedule that does not iterate reports `"none"`,
+since no spacing rule generated its single step.
+
+There was a `fixed()` classmethod covering the non-iterating cases. Once `base`
+became the first field it was the same thing spelled longer, so it is gone
+rather than kept as a second way to say one thing.
+
+**The absolute forms take no base**: their steps already are the amplitudes, so
 there is nothing left for a base to contribute. That is the one asymmetry in the
 "two axes" story, and it is enforced rather than papered over.
 
@@ -165,7 +186,7 @@ ordering) and refused alongside a catalog.
 Keying amplitudes by resonator **name** rather than by position retires the
 "must match `res_info_dict.keys()` order" fragility, and makes per-resonator
 amplitudes available in every mode rather than only in the single-sweep one.
-Because `ResonatorCatalog` requires an amplitude at construction, `scaled` has no
+Because `ResonatorCatalog` requires an amplitude at construction, `multiplicative` has no
 "no registry yet, run a plain sweep first" failure mode.
 
 Two failures are caught here that would otherwise reach the hardware, since

@@ -1,4 +1,4 @@
-"""Sweeping one array at a ladder of amplitudes: the amplitudes, and the answers.
+"""Sweeping one array at several amplitudes: the amplitudes, and the answers.
 
 The pure half of the multi-amplitude multisweep.  Two things live here, and they
 are the two ends of the same contract:
@@ -17,44 +17,44 @@ can be built, printed, validated and unit-tested with no hardware and no GUI in
 sight.
 
 **A step is one amplitude.**  Steps are numbered from 0 in the order they are
-measured.  A step may be swept twice — once per direction — but direction is not
-this module's business: it is an axis the driver adds *beneath* a step, never
-fused into the step index.  So ``len(schedule)`` is a count of amplitudes, not of
-sweeps.
+measured.  A step may be swept twice — once per frequency direction — but
+direction is not this module's business: it is an axis the driver adds *beneath*
+a step, never fused into the step index.  So ``len(schedule)`` is a count of
+amplitudes, not of sweeps.
 
-A schedule is a **base** and a **ladder**:
+Two fields decide every step: a **base** amplitude per resonator, and the steps
+applied to it.  The base is the catalog's own ``bias.amplitude`` by default, or
+one number for everything, or one per resonator by name.  Steps are either
+**relative** — multiplying the base, so every resonator keeps its own scale — or
+**absolute**, which *are* the amplitude and apply to all of them equally.
 
-* the *base* is what each resonator would be swept at with no ladder at all —
-  the catalog's own ``bias.amplitude`` (the default), one number for everything,
-  or one per resonator by name;
-* the *ladder* is the rungs.  A **relative** ladder multiplies the base, so
-  every resonator keeps its own scale; an **absolute** ladder *is* the amplitude
-  and applies to all of them equally.
+Which is why the absolute forms take no base: there would be nothing left for a
+base to contribute.  Per-resonator *absolute* sequences are deliberately not
+representable — the proportional case, which is what a bifurcation walk wants, is
+``multiplicative(base={...})``, and non-proportional ones have yet to find a use
+that justifies the extra state.
 
-Which is why an absolute ladder takes no base: there is nothing left for a base
-to contribute.  Per-resonator *absolute* ladders are deliberately not
-representable — proportional per-resonator ladders, which is what a bifurcation
-walk wants, are ``scaled(base={...})``, and non-proportional ones have yet to
-find a use that justifies the extra state.
+No iteration — one pass — is the plain constructor::
 
-Four ways to say it, all sugar over that one pair::
+    AmplitudeSchedule()                        # each resonator's own amplitude
+    AmplitudeSchedule(0.005)                   # one amplitude for all
+    AmplitudeSchedule({"R0001": 0.004, ...})   # per resonator
 
-    AmplitudeSchedule.fixed()                          # the catalog as it stands
-    AmplitudeSchedule.fixed(0.005)                     # one amplitude for all
-    AmplitudeSchedule.fixed({"R0001": 0.004})          # per resonator
-    AmplitudeSchedule.scaled(0.5, 2.0, 5)              # × each resonator's own
-    AmplitudeSchedule.scaled(0.5, 2.0, 5, base=0.004)  # × a base you chose
-    AmplitudeSchedule.ramp(1e-3, 1e-2, 6)              # absolute, log-spaced
-    AmplitudeSchedule.explicit([1e-3, 3e-3, 1e-2])     # absolute, arbitrary
+and the iterating forms are classmethods::
+
+    AmplitudeSchedule.multiplicative(0.5, 2.0, 5)              # × each resonator's own
+    AmplitudeSchedule.multiplicative(0.5, 2.0, 5, base=0.004)  # × a base you chose
+    AmplitudeSchedule.ramp(1e-3, 1e-2, 6)                      # absolute, log-spaced
+    AmplitudeSchedule.explicit([1e-3, 3e-3, 1e-2])             # absolute, arbitrary
 
 and then::
 
     for step in schedule.steps(catalog):
-        sweeps = await crs.multisweep(catalog, amp=step.amplitudes, ...)
+        sections = await crs.multisweep(catalog, amp=step.amplitudes, ...)
 
 ``steps`` keys its amplitudes by resonator **name**, which is what retires the
 "the list must match ``res_info_dict.keys()`` order" coupling of the Periscope
-dialog this replaces, and makes per-resonator amplitudes available on every rung
+dialog this replaces, and makes per-resonator amplitudes available on every step
 rather than only on a single-sweep one.
 """
 
@@ -98,14 +98,14 @@ def _named(names: Sequence[str]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class AmplitudeStep:
-    """One amplitude step: what every sweep is probed at, for one pass.
+    """One amplitude step: what every sweep section is probed at, for one pass.
 
     ``amplitudes`` goes straight into ``crs.multisweep(amp=...)`` — it is keyed
-    by the same names the sweeps come back under.
+    by the same names the sweep sections come back under.
     """
 
     step: int  # execution order, 0-based
-    amplitudes: dict[str, float]  # normalized DAC units, by sweep name
+    amplitudes: dict[str, float]  # normalized DAC units, by section name
     factor: float | None  # the rung, or None when the ladder was absolute
 
     def to_dict(self) -> dict:
@@ -124,7 +124,8 @@ class AmplitudeStep:
         )
         rung = "" if self.factor is None else f", ×{self.factor:g}"
         return (
-            f"AmplitudeStep(step={self.step}, {len(values)} sweeps at {span}{rung})"
+            f"AmplitudeStep(step={self.step}, {len(values)} sweep sections "
+            f"at {span}{rung})"
         )
 
 
@@ -154,7 +155,7 @@ def _build_ladder(
             f"nsteps=1 with {what} running {start:g} to {stop:g}: which of the "
             f"two did you mean? Pass nsteps>1, or say it directly with one step "
             f"— explicit([{start:g}]) for an absolute amplitude, or "
-            f"fixed()/scaled(1, 1, 1) to stay where you are."
+            f"AmplitudeSchedule() to stay where you are."
         )
     if spacing == "log" and (start <= 0 or stop <= 0):
         raise ValueError(
@@ -170,14 +171,19 @@ def _build_ladder(
 
 @dataclass(frozen=True, slots=True)
 class AmplitudeSchedule:
-    """A base and a ladder: the amplitude steps of a multi-amplitude sweep.
+    """What amplitude each resonator is probed at, on each pass.
 
-    Built through :meth:`fixed`, :meth:`scaled`, :meth:`ramp` or
-    :meth:`explicit` rather than field by field, though the fields are public
-    and constructing one directly is supported.
+    Two fields carry the whole answer: a **base** amplitude per resonator, and
+    the **steps** applied to it. The iterating forms are built through
+    :meth:`multiplicative`, :meth:`ramp` and :meth:`explicit`; the two that do
+    not iterate are just the constructor::
 
-    The default — an empty constructor — is "sweep the catalog exactly as it
-    stands, once", so the degenerate case needs no special mode.
+        AmplitudeSchedule()         # one pass, at each resonator's own amplitude
+        AmplitudeSchedule(0.005)    # one pass, at 0.005 for everything
+        AmplitudeSchedule({"R0001": 0.004, ...})   # one pass, per resonator
+
+    which is why *base* is the first argument: that is the only field a caller
+    sets by hand with any regularity.
     """
 
     # Stamped into to_dict output and required exactly by from_dict, so a file
@@ -186,14 +192,14 @@ class AmplitudeSchedule:
     # cannot absorb.
     SCHEMA_VERSION = 1
 
+    base: float | Mapping[str, float] | Sequence[float] | None = None
     ladder: tuple[float, ...] = (1.0,)
     relative: bool = True
-    base: float | Mapping[str, float] | Sequence[float] | None = None
-    # Provenance only: how the ladder was generated, for describe() and
+    # Provenance only: how the steps were generated, for describe() and
     # to_dict() to report. Nothing computes with it — the ladder itself is the
     # truth — so it is excluded from equality, and two schedules that measure
     # the same thing compare equal however they were spelled.
-    spacing: str = field(default="explicit", compare=False)
+    spacing: str = field(default="none", compare=False)
 
     def __post_init__(self):
         ladder = tuple(float(v) for v in self.ladder)
@@ -221,7 +227,7 @@ class AmplitudeSchedule:
                 raise ValueError(
                     "An absolute ladder takes no base: its rungs *are* the "
                     "amplitudes, so there is nothing for a base to contribute. "
-                    "Use scaled(..., base=...) for a ladder that multiplies a "
+                    "Use multiplicative(..., base=...) for a ladder that multiplies a "
                     "base you chose."
                 )
             # Absolute rungs are amplitudes, so they answer to the same domain
@@ -239,24 +245,14 @@ class AmplitudeSchedule:
         object.__setattr__(self, "ladder", ladder)
 
     # ─── constructors ────────────────────────────────────────────────────────
+    #
+    # Only the iterating forms need one. A schedule that does not iterate is
+    # the plain constructor — AmplitudeSchedule(), AmplitudeSchedule(0.005),
+    # AmplitudeSchedule({...}) — which is what `base` being the first field
+    # buys.
 
     @classmethod
-    def fixed(
-        cls, base: float | Mapping[str, float] | Sequence[float] | None = None
-    ) -> AmplitudeSchedule:
-        """One step, with no ladder at all.
-
-        Args:
-            base: ``None`` for each resonator's own ``bias.amplitude``, one
-                number for all of them, or a ``{name: amplitude}`` mapping.
-
-        The single-sweep case, and the shape a driver call degenerates to when
-        the caller does not want a ladder.
-        """
-        return cls(ladder=(1.0,), relative=True, base=base, spacing="none")
-
-    @classmethod
-    def scaled(
+    def multiplicative(
         cls,
         start: float,
         stop: float,
@@ -270,9 +266,9 @@ class AmplitudeSchedule:
         Every resonator keeps its own scale, so an array biased across a spread
         of amplitudes walks that spread up and down together::
 
-            AmplitudeSchedule.scaled(0.5, 2.0, 5)                 # of the catalog's
-            AmplitudeSchedule.scaled(0.5, 2.0, 5, base=0.004)     # of one number
-            AmplitudeSchedule.scaled(0.5, 2.0, 5, base={...})     # of your own, per name
+            AmplitudeSchedule.multiplicative(0.5, 2.0, 5)                 # of the catalog's
+            AmplitudeSchedule.multiplicative(0.5, 2.0, 5, base=0.004)     # of one number
+            AmplitudeSchedule.multiplicative(0.5, 2.0, 5, base={...})     # of your own, per name
 
         Args:
             start: factor of the first step.
@@ -280,7 +276,8 @@ class AmplitudeSchedule:
             nsteps: how many steps, inclusive of both ends.
             spacing: ``"log"`` (the default — equal ratios, so equal steps in
                 dB) or ``"linear"``.
-            base: as :meth:`fixed`.
+            base: ``None`` for each resonator's own ``bias.amplitude``, one
+                number for all of them, or a ``{name: amplitude}`` mapping.
         """
         return cls(
             ladder=_build_ladder(start, stop, nsteps, spacing, what="factors"),
@@ -324,8 +321,9 @@ class AmplitudeSchedule:
 
     @property
     def nsteps(self) -> int:
-        """How many amplitude steps. Not how many sweeps — see the driver's
-        ``directions``, which multiplies this."""
+        """How many amplitude steps. Not how many sweeps — one sweep is a
+        whole multisweep measurement, and the driver's ``directions``
+        multiplies this to get that count."""
         return len(self.ladder)
 
     def __len__(self) -> int:
@@ -383,7 +381,7 @@ class AmplitudeSchedule:
             raise TypeError(
                 "target must be a ResonatorCatalog or a sequence of sweep "
                 "names. A mapping of amplitudes is a *base* — pass it as "
-                "base= to fixed() or scaled()."
+                "base= to AmplitudeSchedule() or multiplicative()."
             )
 
         names = list(target)
@@ -391,8 +389,8 @@ class AmplitudeSchedule:
             raise ValueError("target is empty: there is nothing to sweep.")
         if not all(isinstance(n, str) for n in names):
             raise TypeError(
-                "sweep names must be strings — they are the keys the sweeps "
-                "come back under."
+                "section names must be strings — they are the keys the sweep "
+                "sections come back under."
             )
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
@@ -456,7 +454,7 @@ class AmplitudeSchedule:
             if len(values) != len(names):
                 raise ValueError(
                     f"base has {len(values)} amplitudes for {len(names)} "
-                    f"sweeps. Pass one per sweep, in the same order, or a "
+                    f"sections. Pass one per section, in the same order, or a "
                     f"single number for all."
                 )
             return dict(zip(names, values))
@@ -495,7 +493,7 @@ class AmplitudeSchedule:
 
         Args:
             target: a :class:`~rfmux.core.resonators.ResonatorCatalog`, or the
-                names of the sweeps when there is no catalog — for a bare
+                names of the sweep sections when there is no catalog — for a bare
                 ``center_frequencies`` sweep, the same names ``multisweep``
                 will key its results by (``S0001…`` by default).
 
@@ -577,7 +575,7 @@ class AmplitudeSchedule:
             "relative": self.relative,
             "spacing": self.spacing,
             "ladder": list(self.ladder),
-            "n_sweep_targets": len(names),
+            "n_sections": len(names),
             "n_directions": n_directions,
             # The number that actually predicts how long this takes.
             "n_sweeps": self.nsteps * n_directions,
@@ -627,7 +625,7 @@ class AmplitudeSchedule:
             f"{self.nsteps} amplitude step{'' if self.nsteps == 1 else 's'} × "
             f"{n_directions} direction{'' if n_directions == 1 else 's'} = "
             f"{self.nsteps * n_directions} sweeps of {len(names)} "
-            f"target{'' if len(names) == 1 else 's'}.",
+            f"section{'' if len(names) == 1 else 's'}.",
         ))
         return issues
 
@@ -664,7 +662,7 @@ class AmplitudeSchedule:
             ladder=tuple(d["ladder"]),
             relative=bool(d["relative"]),
             base=d.get("base"),
-            spacing=d.get("spacing", "explicit"),
+            spacing=d.get("spacing", "none"),
         )
 
 
@@ -761,11 +759,11 @@ def _iterations(results: Mapping) -> dict:
         ) from None
 
 
-def _sweep_names(results: Mapping) -> list[str]:
-    """Every name that appears in the first sweep, in its order."""
+def _section_names(results: Mapping) -> list[str]:
+    """Every section name that appears in the first sweep, in its order."""
     for by_direction in _iterations(results).values():
-        for sweeps in by_direction.values():
-            return list(sweeps)
+        for sections in by_direction.values():
+            return list(sections)
     return []
 
 
@@ -789,17 +787,17 @@ def collect_amplitude_iterations_for(results: Mapping, name: str) -> dict:
     collected = {}
     for iteration, by_direction in _iterations(results).items():
         entries = {
-            direction: sweeps[name]
-            for direction, sweeps in by_direction.items()
-            if name in sweeps
+            direction: sections[name]
+            for direction, sections in by_direction.items()
+            if name in sections
         }
         if entries:
             collected[iteration] = entries
 
     if not collected:
-        available = _sweep_names(results)
+        available = _section_names(results)
         raise KeyError(
-            f"{name!r} was not swept. The names in play are "
+            f"{name!r} was not swept. The section names in play are "
             f"{_named(available)}."
         )
     return collected
@@ -830,8 +828,8 @@ def get_amplitudes_at_iteration(results: Mapping, iteration: int) -> dict:
 
     # Every direction of one iteration was swept at the same amplitudes, so the
     # first one answers the question.
-    for sweeps in iterations[iteration].values():
-        return {name: float(s["sweep_amplitude"]) for name, s in sweeps.items()}
+    for sections in iterations[iteration].values():
+        return {name: float(s["sweep_amplitude"]) for name, s in sections.items()}
     return {}
 
 
@@ -874,7 +872,7 @@ def find_iteration_matching_amplitude(
         ).items()
     }
     if not per_iteration:
-        raise ValueError(f"No sweeps of {name!r} to match against.")
+        raise ValueError(f"No sweep sections for {name!r} to match against.")
 
     return min(per_iteration, key=lambda i: abs(per_iteration[i] - amplitude))
 

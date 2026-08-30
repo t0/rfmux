@@ -140,7 +140,7 @@ async def test_each_sweep_gets_the_amplitudes_of_its_own_step():
     crs = FakeCRS()
     catalog = a_catalog(amplitudes=(0.001, 0.002))
 
-    await drive(crs, catalog, amp_schedule=AmplitudeSchedule.scaled(1.0, 2.0, 2))
+    await drive(crs, catalog, amp_schedule=AmplitudeSchedule.multiplicative(1.0, 2.0, 2))
 
     assert crs.calls[0]["amp"] == pytest.approx({"R0001": 0.001, "R0002": 0.002})
     assert crs.calls[1]["amp"] == pytest.approx({"R0001": 0.002, "R0002": 0.004})
@@ -193,7 +193,7 @@ async def test_the_catalog_is_passed_through_untouched():
     catalog = a_catalog()
     before = catalog.to_dict()
 
-    await drive(crs, catalog, amp_schedule=AmplitudeSchedule.scaled(0.5, 2.0, 3))
+    await drive(crs, catalog, amp_schedule=AmplitudeSchedule.multiplicative(0.5, 2.0, 3))
 
     assert all(c["catalog"] is catalog for c in crs.calls)
     assert catalog.to_dict() == before  # the driver mutates nothing
@@ -283,7 +283,7 @@ async def test_an_overshooting_ladder_is_refused_before_anything_is_measured():
         await drive(
             crs,
             catalog,
-            amp_schedule=AmplitudeSchedule.scaled(1.0, 4.0, 3, spacing="linear"),
+            amp_schedule=AmplitudeSchedule.multiplicative(1.0, 4.0, 3, spacing="linear"),
         )
 
     assert crs.calls == []
@@ -401,7 +401,7 @@ async def test_the_amplitude_of_a_step_is_recoverable_without_being_stored_twice
     catalog = a_catalog(amplitudes=(0.001, 0.002, 0.004))
 
     result = await drive(
-        crs, catalog, amp_schedule=AmplitudeSchedule.scaled(1.0, 4.0, 3)
+        crs, catalog, amp_schedule=AmplitudeSchedule.multiplicative(1.0, 4.0, 3)
     )
 
     step = result["results"][2]["upward"]
@@ -486,7 +486,7 @@ async def test_sweep_callback_carries_the_step_amplitudes_and_its_rung():
     await drive(
         crs,
         a_catalog(amplitudes=(0.001,)),
-        amp_schedule=AmplitudeSchedule.scaled(2.0, 2.0, 1),
+        amp_schedule=AmplitudeSchedule.multiplicative(2.0, 2.0, 1),
         sweep_callback=seen.append,
     )
 
@@ -602,7 +602,7 @@ async def test_the_readers_work_on_what_the_driver_actually_returns():
     result = await drive(
         crs,
         catalog,
-        amp_schedule=AmplitudeSchedule.scaled(0.25, 4.0, 5),
+        amp_schedule=AmplitudeSchedule.multiplicative(0.25, 4.0, 5),
         directions=("upward", "downward"),
     )
 

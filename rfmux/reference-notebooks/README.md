@@ -1,17 +1,3 @@
----
-jupyter:
-  jupytext:
-    text_representation:
-      extension: .md
-      format_name: markdown
-      format_version: '1.3'
-      jupytext_version: 1.16.4
-  kernelspec:
-    display_name: Python 3 (ipykernel)
-    language: python
-    name: python3
----
-
 # Reference notebooks
 
 These ship with the `rfmux` package and are provisioned **read-only**, so save
@@ -38,9 +24,8 @@ jupytext -o pulse_capture.ipynb pulse_capture.md
   streaming HDF5, histograms and matched slow+fast capture.
 
 Each has a `.py` counterpart beside it showing the same sequence as a plain
-script — a reference for writing your own code against the API, and a quick way
-to smoke-test a change against `MOCK`. The notebook explains why; the script
-shows what to call.
+script. This is intended as a reference for writing your own code against the API.
+It is also a quick way to smoke-test a change against `MOCK`.
 
 ## Connecting
 
@@ -55,5 +40,4 @@ await crs.resolve()
 await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)
 ```
 
-With no hardware, both demos stand up a simulated CRS instead. See their
-mock-mode sections.
+Both demos can also run in mock mode with simulated hardware.

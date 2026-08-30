@@ -530,11 +530,10 @@ def test_a_step_is_accepted_by_multisweeps_own_amplitude_resolution():
 # ─── the driver's output: packing and reading ─────────────────────────────────
 
 
-def a_sweep_entry(name, amplitude, direction):
+def a_sweep_entry(amplitude, direction):
     """One resonator's worth of a multisweep return, cut down to what the
     readers actually touch."""
     return {
-        "name": name,
         "sweep_amplitude": amplitude,
         "sweep_direction": direction,
         "original_center_frequency": 1.0e9,
@@ -558,7 +557,7 @@ def packed(
     sweeps = {
         step.step: {
             direction: {
-                name: a_sweep_entry(name, amplitude, direction)
+                name: a_sweep_entry(amplitude, direction)
                 for name, amplitude in step.amplitudes.items()
             }
             for direction in directions
@@ -573,9 +572,6 @@ def packed(
         span_hz=200e3,
         npoints_per_sweep=101,
         nsamps=10,
-        bias_frequency_method="max-diq",
-        rotate_saved_data=False,
-        apply_df_calibration=True,
         catalog=catalog,
         names=names,
         requested_module=None,
@@ -631,11 +627,13 @@ def test_one_resonators_sweeps_across_every_iteration():
     assert [
         c["upward"]["sweep_amplitude"] for c in collected.values()
     ] == pytest.approx([0.001, 0.002, 0.004])
-    # and only that resonator
+    # and only that resonator. A section entry does not name itself — it is
+    # already keyed by one — so this checks the collector handed back the very
+    # entries filed under "R0001", not merely ones that look like them.
     assert all(
-        entry["name"] == "R0001"
-        for by_direction in collected.values()
-        for entry in by_direction.values()
+        entry is result["results"][iteration][direction]["R0001"]
+        for iteration, by_direction in collected.items()
+        for direction, entry in by_direction.items()
     )
 
 

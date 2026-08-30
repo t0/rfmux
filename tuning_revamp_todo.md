@@ -81,13 +81,57 @@ channels the sweep may silence.
 
 That test exists because the behaviour was changed and needed a guard, not
 because the loop is now covered. Still unexercised: NCO region splitting (the
-`MAX_NCO_SPAN_HZ` cut and the no-phase-stitching seam between regions), the
-`min-s21` / `max-diq` recalculation arithmetic, `rotate_saved_data`, and
-`apply_df_calibration`. The MockCRS route is cheap once resonators are generated
-at known frequencies — `crs.generate_resonators({"num_resonances": n,
-"auto_bias_kids": False})` returns the list, and sweeping real dips is what makes
-the recalculation branches run at all (on a flat baseline `max-diq` finds zero
-IQ velocity, gives up, and silently skips the whole TOD path).
+`MAX_NCO_SPAN_HZ` cut and the no-phase-stitching seam between regions). The
+MockCRS route is cheap once resonators are generated at known frequencies —
+`crs.generate_resonators({"num_resonances": n, "auto_bias_kids": False})`
+returns the list.
+
+(The recalculation arithmetic, `rotate_saved_data` and `apply_df_calibration`
+used to be on this list. They are gone from the macro — see below — so there is
+nothing left to cover.)
+
+## multisweep measures, and does nothing else
+
+The macro no longer rotates, re-centres or df-calibrates. Removed: the
+`bias_frequency_method`, `rotate_saved_data` and `apply_df_calibration`
+arguments, the `_get_recalculated_center_freq` helper, and the whole per-NCO-
+region TOD acquisition that fed the rotation. A section entry is now
+`channel`, `frequencies`, `iq_counts`, `iq_volts`, `original_center_frequency`,
+`sweep_direction`, `sweep_amplitude` — and nothing else. `multiamp_multisweep`
+lost the same three pass-throughs, `pack_results` dropped them from
+`call_params`, and `RESULTS_SCHEMA_VERSION` went to 2.
+
+Two things to bring back, deliberately, when there is something to bring them
+back *for*:
+
+1. **Re-centring across an amplitude ladder.** The point of the old
+   recalculation was to let a sweep centre follow a resonance that moves
+   between amplitude steps. When it returns it adjusts the *sweep centre* of
+   the next step, decided by whatever analysis found the dip — not a
+   `bias_frequency` reported out of a sweep. The bias frequency lives in the
+   catalog's `BiasPoint`.
+2. **df calibration**, from the fitting layer that has yet to be written, off
+   the sweep it was fit to.
+
+### Consumers still reading the old contract
+
+None of these is a regression from this change alone — all of them predate it
+and are already on the list to be rewired — but they now fail sooner and more
+loudly, so check them off when their rewrite lands:
+
+* **Periscope's `MultisweepTask`** (`tools/periscope/tasks.py:669`) passes
+  `bias_frequency_method` and `rotate_saved_data` straight into
+  `crs.multisweep`; `app_runtime.py:2365` builds the same pair. Both are now a
+  `TypeError`. `multisweep_dialog.py` has the checkbox and combo that produce
+  them, and `multisweep_panel.py` plots `iq_complex`. Part of step 5.
+* **The legacy analysis stack** — `fitting.fit_skewed_multisweep`,
+  `fitting_nonlinear.fit_nonlinear_iq_multisweep` and `bias_kids` all read
+  `iq_complex` and `bias_frequency` off a multisweep entry. They are being
+  replaced rather than ported, so they were left alone.
+* **`reference-notebooks/Demos/simplified_tuning_flow.{py,md}`** passes the
+  removed kwargs and then indexes results by integer, which the catalog revamp
+  had already broken. `test/algorithms/test_measurement_flow.py` keeps passing
+  because it mocks `crs.multisweep`, so CI will not catch either.
 
 ## Retire the legacy resonance finder
 

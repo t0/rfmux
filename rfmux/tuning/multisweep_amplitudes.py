@@ -675,7 +675,14 @@ class AmplitudeSchedule:
 # means, and two files agreeing about one contract is one file too many.
 
 # Bumped when the packed dict changes shape in a way a reader cannot absorb.
-RESULTS_SCHEMA_VERSION = 1
+#
+# 2: sweeps stopped rotating, re-centring and df-calibrating themselves. A
+#    section entry lost 'name', 'phase_degrees', 'bias_frequency',
+#    'recalculation_method_applied', 'rotation_tod', 'applied_rotation_degrees',
+#    'df_calibration' and 'calibrated_tod_df'; 'iq_complex'/'iq_complex_volts'
+#    became 'iq_counts'/'iq_volts'; and call_params lost the three arguments
+#    that drove all of it.
+RESULTS_SCHEMA_VERSION = 2
 
 
 def pack_results(
@@ -687,9 +694,6 @@ def pack_results(
     span_hz: float,
     npoints_per_sweep: int,
     nsamps: int,
-    bias_frequency_method: str | None,
-    rotate_saved_data: bool,
-    apply_df_calibration: bool,
     catalog=None,
     center_frequencies: Sequence[float] | None = None,
     names: Sequence[str] | None = None,
@@ -739,9 +743,6 @@ def pack_results(
             "span_hz": float(span_hz),
             "npoints_per_sweep": int(npoints_per_sweep),
             "nsamps": int(nsamps),
-            "bias_frequency_method": bias_frequency_method,
-            "rotate_saved_data": bool(rotate_saved_data),
-            "apply_df_calibration": bool(apply_df_calibration),
             "module": requested_module,
         },
         "results": {int(i): dict(by_direction) for i, by_direction in sweeps.items()},

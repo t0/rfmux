@@ -290,8 +290,7 @@ The driver wraps those:
         "amp_schedule": amp_schedule.to_dict(),
         "directions": ["upward", "downward"],
         "span_hz": ..., "npoints_per_sweep": ..., "nsamps": ...,
-        "bias_frequency_method": ..., "rotate_saved_data": ...,
-        "apply_df_calibration": ..., "module": ...,
+        "module": ...,
     },
     "results": {
         0: {                              # the amplitude step, in measured order

@@ -112,9 +112,6 @@ async def multiamp_multisweep(
     amp_schedule: AmplitudeSchedule | None = None,
     directions: Sequence[str] = ("upward",),
     nsamps: int = 10,
-    bias_frequency_method: str | None = "max-diq",
-    rotate_saved_data: bool = False,
-    apply_df_calibration: bool = True,
     center_frequencies: list[float] | None = None,
     names: list[str] | None = None,
     module: int | None = None,
@@ -140,7 +137,7 @@ async def multiamp_multisweep(
             amp_schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 6),
             directions=("upward", "downward"),
         )
-        results["results"][0]["upward"]["R0001"]["iq_complex"]
+        results["results"][0]["upward"]["R0001"]["iq_counts"]
 
     Omitting *amp_schedule* sweeps the catalog at its own amplitudes, once — so
     the useful degenerate call is an up-and-down pair with nothing else said::
@@ -160,7 +157,7 @@ async def multiamp_multisweep(
             span_hz=200e3, npoints_per_sweep=101,
             amp_schedule=AmplitudeSchedule.ramp(1e-4, 1e-2, 5),
         )
-        results["results"][0]["upward"]["S0001"]["iq_complex"]
+        results["results"][0]["upward"]["S0001"]["iq_counts"]
 
     Args:
         crs (CRS): The CRS object (injected by macro).
@@ -183,12 +180,6 @@ async def multiamp_multisweep(
             order the sweeps are measured in.
         nsamps (int, optional): Samples averaged per frequency point. Defaults
             to 10.
-        bias_frequency_method (str | None, optional): Passed to ``multisweep``
-            unchanged — ``"min-s21"``, ``"max-diq"`` or None. Its result is
-            reported per sweep, not written back into the catalog. Defaults to
-            ``"max-diq"``.
-        rotate_saved_data (bool, optional): Passed through. Defaults to False.
-        apply_df_calibration (bool, optional): Passed through. Defaults to True.
         center_frequencies (list[float], optional): A bare list of sweep
             centres, for an array that is not tuned yet. Pass this or *catalog*,
             not both.
@@ -321,10 +312,7 @@ async def multiamp_multisweep(
                 npoints_per_sweep=npoints_per_sweep,
                 amp=step.amplitudes,
                 nsamps=nsamps,
-                bias_frequency_method=bias_frequency_method,
-                rotate_saved_data=rotate_saved_data,
                 sweep_direction=direction,
-                apply_df_calibration=apply_df_calibration,
                 module=resolved_module,
                 progress_callback=progress_callback,
                 data_callback=inner_data_callback,
@@ -362,9 +350,6 @@ async def multiamp_multisweep(
         span_hz=span_hz,
         npoints_per_sweep=npoints_per_sweep,
         nsamps=nsamps,
-        bias_frequency_method=bias_frequency_method,
-        rotate_saved_data=rotate_saved_data,
-        apply_df_calibration=apply_df_calibration,
         catalog=catalog,
         center_frequencies=center_frequencies,
         names=names,

@@ -2,9 +2,9 @@
 
 The one test that drives multisweep's measurement loop rather than its input
 resolution, because this is behaviour no amount of argument-checking can show:
-the loop zeroes channels on the way in (to quiet its other NCO regions), before
-a TOD acquisition, and again on the way out. All three must stay inside the set
-of channels the sweep itself put a tone on.
+the loop zeroes channels on the way in (to quiet its other NCO regions) and
+again on the way out. Both must stay inside the set of channels the sweep
+itself put a tone on.
 
 Spawns a MockCRS server, hence slow_acquisition.
 """
@@ -36,13 +36,9 @@ def crs_mock():
 
 
 async def a_catalog_of_real_resonators(crs, n=3):
-    """A catalog on frequencies the mock actually has resonators at.
-
-    It matters: on a flat baseline the ``max-diq`` recalculation finds zero IQ
-    velocity everywhere, gives up, and the TOD acquisition — one of the three
-    places that zeroes channels — never runs. Sweeping real dips is what puts
-    that branch under test.
-    """
+    """A catalog on frequencies the mock actually has resonators at, so the
+    channel bookkeeping is exercised by a sweep of the shape a user would
+    actually take rather than one over a flat baseline."""
     _, frequencies = await crs.generate_resonators(
         {"num_resonances": n, "auto_bias_kids": False}
     )
@@ -80,15 +76,8 @@ async def test_a_tone_the_caller_parked_elsewhere_survives_the_sweep(crs_mock):
         span_hz=100e3,
         npoints_per_sweep=9,
         nsamps=2,
-        # Recalculation succeeding is what drives the TOD acquisition, and with
-        # it the second of the three channel-zeroing sites.
-        bias_frequency_method="max-diq",
-        apply_df_calibration=False,
     )
     assert sorted(sweeps) == ["R0001", "R0002", "R0003"]
-    assert any(
-        s["recalculation_method_applied"] == "max-diq" for s in sweeps.values()
-    ), "the TOD path did not run, so its channel zeroing is not under test"
 
     assert await crs.get_amplitude(
         channel=FOREIGN_CHANNEL, module=MODULE
@@ -107,8 +96,6 @@ async def test_the_sweeps_own_channels_are_left_silent(crs_mock):
         span_hz=100e3,
         npoints_per_sweep=5,
         nsamps=2,
-        bias_frequency_method=None,
-        apply_df_calibration=False,
     )
 
     for r in catalog:

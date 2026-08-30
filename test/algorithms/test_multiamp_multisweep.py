@@ -173,18 +173,12 @@ async def test_the_sweep_parameters_reach_multisweep_unchanged():
         span_hz=123e3,
         npoints_per_sweep=57,
         nsamps=42,
-        bias_frequency_method="min-s21",
-        rotate_saved_data=True,
-        apply_df_calibration=False,
     )
 
     call = crs.calls[0]
     assert call["span_hz"] == 123e3
     assert call["npoints_per_sweep"] == 57
     assert call["nsamps"] == 42
-    assert call["bias_frequency_method"] == "min-s21"
-    assert call["rotate_saved_data"] is True
-    assert call["apply_df_calibration"] is False
 
 
 @pytest.mark.asyncio
@@ -386,7 +380,7 @@ async def test_a_step_swept_once_holds_only_that_direction():
 
 @pytest.mark.asyncio
 async def test_under_a_direction_is_exactly_what_multisweep_returned():
-    sentinel = {"R0001": {"name": "R0001", "iq_complex": "opaque"}}
+    sentinel = {"R0001": {"iq_counts": "opaque"}}
     crs = FakeCRS(sweep_result=sentinel)
 
     result = await drive(crs, a_catalog())
@@ -452,7 +446,7 @@ async def test_center_frequencies_are_recorded_only_as_passed():
 @pytest.mark.asyncio
 async def test_the_result_carries_a_schema_version():
     result = await drive(FakeCRS(), a_catalog())
-    assert result["schema_version"] == 1
+    assert result["schema_version"] == 2
 
 
 # ─── callbacks ────────────────────────────────────────────────────────────────

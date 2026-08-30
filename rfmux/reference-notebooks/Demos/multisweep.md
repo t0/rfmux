@@ -228,11 +228,11 @@ def plot_ms(ms, keys, title):
         centre = s["original_center_frequency"]
         offset_khz = (s["frequencies"] - centre) / 1e3
 
-        axes[0, column].plot(s["iq_complex"].real, s["iq_complex"].imag, lw=0.9)
+        axes[0, column].plot(s["iq_counts"].real, s["iq_counts"].imag, lw=0.9)
         axes[0, column].set_aspect("equal", "datalim")
         axes[0, column].set_title(f"{key}\n{centre/1e6:.3f} MHz", fontsize=9)
 
-        axes[1, column].plot(offset_khz, 20 * np.log10(np.abs(s["iq_complex"])), lw=0.9)
+        axes[1, column].plot(offset_khz, 20 * np.log10(np.abs(s["iq_counts"])), lw=0.9)
         axes[1, column].set_xlabel("offset [kHz]", fontsize=8)
 
     axes[0, 0].set_ylabel("Q")
@@ -617,7 +617,7 @@ def plot_amplitude_iterations(results, name, direction="upward"):
         ) / 1e3
         # Divide out the drive, so the shapes can be compared rather than just
         # the one that was loudest sitting on top.
-        iq = section["iq_complex"] / section["sweep_amplitude"]
+        iq = section["iq_counts"] / section["sweep_amplitude"]
 
         ax_mag.plot(offset_khz, 20 * np.log10(np.abs(iq)), lw=1.0, color=colour)
         ax_iq.plot(iq.real, iq.imag, lw=1.0, color=colour)
@@ -671,7 +671,7 @@ def plot_sections_at_iteration(results, iteration, direction="upward", ncols=5):
         offset_khz = (
             section["frequencies"] - section["original_center_frequency"]
         ) / 1e3
-        iq = section["iq_complex"] / section["sweep_amplitude"]
+        iq = section["iq_counts"] / section["sweep_amplitude"]
 
         panel.plot(offset_khz, 20 * np.log10(np.abs(iq)), lw=1.0, color=colour)
         panel.set_title(f"{name}\n{amplitudes[name]:.5f}", fontsize=8)
@@ -787,7 +787,7 @@ def plot_both_directions(results, name):
             offset_khz = (
                 section["frequencies"] - section["original_center_frequency"]
             ) / 1e3
-            iq = section["iq_complex"] / section["sweep_amplitude"]
+            iq = section["iq_counts"] / section["sweep_amplitude"]
             ax.plot(offset_khz, 20 * np.log10(np.abs(iq)), lw=1.0, color=colour,
                     ls=styles.get(direction, ":"))
 

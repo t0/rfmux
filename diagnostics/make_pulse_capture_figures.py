@@ -57,38 +57,32 @@ def capture_window_anatomy(path):
     # max(10 samples, margin_fraction x core).
     confirmed = end + 0.45 * (end - trig)
 
-    # save_to_end_confirmed defaults to True, which keeps every sample the
-    # state machine saw.  So the saved window runs from before the trigger
-    # all the way to the confirmation: one band, drawn once.  The hatched
-    # stretch is the tail that save_to_end_confirmed=False drops, and it is
-    # marked rather than shaded separately so the default window does not
-    # read as ending at the below-threshold instant.
+    # The window runs from before the trigger to the end-of-pulse
+    # confirmation, which is what the detector saves.  One band, no
+    # sub-divisions: save_to_end_confirmed is the only thing that would
+    # shorten it, and splitting the shading for it made the default window
+    # read as ending early.
     ax.axvspan(trig - margin, confirmed, color="#3366CC", alpha=0.10,
                zorder=0)
-    ax.axvspan(end + margin, confirmed, facecolor="none", edgecolor="#3366CC",
-               hatch="///", lw=0.0, alpha=0.55, zorder=1)
     ax.axvline(trig, color="#CC6633", lw=1.6, zorder=4)
     ax.axvline(end, color="#33884D", lw=1.6, ls=":", zorder=4)
     ax.axvline(confirmed, color="#33884D", lw=1.2, ls="--", zorder=4)
 
     # Labels are kept sparse on purpose: margin_fraction is 10% of an 18 ms
     # window here, far too small to annotate legibly, so the prose covers it.
-    ax.text((trig - margin + confirmed) / 2, -3.3, "saved window (default)",
+    ax.text((trig - margin + confirmed) / 2, -3.3, "saved window",
             ha="center", fontsize=9, color="#3366CC", weight="bold")
     ax.annotate("end confirmed",
                 xy=(confirmed, 7.4), xytext=(confirmed + 2.0, 8.4),
                 fontsize=8, color="#33884D", va="center",
                 arrowprops=dict(arrowstyle="->", color="#33884D", lw=1))
-    ax.annotate("save_to_end_confirmed=False\nstops the window here",
-                xy=(end + margin, -2.6), xytext=(confirmed + 4.0, -6.5),
-                fontsize=7.5, color="#3366CC", va="center",
-                arrowprops=dict(arrowstyle="->", color="#3366CC", lw=1))
 
     ax.annotate("trigger", xy=(trig, THRESH), xytext=(trig + 7, 9.2),
                 fontsize=9, color="#CC6633",
                 arrowprops=dict(arrowstyle="->", color="#CC6633", lw=1.1))
+    # Placed past the confirmation line: at end + 4 the text ran across it.
     ax.annotate("both quadratures back\ninside end_sigma", xy=(end, END),
-                xytext=(end + 4, 5.6), fontsize=8, color="#33884D",
+                xytext=(confirmed + 3.5, 3.9), fontsize=8, color="#33884D",
                 arrowprops=dict(arrowstyle="->", color="#33884D", lw=1))
 
     ax.axvline(hard_stop, color="#7A5AA8", lw=1.4, ls="-.")
@@ -101,7 +95,7 @@ def capture_window_anatomy(path):
     ax.set_ylabel("deviation from baseline (σ)")
     ax.set_title("Anatomy of one capture window")
     ax.set_xlim(t[0], t[-1])
-    ax.set_ylim(-7.6, 10.5)
+    ax.set_ylim(-6.2, 10.5)
     ax.legend(loc="lower right", fontsize=8, framealpha=0.95)
     fig.tight_layout()
     fig.savefig(path, dpi=140)

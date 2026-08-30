@@ -161,12 +161,18 @@ crs = await create_mock_crs(module=1, config={
     "auto_bias_kids": True,
     "bias_amplitude": 0.001,
     "pulse_mode": "periodic",
-    "pulse_period": 0.05,
-    "pulse_tau_rise": 1e-6,
-    "pulse_tau_decay": 1e-3,
+    "pulse_period": 0.25,
+    "pulse_tau_rise": 5e-3,
+    "pulse_tau_decay": 25e-3,
     "pulse_amplitude": 2.0,
 })
 ```
+
+Match the decay constant to the rate you are sampling at. The default
+decimation gives 596 Hz, so a sample every 1.68 ms, and the 25 ms decay above
+is about fifteen samples long. A decay shorter than the sample period lands
+inside one sample and is detected but not resolved, which looks like a single
+spike rather than a pulse.
 
 `periscope --mock` gives the same simulation behind the GUI. The screenshots
 in this document were taken from a mock capture.

@@ -72,8 +72,8 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.max_pulse_spin.setDecimals(1)
         self.max_pulse_spin.setValue(config.max_pulse_ms)
         self.max_pulse_spin.setToolTip(
-            "Longest pulse you expect — every time scale in the "
-            "detector derives from this.  Estimate generously.\n"
+            "Longest pulse you expect — every time scale in pulse "
+            "detection derives from this.  Estimate generously.\n"
             "Sets the ring buffer (1.5×), the hard stop that "
             "force-ends a stuck capture (1.2×), the noise-training "
             "length (20×), the rolling-baseline median span, and the "
@@ -161,7 +161,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.end_confirmed_check = QtWidgets.QCheckBox(
             "Save the full tail (to end-of-pulse confirmation)")
         self.end_confirmed_check.setToolTip(
-            "On: keep every sample the detector saw, so the decay runs "
+            "On: keep every sample the engine saw, so the decay runs "
             "to where the end condition was confirmed.  Off: stop a "
             "margin past the point the pulse fell below threshold, "
             "which keeps window length a property of the pulse rather "

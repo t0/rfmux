@@ -1256,3 +1256,43 @@ def test_template_legend_does_not_grow_without_bound(qt_app):
     panel._template_data = _template_data(channels)
     panel._render_templates()
     assert _legend_rows(panel.template_plot_i) == 0
+
+
+def test_main_display_and_pulse_capture_rotate_the_same_way(qt_app):
+    """Periscope's df display and pulse capture must agree on the rotation.
+
+    Both take IQ in volts to frequency shift plus dissipation, and both
+    now go through apply_storage_transform.  They were separate before,
+    and the copy written second used the conjugate -- which sends a pure
+    frequency excursion into both axes with the wrong sign.  Comparing
+    against the surviving correct one would have caught it immediately,
+    so this pins them together.
+    """
+    import numpy as np
+    from rfmux.core.transferfunctions import convert_roc_to_volts
+    from rfmux.pulse_capture.analysis import apply_storage_transform
+
+    rng = np.random.default_rng(3)
+    raw_i = rng.normal(200.0, 20.0, 512)
+    raw_q = rng.normal(-90.0, 20.0, 512)
+    cal = 3.0e6 * np.exp(1j * np.radians(37.0))
+
+    # The definition, spelled out: (I + jQ) * calibration, in volts.
+    volts = convert_roc_to_volts(raw_i) + 1j * convert_roc_to_volts(raw_q)
+    want = volts * cal
+
+    got_df, got_diss = apply_storage_transform(
+        convert_roc_to_volts(raw_i), convert_roc_to_volts(raw_q),
+        cal.real, cal.imag)
+
+    # Not bitwise: numpy's complex multiply and the explicit real form
+    # round differently where the imaginary part passes through zero.
+    assert np.allclose(got_df, want.real, rtol=1e-12, atol=0)
+    assert np.allclose(got_diss, want.imag, rtol=1e-9,
+                       atol=1e-12 * np.abs(want).max())
+
+    # The sign is the part that was wrong: conjugating flips it.
+    wrong_df, _ = apply_storage_transform(
+        convert_roc_to_volts(raw_i), convert_roc_to_volts(raw_q),
+        cal.real, -cal.imag)
+    assert not np.allclose(wrong_df, want.real, rtol=1e-6)

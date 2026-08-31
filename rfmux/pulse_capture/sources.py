@@ -302,7 +302,7 @@ async def run_pfb_source(
             # A whole packet per channel per call.  The packet
             # interleaves the streamed channels round-robin, so one
             # channel is a strided slice; feeding those arrays straight
-            # through is what lets the detector absorb quiet stretches
+            # through is what lets the engine absorb quiet stretches
             # with numpy rather than 1.22 million Python calls a second.
             # NaN where the packet has no usable timestamp — the session
             # drops and counts those, exactly as the per-sample path did

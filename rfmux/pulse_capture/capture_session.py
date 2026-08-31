@@ -249,7 +249,7 @@ class PulseCaptureConfig:
     #: ring, so it is the same stop the engine's own default computes.
     #: The ring (1.5x) still has room for the pre-trigger margin, and a
     #: baseline that drifted mid-capture can delay the end condition but
-    #: never wedge the detector.
+    #: never wedge the engine.
     HARD_STOP_FACTOR = HARD_STOP_RING_FRACTION * BUFFER_SAFETY
 
     # ── ms → samples (per stream rate) ────────────────────────────
@@ -1017,11 +1017,11 @@ class PulseCaptureSession(_CallbackHost):
                 key = ("sample_rate_fast" if self.streamer_mode == "fast"
                        else "sample_rate_slow")
                 capture_params[key] = self.sample_rate
-            # Self-describing: what basis the stored samples are in, what
-            # units, and the counts-to-volts constant they were written
-            # with.  VOLTS_PER_ROC is marked empirical and will change, so
-            # a file that leans on the reader's copy quietly changes
-            # meaning when it does.
+            # Written so the file describes itself: the basis and units
+            # of the stored samples, and the counts-to-volts constant
+            # they were converted with.  A capture that carries its own
+            # conversion factors can be read years later without
+            # matching the library version that produced it.
             capture_params.setdefault("trigger_basis", self.trigger_basis)
             for ch in self.channels:          # fills stored_units
                 self._storage_coeffs(ch)

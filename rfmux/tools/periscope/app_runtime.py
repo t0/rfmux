@@ -12,6 +12,7 @@ from PyQt6 import sip
 import numpy as np
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 from ... import streamer as _streamer
+from ...pulse_capture.analysis import apply_storage_transform
 from ...pulse_capture.sources import (
     columns_for_width,
 )
@@ -44,10 +45,14 @@ class PeriscopeRuntime:
         if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
             df_cal = self.df_calibrations[self.module].get(ch_val)
             if df_cal is not None:
-                # Apply df calibration
-                iq_volts = convert_roc_to_volts(rawI) + 1j * convert_roc_to_volts(rawQ)
-                df_complex = iq_volts * df_cal
-                return df_complex.real, df_complex.imag  # Frequency shift (Hz), Dissipation (unitless)
+                # (I + jQ) * calibration, the rotation convert_iq_to_df
+                # defines.  Shared with pulse capture rather than written
+                # twice: the second copy of this got the conjugate, which
+                # sends a pure frequency excursion into both axes.
+                cal = complex(df_cal)
+                return apply_storage_transform(
+                    convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ),
+                    cal.real, cal.imag)
             else:
                 # No calibration - fall back to real_units check (matches PSD task behavior)
                 return (convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)) if self.real_units else (rawI, rawQ)

@@ -337,7 +337,7 @@ spec, from `get_biased_channels`, or by hand.
 hand it, which is what lets one configuration work unchanged across a 4000×
 span of rates from the decimated slow stream to the PFB stream.
 
-How the detector works:
+How pulse detection works:
 
 - **A capture opens on either I or Q, and closes only when both have settled.**
   It opens when either leaves ±`threshold_sigma`, and closes when both are back

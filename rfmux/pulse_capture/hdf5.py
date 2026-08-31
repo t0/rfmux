@@ -473,11 +473,11 @@ class PulseHDF5Reader:
         )
 
     def volts_per_count(self) -> Optional[float]:
-        """The counts-to-volts constant this capture was written with.
+        """The counts-to-volts constant *this file* was written with.
 
-        Stored per file rather than taken from the library because
-        VOLTS_PER_ROC is empirical and will be revised; an old capture
-        read with a new constant would silently change meaning.
+        Read from the file's metadata, not from the library: it is what
+        the capture was converted with, which is what makes the samples
+        interpretable without knowing which version wrote them.
         """
         if self.f is None:
             return None
@@ -686,7 +686,7 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
     pulse_grp.attrs["truncated"] = bool(pulse_data.get("truncated", False))
     pulse_grp.attrs["n_samples"] = len(amp_I)
 
-    # Where the detector triggered and where the end condition confirmed
+    # Where the engine triggered and where the end condition confirmed
     # the end — kept so a saved capture can be reviewed against the
     # decisions that produced it, not just its samples.
     for key in ("trigger_index", "end_index", "below_threshold_index",

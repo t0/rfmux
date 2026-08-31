@@ -31,7 +31,7 @@ Usage::
     )
 
     # 3. Feed samples.  Completed pulses arrive through on_pulse; the
-    #    detector holds only the ring buffer, so a capture can run
+    #    engine holds only the ring buffer, so a capture can run
     #    indefinitely without growing.
     for channel, i_val, q_val, timestamp in sample_stream:
         pcap.process_sample(channel, i_val, q_val, timestamp)
@@ -48,7 +48,7 @@ from typing import Callable, Dict, List, Optional
 _SQRT2 = math.sqrt(2.0)
 
 # ── Ring geometry ───────────────────────────────────────────────────
-# Every time scale in the detector is a fraction of the longest pulse
+# Every time scale in the engine is a fraction of the longest pulse
 # the ring was sized for, so ONE user-facing number (max_pulse_ms) sets
 # them all.  The two constants live here, in the layer that owns the
 # ring, and PulseCaptureConfig derives from them — otherwise a bare
@@ -57,7 +57,7 @@ _SQRT2 = math.sqrt(2.0)
 
 #: Ring headroom over the longest expected pulse.  The pre-trigger
 #: margin and the end-confirmation tail share the ring with the pulse.
-#: End-of-pulse threshold, in sigma.  Defined here, where the detector
+#: End-of-pulse threshold, in sigma.  Defined here, where the engine
 #: lives, because it was written three times with two different values:
 #: PulseCapture and PulseCaptureSession said 1.0, PulseCaptureConfig
 #: said 1.5, so constructing the engine directly behaved differently
@@ -202,7 +202,7 @@ class _ChState:
 # ───────────────────────── PulseCapture ─────────────────────────────
 
 class PulseCapture:
-    """Streaming multi-channel pulse detector with dual I/Q sigma-based triggering.
+    """Streaming multi-channel pulse-detection engine, triggering on I and Q.
 
     For each channel, both I and Q are monitored independently.  A pulse
     must satisfy two conditions on **either** component: deviate from the
@@ -311,7 +311,7 @@ class PulseCapture:
         of the longest pulse the ring was sized for (the ring is
         ``BUFFER_SAFETY`` times that pulse).  Shared with noise
         estimation so the measured jump-σ is taken at the same lag the
-        detector uses, and equal by construction to
+        edge detector uses, and equal by construction to
         ``PulseCaptureConfig.edge_lookback_samples`` for the same
         intent."""
         return max(1, int(round(
@@ -406,7 +406,7 @@ class PulseCapture:
         self.state: Dict[int, _ChState] = {c: _ChState() for c in self.channels}
 
         # Results.  Completed pulses leave through on_pulse and are not
-        # retained here — the detector's memory is the ring buffer and
+        # retained here — the engine's memory is the ring buffer and
         # nothing else, so a capture can run for as long as you like.
         self.start_time: Optional[float] = None
         #: Per-channel pulse counter, keyed by channel number.  It
@@ -462,7 +462,7 @@ class PulseCapture:
                     Q: np.ndarray, T: np.ndarray) -> None:
         """Absorb a run of samples that provably cannot do anything.
 
-        Valid only when the detector is not capturing, no sample in the
+        Valid only when the engine is not capturing, no sample in the
         run reaches ``threshold_sigma``, and the baseline mean does not
         move within it.  Under those three conditions process_sample's
         entire body reduces to: append to the ring, feed the decimated
@@ -683,7 +683,7 @@ class PulseCapture:
         # is neither above threshold nor mid-capture the whole block was
         # computed and thrown away.  That is nearly every sample of a
         # quiet stream, and it was the single largest cost in the
-        # detector's hot loop.
+        # engine's hot loop.
         if self.edge_lookback > 0 and eligible and not st.capturing:
             # The usable lag shortens near the start of the stream and
             # after a statistics epoch reset — a reference from before
@@ -1043,10 +1043,10 @@ class PulseCapture:
         self.pulse_count[channel] += 1
         k = self.pulse_count[channel]
 
-        # The only way a completed pulse leaves the detector.  A consumer
+        # The only way a completed pulse leaves the engine.  A consumer
         # that wants them all in memory (trigger_capture) collects them
         # here; one that streams to disk writes them here.  Either way
-        # the detector keeps nothing.
+        # the engine keeps nothing.
         if self.on_pulse is not None:
             self.on_pulse(channel, k, pulse_data)
 

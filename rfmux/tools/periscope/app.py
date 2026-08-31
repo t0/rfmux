@@ -1908,14 +1908,27 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         crs = getattr(self, "crs", None)
         if crs is None or not getattr(self, "is_mock_mode", False):
             return
-        # channel_list is the plot layout: one list per row of plots.
-        channels = sorted({c for group in getattr(self, "channel_list", [])
-                           for c in group})
-        if not channels:
-            return
+
+        async def _measure():
+            # Every biased channel, not just the ones on screen: the
+            # display can change without the tuning changing, and a
+            # channel that appears later should already have its number.
+            from ...algorithms.measurement.channel_selection import (
+                get_biased_channels)
+            channels = await get_biased_channels(crs, module)
+            if not channels:
+                # Nothing reports as biased; fall back to the plot
+                # layout, which is one list per row of plots.
+                channels = sorted({c for group in
+                                   getattr(self, "channel_list", [])
+                                   for c in group})
+            if not channels:
+                return {}
+            return await crs.measure_df_calibrations(
+                channels=channels, module=module)
+
         try:
-            cals = asyncio.run(crs.measure_df_calibrations(
-                channels=channels, module=module))
+            cals = asyncio.run(_measure())
         except Exception as exc:
             print(f"[Periscope] df calibration failed: {exc}")
             return

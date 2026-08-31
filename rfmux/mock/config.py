@@ -108,7 +108,7 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Automatic KID biasing parameters
     # -------------------------------------------------------------------------
     "auto_bias_kids": False,   # Enable automatic channel configuration
-    "bias_amplitude": 0.01,    # Bias amplitude in normalized units (≈ -40 dBm)
+    "bias_amplitude": 0.0015,    # Bias amplitude in normalized units (≈ -40 dBm)
 
     # -------------------------------------------------------------------------
     # UDP streamer (ADC simulation)

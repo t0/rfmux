@@ -1329,3 +1329,49 @@ def test_main_display_and_pulse_capture_rotate_the_same_way(qt_app):
         convert_roc_to_volts(raw_i), convert_roc_to_volts(raw_q),
         cal.conjugate())
     assert not np.allclose(wrong_df, want.real, rtol=1e-6)
+
+
+def test_axis_labels_name_what_is_plotted(qt_app, tmp_path, monkeypatch):
+    """Labels come from the data on the axes, not from the request.
+
+    Taking the basis from what was asked for and the units from the
+    fallback produced "I (Hz)": quadrature names over samples stored as
+    frequency and dissipation, which are not the quadratures.
+    """
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Writer
+    from rfmux.tools.periscope import pulse_capture_panel as m
+
+    monkeypatch.setattr(m.QtWidgets.QMessageBox, "warning",
+                        lambda *a, **k: None)
+
+    path = tmp_path / "df_basis.h5"
+    PulseHDF5Writer(path, [1], {1: ChannelNoiseStats()},
+                    {"streamer_mode": "slow", "sample_rate": 596.0,
+                     "trigger_basis": "df", "stored_units": "Hz"},
+                    df_calibrations={1: 2.0e6 + 0j},
+                    stored_units={1: "Hz"}).finalize()
+
+    panel = m.PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+
+    expected = {
+        m.UNITS_DF: ("df (Hz)", "dissipation (Hz)"),
+        m.UNITS_VOLTS: ("I (V)", "Q (V)"),
+        m.UNITS_COUNTS: ("I (counts)", "Q (counts)"),
+    }
+    for units, names in expected.items():
+        panel.units_combo.setCurrentText(units)
+        assert panel._axis_names(1) == names, f"wrong labels for {units}"
+
+    # The case that produced "I (Hz)": stored in the frequency basis, but
+    # the view cannot be rebuilt, so the stored samples are drawn as they
+    # are -- and those are df and dissipation, not I and Q.
+    panel._channel_cal = lambda ch: None
+    panel.units_combo.blockSignals(True)
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    panel.units_combo.blockSignals(False)
+    assert panel._axis_names(1) == ("df (Hz)", "dissipation (Hz)")
+
+    panel.close()
+    spin(qt_app)

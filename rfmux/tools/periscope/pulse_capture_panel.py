@@ -1741,10 +1741,22 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         return 1
 
     def _axis_names(self, channel: int) -> Tuple[str, str]:
-        """Axis labels for the current view, e.g. ``("df (Hz)", ...)``."""
-        basis, _ = self._view_state()
-        unit = self._units_label(channel)
-        if basis == "df" and self._view_coeffs(channel) is not None:
+        """Axis labels for what is actually plotted.
+
+        Both halves come from the same place.  Taking the basis from the
+        request and the units from the fallback gave "I (Hz)" -- the
+        quadrature names over samples stored as frequency and
+        dissipation, which are not the quadratures at all.
+        """
+        view = self._view_coeffs(channel)
+        if view is not None:
+            basis, _ = self._view_state()
+            unit = view[1]
+        else:
+            # Cannot produce what was asked for, so the stored samples
+            # are drawn as they are: name those.
+            basis, unit = self._stored_state(channel)
+        if basis == "df":
             return f"df ({unit})", f"dissipation ({unit})"
         return f"I ({unit})", f"Q ({unit})"
 

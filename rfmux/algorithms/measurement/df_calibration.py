@@ -32,8 +32,8 @@ async def measure_df_calibrations(
     crs: CRS,
     channels: List[int],
     module: int = 1,
-    span_hz: float = 40e3,
-    n_points: int = 9,
+    span_hz: float = 100e3,
+    resolution_hz: float = 500.0,
     n_samples: int = 10,
 ) -> Dict[int, complex]:
     """``{channel: calibration}`` measured where each channel sits now.
@@ -46,11 +46,16 @@ async def measure_df_calibrations(
     module : int
         Module index (1-based).
     span_hz : float
-        Half-width of the sweep either side of the bias point.  Wide
-        enough to see the slope, narrow enough to stay linear.
-    n_points : int
-        Points per sweep.  The cubic spline needs four; nine gives a
-        stable derivative without costing much time.
+        Full width of the sweep, centred on the bias point.
+    resolution_hz : float
+        Spacing between points.  This is the parameter that matters:
+        the spline has to resolve the resonance to differentiate it, so
+        the spacing must be well inside the linewidth.  A few kHz of
+        linewidth against 100 Hz spacing gives tens of points across the
+        feature.  Coarser than the linewidth and the fit runs through
+        the dip rather than around it -- the magnitude still looks
+        plausible while the phase, which is the whole rotation, is
+        wrong.
     n_samples : int
         Samples averaged per point.
 
@@ -70,7 +75,9 @@ async def measure_df_calibrations(
         bias = nco + rel
         cal = None
         try:
-            freqs = np.linspace(bias - span_hz, bias + span_hz, n_points)
+            half = 0.5 * span_hz
+            n_points = max(5, int(round(span_hz / resolution_hz)) + 1)
+            freqs = np.linspace(bias - half, bias + half, n_points)
             iq = np.empty(n_points, dtype=complex)
             for k, f in enumerate(freqs):
                 await crs.set_frequency(f - nco, channel=channel,

@@ -67,6 +67,7 @@ from .session_browser_panel import SessionBrowserPanel
 from .session_startup_dialog import UnifiedStartupDialog
 from rfmux.core.transferfunctions import convert_roc_to_volts
 from rfmux.mock import config as mc
+import asyncio
 import datetime
 import time
 
@@ -1869,6 +1870,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             
             # Check if calibration data is available
             if not self.df_calibrations.get(self.module):
+                self._load_board_df_calibrations(self.module)
+            if not self.df_calibrations.get(self.module):
                 QtWidgets.QMessageBox.warning(
                     self,
                     "df Calibration Not Available",
@@ -1876,7 +1879,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     "To use df units:\n"
                     "1. Run a multisweep analysis\n"
                     "2. Click 'Bias KIDs' in the multisweep window\n"
-                    "3. The calibration data will be loaded automatically"
+                    "3. The calibration data will be loaded automatically\n\n"
+                    "In mock mode, enabling auto_bias_kids measures one for "
+                    "each channel it tunes."
                 )
                 # Reset to counts mode
                 self.rb_counts.setChecked(True)
@@ -1887,6 +1892,26 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Rebuild layout to update axis labels
         self._build_layout()
     
+    def _load_board_df_calibrations(self, module: int) -> None:
+        """Take calibrations the board already holds, if it offers any.
+
+        The mock measures one per channel as auto_bias_kids tunes them,
+        so a simulated session can use df units without running a
+        multisweep first.  Real boards have no such call: there the
+        calibration comes from bias_kids through the multisweep panel,
+        and this does nothing.
+        """
+        crs = getattr(self, "crs", None)
+        if crs is None:
+            return
+        try:
+            rows = asyncio.run(crs.get_df_calibrations(module=module))
+            cals = {int(ch): complex(re, im) for ch, re, im in rows}
+        except Exception:
+            return          # not a mock, or nothing biased yet
+        if cals:
+            self._handle_df_calibration_ready(module, cals)
+
     def _handle_df_calibration_ready(self, module: int, df_calibrations: Dict[int, complex]):
         """
         Handle the df_calibration_ready signal from MultisweepWindow.

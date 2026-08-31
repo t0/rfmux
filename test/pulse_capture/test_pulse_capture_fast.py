@@ -396,3 +396,44 @@ def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):
         # Rotated and calibrated, so the samples are hertz, not volts.
         assert reader.stored_units(ch) == "Hz"
         assert reader.df_calibration(ch) is not None
+
+
+def test_periscope_takes_the_mocks_df_calibration(mock_crs):
+    """Selecting df units in mock mode finds a calibration.
+
+    The mock measures one per channel as auto_bias_kids tunes them, but
+    Periscope only learned about calibrations through the multisweep
+    panel's bias_kids run, so a simulated session was told none existed.
+    """
+    from rfmux.tools.periscope.app import Periscope
+
+    loop, crs = mock_crs
+
+    class Fake:
+        """Only the parts _load_board_df_calibrations touches."""
+        module = 1
+
+        def __init__(self, board):
+            self.crs = board
+            self.df_calibrations = {}
+
+        _load_board_df_calibrations = Periscope._load_board_df_calibrations
+
+        def _handle_df_calibration_ready(self, module, cals):
+            self.df_calibrations[module] = cals
+
+    f = Fake(crs)
+    assert not f.df_calibrations.get(1), "should start with none"
+    f._load_board_df_calibrations(1)
+    cals = f.df_calibrations.get(1) or {}
+    assert cals, "the mock's calibrations did not reach Periscope"
+    assert all(isinstance(c, complex) and abs(c) > 0 for c in cals.values())
+
+    # A board that offers no such call is left alone rather than erroring:
+    # on real hardware the calibration comes from bias_kids.
+    class NoCall:
+        pass
+
+    g = Fake(NoCall())
+    g._load_board_df_calibrations(1)
+    assert g.df_calibrations == {}

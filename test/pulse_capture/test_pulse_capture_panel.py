@@ -596,35 +596,67 @@ def test_template_tab_renders(qt_app, tmp_path):
     spin(qt_app)
 
 
-def test_view_units_and_basis_are_independent(qt_app):
-    """Units and basis are separate choices, and Hz needs both."""
+def test_the_three_views(qt_app):
+    """counts, volts and df, as the main window offers them.
+
+    Basis and scale are not offered separately: rotating without
+    converting to hertz, or asking for hertz on the quadratures, are
+    combinations with no meaning.
+    """
     from rfmux.core.transferfunctions import VOLTS_PER_ROC
+    from rfmux.tools.periscope.pulse_capture_panel import (
+        UNITS_COUNTS, UNITS_DF, UNITS_VOLTS)
     cal = 2.0e6 + 0.0j
 
     panel = PulseCapturePanel(dark_mode=False,
                               df_calibrations={1: {1: cal}})
     panel.module_spin.setValue(1)
 
-    # Live captures store volts, so the default view is a no-op.
-    panel.basis_combo.setCurrentText("I/Q")
-    panel.units_combo.setCurrentText("V")
+    # Exactly three, and no basis control to pair them with.
+    items = [panel.units_combo.itemText(i)
+             for i in range(panel.units_combo.count())]
+    assert items == [UNITS_COUNTS, UNITS_VOLTS, UNITS_DF]
+    assert not hasattr(panel, "basis_combo")
+
+    # Live captures store volts, so that view is a no-op.
+    panel.units_combo.setCurrentText(UNITS_VOLTS)
     assert panel._amp_scale(1) == pytest.approx(1.0)
     assert panel._axis_names(1) == ("I (V)", "Q (V)")
 
-    # Counts are recoverable: divide out the constant the file records.
-    panel.units_combo.setCurrentText("counts")
+    # Counts divide out the constant the file records.
+    panel.units_combo.setCurrentText(UNITS_COUNTS)
     assert panel._amp_scale(1) == pytest.approx(1.0 / VOLTS_PER_ROC)
 
-    # Hz is a property of the frequency axis, so it needs the df view.
-    panel.units_combo.setCurrentText("Hz")
-    assert panel._view_coeffs(1) is None, "Hz in the I/Q basis is meaningless"
-
-    panel.basis_combo.setCurrentText("df/diss")
+    # df rotates and scales together.
+    panel.units_combo.setCurrentText(UNITS_DF)
     assert panel._amp_scale(1) == pytest.approx(abs(cal))
     assert panel._axis_names(1) == ("df (Hz)", "dissipation (Hz)")
 
-    # Rotating without a calibration is refused rather than guessed.
+    # An uncalibrated channel cannot be rotated, so it is refused.
     assert panel._view_coeffs(7) is None
+    panel.close()
+    spin(qt_app)
+
+
+def test_df_view_is_refused_without_a_calibration(qt_app, monkeypatch):
+    """Selecting df uncalibrated says so instead of drawing volts.
+
+    Falling back silently meant the plot showed volts under a hertz
+    label, which is worse than not offering the view.
+    """
+    from rfmux.tools.periscope import pulse_capture_panel as m
+
+    warned = []
+    monkeypatch.setattr(m.QtWidgets.QMessageBox, "warning",
+                        lambda *a, **k: warned.append(a[2] if len(a) > 2 else ""))
+
+    panel = PulseCapturePanel(dark_mode=False)      # no calibration at all
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    spin(qt_app)
+
+    assert warned, "selecting df with no calibration should say so"
+    assert panel.units_combo.currentText() == m.UNITS_VOLTS, \
+        "should fall back to a view it can actually draw"
     panel.close()
     spin(qt_app)
 
@@ -672,11 +704,13 @@ def test_review_mode_reads_calibration_from_the_file(qt_app, tmp_path):
     writer.finalize()
 
     panel = PulseCapturePanel(dark_mode=False)      # no calibration passed in
-    panel.basis_combo.setCurrentText("df/diss")
-    panel.units_combo.setCurrentText("Hz")
-    assert panel._view_coeffs(1) is None, "nothing known about the channel yet"
+    from rfmux.tools.periscope.pulse_capture_panel import UNITS_DF
+    # Nothing known about the channel yet, so df is not on offer;
+    # volts still is, being only a scale.
+    assert panel._channel_cal(1) is None
 
     panel.load_from_hdf5(path)
+    panel.units_combo.setCurrentText(UNITS_DF)   # now the file supplies one
     spin(qt_app)
     # The file carries the calibration, so the rotated view is available
     # even though no Periscope session ever held one.  This file has no

@@ -145,6 +145,18 @@ _HIST_METRICS = [
 ]
 
 
+#: The three views the panel offers, and the (basis, units) each means.
+#: Kept in step with the main window's counts / real / df selector.
+UNITS_COUNTS = "counts"
+UNITS_VOLTS = "volts"
+UNITS_DF = "df (Hz)"
+_VIEW_STATES = {
+    UNITS_COUNTS: ("iq", "counts"),
+    UNITS_VOLTS: ("iq", "V"),
+    UNITS_DF: ("df", "Hz"),
+}
+
+
 class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     """Live pulse capture with pulse tree, waveform viewer, and histograms."""
 
@@ -322,22 +334,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                                      "re-triggers during the decay")
         h.addWidget(self.pileup_check)
 
-        h.addWidget(QtWidgets.QLabel("View:"))
-        self.basis_combo = QtWidgets.QComboBox()
-        self.basis_combo.addItems(["I/Q", "df/diss"])
-        self.basis_combo.setToolTip(
-            "Axes to display.  Independent of what the capture triggered "
-            "on: the file records the basis and the calibration, so either "
-            "view is exact.  Needs a df calibration for the channel.")
-        self.basis_combo.currentTextChanged.connect(self._on_view_changed)
-        h.addWidget(self.basis_combo)
-
+        h.addWidget(QtWidgets.QLabel("Units:"))
         self.units_combo = QtWidgets.QComboBox()
-        self.units_combo.addItems(["V", "Hz", "counts"])
+        # The same three the main window offers, and for the same reason:
+        # basis and scale are not independent in any useful way.  Hertz is
+        # a property of the frequency axis, so "df" means rotated *and*
+        # scaled, and there is no such thing as volts on that axis.
+        self.units_combo.addItems([UNITS_COUNTS, UNITS_VOLTS, UNITS_DF])
+        self.units_combo.setCurrentText(UNITS_VOLTS)
         self.units_combo.setToolTip(
-            "Units for waveforms, histograms and templates.  Hz is a "
-            "property of the frequency axis, so it needs both the "
-            "df/diss view and a calibration.")
+            "Units for waveforms, histograms and templates.\n\n"
+            "counts: raw ADC.  volts: the readout scale.  df: rotated "
+            "into frequency and dissipation, in hertz — needs a df "
+            "calibration for the channel.")
         self.units_combo.currentTextChanged.connect(self._on_view_changed)
         h.addWidget(self.units_combo)
 
@@ -1660,9 +1669,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         return basis, units
 
     def _view_state(self) -> Tuple[str, str]:
-        """(basis, units) the user is asking for."""
-        basis = "df" if self.basis_combo.currentText() == "df/diss" else "iq"
-        return basis, self.units_combo.currentText()
+        """(basis, units) for the selected view.
+
+        Three choices, not a basis crossed with a scale: rotating without
+        converting to hertz, or asking for hertz on the quadratures, are
+        combinations with no meaning.
+        """
+        return _VIEW_STATES.get(self.units_combo.currentText(),
+                                ("iq", "V"))
 
     def _view_coeffs(self, channel: int):
         """(factor, units) taking stored samples to the current view.
@@ -1751,12 +1765,37 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             jump_std_I=ns.jump_std_I * k, jump_std_Q=ns.jump_std_Q * k)
 
     def _units_are_hz(self) -> bool:
-        return self.units_combo.currentText() == "Hz"
+        return self.units_combo.currentText() == UNITS_DF
 
     def _on_view_changed(self, _text: str = "") -> None:
+        if (self.units_combo.currentText() == UNITS_DF
+                and not self._any_channel_calibrated()):
+            # Say so rather than quietly drawing volts under a hertz
+            # label, which is what falling back used to look like.
+            QtWidgets.QMessageBox.warning(
+                self, "df Calibration Not Available",
+                "No df calibration for these channels, so frequency and "
+                "dissipation cannot be separated.\n\n"
+                "It comes from bias_kids — run a multisweep and click "
+                "'Bias KIDs'. In mock mode, enabling auto_bias_kids "
+                "measures one for each channel it tunes.\n\n"
+                "A capture already holding one carries it in the file, "
+                "so opening that capture is enough.")
+            self.units_combo.blockSignals(True)
+            self.units_combo.setCurrentText(UNITS_VOLTS)
+            self.units_combo.blockSignals(False)
         self._render_histograms()
         self._render_templates()
         self._refresh_pulse_plot()
+
+    def _any_channel_calibrated(self) -> bool:
+        """Whether any displayed channel has a df calibration.
+
+        Any rather than all: a mixed capture should still offer the view
+        for the channels that can show it.
+        """
+        channels = list(self._counts) or [self._label_channel()]
+        return any(self._channel_cal(ch) is not None for ch in channels)
 
     def _on_hist_stream_changed(self, stream: str) -> None:
         if stream in self._hist_data_by_stream:

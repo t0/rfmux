@@ -56,12 +56,10 @@ def _store_units(grp, stored_units, channel) -> None:
 def _store_df_calibration(grp, df_calibrations, channel) -> None:
     """Stamp *channel*'s df calibration onto *grp*, if there is a usable one.
 
-    Guarded because a wrong-shaped mapping used to take the whole capture
-    with it.  h5py refuses to store a dict, the writer's constructor
-    raised, and PulseCaptureSession turned that into "could not open HDF5
-    file" with ``writer = None`` -- a capture that ran to completion and
-    saved nothing.  A calibration we cannot store is worth a warning; the
-    pulses are worth more than the units they are labelled in.
+    Expects the flat ``{channel: calibration}`` mapping.  Anything h5py
+    cannot store as an attribute is skipped with a warning rather than
+    raised: the pulses are worth more than the units they are labelled
+    in, and a writer that refuses to open costs the whole capture.
     """
     if not isinstance(df_calibrations, dict) or not df_calibrations:
         return

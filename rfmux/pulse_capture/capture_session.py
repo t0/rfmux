@@ -64,7 +64,11 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 
 from .. import streamer
-from ..core.transferfunctions import PFB_SAMPLING_FREQ, VOLTS_PER_ROC
+from ..core.transferfunctions import (
+    PFB_SAMPLING_FREQ,
+    VOLTS_PER_ROC,
+    apply_iq_conversion,
+)
 
 from .detection import (
     DEFAULT_END_SIGMA,
@@ -75,7 +79,6 @@ from .detection import (
     estimate_noise_stats,
 )
 from .analysis import (
-    apply_storage_transform,
     pulse_summary,
     storage_transform,
 )
@@ -696,9 +699,9 @@ class PulseCaptureSession(_CallbackHost):
         co = self._store_coeff.get(channel)
         if co is None:
             cal = (self.df_calibrations or {}).get(channel)
-            c, sn, units = storage_transform(cal, self.trigger_basis)
+            factor, units = storage_transform(cal, self.trigger_basis)
             self.stored_units[channel] = units
-            co = (c, sn)
+            co = factor
             self._store_coeff[channel] = co
         return co
 
@@ -716,10 +719,8 @@ class PulseCaptureSession(_CallbackHost):
         Thresholds are in units of the measured noise, so the scale
         cannot move them; only the rotation changes what is detected.
         """
-        c, sn = self._storage_coeffs(channel)
-        if sn == 0.0:
-            return i_vals * c, q_vals * c
-        return apply_storage_transform(i_vals, q_vals, c, sn)
+        factor = self._storage_coeffs(channel)
+        return apply_iq_conversion(i_vals, q_vals, factor)
 
     def feed_sample(
         self,

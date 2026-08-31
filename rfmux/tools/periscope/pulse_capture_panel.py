@@ -49,11 +49,11 @@ from ...pulse_capture.capture_session import (
 )
 from ...pulse_capture.hdf5 import PulseHDF5Reader
 from ...core.transferfunctions import (
+    apply_iq_conversion,
     PFB_SAMPLING_FREQ,
     decimation_to_sampling,
 )
 from ...pulse_capture.analysis import (
-    apply_storage_transform,
     display_transform,
 )
 
@@ -1485,9 +1485,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                        summary: dict) -> None:
         """Insert one pulse into the tree, newest first.
 
-        Shared by the live handler and the review loader: the row looks
-        the same whether the pulse just arrived or came out of a file,
-        and it used to be built twice.
+        Shared by the live handler and the review loader, so a row looks
+        the same whether the pulse just arrived or came out of a file.
         """
         parent = self._channel_items.get(channel)
         if parent is None:
@@ -1620,11 +1619,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         """Calibrations for the selected module, as {channel: calibration}.
 
         Periscope keeps one mapping per module, because its plots are
-        per-module.  PulseCaptureSession and PulseHDF5Writer take the flat
-        per-channel mapping the tuning flow builds.  Flattening here is
-        what keeps the storage layer from having to know about modules --
-        and passing the nested one straight through is what used to make
-        the writer refuse the file.
+        per-module; PulseCaptureSession and PulseHDF5Writer take the flat
+        per-channel mapping.  Flattening here keeps the storage layer
+        from having to know about modules.  Accepts either shape, so a
+        headless caller's flat mapping passes through unchanged.
         """
         cal = self.df_calibrations
         if not isinstance(cal, dict) or not cal:
@@ -1667,7 +1665,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         return basis, self.units_combo.currentText()
 
     def _view_coeffs(self, channel: int):
-        """(cos, sin, label) taking stored samples to the current view.
+        """(factor, units) taking stored samples to the current view.
 
         None when the view cannot be produced -- hertz or a rotation with
         no calibration.  Callers show what is stored rather than putting
@@ -1686,14 +1684,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         t = self._view_coeffs(channel)
         if t is None:
             return None
-        c, sn, _label = t
-        return float((c * c + sn * sn) ** 0.5)
+        return abs(t[0])
 
     def _units_label(self, channel: int) -> str:
         """Axis label for *channel* under the current view."""
         t = self._view_coeffs(channel)
         if t is not None:
-            return t[2]
+            return t[1]
         return self._stored_state(channel)[1]
 
     def _refresh_pulse_plot(self) -> None:
@@ -1969,8 +1966,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         ns = self.noise_stats.get(channel)
         view = self._view_coeffs(channel)
         if view is not None:
-            vc, vs, _label = view
-            amp_I, amp_Q = apply_storage_transform(amp_I, amp_Q, vc, vs)
+            factor, _units = view
+            amp_I, amp_Q = apply_iq_conversion(amp_I, amp_Q, factor)
             ns = self._view_noise(channel, ns)
         first, second = self._axis_names(channel)
         for plot, name in ((self.pulse_plot_i, first),

@@ -10,9 +10,11 @@ from contextlib import contextmanager
 from .extract_params import ParamKeyExtractor
 from PyQt6 import sip
 import numpy as np
-from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+from rfmux.core.transferfunctions import (
+    PFB_SAMPLING_FREQ,
+    apply_iq_conversion,
+)
 from ... import streamer as _streamer
-from ...pulse_capture.analysis import apply_storage_transform
 from ...pulse_capture.sources import (
     columns_for_width,
 )
@@ -49,10 +51,9 @@ class PeriscopeRuntime:
                 # defines.  Shared with pulse capture rather than written
                 # twice: the second copy of this got the conjugate, which
                 # sends a pure frequency excursion into both axes.
-                cal = complex(df_cal)
-                return apply_storage_transform(
+                return apply_iq_conversion(
                     convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ),
-                    cal.real, cal.imag)
+                    df_cal)
             else:
                 # No calibration - fall back to real_units check (matches PSD task behavior)
                 return (convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)) if self.real_units else (rawI, rawQ)

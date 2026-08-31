@@ -478,9 +478,9 @@ class TestPulseHDF5:
         """
         import numpy as np
         from rfmux.core.transferfunctions import (
-            convert_iq_to_df, VOLTS_PER_ROC)
+            VOLTS_PER_ROC, apply_iq_conversion, convert_iq_to_df)
         from rfmux.pulse_capture.analysis import (
-            apply_storage_transform, display_transform, storage_transform)
+            display_transform, storage_transform)
 
         # A sweep with a known complex slope; the calibration is 1/slope.
         freqs = np.linspace(-1e5, 1e5, 401)
@@ -493,9 +493,9 @@ class TestPulseHDF5:
         counts = (d_iq.real / VOLTS_PER_ROC, d_iq.imag / VOLTS_PER_ROC)
 
         # Counts in, hertz out, through the transform a capture applies.
-        c, sn, units = storage_transform(cal, "df")
+        factor, units = storage_transform(cal, "df")
         assert units == "Hz"
-        df, diss = apply_storage_transform(counts[0], counts[1], c, sn)
+        df, diss = apply_iq_conversion(counts[0], counts[1], factor)
         assert df == pytest.approx(shift_hz, rel=1e-9)
         assert df == pytest.approx((d_iq * cal).real, rel=1e-9)
         # A pure frequency shift has no dissipation component.
@@ -506,7 +506,7 @@ class TestPulseHDF5:
         # view of a capture exact.
         back = display_transform(cal, "df", "Hz", "iq", "V")
         assert back is not None
-        vi, vq = apply_storage_transform(df, diss, back[0], back[1])
+        vi, vq = apply_iq_conversion(df, diss, back[0])
         assert vi == pytest.approx(d_iq.real, rel=1e-9)
         assert vq == pytest.approx(d_iq.imag, rel=1e-9)
 

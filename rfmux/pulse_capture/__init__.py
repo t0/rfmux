@@ -54,7 +54,6 @@ from .detection import (
 from .analysis import (
     derive_tau,
     pulse_peaks,
-    apply_storage_transform,
     display_transform,
     pulse_summary,
 )
@@ -94,7 +93,6 @@ __all__ = [
     # analysis
     "derive_tau",
     "pulse_peaks",
-    "apply_storage_transform",
     "display_transform",
     "pulse_summary",
     # accumulators

@@ -688,6 +688,35 @@ def exp_bin_noise_data(f: np.ndarray, psd: np.ndarray, nbins: int = 1000) -> tup
     return np.array(fbinned), np.array(psd_binned)
 
 
+def apply_iq_conversion(i_vals, q_vals, factor):
+    """Convert an (I, Q) pair by a complex factor.
+
+    Computes ``(I + jQ) * factor`` and returns its real and imaginary
+    parts, in the convention :func:`convert_iq_to_df` defines: a
+    frequency shift moves IQ by ``df * (dI/df + j dQ/df)``, so
+    multiplying by the calibration -- its reciprocal -- recovers the
+    shift.  The factor carries whatever conversion is wanted: a rotation
+    into the frequency basis, a scale into volts or hertz, or both.
+
+    Parameters
+    ----------
+    i_vals, q_vals : array_like or float
+        The two quadratures, in matching units.
+    factor : complex
+        Conversion to apply.
+
+    Returns
+    -------
+    tuple
+        ``(first, second)`` -- the real and imaginary parts of the
+        product, shaped like the inputs.  With a df calibration these
+        are frequency shift and dissipation.
+    """
+    f = complex(factor)
+    c, s = f.real, f.imag
+    return i_vals * c - q_vals * s, i_vals * s + q_vals * c
+
+
 def convert_iq_to_df(iq, fbias, f_calsweep, iq_calsweep):
     '''
     Equation 4.5 of Pete Barry's thesis (https://orca.cardiff.ac.uk/id/eprint/71562/1/2014BarryPPhD.pdf)

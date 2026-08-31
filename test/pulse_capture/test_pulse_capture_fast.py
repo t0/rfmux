@@ -360,8 +360,8 @@ def test_macro_stores_df_calibrations(mock_crs, tmp_path):
     # Uncalibrated channels stay in volts rather than being given a
     # scale of 1; storage_transform is what decides.
     from rfmux.pulse_capture.analysis import storage_transform
-    assert storage_transform(2.5e6, "df")[2] == "Hz"
-    assert storage_transform(None, "df")[2] == "V"
+    assert storage_transform(2.5e6, "df")[1] == "Hz"
+    assert storage_transform(None, "df")[1] == "V"
 
 
 def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):

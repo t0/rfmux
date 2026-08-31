@@ -221,13 +221,12 @@ def pulse_summary(
 def storage_transform(df_calibration, trigger_basis: str = "iq"):
     """How one channel's samples are rotated and scaled for storage.
 
-    Returns ``(cos, sin, units)`` describing the map applied on the way
-    in, once, so that everything downstream -- ring buffer, noise
+    Returns ``(factor, units)``: the complex map applied on the way in,
+    once, so that everything downstream -- ring buffer, noise
     estimate, trigger, summaries, histograms, templates and the stored
     waveform -- is in the same physical units::
 
-        first  = i*cos + q*sin
-        second = q*cos - i*sin
+        first + j*second = (I + jQ) * factor
 
     Samples are never stored in ADC counts.  Counts are an artefact of
     the readout tied to the I/Q axes; a *count* projected onto the
@@ -250,8 +249,8 @@ def storage_transform(df_calibration, trigger_basis: str = "iq"):
             mag = abs(cal)
             unit = cal / mag
             scale = volts * mag
-            return unit.real * scale, unit.imag * scale, "Hz"
-    return volts, 0.0, "V"
+            return unit * scale, "Hz"
+    return complex(volts), "V"
 
 
 def display_transform(df_calibration, stored_basis: str, stored_units: str,
@@ -265,8 +264,8 @@ def display_transform(df_calibration, stored_basis: str, stored_units: str,
 
     The rotation comes from the basis and the scale from the units, and
     they are independent: counts in the frequency basis are still
-    rotated, they are simply not scaled.  Returns ``(cos, sin, label)``
-    for :func:`apply_storage_transform`, or ``None`` when the request
+    rotated, they are simply not scaled.  Returns ``(factor, units)``
+    for :func:`apply_iq_conversion`, or ``None`` when the request
     cannot be honoured -- hertz or a rotation without a calibration --
     so callers fall back to what is stored rather than putting an
     unscaled number under the wrong label.
@@ -275,8 +274,7 @@ def display_transform(df_calibration, stored_basis: str, stored_units: str,
     wanted = _basis_units_factor(df_calibration, view_basis, view_units)
     if stored is None or wanted is None or stored == 0:
         return None
-    w = wanted / stored
-    return w.real, w.imag, view_units
+    return wanted / stored, view_units
 
 
 def _basis_units_factor(df_calibration, basis: str, units: str):
@@ -300,21 +298,3 @@ def _basis_units_factor(df_calibration, basis: str, units: str):
     else:
         return None
     return rotation * scale
-
-
-def apply_storage_transform(i_vals, q_vals, cos_c, sin_c):
-    """Apply a (cos, sin) pair to a pair of axes.
-
-    This is the complex product ``(I + jQ) * (cos + j sin)``, which is
-    the convention ``convert_iq_to_df`` defines: a frequency shift df
-    moves IQ by ``df * (dI/df + j dQ/df)``, so multiplying by the
-    calibration -- its reciprocal -- returns the shift.  Conjugating
-    instead sends a pure frequency excursion into both axes with the
-    wrong sign, which is what this did until it was checked against
-    convert_iq_to_df directly.
-    """
-    first = i_vals * cos_c - q_vals * sin_c
-    second = i_vals * sin_c + q_vals * cos_c
-    return first, second
-
-

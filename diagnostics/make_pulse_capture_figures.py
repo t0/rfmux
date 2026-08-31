@@ -82,7 +82,8 @@ def capture_window_anatomy(path):
                 arrowprops=dict(arrowstyle="->", color="#CC6633", lw=1.1))
     # Placed past the confirmation line: at end + 4 the text ran across it.
     ax.annotate("both quadratures back\ninside end_sigma", xy=(end, END),
-                xytext=(confirmed + 3.5, 3.9), fontsize=8, color="#33884D",
+                xytext=(confirmed + 3.5, 4.2), fontsize=8, color="#33884D",
+                va="top",
                 arrowprops=dict(arrowstyle="->", color="#33884D", lw=1))
 
     ax.axvline(hard_stop, color="#7A5AA8", lw=1.4, ls="-.")

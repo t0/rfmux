@@ -243,3 +243,181 @@ def counts_to_hz_scale(df_calibration: Optional[float]) -> Optional[float]:
     if df_calibration is None:
         return None
     return abs(complex(df_calibration)) * VOLTS_PER_ROC
+
+
+def counts_to_volts_scale() -> float:
+    """Multiplier taking ADC counts to volts at the readout.
+
+    Needs no calibration: it is the same constant for every channel.
+    Kept as a function beside :func:`counts_to_hz_scale` so callers do
+    one thing to get a scale, and so the value a capture was written
+    with can be read back from the file rather than assumed -- see
+    ``volts_per_count`` in the HDF5 metadata.  ``VOLTS_PER_ROC`` is
+    marked empirical in transferfunctions.py and will change.
+    """
+    return VOLTS_PER_ROC
+
+
+def storage_scale(df_calibration, trigger_basis: str = "iq"):
+    """``(scale, units)`` taking a channel's counts to what is stored.
+
+    Applied where a finished pulse leaves the detector, not on the way
+    in.  The detector's thresholds are all in units of the measured
+    noise, so scaling before it would be mathematically inert -- but it
+    is not numerically inert: the multi-channel block path is sensitive
+    to the magnitude of the samples, and changing that magnitude changes
+    which sample a trigger lands on.  Rotating is worth that risk
+    because it changes what is detectable; scaling is not, because it
+    changes nothing except the number on the axis.
+    """
+    volts = VOLTS_PER_ROC
+    if trigger_basis == "df" and df_calibration is not None:
+        cal = complex(df_calibration)
+        if cal != 0:
+            return volts * abs(cal), "Hz"
+    return volts, "V"
+
+
+def storage_transform(df_calibration, trigger_basis: str = "iq"):
+    """How one channel's samples are rotated and scaled for storage.
+
+    Returns ``(cos, sin, units)`` describing the map applied on the way
+    in, once, so that everything downstream -- ring buffer, noise
+    estimate, trigger, summaries, histograms, templates and the stored
+    waveform -- is in the same physical units::
+
+        first  = i*cos + q*sin
+        second = q*cos - i*sin
+
+    Samples are never stored in ADC counts.  Counts are an artefact of
+    the readout tied to the I/Q axes; a *count* projected onto the
+    frequency axis is a linear combination of two ADC readings and means
+    nothing on its own.  So a channel is stored in volts, or in hertz
+    once it has been rotated into the frequency basis, and the file
+    carries both conversions so any other view is recoverable.
+
+    ``trigger_basis="df"`` uses the calibration's phase to rotate, and
+    its magnitude as part of the scale.  Without a calibration there is
+    nothing to rotate with, so the channel stays in the quadratures and
+    in volts.  Folding the scale into the rotation coefficients keeps
+    this to the same two multiplies per axis either way, which matters
+    at 2.44 MHz.
+    """
+    volts = VOLTS_PER_ROC
+    if trigger_basis == "df" and df_calibration is not None:
+        cal = complex(df_calibration)
+        if cal != 0:
+            mag = abs(cal)
+            unit = cal / mag
+            scale = volts * mag
+            return unit.real * scale, unit.imag * scale, "Hz"
+    return volts, 0.0, "V"
+
+
+def display_transform(df_calibration, stored_basis: str, stored_units: str,
+                      view_basis: str, view_units: str):
+    """Coefficients taking *stored* samples to what the user asked for.
+
+    Storage and display are each a rotation and a scale, so each is one
+    complex number and going between them is a single division.  No
+    round trip through counts, and no second place to get the rotation
+    backwards.
+
+    The rotation comes from the basis and the scale from the units, and
+    they are independent: counts in the frequency basis are still
+    rotated, they are simply not scaled.  Returns ``(cos, sin, label)``
+    for :func:`apply_storage_transform`, or ``None`` when the request
+    cannot be honoured -- hertz or a rotation without a calibration --
+    so callers fall back to what is stored rather than putting an
+    unscaled number under the wrong label.
+    """
+    stored = _basis_units_factor(df_calibration, stored_basis, stored_units)
+    wanted = _basis_units_factor(df_calibration, view_basis, view_units)
+    if stored is None or wanted is None or stored == 0:
+        return None
+    w = wanted / stored
+    return w.real, w.imag, view_units
+
+
+def _basis_units_factor(df_calibration, basis: str, units: str):
+    """One complex number for "rotate into *basis*, scale to *units*"."""
+    cal = None if df_calibration is None else complex(df_calibration)
+    if basis == "df":
+        if cal is None or cal == 0:
+            return None                 # nothing to rotate with
+        rotation = cal / abs(cal)
+    else:
+        rotation = complex(1.0, 0.0)
+
+    if units == "counts":
+        scale = 1.0
+    elif units == "V":
+        scale = VOLTS_PER_ROC
+    elif units == "Hz":
+        if cal is None or cal == 0 or basis != "df":
+            return None                 # Hz is a property of the df axis
+        scale = VOLTS_PER_ROC * abs(cal)
+    else:
+        return None
+    return rotation * scale
+
+
+def apply_storage_transform(i_vals, q_vals, cos_c, sin_c):
+    """Apply :func:`storage_transform`'s coefficients to a pair of axes."""
+    first = i_vals * cos_c + q_vals * sin_c
+    second = q_vals * cos_c - i_vals * sin_c
+    return first, second
+
+
+def rotate_to_df(i_vals, q_vals, df_calibration):
+    """Rotate (I, Q) into (frequency, dissipation).
+
+    ``df_calibration`` from ``bias_kids`` is complex: its phase is the
+    angle between the (I, Q) axes and the resonator's frequency
+    direction, set by the bias point and cable delay.  A KID pulse moves
+    the resonance frequency, so it lies along that direction -- in the
+    raw quadratures it is split between the two by an angle nothing
+    controls, and each quadrature carries the full noise.  Rotating puts
+    the signal in one axis, which is what makes it worth triggering on.
+
+    Only the phase is used.  The magnitude is a scale, and every
+    threshold downstream is in units of the measured noise, so scaling
+    both axes changes nothing.  Returns arrays of the same shape as the
+    input; pass a scalar and you get scalars back.
+
+    Returns the input unchanged when there is no calibration: a channel
+    that cannot be rotated is triggered on in I/Q rather than guessed at.
+    """
+    if df_calibration is None:
+        return i_vals, q_vals
+    cal = complex(df_calibration)
+    if cal == 0:
+        return i_vals, q_vals
+    unit = cal / abs(cal)           # phase only; magnitude is a scale
+    c, s = unit.real, unit.imag
+    # (df, diss) = (I + jQ) * conj(unit), written out so the arrays stay
+    # real and no complex temporary is allocated per sample.
+    df = i_vals * c + q_vals * s
+    diss = q_vals * c - i_vals * s
+    return df, diss
+
+
+def rotate_from_df(df_vals, diss_vals, df_calibration):
+    """Inverse of :func:`rotate_to_df`, exact to floating point.
+
+    The rotation uses only the calibration's phase, so it is orthonormal
+    and this recovers (I, Q) bit-for-bit up to rounding.  That is what
+    lets a capture be *stored* in the basis it was triggered in without
+    losing the ability to look at it in the other one: the basis and the
+    calibration are both in the file, so either view is reconstructible.
+    """
+    if df_calibration is None:
+        return df_vals, diss_vals
+    cal = complex(df_calibration)
+    if cal == 0:
+        return df_vals, diss_vals
+    unit = cal / abs(cal)
+    c, s = unit.real, unit.imag
+    i_vals = df_vals * c - diss_vals * s
+    q_vals = df_vals * s + diss_vals * c
+    return i_vals, q_vals

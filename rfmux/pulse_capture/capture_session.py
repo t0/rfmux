@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -74,7 +74,12 @@ from .detection import (
     PulseCapture,
     estimate_noise_stats,
 )
-from .analysis import pulse_summary
+from .analysis import (
+    counts_to_volts_scale,
+    pulse_summary,
+    rotate_to_df,
+    storage_scale,
+)
 from .accumulators import PulseHistogramSet, PulseTemplateSet
 
 from .hdf5 import DualPulseHDF5Writer, PulseHDF5Writer
@@ -86,6 +91,10 @@ from .hdf5 import DualPulseHDF5Writer, PulseHDF5Writer
 #: them, the session holds them, PulseCapture consumes them, and the
 #: HDF5 file records them.  Every hand-maintained copy of the list is a
 #: chance for those to disagree.
+#:
+#: Session-level settings that PulseCapture does not take -- trigger_basis,
+#: which is applied on the way in rather than by the engine -- go into
+#: capture_params directly instead, and are pinned by their own test.
 DETECTION_PARAMS = (
     "threshold_sigma",
     "end_sigma",
@@ -211,6 +220,13 @@ class PulseCaptureConfig:
     #: already carry 64x the samples, or high count rates, where longer
     #: windows overlap and raise the pileup fraction.
     save_to_end_confirmed: bool = True
+    #: Which basis the trigger tests: ``"iq"`` (the raw quadratures) or
+    #: ``"df"`` (frequency and dissipation, rotated with the channel's
+    #: df calibration).  A KID pulse moves the resonance frequency, so
+    #: under "df" it lies along one axis instead of being split between
+    #: two by an angle nothing controls.  A channel with no calibration
+    #: cannot be rotated and stays on "iq".
+    trigger_basis: str = "iq"
 
     #: Ring geometry, owned by pulse_detection so the engine's bare
     #: defaults and these derivations cannot disagree.
@@ -349,6 +365,7 @@ class PulseCaptureConfig:
             "trigger_samples": self.trigger_samples_for(sample_rate),
             "enable_pileup": self.enable_pileup,
             "save_to_end_confirmed": self.save_to_end_confirmed,
+            "trigger_basis": self.trigger_basis,
             "buf_size": self.buf_size(sample_rate),
             "noise_samples": self.noise_samples(sample_rate),
             "baseline_window": self.baseline_window_samples(sample_rate),
@@ -536,6 +553,7 @@ class PulseCaptureSession(_CallbackHost):
         max_capture_samples: Optional[int] = None,
         hdf5_path: Optional[str | Path] = None,
         df_calibrations: Optional[Dict[int, float]] = None,
+        trigger_basis: str = "iq",
         histogram_flush_every: int = 50,
         histogram_flush_interval_s: float = 0.5,
         progress_interval_s: float = 0.1,
@@ -575,6 +593,14 @@ class PulseCaptureSession(_CallbackHost):
         self.max_capture_samples = max(0, int(max_capture_samples))
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
         self.df_calibrations = df_calibrations
+        self.trigger_basis = (
+            trigger_basis if trigger_basis in ("iq", "df") else "iq")
+        #: Per-channel units of everything stored, filled in as channels
+        #: are first seen: "Hz" once rotated into the frequency basis,
+        #: "V" otherwise.  One capture can hold both, because a channel
+        #: without a calibration cannot be rotated.
+        self.stored_units: Dict[int, str] = {}
+        self._store_coeff: Dict[int, tuple] = {}
         self.histogram_flush_every = int(histogram_flush_every)
         self.histogram_flush_interval_s = float(histogram_flush_interval_s)
         self._last_flush_t = 0.0
@@ -662,6 +688,40 @@ class PulseCaptureSession(_CallbackHost):
 
     # ── Sample ingestion ──────────────────────────────────────────
 
+    def _storage_coeffs(self, channel: int):
+        """Cached (cos, sin) taking *channel* from raw counts to storage.
+
+        Computed once per channel: the calibration cannot change inside
+        a capture, and this runs per sample on a 2.44 MHz stream.
+        """
+        co = self._store_coeff.get(channel)
+        if co is None:
+            cal = (self.df_calibrations or {}).get(channel)
+            scale, units = storage_scale(cal, self.trigger_basis)
+            self.stored_units[channel] = units
+            co = (cal if self.trigger_basis == "df" else None, scale)
+            self._store_coeff[channel] = co
+        return co
+
+    def _to_trigger_basis(self, channel: int, i_vals, q_vals):
+        """Samples as they are triggered on, and as they are stored.
+
+        Applied once, here, so the ring buffer, the noise estimate, the
+        trigger, the summaries, the histograms, the templates and the
+        stored waveform are all the same physical quantity.  That is
+        what makes the noise sigma right for the axis being thresholded,
+        with no transform of the stored sigmas and no covariance to
+        carry -- and it is why nothing downstream has to know a basis
+        was chosen.
+
+        Thresholds are in units of the measured noise, so the scale
+        cannot move them; only the rotation changes what is detected.
+        """
+        cal, _scale = self._storage_coeffs(channel)
+        if cal is None:
+            return i_vals, q_vals
+        return rotate_to_df(i_vals, q_vals, cal)
+
     def feed_sample(
         self,
         channel: int,
@@ -677,6 +737,7 @@ class PulseCaptureSession(_CallbackHost):
         derives from these timestamps, so NaN would silently poison
         durations and tau.
         """
+        i_val, q_val = self._to_trigger_basis(channel, i_val, q_val)
         if self.state is CaptureState.ESTIMATING:
             buf = self._noise_buf.get(channel)
             n = self._noise_n.get(channel, 0)
@@ -734,6 +795,7 @@ class PulseCaptureSession(_CallbackHost):
         I = np.asarray(i_vals, dtype=np.float64)
         Q = np.asarray(q_vals, dtype=np.float64)
         T = np.asarray(timestamps, dtype=np.float64)
+        I, Q = self._to_trigger_basis(channel, I, Q)
         n = I.shape[0]
         if not (n == Q.shape[0] == T.shape[0]):
             raise ValueError("feed_block needs equal-length arrays")
@@ -942,21 +1004,58 @@ class PulseCaptureSession(_CallbackHost):
                 key = ("sample_rate_fast" if self.streamer_mode == "fast"
                        else "sample_rate_slow")
                 capture_params[key] = self.sample_rate
+            # Self-describing: what basis the stored samples are in, what
+            # units, and the counts-to-volts constant they were written
+            # with.  VOLTS_PER_ROC is marked empirical and will change, so
+            # a file that leans on the reader's copy quietly changes
+            # meaning when it does.
+            capture_params.setdefault("trigger_basis", self.trigger_basis)
+            for ch in self.channels:          # fills stored_units
+                self._storage_coeffs(ch)
+            units = set(self.stored_units.values())
+            capture_params.setdefault(
+                "stored_units",
+                units.pop() if len(units) == 1 else "mixed")
+            capture_params.setdefault("volts_per_count",
+                                      counts_to_volts_scale())
             try:
                 self.writer = PulseHDF5Writer(
                     self.hdf5_path,
                     self.channels,
-                    self.noise_stats,
+                    {ch: self._scaled_noise(ch) for ch in self.channels},
                     capture_params,
                     df_calibrations=self.df_calibrations,
+                    stored_units=self.stored_units,
                 )
             except Exception as e:
                 self.writer = None
                 self._error(f"Could not open HDF5 file {self.hdf5_path}: {e}")
 
+    def _scaled_noise(self, channel: int):
+        """This channel's noise statistics in the units it is stored in."""
+        ns = self.noise_stats.get(channel)
+        _cal, scale = self._storage_coeffs(channel)
+        if ns is None or scale == 1.0:
+            return ns
+        return replace(
+            ns,
+            mean_I=ns.mean_I * scale, std_I=ns.std_I * scale,
+            mean_Q=ns.mean_Q * scale, std_Q=ns.std_Q * scale,
+            jump_std_I=ns.jump_std_I * scale,
+            jump_std_Q=ns.jump_std_Q * scale)
+
     def _on_engine_pulse(self, channel: int, pulse_idx: int,
                          pulse_data: dict) -> None:
-        ns = self.noise_stats.get(channel)
+        # Counts become volts, or hertz once rotated, here -- on the way
+        # out of the detector rather than into it.  Everything past this
+        # point (summary, file, histograms, templates, callbacks) is one
+        # physical quantity, and the detector's numerics are untouched.
+        _cal, scale = self._storage_coeffs(channel)
+        if scale != 1.0:
+            pulse_data = dict(pulse_data)
+            pulse_data["Amp_I"] = pulse_data["Amp_I"] * scale
+            pulse_data["Amp_Q"] = pulse_data["Amp_Q"] * scale
+        ns = self._scaled_noise(channel)
         summary = pulse_summary(pulse_data, ns, self.threshold_sigma)
 
         self.pulse_counts[channel] = self.pulse_counts.get(channel, 0) + 1

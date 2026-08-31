@@ -1281,9 +1281,14 @@ class TestDetectionParamsPlumbing:
         )
         kw = PulseCaptureConfig().session_kwargs(19073.486328125)
         # session_kwargs also carries the two sizing quantities, which
-        # are not detection knobs but are needed to build the session.
+        # are not detection knobs but are needed to build the session,
+        # and trigger_basis, which the session applies on the way in
+        # rather than handing to PulseCapture.
         assert set(kw) == set(DETECTION_PARAMS) | {"buf_size",
-                                                   "noise_samples"}
+                                                   "noise_samples",
+                                                   "trigger_basis"}
+        # The join that matters: every detection knob still gets there.
+        assert set(DETECTION_PARAMS) <= set(kw)
 
     def test_every_detection_param_is_a_pulse_capture_argument(self):
         import inspect

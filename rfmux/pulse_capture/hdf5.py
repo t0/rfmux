@@ -38,6 +38,21 @@ from .analysis import pulse_summary
 
 
 
+def _store_units(grp, stored_units, channel) -> None:
+    """Record what a channel's stored samples actually are.
+
+    Per channel rather than per file: a capture in the frequency basis
+    still holds uncalibrated channels in volts, because there is nothing
+    to rotate them with.  A reader that assumed one answer for the whole
+    file would mislabel those.
+    """
+    if not isinstance(stored_units, dict):
+        return
+    units = stored_units.get(channel)
+    if units:
+        grp.attrs["stored_units"] = str(units)
+
+
 def _store_df_calibration(grp, df_calibrations, channel) -> None:
     """Stamp *channel*'s df calibration onto *grp*, if there is a usable one.
 
@@ -82,9 +97,10 @@ class _PulseFileWriter:
     #: missing here is dropped without complaint.
     #: test_every_detection_param_reaches_the_file pins it.
     _META = (
-        (str, ("streamer_mode",)),
+        (str, ("streamer_mode", "trigger_basis", "stored_units")),
         (float, ("threshold_sigma", "end_sigma", "margin_fraction",
-                 "sample_rate_slow", "sample_rate_fast")),
+                 "sample_rate_slow", "sample_rate_fast",
+                 "volts_per_count")),
         (int, ("min_pulse_samples", "module", "trigger_samples",
                "baseline_window", "edge_lookback", "max_capture_samples")),
         (bool, ("enable_pileup", "save_to_end_confirmed")),
@@ -214,6 +230,7 @@ class PulseHDF5Writer(_PulseFileWriter):
         noise_stats: Dict[int, ChannelNoiseStats],
         capture_params: Dict[str, Any],
         df_calibrations: Optional[Dict[int, float]] = None,
+        stored_units: Optional[Dict[int, str]] = None,
     ):
         super().__init__(path, channels, capture_params)
         self._noise_stats = dict(noise_stats)
@@ -225,6 +242,7 @@ class PulseHDF5Writer(_PulseFileWriter):
                 ch, ChannelNoiseStats()))
             grp.attrs["pulse_count"] = 0
             _store_df_calibration(grp, df_calibrations, ch)
+            _store_units(grp, stored_units, ch)
 
         # ── Histogram / template groups (updated periodically) ────
         self.f.create_group("histograms")
@@ -316,7 +334,8 @@ class DualPulseHDF5Writer(_PulseFileWriter):
 
     def __init__(self, path, channels: List[int],
                  capture_params: Dict[str, Any],
-                 df_calibrations: Optional[Dict[int, float]] = None):
+                 df_calibrations: Optional[Dict[int, float]] = None,
+                 stored_units: Optional[Dict[int, str]] = None):
         super().__init__(path, channels, capture_params)
         self._noise: Dict[str, Dict[int, ChannelNoiseStats]] = {
             s: {} for s in self.STREAMS}
@@ -331,6 +350,7 @@ class DualPulseHDF5Writer(_PulseFileWriter):
                 grp = sgrp.create_group(f"channel_{ch}")
                 grp.attrs["pulse_count"] = 0
                 _store_df_calibration(grp, df_calibrations, ch)
+                _store_units(grp, stored_units, ch)
             self.f.create_group(f"histograms/{stream}")
 
         matched = self.f.create_group("matched")
@@ -451,6 +471,45 @@ class PulseHDF5Reader:
             jump_std_I=float(grp.attrs.get("noise_jump_std_I", 0.0)),
             jump_std_Q=float(grp.attrs.get("noise_jump_std_Q", 0.0)),
         )
+
+    def volts_per_count(self) -> Optional[float]:
+        """The counts-to-volts constant this capture was written with.
+
+        Stored per file rather than taken from the library because
+        VOLTS_PER_ROC is empirical and will be revised; an old capture
+        read with a new constant would silently change meaning.
+        """
+        if self.f is None:
+            return None
+        meta = self.f.get("metadata")
+        return None if meta is None else meta.attrs.get("volts_per_count")
+
+    def stored_units(self, channel: int,
+                     stream: Optional[str] = None) -> str:
+        """Units of *channel*'s stored samples: ``"Hz"`` or ``"V"``.
+
+        ``"counts"`` for files written before samples were stored in
+        physical units, which is what those actually hold.
+        """
+        if self.f is None:
+            return "counts"
+        grp = self.f.get(self._ch_key(channel, stream))
+        if grp is None:
+            return "counts"
+        return str(grp.attrs.get("stored_units", "counts"))
+
+    def trigger_basis(self) -> str:
+        """Basis the samples were triggered on, and are stored in.
+
+        ``"iq"`` or ``"df"``.  Files written before this was recorded
+        predate the rotation and are therefore I/Q.
+        """
+        if self.f is None:
+            return "iq"
+        meta = self.f.get("metadata")
+        if meta is None:
+            return "iq"
+        return str(meta.attrs.get("trigger_basis", "iq"))
 
     def df_calibration(self, channel: int,
                        stream: Optional[str] = None) -> Optional[float]:

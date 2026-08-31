@@ -1936,7 +1936,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"Pulse #{pulse_idx:06d} — Channel {channel}   {pile}\n"
             f"{summary.get('n_samples', 0)} samples   "
             f"{summary.get('duration_ms', 0):.2f} ms   "
-            f"peak {summary.get('peak_amp', 0):.0f} cts "
+            f"peak {summary.get('peak_amp', 0):.4g} "f"{self._units_label(channel)} "
             f"({summary.get('snr', 0):.1f}σ)\n"
             f"derived τ = {tau_str}"
             + self._decision_text(wf))
@@ -1979,11 +1979,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             plot.getPlotItem().setLabel("left", name)
         x0 = float(t_rel[0]) if len(t_rel) else 0.0
         x1 = float(t_rel[-1]) if len(t_rel) else 1.0
-        for quad, plot, data in (("I", self.pulse_plot_i, amp_I),
-                                 ("Q", self.pulse_plot_q, amp_Q)):
+        # Series names follow the axes: "I (pulse)" over a plot labelled
+        # df (Hz) names the wrong thing.  The colours stay keyed to the
+        # underlying quadrature so a trace does not change colour when
+        # the view does.
+        series = [n.split(" (")[0] for n in (first, second)]
+        for quad, label, plot, data in (
+                ("I", series[0], self.pulse_plot_i, amp_I),
+                ("Q", series[1], self.pulse_plot_q, amp_Q)):
             plot.plot(t_rel, data,
                       pen=pg.mkPen(IQ_COLORS[quad], width=LINE_WIDTH),
-                      name=f"{quad} (pulse)")
+                      name=f"{label} (pulse)")
             self._annotate_noise_bands(plot, quad, ns, x0, x1, "#888888")
             self._annotate_decisions(plot, wf, t0, quad)
 
@@ -2187,10 +2193,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     connect="finite",
                 )
             if metric == "amplitude":
-                item.setLabel("bottom",
-                              "amplitude (Δf)" if any_scaled
-                              else "amplitude (counts)",
-                              units="Hz" if any_scaled else None)
+                # One unit, in the label.  pyqtgraph's units= appends a
+                # second bracket, which read "amplitude (Δf) (Hz)".
+                item.setLabel(
+                    "bottom",
+                    f"amplitude ({self._units_label(self._label_channel())})")
             # Fit x to the populated bins — auto-expanded ranges
             # otherwise leave the data huddled at one edge
             if occupied_lo is not None and occupied_hi > occupied_lo:

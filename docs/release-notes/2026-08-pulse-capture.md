@@ -96,8 +96,14 @@ the toolbar, and press Start.
 ![Pulse Capture panel reviewing a capture file](images/pulse-capture-panel-review.png)
 
 The left pane lists every pulse with its length and signal-to-noise. The plot
-stacks I and Q against a common time axis. Markers show the trigger sample,
-where the signal fell back below threshold, and where the end was confirmed.
+stacks the two axes against a common time axis, and markers show the trigger
+sample, where the signal fell back below threshold, and where the end was
+confirmed.
+
+The capture above was triggered in the frequency basis, so the axes are df and
+dissipation rather than I and Q, and the amplitudes are in hertz. The pulse is
+in df, which is the point of rotating: it is a frequency excursion, and in the
+raw quadratures it would be split between the two.
 
 The panel also opens a finished file. Point it at an `.h5` and it enters
 review mode, which is what the screenshot above shows. Captures written into
@@ -216,7 +222,10 @@ inside one sample and is detected but not resolved, which looks like a single
 spike rather than a pulse.
 
 `periscope --mock` gives the same simulation behind the GUI. The screenshots
-in this document were taken from a mock capture.
+in this document were taken from a mock capture, triggered in the frequency
+basis. The mock's `auto_bias_kids` skips the sweep-and-fit that produces a
+calibration on hardware, so those captures were given one measured from the
+simulated pulses' own direction.
 
 The mock generates both streams in one process, so fast and dual captures run
 slower than real time: two PFB channels is 4.9 M complex samples a second to

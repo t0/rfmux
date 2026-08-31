@@ -198,3 +198,24 @@ async def test_mock_crs():
 if __name__ == "__main__":
     # Run test if executed directly
     asyncio.run(test_mock_crs())
+
+
+async def mock_df_calibrations(crs, module: int = 1) -> dict:
+    """``{channel: complex}`` calibrations from a mock's auto-bias.
+
+    The mock measures these when it biases, by sweeping its own
+    resonators and calling the same ``convert_iq_to_df`` that
+    ``bias_kids`` uses on hardware.  So mock captures can work in hertz,
+    and can trigger on frequency rather than the raw quadratures,
+    without a real sweep-and-fit::
+
+        crs = await create_mock_crs(module=1,
+                                    config={"auto_bias_kids": True})
+        df_cals = await mock_df_calibrations(crs, module=1)
+        await crs.trigger_capture(..., df_calibrations=df_cals,
+                                  trigger_basis="df")
+
+    Returns an empty dict if nothing has been biased.
+    """
+    rows = await crs.get_df_calibrations(module=module)
+    return {int(ch): complex(re, im) for ch, re, im in rows}

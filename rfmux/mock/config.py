@@ -108,6 +108,11 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Automatic KID biasing parameters
     # -------------------------------------------------------------------------
     "auto_bias_kids": False,   # Enable automatic channel configuration
+    # Measure a df calibration for each biased channel, by sweeping the
+    # simulated resonator and calling the same convert_iq_to_df that
+    # bias_kids uses on hardware.  Costs nine get_samples per channel at
+    # bias time; turn it off for large arrays where nothing needs hertz.
+    "auto_df_calibration": True,
     "bias_amplitude": 0.01,    # Bias amplitude in normalized units (≈ -40 dBm)
 
     # -------------------------------------------------------------------------

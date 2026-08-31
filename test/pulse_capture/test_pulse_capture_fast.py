@@ -361,3 +361,37 @@ def test_macro_stores_df_calibrations(mock_crs, tmp_path):
     from rfmux.core.transferfunctions import VOLTS_PER_ROC
     assert counts_to_hz_scale(2.5e6) == pytest.approx(2.5e6 * VOLTS_PER_ROC)
     assert counts_to_hz_scale(None) is None
+
+
+def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):
+    """The mock measures its own calibration, so mock captures can be in Hz.
+
+    auto_bias_kids skips the sweep-and-fit that produces one on
+    hardware, which left every mock capture uncalibrated and stuck on
+    the quadratures.  The mock now sweeps its own resonators at bias
+    time and calls the same convert_iq_to_df that bias_kids does, so the
+    number means the same thing and cannot drift from the hardware
+    definition.
+    """
+    import numpy as np
+    from rfmux.mock.helpers import mock_df_calibrations
+
+    loop, crs = mock_crs
+    cals = loop.run_until_complete(mock_df_calibrations(crs, module=1))
+    assert cals, "auto_bias_kids produced no calibration"
+    for ch, cal in cals.items():
+        assert isinstance(cal, complex) and np.isfinite(cal)
+        assert abs(cal) > 0
+
+    path = tmp_path / "mock_cal.h5"
+    result = loop.run_until_complete(crs.trigger_capture(
+        channel=sorted(cals)[:1], module=1, streamer_mode="slow",
+        time_run=3.0, hdf5_path=path, df_calibrations=cals,
+        trigger_basis="df", verbose=False))
+    ch = result.channels[0]
+
+    with PulseHDF5Reader(path) as reader:
+        assert reader.trigger_basis() == "df"
+        # Rotated and calibrated, so the samples are hertz, not volts.
+        assert reader.stored_units(ch) == "Hz"
+        assert reader.df_calibration(ch) is not None

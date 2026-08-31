@@ -363,9 +363,18 @@ def _basis_units_factor(df_calibration, basis: str, units: str):
 
 
 def apply_storage_transform(i_vals, q_vals, cos_c, sin_c):
-    """Apply :func:`storage_transform`'s coefficients to a pair of axes."""
-    first = i_vals * cos_c + q_vals * sin_c
-    second = q_vals * cos_c - i_vals * sin_c
+    """Apply a (cos, sin) pair to a pair of axes.
+
+    This is the complex product ``(I + jQ) * (cos + j sin)``, which is
+    the convention ``convert_iq_to_df`` defines: a frequency shift df
+    moves IQ by ``df * (dI/df + j dQ/df)``, so multiplying by the
+    calibration -- its reciprocal -- returns the shift.  Conjugating
+    instead sends a pure frequency excursion into both axes with the
+    wrong sign, which is what this did until it was checked against
+    convert_iq_to_df directly.
+    """
+    first = i_vals * cos_c - q_vals * sin_c
+    second = i_vals * sin_c + q_vals * cos_c
     return first, second
 
 
@@ -395,10 +404,11 @@ def rotate_to_df(i_vals, q_vals, df_calibration):
         return i_vals, q_vals
     unit = cal / abs(cal)           # phase only; magnitude is a scale
     c, s = unit.real, unit.imag
-    # (df, diss) = (I + jQ) * conj(unit), written out so the arrays stay
-    # real and no complex temporary is allocated per sample.
-    df = i_vals * c + q_vals * s
-    diss = q_vals * c - i_vals * s
+    # (df, diss) = (I + jQ) * unit, matching convert_iq_to_df.  Written
+    # out so the arrays stay real and no complex temporary is allocated
+    # per sample.
+    df = i_vals * c - q_vals * s
+    diss = i_vals * s + q_vals * c
     return df, diss
 
 
@@ -418,6 +428,6 @@ def rotate_from_df(df_vals, diss_vals, df_calibration):
         return df_vals, diss_vals
     unit = cal / abs(cal)
     c, s = unit.real, unit.imag
-    i_vals = df_vals * c - diss_vals * s
-    q_vals = df_vals * s + diss_vals * c
+    i_vals = df_vals * c + diss_vals * s
+    q_vals = diss_vals * c - df_vals * s
     return i_vals, q_vals

@@ -467,6 +467,50 @@ class TestPulseHDF5:
             assert reader.df_calibration(1) == pytest.approx(42.5)
             assert reader.df_calibration(99) is None
 
+    def test_rotation_matches_convert_iq_to_df(self):
+        """The rotation is the one convert_iq_to_df defines, not its conjugate.
+
+        df_calibration is the reciprocal of dIQ/df, so a frequency shift
+        is recovered by *multiplying* IQ by it.  Conjugating instead
+        sends a pure frequency excursion into both axes with the wrong
+        sign -- which is what this did, undetected, because nothing
+        compared the two directly.
+        """
+        import numpy as np
+        from rfmux.core.transferfunctions import (
+            convert_iq_to_df, VOLTS_PER_ROC)
+        from rfmux.pulse_capture.analysis import (
+            apply_storage_transform, rotate_from_df, rotate_to_df,
+            storage_transform)
+
+        # A sweep with a known complex slope; the calibration is 1/slope.
+        freqs = np.linspace(-1e5, 1e5, 401)
+        slope = (2.0 + 5.0j) * 1e-9              # volts per Hz
+        cal = convert_iq_to_df(np.array([1.0 + 0j]), 0.0,
+                               freqs, slope * freqs)[0]
+
+        shift_hz = 1000.0
+        d_iq = slope * shift_hz                   # what that shift does to IQ
+        expected = d_iq * cal                     # production definition
+
+        # Counts in, hertz out, through the transform a capture applies.
+        c, sn, units = storage_transform(cal, "df")
+        assert units == "Hz"
+        df, diss = apply_storage_transform(d_iq.real / VOLTS_PER_ROC,
+                                           d_iq.imag / VOLTS_PER_ROC, c, sn)
+        assert df == pytest.approx(shift_hz, rel=1e-9)
+        assert df == pytest.approx(expected.real, rel=1e-9)
+        # A pure frequency shift has no dissipation component.
+        assert abs(diss) < 1e-6 * abs(df)
+
+        # Phase-only rotation keeps the whole excursion, and inverts.
+        r_df, r_diss = rotate_to_df(d_iq.real, d_iq.imag, cal)
+        assert r_df == pytest.approx(abs(d_iq), rel=1e-9)
+        assert abs(r_diss) < 1e-9 * abs(r_df)
+        back_i, back_q = rotate_from_df(r_df, r_diss, cal)
+        assert back_i == pytest.approx(d_iq.real, rel=1e-9)
+        assert back_q == pytest.approx(d_iq.imag, rel=1e-9)
+
     def test_unusable_df_calibration_costs_the_units_not_the_file(
             self, tmp_path):
         """A wrong-shaped mapping must not take the capture with it.

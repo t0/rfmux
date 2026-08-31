@@ -628,6 +628,22 @@ Hand them to the session and they are written into the file with the pulses:
 instead of being split between two by an angle nothing controls. It needs a
 calibration; a channel without one stays on the quadratures, and in volts.
 
+The mock measures one for itself. `auto_bias_kids` skips the sweep-and-fit, so
+instead the simulator sweeps its own resonators at bias time and calls the same
+`convert_iq_to_df` that `bias_kids` uses, which means the number cannot drift
+from the hardware definition:
+
+```python
+if IS_MOCK:
+    from rfmux.mock.helpers import mock_df_calibrations
+    df_cals = await mock_df_calibrations(crs, module=MODULE)
+    for ch, cal in sorted(df_cals.items()):
+        print(f"  ch{ch}: {abs(cal):.3g} Hz per volt, "
+              f"{np.degrees(np.angle(cal)):+.1f} deg")
+else:
+    df_cals = {}
+```
+
 Every capture is self-describing — the units per channel, the counts-to-volts
 constant and the calibration are all in the file, so nothing has to assume
 this library's constants:

@@ -236,6 +236,9 @@ class ServerMockCRS:
 
         self._rfdc_initialized = False
         self._nco_frequencies = {}
+        #: {module: {channel: complex}} from auto-bias, the same
+        #: quantity bias_kids returns on hardware.
+        self._df_calibrations = {}
         self._adc_attenuators = {m: {"amplitude": 0.0, "units": self.Units.DB} for m in range(1, 5)}
         self._dac_scales = {m: {"amplitude": 1.0, "units": self.Units.DBM} for m in range(1, 5)}
         self._adc_autocal = {m: True for m in range(1, 5)}
@@ -396,15 +399,86 @@ class ServerMockCRS:
                 await self.set_amplitude(amplitude, channel=channel, module=module)
                 await self.set_phase(0, channel=channel, module=module)
                 
+                if config.get('auto_df_calibration', True):
+                    cal = await self._measure_df_calibration(
+                        dip_freq, nco_freq, channel, module)
+                    if cal is not None:
+                        self._df_calibrations.setdefault(
+                            module, {})[channel] = cal
+
                 configured_count += 1
-                
-            print(f"[MockCRS] Configured {configured_count} channels with automatic KID biasing")
+
+            n_cal = len(self._df_calibrations.get(module, {}))
+            print(f"[MockCRS] Configured {configured_count} channels with "
+                  f"automatic KID biasing ({n_cal} calibrated)")
             
         except Exception as e:
             print(f"[MockCRS] Error in auto-bias KIDs: {e}")
             import traceback
             traceback.print_exc()
             # Don't re-raise - this is a convenience feature, not critical
+
+    async def _measure_df_calibration(self, bias_freq, nco_freq, channel,
+                                      module, span_hz=40e3, n_points=9):
+        """Calibration at the bias point, measured the way hardware is.
+
+        ``bias_kids`` gets this from a sweep: it splines I and Q against
+        frequency, differentiates at the bias point and inverts, which is
+        ``convert_iq_to_df``.  The mock knows its resonators exactly and
+        could differentiate the model instead, but that would need the
+        scale factor between the model's S21 and the counts the readout
+        reports -- a second path to keep in step with the first.
+        Sweeping and calling the same function cannot disagree with
+        hardware about units or sign.
+
+        Nine points is enough for the cubic spline and costs nine
+        get_samples calls per channel.  Restores the bias frequency
+        before returning.
+        """
+        import numpy as _np
+        from ..core.transferfunctions import (
+            convert_iq_to_df, convert_roc_to_volts)
+
+        try:
+            freqs = _np.linspace(bias_freq - span_hz, bias_freq + span_hz,
+                                 n_points)
+            iq = _np.empty(n_points, dtype=complex)
+            for k, f in enumerate(freqs):
+                await self.set_frequency(f - nco_freq, channel=channel,
+                                         module=module)
+                s = await self.get_samples(10, channel=channel, module=module)
+                # Server-side this is a plain dict; the tuber client is
+                # what turns it into something with .i / .q.
+                si = s["i"] if isinstance(s, dict) else s.i
+                sq = s["q"] if isinstance(s, dict) else s.q
+                iq[k] = (_np.mean(_np.asarray(si))
+                         + 1j * _np.mean(_np.asarray(sq)))
+            cal = convert_iq_to_df(_np.array([1.0 + 0j]), bias_freq, freqs,
+                                   convert_roc_to_volts(iq))[0]
+        except Exception as e:
+            print(f"[MockCRS]   Ch {channel}: df calibration failed: {e}")
+            return None
+        finally:
+            await self.set_frequency(bias_freq - nco_freq, channel=channel,
+                                     module=module)
+        return complex(cal) if _np.isfinite(cal) else None
+
+    async def get_df_calibrations(self, module=1):
+        """Calibrations from auto-bias, as ``[[channel, real, imag], ...]``.
+
+        The same quantity ``bias_kids`` returns on hardware: the complex
+        factor taking IQ in volts to frequency shift plus dissipation.
+        Split into real and imaginary parts because this crosses JSON,
+        which has no complex type, and returned as a list because a dict
+        would come back with its integer keys turned into strings.
+        :func:`rfmux.mock.helpers.mock_df_calibrations` puts it back
+        together; hand that to a capture as ``df_calibrations=``.
+
+        Empty until something has been biased.
+        """
+        cals = self._df_calibrations.get(module, {})
+        return [[int(ch), float(c.real), float(c.imag)]
+                for ch, c in sorted(cals.items())]
 
     def validate_enum_member(self, value, enum_class, name):
         if isinstance(value, str):

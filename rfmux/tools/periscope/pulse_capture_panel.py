@@ -55,6 +55,7 @@ from ...core.transferfunctions import (
 )
 from ...pulse_capture.analysis import (
     display_transform,
+    storage_transform,
 )
 
 # Fast/PFB stream overlay colors (darker variants, HUD convention)
@@ -1657,15 +1658,25 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         return cal
 
     def _stored_state(self, channel: int) -> Tuple[str, str]:
-        """(basis, units) the samples for *channel* are held in."""
+        """(basis, units) the samples for *channel* are held in.
+
+        A finished capture says so in the file.  A live one is derived
+        from the same storage_transform the session applies, rather than
+        from state the panel would have to be told about and could be
+        told wrongly -- which is what happened: the two attributes this
+        used to read were never assigned, so a live capture in the
+        frequency basis was displayed as though it were quadratures in
+        volts.
+        """
         if self.reader is not None:
             try:
                 return self.reader.trigger_basis(), \
                     self.reader.stored_units(channel)
             except Exception:
                 pass
-        basis = getattr(self, "_live_trigger_basis", "iq")
-        units = getattr(self, "_live_units", {}).get(channel, "V")
+        basis = getattr(self.capture_config, "trigger_basis", "iq")
+        _factor, units = storage_transform(
+            self._flat_df_calibrations().get(channel), basis)
         return basis, units
 
     def _view_state(self) -> Tuple[str, str]:

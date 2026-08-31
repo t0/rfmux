@@ -1375,3 +1375,40 @@ def test_axis_labels_name_what_is_plotted(qt_app, tmp_path, monkeypatch):
 
     panel.close()
     spin(qt_app)
+
+
+def test_live_capture_knows_what_it_stored(qt_app):
+    """A live df capture is not displayed as though it were quadratures.
+
+    The panel used to read two attributes for this that nothing ever
+    assigned, so every live capture looked like I/Q in volts.  Viewing a
+    frequency-basis capture in df then multiplied samples already in
+    hertz by the calibration a second time.
+    """
+    from rfmux.pulse_capture import PulseCaptureConfig
+    from rfmux.tools.periscope import pulse_capture_panel as m
+
+    cal = 2.0e6 + 0j
+    panel = m.PulseCapturePanel(dark_mode=False,
+                                df_calibrations={1: {1: cal}})
+    panel.module_spin.setValue(1)
+
+    # Default basis: quadratures, stored in volts.
+    assert panel._stored_state(1) == ("iq", "V")
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    assert panel._amp_scale(1) == pytest.approx(abs(cal))
+
+    # Capturing in the frequency basis stores hertz, so displaying df is
+    # a no-op rather than a second application of the calibration.
+    panel.capture_config = PulseCaptureConfig(trigger_basis="df")
+    assert panel._stored_state(1) == ("df", "Hz")
+    assert panel._amp_scale(1) == pytest.approx(1.0)
+    assert panel._axis_names(1) == ("df (Hz)", "dissipation (Hz)")
+
+    # And volts is reachable from there, by undoing the calibration.
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
+    assert panel._amp_scale(1) == pytest.approx(1.0 / abs(cal))
+    assert panel._axis_names(1) == ("I (V)", "Q (V)")
+
+    panel.close()
+    spin(qt_app)

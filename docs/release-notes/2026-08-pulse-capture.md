@@ -35,12 +35,38 @@ The call estimates the noise on each channel first, then triggers at
 `threshold_sigma` above that baseline. Nothing needs to be known in advance
 about the pulse height.
 
-Pass `df_calibrations={channel: calibration}` from `bias_kids` and the
-calibration is stored in the capture file, so amplitudes can be read as Δf in
-Hz instead of ADC counts. Channels without one stay in counts rather than
-being given a scale of 1. Triggering is unaffected either way: the threshold
-is in units of each channel's measured noise, which is a ratio, so it does not
-depend on the calibration.
+Pass `df_calibrations={channel: calibration}` from `bias_kids` and the capture
+is stored in physical units: volts, or hertz for a channel that has been
+rotated into the frequency basis. The file records the calibration, the
+counts-to-volts constant and the units per channel, so a reader needs nothing
+from this library to interpret it.
+
+### Triggering on frequency instead of the quadratures
+
+A pulse moves the resonance frequency, so it lies along one direction in the
+IQ plane. That direction is set by the bias point and the cable delay, and has
+nothing to do with the I and Q axes. Thresholding the raw quadratures
+therefore tests an arbitrary basis: at 45 degrees each one sees the pulse
+divided by the square root of two while carrying the full noise.
+
+```python
+result = await crs.trigger_capture(
+    channel=[1], module=1, streamer_mode="slow", time_run=10.0,
+    df_calibrations=df_cals,
+    trigger_basis="df",        # rotate first, then threshold
+)
+```
+
+The calibration's phase is the rotation; its magnitude is the hertz-per-count
+scale. On synthetic data, a 7σ pulse at 45 degrees against a 4σ threshold: 18
+of 19 detected rotated, 3 of 19 on the quadratures. The edge test compounds
+it, because an instant rise gives A/√2 jump-sigmas either way.
+
+A channel with no calibration cannot be rotated, so it stays on the
+quadratures and in volts. One capture can hold both.
+
+This makes the calibration matter for detection rather than only for labelling
+an axis: a wrong one costs sensitivity.
 
 `result` carries the pulses, their summaries and the noise statistics. The
 same content is written to `hdf5_path` as the capture runs, so an interrupted
@@ -83,8 +109,13 @@ a session folder appear in the Session Browser and open from there.
 
 Signal-to-noise, peak amplitude, duration and derived decay constant are
 accumulated over every pulse and updated live. Ranges expand as new pulses
-arrive, so there is nothing to configure up front. Amplitudes can be shown in
-raw counts or converted to Hz of frequency shift.
+arrive, so there is nothing to configure up front.
+
+The View and units controls in the toolbar drive the waveforms, the histograms
+and the templates together, and are independent of what the capture triggered
+on: the file carries the basis, the units and the calibration, so either view
+is exact. Hertz is a property of the frequency axis, so it needs both the
+rotated view and a calibrated channel; volts needs neither.
 
 ## Read the file back
 

@@ -120,3 +120,24 @@ def test_max_pulse_is_a_primary_control_and_drives_training(qt_app):
     assert dlg.get_config().noise_train_span_ms() == 800.0
     assert dlg.noise_label.text() != first, "readout did not follow"
     dlg.close()
+
+
+def test_trigger_basis_round_trips(qt_app):
+    """The basis survives the dialog, and does not disturb the rest.
+
+    It is the one capture setting that changes what gets detected rather
+    than how much of it is kept, so a dialog that silently reset it to
+    the default would be worse than not offering it.
+    """
+    from rfmux.pulse_capture import PulseCaptureConfig
+
+    for basis in ("iq", "df"):
+        src = PulseCaptureConfig(trigger_basis=basis, threshold_sigma=7.5,
+                                 max_pulse_ms=123.0, enable_pileup=False)
+        out = PulseCaptureSettingsDialog(
+            config=src, sample_rate=596.0).get_config()
+        assert out.trigger_basis == basis
+        # The other knobs come back untouched.
+        assert out.threshold_sigma == pytest.approx(7.5)
+        assert out.max_pulse_ms == pytest.approx(123.0)
+        assert out.enable_pileup is False

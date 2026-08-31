@@ -176,6 +176,28 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.end_confirmed_check.setChecked(config.save_to_end_confirmed)
         adv.addRow(self.end_confirmed_check)
 
+        self.basis_combo = QtWidgets.QComboBox()
+        self.basis_combo.addItems(["I/Q (quadratures)",
+                                   "df/dissipation (rotated)"])
+        self.basis_combo.setCurrentIndex(
+            1 if config.trigger_basis == "df" else 0)
+        self.basis_combo.setToolTip(
+            "What the threshold is applied to.\n\n"
+            "A pulse moves the resonance frequency, so it lies along one "
+            "direction in the IQ plane — set by the bias point and cable "
+            "delay, and unrelated to the I and Q axes.  Testing the raw "
+            "quadratures therefore tests an arbitrary basis: at 45 "
+            "degrees each one sees the pulse divided by root two while "
+            "carrying the full noise.  Rotating first puts the signal in "
+            "one axis.\n\n"
+            "Needs a df calibration from bias_kids.  Channels without "
+            "one cannot be rotated and stay on the quadratures.\n\n"
+            "This makes the calibration matter for detection, not just "
+            "for labelling an axis: a wrong one costs sensitivity.  It "
+            "also sets the units the capture is stored in — hertz once "
+            "rotated, volts otherwise.")
+        adv.addRow("Trigger basis:", self.basis_combo)
+
         # What each primary knob drives, at the actual stream rate —
         # the derivations live in PulseCaptureConfig, this only renders
         # them.
@@ -227,6 +249,8 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             max_pulse_ms=float(self.max_pulse_spin.value()),
             enable_pileup=self.pileup_check.isChecked(),
             save_to_end_confirmed=self.end_confirmed_check.isChecked(),
+            trigger_basis=("df" if self.basis_combo.currentIndex() == 1
+                           else "iq"),
         )
 
     def _update_dependent_values(self):

@@ -606,35 +606,41 @@ plt.title("Trigger-aligned template"); plt.legend(); plt.show()
 
 ### Calibrated amplitudes
 
-Waveforms are stored in raw ADC counts, which are only comparable across
-channels once calibrated. `counts_to_hz_scale` turns them into Δf, and is the
-same conversion behind the panel's counts/Hz selector.
+Samples are stored in physical units, not ADC counts: volts, or hertz for a
+channel rotated into the frequency basis. Counts belong to the I and Q axes, so
+a count projected onto the frequency axis is a combination of two ADC readings
+and means nothing on its own.
 
-The calibration itself comes from `bias_kids`, which returns a `df_calibration`
-(Hz per radian) per detector. Hand those to the session and they are written
-into the capture file alongside the pulses:
+The calibration comes from `bias_kids`, which returns a complex
+`df_calibration` per detector. Its magnitude is the hertz-per-count scale and
+its phase is the angle between the quadratures and the frequency direction.
+Hand them to the session and they are written into the file with the pulses:
 
     bias_results = await bias_kids(crs=crs, multisweep_results=...,
                                    module=MODULE)
     df_cals = {ch: d["df_calibration"] for ch, d in bias_results.items()
                if "df_calibration" in d}
 
-    capture_session = PulseCaptureSession(..., df_calibrations=df_cals)
+    capture_session = PulseCaptureSession(..., df_calibrations=df_cals,
+                                          trigger_basis="df")
 
-This notebook's mock detectors were biased by `auto_bias_kids`, which skips that
-sweep-and-fit step, so the channels below are uncalibrated and
-`counts_to_hz_scale` returns `None`. Treat `None` as "show counts" rather than
-substituting 1.0 — unscaled counts mislabelled as Hz are worse than no
-calibration at all.
+`trigger_basis="df"` rotates before thresholding, so a pulse lands on one axis
+instead of being split between two by an angle nothing controls. It needs a
+calibration; a channel without one stays on the quadratures, and in volts.
+
+Every capture is self-describing — the units per channel, the counts-to-volts
+constant and the calibration are all in the file, so nothing has to assume
+this library's constants:
 
 ```python
+print(f"trigger basis: {reader.trigger_basis()}   "
+      f"volts per count: {reader.volts_per_count():.4g}")
 for ch in reader.channels:
-    scale = counts_to_hz_scale(reader.df_calibration(ch))
-    if scale is None:
-        print(f"  ch{ch}: uncalibrated — amplitudes stay in counts")
-    else:
-        peak = reader.get_pulse_metadata(ch, 1).get("peak_amp", float("nan"))
-        print(f"  ch{ch}: {peak:.0f} counts → {peak * scale:.1f} Hz")
+    units = reader.stored_units(ch)
+    cal = reader.df_calibration(ch)
+    peak = reader.get_pulse_metadata(ch, 1).get("peak_amp", float("nan"))
+    note = "uncalibrated" if cal is None else f"|cal| = {abs(cal):.3g} Hz/count"
+    print(f"  ch{ch}: peak {peak:.4g} {units}   ({note})")
 
 reader.close()
 ```
@@ -773,7 +779,7 @@ objects this notebook does:
 | (how the GUI tap feeds the session) | `SlowIngest` — the same class `run_slow_source` uses, so the GUI and this notebook block, keep sample time and stop on duration identically |
 | **⟳ Re-estimate Noise** | `capture_session.re_estimate_noise()` |
 | Live pulse / histogram / template plots | `on_pulse`, `on_histograms`, `on_templates` callbacks |
-| counts / Hz selector | `counts_to_hz_scale(df_calibration)` |
+| View basis / units controls | `display_transform(...)` |
 | Output `.h5` + Session Browser review | `hdf5_path=` + `PulseHDF5Reader` |
 
 The same sequence as a plain script, for writing your own or smoke-testing against MOCK:

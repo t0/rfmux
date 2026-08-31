@@ -1788,19 +1788,26 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         return f"I ({unit})", f"Q ({unit})"
 
     def _view_noise(self, channel: int, ns):
-        """Noise statistics scaled into the current view.
+        """Noise statistics taken into the current view.
 
-        The rotation is orthonormal, so a per-axis sigma survives it
-        unchanged in magnitude; only the units ratio applies.
+        The two halves do not transform alike.  The baseline is a
+        signed position in the plane, so it rotates with the samples --
+        scaling it alone left the baseline and the threshold lines
+        drawn from volts while the trace above them was in hertz.  The
+        spreads are magnitudes, and the rotation mixes the quadratures,
+        so they carry over by its length only.
         """
         if ns is None:
             return ns
-        k = self._amp_scale(channel)
-        if k is None or k == 1.0:
+        view = self._view_coeffs(channel)
+        if view is None or view[0] == 1.0:
             return ns
+        factor = view[0]
+        k = abs(factor)
+        mean_I, mean_Q = apply_iq_conversion(ns.mean_I, ns.mean_Q, factor)
         return replace(
-            ns, mean_I=ns.mean_I * k, std_I=ns.std_I * k,
-            mean_Q=ns.mean_Q * k, std_Q=ns.std_Q * k,
+            ns, mean_I=mean_I, std_I=ns.std_I * k,
+            mean_Q=mean_Q, std_Q=ns.std_Q * k,
             jump_std_I=ns.jump_std_I * k, jump_std_Q=ns.jump_std_Q * k)
 
     def _units_are_hz(self) -> bool:

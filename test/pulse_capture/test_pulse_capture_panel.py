@@ -1514,3 +1514,73 @@ def test_templates_are_rotated_not_just_scaled(qt_app):
 
     panel.close()
     spin(qt_app)
+
+
+def test_noise_bands_follow_the_rotation(qt_app):
+    """The baseline and threshold lines rotate with the samples.
+
+    The waveform went through the calibration but the noise statistics
+    were only scaled by its magnitude, so in the df view the baseline
+    and the +/-sigma lines were drawn from the volts-basis position
+    while the trace above them was in hertz -- horizontal lines that
+    belonged to a different basis.
+
+    A baseline is a signed position in the plane, so it rotates.  The
+    spreads are magnitudes and take the rotation's length only.
+    """
+    import pyqtgraph as pg
+
+    from rfmux.core.transferfunctions import apply_iq_conversion
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    from rfmux.tools.periscope import pulse_capture_panel as m
+
+    cal = 2.0e6 * np.exp(1j * np.radians(40.0))
+    ns = ChannelNoiseStats(mean_I=3.0, std_I=0.5, mean_Q=-7.0, std_Q=0.5)
+
+    panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    panel.module_spin.setValue(1)
+    panel.noise_stats = {1: ns}
+    panel._pulse_summaries[(1, 1)] = {
+        "n_samples": 8, "duration_ms": 1.0, "peak_amp": 0.0, "snr": 0.0,
+        "tau_ms": float("nan"),
+    }
+    # A flat stretch sitting exactly on the baseline: wherever the trace
+    # is drawn, the baseline line has to be drawn on top of it.
+    flat = np.full(8, 1.0)
+    panel._get_waveform = lambda ch, idx, stream="slow": {
+        "Time": np.arange(8) * 1e-3,
+        "Amp_I": flat * ns.mean_I,
+        "Amp_Q": flat * ns.mean_Q,
+    }
+
+    def drawn(plot):
+        out = {}
+        for item in plot.getPlotItem().listDataItems():
+            if item.yData is None:
+                continue
+            out.setdefault(item.name() or "", []).append(
+                float(np.nanmean(item.yData)))
+        return out
+
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    panel._show_pulse(1, 1)
+
+    want_I, want_Q = apply_iq_conversion(ns.mean_I, ns.mean_Q, cal)
+    for plot, want in ((panel.pulse_plot_i, want_I),
+                       (panel.pulse_plot_q, want_Q)):
+        got = drawn(plot)
+        base = [v for k, v in got.items() if "baseline" in k]
+        trace = [v for k, v in got.items() if "pulse" in k]
+        assert base and trace, got.keys()
+        assert base[0][0] == pytest.approx(want, rel=1e-9)
+        assert trace[0][0] == pytest.approx(want, rel=1e-9)
+        # The thing that was wrong: scaling alone puts it elsewhere.
+        assert base[0][0] == pytest.approx(trace[0][0], rel=1e-9)
+
+    # The spreads take the length only -- a rotation does not stretch them.
+    view_ns = panel._view_noise(1, ns)
+    assert view_ns.std_I == pytest.approx(ns.std_I * abs(cal), rel=1e-12)
+    assert view_ns.std_Q == pytest.approx(ns.std_Q * abs(cal), rel=1e-12)
+
+    panel.close()
+    spin(qt_app)

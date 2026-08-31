@@ -2361,6 +2361,7 @@ class PeriscopeRuntime:
             "min_Q": DEFAULT_MIN_Q,
             "max_Q": DEFAULT_MAX_Q,
             "min_resonance_separation_hz": DEFAULT_MIN_RESONANCE_SEPARATION_HZ,
+            "require_isolation": DEFAULT_REQUIRE_ISOLATION,
             "data_exponent": DEFAULT_DATA_EXPONENT,
         }
         _assert_param_keys(

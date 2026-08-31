@@ -121,6 +121,10 @@ DEFAULT_MIN_DIP_DEPTH_DB = 2.0  # dB
 DEFAULT_MIN_Q = 1e4
 DEFAULT_MAX_Q = 1e7
 DEFAULT_MIN_RESONANCE_SEPARATION_HZ = 1e4  # 10 KHz
+# Off keeps the historical meaning of the separation -- thin crowded
+# peaks down to the most prominent.  On makes it a guarantee that
+# nothing is beside what comes back.
+DEFAULT_REQUIRE_ISOLATION = False
 DEFAULT_DATA_EXPONENT = 2.0
 
 # Sampling settings

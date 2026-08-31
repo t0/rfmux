@@ -399,6 +399,7 @@ def find_resonances(
     min_Q: float = 1e4,
     max_Q: float = 1e7,
     min_resonance_separation_hz: float = 100e3,
+    require_isolation: bool = False,
     data_exponent: float = 2.0,
     module_identifier: str | int | None = None,
 ):
@@ -426,8 +427,26 @@ def find_resonances(
         Maximum estimated quality factor. Used to calculate the minimum allowed width
         of a resonance feature, by default 1e7.
     min_resonance_separation_hz : float, optional
-        Minimum frequency separation between identified peaks. Corresponds to `distance`
-        in `scipy.signal.find_peaks`, by default 100e3.
+        Minimum frequency separation between resonances, by default 100e3. What it
+        does depends on `require_isolation`.
+    require_isolation : bool, optional
+        Whether a returned resonance must have no neighbour within
+        `min_resonance_separation_hz`, by default False.
+
+        False is `distance` in `scipy.signal.find_peaks`: of any group closer
+        than the separation, the most prominent is kept and the rest are
+        discarded. The returned list obeys the separation, but a survivor can
+        still have a real resonance beside it -- the one that was discarded.
+        Biasing it reads two detectors at once.
+
+        True drops every member of such a group instead, so each returned
+        resonance is one nothing else is close to. The separation stops being a
+        thinning rule and becomes a guarantee about what comes back.
+
+        Isolation is judged against the peaks this function found: a neighbour
+        too shallow or too broad to pass `min_dip_depth_db`, `min_Q` or `max_Q`
+        is not one of them. Widen those cuts if near-threshold neighbours are
+        the collisions you care about.
     data_exponent : float, optional
         Exponent applied to the magnitude data before dB conversion to potentially
         enhance peak visibility, by default 2.0.
@@ -497,8 +516,31 @@ def find_resonances(
             -mag_db,
             prominence=min_dip_depth_db,
             width=(min_width_pts, max_width_pts),
-            distance=min_separation_pts
+            # Under require_isolation the crowded peaks have to survive the
+            # search: one scipy dropped for being too close is precisely the
+            # neighbour that makes its survivor a collision.
+            distance=None if require_isolation else min_separation_pts,
         )
+
+        # c2. Drop collided peaks, keeping neither member:
+        if require_isolation and len(peaks) > 1:
+            peak_hz = frequencies[peaks]
+            # find_peaks returns ascending indices, so consecutive pairs are
+            # the only ones that can be too close.
+            crowded = np.diff(peak_hz) < min_resonance_separation_hz
+            keep = np.ones(len(peaks), dtype=bool)
+            keep[:-1] &= ~crowded      # a neighbour above it
+            keep[1:] &= ~crowded       # a neighbour below it
+            n_dropped = int((~keep).sum())
+            if n_dropped:
+                warnings.warn(
+                    f"Dropped {n_dropped} of {len(peaks)} peaks for "
+                    f"{module_identifier or 'data'}: closer than "
+                    f"{min_resonance_separation_hz:.4g} Hz to another peak. "
+                    "Both members of each such pair are dropped, since "
+                    "neither can be read without the other.")
+            peaks = peaks[keep]
+            properties = {key: val[keep] for key, val in properties.items()}
 
         # d. Apply Resilience Logic:
         if expected_resonances is not None and len(peaks) != expected_resonances:

@@ -134,9 +134,9 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "pulse_resonators": "all",    # 'all' or list of resonator indices
 
     # Random pulse amplitude distribution (random mode only)
-    "pulse_random_amp_mode": "uniform",  # "fixed" | "uniform" | "lognormal"
-    "pulse_random_amp_min": 1.5,        # for uniform mode (>= 1.0)
-    "pulse_random_amp_max": 3.0,        # for uniform mode (>= min)
+    "pulse_random_amp_mode": "fixed",  # "fixed" | "uniform" | "lognormal"
+    "pulse_random_amp_min": 1.1,        # for uniform mode (>= 1.0)
+    "pulse_random_amp_max": 1.5,        # for uniform mode (>= min)
     "pulse_random_amp_logmean": 0.7,    # for lognormal mode
     "pulse_random_amp_logsigma": 0.3,   # for lognormal mode (>= 0)
 

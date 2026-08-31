@@ -357,10 +357,11 @@ def test_macro_stores_df_calibrations(mock_crs, tmp_path):
         # Uncalibrated channels stay in counts rather than getting a 1.0.
         assert reader.df_calibration(2) is None
 
-    from rfmux.pulse_capture.analysis import counts_to_hz_scale
-    from rfmux.core.transferfunctions import VOLTS_PER_ROC
-    assert counts_to_hz_scale(2.5e6) == pytest.approx(2.5e6 * VOLTS_PER_ROC)
-    assert counts_to_hz_scale(None) is None
+    # Uncalibrated channels stay in volts rather than being given a
+    # scale of 1; storage_transform is what decides.
+    from rfmux.pulse_capture.analysis import storage_transform
+    assert storage_transform(2.5e6, "df")[2] == "Hz"
+    assert storage_transform(None, "df")[2] == "V"
 
 
 def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):

@@ -480,8 +480,7 @@ class TestPulseHDF5:
         from rfmux.core.transferfunctions import (
             convert_iq_to_df, VOLTS_PER_ROC)
         from rfmux.pulse_capture.analysis import (
-            apply_storage_transform, rotate_from_df, rotate_to_df,
-            storage_transform)
+            apply_storage_transform, display_transform, storage_transform)
 
         # A sweep with a known complex slope; the calibration is 1/slope.
         freqs = np.linspace(-1e5, 1e5, 401)
@@ -491,25 +490,25 @@ class TestPulseHDF5:
 
         shift_hz = 1000.0
         d_iq = slope * shift_hz                   # what that shift does to IQ
-        expected = d_iq * cal                     # production definition
+        counts = (d_iq.real / VOLTS_PER_ROC, d_iq.imag / VOLTS_PER_ROC)
 
         # Counts in, hertz out, through the transform a capture applies.
         c, sn, units = storage_transform(cal, "df")
         assert units == "Hz"
-        df, diss = apply_storage_transform(d_iq.real / VOLTS_PER_ROC,
-                                           d_iq.imag / VOLTS_PER_ROC, c, sn)
+        df, diss = apply_storage_transform(counts[0], counts[1], c, sn)
         assert df == pytest.approx(shift_hz, rel=1e-9)
-        assert df == pytest.approx(expected.real, rel=1e-9)
+        assert df == pytest.approx((d_iq * cal).real, rel=1e-9)
         # A pure frequency shift has no dissipation component.
         assert abs(diss) < 1e-6 * abs(df)
 
-        # Phase-only rotation keeps the whole excursion, and inverts.
-        r_df, r_diss = rotate_to_df(d_iq.real, d_iq.imag, cal)
-        assert r_df == pytest.approx(abs(d_iq), rel=1e-9)
-        assert abs(r_diss) < 1e-9 * abs(r_df)
-        back_i, back_q = rotate_from_df(r_df, r_diss, cal)
-        assert back_i == pytest.approx(d_iq.real, rel=1e-9)
-        assert back_q == pytest.approx(d_iq.imag, rel=1e-9)
+        # And the view can put it back: stored hertz to the quadratures
+        # in volts is the same map inverted, which is what makes either
+        # view of a capture exact.
+        back = display_transform(cal, "df", "Hz", "iq", "V")
+        assert back is not None
+        vi, vq = apply_storage_transform(df, diss, back[0], back[1])
+        assert vi == pytest.approx(d_iq.real, rel=1e-9)
+        assert vq == pytest.approx(d_iq.imag, rel=1e-9)
 
     def test_unusable_df_calibration_costs_the_units_not_the_file(
             self, tmp_path):

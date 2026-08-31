@@ -54,7 +54,6 @@ from ...core.transferfunctions import (
 )
 from ...pulse_capture.analysis import (
     apply_storage_transform,
-    counts_to_hz_scale,
     display_transform,
 )
 

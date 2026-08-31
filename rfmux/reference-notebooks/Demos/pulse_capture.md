@@ -57,7 +57,7 @@ import matplotlib.pyplot as plt
 import rfmux
 from rfmux.pulse_capture import (
     DualPulseCaptureSession, PulseCaptureConfig, PulseCaptureSession,
-    PulseHDF5Reader, counts_to_hz_scale,
+    PulseHDF5Reader,
     run_dual_source, run_pfb_source, run_slow_source,
 )
 from rfmux.core.transferfunctions import (

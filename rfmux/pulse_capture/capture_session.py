@@ -64,7 +64,7 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 
 from .. import streamer
-from ..core.transferfunctions import PFB_SAMPLING_FREQ
+from ..core.transferfunctions import PFB_SAMPLING_FREQ, VOLTS_PER_ROC
 
 from .detection import (
     DEFAULT_END_SIGMA,
@@ -76,7 +76,6 @@ from .detection import (
 )
 from .analysis import (
     apply_storage_transform,
-    counts_to_volts_scale,
     pulse_summary,
     storage_transform,
 )
@@ -1031,7 +1030,7 @@ class PulseCaptureSession(_CallbackHost):
                 "stored_units",
                 units.pop() if len(units) == 1 else "mixed")
             capture_params.setdefault("volts_per_count",
-                                      counts_to_volts_scale())
+                                      VOLTS_PER_ROC)
             try:
                 self.writer = PulseHDF5Writer(
                     self.hdf5_path,

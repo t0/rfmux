@@ -52,9 +52,10 @@ from .detection import (
     estimate_noise_stats,
 )
 from .analysis import (
-    counts_to_hz_scale,
     derive_tau,
     pulse_peaks,
+    apply_storage_transform,
+    display_transform,
     pulse_summary,
 )
 from .accumulators import (
@@ -91,9 +92,10 @@ __all__ = [
     "PulseCapture",
     "estimate_noise_stats",
     # analysis
-    "counts_to_hz_scale",
     "derive_tau",
     "pulse_peaks",
+    "apply_storage_transform",
+    "display_transform",
     "pulse_summary",
     # accumulators
     "HistogramAccumulator",

@@ -649,14 +649,6 @@ def test_df_calibrations_reach_the_session_flat(qt_app):
     panel.module_spin.setValue(2)
     assert panel._flat_df_calibrations() == {1: 9.9e9}
 
-    # bias_kids returns a complex calibration: magnitude is the Hz scale,
-    # phase is the rotation to (frequency, dissipation).  float() raised
-    # TypeError on every genuinely calibrated channel.
-    from rfmux.pulse_capture.analysis import counts_to_hz_scale
-    from rfmux.core.transferfunctions import VOLTS_PER_ROC
-    assert counts_to_hz_scale(3.0e6 + 4.0e6j) == pytest.approx(
-        5.0e6 * VOLTS_PER_ROC)
-
     # A headless caller's already-flat mapping survives unchanged.
     flat_panel = PulseCapturePanel(dark_mode=False,
                                    df_calibrations={1: 5.0e6})

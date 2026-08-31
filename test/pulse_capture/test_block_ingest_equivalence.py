@@ -129,7 +129,7 @@ def test_unusable_timestamps_are_dropped_not_poisoned():
     acc.flush()
     s.stop()
     # Those samples are accounted for, not silently turned into NaN
-    # timestamps inside the detector.
+    # timestamps inside the engine.
     assert s.dropped_invalid_ts > 0
 
 
@@ -165,7 +165,7 @@ def test_held_tail_is_not_transformed_twice():
     feed_block, which applies the basis transform -- so those samples,
     and only those, were transformed a second time.
 
-    Checked against the samples the detector actually receives, rather
+    Checked against the samples the engine actually receives, rather
     than against what was detected: the doubled stretch is short and
     sits at the transition, so whether it changes a trigger depends on
     where the pulses happen to fall.  It needs several channels, because
@@ -178,7 +178,7 @@ def test_held_tail_is_not_transformed_twice():
     rng = np.random.default_rng(11)
     packets = _packets(channels, 1400, rng)
 
-    # Everything the detector was handed, per channel, in order.
+    # Everything the engine was handed, per channel, in order.
     seen = {c: [] for c in channels}
     session = PulseCaptureSession(
         channels=list(channels), sample_rate=FS, noise_samples=NOISE,
@@ -213,7 +213,7 @@ def test_held_tail_is_not_transformed_twice():
         _d.PulseCapture.process_sample = real_sample
     assert any(seen.values())
 
-    # Raw counts the detector should have received, once converted.
+    # Raw counts the engine should have received, once converted.
     raw = {c: [float(v[i].real) for v, _ in packets]
            for i, c in enumerate(channels)}
     for ch in channels:
@@ -223,4 +223,4 @@ def test_held_tail_is_not_transformed_twice():
         near = np.array([np.min(np.abs(np.array(raw[ch]) - r)) for r in ratios])
         assert np.all(near < 1e-6), (
             f"ch{ch}: {int((near >= 1e-6).sum())} of {len(got)} samples reached "
-            "the detector with the conversion applied more than once")
+            "the engine with the conversion applied more than once")

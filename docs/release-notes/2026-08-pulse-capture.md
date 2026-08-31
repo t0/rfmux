@@ -117,11 +117,11 @@ Signal-to-noise, peak amplitude, duration and derived decay constant are
 accumulated over every pulse and updated live. Ranges expand as new pulses
 arrive, so there is nothing to configure up front.
 
-The View and units controls in the toolbar drive the waveforms, the histograms
-and the templates together, and are independent of what the capture triggered
-on: the file carries the basis, the units and the calibration, so either view
-is exact. Hertz is a property of the frequency axis, so it needs both the
-rotated view and a calibrated channel; volts needs neither.
+One Units control in the toolbar drives the waveforms, the histograms and the
+templates together, and it is independent of what the capture triggered on:
+the file carries the basis, the units and the calibration, so either view is
+exact. It offers counts, volts, and df in hertz -- the last is a property of
+the frequency axis, so it needs a calibrated channel; the other two do not.
 
 ## Read the file back
 
@@ -206,12 +206,17 @@ crs = await create_mock_crs(module=1, config={
     "num_resonances": 2,
     "resonator_random_seed": 42,
     "auto_bias_kids": True,
-    "bias_amplitude": 0.001,
     "pulse_mode": "periodic",
     "pulse_period": 0.25,
     "pulse_tau_rise": 5e-3,
     "pulse_tau_decay": 25e-3,
-    "pulse_amplitude": 2.0,
+
+    # A spread of heights rather than one repeated event.  Leave these
+    # out and every pulse is "pulse_amplitude", which now defaults to
+    # the fixed mode so that setting it does something.
+    "pulse_random_amp_mode": "uniform",
+    "pulse_random_amp_min": 1.1,
+    "pulse_random_amp_max": 1.5,
 })
 ```
 
@@ -223,9 +228,10 @@ spike rather than a pulse.
 
 `periscope --mock` gives the same simulation behind the GUI. The screenshots
 in this document were taken from a mock capture, triggered in the frequency
-basis. The mock's `auto_bias_kids` skips the sweep-and-fit that produces a
-calibration on hardware, so those captures were given one measured from the
-simulated pulses' own direction.
+basis, by `docs/make_release_note_screenshots.py` -- the config above is the
+one it uses. The mock's `auto_bias_kids` skips the sweep-and-fit that produces
+a calibration on hardware, so the script calls `measure_df_calibrations`
+first, which is that sweep on its own.
 
 The mock generates both streams in one process, so fast and dual captures run
 slower than real time: two PFB channels is 4.9 M complex samples a second to
@@ -258,6 +264,14 @@ sample counts were wrong by a factor of two.
 **`rfmux.streamer.PFB_SAMPLE_RATE` is gone.** It held the same incorrect
 value and was never used inside the package. Use `PFB_SAMPLING_FREQ` from
 `rfmux.core.transferfunctions`.
+
+**The mock's `pulse_amplitude` now does something.** `pulse_random_amp_mode`
+defaulted to `"uniform"`, and the amplitude sampler only reads
+`pulse_amplitude` in its fixed branch -- so setting it in the config or the
+Mock Configuration dialog changed nothing. The default is `"fixed"`, which
+makes the direct parameter direct; ask for `"uniform"` or `"lognormal"` to get
+a spread. The uniform range also moves from 1.5-3.0 to 1.1-1.5, closer to the
+threshold where a detection actually has to work for its living.
 
 ## Where to go next
 

@@ -669,7 +669,6 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         show_band = self.template_residual_check.isChecked()
         totals = []
-        scaled_any = False
         # Track the data extent so the view fits the STACKED region:
         # bins outside it are NaN/empty and would otherwise stretch the
         # axes over the full pre/post grid.
@@ -691,15 +690,27 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 x_hi = hi if x_hi is None else max(x_hi, hi)
             color = _channel_color(ch)
             scale = self._amp_scale(ch)
-            if scale is not None:
-                scaled_any = True
+            # Convert the pair together.  Averaging and the conversion are
+            # both linear, so a rotated template equals the template of
+            # rotated pulses -- but only if the two axes are transformed
+            # as a pair.  Scaling them one at a time left the templates
+            # unrotated under df/dissipation labels.
+            view = self._view_coeffs(ch)
+            means = {q: data.get(f"template_{q}_ch{ch}") for q in ("I", "Q")}
+            rotated = (view is not None and means["I"] is not None
+                       and means["Q"] is not None)
+            if rotated:
+                a, b = apply_iq_conversion(
+                    np.asarray(means["I"], dtype=np.float64),
+                    np.asarray(means["Q"], dtype=np.float64), view[0])
+                means = {"I": a, "Q": b}
             for quad, plot in (("I", self.template_plot_i),
                                ("Q", self.template_plot_q)):
-                mean = data.get(f"template_{quad}_ch{ch}")
+                mean = means.get(quad)
                 if mean is None:
                     continue
                 mean = np.asarray(mean, dtype=np.float64)
-                if scale is not None:
+                if scale is not None and not rotated:
                     mean = mean * scale
                 plot.plot(np.asarray(t, float), mean,
                           pen=pg.mkPen(color, width=2.2),
@@ -714,6 +725,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     cur[0] = lo if cur[0] is None else min(cur[0], lo)
                     cur[1] = hi if cur[1] is None else max(cur[1], hi)
 
+                # The residual is a spread, not a signed pair: the
+                # rotation mixes the quadratures, so only its length
+                # carries over -- which is what `scale` already is.
                 resid = data.get(f"residual_{quad}_ch{ch}")
                 if show_band and resid is not None:
                     resid = np.asarray(resid, dtype=np.float64)
@@ -737,12 +751,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     fill = pg.FillBetweenItem(upper, lower, brush=band)
                     plot.addItem(fill)
 
-        for plot, quad in ((self.template_plot_i, "I"),
-                           (self.template_plot_q, "Q")):
+        first, second = self._axis_names(self._label_channel())
+        for plot, quad, name in ((self.template_plot_i, "I", first),
+                                 (self.template_plot_q, "Q", second)):
             item = plot.getPlotItem()
-            item.setLabel(
-                "left", f"{quad} (Δf)" if scaled_any else f"{quad} (counts)",
-                units="Hz" if scaled_any else None)
+            # Same names the pulse view uses.  These were set here
+            # separately and kept the old "I (Δf)" wording, overwriting
+            # what the view had already chosen.
+            item.setLabel("left", name)
             # Fit to the stacked data, not the whole pre/post grid
             if x_lo is not None and x_hi > x_lo:
                 item.vb.setXRange(x_lo, x_hi, padding=0.02)

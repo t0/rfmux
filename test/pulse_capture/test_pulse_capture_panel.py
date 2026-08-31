@@ -1247,8 +1247,8 @@ def _template_data(channels, n=16):
     data = {}
     for c in channels:
         data[f"time_s_ch{c}"] = np.arange(n) * 1e-3
-        data[f"mean_I_ch{c}"] = np.linspace(1.0, 0.0, n)
-        data[f"mean_Q_ch{c}"] = np.zeros(n)
+        data[f"template_I_ch{c}"] = np.linspace(1.0, 0.0, n)
+        data[f"template_Q_ch{c}"] = np.zeros(n)
         data[f"counts_ch{c}"] = np.full(n, 5)
     return data
 
@@ -1409,6 +1409,84 @@ def test_live_capture_knows_what_it_stored(qt_app):
     panel.units_combo.setCurrentText(m.UNITS_VOLTS)
     assert panel._amp_scale(1) == pytest.approx(1.0 / abs(cal))
     assert panel._axis_names(1) == ("I (V)", "Q (V)")
+
+    panel.close()
+    spin(qt_app)
+
+
+def test_templates_are_rotated_not_just_scaled(qt_app):
+    """A stacked template under df labels must be the rotated template.
+
+    Scaling I and Q one at a time by |calibration| leaves the pair
+    unrotated: the plots keep their quadrature shapes while the axes
+    claim frequency and dissipation, so the two look swapped against
+    the pulse view, which does rotate.  Averaging and the rotation are
+    both linear, so the rotated template is the template of rotated
+    pulses -- but only when the pair is converted together.
+    """
+    import pyqtgraph as pg
+
+    from rfmux.tools.periscope import pulse_capture_panel as m
+
+    cal = 2.0e6 * np.exp(1j * np.radians(40.0))
+    # A pure frequency excursion moves (I, Q) along the direction of
+    # 1/calibration, not of the calibration itself.
+    ang = np.angle(1.0 / cal)
+    t = np.linspace(0.0, 0.1, 64)
+    env = 100.0 * np.exp(-t / 0.02)
+
+    panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    panel.module_spin.setValue(1)
+    panel._counts = {1: 10}
+    panel._template_data = {
+        "time_s_ch1": t,
+        "counts_ch1": np.full(t.size, 10),
+        "template_I_ch1": env * np.cos(ang),
+        "template_Q_ch1": env * np.sin(ang),
+        "residual_I_ch1": np.full(t.size, 10.0),
+        "residual_Q_ch1": np.full(t.size, 10.0),
+    }
+    panel.template_residual_check.setChecked(True)
+
+    def peaks():
+        out = []
+        for plot in (panel.template_plot_i, panel.template_plot_q):
+            curves = [c for c in plot.getPlotItem().listDataItems()
+                      if c.yData is not None]
+            assert curves, "template plotted nothing"
+            out.append(max(np.nanmax(np.abs(c.yData)) for c in curves))
+        return out
+
+    # Volts: stored as volts already, so the trace is untouched and both
+    # quadratures carry the excursion.
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
+    panel._render_templates()
+    v_i, v_q = peaks()
+    assert v_i == pytest.approx(100.0 * abs(np.cos(ang)), rel=1e-6)
+    assert v_q == pytest.approx(100.0 * abs(np.sin(ang)), rel=1e-6)
+
+    # df: the whole excursion is frequency, so dissipation is empty.
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    panel._render_templates()
+    df, diss = peaks()
+    assert df == pytest.approx(100.0 * abs(cal), rel=1e-9)
+    assert diss < 1e-9 * df, f"dissipation kept {diss} of {df}"
+    assert panel._axis_names(1) == ("df (Hz)", "dissipation (Hz)")
+
+    # Scaling without rotating splits it across both, which is the bug.
+    assert not np.isclose(100.0 * abs(cal) * abs(np.sin(ang)), 0.0)
+
+    # The residual band travels with the mean.  It is a spread rather
+    # than a signed pair, so it takes the rotation's length only -- but
+    # it does have to take it, or the band is drawn in volts under a
+    # hertz axis and collapses onto the mean.  Read the band itself:
+    # the plot's y-range is set by the mean and padded, so it cannot
+    # tell a scaled band from an unscaled one.
+    fills = [it for it in panel.template_plot_i.getPlotItem().items
+             if isinstance(it, pg.FillBetweenItem)]
+    assert len(fills) == 1, fills
+    upper = max(np.nanmax(c.yData) for c in fills[0].curves)
+    assert upper == pytest.approx((100.0 + 10.0) * abs(cal), rel=1e-9)
 
     panel.close()
     spin(qt_app)

@@ -596,24 +596,36 @@ def test_template_tab_renders(qt_app, tmp_path):
     spin(qt_app)
 
 
-def test_units_toggle_scales_amplitude(qt_app, tmp_path):
-    """counts → Hz uses counts × VOLTS_PER_ROC × df_calibration."""
+def test_view_units_and_basis_are_independent(qt_app):
+    """Units and basis are separate choices, and Hz needs both."""
     from rfmux.core.transferfunctions import VOLTS_PER_ROC
+    cal = 2.0e6 + 0.0j
 
     panel = PulseCapturePanel(dark_mode=False,
-                              df_calibrations={1: {1: 2.0e6}})
+                              df_calibrations={1: {1: cal}})
     panel.module_spin.setValue(1)
-    assert panel._df_scale(1) == pytest.approx(2.0e6 * VOLTS_PER_ROC)
-    assert panel._df_scale(7) is None          # uncalibrated channel
-    assert not panel._units_are_hz()
-    panel.units_combo.setCurrentText("Hz")
-    assert panel._units_are_hz()
 
-    # No calibration at all → no scaling offered
-    plain = PulseCapturePanel(dark_mode=False)
-    assert plain._df_scale(1) is None
+    # Live captures store volts, so the default view is a no-op.
+    panel.basis_combo.setCurrentText("I/Q")
+    panel.units_combo.setCurrentText("V")
+    assert panel._amp_scale(1) == pytest.approx(1.0)
+    assert panel._axis_names(1) == ("I (V)", "Q (V)")
+
+    # Counts are recoverable: divide out the constant the file records.
+    panel.units_combo.setCurrentText("counts")
+    assert panel._amp_scale(1) == pytest.approx(1.0 / VOLTS_PER_ROC)
+
+    # Hz is a property of the frequency axis, so it needs the df view.
+    panel.units_combo.setCurrentText("Hz")
+    assert panel._view_coeffs(1) is None, "Hz in the I/Q basis is meaningless"
+
+    panel.basis_combo.setCurrentText("df/diss")
+    assert panel._amp_scale(1) == pytest.approx(abs(cal))
+    assert panel._axis_names(1) == ("df (Hz)", "dissipation (Hz)")
+
+    # Rotating without a calibration is refused rather than guessed.
+    assert panel._view_coeffs(7) is None
     panel.close()
-    plain.close()
     spin(qt_app)
 
 
@@ -668,10 +680,20 @@ def test_review_mode_reads_calibration_from_the_file(qt_app, tmp_path):
     writer.finalize()
 
     panel = PulseCapturePanel(dark_mode=False)      # no calibration passed in
-    assert panel._df_scale(1) is None
+    panel.basis_combo.setCurrentText("df/diss")
+    panel.units_combo.setCurrentText("Hz")
+    assert panel._view_coeffs(1) is None, "nothing known about the channel yet"
+
     panel.load_from_hdf5(path)
     spin(qt_app)
-    assert panel._df_scale(1) == pytest.approx(2.0e6 * VOLTS_PER_ROC)
+    # The file carries the calibration, so the rotated view is available
+    # even though no Periscope session ever held one.  This file has no
+    # stored_units attribute, which is what a capture written before
+    # samples were stored in physical units looks like: the reader says
+    # counts, and counts -> Hz is the calibration times volts-per-count.
+    assert panel.reader.stored_units(1) == "counts"
+    assert panel._amp_scale(1) == pytest.approx(2.0e6 * VOLTS_PER_ROC)
+    assert panel._axis_names(1) == ("df (Hz)", "dissipation (Hz)")
     panel.close()
     spin(qt_app)
     spin(qt_app)

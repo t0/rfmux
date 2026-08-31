@@ -22,6 +22,7 @@ import csv
 import datetime
 import time
 from pathlib import Path
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -51,7 +52,11 @@ from ...core.transferfunctions import (
     PFB_SAMPLING_FREQ,
     decimation_to_sampling,
 )
-from ...pulse_capture.analysis import counts_to_hz_scale
+from ...pulse_capture.analysis import (
+    apply_storage_transform,
+    counts_to_hz_scale,
+    display_transform,
+)
 
 # Fast/PFB stream overlay colors (darker variants, HUD convention)
 FAST_IQ_COLORS = {"I": "#24478F", "Q": "#8F4724"}
@@ -318,6 +323,25 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                                      "re-triggers during the decay")
         h.addWidget(self.pileup_check)
 
+        h.addWidget(QtWidgets.QLabel("View:"))
+        self.basis_combo = QtWidgets.QComboBox()
+        self.basis_combo.addItems(["I/Q", "df/diss"])
+        self.basis_combo.setToolTip(
+            "Axes to display.  Independent of what the capture triggered "
+            "on: the file records the basis and the calibration, so either "
+            "view is exact.  Needs a df calibration for the channel.")
+        self.basis_combo.currentTextChanged.connect(self._on_view_changed)
+        h.addWidget(self.basis_combo)
+
+        self.units_combo = QtWidgets.QComboBox()
+        self.units_combo.addItems(["V", "Hz", "counts"])
+        self.units_combo.setToolTip(
+            "Units for waveforms, histograms and templates.  Hz is a "
+            "property of the frequency axis, so it needs both the "
+            "df/diss view and a calibration.")
+        self.units_combo.currentTextChanged.connect(self._on_view_changed)
+        h.addWidget(self.units_combo)
+
         self.btn_settings = QtWidgets.QPushButton("Settings…")
         self.btn_settings.setToolTip(
             "All capture parameters: margins, min/max pulse length, "
@@ -421,8 +445,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         # baseline/threshold bands in its own quadrature's sigma.
         self.pulse_plot_i = pg.PlotWidget(viewBox=ClickableViewBox())
         self.pulse_plot_q = pg.PlotWidget(viewBox=ClickableViewBox())
-        for plot, ylabel in ((self.pulse_plot_i, "I (counts)"),
-                             (self.pulse_plot_q, "Q (counts)")):
+        for plot, ylabel in ((self.pulse_plot_i, "I (V)"),
+                             (self.pulse_plot_q, "Q (V)")):
             item = plot.getPlotItem()
             item.setLabel("left", ylabel)
             item.showGrid(x=True, y=True, alpha=0.3)
@@ -560,14 +584,6 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.hist_stream_combo.setVisible(False)  # both-mode only
         controls.addWidget(self.hist_stream_combo)
 
-        controls.addWidget(QtWidgets.QLabel("Units:"))
-        self.units_combo = QtWidgets.QComboBox()
-        self.units_combo.addItems(["counts", "Hz"])
-        self.units_combo.setToolTip(
-            "Amplitudes in raw ADC counts, or calibrated Δf (Hz) when a "
-            "df calibration is available for the channel")
-        self.units_combo.currentTextChanged.connect(self._on_units_changed)
-        controls.addWidget(self.units_combo)
         controls.addStretch(1)
         v.addLayout(controls)
 
@@ -665,7 +681,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 x_lo = lo if x_lo is None else min(x_lo, lo)
                 x_hi = hi if x_hi is None else max(x_hi, hi)
             color = _channel_color(ch)
-            scale = self._df_scale(ch) if self._units_are_hz() else None
+            scale = self._amp_scale(ch)
             if scale is not None:
                 scaled_any = True
             for quad, plot in (("I", self.template_plot_i),
@@ -1620,28 +1636,131 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         # Already flat: a headless caller's {channel: calibration}.
         return {ch: v for ch, v in cal.items() if not isinstance(v, dict)}
 
-    def _df_scale(self, channel: int) -> Optional[float]:
-        """counts → Hz factor for *channel*, or None if uncalibrated.
+    def _channel_cal(self, channel: int):
+        """This channel's df calibration, from the session or the file.
 
-        Falls back to the open file, which is where the calibration lives
-        once a capture is over: in review mode there is no Periscope
-        session holding it.  The conversion itself is shared with headless
-        callers as counts_to_hz_scale.
+        In review mode there is no Periscope session holding one, so the
+        file is the only place it survives a capture.
         """
-        df_cal = self._flat_df_calibrations().get(channel)
-        if df_cal is None and self.reader is not None:
+        cal = self._flat_df_calibrations().get(channel)
+        if cal is None and self.reader is not None:
             try:
-                df_cal = self.reader.df_calibration(channel)
+                cal = self.reader.df_calibration(channel)
             except Exception:
-                df_cal = None
-        return counts_to_hz_scale(df_cal)
+                cal = None
+        return cal
+
+    def _stored_state(self, channel: int) -> Tuple[str, str]:
+        """(basis, units) the samples for *channel* are held in."""
+        if self.reader is not None:
+            try:
+                return self.reader.trigger_basis(), \
+                    self.reader.stored_units(channel)
+            except Exception:
+                pass
+        basis = getattr(self, "_live_trigger_basis", "iq")
+        units = getattr(self, "_live_units", {}).get(channel, "V")
+        return basis, units
+
+    def _view_state(self) -> Tuple[str, str]:
+        """(basis, units) the user is asking for."""
+        basis = "df" if self.basis_combo.currentText() == "df/diss" else "iq"
+        return basis, self.units_combo.currentText()
+
+    def _view_coeffs(self, channel: int):
+        """(cos, sin, label) taking stored samples to the current view.
+
+        None when the view cannot be produced -- hertz or a rotation with
+        no calibration.  Callers show what is stored rather than putting
+        an unscaled number under a label it does not have.
+        """
+        sb, su = self._stored_state(channel)
+        vb, vu = self._view_state()
+        return display_transform(self._channel_cal(channel), sb, su, vb, vu)
+
+    def _amp_scale(self, channel: int) -> Optional[float]:
+        """Factor for amplitude-like scalars, or None if unavailable.
+
+        Amplitudes are magnitudes, so the rotation contributes only its
+        length -- which is 1 -- and this reduces to the units ratio.
+        """
+        t = self._view_coeffs(channel)
+        if t is None:
+            return None
+        c, sn, _label = t
+        return float((c * c + sn * sn) ** 0.5)
+
+    def _units_label(self, channel: int) -> str:
+        """Axis label for *channel* under the current view."""
+        t = self._view_coeffs(channel)
+        if t is not None:
+            return t[2]
+        return self._stored_state(channel)[1]
+
+    def _refresh_pulse_plot(self) -> None:
+        """Redraw for a changed view, labels included.
+
+        The labels are set even with nothing selected, so an empty panel
+        does not advertise units the next capture will not be in.
+        """
+        ch = self._label_channel()
+        first, second = self._axis_names(ch)
+        for plot, name in ((self.pulse_plot_i, first),
+                           (self.pulse_plot_q, second),
+                           (self.template_plot_i, first),
+                           (self.template_plot_q, second)):
+            plot.getPlotItem().setLabel("left", name)
+        cur = self._current_view
+        if cur is not None:
+            try:
+                self._show_pulse(*cur)
+            except Exception:
+                pass
+
+    def _label_channel(self) -> int:
+        """A channel to take axis labels from when none is selected."""
+        cur = self._current_view
+        if cur is not None:
+            return cur[0]
+        try:
+            chans = self._parse_channels()
+            if chans:
+                return chans[0]
+        except Exception:
+            pass
+        return 1
+
+    def _axis_names(self, channel: int) -> Tuple[str, str]:
+        """Axis labels for the current view, e.g. ``("df (Hz)", ...)``."""
+        basis, _ = self._view_state()
+        unit = self._units_label(channel)
+        if basis == "df" and self._view_coeffs(channel) is not None:
+            return f"df ({unit})", f"dissipation ({unit})"
+        return f"I ({unit})", f"Q ({unit})"
+
+    def _view_noise(self, channel: int, ns):
+        """Noise statistics scaled into the current view.
+
+        The rotation is orthonormal, so a per-axis sigma survives it
+        unchanged in magnitude; only the units ratio applies.
+        """
+        if ns is None:
+            return ns
+        k = self._amp_scale(channel)
+        if k is None or k == 1.0:
+            return ns
+        return replace(
+            ns, mean_I=ns.mean_I * k, std_I=ns.std_I * k,
+            mean_Q=ns.mean_Q * k, std_Q=ns.std_Q * k,
+            jump_std_I=ns.jump_std_I * k, jump_std_Q=ns.jump_std_Q * k)
 
     def _units_are_hz(self) -> bool:
         return self.units_combo.currentText() == "Hz"
 
-    def _on_units_changed(self, _text: str) -> None:
+    def _on_view_changed(self, _text: str = "") -> None:
         self._render_histograms()
         self._render_templates()
+        self._refresh_pulse_plot()
 
     def _on_hist_stream_changed(self, stream: str) -> None:
         if stream in self._hist_data_by_stream:
@@ -1846,7 +1965,18 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         amp_I = np.asarray(wf["Amp_I"], dtype=np.float64)
         amp_Q = np.asarray(wf["Amp_Q"], dtype=np.float64)
 
+        # Stored samples into the requested view.  Both axes rotate
+        # together, so the noise bands drawn below have to come along.
         ns = self.noise_stats.get(channel)
+        view = self._view_coeffs(channel)
+        if view is not None:
+            vc, vs, _label = view
+            amp_I, amp_Q = apply_storage_transform(amp_I, amp_Q, vc, vs)
+            ns = self._view_noise(channel, ns)
+        first, second = self._axis_names(channel)
+        for plot, name in ((self.pulse_plot_i, first),
+                           (self.pulse_plot_q, second)):
+            plot.getPlotItem().setLabel("left", name)
         x0 = float(t_rel[0]) if len(t_rel) else 0.0
         x1 = float(t_rel[-1]) if len(t_rel) else 1.0
         for quad, plot, data in (("I", self.pulse_plot_i, amp_I),
@@ -2029,7 +2159,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     continue
                 edges = base_edges
                 if scalable:
-                    scale = self._df_scale(ch)
+                    scale = self._amp_scale(ch)
                     if scale is not None:
                         edges = base_edges * scale
                         any_scaled = True

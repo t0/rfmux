@@ -207,6 +207,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Start the UDP packet receiver thread (UDPReceiver from .tasks).
         self._init_receiver()
 
+        # Measure df calibrations now, while starting up, rather than the
+        # first time someone picks df units: the sweep is synchronous and
+        # freezes the window for as long as it runs.  Mock mode only --
+        # see _measure_df_calibrations.
+        self._measure_df_calibrations(self.module)
+
         # Initialize a QThreadPool for managing concurrent tasks (QThreadPool from .utils).
         # Used for network analysis, PSD calculations, etc.
         self.pool = QThreadPool()
@@ -1870,6 +1876,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             
             # Check if calibration data is available
             if not self.df_calibrations.get(self.module):
+                # Normally done at startup; this catches a module tuned
+                # afterwards, and costs a brief freeze when it fires.
                 self._measure_df_calibrations(self.module)
             if not self.df_calibrations.get(self.module):
                 QtWidgets.QMessageBox.warning(

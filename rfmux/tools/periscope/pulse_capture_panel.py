@@ -91,14 +91,23 @@ def _spread(values) -> str:
             f"(median {ordered[len(ordered) // 2]:.2f})")
 
 
-def _noise_line(stats: dict) -> str:
-    """Noise strip text for one stream."""
+def _noise_line(stats: dict, names=("I", "Q"), unit: str = "") -> str:
+    """Noise strip text for one stream, in the units on the axes.
+
+    The names and the unit come from the caller because the strip sits
+    above plots whose basis the user can change: printing I and Q with
+    no unit described whatever happened to be on disk.  ``g`` rather
+    than a fixed decimal count, because hertz and volts are many orders
+    of magnitude apart and neither should overflow the strip.
+    """
+    a, b = names
+    tail = f" {unit}" if unit else ""
     return _summarize(
         stats,
-        lambda c, ns: (f"Ch{c} I={ns.mean_I:.1f}±{ns.std_I:.2f}, "
-                       f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}"),
-        lambda st: (f"{len(st)} ch — σI {_spread(n.std_I for n in st.values())}"
-                    f", σQ {_spread(n.std_Q for n in st.values())}"))
+        lambda c, ns: (f"Ch{c} {a}={ns.mean_I:.4g}±{ns.std_I:.3g}, "
+                       f"{b}={ns.mean_Q:.4g}±{ns.std_Q:.3g}{tail}"),
+        lambda st: (f"{len(st)} ch — σ{a} {_spread(n.std_I for n in st.values())}"
+                    f", σ{b} {_spread(n.std_Q for n in st.values())}{tail}"))
 
 
 def _noise_line_sigma(stats: dict) -> str:
@@ -122,11 +131,13 @@ def _legend_name(channel: int, count, n_channels: int):
     return f"Ch {channel} (n={count})"
 
 
-def _noise_detail(stats: dict) -> str:
+def _noise_detail(stats: dict, names=("I", "Q"), unit: str = "") -> str:
     """Full per-channel listing, for the tooltip."""
+    a, b = names
+    tail = f" {unit}" if unit else ""
     return "\n".join(
-        f"Ch{c}  I={ns.mean_I:.1f}±{ns.std_I:.2f}   "
-        f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}"
+        f"Ch{c}  {a}={ns.mean_I:.4g}±{ns.std_I:.3g}   "
+        f"{b}={ns.mean_Q:.4g}±{ns.std_Q:.3g}{tail}"
         for c, ns in sorted(stats.items()))
 
 
@@ -1266,8 +1277,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         self.noise_stats = {c: self.reader.noise_stats(c) for c in channels}
-        self.noise_label.setText("Noise:  " + _noise_line(self.noise_stats))
-        self.noise_label.setToolTip(_noise_detail(self.noise_stats))
+        self._refresh_noise_label()
 
         # Tree from lazy per-pulse metadata (ascending insert at row 0
         # → newest first), with fallbacks for files written before the
@@ -1484,9 +1494,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         self.noise_stats = noise_stats
-        self.noise_label.setText("Noise:  " + _noise_line(noise_stats)
-                                 + self._baseline_summary())
-        self.noise_label.setToolTip(_noise_detail(noise_stats))
+        self._refresh_noise_label(self._baseline_summary())
         print("[PulseCapture] Noise estimated: " + _noise_line(noise_stats)
               + self._baseline_summary())
         self._refresh_status_line()
@@ -1810,6 +1818,23 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             mean_Q=mean_Q, std_Q=ns.std_Q * k,
             jump_std_I=ns.jump_std_I * k, jump_std_Q=ns.jump_std_Q * k)
 
+    def _refresh_noise_label(self, extra: str = "") -> None:
+        """Noise strip in the units on the axes, not the ones on disk.
+
+        Set once when the statistics arrived, it kept naming I and Q in
+        whatever the capture stored while the plots below it had been
+        switched to another basis.  It is cheap, so it just follows the
+        view.
+        """
+        stats = {c: self._view_noise(c, ns)
+                 for c, ns in (self.noise_stats or {}).items()}
+        first, second = self._axis_names(self._label_channel())
+        names = tuple(n.split(" (")[0] for n in (first, second))
+        unit = first.rpartition(" (")[2].rstrip(")")
+        self.noise_label.setText(
+            "Noise:  " + _noise_line(stats, names, unit) + extra)
+        self.noise_label.setToolTip(_noise_detail(stats, names, unit))
+
     def _units_are_hz(self) -> bool:
         return self.units_combo.currentText() == UNITS_DF
 
@@ -1833,6 +1858,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._render_histograms()
         self._render_templates()
         self._refresh_pulse_plot()
+        self._refresh_noise_label()
 
     def _any_channel_calibrated(self) -> bool:
         """Whether any displayed channel has a df calibration.

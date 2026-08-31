@@ -1584,3 +1584,41 @@ def test_noise_bands_follow_the_rotation(qt_app):
 
     panel.close()
     spin(qt_app)
+
+
+def test_noise_strip_follows_the_view(qt_app):
+    """The noise strip names the basis on the axes and carries its unit.
+
+    It was written once, when the statistics arrived, as "I=... Q=..."
+    with no unit at all -- so it went on describing what the capture
+    stored while the plots underneath had been switched to another
+    basis, and never said which.
+    """
+    from rfmux.core.transferfunctions import apply_iq_conversion
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    from rfmux.tools.periscope import pulse_capture_panel as m
+
+    cal = 2.0e6 * np.exp(1j * np.radians(40.0))
+    ns = ChannelNoiseStats(mean_I=3.0, std_I=0.5, mean_Q=-7.0, std_Q=0.5)
+
+    panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    panel.module_spin.setValue(1)
+    panel.noise_stats = {1: ns}
+    panel._refresh_noise_label()        # what the arrival path does
+
+    text = panel.noise_label.text()
+    assert "I=" in text and "Q=" in text, text
+    assert "V" in text, text
+
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    text = panel.noise_label.text()
+    assert "df=" in text and "dissipation=" in text, text
+    assert "Hz" in text, text
+    assert "I=" not in text and "Q=" not in text, text
+
+    # And the numbers are the rotated ones, not the stored ones scaled.
+    want_I, _ = apply_iq_conversion(ns.mean_I, ns.mean_Q, cal)
+    assert f"{want_I:.4g}" in text, (text, f"{want_I:.4g}")
+
+    panel.close()
+    spin(qt_app)

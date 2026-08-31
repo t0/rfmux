@@ -940,13 +940,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 # Check if viewbox is valid before accessing (may be deleted during layout rebuild)
                 if isinstance(viewbox, ClickableViewBox) and not sip.isdeleted(viewbox): # ClickableViewBox from .utils, sip from PyQt6
                     viewbox.enableZoomBoxMode(enable)
-        for window_id, window_data in self.netanal_windows.items():
+        for window_data in self._live_netanal_windows().values():
             window = window_data.get('window')
             if window: # window is NetworkAnalysisWindow from .ui
                 for module_idx in window.plots: # module_idx is int key
                     for plot_type in ['amp_plot', 'phase_plot']:
                         viewbox = window.plots[module_idx][plot_type].getViewBox()
-                        if isinstance(viewbox, ClickableViewBox):
+                        # Same check as the main plots above: a live panel
+                        # can still be mid-rebuild.
+                        if (isinstance(viewbox, ClickableViewBox)
+                                and not sip.isdeleted(viewbox)):
                             viewbox.enableZoomBoxMode(enable)
                 if hasattr(window, 'zoom_box_cb'):
                     window.zoom_box_cb.setChecked(enable)
@@ -1348,14 +1351,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             # Find the panel that's calling this
             if source_panel is None:
                 # Try to find it from params (fallback)
-                for w_id, w_data in self.netanal_windows.items():
+                for w_id, w_data in self._live_netanal_windows().items():
                     if w_data['window'].current_params == params:
                         source_panel = w_data['window']
                         break
             
             # Find window_id for this panel
             window_id = None
-            for w_id, w_data in self.netanal_windows.items():
+            for w_id, w_data in self._live_netanal_windows().items():
                 if w_data['window'] == source_panel: 
                     window_id = w_id
                     break
@@ -3001,6 +3004,30 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             traceback.print_exc()
     
+    def _live_netanal_windows(self) -> Dict[str, Dict]:
+        """Network-analysis entries whose panel AND dock are still alive.
+
+        Same hazard as _live_pulse_capture_windows below, on a registry
+        that never got the same treatment: closing a dock destroys the
+        C++ objects while the dict entry survives, and nothing removed
+        one, so a closed Network Analysis left an entry that every later
+        walk of this dict dereferenced.  _build_layout walks it on every
+        rebuild -- changing units, toggling PSD, changing channels --
+        and each raised 'wrapped C/C++ object of type ClickableViewBox
+        has been deleted'.  Prune as we go.
+        """
+        registry = getattr(self, 'netanal_windows', {})
+        live: Dict[str, Dict] = {}
+        for window_id in list(registry.keys()):
+            entry = registry.get(window_id) or {}
+            panel, dock = entry.get('window'), entry.get('dock')
+            if (panel is None or dock is None
+                    or sip.isdeleted(panel) or sip.isdeleted(dock)):
+                registry.pop(window_id, None)
+                continue
+            live[window_id] = entry
+        return live
+
     def _live_pulse_capture_windows(self):
         """Registry entries whose panel AND dock are still alive.
 

@@ -591,11 +591,10 @@ class PeriscopeRuntime:
     def _update_dark_mode_in_child_windows(self):
         """Propagate dark mode setting to all open child windows and panels."""
         # Update NetworkAnalysis panels (in docks)
-        if hasattr(self, 'netanal_windows'):
-            for window_data in self.netanal_windows.values():
-                panel = window_data.get('window')  # 'window' key contains panel instance
-                if panel and hasattr(panel, 'apply_theme'):
-                    panel.apply_theme(self.dark_mode)
+        for window_data in self._live_netanal_windows().values():
+            panel = window_data.get('window')  # 'window' key contains panel instance
+            if panel and hasattr(panel, 'apply_theme'):
+                panel.apply_theme(self.dark_mode)
         
         # Update Multisweep panels (in docks)
         if hasattr(self, 'multisweep_windows'):

@@ -628,20 +628,18 @@ Hand them to the session and they are written into the file with the pulses:
 instead of being split between two by an angle nothing controls. It needs a
 calibration; a channel without one stays on the quadratures, and in volts.
 
-The mock measures one for itself. `auto_bias_kids` skips the sweep-and-fit, so
-instead the simulator sweeps its own resonators at bias time and calls the same
-`convert_iq_to_df` that `bias_kids` uses, which means the number cannot drift
-from the hardware definition:
+`auto_bias_kids` skips the sweep-and-fit, so a simulated array has no
+calibration yet. `measure_df_calibrations` is that measurement on its own: a
+narrow sweep around each bias point through the same `convert_iq_to_df`. It is
+host-side and uses only `set_frequency` and `get_samples`, so it runs against a
+board too — though on hardware you would normally take the calibration from
+`bias_kids` rather than sweep a tuned array again.
 
 ```python
-if IS_MOCK:
-    from rfmux.mock.helpers import mock_df_calibrations
-    df_cals = await mock_df_calibrations(crs, module=MODULE)
-    for ch, cal in sorted(df_cals.items()):
-        print(f"  ch{ch}: {abs(cal):.3g} Hz per volt, "
-              f"{np.degrees(np.angle(cal)):+.1f} deg")
-else:
-    df_cals = {}
+df_cals = await crs.measure_df_calibrations(channels=CHANNELS, module=MODULE)
+for ch, cal in sorted(df_cals.items()):
+    print(f"  ch{ch}: {abs(cal):.3g} Hz per volt, "
+          f"{np.degrees(np.angle(cal)):+.1f} deg")
 ```
 
 Every capture is self-describing — the units per channel, the counts-to-volts

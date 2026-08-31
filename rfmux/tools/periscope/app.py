@@ -1870,7 +1870,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             
             # Check if calibration data is available
             if not self.df_calibrations.get(self.module):
-                self._load_board_df_calibrations(self.module)
+                self._measure_df_calibrations(self.module)
             if not self.df_calibrations.get(self.module):
                 QtWidgets.QMessageBox.warning(
                     self,
@@ -1892,25 +1892,35 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Rebuild layout to update axis labels
         self._build_layout()
     
-    def _load_board_df_calibrations(self, module: int) -> None:
-        """Take calibrations the board already holds, if it offers any.
+    def _measure_df_calibrations(self, module: int) -> None:
+        """Measure a calibration for the displayed channels, in mock mode.
 
-        The mock measures one per channel as auto_bias_kids tunes them,
-        so a simulated session can use df units without running a
-        multisweep first.  Real boards have no such call: there the
-        calibration comes from bias_kids through the multisweep panel,
-        and this does nothing.
+        The measurement is ``crs.measure_df_calibrations`` -- a narrow
+        sweep around each bias point, the same one ``bias_kids`` does as
+        part of its fit -- so a simulated session can use df units
+        without a multisweep first.
+
+        Only in mock mode.  Sweeping moves each channel's frequency and
+        puts it back, which is free against a simulator and not something
+        to do to a tuned array because someone picked a units option; on
+        hardware the calibration comes from bias_kids.
         """
         crs = getattr(self, "crs", None)
-        if crs is None:
+        if crs is None or not getattr(self, "is_mock_mode", False):
+            return
+        # channel_list is the plot layout: one list per row of plots.
+        channels = sorted({c for group in getattr(self, "channel_list", [])
+                           for c in group})
+        if not channels:
             return
         try:
-            rows = asyncio.run(crs.get_df_calibrations(module=module))
-            cals = {int(ch): complex(re, im) for ch, re, im in rows}
-        except Exception:
-            return          # not a mock, or nothing biased yet
+            cals = asyncio.run(crs.measure_df_calibrations(
+                channels=channels, module=module))
+        except Exception as exc:
+            print(f"[Periscope] df calibration failed: {exc}")
+            return
         if cals:
-            self._handle_df_calibration_ready(module, cals)
+            self._handle_df_calibration_ready(module, dict(cals))
 
     def _handle_df_calibration_ready(self, module: int, df_calibrations: Dict[int, complex]):
         """

@@ -365,21 +365,20 @@ def test_macro_stores_df_calibrations(mock_crs, tmp_path):
 
 
 def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):
-    """The mock measures its own calibration, so mock captures can be in Hz.
+    """A calibration can be measured against the simulator, so mock
+    captures can be in Hz.
 
-    auto_bias_kids skips the sweep-and-fit that produces one on
-    hardware, which left every mock capture uncalibrated and stuck on
-    the quadratures.  The mock now sweeps its own resonators at bias
-    time and calls the same convert_iq_to_df that bias_kids does, so the
-    number means the same thing and cannot drift from the hardware
-    definition.
+    measure_df_calibrations is host-side and uses only set_frequency and
+    get_samples, so the same code runs against a board.  A simulated
+    board has none of its own to hand out: the number is a measurement,
+    not a property of the hardware.
     """
     import numpy as np
-    from rfmux.mock.helpers import mock_df_calibrations
 
     loop, crs = mock_crs
-    cals = loop.run_until_complete(mock_df_calibrations(crs, module=1))
-    assert cals, "auto_bias_kids produced no calibration"
+    cals = loop.run_until_complete(
+        crs.measure_df_calibrations(channels=[1, 2], module=1))
+    assert cals, "no calibration measured against the simulator"
     for ch, cal in cals.items():
         assert isinstance(cal, complex) and np.isfinite(cal)
         assert abs(cal) > 0
@@ -399,9 +398,8 @@ def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):
 
 
 def test_periscope_takes_the_mocks_df_calibration(mock_crs):
-    """Selecting df units in mock mode finds a calibration.
+    """Selecting df units in mock mode measures a calibration.
 
-    The mock measures one per channel as auto_bias_kids tunes them, but
     Periscope only learned about calibrations through the multisweep
     panel's bias_kids run, so a simulated session was told none existed.
     """
@@ -410,30 +408,29 @@ def test_periscope_takes_the_mocks_df_calibration(mock_crs):
     loop, crs = mock_crs
 
     class Fake:
-        """Only the parts _load_board_df_calibrations touches."""
+        """Only the parts _measure_df_calibrations touches."""
         module = 1
+        channel_list = [[1, 2]]
 
-        def __init__(self, board):
+        def __init__(self, board, is_mock=True):
             self.crs = board
+            self.is_mock_mode = is_mock
             self.df_calibrations = {}
 
-        _load_board_df_calibrations = Periscope._load_board_df_calibrations
+        _measure_df_calibrations = Periscope._measure_df_calibrations
 
         def _handle_df_calibration_ready(self, module, cals):
             self.df_calibrations[module] = cals
 
     f = Fake(crs)
     assert not f.df_calibrations.get(1), "should start with none"
-    f._load_board_df_calibrations(1)
+    f._measure_df_calibrations(1)
     cals = f.df_calibrations.get(1) or {}
-    assert cals, "the mock's calibrations did not reach Periscope"
+    assert cals, "the measurement did not reach Periscope"
     assert all(isinstance(c, complex) and abs(c) > 0 for c in cals.values())
 
-    # A board that offers no such call is left alone rather than erroring:
-    # on real hardware the calibration comes from bias_kids.
-    class NoCall:
-        pass
-
-    g = Fake(NoCall())
-    g._load_board_df_calibrations(1)
+    # Not on hardware: sweeping moves a tuned array, so the calibration
+    # there comes from bias_kids, not from picking a units option.
+    g = Fake(crs, is_mock=False)
+    g._measure_df_calibrations(1)
     assert g.df_calibrations == {}

@@ -14,6 +14,7 @@ from . import take_netanal
 from . import py_get_pfb_samples
 from . import multisweep
 from . import bias_kids
+from . import df_calibration
 from . import channel_selection
 from . import streamer_config
 from . import trigger_capture
@@ -25,6 +26,7 @@ __all__ = [
     "py_get_pfb_samples",
     "multisweep",
     "bias_kids",
+    "df_calibration",
     "channel_selection",
     "streamer_config",
     "trigger_capture",

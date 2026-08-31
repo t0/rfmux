@@ -6,16 +6,12 @@ jupyter:
     name: python3
 ---
 
-# Tuning KIDs
+# Full KID Tuning Guide
 
-End-to-end detector tuning from the Python API: sweep the band, find the
-resonators, characterise each one, bias it, and measure the noise
-you are left with — **without opening Periscope**.
-
-This is the sequence every KID measurement starts from. Nothing downstream —
-noise spectra, pulse capture, science data — means anything until the carriers
-are sitting where they belong, because all of it measures *deviation from the
-bias tone*.
+This is an end-to-end detector tuning guide using the Python API rather than the Periscope GUI.
+These operations are most applicable when first cooling down a new chip.
+Subsequent runs would likely begin with some knowledge of the nominal detector frequencies, 
+and thus avoid the first several steps.
 
 Everything here is the same code path Periscope's tuning panels drive. The GUI
 runs these functions from `QThread` workers and draws the results; this notebook
@@ -23,10 +19,10 @@ calls them directly and plots instead.
 
 | Step | Function |
 |---|---|
-| Sweep the band | `crs.take_netanal()` |
-| Remove the cable delay | `fit_cable_delay`, `calculate_new_cable_length` |
-| Find the resonators | `find_resonances()` |
-| Characterise each one | `crs.multisweep()` |
+| Perform a network analysis to find the resonances | `crs.take_netanal()` |
+| Remove the cable delay (optional) | `fit_cable_delay`, `calculate_new_cable_length` |
+| Select resonators frequencies | `find_resonances()` |
+| Characterise each one in more detail | `crs.multisweep()` |
 | Fit the resonances | `fit_skewed_multisweep`, `fit_nonlinear_iq_multisweep` |
 | Bias the detectors | `bias_kids()` |
 | Measure the noise | `crs.py_get_samples()`, `crs.py_get_pfb_samples()` |
@@ -34,8 +30,7 @@ calls them directly and plots instead.
 ## How to use this document
 
 Run the cells in order; later ones use variables the earlier ones defined.
-Section 1 is the exception: it offers three ways to get a CRS, and you run only
-the one that fits.
+Section 1 is the exception: it offers three ways to initialize a CRS object.
 
 This format saves no outputs, so every number you see is one you just produced.
 The shipped copy is read-only: *File → Save Notebook As…* to keep changes.
@@ -67,9 +62,9 @@ from rfmux.algorithms.measurement.fitting_nonlinear import (
 )
 
 # Results are written here. Reference notebooks are provisioned to a
-# read-only directory, so writing next to the notebook would fail for anyone
-# who opened it from Periscope — default to a writable scratch directory and
-# say where it is. Override with RFMUX_DEMO_OUTPUT.
+# read-only directory, so writing next to the notebook fails if this is
+# being executed from a Periscope-initiated jupyter notebook.
+# Override with RFMUX_DEMO_OUTPUT.
 OUTPUT_DIR = Path(os.environ.get(
     "RFMUX_DEMO_OUTPUT", Path(tempfile.gettempdir()) / "rfmux_tuning_flow"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -88,33 +83,31 @@ Everything below needs a CRS. **Run exactly one** of the three options:
 
 | | When to use it | Where |
 |---|---|---|
-| **A. Attach to a running board** | Periscope launched this notebook, or you know the board's address | below |
-| **B. Your own board** | You have hardware and its serial | below |
-| **C. Simulate one** | No hardware, and nothing already running | section 2 |
+| **A. An existing Mock or Real Periscope session is already running** | Periscope launched the Jupyter environment you are viewing this notebook within, and it is already configured for either a real board or a mock instance | below |
+| **B. Starting from scratch with real hardware** | You have a CRS and this notebook is being viewed separately from Periscope | below |
+| **C. Start a new simulated environment** | No Periscope GUI instance already, and nothing already running | section 2 |
 
-### A. Attach to a board that is already running
+### A. Attach to a real or mock CRS instance that is already loaded with Periscope
 
 Use this when Periscope is driving a board — real or simulated — and you want to
 work with *that* one rather than starting your own.
 
 Periscope sets `RFMUX_CRS_HOSTNAME` when it launches this notebook, which is how
-the cell finds the board with no configuration from you. It is not required:
-paste an address into `HOSTNAME` and this works from any kernel.
+the cell finds the board with no configuration from you.
 
-Attaching matters most in mock mode. A simulated CRS is created, not discovered:
-its RPC port is assigned by the OS at startup, so there is no address to look up.
-A second `create_mock_crs()` gives you a *second, unrelated* simulation, whose
-detectors are not the ones Periscope is showing you.
+Attaching matters most if you have already configured Periscope in mock mode.
+A second `create_mock_crs()` gives you a *second, unrelated* simulation,
+whose detectors are not the ones Periscope is showing you.
 
 ```python
 HOSTNAME = os.environ.get("RFMUX_CRS_HOSTNAME")   # or paste "127.0.0.1:43431"
 SERIAL = os.environ.get("RFMUX_CRS_SERIAL", "0000")
 
 if HOSTNAME:
-    _s = rfmux.load_session(
+    s = rfmux.load_session(
         f'!HardwareMap [ !CRS {{ serial: "{SERIAL}", '
         f'hostname: "{HOSTNAME}" }} ]')
-    crs = _s.query(rfmux.CRS).one()
+    crs = s.query(rfmux.CRS).one()
     await crs.resolve()
     print(f"attached to CRS {SERIAL} at {HOSTNAME}")
 else:
@@ -122,32 +115,29 @@ else:
           "(your own board) or section 2 (simulation).")
 ```
 
-### B. Your own board
+### B. Your own board, no Periscope GUI
 
 ```python
 # SERIAL = "0042"
-# _s = rfmux.load_session(f'!HardwareMap [ !CRS {{ serial: "{SERIAL}" }} ]')
-# crs = _s.query(rfmux.CRS).one()
+# s = rfmux.load_session(f'!HardwareMap [ !CRS {{ serial: "{SERIAL}" }} ]')
+# crs = s.query(rfmux.CRS).one()
 # await crs.resolve()
 # await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)
 # print(f"connected to CRS {SERIAL}")
 ```
 
-## 2. Mock mode configuration
+## 2. Mock mode configuration, no Periscope GUI
 
 **Skip this section entirely if section 1 already gave you a CRS** — the cell
 below no-ops in that case.
 
 If you have no hardware, this stands up a simulated CRS: ten resonators spread
-across 600 MHz–1 GHz, generated from a physical LEKID model rather than drawn as
-Lorentzian shapes, so they respond to drive power and temperature the way real
-ones do.
+across 600 MHz–1 GHz, generated from a physical LEKID model, so they respond to
+drive power and temperature the way real ones do.
 
 Note what is **not** set here: `auto_bias_kids`. The simulation *can* bias
-carriers on its own resonators — it knows where they are — and the pulse-capture
-notebook uses that to skip straight to detection. Here it would defeat the
-purpose. Everything below exists to find those frequencies the way you have to
-on real hardware, where nothing knows them in advance.
+carriers on its own resonators (the pulse-capture notebook uses that to skip straight 
+to detection). For this guide we don't take that shortcut.
 
 `resonator_random_seed` fixes the array: same ten detectors on every run, so a
 number that changes between runs is your change, not the simulation's.
@@ -221,13 +211,13 @@ The first measurement is a wide sweep: step a comb of tones across the band and
 record the transmitted amplitude and phase at each frequency. Resonators appear
 as narrow dips in |S21| — each one is absorbing power at its resonant frequency.
 
-The sweep is not one tone walking across the band. `take_netanal` uses up to
-`max_chans` channels at once and re-tunes the NCO for each `max_span`-wide chunk,
+The sweep is much faster than a VNA because it is more than one tone active simultaneously.
+`take_netanal` uses up to `max_chans` channels at once and re-tunes the NCO for each `max_span`-wide chunk,
 stitching the chunks together with a phase rotation computed from the one
 frequency they share. That is why `npoints` can be 50,000 and still finish in
 seconds.
 
-Parameters worth understanding:
+Parameters:
 
 - **`amp`** — drive amplitude in normalized DAC units. Too high and you drive the
   resonators nonlinear (they bifurcate, and the dip stops being a dip); too low
@@ -237,12 +227,11 @@ Parameters worth understanding:
 - **`npoints`** — sweep resolution. A resonator you do not put enough points
   across is a resonator you cannot fit, and at high Q the linewidth is only a few
   kHz.
-- **`max_span`** — 500 MHz, the droop-free bandwidth of one NCO setting.
+- **`max_span`** — Defaults to 500 MHz, the droop-free bandwidth of one NCO setting.
 
-> On a shared board, remember this changes hardware state: the sweep programs
-> channels and moves the NCO. If Periscope is attached to the same board its
-> plots will follow along, exactly as if you had driven its Network Analysis
-> panel.
+> Remember this changes hardware state: the sweep programs channels and moves the NCO.
+> If Periscope is attached to the same board its plots will follow along, exactly as 
+> if you had driven its Network Analysis panel.
 
 ```python
 NETANAL_PARAMS = {
@@ -285,27 +274,20 @@ ax2.set_ylabel("phase (deg)"); ax2.set_xlabel("frequency (MHz)")
 plt.tight_layout(); plt.show()
 ```
 
-Look at the phase panel, because it is the reason for the next section. On a
-board with cable between it and the detectors, that panel is a sawtooth: the
-phase wraps through ±180° many times across the band, and the slope doing it is
-not the detectors. The simulation has no cable, so its phase stays inside a few
-tens of degrees and shows only the resonators. Either way the next section
-measures the slope and removes whatever it finds.
-
 ## 4. Unwrap the cable delay
 
 A signal that takes τ seconds to travel out and back arrives with a phase that
 advances linearly with frequency: `φ = -2πfτ`. Over a 500 MHz sweep with a few
-metres of coax that is many full turns, and it swamps the phase structure of the
-resonances themselves.
+metres of coax that is many full turns, and it the resulting phase ramps can
+swamp the phase structure of the resonances themselves.
 
-The board can remove it. `set_cable_length` tells the firmware how much delay to
-compensate, so the correction happens before you ever see the data.
+This can be measured and compensated for in hardware.
+`set_cable_length` tells the firmware how much delay to compensate, so the 
+correction happens before you ever see the data.
 
 `fit_cable_delay` measures the residual slope of the *unwrapped* phase and
 converts it to a delay; `calculate_new_cable_length` turns that delay into the
-length to add to the current setting. Both are pure functions — worth reading,
-they are about ten lines each.
+length to add to the current setting. 
 
 ```python
 tau_additional = fit_cable_delay(frequencies, phase_degrees)
@@ -320,14 +302,8 @@ print(f"cable length     {current_cable_length:.3f} m → {new_cable_length:.3f}
 ```
 
 On a simulated CRS there is no cable, so the fit comes back with a few
-picoseconds of nothing and the length is unchanged. That is the correct result
-and worth watching once: the step tells you whether there is anything to remove,
-rather than assuming there is.
+picoseconds of nothing and the length is unchanged. 
 
-The fit is a straight line through the unwrapped phase. Plotting the data
-against that line, and the residual left over, separates the cable from the
-detectors — on hardware the line carries almost all of the phase, and here it is
-nearly flat:
 
 ```python
 unwrapped_rad = np.unwrap(np.deg2rad(phase_degrees))
@@ -368,9 +344,8 @@ both directions:
 - **`min_Q` / `max_Q`** — converted into an allowed *width* for the dip. A
   feature broader than `min_Q` allows is not a resonator; one narrower than
   `max_Q` allows is a spike.
-- **`min_resonance_separation_hz`** — collapses double-counted structure on one
-  resonator. Set it above your expected collision scale and you merge genuinely
-  distinct detectors.
+- **`min_resonance_separation_hz`** — Does not presently guarantee no collisions,
+  just that the selected resonances are separated by more than this minimum.
 
 ```python
 FIND_RES_PARAMS = {
@@ -416,7 +391,7 @@ plt.tight_layout(); plt.show()
 
 ## 6. Multisweep
 
-The wide sweep located the resonators; it did not resolve them. At 50,000 points
+The wide sweep located the resonators, but hhas not resolved them. At 50,000 points
 across 500 MHz you get one point every 10 kHz, and a Q of 10⁵ at 1 GHz has a
 linewidth of 10 kHz — the whole resonance is a couple of samples.
 
@@ -426,10 +401,7 @@ all simultaneously over a narrow span. Five hundred points across 500 kHz is
 because the tones are simultaneous it costs about the same wall-clock time as
 sweeping one.
 
-The span and the point count are a pair, and it is the *ratio* that matters.
-Widen the span without adding points and you are back to the resolution you
-started with; the useful check is points-per-linewidth, not points.
-
+It also determines a likely bias frequency for that power level.
 `bias_frequency_method` decides which frequency the carrier is biased at:
 
 - **`"max-diq"`** (default) — the point of steepest IQ motion, |d(I+jQ)/df|. This
@@ -467,8 +439,7 @@ print(f"\n{len(multisweep_results)} resonances swept")
 ```
 
 The result is keyed by **detector index** (1-based, matching the channel each
-resonator was assigned) — not by frequency. This trips people up: the keys look
-numeric, so it is tempting to read them as frequencies. The frequencies are
+resonator was assigned) — not by frequency. The frequencies are
 inside each entry.
 
 ```python
@@ -485,9 +456,6 @@ for key in sorted(first):
     print(f"  {key:<32} {described}")
 ```
 
-Each sweep traces a circle in the IQ plane — that is the signature of a
-resonance, and how far around the circle the carrier sits is what a detector
-measures.
 
 ```python
 n_show = min(6, len(det_ids))
@@ -529,11 +497,6 @@ harder, the resonance skews and eventually becomes bistable — it bifurcates, a
 the frequency it sits at depends on which way you swept. Above `a ≈ 0.77` you are
 in that regime. `bias_kids` uses this to reject amplitudes.
 
-At the drive used here (`amp=0.001`) a well-behaved array should come back with
-`a` indistinguishable from zero — the resonators are deep in their linear regime,
-which is where you want them for a first tuning. `a` becomes interesting when you
-sweep the same detectors at several amplitudes and watch where it climbs.
-
 ```python
 FIT_PARAMS = {
     "approx_Q_for_fit": 1e4,
@@ -568,8 +531,6 @@ for det in det_ids:
           f"{p['Qi']:12.0f} {a_str}")
 ```
 
-Fitted parameters are only worth having if you look at their distribution — one
-detector tells you nothing about a wafer.
 
 ```python
 frs = np.array([fitted(d)["fr"] for d in det_ids if fitted(d)])
@@ -590,10 +551,6 @@ ax2.set_ylabel("spacing (MHz)")
 ax2.set_title("Spacing between neighbours")
 plt.tight_layout(); plt.show()
 ```
-
-Spacing matters because two resonators closer together than a few linewidths
-collide: one detector's signal appears in the other's channel. On a real wafer
-this plot is how you find the collisions before they confuse your data.
 
 ## 8. Bias the KIDs
 
@@ -646,9 +603,9 @@ it.
 
 ## 9. Noise on the biased detectors
 
-With the detectors biased, the readout is finally measuring something: the deviation
-of each tone from where it was put. `py_get_samples` collects a timestream from
-the slow (decimated readout) stream and can return the spectrum with it.
+With the detectors biased, the readout is now sensing the detector response.
+`py_get_samples` collects a timestream from the slow (decimated readout) stream
+and can return the spectrum with it.
 
 `reference="absolute"` gives dBm/Hz — an absolute power spectral density, rather
 than dBc/Hz relative to the carrier. `nsegments` sets the Welch averaging: more

@@ -16,6 +16,7 @@ board state briefly.  Callers that must not disturb a tuned array should
 take the calibration from ``bias_kids`` instead.
 """
 
+import warnings
 from typing import Dict, List
 
 import numpy as np
@@ -92,7 +93,12 @@ async def measure_df_calibrations(
 
             cal = convert_iq_to_df(np.array([1.0 + 0j]), bias, freqs,
                                    convert_roc_to_volts(iq))[0]
-        except Exception:
+        except Exception as exc:
+            # Skipping one channel is fine -- it simply gets no
+            # calibration -- but skipping all of them silently would
+            # look identical to a board that has none, so say which.
+            warnings.warn(f"df calibration failed on channel {channel}: "
+                          f"{exc}", stacklevel=2)
             cal = None
         finally:
             await crs.set_frequency(bias - nco, channel=channel,

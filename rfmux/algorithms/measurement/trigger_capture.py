@@ -331,11 +331,11 @@ async def trigger_capture(
         await asyncio.sleep(0.3)  # let the streamer settle before listening
     try:
         if streamer_mode == "both":
-            await _run_dual(result, crs, host, channels, module,
+            await _run_dual(result, host, channels, module,
                             slow_rate, duration_s, hdf5_path,
                             df_calibrations, verbose)
         else:
-            await _run_single(result, crs, host, channels, module,
+            await _run_single(result, host, channels, module,
                               streamer_mode, slow_rate, duration_s,
                               hdf5_path, df_calibrations, verbose)
     finally:
@@ -347,7 +347,7 @@ async def trigger_capture(
     return result
 
 
-async def _run_single(result, crs, host, channels, module, streamer_mode,
+async def _run_single(result, host, channels, module, streamer_mode,
                       slow_rate, duration_s, hdf5_path, df_calibrations,
                       verbose) -> None:
     is_fast = streamer_mode == "fast"
@@ -383,7 +383,7 @@ async def _run_single(result, crs, host, channels, module, streamer_mode,
               "max_pulse_ms")
 
 
-async def _run_dual(result, crs, host, channels, module, slow_rate,
+async def _run_dual(result, host, channels, module, slow_rate,
                     duration_s, hdf5_path, df_calibrations,
                     verbose) -> None:
     slow = StreamResult(sample_rate=slow_rate)

@@ -117,6 +117,10 @@ if HOSTNAME:
         f'hostname: "{HOSTNAME}" }} ]')
     crs = s.query(rfmux.CRS).one()
     await crs.resolve()
+    # The streamer sockets join on the board's address, not the default
+    # loopback set above -- for a real board 127.0.0.1 is the wrong
+    # interface and the capture receives nothing, silently.
+    host = HOSTNAME.split(":")[0]
     print(f"attached to CRS {SERIAL} at {HOSTNAME}")
 else:
     print("Nothing advertised a board. Set HOSTNAME above, or use option B "
@@ -131,7 +135,8 @@ else:
 # crs = s.query(rfmux.CRS).one()
 # await crs.resolve()
 # await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)
-# print(f"connected to CRS {SERIAL}")
+# host = crs.tuber_hostname          # where the streamers send
+# print(f"connected to CRS {SERIAL} at {host}")
 ```
 
 

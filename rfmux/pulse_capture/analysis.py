@@ -233,7 +233,13 @@ def counts_to_hz_scale(df_calibration: Optional[float]) -> Optional[float]:
     Returns None when the channel is uncalibrated, which callers should
     treat as "display raw counts" rather than substituting 1.0 —
     unscaled counts mislabelled as Hz are worse than no calibration.
+
+    ``bias_kids`` returns a *complex* calibration: its magnitude is the
+    Hz-per-count scale, and its phase is the rotation from the (I, Q)
+    axes to (frequency, dissipation).  A scalar amplitude only wants the
+    magnitude, so take it here rather than float(), which raised
+    TypeError on every genuinely calibrated channel.
     """
     if df_calibration is None:
         return None
-    return float(df_calibration) * VOLTS_PER_ROC
+    return abs(complex(df_calibration)) * VOLTS_PER_ROC

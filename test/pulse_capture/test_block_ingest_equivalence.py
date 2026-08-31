@@ -154,3 +154,73 @@ def test_accumulator_flushes_on_channel_change():
     # A different channel set must not be stacked onto the old columns.
     acc.add((5,), np.array([9 + 9j]), 0.2)
     assert seen == [(1, 2), (2, 2)]
+
+
+def test_held_tail_is_not_transformed_twice():
+    """The block held across the end of noise training keeps its basis.
+
+    When one channel fills its noise quota before another, feed_block
+    stashes the rest of that channel's block and replays it once the
+    session starts capturing.  The replay used to go back through
+    feed_block, which applies the basis transform -- so those samples,
+    and only those, were transformed a second time.
+
+    Checked against the samples the detector actually receives, rather
+    than against what was detected: the doubled stretch is short and
+    sits at the transition, so whether it changes a trigger depends on
+    where the pulses happen to fall.  It needs several channels, because
+    with one nothing is ever held.
+    """
+    import numpy as np
+    from rfmux.core.transferfunctions import VOLTS_PER_ROC
+
+    channels = (1, 2, 3)
+    rng = np.random.default_rng(11)
+    packets = _packets(channels, 1400, rng)
+
+    # Everything the detector was handed, per channel, in order.
+    seen = {c: [] for c in channels}
+    session = PulseCaptureSession(
+        channels=list(channels), sample_rate=FS, noise_samples=NOISE,
+        on_pulse=lambda *a: None)
+
+    # Patched on the class, because the drain happens inside the same
+    # call that builds the engine -- wrapping session.pcap afterwards
+    # misses exactly the samples in question.
+    from rfmux.pulse_capture import detection as _d
+    real_block = _d.PulseCapture.process_block
+    real_sample = _d.PulseCapture.process_sample
+
+    def spy_block(self, ch, I, Q, T):
+        seen.setdefault(ch, []).extend(np.asarray(I).tolist())
+        return real_block(self, ch, I, Q, T)
+
+    def spy_sample(self, ch, i, q, t):
+        seen.setdefault(ch, []).append(float(i))
+        return real_sample(self, ch, i, q, t)
+
+    _d.PulseCapture.process_block = spy_block
+    _d.PulseCapture.process_sample = spy_sample
+    try:
+        session.start()
+        acc = SlowIngest(session.feed_block, max_packets=256, max_age_s=1e9)
+        for values, ts in packets:
+            acc.add(channels, values, ts)
+        acc.flush()
+        session.stop()
+    finally:
+        _d.PulseCapture.process_block = real_block
+        _d.PulseCapture.process_sample = real_sample
+    assert any(seen.values())
+
+    # Raw counts the detector should have received, once converted.
+    raw = {c: [float(v[i].real) for v, _ in packets]
+           for i, c in enumerate(channels)}
+    for ch in channels:
+        got = np.array(seen[ch])
+        # Every value must be some raw sample times exactly one factor.
+        ratios = got / VOLTS_PER_ROC
+        near = np.array([np.min(np.abs(np.array(raw[ch]) - r)) for r in ratios])
+        assert np.all(near < 1e-6), (
+            f"ch{ch}: {int((near >= 1e-6).sum())} of {len(got)} samples reached "
+            "the detector with the conversion applied more than once")

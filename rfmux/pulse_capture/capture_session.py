@@ -75,10 +75,10 @@ from .detection import (
     estimate_noise_stats,
 )
 from .analysis import (
+    apply_storage_transform,
     counts_to_volts_scale,
     pulse_summary,
-    rotate_to_df,
-    storage_scale,
+    storage_transform,
 )
 from .accumulators import PulseHistogramSet, PulseTemplateSet
 
@@ -697,9 +697,9 @@ class PulseCaptureSession(_CallbackHost):
         co = self._store_coeff.get(channel)
         if co is None:
             cal = (self.df_calibrations or {}).get(channel)
-            scale, units = storage_scale(cal, self.trigger_basis)
+            c, sn, units = storage_transform(cal, self.trigger_basis)
             self.stored_units[channel] = units
-            co = (cal if self.trigger_basis == "df" else None, scale)
+            co = (c, sn)
             self._store_coeff[channel] = co
         return co
 
@@ -717,10 +717,10 @@ class PulseCaptureSession(_CallbackHost):
         Thresholds are in units of the measured noise, so the scale
         cannot move them; only the rotation changes what is detected.
         """
-        cal, _scale = self._storage_coeffs(channel)
-        if cal is None:
-            return i_vals, q_vals
-        return rotate_to_df(i_vals, q_vals, cal)
+        c, sn = self._storage_coeffs(channel)
+        if sn == 0.0:
+            return i_vals * c, q_vals * c
+        return apply_storage_transform(i_vals, q_vals, c, sn)
 
     def feed_sample(
         self,
@@ -796,6 +796,18 @@ class PulseCaptureSession(_CallbackHost):
         Q = np.asarray(q_vals, dtype=np.float64)
         T = np.asarray(timestamps, dtype=np.float64)
         I, Q = self._to_trigger_basis(channel, I, Q)
+        self._feed_block_prepared(channel, I, Q, T)
+
+    def _feed_block_prepared(self, channel: int, I, Q, T) -> None:
+        """feed_block's body, for samples already in the trigger basis.
+
+        Split out because the tail held across the end of noise training
+        is drained back through here.  Routing that through feed_block
+        applied the basis transform to it a second time -- for the one
+        block after the transition, on the one channel that filled its
+        quota early.  Which is why it needed several channels to show
+        up at all.
+        """
         n = I.shape[0]
         if not (n == Q.shape[0] == T.shape[0]):
             raise ValueError("feed_block needs equal-length arrays")
@@ -853,7 +865,9 @@ class PulseCaptureSession(_CallbackHost):
         """Feed everything held during training, now that we capture."""
         pending, self._pending_post_noise = self._pending_post_noise, {}
         for channel, (I, Q, T) in pending.items():
-            self.feed_block(channel, I, Q, T)
+            # Already in the trigger basis: they were transformed on the
+            # way in, before being held.
+            self._feed_block_prepared(channel, I, Q, T)
 
     def _emit_progress(self) -> None:
         self._progress_dirty = False
@@ -1022,7 +1036,7 @@ class PulseCaptureSession(_CallbackHost):
                 self.writer = PulseHDF5Writer(
                     self.hdf5_path,
                     self.channels,
-                    {ch: self._scaled_noise(ch) for ch in self.channels},
+                    self.noise_stats,
                     capture_params,
                     df_calibrations=self.df_calibrations,
                     stored_units=self.stored_units,
@@ -1031,31 +1045,9 @@ class PulseCaptureSession(_CallbackHost):
                 self.writer = None
                 self._error(f"Could not open HDF5 file {self.hdf5_path}: {e}")
 
-    def _scaled_noise(self, channel: int):
-        """This channel's noise statistics in the units it is stored in."""
-        ns = self.noise_stats.get(channel)
-        _cal, scale = self._storage_coeffs(channel)
-        if ns is None or scale == 1.0:
-            return ns
-        return replace(
-            ns,
-            mean_I=ns.mean_I * scale, std_I=ns.std_I * scale,
-            mean_Q=ns.mean_Q * scale, std_Q=ns.std_Q * scale,
-            jump_std_I=ns.jump_std_I * scale,
-            jump_std_Q=ns.jump_std_Q * scale)
-
     def _on_engine_pulse(self, channel: int, pulse_idx: int,
                          pulse_data: dict) -> None:
-        # Counts become volts, or hertz once rotated, here -- on the way
-        # out of the detector rather than into it.  Everything past this
-        # point (summary, file, histograms, templates, callbacks) is one
-        # physical quantity, and the detector's numerics are untouched.
-        _cal, scale = self._storage_coeffs(channel)
-        if scale != 1.0:
-            pulse_data = dict(pulse_data)
-            pulse_data["Amp_I"] = pulse_data["Amp_I"] * scale
-            pulse_data["Amp_Q"] = pulse_data["Amp_Q"] * scale
-        ns = self._scaled_noise(channel)
+        ns = self.noise_stats.get(channel)
         summary = pulse_summary(pulse_data, ns, self.threshold_sigma)
 
         self.pulse_counts[channel] = self.pulse_counts.get(channel, 0) + 1

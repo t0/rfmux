@@ -888,7 +888,12 @@ class TestPulseCaptureSession:
         _feed_noise(session, 200, rng, mean=5.0)  # shifted baseline
         assert session.state is CaptureState.CAPTURING
         assert len(events["noise"]) == 2
-        assert session.noise_stats[1].mean_I == pytest.approx(5.0, abs=1.0)
+        # Samples are converted to physical units on the way in, so the
+        # statistics are in volts: 5 counts of shift, times the readout's
+        # counts-to-volts constant.
+        from rfmux.core.transferfunctions import VOLTS_PER_ROC
+        assert session.noise_stats[1].mean_I / VOLTS_PER_ROC == \
+            pytest.approx(5.0, abs=1.0)
 
         _feed_capture_stream(session, 1000, [100], rng, mean=5.0,
                              t_offset=t_end)
@@ -896,7 +901,9 @@ class TestPulseCaptureSession:
         session.stop()
 
         with PulseHDF5Reader(tmp_path / "session.h5") as reader:
-            assert reader.noise_stats(1).mean_I == pytest.approx(5.0, abs=1.0)
+            assert reader.stored_units(1) == "V"
+            assert reader.noise_stats(1).mean_I / VOLTS_PER_ROC == \
+                pytest.approx(5.0, abs=1.0)
             assert reader.pulse_count(1) == 2
 
     def test_stop_idempotent(self, tmp_path):

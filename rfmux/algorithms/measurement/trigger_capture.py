@@ -198,7 +198,7 @@ async def trigger_capture(
     max_pulse_ms: Optional[float] = None,
     hdf5_path: Optional[Union[str, Path]] = None,
     df_calibrations: Optional[Dict[int, complex]] = None,
-    trigger_basis: str = "iq",
+    trigger_basis: Optional[str] = None,
     verbose: bool = True,
 ) -> PulseCaptureResult:
     """Capture threshold-triggered pulses from the slow, fast, or both streams.
@@ -275,6 +275,11 @@ async def trigger_capture(
     ) if value is not None}
     if overrides:
         config = dataclasses.replace(config, **overrides)
+    if trigger_basis is not None:
+        # One source of truth: the config carries it to the session
+        # through session_kwargs, so it must not also be passed
+        # alongside.  None here means 'whatever the config says'.
+        config = dataclasses.replace(config, trigger_basis=trigger_basis)
 
     host = streamer.resolve_host(crs.tuber_hostname)
     dec = await crs.get_decimation()
@@ -328,12 +333,11 @@ async def trigger_capture(
         if streamer_mode == "both":
             await _run_dual(result, crs, host, channels, module,
                             slow_rate, duration_s, hdf5_path,
-                            df_calibrations, trigger_basis, verbose)
+                            df_calibrations, verbose)
         else:
             await _run_single(result, crs, host, channels, module,
                               streamer_mode, slow_rate, duration_s,
-                              hdf5_path, df_calibrations, trigger_basis,
-                              verbose)
+                              hdf5_path, df_calibrations, verbose)
     finally:
         if use_pfb:
             await crs.set_pfb_streamer(channel=None, module=module)
@@ -345,7 +349,7 @@ async def trigger_capture(
 
 async def _run_single(result, crs, host, channels, module, streamer_mode,
                       slow_rate, duration_s, hdf5_path, df_calibrations,
-                      trigger_basis, verbose) -> None:
+                      verbose) -> None:
     is_fast = streamer_mode == "fast"
     rate = PFB_SAMPLING_FREQ if is_fast else slow_rate
     stream = StreamResult(sample_rate=rate)
@@ -353,7 +357,7 @@ async def _run_single(result, crs, host, channels, module, streamer_mode,
     capture_session = PulseCaptureSession(
         channels=channels, module=module, streamer_mode=streamer_mode,
         sample_rate=rate, hdf5_path=hdf5_path,
-        df_calibrations=df_calibrations, trigger_basis=trigger_basis,
+        df_calibrations=df_calibrations,
         on_pulse=_collector(stream),
         on_error=(lambda m: print(f"[trigger_capture] {m}")) if verbose
         else None,
@@ -381,7 +385,7 @@ async def _run_single(result, crs, host, channels, module, streamer_mode,
 
 async def _run_dual(result, crs, host, channels, module, slow_rate,
                     duration_s, hdf5_path, df_calibrations,
-                    trigger_basis, verbose) -> None:
+                    verbose) -> None:
     slow = StreamResult(sample_rate=slow_rate)
     fast = StreamResult(sample_rate=PFB_SAMPLING_FREQ)
     collectors = {"slow": _collector(slow), "fast": _collector(fast)}
@@ -390,7 +394,7 @@ async def _run_dual(result, crs, host, channels, module, slow_rate,
         channels=channels, module=module, slow_rate=slow_rate,
         fast_rate=PFB_SAMPLING_FREQ, config=result.config,
         hdf5_path=hdf5_path,
-        df_calibrations=df_calibrations, trigger_basis=trigger_basis,
+        df_calibrations=df_calibrations,
         on_pulse=lambda s, ch, idx, summary, wf:
             collectors[s](ch, idx, summary, wf),
         on_pair=result.pairs.append,

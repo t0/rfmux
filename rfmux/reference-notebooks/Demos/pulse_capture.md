@@ -91,55 +91,49 @@ Everything below needs a CRS. **Run exactly one** of the three options:
 
 | | When to use it | Where |
 |---|---|---|
-| **A. Attach to a running board** | Periscope launched this notebook, or you know the board's address | below |
-| **B. Your own board** | You have hardware and its serial | below |
-| **C. Simulate one** | No hardware, and nothing already running | section 2 |
+| **A. An existing Mock or Real Periscope session is already running** | Periscope launched the Jupyter environment you are viewing this notebook within, and it is already configured for either a real board or a mock instance | below |
+| **B. Starting from scratch with real hardware** | You have a CRS and this notebook is being viewed separately from Periscope | below |
+| **C. Start a new simulated environment** | No Periscope GUI instance already, and nothing already running | section 2 |
 
-On real hardware the detectors must already be biased, since pulse detection
-works on the deviation of a biased detector. Run `simplified_tuning_flow.py` (in
-this folder) first, or use the Periscope tuning panels.
-
-### A. Attach to a board that is already running
+### A. Attach to a real or mock CRS instance that is already loaded with Periscope
 
 Use this when Periscope is driving a board — real or simulated — and you want to
 work with *that* one rather than starting your own.
 
 Periscope sets `RFMUX_CRS_HOSTNAME` when it launches this notebook, which is how
-the cell finds the board with no configuration from you. It is not required:
-paste an address into `HOSTNAME` and this works from any kernel.
+the cell finds the board with no configuration from you.
 
-Attaching matters most in mock mode. A simulated CRS is created, not discovered:
-its RPC port is assigned by the OS at startup, so there is no address to look up.
-A second `create_mock_crs()` gives you a *second, unrelated* simulation on the
-same UDP port, and a receiver then sees both interleaved with no error.
+Attaching matters most if you have already configured Periscope in mock mode.
+A second `create_mock_crs()` gives you a *second, unrelated* simulation,
+whose detectors are not the ones Periscope is showing you.
 
 ```python
 HOSTNAME = os.environ.get("RFMUX_CRS_HOSTNAME")   # or paste "127.0.0.1:43431"
 SERIAL = os.environ.get("RFMUX_CRS_SERIAL", "0000")
 
 if HOSTNAME:
-    _s = rfmux.load_session(
+    s = rfmux.load_session(
         f'!HardwareMap [ !CRS {{ serial: "{SERIAL}", '
         f'hostname: "{HOSTNAME}" }} ]')
-    crs = _s.query(rfmux.CRS).one()
+    crs = s.query(rfmux.CRS).one()
     await crs.resolve()
-    host = HOSTNAME.split(":")[0]
     print(f"attached to CRS {SERIAL} at {HOSTNAME}")
 else:
     print("Nothing advertised a board. Set HOSTNAME above, or use option B "
           "(your own board) or section 2 (simulation).")
 ```
 
-### B. Your own board
+### B. Your own board, no Periscope GUI
 
 ```python
 # SERIAL = "0042"
-# _s = rfmux.load_session(f'!HardwareMap [ !CRS {{ serial: "{SERIAL}" }} ]')
-# crs = _s.query(rfmux.CRS).one()
+# s = rfmux.load_session(f'!HardwareMap [ !CRS {{ serial: "{SERIAL}" }} ]')
+# crs = s.query(rfmux.CRS).one()
 # await crs.resolve()
-# host = crs.tuber_hostname
-# print(f"connected to CRS {SERIAL} at {host}")
+# await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)
+# print(f"connected to CRS {SERIAL}")
 ```
+
 
 ## 2. Mock mode configuration
 
@@ -153,8 +147,7 @@ Pulse heights are drawn uniformly between `pulse_random_amp_min` and
 `pulse_random_amp_max`, so the amplitude histogram in section 7 shows a
 distribution rather than a single spike.
 
-The noise is deliberately not idealised, because a detector that only works on
-white noise is not worth testing:
+The noise is deliberately not idealised:
 
 - **White readout noise** (`udp_noise_level`): the flat floor the σ thresholds
   are measured against.
@@ -251,17 +244,17 @@ print("simulation created by this notebook" if IS_MOCK
 
 ## 3. Configure the streamers
 
-Two streams carry samples off the board:
+Two streams carry data off the board:
 
 - the **slow** readout stream, decimated in stages from ~38 kHz down to ~596 Hz,
   carrying up to 1024 channels per module (port 9876);
 - the **fast** PFB stream at ~2.44 MHz, limited to 4 channels of one module
   (port 9877).
 
-The decimation is a physics choice, not a taste one: you want roughly **10 or
-more samples across one pulse decay constant**, or the decay is too sparsely
-sampled to fit. Below that the pulse is a spike; far above it you are paying
-bandwidth for nothing and risking dropped packets.
+Which of these streams, and at what decimation, you choose depends on the detector
+properties. You want roughly **10 or more samples across one pulse decay constant**,
+or else the decay is too sparsely sampled to fit. Below that the pulse is a spike; 
+far above it you are oversampling the pulse.
 
 `validate()` reports the hardware rules (long packets need stage ≥ 3, the 1 GbE
 budget, OS receive-buffer advice) as `(severity, message)` pairs. `describe()`
@@ -269,8 +262,7 @@ returns the derived rates and link budget.
 
 > If you attached to Periscope's CRS in section 1, remember the streamer is a
 > shared resource: changing the decimation here changes it for Periscope's plots
-> too, exactly as the *Streamer…* dialog would. That is usually what you want —
-> one board, one configuration — but it is not a private setting.
+> too, exactly as the *Streamer…* dialog would. 
 
 ```python
 PULSE_TAU_S = 1e-3          # expected decay constant
@@ -437,9 +429,9 @@ for rate, label in [(596.0, "slow, stage 6"), (fs, f"slow, stage {dec}"),
 
 ## 5. One-shot capture
 
-`trigger_capture` is the simplest entry point — one call, no session lifecycle,
-everything handed back in memory. Underneath it is a thin caller over exactly
-the machinery the rest of this notebook uses, so the two are never out of step.
+`trigger_capture` is an in-memory version of pulse capture.
+It is suitable for bounded runs that can be held entirely within RAM, but
+quickly becomes unsuitable for long capture sessions.
 
 `streamer_mode` is `"slow"`, `"fast"` (PFB, ≤ 4 channels) or `"both"`. Noise
 training runs first and is *not* charged against `time_run`.
@@ -461,14 +453,12 @@ res
 ```
 
 Because it is a session underneath, `hdf5_path=` makes the one-shot call write a
-real capture file too — pulses, histograms and templates, openable in Periscope.
+real capture file, which includes pulses, histograms and templates, openable in Periscope.
 Use a session directly (next section) when a capture is long enough that holding
 every pulse in memory stops being reasonable.
 
 Each pulse comes with its metrics already computed. `res.summaries[ch][idx]` is
-`pulse_summary()` output — the single source of truth for per-pulse scalars,
-which the HDF5 writer, the histograms and the GUI all derive from, so they can
-never disagree.
+`pulse_summary()` output.
 
 ```python
 ch = CHANNELS[0]
@@ -501,7 +491,7 @@ lands slightly below the true crossing, so it runs a few percent low.
 
 `PulseCaptureSession` is what the panel actually runs. It trains on noise, then
 detects, and as each pulse closes it appends to HDF5, updates running histograms
-and stacks a trigger-aligned template — all incrementally, so memory stays flat
+and stacks a trigger-aligned template. Since this is incremental, memory stays flat
 no matter how long you capture.
 
 You feed it from `run_slow_source` / `run_pfb_source`, or from any sample source
@@ -677,10 +667,10 @@ finally:
 
 ## 9. Both streams at once, with matched pairs
 
-`DualPulseCaptureSession` runs two independent detectors — one per stream, each
-with its own noise training and rate-appropriate parameters — and matches their
-pulses by trigger time. `run_dual_source` drives both sockets concurrently;
-whichever side finishes first stops the other, since a matcher fed by one stream
+`DualPulseCaptureSession` runs two independent pulse detection engines for fast
+and slow samples, each with its own noise training and rate-appropriate parameters.
+It and matches their pulses by trigger time. `run_dual_source` drives both sockets
+concurrently; whichever side finishes first stops the other, since a matcher fed by one stream
 alone just accumulates one-sided pulses.
 
 Each matched pair also stores a common time span: the widest interval either
@@ -747,8 +737,7 @@ if two_sided:
 Budget for the file size: every pair stores that common span from *both* rings,
 and at 2.44 MHz that window is thousands of samples. The capture above averages
 roughly 200 kB per pair — about 16 MB for two seconds at this (very high) mock
-pulse rate. Real detector rates are far lower, but on a long run the union
-windows, not the triggered cores, are what fills the disk.
+pulse rate.
 
 The dual file keeps the two streams in separate groups plus a match table.
 `PulseHDF5Reader` reports `dual=True` and takes a `stream=` argument:
@@ -764,7 +753,7 @@ with PulseHDF5Reader(OUTPUT_DIR / "pulse_capture_dual.h5") as r:
 
 ## 10. Where this maps in Periscope
 
-If you also use the GUI, the correspondence is exact — the panel sets the same
+If you also use the GUI, the correspondence is exact. The panel sets the same
 objects this notebook does:
 
 | Periscope control | API equivalent |

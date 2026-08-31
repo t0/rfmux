@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Regenerate the static figures embedded in the pulse-capture notebook.
+Regenerate the static figures embedded in the pulse-capture documentation.
 
 The notebook (rfmux/reference-notebooks/Demos/pulse_capture.md) produces all
 of its data plots by running code, so the only figures shipped as files are
 diagrams that explain the detector rather than show measurements.  This
 script writes them, so they can be regenerated rather than being an opaque
-binary in the tree.
+binary in the tree -- which is how the saved window came to be drawn ending
+at the wrong place and stayed that way through a policy change.
 
-    python diagnostics/make_pulse_capture_figures.py
+Writes every copy of each figure, so the notebook and the release note
+cannot drift apart.
+
+    python docs/make_pulse_capture_figures.py
 """
 
 import pathlib
@@ -18,8 +22,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-OUT = (pathlib.Path(__file__).resolve().parents[1]
-       / "rfmux" / "reference-notebooks" / "Demos")
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+#: Every place each figure is embedded.  The first is the source of truth;
+#: the rest are copies kept byte-identical by writing them all here.
+ANATOMY_PATHS = (
+    ROOT / "rfmux" / "reference-notebooks" / "Demos" / "pulse_capture_anatomy.png",
+    ROOT / "docs" / "release-notes" / "images" / "capture-window-anatomy.png",
+)
 
 THRESH, END = 5.0, 1.5
 
@@ -105,5 +115,10 @@ def capture_window_anatomy(path):
 
 
 if __name__ == "__main__":
-    OUT.mkdir(parents=True, exist_ok=True)
-    capture_window_anatomy(OUT / "pulse_capture_anatomy.png")
+    first, *copies = ANATOMY_PATHS
+    first.parent.mkdir(parents=True, exist_ok=True)
+    capture_window_anatomy(first)
+    for dest in copies:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(first.read_bytes())
+        print(f"copied to {dest}")

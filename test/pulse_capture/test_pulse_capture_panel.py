@@ -1097,6 +1097,9 @@ def test_all_without_a_crs_declines(qt_app):
     # buffer estimate.
     assert panel._parse_channels(quiet=True) is None
 
+    panel.close()
+    spin(qt_app)
+
 
 def test_all_with_nothing_biased_declines(qt_app):
     crs = _BiasedCRS([])
@@ -1203,6 +1206,9 @@ def test_many_channels_are_summarised(qt_app, _id, drive, many, must_contain):
     # Nothing is lost — the full listing moves to the tooltip.
     assert label.toolTip().count("\n") == many - 1
 
+    panel.close()
+    spin(qt_app)
+
 
 @pytest.mark.parametrize("_id,drive,many,must_contain", STATUS_SURFACES,
                          ids=[s[0] for s in STATUS_SURFACES])
@@ -1211,6 +1217,9 @@ def test_a_few_channels_are_named(qt_app, _id, drive, many, must_contain):
     label = drive(panel, [1, 2])
     text = label.text()
     assert "Ch1" in text and "Ch2" in text, text
+
+    panel.close()
+    spin(qt_app)
 
 
 def test_capturing_status_before_any_pulse(qt_app):
@@ -1222,6 +1231,9 @@ def test_capturing_status_before_any_pulse(qt_app):
     panel._refresh_status_line()
     assert "none firing yet" in panel.status_label.text()
 
+    panel.close()
+    spin(qt_app)
+
 
 def test_status_labels_do_not_drive_panel_width(qt_app):
     # Even if some future message is long, the label's size hint must
@@ -1230,6 +1242,9 @@ def test_status_labels_do_not_drive_panel_width(qt_app):
     for label in (panel.status_label, panel.noise_label):
         assert (label.sizePolicy().horizontalPolicy()
                 is QtWidgets.QSizePolicy.Policy.Ignored)
+
+    panel.close()
+    spin(qt_app)
 
 
 # ── plot legends and summaries stay bounded ───────────────────────
@@ -1271,6 +1286,9 @@ def test_histogram_legend_does_not_grow_without_bound(qt_app):
         title = panel.hist_plots[metric].getPlotItem().titleLabel.text
         assert "128 ch" in title, f"{metric} title should say how many"
 
+    panel.close()
+    spin(qt_app)
+
 
 def test_histogram_legend_kept_for_a_few_channels(qt_app):
     panel = PulseCapturePanel(dark_mode=False)
@@ -1279,6 +1297,9 @@ def test_histogram_legend_kept_for_a_few_channels(qt_app):
     panel._hist_data = _hist_data(channels)
     panel._render_histograms()
     assert _legend_rows(panel.hist_plots["snr"]) == 2
+
+    panel.close()
+    spin(qt_app)
 
 
 def test_template_legend_does_not_grow_without_bound(qt_app):
@@ -1290,6 +1311,9 @@ def test_template_legend_does_not_grow_without_bound(qt_app):
     panel._template_data = _template_data(channels)
     panel._render_templates()
     assert _legend_rows(panel.template_plot_i) == 0
+
+    panel.close()
+    spin(qt_app)
 
 
 def test_main_display_and_pulse_capture_rotate_the_same_way(qt_app):

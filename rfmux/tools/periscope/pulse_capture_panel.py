@@ -22,7 +22,7 @@ import csv
 import datetime
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
@@ -1094,7 +1094,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 fast_rate=PFB_SAMPLING_FREQ,
                 config=self.capture_config,
                 hdf5_path=path,
-                df_calibrations=self.df_calibrations,
+                df_calibrations=self._flat_df_calibrations(),
             )
         else:
             capture_session = PulseCaptureSession(
@@ -1102,7 +1102,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 module=module,
                 streamer_mode=mode,
                 hdf5_path=path,
-                df_calibrations=self.df_calibrations,
+                df_calibrations=self._flat_df_calibrations(),
                 sample_rate=fs,
                 **self.capture_config.session_kwargs(fs),
             )
@@ -1601,22 +1601,39 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"● Capturing — {total} pulses ({rate:.1f}/min) — {ch_str} — "
             f"{hh:02d}:{mm:02d}:{ss:02d}{drop_str}", "#4CC38A")
 
+    def _flat_df_calibrations(self) -> Dict[int, Any]:
+        """Calibrations for the selected module, as {channel: calibration}.
+
+        Periscope keeps one mapping per module, because its plots are
+        per-module.  PulseCaptureSession and PulseHDF5Writer take the flat
+        per-channel mapping the tuning flow builds.  Flattening here is
+        what keeps the storage layer from having to know about modules --
+        and passing the nested one straight through is what used to make
+        the writer refuse the file.
+        """
+        cal = self.df_calibrations
+        if not isinstance(cal, dict) or not cal:
+            return {}
+        per_module = cal.get(int(self.module_spin.value()))
+        if isinstance(per_module, dict):
+            return dict(per_module)
+        # Already flat: a headless caller's {channel: calibration}.
+        return {ch: v for ch, v in cal.items() if not isinstance(v, dict)}
+
     def _df_scale(self, channel: int) -> Optional[float]:
         """counts → Hz factor for *channel*, or None if uncalibrated.
 
-        Only the lookup through the nested/flat calibration mapping is
-        GUI business; the conversion itself is shared with headless
+        Falls back to the open file, which is where the calibration lives
+        once a capture is over: in review mode there is no Periscope
+        session holding it.  The conversion itself is shared with headless
         callers as counts_to_hz_scale.
         """
-        cal = self.df_calibrations
-        if not cal:
-            return None
-        module = int(self.module_spin.value())
-        per_module = cal.get(module) if isinstance(cal, dict) else None
-        if isinstance(per_module, dict):
-            df_cal = per_module.get(channel)
-        else:  # flat {channel: cal} mapping
-            df_cal = cal.get(channel) if isinstance(cal, dict) else None
+        df_cal = self._flat_df_calibrations().get(channel)
+        if df_cal is None and self.reader is not None:
+            try:
+                df_cal = self.reader.df_calibration(channel)
+            except Exception:
+                df_cal = None
         return counts_to_hz_scale(df_cal)
 
     def _units_are_hz(self) -> bool:

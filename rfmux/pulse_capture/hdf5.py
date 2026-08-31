@@ -25,6 +25,8 @@ Usage (read)::
 from __future__ import annotations
 
 import time
+import warnings
+
 import numpy as np
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
@@ -33,6 +35,32 @@ import h5py
 
 from .detection import ChannelNoiseStats
 from .analysis import pulse_summary
+
+
+
+def _store_df_calibration(grp, df_calibrations, channel) -> None:
+    """Stamp *channel*'s df calibration onto *grp*, if there is a usable one.
+
+    Guarded because a wrong-shaped mapping used to take the whole capture
+    with it.  h5py refuses to store a dict, the writer's constructor
+    raised, and PulseCaptureSession turned that into "could not open HDF5
+    file" with ``writer = None`` -- a capture that ran to completion and
+    saved nothing.  A calibration we cannot store is worth a warning; the
+    pulses are worth more than the units they are labelled in.
+    """
+    if not isinstance(df_calibrations, dict) or not df_calibrations:
+        return
+    value = df_calibrations.get(channel)
+    if value is None:
+        return
+    if not isinstance(value, (int, float, complex, np.number)):
+        warnings.warn(
+            f"ignoring df_calibration for channel {channel}: expected a "
+            f"number, got {type(value).__name__}.  df_calibrations is the "
+            f"flat {{channel: calibration}} mapping, not one keyed by module.",
+            stacklevel=3)
+        return
+    grp.attrs["df_calibration"] = value
 
 
 # ───────────────────────── Shared writer plumbing ───────────────────
@@ -196,8 +224,7 @@ class PulseHDF5Writer(_PulseFileWriter):
             self._write_noise_attrs(grp, noise_stats.get(
                 ch, ChannelNoiseStats()))
             grp.attrs["pulse_count"] = 0
-            if df_calibrations and ch in df_calibrations:
-                grp.attrs["df_calibration"] = df_calibrations[ch]
+            _store_df_calibration(grp, df_calibrations, ch)
 
         # ── Histogram / template groups (updated periodically) ────
         self.f.create_group("histograms")
@@ -303,8 +330,7 @@ class DualPulseHDF5Writer(_PulseFileWriter):
             for ch in channels:
                 grp = sgrp.create_group(f"channel_{ch}")
                 grp.attrs["pulse_count"] = 0
-                if df_calibrations and ch in df_calibrations:
-                    grp.attrs["df_calibration"] = df_calibrations[ch]
+                _store_df_calibration(grp, df_calibrations, ch)
             self.f.create_group(f"histograms/{stream}")
 
         matched = self.f.create_group("matched")

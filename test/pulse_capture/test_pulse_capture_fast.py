@@ -324,3 +324,40 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
         # fast/slow baseline ratios pre-/256: ~255x at dec 1, ~51x at
         # dec 6) — so no amplitude-ratio assertion is possible here.
         # See the plan doc follow-up on mock stream-gain modeling.
+
+
+def test_macro_stores_df_calibrations(mock_crs, tmp_path):
+    """crs.trigger_capture(df_calibrations=...) reaches the capture file.
+
+    Lives in this module to reuse its MockCRS rather than paying for a
+    second server; it captures the slow stream, which is the cheapest
+    path through the macro.
+
+    The macro had no df_calibrations argument at all, so the only way to
+    label a headless capture in Hz was to bypass it and drive
+    PulseCaptureSession directly.  A signature check would not be enough:
+    the first attempt forwarded the value from the helper that builds the
+    session without giving that helper the parameter, which is a
+    NameError only a real call reaches.
+    """
+    loop, crs = mock_crs
+    path = tmp_path / "headless_cal.h5"
+
+    result = loop.run_until_complete(crs.trigger_capture(
+        channel=[1, 2], module=1, streamer_mode="slow", time_run=3.0,
+        hdf5_path=path,
+        df_calibrations={1: 2.5e6},        # channel 2 left uncalibrated
+        verbose=False,
+    ))
+    assert result.streamer_mode == "slow"
+    assert path.exists()
+
+    with PulseHDF5Reader(path) as reader:
+        assert reader.df_calibration(1) == pytest.approx(2.5e6)
+        # Uncalibrated channels stay in counts rather than getting a 1.0.
+        assert reader.df_calibration(2) is None
+
+    from rfmux.pulse_capture.analysis import counts_to_hz_scale
+    from rfmux.core.transferfunctions import VOLTS_PER_ROC
+    assert counts_to_hz_scale(2.5e6) == pytest.approx(2.5e6 * VOLTS_PER_ROC)
+    assert counts_to_hz_scale(None) is None

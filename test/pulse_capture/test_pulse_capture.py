@@ -467,6 +467,28 @@ class TestPulseHDF5:
             assert reader.df_calibration(1) == pytest.approx(42.5)
             assert reader.df_calibration(99) is None
 
+    def test_unusable_df_calibration_costs_the_units_not_the_file(
+            self, tmp_path):
+        """A wrong-shaped mapping must not take the capture with it.
+
+        Periscope keys its calibrations by module, so passing them
+        straight through handed h5py a dict.  It refused, the writer's
+        constructor raised, and PulseCaptureSession turned that into
+        ``writer = None`` -- a capture that ran and saved nothing.
+        """
+        path = tmp_path / "nested.h5"
+        with pytest.warns(UserWarning, match="df_calibration"):
+            writer = PulseHDF5Writer(
+                path, [1], {1: _make_noise_stats()},
+                {"streamer_mode": "slow"},
+                df_calibrations={1: {1: 42.5}},   # {module: {channel: cal}}
+            )
+            writer.finalize()
+
+        assert path.exists(), "the file is worth more than the units"
+        with PulseHDF5Reader(path) as reader:
+            assert reader.df_calibration(1) is None
+
     def test_nonexistent_pulse_returns_none(self, tmp_path):
         path = tmp_path / "test.h5"
         writer = self._make_writer(path, channels=[1])

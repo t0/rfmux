@@ -702,7 +702,7 @@ df_cals = {d.get("bias_channel", det): d["df_calibration"]
            for det, d in bias_results.items()
            if d.get("df_calibration") is not None}
 print(f"df calibrations for {len(df_cals)} channels — pass these to "
-      f"PulseCaptureSession(df_calibrations=…)")
+      f"crs.trigger_capture(df_calibrations=…) or PulseCaptureSession")
 ```
 
 ## 11. Where this maps in Periscope

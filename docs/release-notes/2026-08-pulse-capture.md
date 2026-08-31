@@ -35,6 +35,13 @@ The call estimates the noise on each channel first, then triggers at
 `threshold_sigma` above that baseline. Nothing needs to be known in advance
 about the pulse height.
 
+Pass `df_calibrations={channel: calibration}` from `bias_kids` and the
+calibration is stored in the capture file, so amplitudes can be read as Δf in
+Hz instead of ADC counts. Channels without one stay in counts rather than
+being given a scale of 1. Triggering is unaffected either way: the threshold
+is in units of each channel's measured noise, which is a ratio, so it does not
+depend on the calibration.
+
 `result` carries the pulses, their summaries and the noise statistics. The
 same content is written to `hdf5_path` as the capture runs, so an interrupted
 run keeps whatever it had already seen.

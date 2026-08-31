@@ -617,6 +617,58 @@ def test_units_toggle_scales_amplitude(qt_app, tmp_path):
     spin(qt_app)
 
 
+def test_df_calibrations_reach_the_session_flat(qt_app):
+    """What the panel hands a session is {channel: cal}, not {module: ...}.
+
+    Periscope stores one mapping per module.  The session and the HDF5
+    writer take the flat per-channel mapping the tuning flow builds, and
+    passing the nested one through is what made the writer refuse the
+    file, losing the capture rather than the units.
+    """
+    panel = PulseCapturePanel(dark_mode=False,
+                              df_calibrations={1: {1: 2.0e6, 2: 3.0e6},
+                                               2: {1: 9.9e9}})
+    panel.module_spin.setValue(1)
+    flat = panel._flat_df_calibrations()
+    assert flat == {1: 2.0e6, 2: 3.0e6}
+    assert all(not isinstance(v, dict) for v in flat.values())
+
+    # Module 2 is a different set, and must not leak into module 1.
+    panel.module_spin.setValue(2)
+    assert panel._flat_df_calibrations() == {1: 9.9e9}
+
+    # A headless caller's already-flat mapping survives unchanged.
+    flat_panel = PulseCapturePanel(dark_mode=False,
+                                   df_calibrations={1: 5.0e6})
+    assert flat_panel._flat_df_calibrations() == {1: 5.0e6}
+
+    panel.close()
+    flat_panel.close()
+    spin(qt_app)
+
+
+def test_review_mode_reads_calibration_from_the_file(qt_app, tmp_path):
+    """Hz units work on a loaded capture, where no session holds the cal."""
+    from rfmux.core.transferfunctions import VOLTS_PER_ROC
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Writer
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+
+    path = tmp_path / "reviewed.h5"
+    writer = PulseHDF5Writer(path, [1], {1: ChannelNoiseStats()},
+                             {"streamer_mode": "slow", "sample_rate": 596.0},
+                             df_calibrations={1: 2.0e6})
+    writer.finalize()
+
+    panel = PulseCapturePanel(dark_mode=False)      # no calibration passed in
+    assert panel._df_scale(1) is None
+    panel.load_from_hdf5(path)
+    spin(qt_app)
+    assert panel._df_scale(1) == pytest.approx(2.0e6 * VOLTS_PER_ROC)
+    panel.close()
+    spin(qt_app)
+    spin(qt_app)
+
+
 def test_csv_exports(qt_app, tmp_path):
     """Each viewer tab exports its own CSV."""
     import csv as _csv

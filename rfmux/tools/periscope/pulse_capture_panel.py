@@ -59,7 +59,9 @@ from ...pulse_capture.analysis import (
 )
 
 # Fast/PFB stream overlay colors (darker variants, HUD convention)
-FAST_IQ_COLORS = {"I": "#24478F", "Q": "#8F4724"}
+# The fast stream keeps the quadrature hue family but sits apart from
+# the slow one on the same plot: blue/purple, orange/red.
+FAST_IQ_COLORS = {"I": "#7A3FBF", "Q": "#CC3333"}
 
 # Channel plot colors: ch1 = I-blue, ch2 = Q-orange (HUD convention),
 # further channels from Tableau10.
@@ -501,12 +503,18 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for level, style, tag in (
                 (thr, QtCore.Qt.PenStyle.DashLine, f"±{thr:g}σ trigger"),
                 (end, QtCore.Qt.PenStyle.DotLine, f"±{end:g}σ end")):
-            for i, sign in enumerate((+1, -1)):
-                plot.plot(
-                    x, np.full(2, mean + sign * level * std),
-                    pen=pg.mkPen(color, width=1.0, style=style),
-                    # Name once per pair, or the legend doubles up.
-                    name=f"{prefix}{tag}" if i == 0 else None)
+            # The +/- pair is ONE item, joined by a NaN gap: one legend
+            # entry that hides and shows both lines.  Two items with one
+            # named left the unnamed twin behind when the entry was
+            # switched off.
+            band = mean + level * std
+            plot.plot(
+                np.array([x0, x1, np.nan, x0, x1], dtype=float),
+                np.array([band, band, np.nan,
+                          2 * mean - band, 2 * mean - band], dtype=float),
+                connect="finite",
+                pen=pg.mkPen(color, width=1.0, style=style),
+                name=f"{prefix}{tag}")
 
     @staticmethod
     def _decision_text(wf) -> str:

@@ -478,3 +478,89 @@ def test_pfb_batch_yields_to_the_loop(monkeypatch):
     # 40 packets in one drain -> yields at k=8,16,24,32 inside the batch,
     # plus the one after the batch.  One-per-batch would give ~1.
     assert yields["n"] >= 4, f"only {yields['n']} yields for {N} packets"
+
+
+def test_union_window_spans_the_saved_record():
+    """The pair's window covers the whole saved record, not the core.
+
+    duration_s is trigger-to-below-threshold by design (a pulse
+    property, for the histograms).  Used as the display extent it cut
+    the drawn data mid-pulse while the marks, read from the record, ran
+    on to end-confirmed: 4.2 ms of trace under a 16 ms end mark.
+    """
+    from rfmux.pulse_capture.capture_session import DualPulseCaptureSession as D
+    T = 43000.0
+    pair = {"slow_summary": {"timestamp": T + 0.000, "start_time": T + 0.000,
+                             "trigger_time": T + 0.002, "duration_s": 0.004,
+                             "end_time": T + 0.016},
+            "fast_summary": None}
+    t0, t1 = D._union_window(pair)
+    assert t1 >= T + 0.016, f"window ends at +{(t1-T)*1e3:.1f} ms, record at +16 ms"
+    assert t0 <= T + 0.000
+
+    # A summary from before end_time was carried still gets the core.
+    old = {"slow_summary": {"timestamp": T, "duration_s": 0.004},
+           "fast_summary": None}
+    t0, t1 = D._union_window(old)
+    assert t1 == pytest.approx(T + 0.004 + 0.0004, abs=1e-6)
+
+
+def test_matcher_anchors_on_the_trigger_not_the_record_start():
+    """Two streams' records of ONE event start at different pre-margins
+    (each is a fraction of that stream's own saved length).  Anchoring
+    the midpoint on the record start pushed them apart by that
+    difference; anchoring on the trigger keeps them together."""
+    from rfmux.pulse_capture.capture_session import IncrementalPulseMatcher
+    pairs = []
+    m = IncrementalPulseMatcher(window_s=0.05, grace_s=0.25,
+                                on_pair=lambda p: pairs.append(p))
+    T = 43000.0
+    # Same trigger, same core; the fast record kept a 120 ms pre-margin
+    # (a long confirmation tail), the slow one 5 ms.  Record starts
+    # differ by 115 ms -- well outside the 50 ms window.
+    m.add("slow", 1, 1, {"timestamp": T - 0.005, "trigger_time": T,
+                         "duration_s": 0.004})
+    m.add("fast", 1, 1, {"timestamp": T - 0.120, "trigger_time": T,
+                         "duration_s": 0.004})
+    assert m.matched == 1 and pairs and pairs[0]["slow_idx"] == 1 \
+        and pairs[0]["fast_idx"] == 1, "one event, two records, no match"
+
+
+def test_band_pair_is_one_legend_entry_that_hides_both(qt_app):
+    """Each +/- band is a single item: switching its legend entry off
+    removes both lines, not just the one that carried the name."""
+    import pyqtgraph as pg
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    panel = PulseCapturePanel(dark_mode=False)
+    plot = panel.pulse_plot_i
+    ns = ChannelNoiseStats(mean_I=10.0, std_I=2.0, mean_Q=0.0, std_Q=1.0)
+    panel.threshold_spin.setValue(5.0)
+    panel.end_spin.setValue(1.5)
+    panel._annotate_noise_bands(plot, "I", ns, 0.0, 1.0, "#888888")
+
+    named = {}
+    for item in plot.getPlotItem().listDataItems():
+        if item.name():
+            named.setdefault(item.name(), []).append(item)
+    trig = named["±5σ trigger"]
+    assert len(trig) == 1, "the trigger band is two items again"
+    y = np.asarray(trig[0].yData, float)
+    levels = set(np.round(y[np.isfinite(y)], 6))
+    assert levels == {20.0, 0.0}, f"both +/- lines must be in the one item: {levels}"
+    # And no unnamed twin lurking at either level.
+    for item in plot.getPlotItem().listDataItems():
+        if not item.name():
+            yy = np.asarray(item.yData, float)
+            assert not (set(np.round(yy[np.isfinite(yy)], 6)) & levels), \
+                "an unnamed line still sits at a band level"
+    panel.close()
+    spin(qt_app)
+
+
+def test_fast_and_slow_traces_are_told_apart_by_hue():
+    from rfmux.tools.periscope.pulse_capture_panel import FAST_IQ_COLORS
+    from rfmux.tools.periscope.utils import IQ_COLORS
+    for q in ("I", "Q"):
+        assert FAST_IQ_COLORS[q].lower() != IQ_COLORS[q].lower()

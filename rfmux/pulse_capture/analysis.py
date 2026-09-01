@@ -205,6 +205,16 @@ def pulse_summary(
     else:
         tau_s = float("nan")
 
+    # Three instants, kept apart because they answer different
+    # questions.  ``timestamp`` is the first SAVED sample -- the record
+    # start, pre-trigger margin included -- and stays what it was.
+    # ``trigger_time`` is the physical event, the right anchor for
+    # anything that must line up across streams: the record start
+    # moves with each stream's own margin.  ``end_time`` is the last
+    # saved sample, so a consumer showing the record can span all of
+    # it rather than guessing from the core duration.
+    trig = pulse_data.get("trigger_time")
+    end = pulse_data.get("end_time")
     return {
         "n_samples": int(len(np.asarray(pulse_data["Amp_I"]))),
         "pileup": bool(pulse_data.get("pileup", False)),
@@ -213,6 +223,12 @@ def pulse_summary(
         "duration_s": duration_s,
         "duration_ms": duration_s * 1e3,
         "timestamp": timestamp,
+        "start_time": timestamp,
+        "trigger_time": (float(trig) if trig is not None
+                         and np.isfinite(trig) else timestamp),
+        "end_time": (float(end) if end is not None and np.isfinite(end)
+                     else (float(np.max(valid_times))
+                           if len(valid_times) else timestamp)),
         "tau_s": tau_s,
         "tau_ms": tau_s * 1e3,
     }

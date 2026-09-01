@@ -1144,8 +1144,13 @@ class IncrementalPulseMatcher:
 
     def add(self, stream: str, channel: int, pulse_idx: int,
             summary: dict) -> None:
-        mid = summary.get("timestamp", 0.0) \
-            + summary.get("duration_s", 0.0) / 2.0
+        # Midpoint of the pulse's core, anchored on the TRIGGER: the
+        # record start (``timestamp``) sits a pre-margin before it, and
+        # that margin is a fraction of each stream's own saved length --
+        # so anchoring there would shift the two streams' midpoints
+        # apart by however differently their tails were kept.
+        anchor = summary.get("trigger_time", summary.get("timestamp", 0.0))
+        mid = anchor + summary.get("duration_s", 0.0) / 2.0
         if not math.isfinite(mid):
             return
 
@@ -1563,14 +1568,24 @@ class DualPulseCaptureSession(_CallbackHost):
 
     @staticmethod
     def _union_window(pair: dict) -> Optional[tuple]:
-        """[t0, t1] spanning every available trigger window + 10% margin."""
+        """[t0, t1] spanning every available SAVED record + 10% margin.
+
+        The saved record, not the core: ``duration_s`` is deliberately
+        trigger-to-below-threshold so histograms measure the pulse and
+        not the baseline, but as a display extent it stopped the drawn
+        data mid-pulse while the marks -- read from the record -- ran
+        on to end-confirmed.  A summary from before ``end_time`` was
+        carried falls back to the core.
+        """
         t0 = t1 = None
         for key in ("slow_summary", "fast_summary"):
             summ = pair.get(key)
             if not summ:
                 continue
-            s0 = summ.get("timestamp", 0.0)
-            s1 = s0 + summ.get("duration_s", 0.0)
+            s0 = summ.get("start_time", summ.get("timestamp", 0.0))
+            s1 = summ.get("end_time")
+            if s1 is None:
+                s1 = summ.get("timestamp", 0.0) + summ.get("duration_s", 0.0)
             if not (math.isfinite(s0) and math.isfinite(s1)):
                 continue
             t0 = s0 if t0 is None else min(t0, s0)

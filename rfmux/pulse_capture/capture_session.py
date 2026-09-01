@@ -1257,6 +1257,13 @@ class DualPulseCaptureSession(_CallbackHost):
         self.channels = list(channels)
         self.module = module
         self.config = config or PulseCaptureConfig()
+        # Both the writer AND the per-stream sessions need these: the
+        # writer to record them, the sessions to rotate.  Handing them
+        # to the writer alone made trigger_basis="df" silently degrade
+        # to volts on both streams -- storage_transform falls back per
+        # channel when it has no calibration -- while the single-stream
+        # path rotated properly.
+        self.df_calibrations = df_calibrations
         # Parity with PulseCaptureSession (panel/task read this)
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
         self.on_noise = on_noise
@@ -1323,6 +1330,7 @@ class DualPulseCaptureSession(_CallbackHost):
             module=self.module,
             streamer_mode=stream,
             sample_rate=sample_rate,
+            df_calibrations=self.df_calibrations,
             hdf5_path=None,  # the dual writer owns the file
             on_noise=lambda ns, s=stream: self._on_stream_noise(s, ns),
             on_pulse=lambda ch, idx, summary, data, s=stream:

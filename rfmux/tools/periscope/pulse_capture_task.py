@@ -270,14 +270,39 @@ class PulseCaptureTask(QtCore.QThread):
                 ingest.add(channels, packet, stamp)
         ingest.flush()
 
+    #: Generation of the most recent PFB enable in this process.  The
+    #: enable and its teardown belong to one capture; a STALE teardown --
+    #: an old task's finally running after a new capture has enabled the
+    #: streamer -- otherwise turns the stream off underneath the running
+    #: capture.  That leaves a board that everyone believes is streaming
+    #: fast, and a dual capture that counts pulses and never pairs them,
+    #: which is the state a live board was found in.
+    _pfb_epoch = 0
+
+    async def _claim_pfb(self, channels) -> int:
+        """Enable the PFB streamer and take ownership of it."""
+        await self.crs.set_pfb_streamer(channel=channels,
+                                        module=self.module)
+        PulseCaptureTask._pfb_epoch += 1
+        return PulseCaptureTask._pfb_epoch
+
+    async def _release_pfb(self, claim: int) -> None:
+        """Disable the PFB streamer -- unless a newer capture owns it."""
+        if PulseCaptureTask._pfb_epoch != claim:
+            return
+        try:
+            await self.crs.set_pfb_streamer(channel=None,
+                                            module=self.module)
+        except Exception as e:
+            self.signals.error.emit(f"PFB teardown failed: {e}")
+
     async def _run_fast(self) -> None:
         """PFB capture: configure the fast streamer, run the shared
         source, keep servicing control requests, always tear down."""
         from ...pulse_capture.sources import run_pfb_source
 
         channels = list(self.session.channels)
-        await self.crs.set_pfb_streamer(channel=channels,
-                                        module=self.module)
+        claim = await self._claim_pfb(channels)
         await asyncio.sleep(0.3)  # settle (trigger_capture precedent)
         try:
             stop = (lambda: self._stop_requested
@@ -293,11 +318,7 @@ class PulseCaptureTask(QtCore.QThread):
                 except asyncio.CancelledError:
                     pass
         finally:
-            try:
-                await self.crs.set_pfb_streamer(channel=None,
-                                                module=self.module)
-            except Exception as e:
-                self.signals.error.emit(f"PFB teardown failed: {e}")
+            await self._release_pfb(claim)
 
     async def _run_both(self) -> None:
         """Concurrent slow+fast capture (DualPulseCaptureSession).
@@ -315,8 +336,7 @@ class PulseCaptureTask(QtCore.QThread):
         )
 
         channels = list(self.session.channels)
-        await self.crs.set_pfb_streamer(channel=channels,
-                                        module=self.module)
+        claim = await self._claim_pfb(channels)
         await asyncio.sleep(0.3)
         try:
             stop = (lambda: self._stop_requested
@@ -329,11 +349,7 @@ class PulseCaptureTask(QtCore.QThread):
             finally:
                 watchdog.cancel()
         finally:
-            try:
-                await self.crs.set_pfb_streamer(channel=None,
-                                                module=self.module)
-            except Exception as e:
-                self.signals.error.emit(f"PFB teardown failed: {e}")
+            await self._release_pfb(claim)
 
     async def _dual_watchdog(self, stop) -> None:
         """Report a dual capture that is training instead of capturing.

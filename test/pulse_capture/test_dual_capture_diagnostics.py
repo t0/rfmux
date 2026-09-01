@@ -114,3 +114,70 @@ def test_watchdog_is_silent_once_both_capture(monkeypatch):
     t, errors = _watchdog_task({"slow": "capturing", "fast": "capturing"})
     asyncio.run(t._dual_watchdog(lambda: False))  # returns on its own
     assert errors == []
+
+
+def test_dual_streams_receive_the_calibrations():
+    """trigger_basis="df" in a dual capture rotates, not just labels.
+
+    The calibrations reached only the dual writer, so the per-stream
+    sessions fell back to volts channel by channel: both streams
+    triggered on unrotated quadratures while the single-stream path,
+    given the same arguments, rotated.  stored_units is the observable
+    -- "Hz" when the rotation happened, "V" when it silently did not.
+    """
+    from rfmux.pulse_capture.capture_session import (
+        DualPulseCaptureSession, PulseCaptureConfig)
+
+    cfg = PulseCaptureConfig(trigger_basis="df", noise_train_ms=50.0)
+    d = DualPulseCaptureSession(
+        channels=[1], module=1, slow_rate=1000.0, fast_rate=10000.0,
+        config=cfg, hdf5_path=None,
+        df_calibrations={1: 2.0e6 + 0j})
+    d.start()
+    t = np.arange(50) / 1000.0
+    z = np.zeros(50)
+    d.feed_slow_block(1, z, z, 1000.0 + t)
+    d.feed_fast_block(1, z, z, 1000.0 + t / 10.0)
+    d.stop()
+
+    assert d.slow.trigger_basis == "df"
+    assert d.slow.stored_units.get(1) == "Hz", d.slow.stored_units
+    assert d.fast.stored_units.get(1) == "Hz", d.fast.stored_units
+
+
+def test_stale_teardown_does_not_disable_a_newer_capture():
+    """The PFB enable and its teardown belong to one capture.
+
+    An old task's finally can run after a new capture has enabled the
+    streamer; disabling it then turns the stream off underneath the
+    running capture -- a board everyone believes is streaming fast, and
+    a dual capture that counts pulses and never pairs them, which is
+    the state a live board was found in.
+    """
+    from rfmux.tools.periscope.pulse_capture_task import PulseCaptureTask
+
+    calls = []
+
+    class _CRS:
+        async def set_pfb_streamer(self, channel=None, module=1):
+            calls.append(channel)
+
+    def make():
+        t = PulseCaptureTask.__new__(PulseCaptureTask)
+        t.crs = _CRS()
+        t.module = 2
+        t.signals = _Signals([])
+        return t
+
+    async def scenario():
+        old, new = make(), make()
+        old_claim = await old._claim_pfb([1])
+        new_claim = await new._claim_pfb([1])
+        # The stale teardown arrives after the new enable: skipped.
+        await old._release_pfb(old_claim)
+        assert calls == [[1], [1]], calls
+        # The owner's own teardown still disables.
+        await new._release_pfb(new_claim)
+        assert calls == [[1], [1], None], calls
+
+    asyncio.run(scenario())

@@ -1611,10 +1611,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             and pair["fast_idx"] is not None
         complement_missing = False
         if matched:
-            dt = pair.get("time_offset") or 0.0
             label = (f"◆ Pair #{pair_idx:04d}  "
                      f"s#{pair['slow_idx']}/f#{pair['fast_idx']}")
-            detail = f"Δt={dt*1e6:+.0f}µs"
+            # Trigger to trigger, when known: the streams' clocks on one
+            # event.  The midpoint offset also carries each stream's
+            # core length, which is not what a reader wants here.
+            toff = pair.get("trigger_offset")
+            if toff is not None and np.isfinite(toff):
+                detail = f"Δt(trig)={toff*1e6:+.0f}µs"
+            else:
+                dt = pair.get("time_offset") or 0.0
+                detail = f"Δt={dt*1e6:+.0f}µs"
         else:
             side = "slow" if pair["slow_idx"] is not None else "fast"
             other = "fast" if side == "slow" else "slow"
@@ -1690,7 +1697,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             if tip:                       # append the drift note when it bites
                 text += f"  —  {tip[0]}"
             self._set_status(text, colour)
-            self.status_label.setToolTip(tip[1] if tip else "")
+            tooltip = tip[1] if tip else ""
+            skew, n = s.get("stream_skew_s"), s.get("stream_skew_n", 0)
+            if skew is not None and n:
+                tooltip += (("\n\n" if tooltip else "")
+                            + f"Stream clock skew: slow − fast trigger time "
+                              f"= {skew*1e3:+.2f} ms (median of {n} matched "
+                              "pairs). This is how far the two streams' "
+                              "timestamps disagree on one event; in the pair "
+                              "view it shows as one stream's marks sitting "
+                              "off the other stream's trace by this much.")
+            self.status_label.setToolTip(tooltip)
             return
         total = s.get("total_pulses", 0)
         rate = s.get("rate_per_min", 0.0)
@@ -2220,13 +2237,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 if (slow_wf is not None) else \
                 "fast-triggered (slow window unavailable)"
         dt = meta.get("time_offset")
+        toff = meta.get("trigger_offset")
         summ = meta.get("slow_summary") or meta.get("fast_summary") or {}
         tau_ms = summ.get("tau_ms", float("nan"))
         self.pulse_info.setText(
             f"Pair #{pair_idx:04d} — Channel {channel}   "
             f"[{provenance}]\n"
             f"slow #{meta.get('slow_idx')} / fast #{meta.get('fast_idx')}"
-            + (f"   Δt = {dt*1e6:+.0f} µs" if dt is not None else "")
+            + (f"   Δt(trigger) = {toff*1e6:+.0f} µs  (slow − fast: the "
+               f"streams' clocks on this event)"
+               if toff is not None and np.isfinite(toff)
+               else (f"   Δt = {dt*1e6:+.0f} µs" if dt is not None else ""))
             + (f"\nSNR {summ.get('snr', 0):.1f}σ, "
                f"τ = {tau_ms:.2f} ms"
                if np.isfinite(tau_ms) else ""))

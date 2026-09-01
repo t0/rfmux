@@ -621,3 +621,59 @@ def test_review_mode_restores_the_full_tail_setting(qt_app, tmp_path):
     assert panel._saves_full_tail() is False
     panel.close()
     spin(qt_app)
+
+
+def test_matched_pair_reports_trigger_to_trigger_skew():
+    """The pair carries slow-minus-fast TRIGGER time: the two clocks on
+    one event, independent of each stream's core length.  The midpoint
+    offset is not that -- it folds in core/2 per stream."""
+    from rfmux.pulse_capture.capture_session import IncrementalPulseMatcher
+    pairs = []
+    m = IncrementalPulseMatcher(window_s=0.05, grace_s=0.25,
+                                on_pair=lambda p: pairs.append(p))
+    T = 43000.0
+    # Same event; the fast clock reads it 1.6 ms earlier; cores differ.
+    m.add("slow", 1, 1, {"timestamp": T - 0.005, "trigger_time": T,
+                         "duration_s": 0.010})
+    m.add("fast", 1, 1, {"timestamp": T - 0.0016 - 0.02,
+                         "trigger_time": T - 0.0016, "duration_s": 0.002})
+    assert pairs and pairs[0]["slow_idx"] and pairs[0]["fast_idx"]
+    assert pairs[0]["trigger_offset"] == pytest.approx(0.0016, abs=1e-9)
+    # and the midpoint offset is NOT the skew (it carries core/2 each)
+    assert pairs[0]["time_offset"] != pytest.approx(0.0016, abs=1e-4)
+
+
+def test_dual_stats_carry_the_median_skew():
+    d, pairs = _dual_for_deferral()
+    T0 = 43000.0
+    _feed_to(d, "fast", T0, T0 + 1.0, 100000.0)
+    _feed_to(d, "slow", T0, T0 + 1.0, 1000.0)
+    for k, off in enumerate((0.0010, 0.0016, 0.0030)):
+        d._on_matcher_pair({"channel": 1, "pair_idx": k + 1,
+                            "slow_idx": k + 1, "fast_idx": k + 1,
+                            "slow_summary": {"timestamp": T0 + 0.3, "duration_s": 0.01,
+                                             "start_time": T0 + 0.3,
+                                             "saved_end_time": T0 + 0.32},
+                            "fast_summary": {"timestamp": T0 + 0.3, "duration_s": 0.01,
+                                             "start_time": T0 + 0.3,
+                                             "saved_end_time": T0 + 0.32},
+                            "time_offset": 0.0, "trigger_offset": off})
+    st = d.stats()
+    assert st["stream_skew_n"] == 3
+    assert st["stream_skew_s"] == pytest.approx(0.0016)
+    d.stop()
+
+
+def test_pair_row_shows_trigger_skew(qt_app):
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._both_mode = True
+    panel._reset_results([1])
+    panel._on_pair_matched({"channel": 1, "pair_idx": 1, "slow_idx": 1,
+                            "fast_idx": 1, "time_offset": 0.003,
+                            "trigger_offset": -0.0008,
+                            "slow_summary": {"snr": 10.0}, "fast_summary": None})
+    row = panel._channel_items[1].child(0)
+    assert "Δt(trig)=-800µs" in row.text(1), row.text(1)
+    panel.close()
+    spin(qt_app)

@@ -1235,6 +1235,16 @@ class IncrementalPulseMatcher:
             "fast_summary": fast.summary if fast else None,
             "time_offset": (slow.mid - fast.mid)
             if slow and fast else None,
+            # Trigger-to-trigger: the two streams' clocks disagreeing
+            # on ONE physical event.  time_offset above is midpoint to
+            # midpoint and folds in each stream's own core length, so
+            # it reads several ms even on identical clocks.
+            "trigger_offset": (
+                slow.summary["trigger_time"] - fast.summary["trigger_time"]
+                if slow and fast
+                and slow.summary.get("trigger_time") is not None
+                and fast.summary.get("trigger_time") is not None
+                else None),
         }
         if self.on_pair is not None:
             self.on_pair(pair)
@@ -1328,6 +1338,9 @@ class DualPulseCaptureSession(_CallbackHost):
         # in emission order.  See _on_matcher_pair.
         self._pending_pairs: List[Tuple[dict, Optional[tuple]]] = []
         self._pair_window_wait_s = pair_window_wait_s
+        #: slow-minus-fast trigger time of every matched pair: the
+        #: board's inter-stream clock skew, one sample per event.
+        self._trigger_offsets: List[float] = []
 
         self.slow = self._make_stream("slow", slow_rate)
         self.fast = self._make_stream("fast", fast_rate)
@@ -1469,7 +1482,11 @@ class DualPulseCaptureSession(_CallbackHost):
         if self.slow.sample_rate and self.fast.sample_rate:
             overlap = min(self.slow.buf_size / self.slow.sample_rate,
                           self.fast.buf_size / self.fast.sample_rate)
-        return {"stream_lag_s": lag, "ring_overlap_s": overlap}
+        offs = self._trigger_offsets
+        return {"stream_lag_s": lag, "ring_overlap_s": overlap,
+                # Median slow-minus-fast trigger time over matched pairs.
+                "stream_skew_s": (float(np.median(offs)) if offs else None),
+                "stream_skew_n": len(offs)}
 
     # ── Internal wiring ───────────────────────────────────────────
 
@@ -1570,6 +1587,9 @@ class DualPulseCaptureSession(_CallbackHost):
                         break          # still waiting on a ring
                     # Waited out: the missing window stays absent.
             self._pending_pairs.pop(0)
+            off = pair.get("trigger_offset")
+            if off is not None and math.isfinite(off):
+                self._trigger_offsets.append(float(off))
             self._to_writer("append_match", pair["channel"], pair,
                             what="match write")
             self._callback(self.on_pair, pair)

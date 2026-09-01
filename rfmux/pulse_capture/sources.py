@@ -188,6 +188,30 @@ def _flush(sock) -> None:
             return
 
 
+#: Datagrams drained per event-loop wake.  One-per-wake made a stream's
+#: throughput proportional to how often the loop scheduled it: with two
+#: streams sharing the loop and per-packet processing measured in
+#: milliseconds, the loop manages a few hundred task steps a second and
+#: the slow stream -- needing 596 of them -- starved to a fraction of
+#: real time (0.8 s of sample time over 300 s of wall time, live).
+#: Draining a bounded batch per wake divorces throughput from scheduling
+#: fairness: the slow stream needs ~2 wakes a second at stage 6.  The
+#: caps bound how long one wake may hold the loop.
+_SLOW_DRAIN_CAP = 256
+_PFB_DRAIN_CAP = 64
+
+
+def _drain(sock, first: bytes, size: int, cap: int) -> list:
+    """*first* plus whatever else the socket already holds, up to *cap*."""
+    batch = [first]
+    while len(batch) < cap:
+        try:
+            batch.append(sock.recv(size))
+        except BlockingIOError:
+            break
+    return batch
+
+
 async def run_slow_source(
     capture_session,
     host: str,
@@ -224,7 +248,8 @@ async def run_slow_source(
             host, port=streamer.STREAMER_PORT) as sock:
         sock.setblocking(False)
         _flush(sock)
-        while True:
+        done = False
+        while not done:
             if should_stop is not None and should_stop():
                 break
             try:
@@ -233,24 +258,31 @@ async def run_slow_source(
                     streamer.STREAMER_TIMEOUT)
             except asyncio.TimeoutError:
                 break
-            pkt = streamer.ReadoutPacket(data)
-            if pkt.module != module - 1:
-                continue
-            raw = np.array(pkt) / 256.0
-            ts = streamer.ts_to_seconds(pkt.ts)
-            if len(pkt) != width:
-                # Recomputed only when the packet mode changes, not per
-                # packet -- that would undo the point of blocking.
-                width = len(pkt)
-                columns = columns_for_width(requested, width)
-            if columns[0]:
-                ingest.add(columns[0], raw[columns[1]], ts)
-            else:
-                # No wanted channel in this packet, but still time
-                # passing -- the duration must not stall on it.
-                ingest.advance(ts)
-            if ingest.complete:
-                break
+            for data in _drain(sock, data, streamer.LONG_PACKET_SIZE,
+                               _SLOW_DRAIN_CAP):
+                pkt = streamer.ReadoutPacket(data)
+                if pkt.module != module - 1:
+                    continue
+                raw = np.array(pkt) / 256.0
+                ts = streamer.ts_to_seconds(pkt.ts)
+                if len(pkt) != width:
+                    # Recomputed only when the packet mode changes, not
+                    # per packet -- that would undo the point of
+                    # blocking.
+                    width = len(pkt)
+                    columns = columns_for_width(requested, width)
+                if columns[0]:
+                    ingest.add(columns[0], raw[columns[1]], ts)
+                else:
+                    # No wanted channel in this packet, but still time
+                    # passing -- the duration must not stall on it.
+                    ingest.advance(ts)
+                if ingest.complete:
+                    done = True
+                    break
+            # An explicit turn for whatever shares the loop -- in a dual
+            # capture, the other stream.
+            await asyncio.sleep(0)
         ingest.flush()   # don't strand the tail of the capture
     return ingest.elapsed
 
@@ -291,7 +323,8 @@ async def run_pfb_source(
             host, port=streamer.PFB_STREAMER_PORT) as sock:
         sock.setblocking(False)
         _flush(sock)
-        while True:
+        done = False
+        while not done:
             if should_stop is not None and should_stop():
                 break
             try:
@@ -308,41 +341,49 @@ async def run_pfb_source(
                         "thinks), and that nothing tore it down.")
                 break
             got_any = True
-            pkt = streamer.PFBPacket(data)
-            # Match the slow stream's 16-bit ADC scale: np.array(pkt)
-            # applies the packetizer /256; the second /256 brings the
-            # 24-bit datapath down to ADC counts (same convention as
-            # the slow readout path).  Without it, fast samples sit
-            # exactly 256x above slow samples for the same signal.
-            raw = np.array(pkt) / 256.0
-            ts = streamer.ts_to_seconds(pkt.ts)
-            time_samples = pkt.num_samples // n_groups
-            # A whole packet per channel per call.  The packet
-            # interleaves the streamed channels round-robin, so one
-            # channel is a strided slice; feeding those arrays straight
-            # through is what lets the engine absorb quiet stretches
-            # with numpy rather than 1.22 million Python calls a second.
-            # NaN where the packet has no usable timestamp — the session
-            # drops and counts those, exactly as the per-sample path did
-            # with None.
-            t0 = ts if ts is not None else float("nan")
-            times = t0 + np.arange(time_samples) / sample_rate
-            for slot, ch in enumerate(channels):
-                v = raw[slot:time_samples * n_groups:n_groups]
-                if v.shape[0] == 0:
-                    continue
-                n_ok = min(v.shape[0], times.shape[0])
-                # Every session and facade exposes feed_block, and
-                # there is deliberately no per-sample fallback: it would
-                # put the fast stream on the path this function exists
-                # to avoid.
-                capture_session.feed_block(ch, v[:n_ok].real, v[:n_ok].imag,
-                                   times[:n_ok])
-            # Exact per-packet span — independent of timestamp
-            # discontinuities across rate changes.
-            elapsed += time_samples / sample_rate
-            if duration_s is not None and elapsed >= duration_s:
-                break
+            for data in _drain(sock, data, streamer.PFB_PACKET_SIZE,
+                               _PFB_DRAIN_CAP):
+                pkt = streamer.PFBPacket(data)
+                # Match the slow stream's 16-bit ADC scale: np.array(pkt)
+                # applies the packetizer /256; the second /256 brings the
+                # 24-bit datapath down to ADC counts (same convention as
+                # the slow readout path).  Without it, fast samples sit
+                # exactly 256x above slow samples for the same signal.
+                raw = np.array(pkt) / 256.0
+                ts = streamer.ts_to_seconds(pkt.ts)
+                time_samples = pkt.num_samples // n_groups
+                # A whole packet per channel per call.  The packet
+                # interleaves the streamed channels round-robin, so one
+                # channel is a strided slice; feeding those arrays
+                # straight through is what lets the engine absorb quiet
+                # stretches with numpy rather than 1.22 million Python
+                # calls a second.  NaN where the packet has no usable
+                # timestamp — the session drops and counts those,
+                # exactly as the per-sample path did with None.
+                t0 = ts if ts is not None else float("nan")
+                times = t0 + np.arange(time_samples) / sample_rate
+                for slot, ch in enumerate(channels):
+                    v = raw[slot:time_samples * n_groups:n_groups]
+                    if v.shape[0] == 0:
+                        continue
+                    n_ok = min(v.shape[0], times.shape[0])
+                    # Every session and facade exposes feed_block, and
+                    # there is deliberately no per-sample fallback: it
+                    # would put the fast stream on the path this
+                    # function exists to avoid.
+                    capture_session.feed_block(ch, v[:n_ok].real,
+                                               v[:n_ok].imag,
+                                               times[:n_ok])
+                # Exact per-packet span — independent of timestamp
+                # discontinuities across rate changes.
+                elapsed += time_samples / sample_rate
+                if duration_s is not None and elapsed >= duration_s:
+                    done = True
+                    break
+            # An explicit turn for whatever shares the loop -- in a dual
+            # capture, the slow stream.  The drain cap above bounds how
+            # long this coroutine held it.
+            await asyncio.sleep(0)
     return elapsed
 
 

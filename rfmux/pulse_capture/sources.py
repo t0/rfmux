@@ -199,6 +199,14 @@ def _flush(sock) -> None:
 #: caps bound how long one wake may hold the loop.
 _SLOW_DRAIN_CAP = 256
 _PFB_DRAIN_CAP = 64
+#: PFB packets processed between turns of the loop.  A packet is 1000
+#: samples, and while the engine is capturing every one of them walks
+#: through process_sample: 64 packets is ~150 ms of held loop, during
+#: which the slow stream sits in its queue and its ring falls behind --
+#: measured live as "slow stream 0.4s behind" at every pulse.  Eight is
+#: ~20 ms of walking at worst, and ~300 extra no-op yields a second at
+#: best, which is nothing.
+_PFB_YIELD_EVERY = 8
 
 
 def _drain(sock, first: bytes, size: int, cap: int) -> list:
@@ -341,8 +349,11 @@ async def run_pfb_source(
                         "thinks), and that nothing tore it down.")
                 break
             got_any = True
-            for data in _drain(sock, data, streamer.PFB_PACKET_SIZE,
-                               _PFB_DRAIN_CAP):
+            for k, data in enumerate(_drain(sock, data,
+                                            streamer.PFB_PACKET_SIZE,
+                                            _PFB_DRAIN_CAP)):
+                if k and k % _PFB_YIELD_EVERY == 0:
+                    await asyncio.sleep(0)
                 pkt = streamer.PFBPacket(data)
                 # Match the slow stream's 16-bit ADC scale: np.array(pkt)
                 # applies the packetizer /256; the second /256 brings the

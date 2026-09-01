@@ -265,3 +265,216 @@ def test_status_line_warns_and_tooltips_on_lag(qt_app):
 
     panel.close()
     spin(qt_app)
+
+
+def _coincident_pulse_streams(slow_fs=1000.0, fast_fs=100000.0, seconds=3.0,
+                              t_pulse=1.5, tau=0.02, amp=60.0, seed=3):
+    """The same pulse on both streams, on one clock."""
+    rng = np.random.default_rng(seed)
+    out = {}
+    for name, fs in (("slow", slow_fs), ("fast", fast_fs)):
+        n = int(seconds * fs)
+        t = np.arange(n) / fs
+        sig = rng.normal(0, 1.0, n)
+        m = t >= t_pulse
+        sig[m] += amp * np.exp(-(t[m] - t_pulse) / tau)
+        out[name] = (sig, rng.normal(0, 1.0, n), t)
+    return out
+
+
+def _run_dual_with_slow_lag(lag_s, pair_window_wait_s=3.0):
+    """Feed fast at real time and slow LAGGING by lag_s of stream time --
+    the slow ring is behind when the fast trigger lands and the pair
+    matches.  Returns the pairs emitted."""
+    from rfmux.pulse_capture.capture_session import (
+        DualPulseCaptureSession, PulseCaptureConfig)
+
+    pairs = []
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=50.0, noise_train_ms=300.0)
+    d = DualPulseCaptureSession(
+        channels=[1], module=1, slow_rate=1000.0, fast_rate=100000.0,
+        config=cfg, hdf5_path=None, pair_window_wait_s=pair_window_wait_s,
+        on_pair=lambda p: pairs.append(p), on_error=lambda m: None)
+    d.start()
+    st = _coincident_pulse_streams()
+    t0 = 43000.0
+    sl = 0.05
+    n_slices = int(3.0 / sl)
+    lag_slices = int(round(lag_s / sl))
+    for k in range(n_slices + lag_slices):
+        # fast slice k; slow slice (k - lag) -- slow trails.
+        if k < n_slices:
+            a, b = int(k * sl * 100000), int((k + 1) * sl * 100000)
+            i, q, t = st["fast"]
+            d.feed_fast_block(1, i[a:b], q[a:b], t0 + t[a:b])
+        ks = k - lag_slices
+        if 0 <= ks < n_slices:
+            a, b = int(ks * sl * 1000), int((ks + 1) * sl * 1000)
+            i, q, t = st["slow"]
+            d.feed_slow_block(1, i[a:b], q[a:b], t0 + t[a:b])
+    d.stop()
+    return pairs
+
+
+def test_matched_pair_has_both_windows_when_slow_trails():
+    """Integration sanity: slow fed one slice behind fast (the lag is in
+    wall time, so the fast ring still holds the pulse), the pair matches,
+    and both union windows are present and end together."""
+    pairs = _run_dual_with_slow_lag(lag_s=0.05)
+    matched = [p for p in pairs if p["slow_idx"] and p["fast_idx"]]
+    assert matched, "no matched pair"
+    p = matched[0]
+    assert p.get("slow_tod") is not None and p.get("fast_tod") is not None
+    s_end = float(np.nanmax(p["slow_tod"]["Time"]))
+    f_end = float(np.nanmax(p["fast_tod"]["Time"]))
+    assert s_end >= f_end - 0.002
+
+
+def _dual_for_deferral():
+    from rfmux.pulse_capture.capture_session import (
+        DualPulseCaptureSession, PulseCaptureConfig)
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=50.0, noise_train_ms=50.0)
+    pairs = []
+    d = DualPulseCaptureSession(
+        channels=[1], module=1, slow_rate=1000.0, fast_rate=100000.0,
+        config=cfg, hdf5_path=None, pair_window_wait_s=3.0,
+        on_pair=lambda p: pairs.append(p), on_error=lambda m: None)
+    d.start()
+    return d, pairs
+
+
+def _feed_to(d, stream, t_from, t_to, fs):
+    n = int(round((t_to - t_from) * fs))
+    t = t_from + np.arange(n) / fs
+    z = np.zeros(n)
+    (d.feed_slow_block if stream == "slow" else d.feed_fast_block)(1, z, z, t)
+
+
+def test_each_window_is_taken_when_its_own_ring_covers_it():
+    """The pair forms while the slow ring is behind the window's end.
+
+    Seen live: after a fast capture walked its samples, the slow ring
+    sat behind; the pair matched the instant the fast trigger landed and
+    its slow window was cut at the ring's newest sample, mid-pulse,
+    though the samples were on their way.  The fast window must be taken
+    at once (that ring is current and small), the slow one only once the
+    slow ring reaches the window's end, and the pair emitted then.
+    """
+    d, pairs = _dual_for_deferral()
+    T0 = 43000.0
+    # Fast ring: current, well past the window.  Slow ring: behind it.
+    _feed_to(d, "fast", T0, T0 + 1.00, 100000.0)
+    _feed_to(d, "slow", T0, T0 + 0.60, 1000.0)
+    # A matched pair whose union window ends at T0+0.80 -- beyond what
+    # the slow ring holds, inside what the fast ring holds.
+    pair = {"channel": 1, "pair_idx": 1, "slow_idx": 1, "fast_idx": 1,
+            "slow_summary": {"timestamp": T0 + 0.70, "duration_s": 0.05},
+            "fast_summary": {"timestamp": T0 + 0.70, "duration_s": 0.10},
+            "time_offset": 0.0}
+    d._on_matcher_pair(pair)
+
+    # Not emitted yet: the fast window was taken, the slow one is waiting.
+    assert pairs == []
+    assert pair.get("fast_tod") is not None, "fast window should be taken now"
+    assert "slow_tod" not in pair, "slow window must wait for its ring"
+
+    # The slow ring reaches the window's end -> slow window taken, pair out.
+    _feed_to(d, "slow", T0 + 0.60, T0 + 0.90, 1000.0)
+    assert len(pairs) == 1
+    st = pairs[0]["slow_tod"]
+    assert st is not None
+    assert float(np.nanmax(st["Time"])) >= T0 + 0.80 - 0.002, \
+        "slow window stops short of the window end"
+    d.stop()
+
+
+def test_pairs_are_emitted_in_order_behind_a_waiting_one():
+    """A later, complete pair does not overtake an earlier waiting one."""
+    d, pairs = _dual_for_deferral()
+    T0 = 43000.0
+    _feed_to(d, "fast", T0, T0 + 1.00, 100000.0)
+    _feed_to(d, "slow", T0, T0 + 0.60, 1000.0)
+    waiting = {"channel": 1, "pair_idx": 1, "slow_idx": 1, "fast_idx": 1,
+               "slow_summary": {"timestamp": T0 + 0.70, "duration_s": 0.05},
+               "fast_summary": {"timestamp": T0 + 0.70, "duration_s": 0.05},
+               "time_offset": 0.0}
+    ready = {"channel": 1, "pair_idx": 2, "slow_idx": 2, "fast_idx": 2,
+             "slow_summary": {"timestamp": T0 + 0.30, "duration_s": 0.05},
+             "fast_summary": {"timestamp": T0 + 0.30, "duration_s": 0.05},
+             "time_offset": 0.0}
+    d._on_matcher_pair(waiting)
+    d._on_matcher_pair(ready)
+    assert pairs == [], "the ready pair must not overtake the waiting one"
+    _feed_to(d, "slow", T0 + 0.60, T0 + 0.90, 1000.0)
+    assert [p["pair_idx"] for p in pairs] == [1, 2]
+    d.stop()
+
+
+def test_a_stream_that_never_catches_up_does_not_strand_the_pair():
+    """The wait is bounded: past pair_window_wait_s of the other
+    stream's time, the pair goes out with what there is."""
+    d, pairs = _dual_for_deferral()
+    d._pair_window_wait_s = 0.2
+    T0 = 43000.0
+    # Fast is just past the window (0.85 < 0.755 + 0.2): still waiting.
+    _feed_to(d, "fast", T0, T0 + 0.85, 100000.0)
+    _feed_to(d, "slow", T0, T0 + 0.60, 1000.0)
+    pair = {"channel": 1, "pair_idx": 1, "slow_idx": 1, "fast_idx": 1,
+            "slow_summary": {"timestamp": T0 + 0.70, "duration_s": 0.05},
+            "fast_summary": {"timestamp": T0 + 0.70, "duration_s": 0.05},
+            "time_offset": 0.0}
+    d._on_matcher_pair(pair)
+    assert pairs == []
+    # Only the FAST stream keeps going; slow never reaches the window.
+    _feed_to(d, "fast", T0 + 1.00, T0 + 1.20, 100000.0)
+    assert len(pairs) == 1, "pair stranded behind a stream that never came"
+    assert "slow_tod" not in pairs[0] or pairs[0]["slow_tod"] is None \
+        or float(np.nanmax(pairs[0]["slow_tod"]["Time"])) < T0 + 0.75
+    d.stop()
+
+
+def test_pfb_batch_yields_to_the_loop(monkeypatch):
+    """A long PFB batch turns the loop over every _PFB_YIELD_EVERY
+    packets, so a capture walk cannot hold it for a whole batch."""
+    from rfmux.pulse_capture import sources as src
+
+    sock = _private_pfb_socket(monkeypatch)
+    monkeypatch.setattr(streamer, "STREAMER_TIMEOUT", 0.3)
+    send = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    port = sock.getsockname()[1]
+    pkt = streamer.PFBPacket()
+    pkt.magic = streamer.PFB_PACKET_MAGIC
+    pkt.num_samples = 100
+    blob = bytes(pkt)
+    N = 40
+    for _ in range(N):
+        send.sendto(blob, ("127.0.0.1", port))
+    monkeypatch.setattr(src, "_flush", lambda s: None)
+    import time as _t
+    _t.sleep(0.05)
+
+    yields = {"n": 0}
+    real_sleep = asyncio.sleep
+
+    async def counting_sleep(d):
+        if d == 0:
+            yields["n"] += 1
+        return await real_sleep(d)
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+
+    class _Sink:
+        channels = [1]
+        fed = 0
+
+        def feed_block(self, ch, i, q, t):
+            _Sink.fed += 1
+
+    asyncio.run(src.run_pfb_source(
+        _Sink(), "127.0.0.1", [1],
+        should_stop=lambda: _Sink.fed >= N))
+    send.close()
+    # 40 packets in one drain -> yields at k=8,16,24,32 inside the batch,
+    # plus the one after the batch.  One-per-batch would give ~1.
+    assert yields["n"] >= 4, f"only {yields['n']} yields for {N} packets"

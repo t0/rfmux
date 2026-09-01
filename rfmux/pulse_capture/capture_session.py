@@ -59,7 +59,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -1246,6 +1246,7 @@ class DualPulseCaptureSession(_CallbackHost):
         df_calibrations: Optional[Dict[int, float]] = None,
         match_window_s: float = 0.05,
         match_grace_s: float = 0.25,
+        pair_window_wait_s: float = 3.0,
         on_noise: Optional[Callable] = None,
         on_pulse: Optional[Callable] = None,
         on_pair: Optional[Callable] = None,
@@ -1300,6 +1301,10 @@ class DualPulseCaptureSession(_CallbackHost):
             window_s=match_window_s, grace_s=match_grace_s,
             on_pair=self._on_matcher_pair)
         self._last_advance: Dict[str, float] = {}
+        # Pairs whose union window one of the rings has not reached yet,
+        # in emission order.  See _on_matcher_pair.
+        self._pending_pairs: List[Tuple[dict, Optional[tuple]]] = []
+        self._pair_window_wait_s = pair_window_wait_s
 
         self.slow = self._make_stream("slow", slow_rate)
         self.fast = self._make_stream("fast", fast_rate)
@@ -1387,6 +1392,7 @@ class DualPulseCaptureSession(_CallbackHost):
                                                         float("-inf")) > 0.02:
             self._last_advance[stream] = t
             self.matcher.advance_time(stream, t)
+            self._release_pairs()
 
     def flush_progress(self) -> None:
         """Release held training progress on both streams."""
@@ -1403,6 +1409,7 @@ class DualPulseCaptureSession(_CallbackHost):
         self.slow.stop()
         self.fast.stop()
         self.matcher.flush()
+        self._release_pairs(force=True)   # nothing left to wait for
         self._to_writer("finalize", what="finalize")
 
     @property
@@ -1492,24 +1499,67 @@ class DualPulseCaptureSession(_CallbackHost):
         # records stay untouched — metrics (SNR, tau, histograms) are
         # computed on the physically-triggered cores only; the union
         # windows are the pair's display/analysis data.
-        try:
-            union = self._union_window(pair)
+        #
+        # Each stream's window is taken the moment THAT stream's ring
+        # has reached the end of it -- not all at once when the pair
+        # forms.  A match is emitted the instant the second trigger
+        # lands, and the second stream is usually the fast one, which
+        # has just spent a capture walking samples one at a time while
+        # the slow stream sat behind it on the same loop.  Taken then,
+        # the slow window stopped at the ring's newest sample --
+        # mid-pulse, short of the end mark -- though the samples were
+        # on their way.  Waiting for BOTH rings before taking either is
+        # no good either: the fast ring holds under half a second, and
+        # by the time the slow one caught up the window had slid out of
+        # it.  So the leading ring is read now, the lagging one when it
+        # arrives, and the pair goes out once it has both.  A stream
+        # that never arrives is given pair_window_wait_s of the other
+        # stream's time, then the pair goes out with what there is.
+        self._pending_pairs.append((pair, self._union_window(pair), set()))
+        self._release_pairs()
+
+    def _release_pairs(self, force: bool = False) -> None:
+        """Take the windows whose rings now cover them; emit pairs that
+        have all of theirs.
+
+        In order: a later pair never overtakes an earlier one, so the
+        first incomplete pair holds the rest.
+        """
+        latest = self.matcher._latest
+        while self._pending_pairs:
+            pair, union, done = self._pending_pairs[0]
             if union is not None:
                 t0, t1 = union
                 for stream, session in (("slow", self.slow),
                                         ("fast", self.fast)):
-                    if session.pcap is not None:
-                        pair[f"{stream}_tod"] = \
-                            session.pcap.get_window_by_time(
-                                pair["channel"], t0, t1)
+                    if stream in done:
+                        continue
+                    clock = latest.get(stream)
+                    if force or (clock is not None and clock >= t1):
+                        self._take_window(pair, stream, session, t0, t1)
+                        done.add(stream)
+                if len(done) < 2 and not force:
+                    known = [c for c in (latest.get("slow"),
+                                         latest.get("fast"))
+                             if c is not None]
+                    if (not known
+                            or max(known) < t1 + self._pair_window_wait_s):
+                        break          # still waiting on a ring
+                    # Waited out: the missing window stays absent.
+            self._pending_pairs.pop(0)
+            self._to_writer("append_match", pair["channel"], pair,
+                            what="match write")
+            self._callback(self.on_pair, pair)
+            self._emit_stats()
+
+    def _take_window(self, pair: dict, stream: str, session,
+                     t0: float, t1: float) -> None:
+        try:
+            if session.pcap is not None:
+                pair[f"{stream}_tod"] = session.pcap.get_window_by_time(
+                    pair["channel"], t0, t1)
         except Exception as e:
             self._error(f"Union-window extraction failed: {e}")
-
-        self._to_writer("append_match", pair["channel"], pair,
-                        what="match write")
-        self._callback(self.on_pair, pair)
-        self._emit_stats()
-
 
     @staticmethod
     def _union_window(pair: dict) -> Optional[tuple]:

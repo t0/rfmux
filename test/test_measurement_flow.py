@@ -49,7 +49,7 @@ class TestSimpleTuningFlow:
         
         mock_crs.take_netanal = AsyncMock(return_value={
             'frequencies': frequencies,
-            'iq_complex': iq_complex,
+            'iq_counts': iq_complex,
             'phase_degrees': phase_degrees
         })
         mock_crs.get_cable_length = AsyncMock(return_value=0.0)
@@ -103,7 +103,7 @@ class TestSimpleTuningFlow:
         
         mock_crs.take_netanal = AsyncMock(return_value={
             'frequencies': frequencies,
-            'iq_complex': np.exp(1j * np.deg2rad(phase_degrees)),
+            'iq_counts': np.exp(1j * np.deg2rad(phase_degrees)),
             'phase_degrees': phase_degrees
         })
         mock_crs.get_cable_length = AsyncMock(return_value=0.0)
@@ -152,7 +152,7 @@ class TestSimpleTuningFlow:
         
         mock_crs.take_netanal = AsyncMock(return_value={
             'frequencies': frequencies,
-            'iq_complex': iq_complex,
+            'iq_counts': iq_complex,
             'phase_degrees': phase_degrees
         })
         mock_crs.get_cable_length = AsyncMock(return_value=0.0)
@@ -162,10 +162,11 @@ class TestSimpleTuningFlow:
         
         # Don't mock find_resonances - let it run
         # Mock everything after finding resonances
-        mock_crs.multisweep = AsyncMock(return_value={})
+        mock_crs.multisweep = AsyncMock(return_value=({}, {}))
         
-        with patch('simplified_tuning_flow.bias_kids') as mock_bias:
-            mock_bias.return_value = {}
+        with patch('simplified_tuning_flow.find_bias_points') as mock_find_bias, \
+             patch('simplified_tuning_flow.apply_bias', new_callable=AsyncMock) as mock_apply_bias:
+            mock_apply_bias.return_value = {}
             
             await run_algorithm_flow(
                 mock_crs, 1,
@@ -193,7 +194,7 @@ class TestSimpleTuningFlow:
         frequencies = np.linspace(100e6, 2450e6, 1000)
         mock_crs.take_netanal = AsyncMock(return_value={
             'frequencies': frequencies,
-            'iq_complex': np.random.randn(1000) + 1j * np.random.randn(1000),
+            'iq_counts': np.random.randn(1000) + 1j * np.random.randn(1000),
             'phase_degrees': np.random.randn(1000) * 180
         })
         mock_crs.get_cable_length = AsyncMock(return_value=0.0)
@@ -203,13 +204,13 @@ class TestSimpleTuningFlow:
         # Mock resonances
         test_resonances = [500e6, 600e6, 700e6]
         
-        # Mock multisweep results
+        # Mock multisweep results (second element of the returned tuple)
         multisweep_results = {}
         for i, f in enumerate(test_resonances):
             freqs = np.linspace(f - 250e3, f + 250e3, 50)
             multisweep_results[i] = {
                 'frequencies': freqs,
-                'iq_complex': np.random.randn(50) + 1j * np.random.randn(50),
+                'iq_counts': np.random.randn(50) + 1j * np.random.randn(50),
                 'bias_frequency': f,
                 'fit_params': {
                     'fr': f,
@@ -219,7 +220,14 @@ class TestSimpleTuningFlow:
                 }
             }
         
-        mock_crs.multisweep = AsyncMock(return_value=multisweep_results)
+        # res_info_dict is the first element of the multisweep return tuple;
+        # it must have entries for every key that apply_bias will report back.
+        mock_res_info_dict = {
+            i: {'bias_frequency': f, 'bias_amplitude': 0.001, 'channel_number': i + 1}
+            for i, f in enumerate(test_resonances)
+        }
+        
+        mock_crs.multisweep = AsyncMock(return_value=(mock_res_info_dict, multisweep_results))
         
         # Mock noise data
         mock_spectrum = Mock()
@@ -232,9 +240,16 @@ class TestSimpleTuningFlow:
         mock_samples.spectrum = mock_spectrum
         mock_crs.py_get_samples = AsyncMock(return_value=mock_samples)
         
+        # Bias results returned by the apply_bias mock
+        bias_results = {
+            i: {'bias_frequency': f, 'df_calibration': 1e6}
+            for i, f in enumerate(test_resonances)
+        }
+        
         # Patch the algorithm functions
         with patch('simplified_tuning_flow.find_resonances') as mock_find, \
-             patch('simplified_tuning_flow.bias_kids') as mock_bias, \
+             patch('simplified_tuning_flow.find_bias_points') as mock_find_bias, \
+             patch('simplified_tuning_flow.apply_bias', new_callable=AsyncMock) as mock_apply_bias, \
              patch('simplified_tuning_flow.fit_skewed_multisweep') as mock_fit:
             
             # Mock find_resonances
@@ -250,13 +265,7 @@ class TestSimpleTuningFlow:
             mock_fit.return_value = multisweep_results
             
             # Mock bias
-            bias_results = {}
-            for i, f in enumerate(test_resonances):
-                bias_results[i] = {
-                    'bias_frequency': f,
-                    'df_calibration': 1e6
-                }
-            mock_bias.return_value = bias_results
+            mock_apply_bias.return_value = bias_results
             
             # Run full flow
             await run_algorithm_flow(
@@ -281,7 +290,7 @@ class TestSimpleTuningFlow:
         assert mock_crs.take_netanal.called, "Network analysis should run"
         assert mock_find.called, "Resonance finding should run"
         assert mock_crs.multisweep.called, "Multisweep should run"
-        assert mock_bias.called, "Bias should run"
+        assert mock_apply_bias.called, "Bias should run"
         assert mock_crs.py_get_samples.called, "Noise sampling should run"
         
         print("Full flow completed with all steps")
@@ -298,7 +307,7 @@ class TestSimpleTuningFlow:
         frequencies = np.linspace(100e6, 2450e6, 1000)
         mock_crs.take_netanal = AsyncMock(return_value={
             'frequencies': frequencies,
-            'iq_complex': np.ones(1000) + 1j * np.zeros(1000),
+            'iq_counts': np.ones(1000) + 1j * np.zeros(1000),
             'phase_degrees': np.zeros(1000)
         })
         mock_crs.get_cable_length = AsyncMock(return_value=0.0)

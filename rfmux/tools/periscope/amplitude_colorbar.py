@@ -19,11 +19,14 @@ class AmplitudeColorBar(QtWidgets.QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(46)
+        self.setFixedHeight(62)
         self._min_amp = 0.0
         self._max_amp = 1.0
         self._min_label = ""
         self._max_label = ""
+        self._min_norm_label = ""
+        self._max_norm_label = ""
+        self._show_norm_row = False
         self._direction_note = ""
         self._dark_mode = False
         self._cmap = pg.colormap.get(COLORMAP_CHOICES.get("AMPLITUDE_SWEEP", "inferno"))
@@ -50,6 +53,17 @@ class AmplitudeColorBar(QtWidgets.QWidget):
         self._min_label = UnitConverter.format_probe_label(min_amp, unit_mode, dac_scale)
         self._max_label = UnitConverter.format_probe_label(max_amp, unit_mode, dac_scale)
         self._direction_note = "solid = Upward sweep, dotted = Downward sweep" if has_downward else ""
+
+        # Secondary row: show normalised amplitude when the primary label is in
+        # physical units (dBm / volts with a known dac_scale).
+        self._show_norm_row = unit_mode in ("dbm", "volts") and dac_scale is not None
+        if self._show_norm_row:
+            self._min_norm_label = UnitConverter.format_probe_label(min_amp, "counts", None)
+            self._max_norm_label = UnitConverter.format_probe_label(max_amp, "counts", None)
+        else:
+            self._min_norm_label = ""
+            self._max_norm_label = ""
+
         self.update()  # trigger repaint
 
     # ------------------------------------------------------------------
@@ -69,7 +83,9 @@ class AmplitudeColorBar(QtWidgets.QWidget):
         margin = 8
         bar_top = 4
         bar_height = 14
-        label_y = bar_top + bar_height + 12
+        norm_label_top = bar_top + bar_height + 4   # top of the secondary (norm) label row
+        norm_label_height = 12
+        direction_note_top = norm_label_top + norm_label_height + 2
 
         # --- Gradient bar ---
         bar_left = margin + 60   # room for min label
@@ -112,11 +128,23 @@ class AmplitudeColorBar(QtWidgets.QWidget):
                          QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
                          self._max_label)
 
+        # Secondary row: normalised amplitude labels (only when primary is physical)
+        if self._show_norm_row:
+            font.setPointSize(7)
+            painter.setFont(font)
+            painter.setPen(text_color)
+            painter.drawText(margin, norm_label_top, int(bar_left - margin - 2), norm_label_height,
+                             QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
+                             self._min_norm_label)
+            painter.drawText(int(bar_right + 2), norm_label_top, int(w - bar_right - margin), norm_label_height,
+                             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+                             self._max_norm_label)
+
         # Direction note (below bar, centered)
         if self._direction_note:
             font.setPointSize(7)
             painter.setFont(font)
-            painter.drawText(0, label_y - 4, w, 12,
+            painter.drawText(0, direction_note_top, w, 12,
                              QtCore.Qt.AlignmentFlag.AlignCenter, self._direction_note)
 
         painter.end()

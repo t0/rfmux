@@ -13,7 +13,7 @@ import time
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
     TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
-    ScreenshotMixin
+    ScreenshotMixin, mag_axis_label, make_tab_title,
 )
 from .detector_digest_panel import DetectorDigestPanel
 from .noise_spectrum_panel import NoiseSpectrumPanel
@@ -37,7 +37,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     
     # Signal emitted when bias_kids algorithm completes with df_calibration data
     df_calibration_ready = pyqtSignal(int, dict)  # module, {detector_idx: df_calibration}
-    
+
+    # Signal emitted when IQ rotation angles have been computed after Apply Bias
+    iq_rotation_ready = pyqtSignal(int, dict)   # module, {code: angle_radians}
+
     # Signal for session auto-export
     data_ready = pyqtSignal(str, str, dict)  # type, identifier, data
     def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None, dark_mode=False, loaded_bias=False, is_loaded_data=False):
@@ -77,21 +80,26 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.digest_window_count = 0  # Counter for naming digest tabs
         self.noise_panel_count = 0    # Counter for naming noise tabs
         
-        # Stores the initial/base CFs for detector ID and fallback. Order is important.
-        self.conceptual_section_frequencies: list[float] = list(self.initial_params.get('resonance_frequencies', []))
-        # Stores {amp: {conceptual_idx: output_cf}}
-        self.last_output_cfs_by_amp_and_conceptual_idx: dict[float, dict[int, float]] = {}
         # Amps used for the last configured/completed run, to compare if settings changed.
-        self.current_run_amps: list[float] = list(self.initial_params.get('amps', []))
+        # Use amp_arrays (new format) if present, falling back to amps (old format).
+        _init_amp_arrays = self.initial_params.get('amp_arrays', [])
+        if _init_amp_arrays:
+            self.current_run_amps: list[float] = [arr[0] for arr in _init_amp_arrays if arr]
+        else:
+            self.current_run_amps: list[float] = list(self.initial_params.get('amps', []))
         # probe_amplitudes is used for progress display, should reflect current_run_amps
         self.probe_amplitudes = list(self.current_run_amps) # Ensure it's a copy and reflects current run
 
         self.setWindowTitle(f"Multisweep Results - Module {self.target_module}")
 
+
         # Data storage and state — detector-based format:
-        # {detector_id: {iteration_index: {all_detector_data_fields + amplitude, direction, iteration metadata}}}
+        # {detector_code: {iteration_index: {all_detector_data_fields + amplitude, direction, iteration metadata}}}
         self.results_by_detector = {}
+        # Lightweight resonator registry {code: {bias_frequency, bias_amplitude, channel_number}}
+        self.res_info_dict: dict = {}
         self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed
+
         self.current_iteration_being_processed = None # Tracks the current iteration
         self.unit_mode = "dbm"  # Current unit for magnitude display ("counts", "dbm", "volts")
         self.normalize_traces = True  # Flag to normalize trace plots (magnitude and phase)
@@ -113,23 +121,57 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Module context for DAC scale lookup (can be different from target_module if needed)
         self.active_module_for_dac = self.target_module
 
-        # Center frequency line display
-        self.show_cf_lines_cb = None # Checkbox for toggling CF lines
-        self.cf_lines_mag = {}  # Stores {amplitude: [InfiniteLine_mag]}
-        self.cf_lines_phase = {} # Stores {amplitude: [InfiniteLine_phase]}
+        # "Show Bias Info" checkbox — enabled/checked when bias data is available
+        self.show_bias_info_cb = None  # Checkbox for toggling bias overlays
+
+        # Bias frequency overlay lines (shown after Find Bias completes)
+        # These are InfiniteLine items added to the combined plots to mark the
+        # refined bias frequency for each detector.  Stored so they can be
+        # removed when _redraw_combined_plots is next called.
+        self.bias_freq_lines_mag = []    # InfiniteLine items on combined mag plot
+        self.bias_freq_lines_phase = []  # InfiniteLine items on combined phase plot
         
-        # Bias KIDs output storage
-        self.bias_kids_output = None  # Stores the output from bias_kids algorithm
-        self.nco_frequency_hz = None  # NCO frequency used when biasing (stored for export)
+        # Bias task storage
+        self.bias_kids_output = None     # Stores the output from apply_bias (for export)
+        self.nco_frequency_hz = None     # NCO frequency used when biasing (stored for export)
+        self.find_bias_task = None       # Active FindBiasTask, if any
+        self.find_bias_signals = None    # FindBiasSignals instance
+        self.apply_bias_task = None      # Active ApplyBiasTask, if any
+        self.apply_bias_signals = None   # ApplyBiasSignals instance
+        self.iq_rotation_task = None     # Active ComputeIQRotationTask, if any
+        self.iq_rotation_signals = None  # IQRotationSignals instance
+        self.bias_settings_panel = None  # Lazy-initialized BiasSettingsPanel instance
+
+        # Fit task storage
+        self.run_fits_task    = None     # Active RunFitsTask, if any
+        self.run_fits_signals = None     # RunFitsSignals instance
+        self.fit_settings_panel = None   # Lazy-initialized FitSettingsPanel instance
 
         # Initialize batch tracking for sweep tabs (before _setup_ui)
         self.current_batch = 0
+
         self.batch_size = 8
+
+        # Sort order for aggregate panel grids: "frequency" (default) or "name"
+        self.sort_order = "frequency"
         
         # Storage for sweep grid plots - cached to avoid recreating widgets
-        self.mag_sweep_plots_cache = []  # List of plot widgets for magnitude tab
-        self.iq_sweep_plots_cache = []   # List of plot widgets for IQ tab
-        
+        self.mag_sweep_plots_cache = []        # List of plot widgets for magnitude tab
+        self.iq_sweep_plots_cache = []         # List of plot widgets for IQ tab
+        self.derivative_plots_cache = []       # List of plot widgets for IQ Derivatives tab
+
+        # Fit Results tab (Tab 6) — optional, enabled via Fit Settings
+        self.fit_results_tab = None
+        self.fit_results_grid = None
+        self.fit_results_plots_cache = []
+        self.fit_results_tab_index = 6
+        # Tab 6 display controls (initialized in _setup_plot_area)
+        self._fit_display_mode_rb_index = None
+        self._fit_display_mode_rb_bias = None
+        self._fit_display_index_combo = None
+        self._fit_show_skewed_cb = None
+        self._fit_show_nonlinear_cb = None
+
         # Histogram panel (created lazily in _setup_plot_area)
         self.histogram_panel = None
         self.histograms_generated = False  # Track if histograms have been generated
@@ -152,102 +194,238 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self._setup_toolbar(main_layout)
         self._setup_progress_bar(main_layout)
+        self._setup_panel_title(main_layout)
         self._setup_plot_area(main_layout)
 
 
     def _setup_toolbar(self, layout):
-        """Creates and configures the toolbar with controls (using QWidget instead of QToolBar)."""
-        # Use QWidget container instead of QToolBar for QWidget compatibility
+        """Creates and configures the two-row toolbar with controls (using QWidget instead of QToolBar).
+
+        Top row — workflow actions (run, bias, export/screenshot).
+        Bottom row — view and navigation controls (batch, units, normalization, zoom).
+        """
+        # Outer container holds both rows stacked vertically
         toolbar = QtWidgets.QWidget()
-        toolbar_layout = QtWidgets.QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(5, 5, 5, 5)
+        toolbar_vbox = QtWidgets.QVBoxLayout(toolbar)
+        toolbar_vbox.setContentsMargins(5, 3, 5, 3)
+        toolbar_vbox.setSpacing(2)
+
+        # ── Row 1: Workflow / Action buttons ──────────────────────────────────
+        row1 = QtWidgets.QWidget()
+        row1_layout = QtWidgets.QHBoxLayout(row1)
+        row1_layout.setContentsMargins(0, 0, 0, 0)
+        row1_layout.setSpacing(4)
 
         # Export Data Button
         self.export_btn = QtWidgets.QPushButton("💾")
         self.export_btn.setToolTip("Export data")
         self.export_btn.clicked.connect(self._export_data)
-        toolbar_layout.addWidget(self.export_btn)
-        
+        row1_layout.addWidget(self.export_btn)
+
+        # Screenshot button (kept next to Export — both save output)
+        screenshot_btn = QtWidgets.QPushButton("📷")
+        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        screenshot_btn.clicked.connect(self._export_screenshot)
+        row1_layout.addWidget(screenshot_btn)
+
         # Re-run Multisweep Button
         self.rerun_btn = QtWidgets.QPushButton("Re-run Multisweep")
         self.rerun_btn.clicked.connect(self._rerun_multisweep)
-        toolbar_layout.addWidget(self.rerun_btn)
-        
-        # Bias KIDs Button
-        self.bias_kids_btn = QtWidgets.QPushButton("Bias KIDs")
-        self.bias_kids_btn.clicked.connect(self._bias_kids)
-        self.bias_kids_btn.setToolTip("Bias detectors at optimal operating points based on multisweep results")
-        toolbar_layout.addWidget(self.bias_kids_btn)
+        row1_layout.addWidget(self.rerun_btn)
 
+        # Run Fit button — runs the selected fitting algorithms on existing data
+        self.run_fit_btn = QtWidgets.QPushButton("Run Fit")
+        self.run_fit_btn.clicked.connect(self._run_fit)
+        self.run_fit_btn.setToolTip(
+            "Re-run resonator fitting algorithms on the existing multisweep data.\n"
+            "Useful when the original sweep was run without fitting, or to re-fit\n"
+            "with different settings.  Configure which fits to apply via ⚙ Fit Settings."
+        )
+        row1_layout.addWidget(self.run_fit_btn)
+
+        # Fit Settings button — opens persistent FitSettingsPanel
+        self.fit_settings_btn = QtWidgets.QPushButton("⚙ Fit Settings")
+        self.fit_settings_btn.clicked.connect(self._show_fit_settings)
+        self.fit_settings_btn.setToolTip("Open the fitting settings panel")
+        row1_layout.addWidget(self.fit_settings_btn)
+
+        # Find Bias button
+        self.find_bias_btn = QtWidgets.QPushButton("Find Bias")
+        self.find_bias_btn.clicked.connect(self._find_bias)
+        self.find_bias_btn.setToolTip(
+            "Analyse multisweep data to identify the optimal bias amplitude\n"
+            "and frequency for each resonator (updates res_info_dict).\n"
+            "Inspect the results before applying to hardware."
+        )
+        row1_layout.addWidget(self.find_bias_btn)
+
+        # Apply Bias button — disabled until Find Bias has completed
+        self.apply_bias_btn = QtWidgets.QPushButton("Apply Bias")
+        self.apply_bias_btn.clicked.connect(self._apply_bias)
+        self.apply_bias_btn.setEnabled(False)
+        self.apply_bias_btn.setToolTip(
+            "Programme the CRS hardware channels with the bias conditions\n"
+            "found by Find Bias.  Only available after Find Bias succeeds."
+        )
+        row1_layout.addWidget(self.apply_bias_btn)
+
+        # Bias Settings button — opens persistent settings panel
+        self.bias_settings_btn = QtWidgets.QPushButton("⚙ Bias Settings")
+        self.bias_settings_btn.clicked.connect(self._show_bias_settings)
+        self.bias_settings_btn.setToolTip("Open the bias-finding settings panel")
+        row1_layout.addWidget(self.bias_settings_btn)
+
+        # Get Noise Spectrum button
         self.noise_spectrum_btn = QtWidgets.QPushButton("Get Noise Spectrum")
-        if self.bias_data_avail:
-            self.noise_spectrum_btn.setEnabled(True)
-        else:
-            self.noise_spectrum_btn.setEnabled(False)
-        self.noise_spectrum_btn.setToolTip("Open a dialog to configure and get the noise spectrum, will only work if KIDS is biased.")
+        self.noise_spectrum_btn.setEnabled(self.bias_data_avail)
+        self.noise_spectrum_btn.setToolTip(
+            "Open a dialog to configure and get the noise spectrum, will only work if KIDS is biased."
+        )
         self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
-        toolbar_layout.addWidget(self.noise_spectrum_btn)
-        
-        # Spacer to push subsequent items to the right
-        toolbar_layout.addStretch(1)
-        
+        row1_layout.addWidget(self.noise_spectrum_btn)
+
+        # Transient "Find Bias" status label — hidden until Find Bias completes,
+        # then shown briefly before auto-hiding after 5 s.
+        self._bias_status_label = QtWidgets.QLabel("✓ Bias found")
+        self._bias_status_label.setStyleSheet(
+            "color: #2a8a2a; font-weight: bold; padding: 2px 6px;"
+        )
+        self._bias_status_label.hide()
+        row1_layout.addWidget(self._bias_status_label)
+
+        # Transient "Apply Bias" status label — hidden until Apply Bias completes,
+        # then shown briefly before auto-hiding after 5 s.
+        self._apply_bias_status_label = QtWidgets.QLabel("✓ Bias applied")
+        self._apply_bias_status_label.setStyleSheet(
+            "color: #2a8a2a; font-weight: bold; padding: 2px 6px;"
+        )
+        self._apply_bias_status_label.hide()
+        row1_layout.addWidget(self._apply_bias_status_label)
+
+        # Transient "Fits complete" status label — hidden until Run Fit completes,
+        # then shown briefly before auto-hiding after 5 s.
+        self._fits_status_label = QtWidgets.QLabel("✓ Fits complete")
+        self._fits_status_label.setStyleSheet(
+            "color: #2a8a2a; font-weight: bold; padding: 2px 6px;"
+        )
+        self._fits_status_label.hide()
+        row1_layout.addWidget(self._fits_status_label)
+
+        # Transient "IQ rotation computed" status label — shown briefly after
+        # ComputeIQRotationTask completes following Apply Bias.
+        self._iq_rotation_status_label = QtWidgets.QLabel("✓ IQ rotation computed")
+        self._iq_rotation_status_label.setStyleSheet(
+            "color: #2a8a2a; font-weight: bold; padding: 2px 6px;"
+        )
+        self._iq_rotation_status_label.hide()
+        row1_layout.addWidget(self._iq_rotation_status_label)
+
+        row1_layout.addStretch(1)
+        toolbar_vbox.addWidget(row1)
+
+        # ── Horizontal separator ──────────────────────────────────────────────
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        separator.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+        toolbar_vbox.addWidget(separator)
+
+        # ── Row 2: View / Navigation controls ────────────────────────────────
+        row2 = QtWidgets.QWidget()
+        row2_layout = QtWidgets.QHBoxLayout(row2)
+        row2_layout.setContentsMargins(0, 0, 0, 0)
+        row2_layout.setSpacing(4)
+
         # Batch navigation controls (for sweep tabs)
         self.batch_label = QtWidgets.QLabel("Batch:")
-        toolbar_layout.addWidget(self.batch_label)
-        
+        row2_layout.addWidget(self.batch_label)
+
         self.prev_batch_btn = QtWidgets.QPushButton("◀")
         self.prev_batch_btn.setToolTip("Previous batch")
-        self.prev_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
+        self.prev_batch_btn.setMaximumWidth(30)
         self.prev_batch_btn.clicked.connect(self._prev_batch)
-        toolbar_layout.addWidget(self.prev_batch_btn)
-        
+        row2_layout.addWidget(self.prev_batch_btn)
+
         self.batch_info_label = QtWidgets.QLabel("1 of 1")
         self.batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.batch_info_label.setMinimumWidth(40)
-        toolbar_layout.addWidget(self.batch_info_label)
-        
+        row2_layout.addWidget(self.batch_info_label)
+
         self.next_batch_btn = QtWidgets.QPushButton("▶")
         self.next_batch_btn.setToolTip("Next batch")
-        self.next_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
+        self.next_batch_btn.setMaximumWidth(30)
         self.next_batch_btn.clicked.connect(self._next_batch)
-        toolbar_layout.addWidget(self.next_batch_btn)
-        
+        row2_layout.addWidget(self.next_batch_btn)
+
         self.batch_size_label = QtWidgets.QLabel("Subplots:")
-        toolbar_layout.addWidget(self.batch_size_label)
-        
+        row2_layout.addWidget(self.batch_size_label)
+
         self.batch_size_spin = QtWidgets.QSpinBox()
         self.batch_size_spin.setRange(1, 200)
         self.batch_size_spin.setValue(self.batch_size)
         self.batch_size_spin.setSingleStep(1)
         self.batch_size_spin.setToolTip("Detectors per batch (press Update to apply)")
-        # Note: No longer connects to immediate redraw
-        toolbar_layout.addWidget(self.batch_size_spin)
-        
+        row2_layout.addWidget(self.batch_size_spin)
+
         self.batch_update_btn = QtWidgets.QPushButton("Update")
         self.batch_update_btn.setToolTip("Apply new batch size and regenerate plots")
         self.batch_update_btn.clicked.connect(self._apply_batch_size)
-        toolbar_layout.addWidget(self.batch_update_btn)
+        row2_layout.addWidget(self.batch_update_btn)
+
+        # Sort order selector — placed next to "Subplots" controls
+        self.sort_order_label = QtWidgets.QLabel("Sort:")
+        row2_layout.addWidget(self.sort_order_label)
+
+        self.sort_order_combo = QtWidgets.QComboBox()
+        self.sort_order_combo.addItem("By Frequency", "frequency")
+        self.sort_order_combo.addItem("By Name", "name")
+        self.sort_order_combo.setCurrentIndex(0)   # Default: by frequency
+        self.sort_order_combo.setToolTip(
+            "Sort order for resonator subplots in the aggregate panel pages.\n"
+            "'By Frequency' orders subplots by ascending central frequency.\n"
+            "'By Name' uses alphabetical ordering by resonator code."
+        )
+        self.sort_order_combo.currentIndexChanged.connect(self._on_sort_order_changed)
+        row2_layout.addWidget(self.sort_order_combo)
+
+        # Spacer to push view toggles to the right
+        row2_layout.addStretch(1)
 
         # Normalization Checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
         self.normalize_checkbox.setChecked(self.normalize_traces)
         self.normalize_checkbox.toggled.connect(self._toggle_trace_normalization)
-        toolbar_layout.addWidget(self.normalize_checkbox)
+        row2_layout.addWidget(self.normalize_checkbox)
 
-        # Show Center Frequencies Checkbox
-        self.show_cf_lines_cb = QtWidgets.QCheckBox("Show Center Frequencies")
-        self.show_cf_lines_cb.setChecked(False) # Default to off
-        self.show_cf_lines_cb.toggled.connect(self._toggle_cf_lines_visibility)
-        toolbar_layout.addWidget(self.show_cf_lines_cb)
+        # Show Bias Info Checkbox — disabled until bias data is available
+        self.show_bias_info_cb = QtWidgets.QCheckBox("Show Bias Info")
+        self.show_bias_info_cb.setChecked(False)
+        self.show_bias_info_cb.setEnabled(False)
+        self.show_bias_info_cb.setToolTip(
+            "Toggle bias overlays: highlighted bias amplitude sweep, bias frequency\n"
+            "vertical lines, and ★/a-value legend details.\n"
+            "Available after Find Bias has been run (or when bias info is loaded from file)."
+        )
+        self.show_bias_info_cb.toggled.connect(self._toggle_bias_info_visibility)
+        row2_layout.addWidget(self.show_bias_info_cb)
 
-        self._setup_unit_controls(toolbar_layout)
-        self._setup_zoom_box_control(toolbar_layout)
+        # Show Rotated IQ Checkbox — disabled until IQ rotation angles are available.
+        # Only affects the IQ Circles tab (Tab 1); has no effect on other tabs.
+        self.show_rotated_iq_cb = QtWidgets.QCheckBox("Show Rotated IQ")
+        self.show_rotated_iq_cb.setChecked(False)
+        self.show_rotated_iq_cb.setEnabled(False)
+        self.show_rotated_iq_cb.setToolTip(
+            "Rotate the IQ sweep circles so that the signal-sensitive direction\n"
+            "aligns with the Q axis.  Only visible on the IQ Circles tab.\n"
+            "Available after Apply Bias has been run (or when a file with stored\n"
+            "IQ rotation angles is loaded)."
+        )
+        self.show_rotated_iq_cb.toggled.connect(self._on_show_rotated_iq_changed)
+        row2_layout.addWidget(self.show_rotated_iq_cb)
 
-        # Screenshot button
-        screenshot_btn = QtWidgets.QPushButton("📷")
-        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
-        screenshot_btn.clicked.connect(self._export_screenshot)
-        toolbar_layout.addWidget(screenshot_btn)
+        self._setup_unit_controls(row2_layout)
+        self._setup_zoom_box_control(row2_layout)
+
+        toolbar_vbox.addWidget(row2)
 
         layout.addWidget(toolbar)
 
@@ -290,8 +468,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.plot_tabs.currentChanged.connect(self._on_plot_tab_changed)
         
         # Tab 0: Magnitude Sweeps (per-detector grid)
+
         self.mag_sweeps_tab, self.mag_sweeps_grid, self.mag_colorbar = self._create_sweep_tab()
-        self.plot_tabs.addTab(self.mag_sweeps_tab, "Magnitude Sweeps")
+        self.plot_tabs.addTab(self.mag_sweeps_tab, "Mag vs Freq")
         
         # Tab 1: IQ Circles (per-detector grid)
         self.iq_sweeps_tab, self.iq_sweeps_grid, self.iq_colorbar = self._create_sweep_tab()
@@ -299,22 +478,32 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Tab 2: Combined Plots (original combined view)
         self.combined_tab = self._create_combined_tab()
-        self.plot_tabs.addTab(self.combined_tab, "Combined Plots")
+        self.plot_tabs.addTab(self.combined_tab, "Mag, Phase Overview")
         
         # Tab 3: Histograms (parameter distributions)
         self.histogram_tab = self._create_histogram_tab()
         self.plot_tabs.addTab(self.histogram_tab, "Histograms")
         
+
         # Tab 4: Detector Digest (single-detector detail view)
         self.digest_tab = self._create_digest_tab()
         self.plot_tabs.addTab(self.digest_tab, "Detector Digest")
-        
+
+        # Tab 5: IQ Derivatives (shown after Find Bias)
+        self.derivative_tab, self.derivative_grid = self._create_derivative_tab()
+        self.plot_tabs.addTab(self.derivative_tab, "IQ Derivatives")
+
+        # Tab 6: Fit Results (always visible; shows placeholder until fits have been run)
+        self.fit_results_tab, self.fit_results_grid = self._create_fit_results_tab()
+        self.plot_tabs.addTab(self.fit_results_tab, "Fit Results")
+
         # Set default tab to Magnitude Sweeps
         self.plot_tabs.setCurrentIndex(0)
         
         layout.addWidget(self.plot_tabs)
         
     def _create_sweep_tab(self):
+
         """Create a tab for sweep plots (magnitude or IQ). Returns (tab, grid_layout, colorbar)."""
         tab = QtWidgets.QWidget()
         tab_layout = QtWidgets.QVBoxLayout(tab)
@@ -423,13 +612,152 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         tab_layout.setContentsMargins(0, 0, 0, 0)
         
         # Create a placeholder - we'll create the actual panel when data is available
-        placeholder = QtWidgets.QLabel("Histogram plots will appear here when multisweep data is available.")
+        placeholder = QtWidgets.QLabel("Histograms will appear once fits have been run on the selected multisweep file.")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         placeholder.setStyleSheet("color: gray; font-style: italic;")
         tab_layout.addWidget(placeholder)
         
         return tab
     
+
+    def _create_derivative_tab(self):
+        """Create the IQ Derivatives tab (populated after Find Bias runs).
+
+        Returns
+        -------
+        (tab, grid_layout)
+            The QWidget tab and its inner QGridLayout for derivative subplots.
+        """
+        tab = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(5, 5, 5, 5)
+
+        # Placeholder shown before Find Bias has been run
+        self._derivative_placeholder = QtWidgets.QLabel(
+            "IQ derivative plots will appear here after Find Bias has been run.\n"
+            "Each subplot shows I speed, Q speed, and arc-length speed for the\n"
+            "selected bias amplitude, with the cubic-spline fit overlaid."
+        )
+        self._derivative_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._derivative_placeholder.setStyleSheet("color: gray; font-style: italic;")
+        tab_layout.addWidget(self._derivative_placeholder)
+
+        # Scroll area + grid (identical structure to sweep tabs)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(container)
+        grid.setSpacing(10)
+        scroll.setWidget(container)
+
+        # The scroll area is hidden until Find Bias populates it
+        scroll.hide()
+        self._derivative_scroll = scroll
+        tab_layout.addWidget(scroll)
+
+        return tab, grid
+
+    def _create_fit_results_tab(self):
+        """Create the Fit Results tab (Tab 6).
+
+        Shows per-detector magnitude sweeps overlaid with fitted model curves.
+        Optional: enabled via the "Show Fit Results Tab" checkbox in Fit Settings.
+        Hidden by default until both enabled and fit data are present.
+
+        Returns
+        -------
+        (tab, grid_layout)
+            The QWidget tab and its inner QGridLayout for fit-result subplots.
+        """
+        tab = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(5, 5, 5, 5)
+        tab_layout.setSpacing(4)
+
+        # ── Controls row ──────────────────────────────────────────────────────
+        controls_row = QtWidgets.QWidget()
+        controls_layout = QtWidgets.QHBoxLayout(controls_row)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(6)
+
+        # Amplitude display mode
+        amp_label = QtWidgets.QLabel("Show amplitude:")
+        controls_layout.addWidget(amp_label)
+
+        self._fit_display_mode_rb_index = QtWidgets.QRadioButton("Index:")
+        self._fit_display_mode_rb_index.setChecked(True)
+        self._fit_display_mode_rb_index.setToolTip(
+            "Show the amplitude at sorted position N (0 = lowest)."
+        )
+        controls_layout.addWidget(self._fit_display_mode_rb_index)
+
+        self._fit_display_index_combo = QtWidgets.QComboBox()
+        self._fit_display_index_combo.setMinimumWidth(60)
+        self._fit_display_index_combo.setToolTip(
+            "Select an amplitude index (0 = lowest).\n"
+            "Only indices that have fit data are shown."
+        )
+        self._fit_display_index_combo.addItem("—")  # placeholder until data arrives
+        self._fit_display_index_combo.setEnabled(True)
+        controls_layout.addWidget(self._fit_display_index_combo)
+
+        self._fit_display_mode_rb_bias = QtWidgets.QRadioButton("Bias amplitude")
+        self._fit_display_mode_rb_bias.setToolTip(
+            "Show the bias-amplitude iteration (requires Find Bias to have run)."
+        )
+        controls_layout.addWidget(self._fit_display_mode_rb_bias)
+
+        # Vertical separator
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        sep.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+        controls_layout.addWidget(sep)
+
+        # Model overlay toggles
+        overlay_label = QtWidgets.QLabel("Show:")
+        controls_layout.addWidget(overlay_label)
+
+        self._fit_show_skewed_cb = QtWidgets.QCheckBox("Skewed fit")
+        self._fit_show_skewed_cb.setChecked(True)
+        controls_layout.addWidget(self._fit_show_skewed_cb)
+
+        self._fit_show_nonlinear_cb = QtWidgets.QCheckBox("Nonlinear fit")
+        self._fit_show_nonlinear_cb.setChecked(True)
+        controls_layout.addWidget(self._fit_show_nonlinear_cb)
+
+        controls_layout.addStretch(1)
+        tab_layout.addWidget(controls_row)
+
+        # ── Connect controls → redraw ──────────────────────────────────────────
+        self._fit_display_mode_rb_index.toggled.connect(self._on_fit_results_controls_changed)
+        self._fit_display_mode_rb_bias.toggled.connect(self._on_fit_results_controls_changed)
+        self._fit_display_index_combo.currentIndexChanged.connect(self._on_fit_results_controls_changed)
+        self._fit_show_skewed_cb.toggled.connect(self._on_fit_results_controls_changed)
+        self._fit_show_nonlinear_cb.toggled.connect(self._on_fit_results_controls_changed)
+
+        # ── Placeholder shown before any fits have been run ───────────────────
+        self._fit_results_placeholder = QtWidgets.QLabel(
+            "Plots will appear here once fits have been run on the selected multisweep file."
+        )
+        self._fit_results_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._fit_results_placeholder.setStyleSheet("color: gray; font-style: italic;")
+        tab_layout.addWidget(self._fit_results_placeholder)
+
+        # ── Scroll area + grid ────────────────────────────────────────────────
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(container)
+        grid.setSpacing(10)
+        scroll.setWidget(container)
+
+        # Hidden until fit data is available
+        scroll.hide()
+        self._fit_results_scroll = scroll
+        tab_layout.addWidget(scroll)
+
+        return tab, grid
+
     def _create_digest_tab(self):
         """Create the detector digest tab (single-detector detail view, lazily populated)."""
         tab = QtWidgets.QWidget()
@@ -462,7 +790,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         has_fit_data = False
         for amp_dir_dict in self.results_by_detector.values():
             for det_data in amp_dir_dict.values():
-                if 'fit_params' in det_data or 'nonlinear_fit_params' in det_data:
+                if det_data.get('fits'):
                     has_fit_data = True
                     break
             if has_fit_data:
@@ -512,20 +840,78 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _on_plot_tab_changed(self, index):
         """Handle plot tab changes - show/hide batch controls appropriately."""
-        # Batch controls visible for sweep tabs (0, 1), hidden for combined tab (2)
-        is_sweep_tab = index in (0, 1)
+        # Batch controls visible for sweep tabs (0, 1), IQ Derivatives (5), and Fit Results (6)
+        is_sweep_tab = index in (0, 1, 5, 6)
         
         self.batch_label.setVisible(is_sweep_tab)
         self.prev_batch_btn.setVisible(is_sweep_tab)
         self.batch_info_label.setVisible(is_sweep_tab)
         self.next_batch_btn.setVisible(is_sweep_tab)
+
         self.batch_size_label.setVisible(is_sweep_tab)
         self.batch_size_spin.setVisible(is_sweep_tab)
         self.batch_update_btn.setVisible(is_sweep_tab)
+
+        # Sort order selector is only relevant for the aggregate grid tabs
+        self.sort_order_label.setVisible(is_sweep_tab)
+        self.sort_order_combo.setVisible(is_sweep_tab)
         
+        # When switching to the Fit Results tab, refresh the amplitude index dropdown
+        # so it reflects whatever fit data is currently present.
+        if index == 6 and self.results_by_detector:
+            self._populate_fit_amplitude_combo()
+
         # Redraw the active tab's plots if we have data
         if self.results_by_detector:
             self._redraw_plots()
+
+    def _on_sort_order_changed(self, index: int):
+        """Slot for the sort order combo box.
+
+        Updates ``self.sort_order``, resets to the first batch (so the
+        newly-ordered pages start from page 1), and triggers a full redraw of
+        the currently visible aggregate grid tab.
+        """
+        self.sort_order = self.sort_order_combo.currentData()
+        self.current_batch = 0  # Reset to first page after re-sorting
+        self._redraw_plots()
+
+    def _get_sorted_detector_ids(self, detector_ids_iterable, freq_lookup_func) -> list:
+        """Return detector IDs ordered according to ``self.sort_order``.
+
+        Parameters
+        ----------
+        detector_ids_iterable:
+            Iterable of detector ID keys (strings or integers).
+        freq_lookup_func:
+            Callable ``(detector_id) -> float | None`` — returns the central
+            frequency in Hz for the given detector, or ``None`` when the
+            frequency is not yet known.  Detectors with no frequency are
+            appended at the end, sorted alphabetically among themselves.
+
+        Returns
+        -------
+        list
+            Detector IDs in the chosen order.
+        """
+        ids = list(detector_ids_iterable)
+
+        if self.sort_order == "name":
+            return sorted(ids, key=lambda k: str(k))
+
+        # sort_order == "frequency": ascending by central frequency
+        with_freq = []
+        without_freq = []
+        for det_id in ids:
+            freq = freq_lookup_func(det_id)
+            if freq is not None:
+                with_freq.append((float(freq), det_id))
+            else:
+                without_freq.append(det_id)
+
+        with_freq.sort(key=lambda t: t[0])
+        without_freq.sort(key=lambda k: str(k))
+        return [det_id for _, det_id in with_freq] + without_freq
     
     def _apply_batch_size(self):
         """Apply the batch size from the spin box and regenerate plots."""
@@ -545,13 +931,22 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         """Show next batch."""
         # Get current tab to determine which data to use
         current_tab_idx = self.plot_tabs.currentIndex()
-        if current_tab_idx not in (0, 1):  # Only sweep tabs have batches
+        if current_tab_idx not in (0, 1, 5, 6):  # Only sweep tabs, IQ Derivatives, and Fit Results have batches
             return
             
         if not self.results_by_detector:
             return
         
-        num_detectors = len(self.results_by_detector)
+        # For the derivative tab, count only detectors that have bias_finding data
+        if current_tab_idx == 5:
+            num_detectors = sum(
+                1 for iter_dict in self.results_by_detector.values()
+                if any('bias_finding' in entry for entry in iter_dict.values())
+            )
+        else:
+            # Tabs 0, 1, 6: all detectors
+            num_detectors = len(self.results_by_detector)
+        
         total_batches = max(1, (num_detectors + self.batch_size - 1) // self.batch_size)
         
         if self.current_batch < total_batches - 1:
@@ -579,21 +974,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             
     def _update_mag_plot_label(self):
         """Updates the Y-axis label of the magnitude plot based on current unit and normalization settings."""
-        if not self.combined_mag_plot: return
-
-        if self.normalize_traces:
-            label = "Normalized Magnitude" # Label for magnitude part of the trace
-            # Normalized dBm is still in dB, other normalized units are unitless or relative.
-            units = "dB" if self.unit_mode == "dbm" else "" 
-        else:
-            if self.unit_mode == "counts":
-                label, units = "Magnitude", "Counts"
-            elif self.unit_mode == "dbm":
-                label, units = "Power", "dBm"
-            elif self.unit_mode == "volts":
-                label, units = "Magnitude", "V"
-            else: # Fallback, should not ideally be reached if UI is constrained
-                label, units = "Magnitude", ""
+        if not self.combined_mag_plot:
+            return
+        label, units = mag_axis_label(self.unit_mode, self.normalize_traces)
         self.combined_mag_plot.setLabel('left', label, units=units)
 
     def _toggle_zoom_box_mode(self, enable):
@@ -605,11 +988,34 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._apply_zoom_box_mode()
 
     def _apply_zoom_box_mode(self):
-        """Applies the current zoom_box_mode state to both magnitude and phase plot viewboxes."""
+        """Applies the current zoom_box_mode state to all plot viewboxes.
+
+        Covers:
+        - The Combined Plots tab (combined_mag_plot / combined_phase_plot), which use
+          ClickableViewBox and have an ``enableZoomBoxMode`` helper.
+        - All cached grid plot widgets (Magnitude Sweeps, IQ Circles, IQ Derivatives
+          tabs), which use a plain ``pg.ViewBox`` and are updated via ``setMouseMode``
+          directly.
+        """
+        mode = pg.ViewBox.RectMode if self.zoom_box_mode else pg.ViewBox.PanMode
+
+        # Combined Plots tab — ClickableViewBox
         if self.combined_mag_plot and isinstance(self.combined_mag_plot.getViewBox(), ClickableViewBox):
             self.combined_mag_plot.getViewBox().enableZoomBoxMode(self.zoom_box_mode)
         if self.combined_phase_plot and isinstance(self.combined_phase_plot.getViewBox(), ClickableViewBox):
             self.combined_phase_plot.getViewBox().enableZoomBoxMode(self.zoom_box_mode)
+
+        # Grid plot caches (tabs 0, 1, 5, 6) — plain pg.ViewBox
+        all_caches = (
+            self.mag_sweep_plots_cache
+            + self.iq_sweep_plots_cache
+            + self.derivative_plots_cache
+            + self.fit_results_plots_cache
+        )
+        for pw in all_caches:
+            vb = pw.getViewBox()
+            if vb is not None:
+                vb.setMouseMode(mode)
 
     def _setup_progress_bar(self, layout):
         """Set up progress bar in a separate group, similar to NetworkAnalysisWindow."""
@@ -650,13 +1056,58 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 direction_text = "Unknown"
                 print(f"WARNING: Unexpected sweep_direction value: '{sweep_direction}'")
                 
-            self.current_amp_label.setText(f"Iteration 1/{self.total_iterations}: Amplitude {self.probe_amplitudes[0]:.4f} ({direction_text})")
+            self.current_amp_label.setText(f"Iteration 1/{self.total_iterations} ({direction_text})")
         else:
             self.current_amp_label.setText("No sweeps defined. (Waiting...)")
         self.current_amp_label.setAlignment(Qt.AlignmentFlag.AlignCenter) # Center the text
         progress_layout.addWidget(self.current_amp_label)
         
         layout.addWidget(self.progress_group)
+
+    def _make_panel_title(self) -> str:
+        """Build a panel-level title string for display above the plot tabs.
+
+        Incorporates the module number, the measurement type (Multisweep),
+        and the measurement filename when one has been set.
+
+        Returns:
+            A string such as ``"Module 2 — Multisweep [my_sweep.pkl]"`` when a
+            measurement name is available, or ``"Module 2 — Multisweep"`` when
+            no name has been set.
+        """
+        base = f"Module {self.target_module} — Multisweep"
+        name = self.initial_params.get('measurement_name')
+        if name:
+            return f"{base} [{name}.pkl]"
+        return base
+
+    def _setup_panel_title(self, layout):
+        """Add a styled title label above the plot tabs.
+
+        Creates ``self.panel_title_label`` — a bold, centred ``QLabel`` that
+        is always visible regardless of which tab is active.  The text is
+        built from :meth:`_make_panel_title` and can be refreshed later by
+        calling :meth:`_refresh_panel_title`.
+
+        Args:
+            layout: The ``QVBoxLayout`` to append the label to.
+        """
+        self.panel_title_label = QtWidgets.QLabel(self._make_panel_title())
+        self.panel_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.panel_title_label.setStyleSheet(
+            "font-weight: bold; font-size: 11pt; padding: 2px 6px;"
+        )
+        layout.addWidget(self.panel_title_label)
+
+    def _refresh_panel_title(self):
+        """Update the panel title label to reflect the current ``initial_params``.
+
+        Should be called whenever ``initial_params`` changes (e.g. after a
+        re-run with a new measurement name).  Safe to call even before the
+        label has been created.
+        """
+        if hasattr(self, 'panel_title_label') and self.panel_title_label is not None:
+            self.panel_title_label.setText(self._make_panel_title())
 
     def _hide_progress_bars(self):
         """Hide the entire Analysis Progress group."""
@@ -699,7 +1150,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.total_iterations = max(self.total_iterations, current_display_iteration)
         
         # Set the status message BEFORE the sweep starts
-        status_message = f"Iteration {current_display_iteration}/{self.total_iterations}: Amplitude {amplitude:.4f} ({direction_text})"
+        status_message = f"Iteration {current_display_iteration}/{self.total_iterations} ({direction_text})"
         self.current_amp_label.setText(status_message)
 
     def handle_fitting_progress(self, module: int, status_message: str):
@@ -731,42 +1182,49 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # When fitting is completed, just show the base text
             self.current_amp_label.setText(base_text)
         
-    def update_data(self, module: int, iteration: int, amplitude: float, direction: str, results_for_plotting: dict, results_for_history: dict):
+    def update_data(self, module: int, iteration: int, amplitude: float, direction: str,
+                    multisweep_data_dict: dict, res_info_dict: dict):
         """
         Receives final data for a completed iteration of a multisweep for the target module.
-        Stores the data for plotting and updates the CF history.
+        Stores the sweep data dict for plotting and updates the resonator registry.
 
         Args:
             module (int): The module reporting data.
             iteration (int): The current iteration index.
             amplitude (float): The probe amplitude for which data is provided.
             direction (str): The sweep direction ("upward" or "downward").
-            results_for_plotting (dict): Data for plotting, format: {output_cf: data_dict_val}.
-            results_for_history (dict): Data for history, format: {conceptual_idx: output_cf_key}.
+            multisweep_data_dict (dict): Sweep data keyed by resonator code.
+            res_info_dict (dict): Resonator registry keyed by code
+                                  ({code: {bias_frequency, bias_amplitude, channel_number}}).
         """
         if module != self.target_module: return
-        
+
         self.current_amplitude_being_processed = amplitude
         self.current_iteration_being_processed = iteration
 
-        
         # Store data in detector-based structure, keyed by iteration index.
-        # The amplitude and direction are stored inside each entry, not as keys,
-        # so that all detectors share the same iteration indices even if they
-        # use different amplitudes in the future.
-        if results_for_plotting:
-            for detector_id, det_data in results_for_plotting.items():
+        # The amplitude and direction are stored inside each entry so that all
+        # detectors share the same iteration indices regardless of per-section amplitudes.
+        if multisweep_data_dict:
+            dac_scale = self.dac_scales.get(self.target_module)
+            for detector_id, det_data in multisweep_data_dict.items():
                 if detector_id not in self.results_by_detector:
                     self.results_by_detector[detector_id] = {}
                 entry = dict(det_data)
-                entry['amplitude'] = amplitude
-                entry['direction'] = direction
                 entry['iteration'] = iteration
+                # Inject sweep_power_dbm so the live dict is self-contained.
+                # iq_volts is already present (returned by the multisweep algorithm).
+                norm_amp = entry.get('sweep_amplitude_normalized')
+                entry['sweep_power_dbm'] = (
+                    UnitConverter.normalize_to_dbm(norm_amp, dac_scale)
+                    if norm_amp is not None and dac_scale is not None
+                    else None
+                )
                 self.results_by_detector[detector_id][iteration] = entry
 
-        # --- Update CF history using the pre-mapped results_for_history ---
-        if results_for_history:
-            self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {}).update(results_for_history)
+        # --- Update the live resonator registry ---
+        if res_info_dict:
+            self.res_info_dict = res_info_dict
 
         # Invalidate digest panel so it gets recreated with fresh data
         # (the panel takes a snapshot at creation time and doesn't track live changes)
@@ -781,6 +1239,43 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Note: We now update the status in handle_starting_iteration() instead of here
 
+    def _get_expected_amplitudes(self) -> set:
+        """Return the full set of amplitude values expected for this sweep.
+
+        Flattens every per-section amplitude array from ``initial_params`` so
+        that the colour map and colourbar threshold are computed against the
+        complete global range — from the smallest probe amplitude used on any
+        section to the largest — right from the very first iteration.
+
+        Falls back to the flat ``amps`` list for sweeps that use a common
+        amplitude across all sections, and absorbs any already-observed values
+        for robustness (e.g. panels loaded from file where ``initial_params``
+        may not contain the original ``amp_arrays``).
+        """
+        expected: set = set()
+
+        # Flatten all values from all per-section amplitude arrays.
+        # amp_arrays[i] is the full sequence of amplitudes swept for section i.
+        for arr in self.initial_params.get('amp_arrays', []):
+            try:
+                expected.update(arr)
+            except TypeError:
+                pass  # guard against non-iterable entries
+
+        # Flat-list fallback (used when all sections share the same amplitude schedule)
+        if not expected:
+            expected.update(self.initial_params.get('amps', []))
+
+        # Also absorb any already-observed amplitudes so loaded/re-run panels
+        # always produce a correct reference set even when initial_params is stale.
+        for iter_dict in self.results_by_detector.values():
+            for entry in iter_dict.values():
+                amp = entry.get('sweep_amplitude_normalized')
+                if amp is not None:
+                    expected.add(amp)
+
+        return expected
+
     def _redraw_plots(self):
         """
         Redraws plots based on the currently active tab.
@@ -788,6 +1283,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         For histogram tab (3), updates histogram panel.
         """
         # Early return if no data
+
         if not self.results_by_detector:
             # Clear any existing plots
             if hasattr(self, 'combined_mag_plot') and self.combined_mag_plot:
@@ -807,16 +1303,25 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._redraw_combined_plots()
         # Tab 3: Histograms (parameter distributions)
         elif current_tab_idx == 3:
+
             self._generate_histograms()  # Creates or reloads histogram panel with latest data
             self.histograms_generated = True
         # Tab 4: Detector Digest (recreate if invalidated by new data)
         elif current_tab_idx == 4:
             if self.digest_panel is None and self.results_by_detector:
-                self._open_detector_digest_for_index(1, switch_to_tab=False)
+                first_key = next(iter(self.results_by_detector))
+                self._open_detector_digest_for_index(first_key, switch_to_tab=False)
+        # Tab 5: IQ Derivatives (populated after Find Bias)
+        elif current_tab_idx == 5:
+            self._redraw_derivative_grid()
+        # Tab 6: Fit Results (optional, enabled via Fit Settings)
+        elif current_tab_idx == 6:
+            self._redraw_fit_results_grid()
     
     def _redraw_sweep_grid(self, tab_idx):
         """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
         from .multisweep_grid_helpers import (
+
             create_amplitude_color_map,
             update_sweep_grid
         )
@@ -827,35 +1332,49 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         for detector_id, iter_dict in self.results_by_detector.items():
             detector_data[detector_id] = {}
             for det_entry in iter_dict.values():
-                amp_val = det_entry.get('amplitude')
-                direction = det_entry.get('direction', 'upward')
+                amp_val = det_entry.get('sweep_amplitude_normalized')
+                direction = det_entry.get('sweep_direction', 'upward')
                 freqs = det_entry.get('frequencies', np.array([]))
                 # Use raw counts when in counts mode, otherwise voltage-converted data
                 if self.unit_mode == "counts":
-                    iq_complex = det_entry.get('iq_complex', np.array([]))
+                    iq_counts = det_entry.get('iq_counts', np.array([]))
                 else:
-                    iq_complex = det_entry.get('iq_complex', np.array([]))
-                if amp_val is not None and len(freqs) > 0 and len(iq_complex) > 0:
+                    iq_counts = det_entry.get('iq_counts', np.array([]))
+                if amp_val is not None and len(freqs) > 0 and len(iq_counts) > 0:
                     detector_data[detector_id][(amp_val, direction)] = {
                         'freq': freqs,
-                        'iq': iq_complex,
+                        'iq': iq_counts,
                         'amplitude': amp_val,
                         'direction': direction,
-                        'original_center_frequency': det_entry.get('original_center_frequency')
+                        'original_center_frequency': (
+                            det_entry.get('original_center_frequency')
+                            or det_entry.get('sweep_center_frequency')
+                        ),
+                        'nonlinear_fit_success': det_entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_success', False),
+                        'nonlinear_fit_params': det_entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_params'),
                     }
         
         if not detector_data:
             return
         
+
         # Get all amplitudes for color mapping (unique amplitude values only)
         all_amps = set()
         for det_data in detector_data.values():
             for (amp_val, _direction) in det_data.keys():
                 all_amps.add(amp_val)
         
-        # Create amplitude color mapping (matches combined plot colors)
-        amplitude_to_color = create_amplitude_color_map(all_amps, self.dark_mode)
-        
+        # Build the full expected amplitude set (known from initial_params) so that
+        # the colour map and colourbar threshold are stable across all iterations.
+        expected_amps = self._get_expected_amplitudes()
+
+        # Create amplitude color mapping — pass expected_amps as the reference so
+        # colour positions are assigned based on the total sweep, not just what has
+        # arrived so far.
+        amplitude_to_color = create_amplitude_color_map(
+            all_amps, self.dark_mode, reference_amplitudes=expected_amps
+        )
+
         # Get DAC scale for label formatting
         dac_scale = self.dac_scales.get(self.active_module_for_dac)
         
@@ -875,14 +1394,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         all_sweep_keys = set()
         for det_data in detector_data.values():
             all_sweep_keys.update(det_data.keys())
-        num_sweeps = len(all_sweep_keys)
         has_downward = any(d == 'downward' for _, d in all_sweep_keys)
         
-        # Show colorbar when the inferno colormap is active (num_amps > threshold),
-        # otherwise use per-plot legends with TABLEAU10 colors.
-        num_amps = len(all_amps)
-        if num_amps > AMPLITUDE_COLORMAP_THRESHOLD:
-            sorted_amps = sorted(all_amps)
+        # Use total expected amplitude count for the threshold so that the
+        # legend-vs-colourbar decision is made once up-front and doesn't flip
+        # mid-sweep as more iterations arrive.
+        num_amps_expected = len(expected_amps)
+        if num_amps_expected > AMPLITUDE_COLORMAP_THRESHOLD:
+            # Colourbar range is based on the expected global min/max.
+            sorted_amps = sorted(expected_amps)
             colorbar.update_range(sorted_amps[0], sorted_amps[-1],
                                   dac_scale, self.unit_mode,
                                   self.dark_mode, has_downward)
@@ -892,6 +1412,37 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             colorbar.hide()
             use_legend = True  # show per-plot legends
         
+        # Pass res_info_dict only when the "Show Bias Info" checkbox is checked;
+        # otherwise pass None so the grid helpers suppress all bias overlays.
+        show_bias_info = (
+            self.show_bias_info_cb is not None and self.show_bias_info_cb.isChecked()
+        )
+
+        # Build IQ rotation angles dict for the grid helper (IQ tab only).
+        # Only pass angles when the "Show Rotated IQ" checkbox is active.
+        iq_rotation_angles_for_grid = None
+        if (tab_idx == 1
+                and hasattr(self, 'show_rotated_iq_cb')
+                and self.show_rotated_iq_cb is not None
+                and self.show_rotated_iq_cb.isChecked()
+                and self.res_info_dict):
+            iq_rotation_angles_for_grid = {
+                code: info['iq_rotation_angle']
+                for code, info in self.res_info_dict.items()
+                if 'iq_rotation_angle' in info
+            } or None  # Return None rather than empty dict
+
+        # Compute detector order according to the current sort preference.
+        # For the sweep grid the center frequency is stored inside detector_data.
+        def _sweep_center_freq(det_id):
+            det_d = detector_data.get(det_id, {})
+            if not det_d:
+                return None
+            first_entry = next(iter(det_d.values()), {})
+            return first_entry.get('original_center_frequency')
+
+        sorted_ids = self._get_sorted_detector_ids(detector_data.keys(), _sweep_center_freq)
+
         # Update the grid with widget caching
         update_sweep_grid(
             grid_layout=grid_layout,
@@ -908,13 +1459,25 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             batch_label=self.batch_info_label,
             widget_cache=widget_cache,
             dac_scale=dac_scale,
-            show_legend=use_legend
+            show_legend=use_legend,
+            res_info_dict=self.res_info_dict if show_bias_info else None,
+            iq_rotation_angles=iq_rotation_angles_for_grid,
+            sorted_detector_ids=sorted_ids,
         )
         
         # Install double-click event filter on grid plot widgets
         # Must be AFTER update_sweep_grid so newly created widgets are included
         for pw in widget_cache:
             pw.installEventFilter(self)
+
+        # Apply the current zoom box mode to all (potentially new) grid widgets.
+        # update_sweep_grid may have created fresh pg.PlotWidget instances that
+        # default to pyqtgraph's built-in PanMode; we must set them explicitly.
+        mode = pg.ViewBox.RectMode if self.zoom_box_mode else pg.ViewBox.PanMode
+        for pw in widget_cache:
+            vb = pw.getViewBox()
+            if vb is not None:
+                vb.setMouseMode(mode)
     
     def _redraw_combined_plots(self):
         """Redraw the combined magnitude and phase plots (original view)."""
@@ -933,41 +1496,64 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.curves_mag.clear() # Clear stored references to magnitude curves
         self.curves_phase.clear() # Clear stored references to phase curves
 
-        # Remove existing center frequency (CF) lines
-        for amp_val_lines in self.cf_lines_mag.values():
-            for line in amp_val_lines: self.combined_mag_plot.removeItem(line)
-        self.cf_lines_mag.clear()
-        for amp_val_lines in self.cf_lines_phase.values():
-            for line in amp_val_lines: self.combined_phase_plot.removeItem(line)
-        self.cf_lines_phase.clear()
+        # Remove existing bias frequency overlay lines
+        for line in self.bias_freq_lines_mag:
+            self.combined_mag_plot.removeItem(line)
+        self.bias_freq_lines_mag.clear()
+        for line in self.bias_freq_lines_phase:
+            self.combined_phase_plot.removeItem(line)
+        self.bias_freq_lines_phase.clear()
 
         if not self.results_by_detector:
             self.combined_mag_plot.autoRange(); self.combined_phase_plot.autoRange()
             return
-        
+
+        # Bias overlay visibility is gated on the "Show Bias Info" checkbox.
+        show_bias_info = (
+            self.show_bias_info_cb is not None and self.show_bias_info_cb.isChecked()
+        )
+
+        # --- Determine which amplitudes are "chosen" by Find Bias ---
+        # An amplitude is "chosen" if at least one detector has bias_found=True
+        # and its bias_amplitude matches.  Only populated when bias overlays are on.
+        chosen_amplitudes: set = set()
+        if show_bias_info:
+            for info in self.res_info_dict.values():
+                if info.get('bias_found') and info.get('bias_amplitude') is not None:
+                    chosen_amplitudes.add(info['bias_amplitude'])
+
         # Collect unique (amplitude, direction) pairs and amplitude values from entries
         amplitude_values = set()
         amp_dir_pairs = set()
         for iter_dict in self.results_by_detector.values():
             for entry in iter_dict.values():
-                amp = entry.get('amplitude')
-                direction = entry.get('direction', 'upward')
+                amp = entry.get('sweep_amplitude_normalized')
+                direction = entry.get('sweep_direction', 'upward')
                 if amp is not None:
                     amplitude_values.add(amp)
                     amp_dir_pairs.add((amp, direction))
         num_amps = len(amplitude_values)
             
+        # Build the full expected amplitude set so colour positions and the
+        # colourbar threshold are stable from the very first iteration.
+        expected_amps = self._get_expected_amplitudes()
+
         # Create a mapping for unique amplitude values to colors
-        sorted_amplitudes = sorted(amplitude_values)
-        amplitude_to_color = create_amplitude_color_map(amplitude_values, self.dark_mode)
-        
-        # Colorbar vs legend: show colorbar only when inferno colormap is active
+        amplitude_to_color = create_amplitude_color_map(
+            amplitude_values, self.dark_mode, reference_amplitudes=expected_amps
+        )
+
+        # Colorbar vs legend: base the decision on the total expected count so
+        # the display mode doesn't flip mid-sweep as iterations arrive.
         has_downward = any(d == 'downward' for _, d in amp_dir_pairs)
         dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
-        
-        if num_amps > AMPLITUDE_COLORMAP_THRESHOLD:
+        num_amps_expected = len(expected_amps)
+
+        if num_amps_expected > AMPLITUDE_COLORMAP_THRESHOLD:
+            # Colourbar range spans the expected global min/max.
+            sorted_expected = sorted(expected_amps)
             self.combined_colorbar.update_range(
-                sorted_amplitudes[0], sorted_amplitudes[-1],
+                sorted_expected[0], sorted_expected[-1],
                 dac_scale_for_module, self.unit_mode,
                 self.dark_mode, has_downward)
             self.combined_colorbar.show()
@@ -979,6 +1565,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         legend_items_mag = {} # To avoid duplicate legend entries for the same amplitude/direction combination
         legend_items_phase = {}
         
+
         # Iterate through each (amplitude, direction) pair across all detectors
         for (amp_val, direction) in sorted(amp_dir_pairs):
             # Get color for this amplitude
@@ -986,22 +1573,27 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             
             # Set line style based on direction using constants from utils.py
             line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
-            pen = pg.mkPen(color, width=LINE_WIDTH, style=line_style)
-            
+
             # --- Prepare Legend Entry for this Amplitude (only if legends active) ---
             if show_combined_legend:
                 legend_name_amp = UnitConverter.format_probe_label(amp_val, self.unit_mode, dac_scale_for_module)
                 direction_suffix = " (Down)" if direction == "downward" else " (Up)"
-                full_legend_name = legend_name_amp + direction_suffix
-                
+                # Append chosen indicator to the legend label when this amplitude was selected
+                chosen_suffix = " ★" if amp_val in chosen_amplitudes else ""
+                full_legend_name = legend_name_amp + direction_suffix + chosen_suffix
+
+                # Use the chosen line width for the legend swatch too
+                legend_width = LINE_WIDTH * 2 if amp_val in chosen_amplitudes else LINE_WIDTH
+                legend_pen = pg.mkPen(color, width=legend_width, style=line_style)
+
                 legend_key = (amp_val, direction)
                 
                 if legend_key not in legend_items_mag and self.mag_legend:
-                    dummy_mag_curve_for_legend = pg.PlotDataItem(pen=pen) 
+                    dummy_mag_curve_for_legend = pg.PlotDataItem(pen=legend_pen)
                     self.mag_legend.addItem(dummy_mag_curve_for_legend, full_legend_name)
                     legend_items_mag[legend_key] = dummy_mag_curve_for_legend
                 if legend_key not in legend_items_phase and self.phase_legend:
-                    dummy_phase_curve_for_legend = pg.PlotDataItem(pen=pen)
+                    dummy_phase_curve_for_legend = pg.PlotDataItem(pen=legend_pen)
                     self.phase_legend.addItem(dummy_phase_curve_for_legend, full_legend_name)
                     legend_items_phase[legend_key] = dummy_phase_curve_for_legend
 
@@ -1010,26 +1602,41 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 # Find the entry matching this amplitude and direction
                 data = None
                 for entry in iter_dict.values():
-                    if entry.get('amplitude') == amp_val and entry.get('direction', 'upward') == direction:
+                    if entry.get('sweep_amplitude_normalized') == amp_val and entry.get('sweep_direction', 'upward') == direction:
                         data = entry
                         break
                 if data is None:
                     continue
 
                 freqs_hz = data.get('frequencies', np.array([]))
-                iq_complex = data.get('iq_complex', np.array([]))
+                iq_counts = data.get('iq_counts', np.array([]))
 
-                if freqs_hz is None or iq_complex is None or len(freqs_hz) == 0 or len(iq_complex) == 0:
+                if freqs_hz is None or iq_counts is None or len(freqs_hz) == 0 or len(iq_counts) == 0:
                     continue
+
+                # Thicken the line for this detector's chosen bias amplitude
+                # (only when bias overlays are enabled via the checkbox)
+                det_info = self.res_info_dict.get(res_idx, {})
+                is_chosen_for_det = (
+                    show_bias_info
+                    and det_info.get('bias_found', False)
+                    and det_info.get('bias_amplitude') == amp_val
+                )
+                curve_width = LINE_WIDTH * 2 if is_chosen_for_det else LINE_WIDTH
+                pen = pg.mkPen(color, width=curve_width, style=line_style)
                 
                 # Calculate magnitude and phase
-                s21_mag_raw = np.abs(iq_complex)
+                s21_mag_raw = np.abs(iq_counts)
+                # Compute probe_amp_dbm for dBm normalization if DAC scale available
+                probe_amp_dbm = None
+                if self.normalize_traces and self.unit_mode == 'dbm' and dac_scale_for_module is not None:
+                    probe_amp_dbm = UnitConverter.normalize_to_dbm(amp_val, dac_scale_for_module)
                 s21_mag_processed = UnitConverter.convert_amplitude(
-                    s21_mag_raw, iq_complex, self.unit_mode, 
-                    normalize=self.normalize_traces
+                    s21_mag_raw, iq_counts, self.unit_mode,
+                    normalize=self.normalize_traces, probe_amp_dbm=probe_amp_dbm
                 )
                 # Use pre-calculated phase if available, otherwise calculate from IQ
-                phase_deg = data.get('phase_degrees', np.degrees(np.angle(iq_complex))) 
+                phase_deg = data.get('phase_degrees', np.degrees(np.angle(iq_counts)))
                 
                 if self.normalize_traces and len(phase_deg) > 0:
                     first_phase_val = phase_deg[0]
@@ -1048,19 +1655,33 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 if amp_val not in self.curves_phase: self.curves_phase[amp_val] = {}
                 self.curves_phase[amp_val][res_idx] = phase_curve
 
-                # Add center frequency (CF) lines if enabled
-                if self.show_cf_lines_cb and self.show_cf_lines_cb.isChecked():
-                    bias_freq = data.get('bias_frequency', data.get('original_center_frequency'))
-                    if bias_freq is not None:
-                        cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2)
-                        
-                        mag_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
-                        self.combined_mag_plot.addItem(mag_cf_line)
-                        self.cf_lines_mag.setdefault(amp_val, []).append(mag_cf_line)
+                # --- Bias frequency overlay line (shown when Find Bias has run) ---
+                # One solid vertical line per detector at its refined bias frequency,
+                # using the same color as the chosen amplitude's curves.
+                if is_chosen_for_det:
+                    bias_freq_refined = det_info.get('bias_frequency')
+                    if bias_freq_refined is not None:
+                        # Thin dashed red line for the combined plots so the
+                        # indicator is clearly distinguishable from the sweep
+                        # traces regardless of their color.
+                        bias_line_pen = pg.mkPen(
+                            'r',
+                            style=QtCore.Qt.PenStyle.DashLine,
+                            width=1,
+                        )
+                        mag_bias_line = pg.InfiniteLine(
+                            pos=bias_freq_refined, angle=90,
+                            pen=bias_line_pen, movable=False,
+                        )
+                        self.combined_mag_plot.addItem(mag_bias_line)
+                        self.bias_freq_lines_mag.append(mag_bias_line)
 
-                        phase_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
-                        self.combined_phase_plot.addItem(phase_cf_line)
-                        self.cf_lines_phase.setdefault(amp_val, []).append(phase_cf_line)
+                        phase_bias_line = pg.InfiniteLine(
+                            pos=bias_freq_refined, angle=90,
+                            pen=bias_line_pen, movable=False,
+                        )
+                        self.combined_phase_plot.addItem(phase_bias_line)
+                        self.bias_freq_lines_phase.append(phase_bias_line)
         
         # Adjust plot ranges to fit all data
         self.combined_mag_plot.autoRange()
@@ -1078,6 +1699,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if module == self.target_module:
             self.progress_bar.setValue(100) # Mark as 100% for this specific amplitude
 
+    def _get_filename_override(self) -> str | None:
+        """Return a ``_filename_override`` value derived from the measurement name.
+
+        Reads ``measurement_name`` from ``initial_params`` (set when the
+        MultisweepDialog is accepted).  Returns ``None`` when no custom name
+        was specified so the session manager falls back to its own filename
+        generation / de-duplication logic.
+        """
+        name = self.initial_params.get('measurement_name')
+        return f"{name}.pkl" if name else None
+
     def all_sweeps_completed(self):
         """
         Slot called when all amplitudes in the multisweep have been processed.
@@ -1086,10 +1718,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._check_all_complete()
         self.current_amp_label.setText("All Amplitudes Processed")
         
-        # Emit data_ready signal for session auto-export
+        # Emit data_ready signal for session auto-export.
+        # The session_manager.handle_data_ready will automatically overwrite any
+        # existing file for this (data_type, identifier) pair so that Find Bias
+        # and Run Fit update the same file instead of creating timestamped duplicates.
         if self.results_by_detector:
-            export_data = self._prepare_export_data()
             identifier = f"module{self.target_module}"
+            export_data = self._prepare_export_data()
+            filename_override = self._get_filename_override()
+            if filename_override:
+                export_data['_filename_override'] = filename_override
             self.data_ready.emit("multisweep", identifier, export_data)
         
         # Generate histogram plots once when all data is complete
@@ -1097,10 +1735,24 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._generate_histograms()
             self.histograms_generated = True
         
-        # Auto-populate detector digest for the first detector (lowest frequency)
+        # Update the "Show Bias Info" checkbox state in case loaded data already
+        # contains bias results (e.g. a file saved after Find Bias was run).
+        self._update_bias_info_checkbox_state()
+
+        # Show or hide the Fit Results tab based on settings and whether the loaded
+        # data already contains fit results (e.g. file saved after Run Fit was run).
+        self._update_fit_results_tab_visibility()
+
+        # Auto-populate detector digest for the first detector in insertion order.
         # Don't switch focus — user should stay on the current tab (magnitude sweeps)
         if self.results_by_detector:
-            self._open_detector_digest_for_index(1, switch_to_tab=False)
+            first_key = next(iter(self.results_by_detector))
+            self._open_detector_digest_for_index(first_key, switch_to_tab=False)
+
+        # Auto-run Find Bias if the user requested it in the multisweep dialog.
+        # Deferred via QTimer so all GUI completion signals are processed first.
+        if self.initial_params.get('run_find_bias', False):
+            QtCore.QTimer.singleShot(0, self._find_bias)
         
     def _check_all_complete(self):
         """
@@ -1203,14 +1855,35 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.spectrum_noise_data:
             spectrum_data = self.spectrum_noise_data
         else:
-            spectrum_data = None 
+            spectrum_data = None
+        
+        # Prepare initial_parameters with section_amplitudes if available
+        export_initial_params = self.initial_params.copy()
+        
+        # Extract per-section amplitudes from detector data if not already stored
+        if 'section_amplitudes' not in export_initial_params and self.results_by_detector:
+            section_amps = []
+            for det_idx in sorted(self.results_by_detector.keys()):
+                if isinstance(det_idx, (int, np.integer)):
+                    iter_dict = self.results_by_detector[det_idx]
+                    if iter_dict:
+                        first_entry = iter_dict[min(iter_dict.keys())]
+                        amp = first_entry.get('sweep_amplitude_normalized')
+                        if amp is not None:
+                            section_amps.append(amp)
+
+            if section_amps:
+                export_initial_params['section_amplitudes'] = section_amps
             
         return {
+            'measurement_type': 'multisweep',
             'timestamp': datetime.datetime.now().isoformat(),
             'target_module': self.target_module,
-            'initial_parameters': self.initial_params,
-            'dac_scales_used': self.dac_scales,
-            'results_by_detector': self.results_by_detector,
+            'initial_parameters': export_initial_params,
+            # Only store the DAC scale for the module that actually ran the measurement.
+            'dac_scales_used': self.dac_scales.get(self.target_module),
+            'res_info_dict': self.res_info_dict,        # Lightweight resonator registry
+            'results': self.results_by_detector,
             'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
             'nco_frequency_hz': self.nco_frequency_hz,  # NCO frequency used for biasing
             'noise_data': spectrum_data
@@ -1229,171 +1902,230 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
 
-    def _get_fit_frequencies(self, freqs):
-        """Get fitted resonance frequencies from the first available amplitude data."""
+    def _get_fit_result_frequencies(self) -> list[float] | None:
+        """Return the fitted resonance frequencies (fr) from fit results, or None if no
+        fit results exist in the data.
+
+        Iterates through res_info_dict codes (sorted by channel_number) and looks up
+        ``fit_params`` or ``nonlinear_fit_params`` for each detector in
+        ``results_by_detector``.  Falls back to ``bias_frequency`` for individual
+        detectors that have no fit result, but only if at least ONE detector in the
+        dataset has a real fit result.  Returns ``None`` when no fit results exist at
+        all, so callers can distinguish "fits ran but gave fallback values" from "no
+        fitter was run".
+
+        Returns:
+            List of frequencies in Hz (one per detector, ordered by channel_number),
+            or ``None`` if no ``fit_params`` / ``nonlinear_fit_params`` entries are
+            present anywhere in ``results_by_detector``.
+        """
+        if not self.res_info_dict:
+            return None
+
+        # First pass: check whether any detector has real fit results
+        has_any_fit = any(
+            entry.get('fits', {}).get('skewed', {}).get('fit_params')
+            or entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_params')
+            for iter_dict in self.results_by_detector.values()
+            if iter_dict
+            for entry in [next(iter(iter_dict.values()))]
+        )
+        if not has_any_fit:
+            return None
+
+        # Second pass: build the frequency list, using bias_frequency as a per-entry
+        # fallback for the rare detectors that failed to fit
+        sorted_codes = sorted(
+            self.res_info_dict,
+            key=lambda c: self.res_info_dict[c].get('channel_number', 0)
+        )
+
         ref_freqs = []
-        for det_idx in range(1, len(freqs) + 1):
-            if det_idx not in self.results_by_detector:
+        for code in sorted_codes:
+            fallback = self.res_info_dict[code].get('bias_frequency', 0.0)
+            iter_dict = self.results_by_detector.get(code)
+            if not iter_dict:
+                ref_freqs.append(fallback)
                 continue
-            amp_dir_dict = self.results_by_detector[det_idx]
-            if not amp_dir_dict:
-                continue
-            first_entry = next(iter(amp_dir_dict.values()))
-            if first_entry.get('skewed_fit_success'):
-                ref_freqs.append(first_entry['fit_params']['fr'])
-            elif first_entry.get('nonlinear_fit_success'):
-                ref_freqs.append(first_entry['nonlinear_fit_params']['fr'])
+            first_entry = next(iter(iter_dict.values()))
+            _skewed = first_entry.get('fits', {}).get('skewed', {})
+            _nl     = first_entry.get('fits', {}).get('nonlinear', {})
+            if _skewed.get('skewed_fit_success') and _skewed.get('fit_params'):
+                ref_freqs.append(_skewed['fit_params']['fr'])
+            elif _nl.get('nonlinear_fit_success') and _nl.get('nonlinear_fit_params'):
+                ref_freqs.append(_nl['nonlinear_fit_params']['fr'])
             else:
-                ref_freqs.append(first_entry.get('bias_frequency', first_entry.get('original_center_frequency')))
-        ref_freqs.sort()
+                ref_freqs.append(first_entry.get('bias_frequency', fallback))
         return ref_freqs
     
     
     def _rerun_multisweep(self):
         """
-        Allows the user to re-run the multisweep analysis, potentially with modified parameters.
-        Opens a MultisweepDialog to gather new parameters.
+        Re-run the multisweep analysis, seeding the dialog from the live res_info_dict.
+        Opens a MultisweepDialog for the user to adjust parameters before re-running.
         """
-        # Ensure MultisweepDialog is available (local import to avoid circular dependencies if any)
         from .dialogs import MultisweepDialog
 
-        if not self.conceptual_section_frequencies: # Check conceptual frequencies
+        if not self.res_info_dict and not self.results_by_detector:
+            QtWidgets.QMessageBox.warning(self, "Cannot Re-run",
+                                          "No detector data available to re-run from.")
+            return
+
+        # Build ordered list of current bias frequencies (sorted by channel_number)
+        sorted_codes = sorted(
+            self.res_info_dict,
+            key=lambda c: self.res_info_dict[c].get('channel_number', 0)
+        ) if self.res_info_dict else []
+
+        dialog_seed_frequencies = [
+            self.res_info_dict[c]['bias_frequency'] for c in sorted_codes
+        ]
+
+        # Fall back to sweep_center_frequencies (or legacy resonance_frequencies) from
+        # initial_params if res_info_dict is empty (e.g. loaded data without res_info_dict)
+        if not dialog_seed_frequencies:
+            dialog_seed_frequencies = list(
+                self.initial_params.get('sweep_center_frequencies')
+                or self.initial_params.get('resonance_frequencies', [])
+            )
+
+        if not dialog_seed_frequencies:
             QtWidgets.QMessageBox.warning(self, "Cannot Re-run",
                                           "No center frequencies are known to periscope to run on.")
             return
 
-        # --- Determine frequencies to seed the dialog ---
-        dialog_seed_frequencies = list(self.conceptual_section_frequencies) # Start with conceptual
+        # Fit frequencies: only offered in the dialog when real fit results exist.
+        # Pass an empty list when no fitter was run so the dialog still enters
+        # re-run mode (shows the combo + editable field), but omits the fit option.
+        fit_freqs = self._get_fit_result_frequencies() or []
 
-        ##### Getting the fit values for updating in re-run ######
+        # Original sweep-center frequencies from initial_params (used by "Use previous
+        # multisweep central frequencies" option in the dialog).
+        original_sweep_centers = list(
+            self.initial_params.get('sweep_center_frequencies')
+            or self.initial_params.get('resonance_frequencies', [])
+        ) or dialog_seed_frequencies
 
-        fit_freqs = self._get_fit_frequencies(dialog_seed_frequencies)
+        # Bias frequencies: the refined bias_frequency values stored in res_info_dict
+        # (only meaningful after Find Bias has run; before that they equal the sweep centres).
+        # Only offer bias frequencies in the re-run dialog if Find Bias has actually been
+        # run on the current data (i.e. at least one entry has bias_found == True).
+        # Before Find Bias runs, res_info_dict["bias_frequency"] just holds the sweep
+        # centre frequencies, which are already offered as "previous multisweep central
+        # frequencies" — showing them again as "bias frequencies" would be misleading.
+        has_bias_found = any(
+            info.get('bias_found', False) for info in self.res_info_dict.values()
+        )
+        bias_freqs_for_dialog = (
+            dialog_seed_frequencies if (dialog_seed_frequencies and has_bias_found) else None
+        )
 
-        
-        if self.current_run_amps: # If there was a previous/current run configuration
-            # Use a representative amplitude from the current/last run to seed the dialog
-            # For simplicity, let's use the first amplitude from the current_run_amps.
-            representative_amp_for_seeding = self.current_run_amps[0]
-            for idx, conceptual_cf in enumerate(self.conceptual_section_frequencies):
-                remembered_cf = self._get_closest_remembered_cf(idx, representative_amp_for_seeding)
-                if remembered_cf is not None:
-                    dialog_seed_frequencies[idx] = remembered_cf
-        
-        
-        # Prepare other parameters for the dialog
-        dialog_initial_params = self.initial_params.copy() # Use a copy of the window's last run parameters
-        # The 'resonance_frequencies' in dialog_initial_params will be overwritten by dialog_seed_frequencies
-        # when creating the dialog instance if MultisweepDialog uses its 'initial_params' argument
-        # to populate its own 'resonance_frequencies' field.
-        # However, MultisweepDialog takes 'resonance_frequencies' as a direct argument.
+        # Pass res_info_dict to the dialog so the "Multiplicative scaling" validator
+        # can find it in self.params immediately on the very first re-run of a session.
+        # Without this, res_info_dict is only injected into self.initial_params *after*
+        # the dialog closes, so the first-ever re-run dialog never sees it.
+        dialog_params = self.initial_params.copy()
+        if self.res_info_dict:
+            dialog_params['res_info_dict'] = self.res_info_dict
 
         dialog = MultisweepDialog(
             parent=self,
-            section_center_frequencies=dialog_seed_frequencies, # Seed with potentially updated CFs
+            section_center_frequencies=original_sweep_centers,
             dac_scales=self.dac_scales,
             current_module=self.target_module,
-            initial_params=dialog_initial_params, # Pass other existing params
-            load_multisweep = False,
-            fit_frequencies = fit_freqs
+            initial_params=dialog_params,
+            rerun_mode=True,
+            load_multisweep=False,
+            fit_frequencies=fit_freqs,
+            bias_frequencies=bias_freqs_for_dialog,
         )
 
-        if dialog.exec(): # True if user clicked OK
-            # Reset the loaded data flag since we're now generating fresh data
-            self.is_loaded_data = False
-            
-            # Update the dock title to remove "(Loaded)" suffix
-            periscope = self._get_periscope_parent()
-            if periscope:
-                my_dock = periscope.dock_manager.find_dock_for_widget(self)
-                if my_dock:
-                    # Get current title and remove " (Loaded)" if present
-                    current_title = my_dock.windowTitle()
-                    new_title = current_title.replace(" (Loaded)", "")
-                    my_dock.setWindowTitle(new_title)
-            
-            self.noise_spectrum_btn.setEnabled(False)
-            new_params_from_dialog = dialog.get_parameters()
-            if not new_params_from_dialog:
-                return # Dialog returned None, likely due to validation error
+        if not dialog.exec():
+            return
 
-            new_amps_for_this_run = list(new_params_from_dialog.get('amps', []))
-            # section_frequencies_from_dialog are the ones dialog was seeded with, as it doesn't change them.
-            section_frequencies_from_dialog = list(new_params_from_dialog.get('resonance_frequencies', []))
+        self.is_loaded_data = False
 
-            # --- Determine the final input CFs for the new sweep task ---
-            # This list will be passed to the MultisweepTask as its baseline.
-            # The task itself will then refine this per amplitude.
-            final_baseline_cfs_for_new_task = list(self.conceptual_section_frequencies)
+        # Update dock title
+        periscope = self._get_periscope_parent()
+        if periscope:
+            my_dock = periscope.dock_manager.find_dock_for_widget(self)
+            if my_dock:
+                my_dock.setWindowTitle(my_dock.windowTitle().replace(" (Loaded)", ""))
 
-            if not new_amps_for_this_run: # No amplitudes specified, fall back or warn
-                 QtWidgets.QMessageBox.warning(self, "Configuration Error", "No amplitudes specified for the new sweep.")
-                 # Default to conceptual, or could use section_frequencies_from_dialog
-                 final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
-            elif new_amps_for_this_run == self.current_run_amps:
-                # Amplitudes haven't changed from the last run configuration.
-                # Use the frequencies that were in the dialog (which were seeded from history).
-                final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
+        self.noise_spectrum_btn.setEnabled(False)
+        new_params = dialog.get_parameters()
+        if not new_params:
+            return
+
+        # Update current_run_amps
+        _new_amp_arrays = new_params.get('amp_arrays', [])
+        if _new_amp_arrays:
+            self.current_run_amps = [arr[0] for arr in _new_amp_arrays if arr]
+        else:
+            self.current_run_amps = list(new_params.get('amps', []))
+        self.probe_amplitudes = list(self.current_run_amps)
+
+        # Clear stale Find Bias results from the previous run so that the new sweep
+        # starts without any bias overlays.  The res_info_dict codes, channel numbers,
+        # and bias_amplitude are preserved (bias_amplitude is required by the multisweep
+        # algorithm's Option B path to know what amplitude to sweep at).  Only
+        # bias_found is cleared because all overlay logic is gated on that flag:
+        #   is_chosen_for_det = det_info.get('bias_found', False) and ...
+        for info in self.res_info_dict.values():
+            info.pop('bias_found', None)
+
+        # Apply Bias is no longer valid until Find Bias is re-run on the new data.
+        self.apply_bias_btn.setEnabled(False)
+
+        # Apply parameters and inject res_info_dict so MultisweepTask re-uses existing codes,
+        # BUT only when the user has NOT switched to custom frequencies.  When custom
+        # frequencies are chosen the sweep centers no longer correspond to the existing
+        # resonator registry, so we must use Option A (explicit center_frequencies) and
+        # let MultisweepTask build a fresh res_info_dict.
+        is_custom_freq = getattr(dialog, '_custom_freq_mode', False)
+        self.initial_params.update(new_params)
+        if self.res_info_dict and not is_custom_freq:
+            self.initial_params['res_info_dict'] = self.res_info_dict
+        else:
+            # Custom frequencies: drop the stale registry so the task uses Option A
+            self.initial_params.pop('res_info_dict', None)
+
+        # Refresh the panel title in case the measurement name changed
+        self._refresh_panel_title()
+
+        # Reset window state for the new sweep.
+        # Reset export-file tracking so the new sweep creates a fresh session file
+        # rather than overwriting the previous sweep's file.
+        periscope_for_reset = self._get_periscope_parent()
+        if periscope_for_reset and hasattr(periscope_for_reset, 'session_manager'):
+            periscope_for_reset.session_manager.reset_export_tracking(
+                "multisweep", f"module{self.target_module}"
+            )
+        self.results_by_detector.clear()
+        self.digest_panel = None
+        self.histograms_generated = False
+        self._redraw_plots()
+        if self.progress_bar: self.progress_bar.setValue(0)
+        if self.progress_group: self.progress_group.setVisible(True)
+
+        num_amplitudes = len(self.probe_amplitudes)
+        sweep_direction = self.initial_params.get('sweep_direction', 'upward')
+        self.total_iterations = num_amplitudes * (2 if sweep_direction == "both" else 1)
+        sweep_direction_norm = sweep_direction.lower().strip() if sweep_direction else ""
+        direction_text = "Down" if sweep_direction_norm == "downward" else "Up"
+
+        if self.current_amp_label:
+            if num_amplitudes > 0:
+                self.current_amp_label.setText(f"Iteration 1/{self.total_iterations} ({direction_text})")
             else:
-                # Amplitudes have changed. For each conceptual section,
-                # find the best historical CF based on the *new* representative amplitude.
-                # If no history, use what was in the dialog (which was seeded based on old rep. amp or conceptual).
-                if new_amps_for_this_run: # Ensure there's at least one new amp
-                    representative_new_amp = new_amps_for_this_run[0]
-                    for idx, conceptual_cf in enumerate(self.conceptual_section_frequencies):
-                        remembered_cf = self._get_closest_remembered_cf(idx, representative_new_amp)
-                        if remembered_cf is not None:
-                            final_baseline_cfs_for_new_task[idx] = remembered_cf
-                        else:
-                            # Fallback to what was in the dialog for this index if no better history for new amp
-                            if idx < len(section_frequencies_from_dialog):
-                                 final_baseline_cfs_for_new_task[idx] = section_frequencies_from_dialog[idx]
-                            # Else it remains the conceptual_cf (already initialized)
-                else: # Should be caught by the "No amplitudes specified" case, but as a safeguard
-                    final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
+                self.current_amp_label.setText("No sweeps defined. (Waiting...)")
 
-
-            # Update the 'resonance_frequencies' in new_params_from_dialog to be this chosen baseline
-            new_params_from_dialog['resonance_frequencies'] = final_baseline_cfs_for_new_task
-            
-            # Store the parameters that will actually be used for this run
-            self.initial_params.update(new_params_from_dialog)
-            self.current_run_amps = new_amps_for_this_run # Update current run amps
-            self.probe_amplitudes = list(self.current_run_amps) # For progress display
-
-            # Reset window state for the new sweep
-            self.results_by_detector.clear()
-            self.digest_panel = None  # Force recreation with fresh data on completion
-            self.histograms_generated = False  # Reset histogram flag for new run
-            
-            self._redraw_plots() # Clear plots
-            if self.progress_bar: self.progress_bar.setValue(0)
-            if self.progress_group: self.progress_group.setVisible(True)
-            
-            # Re-calculate total iterations based on new sweep direction
-            num_amplitudes = len(self.probe_amplitudes)
-            sweep_direction = self.initial_params.get('sweep_direction', 'upward')
-            self.total_iterations = num_amplitudes * (2 if sweep_direction == "both" else 1)
-            
-            # Determine initial direction text - consistent with our other direction text logic
-            sweep_direction_norm = sweep_direction.lower().strip() if sweep_direction else ""
-            direction_text = "Down" if sweep_direction_norm == "downward" else "Up"
-
-            
-            
-            if self.current_amp_label:
-                if num_amplitudes > 0:
-                    first_amplitude = self.probe_amplitudes[0]
-                    self.current_amp_label.setText(f"Iteration 1/{self.total_iterations}: Amplitude {first_amplitude:.4f} ({direction_text})")
-                else:
-                    self.current_amp_label.setText("No sweeps defined. (Waiting...)")
-            
-            parent_widget = self._get_periscope_parent()
-            if parent_widget and hasattr(parent_widget, '_start_multisweep_analysis_for_window'):
-                # Pass self.initial_params which now contains the correctly determined baseline CFs
-                parent_widget._start_multisweep_analysis_for_window(self, self.initial_params) # type: ignore
-            else:
-                QtWidgets.QMessageBox.warning(self, "Error",
-                                              "Cannot trigger re-run. Parent linkage or method missing.")
+        parent_widget = self._get_periscope_parent()
+        if parent_widget and hasattr(parent_widget, '_start_multisweep_analysis_for_window'):
+            parent_widget._start_multisweep_analysis_for_window(self, self.initial_params)  # type: ignore
+        else:
+            QtWidgets.QMessageBox.warning(self, "Error",
+                                          "Cannot trigger re-run. Parent linkage or method missing.")
 
     def closeEvent(self, event: pg.QtGui.QCloseEvent):
         """
@@ -1407,93 +2139,46 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             parent_widget.stop_multisweep_task_for_window(self) # type: ignore
         super().closeEvent(event) # Proceed with the standard close event handling
 
-    def _toggle_cf_lines_visibility(self, checked):
-        """
-        Slot for the 'Show Center Frequencies' checkbox.
-        Shows or hides CF lines without a full redraw.
-        Creates lines if they don't exist when showing.
+    def _toggle_bias_info_visibility(self, checked):
+        """Slot for the 'Show Bias Info' checkbox.
+
+        Triggers a full redraw so all tabs pick up the new overlay state.
+        The checkbox controls:
+          - Highlighted (thickened) traces for the chosen bias amplitude
+          - Vertical bias-frequency lines on Combined and grid plots
+          - ★ and nonlinearity-parameter (a) labels in legends
 
         Args:
-            checked (bool): The new state of the checkbox.
+            checked (bool): New checked state of the checkbox.
         """
-        if not self.combined_mag_plot or not self.combined_phase_plot:
-            return # Plots not ready
+        self._redraw_plots()
 
-        if checked:
-            # Show lines. Create them if they don't exist.
-            # Get unique amplitudes from iterations
-            amplitude_values = set()
-            for iter_dict in self.results_by_detector.values():
-                for entry in iter_dict.values():
-                    amp = entry.get('amplitude')
-                    if amp is not None:
-                        amplitude_values.add(amp)
-            num_amps = len(amplitude_values)
-            
-            if num_amps == 0:
-                return
+    def _update_bias_info_checkbox_state(self):
+        """Enable/disable and auto-check the 'Show Bias Info' checkbox.
 
-            # Use the canonical color mapping function
-            amplitude_to_color = create_amplitude_color_map(amplitude_values, self.dark_mode)
-            sorted_amplitudes = sorted(amplitude_values)
+        Should be called whenever ``res_info_dict`` may have gained new
+        ``bias_found`` entries (i.e. after Find Bias completes or after
+        loading data that already contains bias results).
 
-            for amp_val in sorted_amplitudes:
-                color = amplitude_to_color[amp_val]
-                cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2)
-
-                # Ensure lists for this amplitude exist in cf_lines_mag/phase
-                self.cf_lines_mag.setdefault(amp_val, [])
-                self.cf_lines_phase.setdefault(amp_val, [])
-
-                # Create dictionaries for quick lookup of existing lines by their X-position (CF)
-                # This avoids iterating through the list of lines repeatedly for each CF.
-                existing_mag_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_mag[amp_val]}
-                existing_phase_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_phase[amp_val]}
-
-                for res_idx, iter_dict in self.results_by_detector.items():
-                    # Get detector data for this amplitude (any direction)
-                    data = None
-                    for entry in iter_dict.values():
-                        if entry.get('amplitude') == amp_val:
-                            data = entry
-                            break
-                    if data is None:
-                        continue
-                    # Get the actual bias frequency for CF line
-                    bias_freq = data.get('bias_frequency', data.get('original_center_frequency'))
-                    if bias_freq is None:
-                        continue
-                        
-                    # Magnitude plot CF line
-                    if bias_freq in existing_mag_lines_for_amp:
-                        existing_mag_lines_for_amp[bias_freq].setVisible(True)
-                    else:
-                        mag_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
-                        self.combined_mag_plot.addItem(mag_cf_line)
-                        self.cf_lines_mag[amp_val].append(mag_cf_line)
-                        # mag_cf_line.setVisible(True) # Already visible by default when added
-
-                    # Phase plot CF line
-                    if bias_freq in existing_phase_lines_for_amp:
-                        existing_phase_lines_for_amp[bias_freq].setVisible(True)
-                    else:
-                        phase_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
-                        self.combined_phase_plot.addItem(phase_cf_line)
-                        self.cf_lines_phase[amp_val].append(phase_cf_line)
-                        # phase_cf_line.setVisible(True) # Already visible by default when added
+        Behaviour:
+          - If at least one detector has ``bias_found=True``:
+              enable the checkbox and check it (so overlays appear immediately).
+          - Otherwise: uncheck and disable the checkbox.
+        """
+        if self.show_bias_info_cb is None:
+            return
+        has_bias = any(
+            info.get('bias_found', False) for info in self.res_info_dict.values()
+        )
+        # Block signals while we update the checkbox state to avoid a spurious
+        # redraw triggered by the programmatic setChecked call.
+        self.show_bias_info_cb.blockSignals(True)
+        self.show_bias_info_cb.setEnabled(has_bias)
+        if has_bias:
+            self.show_bias_info_cb.setChecked(True)
         else:
-            # Hide all existing CF lines
-            for amp_lines_list in self.cf_lines_mag.values():
-                for line in amp_lines_list:
-                    line.setVisible(False)
-            for amp_lines_list in self.cf_lines_phase.values():
-                for line in amp_lines_list:
-                    line.setVisible(False)
-        
-        # Note: No call to self._redraw_plots() here, to preserve zoom.
-        # The _redraw_plots method will still handle full reconstruction of lines
-        # if it's called for other reasons (data update, unit change, etc.),
-        # respecting the checkbox state at that time.
+            self.show_bias_info_cb.setChecked(False)
+        self.show_bias_info_cb.blockSignals(False)
 
 
     def _take_noise_samps(self):
@@ -1533,7 +2218,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
 
     def _open_noise_spectrum_dialog(self):
-        num_res = len(self.conceptual_section_frequencies)
+        num_res = len(self.res_info_dict) if self.res_info_dict else len(self.results_by_detector)
         periscope = self._get_periscope_parent()
         
         if not periscope or periscope.crs is None: 
@@ -1632,7 +2317,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     
     
                 self.spectrum_noise_data['noise_parameters'] = params
-                num_res = len(self.conceptual_section_frequencies)
+                num_res = len(self.res_info_dict) if self.res_info_dict else len(self.results_by_detector)
     
                 amplitudes = []
                 dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
@@ -1729,6 +2414,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 
                 # Emit data_ready signal for session auto-export
                 export_data = self._prepare_export_data()
+                export_data['measurement_type'] = 'noise'
                 identifier = f"module{module}_noise"
                 self.data_ready.emit("noise", identifier, export_data)
                 
@@ -1757,21 +2443,24 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             print("Warning: No noise spectrum data available")
             return
             
-        # Get conceptual frequency for this detector
-        if detector_idx <= len(self.conceptual_section_frequencies) and detector_idx > 0:
-            conceptual_resonance_base_freq_hz = self.conceptual_section_frequencies[detector_idx - 1]
-        else:
-            print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
+        # Get resonance frequency for this detector, keyed by channel_number.
+        # Build a {channel_number: bias_frequency} map from res_info_dict.
+        ch_to_freq = {
+            info.get('channel_number', 0): info.get('bias_frequency')
+            for info in self.res_info_dict.values()
+        } if self.res_info_dict else {}
+        conceptual_resonance_base_freq_hz = ch_to_freq.get(detector_idx)
+        if conceptual_resonance_base_freq_hz is None:
+            print(f"Warning: Detector channel {detector_idx} not found in res_info_dict.")
             return
-            
-        # Gather data for ALL detectors to enable navigation (similar logic to digest panel)
+
+        # Gather data for ALL detectors (channel_number → freq) to enable navigation
         all_detectors_data = {}
-        # We need conceptual frequencies for navigation
-        for i, freq in enumerate(self.conceptual_section_frequencies):
-            det_id = i + 1
-            all_detectors_data[det_id] = {
-                'conceptual_freq_hz': freq
-            }
+        for code, info in self.res_info_dict.items():
+            ch = info.get('channel_number', 0)
+            freq = info.get('bias_frequency')
+            if ch and freq is not None:
+                all_detectors_data[ch] = {'conceptual_freq_hz': freq}
             
         # Find Periscope parent to create docked panel
         periscope = self._get_periscope_parent()
@@ -1793,10 +2482,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Store direct reference to this MultisweepPanel (if needed)
         panel.multisweep_panel_ref = self
         
-        # Increment counter and use for tab name
+        # Increment counter and use for tab name — prefix with parent measurement name if available
         self.noise_panel_count += 1
         loaded_suffix = " (Loaded)" if self.is_loaded_data else ""
-        dock_title = f"Noise Spectrum #{self.noise_panel_count}{loaded_suffix}"
+        parent_mname = self.initial_params.get('measurement_name', '')
+        if parent_mname:
+            _nname = f"Noise: {parent_mname}{loaded_suffix}"
+        else:
+            _nname = f"Noise Spectrum #{self.noise_panel_count}{loaded_suffix}"
+        dock_title = make_tab_title(_nname)
         dock_id = f"noise_{self.noise_panel_count}_{int(time.time())}"
         
         # Create dock
@@ -1941,20 +2635,36 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Get noise data if available
         noise_data = self.noise_data if self.samples_taken else None
         
-        # Get conceptual frequency for this detector
-        if detector_idx <= len(self.conceptual_section_frequencies) and detector_idx > 0:
-            conceptual_resonance_base_freq_hz = self.conceptual_section_frequencies[detector_idx - 1]
+        # Get reference frequency for this detector.
+        # New format: string codes — read bias_frequency from data.
+        # Old format: integer indices — use conceptual_section_frequencies.
+        if isinstance(detector_idx, str):
+            first_entry = next(iter(self.results_by_detector.get(detector_idx, {}).values()), {})
+            conceptual_resonance_base_freq_hz = (
+                first_entry.get('bias_frequency')
+                or first_entry.get('sweep_center_frequency')
+            )
+            if conceptual_resonance_base_freq_hz is None:
+                print(f"Warning: Could not determine frequency for detector {detector_idx!r}")
+                return
         else:
-            print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
-            return
-        
+            # Legacy integer keys (old format) — read frequency from sweep data directly
+            first_entry = next(iter(self.results_by_detector.get(detector_idx, {}).values()), {})
+            conceptual_resonance_base_freq_hz = first_entry.get(
+                'bias_frequency', first_entry.get('original_center_frequency')
+            )
+            if conceptual_resonance_base_freq_hz is None:
+                print(f"Warning: Detector index {detector_idx!r} not found or has no frequency.")
+                return
+
         # Gather data for this specific detector across all amplitudes and directions
         section_data_for_digest = {}
         
+
         if detector_idx in self.results_by_detector:
             for det_entry in self.results_by_detector[detector_idx].values():
-                amp_val = det_entry.get('amplitude')
-                direction = det_entry.get('direction', 'upward')
+                amp_val = det_entry.get('sweep_amplitude_normalized')
+                direction = det_entry.get('sweep_direction', 'upward')
                 actual_cf_for_this_amp = det_entry.get('bias_frequency',
                                                        det_entry.get('original_center_frequency'))
                 combo_key = f"{amp_val}:{direction}"
@@ -1972,22 +2682,28 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Gather data for ALL detectors to enable navigation
         all_detectors_data = {}
         
-        for det_idx in sorted(self.results_by_detector.keys()):
-            if det_idx <= len(self.conceptual_section_frequencies) and det_idx > 0:
-                conceptual_freq_hz = self.conceptual_section_frequencies[det_idx - 1]
+
+        for det_idx in sorted(self.results_by_detector.keys(), key=lambda k: str(k)):
+            # Determine reference frequency from sweep data (works for both string codes and legacy ints)
+            _entry = next(iter(self.results_by_detector[det_idx].values()), {})
+            if isinstance(det_idx, str):
+                conceptual_freq_hz = (
+                    _entry.get('bias_frequency')
+                    or _entry.get('sweep_center_frequency')
+                    or _entry.get('original_center_frequency')
+                )
             else:
-                conceptual_freq_hz = None
-                # Try to get frequency from first available entry
-                first_entry = next(iter(self.results_by_detector[det_idx].values()), {})
-                conceptual_freq_hz = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
+                # Legacy integer keys — read directly from the sweep entry
+                conceptual_freq_hz = _entry.get('bias_frequency', _entry.get('original_center_frequency'))
             
             if conceptual_freq_hz is None:
                 continue
             
             detector_resonance_data = {}
+
             for det_entry in self.results_by_detector[det_idx].values():
-                amp_val = det_entry.get('amplitude')
-                direction = det_entry.get('direction', 'upward')
+                amp_val = det_entry.get('sweep_amplitude_normalized')
+                direction = det_entry.get('sweep_direction', 'upward')
                 actual_cf = det_entry.get('bias_frequency', det_entry.get('original_center_frequency'))
                 combo_key = f"{amp_val}:{direction}"
                 detector_resonance_data[combo_key] = {
@@ -2041,41 +2757,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Also keep backward-compatible list reference
         self.detector_digest_windows = [panel]
         
+
         # Switch to the Detector Digest tab (unless suppressed, e.g. auto-populate on completion)
         if switch_to_tab:
             self.plot_tabs.setCurrentWidget(self.digest_tab)
 
-    def _get_closest_remembered_cf(self, conceptual_idx: int, target_amp: float) -> float | None:
-        """
-        Finds the remembered output CF for a given conceptual section index,
-        for the amplitude in history closest to target_amp.
-
-        Args:
-            conceptual_idx: Index in self.conceptual_section_frequencies.
-            target_amp: The amplitude we are trying to find a historical match for.
-
-        Returns:
-            The remembered output CF (float) or None if no suitable history found.
-        """
-        min_abs_amp_diff = np.inf
-        best_cf_found = None
-
-        if not self.last_output_cfs_by_amp_and_conceptual_idx:
-            return None
-
-        for amp_in_history, cfs_at_this_amp in self.last_output_cfs_by_amp_and_conceptual_idx.items():
-            if conceptual_idx in cfs_at_this_amp:
-                remembered_cf = cfs_at_this_amp[conceptual_idx]
-                current_diff = abs(amp_in_history - target_amp)
-
-                if current_diff < min_abs_amp_diff:
-                    min_abs_amp_diff = current_diff
-                    best_cf_found = remembered_cf
-                elif current_diff == min_abs_amp_diff:
-                    pass
-        
-        return best_cf_found
-    
     def _get_periscope_parent(self):
         """Find and return the Periscope parent window.
 
@@ -2153,127 +2839,920 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             if hasattr(noise_window, 'apply_theme'):
                 noise_window.apply_theme(dark_mode)
     
-    def _bias_kids(self):
-        """
-        Run the bias_kids algorithm on the current multisweep results.
-        Programs detectors at optimal operating points and stores calibration data.
-        """
-        # Check prerequisites
-        if not self.results_by_detector:
-            QtWidgets.QMessageBox.warning(self, "No Data", 
-                                        "No multisweep data available. Please run a multisweep first.")
-            return
-        
-        # Get Periscope parent
-        periscope = self._get_periscope_parent()
-        if not periscope:
-            QtWidgets.QMessageBox.warning(self, "Parent Not Available", 
-                                        "Parent window not available. Cannot access CRS object.")
-            return
-            
-        if periscope.crs is None:
-            QtWidgets.QMessageBox.warning(self, "CRS Not Available", 
-                                        "CRS object is None. Cannot bias detectors.")
-            return
-        # Import the dialog
-        from .bias_kids_dialog import BiasKidsDialog
-        
-        # Show dialog to get parameters
-        dialog = BiasKidsDialog(self, self.target_module)
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return  # User cancelled
-        
-        # Get parameters from dialog
-        bias_params = dialog.get_parameters()
-        
-        # Pass detector-indexed format directly to bias_kids
-        gui_format_results = {
-            'results_by_detector': self.results_by_detector
-        }
-        
-        # Import BiasKidsTask and BiasKidsSignals from tasks module
-        from .tasks import BiasKidsTask, BiasKidsSignals
-        
-        # Create signals for communication with the task
-        self.bias_kids_signals = BiasKidsSignals()
-        self.bias_kids_signals.progress.connect(self._bias_kids_progress)
-        self.bias_kids_signals.completed.connect(self._bias_kids_completed)
-        self.bias_kids_signals.error.connect(self._bias_kids_error)
-        
-        # Ensure we have a valid module number
-        if self.target_module is None:
-            QtWidgets.QMessageBox.warning(self, "Module Not Set", 
-                                        "Target module is not set. Cannot bias detectors.")
-            return
-        # Create and start the task with dialog parameters
-        self.bias_kids_task = BiasKidsTask(
-            periscope.crs,
-            self.target_module,
-            gui_format_results,
-            self.bias_kids_signals,
-            bias_params  # Pass the dialog parameters
-        )
-        
-        # Update UI to show operation in progress
-        self.bias_kids_btn.setEnabled(False)
-        self.bias_kids_btn.setText("Biasing...")
-        
-        # Start the task
-        self.bias_kids_task.start()
+    # ── Bias Settings ────────────────────────────────────────────────────────
 
-    def _bias_kids_progress(self, module, progress):
-        """Handle progress updates from the bias_kids task."""
-        # Could update a progress indicator if desired
+    def _show_bias_settings(self):
+        """Show (or create) the persistent BiasSettingsPanel window."""
+        from .bias_kids_dialog import BiasSettingsPanel
+        if self.bias_settings_panel is None:
+            self.bias_settings_panel = BiasSettingsPanel(parent=None)
+            # Connect the "Apply Custom Bias to Hardware" shortcut button so that
+            # clicking it in the floating panel triggers the full populate + apply
+            # pipeline without needing the user to press two toolbar buttons.
+            self.bias_settings_panel.apply_custom_bias_requested.connect(
+                self._on_custom_bias_apply_directly
+            )
+        # Refresh the resonator-count hint each time the panel is opened so the
+        # user always sees the correct count for the current multisweep data.
+        self.bias_settings_panel.set_resonator_count(len(self.res_info_dict))
+        self.bias_settings_panel.show()
+        self.bias_settings_panel.raise_()
+        self.bias_settings_panel.activateWindow()
+
+    # ── Find Bias ─────────────────────────────────────────────────────────────
+
+    def _find_bias(self):
+        """
+        Run find_bias_points on the current multisweep results in a background thread.
+
+        Reads algorithm settings from the BiasSettingsPanel (using defaults when
+        the panel has not been opened yet), then starts a FindBiasTask.
+        """
+        # Safety guard: silently reject if either task is still running.
+        # Normally unreachable because both buttons are disabled while a task
+        # runs, but guards against any edge-case re-entry.
+        if (self.find_bias_task is not None and self.find_bias_task.isRunning()) or \
+           (self.run_fits_task is not None and self.run_fits_task.isRunning()):
+            return
+
+        if not self.results_by_detector:
+            QtWidgets.QMessageBox.warning(
+                self, "No Data",
+                "No multisweep data available. Please run a multisweep first."
+            )
+            return
+
+        if not self.res_info_dict:
+            QtWidgets.QMessageBox.warning(
+                self, "No Resonator Registry",
+                "res_info_dict is empty — cannot determine channel assignments."
+            )
+            return
+
+        # Collect settings from the panel (or use defaults)
+        if self.bias_settings_panel is not None:
+            bias_settings = self.bias_settings_panel.get_settings()
+        else:
+            bias_settings = {}  # find_bias_points will use its own defaults
+
+        # Resolve "fraction of sweep bandwidth" → absolute Hz before forwarding
+        # to FindBiasTask (which only understands max_deriv_distance_hz).
+        if bias_settings.get('max_deriv_distance_mode') == 'fraction':
+            span_hz = self.initial_params.get('span_hz', 0.0)
+            fraction = bias_settings.get('max_deriv_distance_fraction', 0.5)
+            if span_hz > 0:
+                bias_settings['max_deriv_distance_hz'] = fraction * span_hz
+            else:
+                # span_hz unavailable — fall back to the absolute kHz value
+                import warnings
+                warnings.warn(
+                    "BiasSettingsPanel: 'fraction of sweep bandwidth' mode selected "
+                    "but span_hz is not available in initial_params; falling back to "
+                    "the absolute kHz value."
+                )
+
+        # ── Custom bias path ─────────────────────────────────────────────────
+        # When "Use Custom Bias" is enabled in BiasSettingsPanel, skip the
+        # find_bias_points algorithm entirely and directly populate res_info_dict
+        # with the user-supplied frequencies and amplitudes.
+        if bias_settings.get('custom_bias_enabled'):
+            self._apply_custom_bias_to_res_info(bias_settings)
+            return
+
+        from .tasks import FindBiasTask, FindBiasSignals
+
+        self.find_bias_signals = FindBiasSignals()
+        self.find_bias_signals.progress.connect(self._find_bias_progress)
+        self.find_bias_signals.completed.connect(self._find_bias_completed)
+        self.find_bias_signals.error.connect(self._find_bias_error)
+
+        self.find_bias_task = FindBiasTask(
+            module=self.target_module,
+            results_by_detector=self.results_by_detector,
+            res_info_dict=self.res_info_dict,
+            signals=self.find_bias_signals,
+            bias_settings=bias_settings,
+        )
+
+        # Disable both Find Bias and Run Fit for the duration of this task.
+        self.find_bias_btn.setEnabled(False)
+        self.find_bias_btn.setText("Finding…")
+        self.run_fit_btn.setEnabled(False)
+        self.apply_bias_btn.setEnabled(False)
+        self.find_bias_task.start()
+
+    def _find_bias_progress(self, module: int, progress: float):
+        """Handle progress updates from FindBiasTask (reserved for future use)."""
         pass
-    
-    def _bias_kids_completed(self, module, biased_results, df_calibrations, nco_frequency_hz):
-        """Handle completion of the bias_kids task."""
-        # Store the output
-        self.bias_kids_output = biased_results
-        
-        # Store the NCO frequency used during biasing
-        self.nco_frequency_hz = nco_frequency_hz
-        
-        # Emit signal with df_calibration data
+
+    def _find_bias_completed(self, module: int, updated_res_info_dict: dict):
+        """
+        Handle successful completion of FindBiasTask.
+
+        Stores the updated res_info_dict, enables Apply Bias, and triggers
+        a redraw of CF lines so they move to the refined bias frequencies.
+        """
+        # Merge the updated fields back into the live res_info_dict
+        for code, info in updated_res_info_dict.items():
+            if code in self.res_info_dict:
+                self.res_info_dict[code].update(info)
+            else:
+                self.res_info_dict[code] = info
+
+        num_found = sum(
+            1 for info in self.res_info_dict.values() if info.get('bias_found', False)
+        )
+        total = len(self.res_info_dict)
+
+        # Wait for the thread to fully finish before dropping the reference.
+        # run() has already returned (it emitted this signal), so wait() is
+        # nearly instantaneous — it just lets Qt complete its internal join so
+        # the C++ QThread object is in the Finished state before Python may GC
+        # the wrapper.  Without this, dropping the last Python reference while
+        # Qt's thread machinery is still winding down can cause a core dump.
+        if self.find_bias_task is not None:
+            self.find_bias_task.wait()
+
+        # Re-enable both Find Bias and Run Fit buttons
+        self.find_bias_btn.setEnabled(True)
+        self.find_bias_btn.setText("Find Bias")
+        self.run_fit_btn.setEnabled(True)
+        self.find_bias_task = None
+
+        # Enable Apply Bias only if at least one bias point was found
+        self.apply_bias_btn.setEnabled(num_found > 0)
+
+        # Enable and auto-check the "Show Bias Info" checkbox so overlays appear
+        # immediately after Find Bias completes.
+        self._update_bias_info_checkbox_state()
+
+        # Redraw all active plot tabs so bias overlays (chosen-amplitude highlights,
+        # bias-frequency vertical lines, and IQ markers) appear immediately.
+        self._redraw_plots()
+
+        # Auto-save the updated res_info_dict (with bias results) to the session file
+        # so that the bias points are preserved when the file is reloaded.
+        # session_manager.handle_data_ready will automatically overwrite the existing
+        # multisweep file rather than creating a new timestamped duplicate.
+        export_data = self._prepare_export_data()
+        self.data_ready.emit("multisweep", f"module{self.target_module}", export_data)
+
+        # Show a transient "✓ Bias found" label in the toolbar that auto-hides after 5 s
+        self._bias_status_label.show()
+        QtCore.QTimer.singleShot(5000, self._bias_status_label.hide)
+
+    def _find_bias_error(self, error_msg: str):
+        """Handle errors from FindBiasTask."""
+        QtWidgets.QMessageBox.critical(self, "Find Bias Error", error_msg)
+        if self.find_bias_task is not None:
+            self.find_bias_task.wait()
+        self.find_bias_btn.setEnabled(True)
+        self.find_bias_btn.setText("Find Bias")
+        self.run_fit_btn.setEnabled(True)
+        self.find_bias_task = None
+
+    # ── Custom Bias helpers ───────────────────────────────────────────────────
+
+    def _apply_custom_bias_to_res_info(self, bias_settings: dict) -> bool:
+        """Apply user-supplied bias frequencies and amplitudes to ``res_info_dict``.
+
+        Instead of running the find_bias_points algorithm, this method assigns
+        the custom values directly to the existing resonators, preserving all
+        other fields (code, channel_number, sweep data, etc.).
+
+        The N user-supplied ``(frequency, amplitude)`` pairs are matched to the
+        N resonators in ascending frequency order (each resonator is identified
+        by its current ``bias_frequency`` or ``sweep_center_frequency``).
+
+        If the "Quantize to hardware frequency grid" checkbox is checked, each
+        frequency is rounded to the nearest hardware tone bin
+        (``_BASE_FREQ_HZ ≈ 298.023 mHz``) before being stored — exactly the
+        same rounding that :func:`~rfmux.algorithms.measurement.bias_kids.apply_bias`
+        would apply when programming the CRS.
+
+        Parameters
+        ----------
+        bias_settings :
+            Dict returned by :meth:`~.bias_kids_dialog.BiasSettingsPanel.get_settings`.
+
+        Returns
+        -------
+        bool
+            ``True`` on success; ``False`` when validation fails (an error
+            dialog is shown to the user before returning ``False``).
+        """
+        import copy
+
+        freqs_hz = bias_settings.get('custom_bias_frequencies_hz') or []
+        amps     = bias_settings.get('custom_bias_amplitudes') or []
+
+        # ── Validate inputs ───────────────────────────────────────────────────
+        if not freqs_hz:
+            QtWidgets.QMessageBox.warning(
+                self, "Custom Bias Error",
+                "No frequencies are entered in the Custom Bias section.\n"
+                "Please enter frequencies and amplitudes before clicking Find Bias."
+            )
+            return False
+
+        if not amps:
+            QtWidgets.QMessageBox.warning(
+                self, "Custom Bias Error",
+                "No amplitudes are entered in the Custom Bias section.\n"
+                "Please enter frequencies and amplitudes before clicking Find Bias."
+            )
+            return False
+
+        if len(freqs_hz) != len(amps):
+            QtWidgets.QMessageBox.warning(
+                self, "Custom Bias Error",
+                f"Number of frequencies ({len(freqs_hz)}) and "
+                f"amplitudes ({len(amps)}) must match."
+            )
+            return False
+
+        n_res = len(self.res_info_dict)
+        n_custom = len(freqs_hz)
+        if n_custom != n_res:
+            QtWidgets.QMessageBox.warning(
+                self, "Custom Bias Error",
+                f"Custom bias has {n_custom} entr{'y' if n_custom == 1 else 'ies'} "
+                f"but there {'is' if n_res == 1 else 'are'} {n_res} resonator"
+                f"{'s' if n_res != 1 else ''} in the current multisweep panel.\n\n"
+                f"Please provide exactly {n_res} frequencies and amplitudes."
+            )
+            return False
+
+        # ── Optional quantization ─────────────────────────────────────────────
+        if bias_settings.get('custom_bias_quantize', True):
+            try:
+                from rfmux.algorithms.measurement.bias_kids import _BASE_FREQ_HZ
+                freqs_hz = [
+                    round(f / _BASE_FREQ_HZ) * _BASE_FREQ_HZ
+                    for f in freqs_hz
+                ]
+            except ImportError:
+                pass   # graceful degradation if constant is unavailable
+
+        # ── Match by ascending frequency order ────────────────────────────────
+        # Sort existing res_info_dict codes by their current reference frequency
+        # (bias_frequency if already set, otherwise sweep_center_frequency).
+        sorted_codes = sorted(
+            self.res_info_dict.keys(),
+            key=lambda code: (
+                self.res_info_dict[code].get('bias_frequency')
+                or self.res_info_dict[code].get('sweep_center_frequency', 0.0)
+            ),
+        )
+
+        # Deep-copy so the panel's dict is only updated on success
+        updated = copy.deepcopy(self.res_info_dict)
+        for code, freq_hz, amp in zip(sorted_codes, freqs_hz, amps):
+            updated[code]['bias_frequency'] = float(freq_hz)
+            updated[code]['bias_amplitude'] = float(amp)
+            updated[code]['bias_found']     = True
+
+        # ── Hand off to the standard completion handler ───────────────────────
+        # _find_bias_completed merges the updated dict, enables Apply Bias,
+        # updates the "Show Bias Info" checkbox, redraws, auto-exports, etc.
+        self._find_bias_completed(self.target_module, updated)
+        return True
+
+    def _on_custom_bias_apply_directly(self):
+        """Slot for the 'Apply Custom Bias to Hardware' shortcut button.
+
+        Called when the user clicks the convenience button inside the Bias
+        Settings floating panel.  Populates ``res_info_dict`` with the custom
+        bias values (same as clicking "Find Bias" with custom bias enabled)
+        and then immediately starts the hardware apply task (same as clicking
+        "Apply Bias" in the toolbar).
+        """
+        if self.bias_settings_panel is None:
+            return
+
+        bias_settings = self.bias_settings_panel.get_settings()
+
+        # Populate res_info_dict (shows an error dialog on failure and returns False)
+        if not self._apply_custom_bias_to_res_info(bias_settings):
+            return
+
+        # Proceed to hardware apply
+        self._apply_bias()
+
+    # ── Apply Bias ────────────────────────────────────────────────────────────
+
+    def _apply_bias(self):
+        """
+        Run apply_bias on the hardware using the bias conditions stored in res_info_dict.
+
+        Requires Find Bias to have completed successfully (i.e. at least one
+        res_info_dict entry has bias_found == True).
+        """
+        periscope = self._get_periscope_parent()
+        if not periscope or periscope.crs is None:
+            QtWidgets.QMessageBox.warning(
+                self, "CRS Not Available",
+                "CRS object is not available.  Cannot programme hardware."
+            )
+            return
+
+        if self.target_module is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Module Not Set",
+                "Target module is not set.  Cannot programme hardware."
+            )
+            return
+
+        num_ready = sum(
+            1 for info in self.res_info_dict.values() if info.get('bias_found', False)
+        )
+        if num_ready == 0:
+            QtWidgets.QMessageBox.warning(
+                self, "No Bias Points",
+                "No bias points are available.  Please run Find Bias first."
+            )
+            return
+
+        from .tasks import ApplyBiasTask, ApplyBiasSignals
+
+        self.apply_bias_signals = ApplyBiasSignals()
+        self.apply_bias_signals.progress.connect(self._apply_bias_progress)
+        self.apply_bias_signals.completed.connect(self._apply_bias_completed)
+        self.apply_bias_signals.error.connect(self._apply_bias_error)
+
+        self.apply_bias_task = ApplyBiasTask(
+            crs=periscope.crs,
+            module=self.target_module,
+            res_info_dict=self.res_info_dict,
+            signals=self.apply_bias_signals,
+        )
+
+        self.apply_bias_btn.setEnabled(False)
+        self.apply_bias_btn.setText("Applying…")
+        self.apply_bias_task.start()
+
+    def _apply_bias_progress(self, module: int, progress: float):
+        """Handle progress updates from ApplyBiasTask."""
+        pass
+
+    def _apply_bias_completed(self, module: int, apply_report: dict):
+        """
+        Handle successful completion of ApplyBiasTask.
+
+        Stores apply_report for export, emits the df_calibration_ready signal
+        so Periscope's df-unit mode picks up the new calibration data, and
+        enables the Noise Spectrum button.
+        """
+        self.bias_kids_output = apply_report  # kept for export compat
+
+        # Extract per-channel df_calibration from res_info_dict
+        # (keyed by channel_number so app_runtime can use it directly)
+        df_calibrations: dict = {}
+        for code, info in self.res_info_dict.items():
+            cal = info.get('df_calibration')
+            ch = info.get('channel_number')
+            if cal is not None and ch is not None:
+                import cmath
+                if not cmath.isnan(cal):
+                    df_calibrations[ch] = cal
+
         if df_calibrations:
             self.df_calibration_ready.emit(module, df_calibrations)
-        
-        # Emit data_ready signal for session auto-export
-        if biased_results:
-            export_data = self._prepare_export_data()
-            identifier = f"module{module}"
-            self.data_ready.emit("bias", identifier, export_data)
-        
-        # Show success dialog
-        num_biased = len(biased_results)
-        total_detectors = len(self.conceptual_section_frequencies)
-        
-        msg = f"Successfully biased {num_biased} out of {total_detectors} detectors.\n\n"
-        
-        if num_biased > 0:
-            msg += "The detectors have been programmed at their optimal operating points."
-            if df_calibrations:
-                msg += "\n\nFrequency shift calibration data has been loaded into the main window."
-        else:
-            msg += "No detectors met the criteria for biasing."
-        
-        QtWidgets.QMessageBox.information(self, "Bias KIDs Complete", msg)
-        
-        # Reset UI
-        self.bias_kids_btn.setEnabled(True)
+
+        # Emit for session auto-export — update the existing multisweep pickle in-place
+        # rather than creating a separate bias_HHMMSS.pkl.  The session manager's
+        # overwrite-tracking mechanism handles the in-place update automatically.
+        export_data = self._prepare_export_data()
+        self.data_ready.emit("multisweep", f"module{self.target_module}", export_data)
+
+        # Re-enable buttons
+        self.apply_bias_btn.setEnabled(True)
+        self.apply_bias_btn.setText("Apply Bias")
         self.noise_spectrum_btn.setEnabled(True)
-        self.bias_kids_btn.setText("Bias KIDs")
-        
-        # Clean up the task
-        self.bias_kids_task = None
-    
-    def _bias_kids_error(self, error_msg):
-        """Handle errors from the bias_kids task."""
-        QtWidgets.QMessageBox.critical(self, "Bias KIDs Error", error_msg)
-        
-        # Reset UI
-        self.bias_kids_btn.setEnabled(True)
-        self.bias_kids_btn.setText("Bias KIDs")
-        
-        # Clean up the task
-        self.bias_kids_task = None
+        self.apply_bias_task = None
+
+        # Show a transient "✓ Bias applied" label in the toolbar that auto-hides after 5 s
+        self._apply_bias_status_label.show()
+        QtCore.QTimer.singleShot(5000, self._apply_bias_status_label.hide)
+
+        # Kick off background IQ rotation computation immediately after bias is applied.
+        # The task runs non-blocking; completion is handled by _iq_rotation_completed.
+        periscope = self._get_periscope_parent()
+        if periscope and periscope.crs is not None and self.res_info_dict:
+            from .tasks import ComputeIQRotationTask, IQRotationSignals
+            self.iq_rotation_signals = IQRotationSignals()
+            self.iq_rotation_signals.completed.connect(self._iq_rotation_completed)
+            self.iq_rotation_signals.error.connect(self._iq_rotation_error)
+            self.iq_rotation_task = ComputeIQRotationTask(
+                crs=periscope.crs,
+                module=module,
+                res_info_dict=self.res_info_dict,
+                signals=self.iq_rotation_signals,
+            )
+            self.iq_rotation_task.start()
+
+    def _apply_bias_error(self, error_msg: str):
+        """Handle errors from ApplyBiasTask."""
+        QtWidgets.QMessageBox.critical(self, "Apply Bias Error", error_msg)
+        self.apply_bias_btn.setEnabled(True)
+        self.apply_bias_btn.setText("Apply Bias")
+        self.apply_bias_task = None
+
+    # ── IQ Plane Rotation ─────────────────────────────────────────────────────
+
+    def _iq_rotation_completed(self, module: int, angles: dict):
+        """Handle successful completion of ComputeIQRotationTask.
+
+        Stores per-channel rotation angles in ``res_info_dict``, emits
+        ``iq_rotation_ready`` (picked up by ``app.py`` to enable the Rotated
+        IQ radio button), re-saves the updated pickle, and shows a transient
+        status label.
+        """
+        if not angles:
+            print("[MultisweepPanel] IQ rotation: no angles computed.", flush=True)
+            if self.iq_rotation_task is not None:
+                self.iq_rotation_task.wait()
+            self.iq_rotation_task = None
+            return
+
+        # Store angle in res_info_dict for each code that was computed
+        for code, theta in angles.items():
+            if code in self.res_info_dict:
+                self.res_info_dict[code]['iq_rotation_angle'] = float(theta)
+
+        # Emit so app.py can store calibrations and enable rb_rotated_iq
+        self.iq_rotation_ready.emit(module, angles)
+
+        # Re-save pickle so angles survive session reload
+        export_data = self._prepare_export_data()
+        self.data_ready.emit("multisweep", f"module{self.target_module}", export_data)
+
+        # Wait for the thread to fully finish before dropping the reference
+        # (near-instantaneous — same rationale as FindBiasTask)
+        if self.iq_rotation_task is not None:
+            self.iq_rotation_task.wait()
+        self.iq_rotation_task = None
+
+        # Show transient "✓ IQ rotation computed" label
+        self._iq_rotation_status_label.show()
+        QtCore.QTimer.singleShot(5000, self._iq_rotation_status_label.hide)
+
+        # Enable and auto-check the "Show Rotated IQ" checkbox so the IQ tab
+        # immediately shows the rotated circles when the user switches to it.
+        self._update_rotated_iq_checkbox_state()
+
+    def _on_show_rotated_iq_changed(self, checked: bool):
+        """Slot for the 'Show Rotated IQ' checkbox.
+
+        Triggers a redraw of the IQ Circles tab (Tab 1) so the rotation is
+        applied or removed.  Has no effect when a different tab is active —
+        the next visit to Tab 1 will pick up the new state automatically.
+
+        Args:
+            checked (bool): New checked state of the checkbox.
+        """
+        # Only redraw if the IQ Circles tab is currently active; otherwise the
+        # next tab switch will trigger a redraw naturally.
+        if hasattr(self, 'plot_tabs') and self.plot_tabs.currentIndex() == 1:
+            self._redraw_sweep_grid(1)
+
+    def _update_rotated_iq_checkbox_state(self):
+        """Enable/disable and auto-check the 'Show Rotated IQ' checkbox.
+
+        Should be called whenever ``res_info_dict`` may have gained
+        ``iq_rotation_angle`` entries (i.e. after
+        :meth:`_iq_rotation_completed` is called, or after loading a session
+        file that contains pre-computed rotation angles).
+
+        Behaviour:
+          - If at least one detector has an ``iq_rotation_angle``:
+              enable the checkbox and check it.
+          - Otherwise: uncheck and disable the checkbox.
+        """
+        if not hasattr(self, 'show_rotated_iq_cb') or self.show_rotated_iq_cb is None:
+            return
+        has_angles = any(
+            'iq_rotation_angle' in info
+            for info in self.res_info_dict.values()
+        )
+        self.show_rotated_iq_cb.blockSignals(True)
+        self.show_rotated_iq_cb.setEnabled(has_angles)
+        if has_angles:
+            self.show_rotated_iq_cb.setChecked(True)
+        else:
+            self.show_rotated_iq_cb.setChecked(False)
+        self.show_rotated_iq_cb.blockSignals(False)
+
+    def _iq_rotation_error(self, error_msg: str):
+        """Handle errors from ComputeIQRotationTask.
+
+        Non-fatal — the IQ rotation is an enhancement on top of Apply Bias.
+        Log the error but do not show a modal dialog.
+        """
+        import sys
+        print(f"[MultisweepPanel] IQ rotation error (non-fatal): {error_msg}",
+              file=sys.stderr, flush=True)
+        if self.iq_rotation_task is not None:
+            self.iq_rotation_task.wait()
+        self.iq_rotation_task = None
+
+    # ── IQ Derivatives tab ────────────────────────────────────────────────────
+
+    def _redraw_derivative_grid(self):
+        """Redraw the IQ Derivatives tab (Tab 5).
+
+        Collects the ``bias_finding`` sub-dict from the selected-amplitude
+        entry for each detector (set by ``find_bias_points``) and delegates
+        rendering to :func:`multisweep_grid_helpers.update_derivative_grid`.
+
+        If no ``bias_finding`` keys exist (Find Bias has not run yet) the
+        placeholder label is shown and the scroll area is kept hidden.
+        """
+        from .multisweep_grid_helpers import update_derivative_grid
+
+        # Build {detector_id: bias_finding_dict} for all detectors that have
+        # a 'bias_finding' key in at least one of their sweep entries.
+        bias_finding_by_detector: dict = {}
+        for det_id, iter_dict in self.results_by_detector.items():
+            for entry in iter_dict.values():
+                bf = entry.get('bias_finding')
+                if bf is not None:
+                    bias_finding_by_detector[det_id] = bf
+                    break  # Only one entry per detector will have bias_finding
+
+        if not bias_finding_by_detector:
+            # Find Bias hasn't run yet — show the placeholder
+            if hasattr(self, '_derivative_placeholder'):
+                self._derivative_placeholder.show()
+            if hasattr(self, '_derivative_scroll'):
+                self._derivative_scroll.hide()
+            return
+
+        # Data is ready — hide placeholder, show scroll area
+        if hasattr(self, '_derivative_placeholder'):
+            self._derivative_placeholder.hide()
+        if hasattr(self, '_derivative_scroll'):
+            self._derivative_scroll.show()
+
+        # Compute detector order: use center frequency from the main sweep data.
+        def _deriv_center_freq(det_id):
+            iter_dict = self.results_by_detector.get(det_id, {})
+            if not iter_dict:
+                return None
+            first_entry = next(iter(iter_dict.values()))
+            return (
+                first_entry.get('original_center_frequency')
+                or first_entry.get('sweep_center_frequency')
+            )
+
+        sorted_ids = self._get_sorted_detector_ids(
+            bias_finding_by_detector.keys(), _deriv_center_freq
+        )
+
+        update_derivative_grid(
+            grid_layout=self.derivative_grid,
+            bias_finding_by_detector=bias_finding_by_detector,
+            current_batch=self.current_batch,
+            batch_size=self.batch_size,
+            dark_mode=self.dark_mode,
+            prev_btn=self.prev_batch_btn,
+            next_btn=self.next_batch_btn,
+            batch_label=self.batch_info_label,
+            widget_cache=self.derivative_plots_cache,
+            unit_mode=self.unit_mode,
+            dac_scale=self.dac_scales.get(self.active_module_for_dac),
+            sorted_detector_ids=sorted_ids,
+        )
+
+        # Install double-click event filter so clicking a derivative subplot
+        # navigates the Detector Digest to that detector.
+        for pw in self.derivative_plots_cache:
+            pw.installEventFilter(self)
+
+        # Apply the current zoom box mode to all (potentially new) derivative widgets.
+        mode = pg.ViewBox.RectMode if self.zoom_box_mode else pg.ViewBox.PanMode
+        for pw in self.derivative_plots_cache:
+            vb = pw.getViewBox()
+            if vb is not None:
+                vb.setMouseMode(mode)
+
+    # ── Fit Results tab (Tab 6) ───────────────────────────────────────────────
+
+    def _populate_fit_amplitude_combo(self):
+        """Populate the amplitude index dropdown in the Fit Results tab.
+
+        Scans ``results_by_detector`` to find which sorted amplitude positions
+        (0-based) have at least one successful fit (skewed or nonlinear) across
+        any detector.  Those positions become the combo items (displayed as
+        plain integers: ``"0"``, ``"1"``, etc.).
+
+        The current selection is preserved when possible; if the previously
+        selected index no longer exists in the new set, the first available
+        index is selected.  Signals are blocked during the rebuild to avoid
+        spurious redraws.
+        """
+        if self._fit_display_index_combo is None:
+            return
+        if not self.results_by_detector:
+            return
+
+        # Collect valid positions: for each detector sort its iterations by
+        # sweep_amplitude and record the 0-based positions that have a fit.
+        valid_indices: set = set()
+        for iter_dict in self.results_by_detector.values():
+            sorted_items = sorted(
+                iter_dict.items(),
+                key=lambda kv: kv[1].get('sweep_amplitude_normalized', 0.0),
+            )
+            for pos, (_iter_idx, entry) in enumerate(sorted_items):
+                if (entry.get('fits', {}).get('skewed', {}).get('skewed_fit_success')
+                        or entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_success')):
+                    valid_indices.add(pos)
+
+        if not valid_indices:
+            # No fit data yet — nothing to show
+            return
+
+        sorted_valid = sorted(valid_indices)
+
+        # Block signals while rebuilding so we don't trigger redundant redraws
+        self._fit_display_index_combo.blockSignals(True)
+        prev_data = self._fit_display_index_combo.currentData()
+
+        self._fit_display_index_combo.clear()
+        for idx in sorted_valid:
+            self._fit_display_index_combo.addItem(str(idx), userData=idx)
+
+        # Restore previous selection if it still exists; otherwise select first
+        restore_row = 0
+        if prev_data is not None:
+            for row in range(self._fit_display_index_combo.count()):
+                if self._fit_display_index_combo.itemData(row) == prev_data:
+                    restore_row = row
+                    break
+        self._fit_display_index_combo.setCurrentIndex(restore_row)
+
+        self._fit_display_index_combo.blockSignals(False)
+
+    def _on_fit_results_controls_changed(self):
+        """Slot for any Tab-6 display control changing — triggers a redraw."""
+        if self.plot_tabs.currentIndex() == 6:
+            self._redraw_fit_results_grid()
+
+    def _redraw_fit_results_grid(self):
+        """Redraw the Fit Results tab (Tab 6).
+
+        Reads the tab's display controls and calls
+        :func:`multisweep_grid_helpers.update_fit_results_grid` to render
+        per-detector magnitude sweeps with fitted model overlays.  Shows a
+        placeholder when no fit data is present yet.
+        """
+        from .multisweep_grid_helpers import update_fit_results_grid
+
+        if not self.results_by_detector:
+            return
+        if self._fit_display_mode_rb_index is None:
+            return  # Tab not yet created
+
+        # Check whether any fit data is present; if not, show the placeholder.
+        has_fit_data = any(
+            entry.get('fits', {}).get('skewed', {}).get('skewed_fit_success')
+            or entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_success')
+            for iter_dict in self.results_by_detector.values()
+            for entry in iter_dict.values()
+        )
+
+        if not has_fit_data:
+            if hasattr(self, '_fit_results_placeholder'):
+                self._fit_results_placeholder.show()
+            if hasattr(self, '_fit_results_scroll'):
+                self._fit_results_scroll.hide()
+            return
+
+        # Fit data is present — hide placeholder, show scroll area
+        if hasattr(self, '_fit_results_placeholder'):
+            self._fit_results_placeholder.hide()
+        if hasattr(self, '_fit_results_scroll'):
+            self._fit_results_scroll.show()
+
+        # Read controls
+        display_mode = (
+            'bias' if self._fit_display_mode_rb_bias.isChecked() else 'index'
+        )
+        # Read amplitude index from the combo (item data stores the actual 0-based index)
+        combo_data = self._fit_display_index_combo.currentData()
+        display_amp_index = combo_data if combo_data is not None else 0
+        show_skewed    = self._fit_show_skewed_cb.isChecked()
+        show_nonlinear = self._fit_show_nonlinear_cb.isChecked()
+        dac_scale = self.dac_scales.get(self.active_module_for_dac)
+
+        # Compute detector order for the Fit Results grid.
+        def _fit_center_freq(det_id):
+            iter_dict = self.results_by_detector.get(det_id, {})
+            if not iter_dict:
+                return None
+            first_entry = next(iter(iter_dict.values()))
+            return (
+                first_entry.get('original_center_frequency')
+                or first_entry.get('sweep_center_frequency')
+            )
+
+        sorted_ids = self._get_sorted_detector_ids(
+            self.results_by_detector.keys(), _fit_center_freq
+        )
+
+        update_fit_results_grid(
+            grid_layout=self.fit_results_grid,
+            data_by_detector=self.results_by_detector,
+            res_info_dict=self.res_info_dict,
+            display_mode=display_mode,
+            display_amplitude_index=display_amp_index,
+            show_skewed=show_skewed,
+            show_nonlinear=show_nonlinear,
+            current_batch=self.current_batch,
+            batch_size=self.batch_size,
+            dark_mode=self.dark_mode,
+            unit_mode=self.unit_mode,
+            normalize=self.normalize_traces,
+            prev_btn=self.prev_batch_btn,
+            next_btn=self.next_batch_btn,
+            batch_label=self.batch_info_label,
+            widget_cache=self.fit_results_plots_cache,
+            dac_scale=dac_scale,
+            sorted_detector_ids=sorted_ids,
+        )
+
+        # Install double-click event filter and apply zoom box mode
+        for pw in self.fit_results_plots_cache:
+            pw.installEventFilter(self)
+        mode = pg.ViewBox.RectMode if self.zoom_box_mode else pg.ViewBox.PanMode
+        for pw in self.fit_results_plots_cache:
+            vb = pw.getViewBox()
+            if vb is not None:
+                vb.setMouseMode(mode)
+
+    def _update_fit_results_tab_visibility(self):
+        """Refresh Tab 6 state after fits may have been added or removed.
+
+        The Fit Results tab is always visible.  This method populates the
+        amplitude index dropdown when fit data is present and triggers a
+        redraw if Tab 6 is currently active.
+        """
+        has_fit_data = any(
+            entry.get('fits', {}).get('skewed', {}).get('skewed_fit_success')
+            or entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_success')
+            for iter_dict in self.results_by_detector.values()
+            for entry in iter_dict.values()
+        ) if self.results_by_detector else False
+
+        if has_fit_data:
+            # Populate the amplitude index dropdown now that fit data is available
+            self._populate_fit_amplitude_combo()
+
+        if hasattr(self, 'plot_tabs') and self.plot_tabs is not None:
+            if self.plot_tabs.currentIndex() == 6:
+                self._redraw_fit_results_grid()
+
+    # ── Fit Settings ─────────────────────────────────────────────────────────
+
+    def _show_fit_settings(self):
+        """Show (or create) the persistent FitSettingsPanel window."""
+        from .fit_settings_panel import FitSettingsPanel
+        if self.fit_settings_panel is None:
+            self.fit_settings_panel = FitSettingsPanel(parent=None)
+        self.fit_settings_panel.show()
+        self.fit_settings_panel.raise_()
+        self.fit_settings_panel.activateWindow()
+
+    # ── Run Fit ───────────────────────────────────────────────────────────────
+
+    def _run_fit(self):
+        """Run the selected fitting algorithms on the current multisweep data.
+
+        Reads fit settings from :class:`FitSettingsPanel` (or loads saved
+        defaults when the panel has not been opened yet), then starts a
+        :class:`~rfmux.tools.periscope.tasks.RunFitsTask` in a background
+        thread.  The task operates on a deep copy of
+        ``self.results_by_detector`` and emits the updated dict on completion;
+        this method's completion handler merges the fit keys back into the
+        live dict.
+        """
+        if not self.results_by_detector:
+            QtWidgets.QMessageBox.warning(
+                self, "No Data",
+                "No multisweep data available.  Please run a multisweep first."
+            )
+            return
+
+        # Collect settings — prefer the open panel, fall back to QSettings defaults.
+        if self.fit_settings_panel is not None:
+            fit_settings = self.fit_settings_panel.get_settings()
+        else:
+            from . import settings as periscope_settings
+            fit_settings = periscope_settings.get_fit_defaults()
+
+        # Guard: at least one fit type must be enabled
+        if not fit_settings.get('apply_skewed_fit') and not fit_settings.get('apply_nonlinear_fit'):
+            QtWidgets.QMessageBox.warning(
+                self, "No Fits Selected",
+                "No fit types are enabled.\n"
+                "Open ⚙ Fit Settings and enable at least one fit."
+            )
+            return
+
+        from .tasks import RunFitsTask, RunFitsSignals
+
+        self.run_fits_signals = RunFitsSignals()
+        self.run_fits_signals.progress.connect(self._run_fits_progress)
+        self.run_fits_signals.completed.connect(self._run_fits_completed)
+        self.run_fits_signals.error.connect(self._run_fits_error)
+
+        self.run_fits_task = RunFitsTask(
+            module=self.target_module,
+            results_by_detector=self.results_by_detector,
+            fit_settings=fit_settings,
+            signals=self.run_fits_signals,
+            res_info_dict=self.res_info_dict,
+        )
+
+        # Disable both Run Fit and Find Bias for the duration of this task.
+        self.run_fit_btn.setEnabled(False)
+        self.run_fit_btn.setText("Fitting…")
+        self.find_bias_btn.setEnabled(False)
+        self.run_fits_task.start()
+
+    def _run_fits_progress(self, module: int, progress: float):
+        """Handle progress updates from RunFitsTask (reserved for future use)."""
+        pass
+
+    def _run_fits_completed(self, module: int, updated_results_by_detector: dict):
+        """Handle successful completion of RunFitsTask.
+
+        Merges the fit-related keys from the updated dict back into
+        ``self.results_by_detector``, invalidates cached views that depend on
+        fit data (histograms, detector digest), emits ``data_ready`` for
+        session auto-export, and shows a transient completion label.
+
+        No broad plot redraw is triggered — lazy redraw on the next tab
+        navigation handles everything without blocking the GUI.
+        """
+        # Merge only the fit-related keys back into the live dict.
+        # All other data (sweep data, IQ, metadata) is untouched.
+        from .tasks import RunFitsTask
+        fit_keys = RunFitsTask._FIT_KEYS
+
+        for code, iter_dict in updated_results_by_detector.items():
+            if code not in self.results_by_detector:
+                continue
+            for iter_idx, updated_entry in iter_dict.items():
+                if iter_idx not in self.results_by_detector[code]:
+                    continue
+                target = self.results_by_detector[code][iter_idx]
+                for key in fit_keys:
+                    if key in updated_entry:
+                        target[key] = updated_entry[key]
+
+        # Invalidate histogram panel so it regenerates with the new fit data
+        # on the next visit to the Histograms tab.
+        if self.histogram_panel is not None and hasattr(self.histogram_panel, 'histogram_cache'):
+            self.histogram_panel.histogram_cache.clear()
+        self.histograms_generated = False
+
+        # Invalidate detector digest so it recreates with updated fit data
+        # on the next visit to the Detector Digest tab.
+        self.digest_panel = None
+
+        # Emit for session auto-export so the pickle file is updated immediately.
+        # session_manager.handle_data_ready will automatically overwrite the existing
+        # multisweep file rather than creating a new timestamped duplicate.
+        export_data = self._prepare_export_data()
+        self.data_ready.emit("multisweep", f"module{self.target_module}", export_data)
+
+        # Wait for the thread to fully finish before dropping the reference
+        # (same rationale as FindBiasTask — prevents native crash on GC).
+        if self.run_fits_task is not None:
+            self.run_fits_task.wait()
+
+        # Re-enable both Run Fit and Find Bias buttons.
+        self.run_fit_btn.setEnabled(True)
+        self.run_fit_btn.setText("Run Fit")
+        self.find_bias_btn.setEnabled(True)
+        self.run_fits_task = None
+
+        # Update Fit Results tab visibility — now that new fit data is present,
+        # the tab should appear if the user has enabled it in Fit Settings.
+        self._update_fit_results_tab_visibility()
+
+        # Show a transient "✓ Fits complete" label that auto-hides after 5 s.
+        self._fits_status_label.show()
+        QtCore.QTimer.singleShot(5000, self._fits_status_label.hide)
+
+    def _run_fits_error(self, error_msg: str):
+        """Handle errors from RunFitsTask."""
+        QtWidgets.QMessageBox.critical(self, "Run Fit Error", error_msg)
+        if self.run_fits_task is not None:
+            self.run_fits_task.wait()
+        self.run_fit_btn.setEnabled(True)
+        self.run_fit_btn.setText("Run Fit")
+        self.find_bias_btn.setEnabled(True)
+        self.run_fits_task = None

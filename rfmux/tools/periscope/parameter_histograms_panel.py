@@ -6,6 +6,7 @@ import pyqtgraph as pg
 
 # Imports from within the 'periscope' subpackage
 from .utils import (
+
     ScreenshotMixin, find_parent_with_attr, TABLEAU10_COLORS, LINE_WIDTH,
     UnitConverter, AMPLITUDE_COLORMAP_THRESHOLD
 )
@@ -132,7 +133,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         if freq_item:
             freq_item.setTitle("Resonance Frequencies", color=pen_color)
             freq_item.setLabel('left', 'Frequency', units='Hz')
-            freq_item.setLabel('bottom', 'Detector ID')
+            freq_item.setLabel('bottom', 'Frequency Rank')
             freq_item.showGrid(x=True, y=True, alpha=0.3)
             self._style_axes(freq_item, pen_color)
         grid.addWidget(self.freq_plot, 0, 0)
@@ -175,6 +176,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         layout.addWidget(plot_container)
         
+
     @staticmethod
     def _color_to_rgb(color):
         """Convert a color (hex string, tuple, list, or numpy array) to an (R, G, B) tuple."""
@@ -207,11 +209,12 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         has_fit_data = False
         for iter_dict in results.values():
             for entry in iter_dict.values():
-                amp = entry.get('amplitude')
-                direction = entry.get('direction', 'upward')
+                amp = entry.get('sweep_amplitude_normalized')
+                direction = entry.get('sweep_direction', 'upward')
                 if amp is not None:
                     sweep_keys_set.add((amp, direction))
-                if entry.get('fit_params') or entry.get('nonlinear_fit_params'):
+                if entry.get('fits', {}).get('skewed', {}).get('fit_params') or \
+                   entry.get('fits', {}).get('nonlinear', {}).get('nonlinear_fit_params'):
                     has_fit_data = True
         
         if not has_fit_data:
@@ -305,17 +308,19 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             # Find entry matching this amplitude + direction
             entry = None
             for e in iter_dict.values():
-                if e.get('amplitude') == amplitude and e.get('direction') == direction:
+                if e.get('sweep_amplitude_normalized') == amplitude and e.get('sweep_direction') == direction:
                     entry = e
                     break
             if entry is None:
                 continue
             # Prefer nonlinear fit params, fall back to skewed
             fit_params = None
-            if entry.get('nonlinear_fit_params'):
-                fit_params = dict(entry['nonlinear_fit_params'])
-            elif entry.get('fit_params'):
-                fit_params = dict(entry['fit_params'])
+            _nl = entry.get('fits', {}).get('nonlinear', {})
+            _sk = entry.get('fits', {}).get('skewed', {})
+            if _nl.get('nonlinear_fit_params'):
+                fit_params = dict(_nl['nonlinear_fit_params'])
+            elif _sk.get('fit_params'):
+                fit_params = dict(_sk['fit_params'])
             if fit_params:
                 params_by_detector[detector_id] = fit_params
         
@@ -384,7 +389,11 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._plot_q_histogram(self.qi_plot, qi_valid, "Qi")
         
     def _plot_frequency_scatter(self, fr_dict):
-        """Plot resonance frequency scatter. fr_dict: {detector_id: freq_hz}."""
+        """Plot resonance frequency scatter. fr_dict: {detector_id: freq_hz}.
+
+        The x-axis shows frequency rank (0-based index sorted by ascending frequency)
+        rather than raw detector IDs, so that string codes and integer keys both work.
+        """
         if not self.freq_plot:
             return
         
@@ -398,14 +407,15 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         if not fr_dict:
             return
         
-        # Extract detector IDs and frequencies
-        detector_ids = sorted(fr_dict.keys())
-        freqs = [fr_dict[det_id] for det_id in detector_ids]
+        # Sort detectors by frequency value; use rank as x-axis
+        sorted_ids = sorted(fr_dict, key=lambda k: fr_dict[k])
+        freqs = [fr_dict[det_id] for det_id in sorted_ids]
+        x_rank = list(range(len(sorted_ids)))
         
         # Create scatter plot
         color = TABLEAU10_COLORS[0]
         scatter = pg.ScatterPlotItem(
-            x=detector_ids,
+            x=x_rank,
             y=freqs,
             size=8,
             pen=pg.mkPen(color, width=1),
@@ -415,7 +425,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Add yield count to title
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-        total = len(detector_ids)
+        total = len(sorted_ids)
         title = f"Resonance Frequencies (Yield: {total})"
         freq_item.setTitle(title, color=pen_color)
         
@@ -527,7 +537,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         amp_values = [self.available_sweep_keys[idx][0] for idx in sorted(fr_by_sweep.keys())]
         amplitude_to_color = create_amplitude_color_map(amp_values, self.dark_mode)
         
-        # Plot each sweep with its color
+        # Plot each sweep with its color, using frequency rank as x-axis
         total_count = 0
         for sweep_idx in sorted(fr_by_sweep.keys()):
             fr_dict = fr_by_sweep[sweep_idx]
@@ -537,18 +547,20 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             amp_value = self.available_sweep_keys[sweep_idx][0]
             color = amplitude_to_color.get(amp_value, TABLEAU10_COLORS[0])
             
-            detector_ids = sorted(fr_dict.keys())
-            freqs = [fr_dict[det_id] for det_id in detector_ids]
+            # Sort by frequency value; use rank as x so string keys work
+            sorted_ids = sorted(fr_dict, key=lambda k: fr_dict[k])
+            freqs = [fr_dict[det_id] for det_id in sorted_ids]
+            x_rank = list(range(len(sorted_ids)))
             
             scatter = pg.ScatterPlotItem(
-                x=detector_ids,
+                x=x_rank,
                 y=freqs,
                 size=8,
                 pen=pg.mkPen(color, width=1),
                 brush=pg.mkBrush(color)
             )
             freq_item.addItem(scatter)
-            total_count += len(detector_ids)
+            total_count += len(sorted_ids)
         
         # Add title
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
@@ -680,6 +692,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         if len(q_values) == 0:
             return
         
+
         # Use global Q ranges if available for consistent x-axis
         global_range = self.global_q_ranges.get(param_name)
         if global_range:
@@ -729,6 +742,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
             x=x,
             height=counts,
             width=width,
+
             brush=pg.mkBrush(*rgba),
             pen=pg.mkPen(color, width=1)
         )
@@ -742,7 +756,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         mean_q = np.mean(q_values)
         median_q = np.median(q_values)
         std_q = np.std(q_values)
-        
+
         # Clean title with just parameter name and count
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
         plot_item.setTitle(f"{param_name} Distribution (N={len(q_values)})", color=pen_color)

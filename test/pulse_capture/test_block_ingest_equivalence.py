@@ -224,3 +224,64 @@ def test_held_tail_is_not_transformed_twice():
         assert np.all(near < 1e-6), (
             f"ch{ch}: {int((near >= 1e-6).sum())} of {len(got)} samples reached "
             "the engine with the conversion applied more than once")
+
+
+def _run_per_sample_cfg(channels, packets, pulses, **kw):
+    s = PulseCaptureSession(channels=list(channels), sample_rate=FS,
+                            noise_samples=NOISE, hdf5_path=None,
+                            on_pulse=lambda ch, idx, summ, data: pulses.append(
+                                (ch, idx, round(float(summ["timestamp"]), 9))),
+                            **kw)
+    s.start()
+    for values, ts in packets:
+        for column, ch in enumerate(channels):
+            v = values[column]
+            s.feed_sample(ch, float(v.real), float(v.imag), ts)
+    s.stop()
+    return s
+
+
+def _run_blocks_cfg(channels, packets, pulses, max_packets=256, **kw):
+    s = PulseCaptureSession(channels=list(channels), sample_rate=FS,
+                            noise_samples=NOISE, hdf5_path=None,
+                            on_pulse=lambda ch, idx, summ, data: pulses.append(
+                                (ch, idx, round(float(summ["timestamp"]), 9))),
+                            **kw)
+    s.start()
+    acc = SlowIngest(s.feed_block, max_packets=max_packets, max_age_s=1e9)
+    for values, ts in packets:
+        acc.add(channels, values, ts)
+    acc.flush()
+    s.stop()
+    return s
+
+
+def test_dense_scattered_crossings_agree():
+    """Block and per-sample ingest agree when crossings scatter.
+
+    process_block walks hit ISLANDS and bulks the quiet gaps between
+    them.  A clean single pulse is one island and never exercises a
+    second; this drives the threshold down into the noise so a block
+    holds many crossings with wide gaps -- the multi-island, gap-bulk
+    path -- and requires the two ingest routes to still detect exactly
+    the same pulses at exactly the same times.
+    """
+    rng = np.random.default_rng(4)
+    channels = (1,)
+    # A couple of real pulses on top of noise, at a low threshold so the
+    # noise itself crosses constantly: many islands per block.
+    packets = _packets(channels, 3000, rng, pulse_starts=(1200, 2100),
+                        tau=15, amp=30.0)
+    kw = dict(threshold_sigma=2.5, end_sigma=1.5)
+
+    by_sample, by_block = [], []
+    _run_per_sample_cfg(channels, packets, by_sample, **kw)
+    # Vary the block boundaries: the gaps must not depend on where a
+    # block happens to split.
+    for mp in (1, 7, 64, 256, 4096):
+        by_block.clear()
+        _run_blocks_cfg(channels, packets, by_block, max_packets=mp, **kw)
+        assert sorted(by_block) == sorted(by_sample), \
+            f"block ingest disagreed at max_packets={mp}: " \
+            f"{len(by_block)} vs {len(by_sample)} pulses"
+    assert by_sample, "the fixture should trigger at 2.5 sigma"

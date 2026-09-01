@@ -569,25 +569,60 @@ class PulseCapture:
                 pos = end
                 continue
 
-            # Absorb the quiet lead-in, hand the state machine the span
-            # that actually contains crossings, and leave the quiet tail
-            # for the next pass to bulk.  Sequential work is bounded by
-            # where the signal is, not by where the block happens to
-            # end — which matters at high count rates, where blocks
-            # holding the last of a decay would otherwise be walked
-            # sample by sample to their end.
+            # Absorb the quiet lead-in, then walk only the hit ISLANDS
+            # and bulk the provably-quiet gaps between them.  Walking the
+            # whole span from the first crossing to the last -- as this
+            # did -- costs ~2.3us of interpreter time per sample even
+            # where the mask already proved the sample is below
+            # threshold.  At a hunting threshold the crossings scatter
+            # across the block, so that span is almost all gap: at 2.5
+            # sigma the engine ran at ~15% of real time here, purely on
+            # gap samples it did not need to walk.
+            #
+            # A gap sample, not capturing and below threshold, does
+            # exactly what _bulk_quiet does: reset the trigger run, feed
+            # the ring and the baseline reservoir, advance the counters.
+            # The edge detector never looks at it (it runs only on
+            # eligible, above-threshold samples), and its lag-K lookback
+            # still reaches back through the bulked samples because they
+            # are in the ring.  So bulking a gap equals walking it --
+            # the same equivalence the lead-in bulk above already
+            # relies on, applied to the interior too.
+            #
+            # Crossings closer together than MERGE_GAP stay in one
+            # island: bulking a handful of samples costs more than
+            # walking them.
+            MERGE_GAP = 32
             seg = pos
             first = int(hits[0])
             if first > 0:
                 self._bulk_quiet(channel, st, I[seg:seg + first],
                                  Q[seg:seg + first], T[seg:seg + first])
                 pos = seg + first
-            stop = seg + int(hits[-1]) + 1
-            while pos < stop:
-                self.process_sample(channel, I[pos], Q[pos], T[pos])
-                pos += 1
+            h = 0
+            nhits = hits.shape[0]
+            while pos < seg + int(hits[-1]) + 1:
+                # pos sits at a crossing (an island start).  Extend the
+                # island while the next crossing is within MERGE_GAP.
+                while (h + 1 < nhits
+                       and int(hits[h + 1]) - int(hits[h]) <= MERGE_GAP):
+                    h += 1
+                walk_stop = seg + int(hits[h]) + 1
+                while pos < walk_stop:
+                    self.process_sample(channel, I[pos], Q[pos], T[pos])
+                    pos += 1
+                    if st.capturing:
+                        break  # let the capturing branch take over
                 if st.capturing:
-                    break  # let the capturing branch take over
+                    break
+                h += 1
+                if h >= nhits:
+                    break  # quiet tail after the last island -> outer bulk
+                nxt = seg + int(hits[h])
+                if nxt > pos:
+                    self._bulk_quiet(channel, st, I[pos:nxt],
+                                     Q[pos:nxt], T[pos:nxt])
+                    pos = nxt
 
     def process_sample(
         self,

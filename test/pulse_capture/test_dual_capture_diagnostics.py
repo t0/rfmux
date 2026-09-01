@@ -15,6 +15,25 @@ import pytest
 
 from rfmux import streamer
 from rfmux.pulse_capture.sources import run_pfb_source
+from test.qt_helpers import spin
+
+
+import contextlib
+import socket
+
+
+def _private_pfb_socket(monkeypatch):
+    """Point run_pfb_source at a private loopback socket nothing sends
+    to, so the real PFB multicast group cannot leak packets in."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+
+    @contextlib.contextmanager
+    def fake(host, port=None, **kw):
+        yield sock
+    monkeypatch.setattr(streamer, "get_multicast_socket", fake)
+    return sock
+
 
 
 class _NeverFed:
@@ -32,6 +51,7 @@ def test_silent_pfb_socket_is_an_error(monkeypatch):
     user had pressed stop, with nothing naming the silent socket.
     """
     monkeypatch.setattr(streamer, "STREAMER_TIMEOUT", 0.2)
+    _private_pfb_socket(monkeypatch)
     with pytest.raises(TimeoutError, match="fast streamer is not sending"):
         asyncio.run(run_pfb_source(_NeverFed(), "127.0.0.1", [1]))
 
@@ -61,6 +81,7 @@ def test_a_stream_that_stops_mid_capture_still_returns(monkeypatch):
         def feed_block(self, ch, i_vals, q_vals, timestamps):
             _Sink.fed += 1
 
+    _private_pfb_socket(monkeypatch)
     monkeypatch.setattr(asyncio, "wait_for", one_packet_then_silence)
     covered = asyncio.run(run_pfb_source(_Sink(), "127.0.0.1", [1]))
     assert covered > 0.0
@@ -181,3 +202,66 @@ def test_stale_teardown_does_not_disable_a_newer_capture():
         assert calls == [[1], [1], None], calls
 
     asyncio.run(scenario())
+
+
+def test_stream_lag_is_reported_in_stats():
+    """The dual session reports how far the fast stream trails the slow.
+
+    The matcher already keeps each stream's processed time, so a lag
+    that would make cross-stream windows unavailable is observable
+    without new bookkeeping.
+    """
+    import numpy as np
+    from rfmux.pulse_capture.capture_session import (
+        DualPulseCaptureSession, PulseCaptureConfig)
+
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, noise_train_ms=50.0,
+                             max_pulse_ms=50.0)
+    d = DualPulseCaptureSession(channels=[1], module=1, slow_rate=1000.0,
+                                fast_rate=100000.0, config=cfg, hdf5_path=None)
+    d.start()
+    t = 43000.0
+    # Feed slow up to t+2.0 but fast only to t+0.5: fast trails by 1.5 s.
+    d.feed_slow_block(1, np.zeros(2000), np.zeros(2000), t + np.arange(2000) / 1000.0)
+    d.feed_fast_block(1, np.zeros(50000), np.zeros(50000), t + np.arange(50000) / 100000.0)
+    d.stop()
+
+    st = d.stats()
+    assert st["stream_lag_s"] == pytest.approx(1.5, abs=0.05)
+    assert st["ring_overlap_s"] is not None and st["ring_overlap_s"] > 0
+
+
+def test_status_line_warns_and_tooltips_on_lag(qt_app):
+    """A drifting fast stream colours the status line and explains itself,
+    the way the dropped-packet indicator does."""
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._both_mode = True
+
+    # Healthy: small lag well inside the ring overlap -> green, no note.
+    ok, tip = panel._stream_lag_signal(
+        {"stream_lag_s": 0.02, "ring_overlap_s": 0.4})
+    assert ok == "#4CC38A" and tip is None
+
+    # Amber: past half the overlap.
+    amber, tip = panel._stream_lag_signal(
+        {"stream_lag_s": 0.25, "ring_overlap_s": 0.4})
+    assert amber == "#E5A23B" and "fast stream" in tip[0]
+
+    # Red: lag exceeds the overlap -> windows are failing now.
+    red, tip = panel._stream_lag_signal(
+        {"stream_lag_s": 3.5, "ring_overlap_s": 0.4})
+    assert red == "#E5484D"
+    assert "unavailable" in tip[1] and "raise the threshold" in tip[1]
+
+    # And it reaches the actual label + tooltip through the status line.
+    panel._last_stats = {"pairs_matched": 0, "pairs_unmatched": 8,
+                         "slow": {"total_pulses": 2}, "fast": {"total_pulses": 6},
+                         "stream_lag_s": 3.5, "ring_overlap_s": 0.4}
+    panel._refresh_status_line()
+    assert "behind" in panel.status_label.text()
+    assert "unavailable" in panel.status_label.toolTip()
+
+    panel.close()
+    spin(qt_app)

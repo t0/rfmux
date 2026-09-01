@@ -1614,15 +1614,54 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 and not self._follow_timer.isActive():
             self._follow_timer.start()
 
+    #: The fast engine is one event loop away from the slow one, so if
+    #: it cannot keep real time it processes older and older data and
+    #: its ring drifts behind the slow ring.  Past the ring overlap the
+    #: two no longer share a time span and cross-stream windows go
+    #: unavailable -- the same failure as dropped packets, and worth the
+    #: same kind of visible warning.  Amber at half the overlap (drift
+    #: is starting), red once it exceeds the overlap (windows failing).
+    _LAG_WARN_FRACTION = 0.5
+
+    def _stream_lag_signal(self, stats: dict):
+        """(status colour, (short, tooltip)) for the current stream lag.
+
+        Returns the healthy green and ``None`` when the lag is fine, so
+        the caller only appends a note when there is one.
+        """
+        lag = stats.get("stream_lag_s")
+        overlap = stats.get("ring_overlap_s")
+        if lag is None or overlap is None or overlap <= 0:
+            return "#4CC38A", None
+        lag = abs(lag)
+        if lag < self._LAG_WARN_FRACTION * overlap:
+            return "#4CC38A", None
+        who = "fast" if (stats.get("stream_lag_s") or 0) >= 0 else "slow"
+        short = f"⚠ {who} stream {lag:.1f}s behind"
+        tip = (
+            f"The {who} stream is {lag:.2f}s behind the other, and the "
+            f"rings overlap only {overlap:.2f}s. When the lag exceeds the "
+            "overlap the two streams no longer share a time span: "
+            "cross-stream windows read 'unavailable' and pulses stop "
+            "matching.\n\nThe engine is not keeping real time on the "
+            "shared event loop — raise the threshold σ (fewer crossings "
+            "to walk) or capture fewer channels.")
+        colour = "#E5484D" if lag >= overlap else "#E5A23B"
+        return colour, (short, tip)
+
     def _refresh_status_line(self) -> None:
         s = self._last_stats
         if self._both_mode and "pairs_matched" in s:
             slow_n = s.get("slow", {}).get("total_pulses", 0)
             fast_n = s.get("fast", {}).get("total_pulses", 0)
-            self._set_status(
-                f"● Capturing — slow {slow_n} | fast {fast_n} pulses — "
-                f"{s['pairs_matched']} matched / "
-                f"{s['pairs_unmatched']} single-trigger pairs", "#4CC38A")
+            text = (f"● Capturing — slow {slow_n} | fast {fast_n} pulses — "
+                    f"{s['pairs_matched']} matched / "
+                    f"{s['pairs_unmatched']} single-trigger pairs")
+            colour, tip = self._stream_lag_signal(s)
+            if tip:                       # append the drift note when it bites
+                text += f"  —  {tip[0]}"
+            self._set_status(text, colour)
+            self.status_label.setToolTip(tip[1] if tip else "")
             return
         total = s.get("total_pulses", 0)
         rate = s.get("rate_per_min", 0.0)

@@ -1418,7 +1418,28 @@ class DualPulseCaptureSession(_CallbackHost):
             "pairs_unmatched": self.matcher.unmatched,
             "total_pulses": (self.slow.total_pulses
                              + self.fast.total_pulses),
+            **self._stream_lag(),
         }
+
+    def _stream_lag(self) -> Dict[str, Any]:
+        """How far the fast stream's processed time trails the slow one.
+
+        The matcher already keeps each stream's newest processed
+        timestamp, so this is free.  A positive ``stream_lag_s`` means
+        the fast engine is behind: once it exceeds ``ring_overlap_s``
+        the two rings no longer share a time span and cross-stream
+        windows go unavailable (and, further out, pulses stop matching).
+        ``ring_overlap_s`` is the smaller of the two rings in seconds --
+        the reach a complement-window extraction still has.
+        """
+        sl = self.matcher._latest.get("slow")
+        fl = self.matcher._latest.get("fast")
+        lag = (sl - fl) if (sl is not None and fl is not None) else None
+        overlap = None
+        if self.slow.sample_rate and self.fast.sample_rate:
+            overlap = min(self.slow.buf_size / self.slow.sample_rate,
+                          self.fast.buf_size / self.fast.sample_rate)
+        return {"stream_lag_s": lag, "ring_overlap_s": overlap}
 
     # ── Internal wiring ───────────────────────────────────────────
 

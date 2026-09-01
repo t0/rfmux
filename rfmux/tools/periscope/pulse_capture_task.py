@@ -321,15 +321,50 @@ class PulseCaptureTask(QtCore.QThread):
         try:
             stop = (lambda: self._stop_requested
                     or self.isInterruptionRequested())
-            await run_dual_source(
-                self.session, self.host, channels, module=self.module,
-                should_stop=stop, slow_source=self._slow_tap_pump)
+            watchdog = asyncio.ensure_future(self._dual_watchdog(stop))
+            try:
+                await run_dual_source(
+                    self.session, self.host, channels, module=self.module,
+                    should_stop=stop, slow_source=self._slow_tap_pump)
+            finally:
+                watchdog.cancel()
         finally:
             try:
                 await self.crs.set_pfb_streamer(channel=None,
                                                 module=self.module)
             except Exception as e:
                 self.signals.error.emit(f"PFB teardown failed: {e}")
+
+    async def _dual_watchdog(self, stop) -> None:
+        """Report a dual capture that is training instead of capturing.
+
+        Both streams have to finish noise training before either may
+        trigger (freeze in _sync_capture_start), so a stream stuck in
+        ESTIMATING silences the whole capture -- and the fast stream's
+        processing load can starve the slow one to a fraction of real
+        time, stretching a one-second training to many minutes.  This
+        was watched live: 0.8 s of slow sample time accumulated over
+        300 s of wall time, no trigger ever armed, and nothing said why.
+        """
+        waited = 0.0
+        while not stop():
+            await asyncio.sleep(15.0)
+            waited += 15.0
+            states = self.session.state
+            stuck = [name for name, st in states.items()
+                     if st == CaptureState.ESTIMATING.value]
+            if not stuck:
+                return
+            done = [n for n in states if n not in stuck]
+            lag = " and ".join(stuck)
+            self.signals.error.emit(
+                f"Still training noise on the {lag} stream after "
+                f"{waited:.0f} s"
+                + (f" ({', '.join(done)} finished; no stream may trigger "
+                   "until both have)" if done else "")
+                + ". The fast stream's processing load can starve the "
+                "slow one -- if this persists, capture the streams "
+                "separately.")
 
     async def _slow_tap_pump(self, stop) -> float:
         """Drain tap-fed slow samples + control items into the dual

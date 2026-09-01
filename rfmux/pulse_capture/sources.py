@@ -272,10 +272,20 @@ async def run_pfb_source(
     timestamp at the PFB rate.
 
     Returns the sample time covered (seconds).
+
+    Raises
+    ------
+    TimeoutError
+        If not a single packet arrives.  A silent PFB socket is a
+        configuration problem -- the fast streamer is off, or the wrong
+        module -- and quietly returning 0.0 made a dual capture end as
+        though someone had pressed stop, with per-stream counters that
+        kept the user watching for pairs that could never come.
     """
     loop = asyncio.get_running_loop()
     n_groups = max(1, len(channels))
     elapsed = 0.0
+    got_any = False
 
     with streamer.get_multicast_socket(
             host, port=streamer.PFB_STREAMER_PORT) as sock:
@@ -289,7 +299,15 @@ async def run_pfb_source(
                     loop.sock_recv(sock, streamer.PFB_PACKET_SIZE),
                     streamer.STREAMER_TIMEOUT)
             except asyncio.TimeoutError:
+                if not got_any:
+                    raise TimeoutError(
+                        f"No PFB packets in {streamer.STREAMER_TIMEOUT} s — "
+                        "the fast streamer is not sending. Check that "
+                        "set_pfb_streamer enabled the right channels and "
+                        "module (get_pfb_streamer says what the board "
+                        "thinks), and that nothing tore it down.")
                 break
+            got_any = True
             pkt = streamer.PFBPacket(data)
             # Match the slow stream's 16-bit ADC scale: np.array(pkt)
             # applies the packetizer /256; the second /256 brings the

@@ -564,3 +564,60 @@ def test_fast_and_slow_traces_are_told_apart_by_hue():
     from rfmux.tools.periscope.utils import IQ_COLORS
     for q in ("I", "Q"):
         assert FAST_IQ_COLORS[q].lower() != IQ_COLORS[q].lower()
+
+
+def _decision_labels(plot):
+    import pyqtgraph as pg
+    out = []
+    for item in plot.getPlotItem().items:
+        if isinstance(item, pg.InfiniteLine) and item.label is not None:
+            out.append(item.label.format)
+    return out
+
+
+def test_end_confirmed_mark_follows_the_full_tail_setting(qt_app):
+    """With the tail not saved there is no confirmation instant in the
+    data, so no mark for it -- it was drawn past the end of the trace
+    regardless of the checkbox."""
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    panel = PulseCapturePanel(dark_mode=False)
+    T = 43000.0
+    wf = {"Time": T + np.arange(20) / 1000.0,
+          "trigger_index": 2, "trigger_time": T + 0.002,
+          "below_threshold_index": 6, "below_threshold_time": T + 0.006,
+          "end_index": 40, "end_time": T + 0.040}   # past the data
+
+    panel.capture_config.save_to_end_confirmed = False
+    panel.pulse_plot_i.clear()
+    panel._annotate_decisions(panel.pulse_plot_i, wf, T, "I")
+    labels = _decision_labels(panel.pulse_plot_i)
+    assert any("trigger" in l for l in labels)
+    assert any("below threshold" in l for l in labels)
+    assert not any("end confirmed" in l for l in labels), labels
+
+    panel.capture_config.save_to_end_confirmed = True
+    panel.pulse_plot_i.clear()
+    panel._annotate_decisions(panel.pulse_plot_i, wf, T, "I")
+    assert any("end confirmed" in l for l in _decision_labels(panel.pulse_plot_i))
+    panel.close()
+    spin(qt_app)
+
+
+def test_review_mode_restores_the_full_tail_setting(qt_app, tmp_path):
+    """An opened file carries the policy that made its records, so the
+    marks drawn over them match it."""
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Writer
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    path = tmp_path / "tail_off.h5"
+    PulseHDF5Writer(path, [1], {1: ChannelNoiseStats()},
+                    {"streamer_mode": "slow", "sample_rate": 596.0,
+                     "save_to_end_confirmed": False}).finalize()
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.capture_config.save_to_end_confirmed = True
+    panel.load_from_hdf5(path)
+    assert panel._saves_full_tail() is False
+    panel.close()
+    spin(qt_app)

@@ -535,6 +535,15 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             parts.append(f"bucket {got}/{want}")
         return "\n" + "   ".join(parts)
 
+    def _saves_full_tail(self) -> bool:
+        """Whether captures keep samples to the end-of-pulse confirmation.
+
+        Live, from the configured capture; in review, restored from the
+        file's capture parameters when it was opened.
+        """
+        return bool(getattr(self.capture_config,
+                            "save_to_end_confirmed", True))
+
     def _annotate_decisions(self, plot, wf, t0, quad,
                             prefix="") -> None:
         """Mark where the engine triggered and where the end condition
@@ -562,12 +571,20 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 return None
             return float(t[int(idx)]) - t0
 
-        marks = (
+        marks = [
             ("trigger_index", "trigger_time", "#33CC66", "trigger"),
             ("below_threshold_index", "below_threshold_time", "#CCAA33",
              "below threshold"),
-            ("end_index", "end_time", "#CC3366", "end confirmed"),
-        )
+        ]
+        # The confirmation instant is only a fact about the saved data
+        # when the tail was kept to it.  With "save the full tail" off
+        # the data stops a margin past below-threshold and the
+        # confirmation happened somewhere past the end of what is
+        # drawn -- a mark there answers a question the setting said
+        # not to ask.
+        if self._saves_full_tail():
+            marks.append(("end_index", "end_time", "#CC3366",
+                          "end confirmed"))
         for idx_key, time_key, color, label in marks:
             label = f"{prefix}{label}"
             x = _t_at(idx_key, time_key)
@@ -1260,6 +1277,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         """Open an existing pulse-capture HDF5 for browsing."""
         self.reader = PulseHDF5Reader(path)
         meta = self.reader.metadata
+        # The marks drawn over a record depend on the policy that made
+        # it, so an opened file sets it the way a live capture does.
+        self.capture_config.save_to_end_confirmed = bool(
+            meta.get("save_to_end_confirmed", True))
         channels = [int(c) for c in self.reader.channels]
 
         # Restore capture parameters so bands/labels reflect the file

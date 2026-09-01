@@ -21,12 +21,30 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
 import pyqtgraph as pg  # noqa: E402
-from PyQt6 import QtWidgets, sip  # noqa: E402
+from PyQt6 import QtCore, QtWidgets, sip  # noqa: E402
 
 from test.qt_helpers import spin  # noqa: E402
 
 from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.utils import ClickableViewBox  # noqa: E402
+
+
+def _delete(qt_app, *widgets):
+    """Destroy the C++ objects the way closing a dock does.
+
+    deleteLater + event loop, not sip.delete: hard deletion of a live
+    QGraphicsView is a use-after-free waiting in pyqtgraph's scene
+    bookkeeping, and on CI it segfaulted a LATER test's widget
+    construction.  The state under test is the same either way -- a
+    live Python wrapper over a dead C++ object.
+    """
+    for w in widgets:
+        w.deleteLater()
+    # processEvents() does not deliver DeferredDelete; only the event
+    # loop proper (or this) does.
+    QtCore.QCoreApplication.sendPostedEvents(
+        None, QtCore.QEvent.Type.DeferredDelete)
+    assert all(sip.isdeleted(w) for w in widgets), "deferred deletion never ran"
 
 
 def _panel():
@@ -59,8 +77,7 @@ def test_a_closed_window_does_not_break_the_rebuild(qt_app):
         assert plot.getViewBox().state["mouseMode"] == pg.ViewBox.RectMode
 
     # Closed, the way closing the dock closes it.
-    sip.delete(panel)
-    sip.delete(dock)
+    _delete(qt_app, panel, dock)
 
     # This is the call that raised on every layout rebuild.
     p._toggle_zoom_box_mode(False)
@@ -97,8 +114,7 @@ def test_the_registry_does_not_grow_without_bound(qt_app):
     for i in range(5):
         panel, dock = _panel(), QtWidgets.QWidget()
         p.netanal_windows[f"na-{i}"] = {"window": panel, "dock": dock}
-        sip.delete(panel)
-        sip.delete(dock)
+        _delete(qt_app, panel, dock)
         p._toggle_zoom_box_mode(True)
 
     assert p.netanal_windows == {}
@@ -117,8 +133,7 @@ def test_a_live_panel_with_dead_viewboxes(qt_app):
     panel, dock = _panel(), QtWidgets.QWidget()
     p = _periscope_with({"window": panel, "dock": dock, "signals": None})
 
-    for plot in panel.plots[1].values():
-        sip.delete(plot.getViewBox())
+    _delete(qt_app, *[plot.getViewBox() for plot in panel.plots[1].values()])
 
     # The panel survives the prune, and the walk still must not raise.
     p._toggle_zoom_box_mode(True)

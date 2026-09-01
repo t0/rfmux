@@ -210,11 +210,14 @@ def pulse_summary(
     # start, pre-trigger margin included -- and stays what it was.
     # ``trigger_time`` is the physical event, the right anchor for
     # anything that must line up across streams: the record start
-    # moves with each stream's own margin.  ``end_time`` is the last
-    # saved sample, so a consumer showing the record can span all of
-    # it rather than guessing from the core duration.
+    # moves with each stream's own margin.  ``saved_end_time`` is the
+    # last SAVED sample, so a consumer showing the record can span all
+    # of it and no more.  It is deliberately not pulse_data's
+    # ``end_time``: that is the instant the end was CONFIRMED, which
+    # under save_to_end_confirmed=False lies past the saved window --
+    # and a display extent reaching it would draw, from the ring, the
+    # very tail the setting says not to keep.
     trig = pulse_data.get("trigger_time")
-    end = pulse_data.get("end_time")
     return {
         "n_samples": int(len(np.asarray(pulse_data["Amp_I"]))),
         "pileup": bool(pulse_data.get("pileup", False)),
@@ -226,9 +229,8 @@ def pulse_summary(
         "start_time": timestamp,
         "trigger_time": (float(trig) if trig is not None
                          and np.isfinite(trig) else timestamp),
-        "end_time": (float(end) if end is not None and np.isfinite(end)
-                     else (float(np.max(valid_times))
-                           if len(valid_times) else timestamp)),
+        "saved_end_time": (float(np.max(valid_times))
+                           if len(valid_times) else timestamp),
         "tau_s": tau_s,
         "tau_ms": tau_s * 1e3,
     }

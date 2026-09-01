@@ -105,6 +105,7 @@ DETECTION_PARAMS = (
     "trigger_samples",
     "enable_pileup",
     "save_to_end_confirmed",
+    "min_end_samples",
     "baseline_window",
     "edge_lookback",
     "max_capture_samples",
@@ -204,6 +205,14 @@ class PulseCaptureConfig:
     #: derives it from the pulse length — see noise_train_span_ms().
     noise_train_ms: float = 0.0
     enable_pileup: bool = True
+    #: Floor under the end-confirmation count, in samples.  A capture
+    #: ends once the confirmation bucket exceeds
+    #: ``max(min_end_samples, margin_fraction * core)``, where the bucket
+    #: fills by one per sample with both quadratures inside end_sigma
+    #: and leaks by one per sample outside it.  The floor is what ends a
+    #: short pulse; it is a sample count, so it is 17 ms at 596 Hz and
+    #: 4 us on the PFB stream.
+    min_end_samples: int = 10
     #: Keep samples all the way to the end-of-pulse CONFIRMATION rather
     #: than stopping a ``margin_fraction`` tail past the below-threshold
     #: instant.  The extra samples are already in the ring, so this
@@ -367,6 +376,7 @@ class PulseCaptureConfig:
             "trigger_samples": self.trigger_samples_for(sample_rate),
             "enable_pileup": self.enable_pileup,
             "save_to_end_confirmed": self.save_to_end_confirmed,
+            "min_end_samples": self.min_end_samples,
             "trigger_basis": self.trigger_basis,
             "buf_size": self.buf_size(sample_rate),
             "noise_samples": self.noise_samples(sample_rate),
@@ -382,6 +392,8 @@ class PulseCaptureConfig:
         return {
             "sample_rate_hz": sample_rate,
             "min_pulse_samples": self.min_pulse_samples(sample_rate),
+            "min_end_samples": self.min_end_samples,
+            "min_end_ms": self.min_end_samples / sample_rate * 1e3,
             "noise_samples": self.noise_samples(sample_rate),
             "noise_train_span_ms": self.noise_train_span_ms(),
             "noise_train_actual_ms":
@@ -441,6 +453,10 @@ class PulseCaptureConfig:
         if not 0 <= self.margin_fraction <= 1:
             issues.append(("error",
                            "Margin fraction must be within 0–1."))
+        if self.min_end_samples < 1:
+            issues.append(("error",
+                           "End confirmation floor must be at least 1 "
+                           "sample."))
         if self.max_pulse_ms <= 0:
             issues.append(("error", "Max pulse length must be positive."))
         if self.min_pulse_ms < 0:
@@ -547,6 +563,7 @@ class PulseCaptureSession(_CallbackHost):
         trigger_samples: int = 2,
         enable_pileup: bool = True,
         save_to_end_confirmed: bool = True,
+        min_end_samples: int = 10,
         buf_size: int = 5000,
         sample_rate: Optional[float] = None,
         noise_samples: int = 1000,
@@ -577,6 +594,7 @@ class PulseCaptureSession(_CallbackHost):
         self.trigger_samples = max(1, int(trigger_samples))
         self.enable_pileup = enable_pileup
         self.save_to_end_confirmed = save_to_end_confirmed
+        self.min_end_samples = max(1, int(min_end_samples))
         self.buf_size = buf_size
         self.sample_rate = sample_rate
         self.noise_samples = int(noise_samples)
@@ -1574,8 +1592,11 @@ class DualPulseCaptureSession(_CallbackHost):
         trigger-to-below-threshold so histograms measure the pulse and
         not the baseline, but as a display extent it stopped the drawn
         data mid-pulse while the marks -- read from the record -- ran
-        on to end-confirmed.  A summary from before ``end_time`` was
-        carried falls back to the core.
+        on to end-confirmed.  And the SAVED record, not the confirmed
+        end: with save_to_end_confirmed off the confirmation instant
+        lies past the window, and an extent reaching it would pull the
+        discarded tail back out of the ring.  A summary from before
+        ``saved_end_time`` was carried falls back to the core.
         """
         t0 = t1 = None
         for key in ("slow_summary", "fast_summary"):
@@ -1583,7 +1604,7 @@ class DualPulseCaptureSession(_CallbackHost):
             if not summ:
                 continue
             s0 = summ.get("start_time", summ.get("timestamp", 0.0))
-            s1 = summ.get("end_time")
+            s1 = summ.get("saved_end_time")
             if s1 is None:
                 s1 = summ.get("timestamp", 0.0) + summ.get("duration_s", 0.0)
             if not (math.isfinite(s0) and math.isfinite(s1)):

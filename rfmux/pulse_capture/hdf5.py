@@ -100,7 +100,7 @@ class _PulseFileWriter:
                  "sample_rate_slow", "sample_rate_fast",
                  "volts_per_count")),
         (int, ("min_pulse_samples", "module", "trigger_samples",
-               "baseline_window", "edge_lookback", "max_capture_samples")),
+               "baseline_window", "edge_lookback", "max_capture_samples", "min_end_samples")),
         (bool, ("enable_pileup", "save_to_end_confirmed")),
     )
 

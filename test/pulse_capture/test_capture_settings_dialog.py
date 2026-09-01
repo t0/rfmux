@@ -141,3 +141,18 @@ def test_trigger_basis_round_trips(qt_app):
         assert out.threshold_sigma == pytest.approx(7.5)
         assert out.max_pulse_ms == pytest.approx(123.0)
         assert out.enable_pileup is False
+
+
+def test_end_floor_is_exposed_and_round_trips(qt_app):
+    """The end-confirmation floor sits under Advanced with the rest of
+    the end logic, reads back into the config, and the derived readout
+    says what it is in time at this rate."""
+    dlg = PulseCaptureSettingsDialog(sample_rate=596.0)
+    assert dlg.min_end_spin.value() == 10
+    assert "end floor 10 samples" in dlg.pulse_derived_label.text()
+    assert "16.8 ms" in dlg.pulse_derived_label.text()
+    dlg.min_end_spin.setValue(4)
+    assert dlg.get_config().min_end_samples == 4
+    assert "end floor 4 samples" in dlg.pulse_derived_label.text()
+    assert "bucket" in dlg.min_end_spin.toolTip()
+    dlg.close()

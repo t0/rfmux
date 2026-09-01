@@ -128,13 +128,32 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "Pulse ends when BOTH I and Q stay within this band")
         adv.addRow("End σ:", self.end_spin)
 
+        self.min_end_spin = QtWidgets.QSpinBox()
+        self.min_end_spin.setRange(1, 100_000)
+        self.min_end_spin.setValue(config.min_end_samples)
+        self.min_end_spin.setToolTip(
+            "Floor under the end-confirmation count.\n\n"
+            "The end is decided by a leaky bucket: it fills by one for "
+            "each sample with BOTH quadratures inside the end band, "
+            "leaks by one for each sample outside it, and the capture "
+            "ends when it exceeds max(this floor, margin fraction × "
+            "the pulse's own length above threshold).  The leak is what "
+            "lets an isolated noisy sample pass without restarting the "
+            "count.\n\n"
+            "For a short pulse the floor is what ends it, so this sets "
+            "how far past below-threshold the end mark lands.  It is a "
+            "sample count: the same number is 17 ms at 596 Hz and 4 µs "
+            "on the PFB stream.")
+        adv.addRow("End confirmation floor (samples):", self.min_end_spin)
+
         self.margin_spin = QtWidgets.QDoubleSpinBox()
         self.margin_spin.setRange(0.0, 1.0)
         self.margin_spin.setSingleStep(0.05)
         self.margin_spin.setValue(config.margin_fraction)
         self.margin_spin.setToolTip(
             "Fraction of the pulse length kept before the trigger, and "
-            "the adaptive end-confirmation count.\n"
+            "the adaptive end-confirmation count: the bucket must exceed "
+            "max(end floor, this × the pulse's length above threshold).\n"
             "Also sets the saved tail after the pulse drops below "
             "threshold — but only when 'Save the full tail' is off, "
             "which is what that tail is a substitute for.")
@@ -230,7 +249,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
 
         for w in (self.threshold_spin, self.end_spin, self.margin_spin,
                   self.min_pulse_spin, self.max_pulse_spin,
-                  self.trigger_spin):
+                  self.trigger_spin, self.min_end_spin):
             w.valueChanged.connect(self._update_dependent_values)
         for c in (self.pileup_check, self.end_confirmed_check):
             c.toggled.connect(self._update_dependent_values)
@@ -249,6 +268,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             max_pulse_ms=float(self.max_pulse_spin.value()),
             enable_pileup=self.pileup_check.isChecked(),
             save_to_end_confirmed=self.end_confirmed_check.isChecked(),
+            min_end_samples=int(self.min_end_spin.value()),
             trigger_basis=("df" if self.basis_combo.currentIndex() == 1
                            else "iq"),
         )
@@ -282,7 +302,9 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
                 f"({d['noise_samples']:,} samples) · "
                 f"baseline median over {_ms(d['baseline_window_ms'])} · "
                 f"edge lookback {_ms(d['edge_lookback_ms'])} "
-                f"({d['edge_lookback']:,} samples)"
+                f"({d['edge_lookback']:,} samples) · "
+                f"end floor {d['min_end_samples']} samples "
+                f"({_ms(d['min_end_ms'])})"
                 + (f" · min pulse {d['min_pulse_samples']} samples"
                    if cfg.min_pulse_ms > 0 else ""))
             self.sigma_derived_label.setText(

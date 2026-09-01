@@ -492,7 +492,7 @@ def test_union_window_spans_the_saved_record():
     T = 43000.0
     pair = {"slow_summary": {"timestamp": T + 0.000, "start_time": T + 0.000,
                              "trigger_time": T + 0.002, "duration_s": 0.004,
-                             "end_time": T + 0.016},
+                             "saved_end_time": T + 0.016},
             "fast_summary": None}
     t0, t1 = D._union_window(pair)
     assert t1 >= T + 0.016, f"window ends at +{(t1-T)*1e3:.1f} ms, record at +16 ms"

@@ -335,6 +335,7 @@ class PulseCapture:
         trigger_samples: int = 2,
         enable_pileup: bool = True,
         save_to_end_confirmed: bool = True,
+        min_end_samples: int = 10,
         on_pulse: Optional[Callable[[int, int, dict], None]] = None,
         baseline_window: int = 0,
         edge_lookback: Optional[int] = None,
@@ -349,6 +350,10 @@ class PulseCapture:
         self.trigger_samples = max(1, int(trigger_samples))
         self.enable_pileup = enable_pileup
         self.save_to_end_confirmed = save_to_end_confirmed
+        # The end-confirmation floor, in samples.  A class default is
+        # kept for the docstring; at 596 Hz ten samples is 17 ms, on the
+        # PFB stream 4 us, so it is a per-stream decision.
+        self._MIN_END_SAMPLES = max(1, int(min_end_samples))
 
         if edge_lookback is None:
             edge_lookback = self.default_edge_lookback(buf_size,

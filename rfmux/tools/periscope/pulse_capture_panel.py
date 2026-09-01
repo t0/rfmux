@@ -23,6 +23,7 @@ import datetime
 import time
 from pathlib import Path
 from dataclasses import replace
+from rfmux.pulse_capture.detection import ChannelNoiseStats
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -479,8 +480,43 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         v.addWidget(self.pulse_plot_q, stretch=1)
         return w
 
+    def _decision_noise(self, wf, ns):
+        """The bands a record was decided against: (trigger, end).
+
+        The live stats object keeps re-centring after a pulse, so a band
+        drawn from it later is not the band that fired — the sample that
+        cleared the threshold at the trigger can sit under a line drawn
+        once the median has wandered on.  A record made since the engine
+        began writing them says where each band was; older records fall
+        back to the stats, and the end band to the trigger band.
+        """
+        if not isinstance(wf, dict) or "trigger_baseline_I" not in wf:
+            return ns, ns
+        try:
+            v = {k: float(wf[k]) for k in (
+                "trigger_baseline_I", "trigger_baseline_Q",
+                "trigger_sigma_I", "trigger_sigma_Q")}
+        except (KeyError, TypeError, ValueError):
+            return ns, ns
+        if not all(np.isfinite(x) for x in v.values()) \
+                or v["trigger_sigma_I"] <= 0 or v["trigger_sigma_Q"] <= 0:
+            return ns, ns
+        base = ns if ns is not None else ChannelNoiseStats()
+        trig = replace(base, mean_I=v["trigger_baseline_I"],
+                       mean_Q=v["trigger_baseline_Q"],
+                       std_I=v["trigger_sigma_I"], std_Q=v["trigger_sigma_Q"])
+        end = trig
+        try:
+            e_I, e_Q = float(wf["end_baseline_I"]), float(wf["end_baseline_Q"])
+            if np.isfinite(e_I) and np.isfinite(e_Q):
+                end = replace(trig, mean_I=e_I, mean_Q=e_Q)
+        except (KeyError, TypeError, ValueError):
+            pass
+        return trig, end
+
     def _annotate_noise_bands(self, plot, quad, ns, x0, x1, color,
-                              prefix="") -> None:
+                              prefix="", thr=None, end=None,
+                              end_ns=None) -> None:
         """Draw the baseline and the ±σ bands on *plot*.
 
         Drawn as two-point curves rather than addLine(): an InfiniteLine
@@ -493,25 +529,35 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         std = getattr(ns, f"std_{quad}", None)
         if mean is None or std is None or not np.isfinite(std) or std <= 0:
             return
-        thr = float(self.threshold_spin.value())
-        end = float(self.end_spin.value())
+        # The record's own levels when it carries them (the spins can
+        # have moved since the capture, and say nothing about a file).
+        thr = float(self.threshold_spin.value()) if thr is None else float(thr)
+        end = float(self.end_spin.value()) if end is None else float(end)
+        end_mean = mean
+        if end_ns is not None:
+            end_mean = getattr(end_ns, f"mean_{quad}", mean)
+            if end_mean is None or not np.isfinite(end_mean):
+                end_mean = mean
         x = np.array([x0, x1], dtype=float)
         plot.plot(x, np.full(2, mean),
                   pen=pg.mkPen(color, width=1.0,
                                style=QtCore.Qt.PenStyle.DotLine),
                   name=f"{prefix}baseline")
-        for level, style, tag in (
-                (thr, QtCore.Qt.PenStyle.DashLine, f"±{thr:g}σ trigger"),
-                (end, QtCore.Qt.PenStyle.DotLine, f"±{end:g}σ end")):
+        for centre, level, style, tag in (
+                (mean, thr, QtCore.Qt.PenStyle.DashLine,
+                 f"±{thr:g}σ trigger"),
+                (end_mean, end, QtCore.Qt.PenStyle.DotLine,
+                 f"±{end:g}σ end")):
             # The +/- pair is ONE item, joined by a NaN gap: one legend
             # entry that hides and shows both lines.  Two items with one
             # named left the unnamed twin behind when the entry was
             # switched off.
-            band = mean + level * std
+            band = centre + level * std
             plot.plot(
                 np.array([x0, x1, np.nan, x0, x1], dtype=float),
                 np.array([band, band, np.nan,
-                          2 * mean - band, 2 * mean - band], dtype=float),
+                          2 * centre - band, 2 * centre - band],
+                         dtype=float),
                 connect="finite",
                 pen=pg.mkPen(color, width=1.0, style=style),
                 name=f"{prefix}{tag}")
@@ -527,6 +573,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         got = wf.get("end_confirm_samples")
         want = wf.get("end_confirm_target")
         parts = [f"trigger @ sample {trig}"]
+        if wf.get("trigger_quad"):
+            # Which quadrature started the above-threshold run: the
+            # mark sits on both plots, and on the other one it can
+            # precede any visible crossing.
+            parts[0] += f" (on {wf['trigger_quad']})"
         if below is not None:
             parts.append(f"below threshold @ {below}")
         if end is not None:
@@ -2159,12 +2210,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Stored samples into the requested view.  Both axes rotate
         # together, so the noise bands drawn below have to come along.
-        ns = self.noise_stats.get(channel)
+        ns, ns_end = self._decision_noise(wf, self.noise_stats.get(channel))
         view = self._view_coeffs(channel)
         if view is not None:
             factor, _units = view
             amp_I, amp_Q = apply_iq_conversion(amp_I, amp_Q, factor)
             ns = self._view_noise(channel, ns)
+            ns_end = self._view_noise(channel, ns_end)
         first, second = self._axis_names(channel)
         for plot, name in ((self.pulse_plot_i, first),
                            (self.pulse_plot_q, second)):
@@ -2182,7 +2234,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             plot.plot(t_rel, data,
                       pen=pg.mkPen(IQ_COLORS[quad], width=LINE_WIDTH),
                       name=f"{label} (pulse)")
-            self._annotate_noise_bands(plot, quad, ns, x0, x1, "#888888")
+            self._annotate_noise_bands(
+                plot, quad, ns, x0, x1, "#888888",
+                thr=wf.get("threshold_sigma"), end=wf.get("end_sigma"),
+                end_ns=ns_end)
             self._annotate_decisions(plot, wf, t0, quad)
 
     def _show_pair(self, channel: int, pair_idx: int) -> None:
@@ -2316,19 +2371,24 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     ("slow", slow_wf, IQ_COLORS[quad])):
                 if wf is None:
                     continue
-                stats = self._noise_by_stream.get(stream) or {}
-                self._annotate_noise_bands(
-                    plot, quad, stats.get(channel), x0, x1, tint,
-                    prefix=f"{stream} ")
                 # The displayed window is usually the UNION ring
                 # extract, which carries no decisions — those live on
                 # the stream's own triggered record.  The marks are
                 # absolute times, so they land correctly on the union
-                # axis once looked up.
+                # axis once looked up; the bands come from the same
+                # record, so they are the bands those marks were
+                # decided against.
                 idx = meta.get(f"{stream}_idx")
                 marks = wf if "trigger_index" in wf else None
                 if marks is None and idx is not None:
                     marks = self._get_waveform(channel, idx, stream)
+                stats = self._noise_by_stream.get(stream) or {}
+                ns, ns_end = self._decision_noise(marks, stats.get(channel))
+                levels = marks if isinstance(marks, dict) else {}
+                self._annotate_noise_bands(
+                    plot, quad, ns, x0, x1, tint, prefix=f"{stream} ",
+                    thr=levels.get("threshold_sigma"),
+                    end=levels.get("end_sigma"), end_ns=ns_end)
                 if marks is not None:
                     self._annotate_decisions(plot, marks, t0, quad,
                                              prefix=f"{stream} ")

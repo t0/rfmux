@@ -179,6 +179,17 @@ class _ChState:
     # is decisive evidence the pulse is over, however stale the mean.
     anchor_I: float = 0.0
     anchor_Q: float = 0.0
+    # The rolling band the trigger was tested against, frozen at the
+    # trigger.  The stats object keeps re-centring after the pulse, so
+    # a band drawn from it later is not the band that fired: a sample
+    # that cleared 5.0σ at the trigger sits under a line drawn at 5.5σ
+    # once the median has wandered, and the mark looks a sample early.
+    trig_mean_I: float = 0.0
+    trig_mean_Q: float = 0.0
+    trig_std_I: float = 0.0
+    trig_std_Q: float = 0.0
+    trig_quad: str = ""
+    run_quad: str = ""
     # This capture began at a pileup split, so it sits on the previous
     # pulse's decaying tail: its peak and tau are pedestal-biased, and
     # it carries the pileup flag when saved however it ends.
@@ -702,6 +713,7 @@ class PulseCapture:
         if max_dev > self.threshold_sigma:
             if st.above_run == 0:
                 st.run_start_abs = st.ch_sample_n
+                st.run_quad = "I" if dev_I >= dev_Q else "Q"
             st.above_run += 1
         else:
             st.above_run = 0
@@ -778,6 +790,9 @@ class PulseCapture:
             st.capturing = True
             st.end_ptr_count = 0
             st.fire_abs = st.ch_sample_n
+            st.trig_mean_I, st.trig_mean_Q = ns.mean_I, ns.mean_Q
+            st.trig_std_I, st.trig_std_Q = ns.std_I, ns.std_Q
+            st.trig_quad = st.run_quad
             # Pre-pulse anchor: the level the pulse rose from, as the
             # median of the edge taps.  Baseline-free — the end tests
             # compare against where the signal actually WAS, so a mean
@@ -917,6 +932,9 @@ class PulseCapture:
                     st.capturing = True
                     st.end_ptr_count = 0
                     st.fire_abs = st.ch_sample_n
+                    st.trig_mean_I, st.trig_mean_Q = ns.mean_I, ns.mean_Q
+                    st.trig_std_I, st.trig_std_Q = ns.std_I, ns.std_Q
+                    st.trig_quad = st.run_quad
                     # The new rise happened within the nearest tap's
                     # window — the run may date back to the previous
                     # pulse's onset if the tail never crossed below
@@ -1066,6 +1084,19 @@ class PulseCapture:
             "end_index": int(end_index),
             "trigger_time": float(ts_all[trig_fifo]),
             "end_time": float(ts_all[L - 1]),
+            # The bands each decision was made against.  The trigger
+            # tested the rolling band of that instant; the end tests
+            # against the pre-pulse anchor.  Neither survives in the
+            # stats object, which keeps re-centring after the pulse.
+            "trigger_baseline_I": float(st.trig_mean_I),
+            "trigger_baseline_Q": float(st.trig_mean_Q),
+            "trigger_sigma_I": float(st.trig_std_I),
+            "trigger_sigma_Q": float(st.trig_std_Q),
+            "trigger_quad": st.trig_quad,
+            "end_baseline_I": float(st.anchor_I),
+            "end_baseline_Q": float(st.anchor_Q),
+            "threshold_sigma": float(self.threshold_sigma),
+            "end_sigma": float(self.end_sigma),
             "end_confirm_samples": int(st.end_ptr_count),
             "end_confirm_target": int(max(
                 self._MIN_END_SAMPLES,

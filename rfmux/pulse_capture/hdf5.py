@@ -691,9 +691,15 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
                 "end_confirm_samples", "end_confirm_target"):
         if key in pulse_data:
             pulse_grp.attrs[key] = int(pulse_data[key])
-    for key in ("trigger_time", "end_time", "below_threshold_time"):
+    for key in ("trigger_time", "end_time", "below_threshold_time",
+                "trigger_baseline_I", "trigger_baseline_Q",
+                "trigger_sigma_I", "trigger_sigma_Q",
+                "end_baseline_I", "end_baseline_Q",
+                "threshold_sigma", "end_sigma"):
         if key in pulse_data:
             pulse_grp.attrs[key] = float(pulse_data[key])
+    if "trigger_quad" in pulse_data:
+        pulse_grp.attrs["trigger_quad"] = str(pulse_data["trigger_quad"])
 
     # Every scalar below comes from pulse_summary(), the same call the
     # histograms, the live on_pulse callback and the GUI derive from.
@@ -726,7 +732,11 @@ def _pulse_dict_from_group(grp) -> dict:
     marks = {k: _convert_attr(grp.attrs[k])
              for k in ("trigger_index", "end_index", "below_threshold_index",
                        "end_confirm_samples", "end_confirm_target",
-                       "trigger_time", "end_time", "below_threshold_time")
+                       "trigger_time", "end_time", "below_threshold_time",
+                       "trigger_baseline_I", "trigger_baseline_Q",
+                       "trigger_sigma_I", "trigger_sigma_Q", "trigger_quad",
+                       "end_baseline_I", "end_baseline_Q",
+                       "threshold_sigma", "end_sigma")
              if k in grp.attrs}
     return {
         **marks,

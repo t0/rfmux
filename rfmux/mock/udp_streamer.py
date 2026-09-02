@@ -110,6 +110,11 @@ class MockCRSStreamer(threading.Thread):
         self.pfb_socket = None
         self.pfb_seq = 0
         self.pfb_packets_sent = 0
+        # Samples generated but not yet sent, and the time of the first
+        # of them: a frame's physics is one call, packets are cut from
+        # it at the hardware's size.
+        self._pfb_buf = None
+        self._pfb_buf_t0 = 0.0
 
         # ── Timing ────────────────────────────────────────────
         self.start_datetime = None
@@ -186,6 +191,7 @@ class MockCRSStreamer(threading.Thread):
         self.pfb_module = module
         self.pfb_seq = 0
         self.pfb_packets_sent = 0
+        self._pfb_buf = None
         self._init_pfb_socket()
         self.pfb_enabled = True
         n = len(self.pfb_channels)
@@ -244,19 +250,17 @@ class MockCRSStreamer(threading.Thread):
                         print(f"[Streamer] Decimation → stage {dec}, "
                               f"slow rate {slow_rate:.1f} Hz")
                         self.last_decimation = dec
+                        self._pfb_buf = None
 
                     # Simulation time for this frame
                     t_frame = (self.total_elapsed_time.get(1, 0.0)
                                + self.seq_counters.get(1, 0) / slow_rate)
 
-                    # ── PFB batches (if enabled) ──────────────
+                    # ── PFB samples for this frame (if enabled) ──
                     if self.pfb_enabled and self.pfb_channels:
-                        n_batches = 2 ** dec  # 1 at dec=0, 64 at dec=6
-                        for batch_idx in range(n_batches):
-                            if not self.running:
-                                break
-                            t_batch = t_frame + batch_idx * PFB_BATCH / PFB_RATE
-                            self._emit_pfb_packet(t_batch, dec)
+                        self._emit_pfb_frame(t_frame, dec)
+                    else:
+                        self._pfb_buf = None
 
                     # ── Slow packets (always) ─────────────────
                     if self.modules_to_stream:
@@ -388,49 +392,73 @@ class MockCRSStreamer(threading.Thread):
 
     # ── PFB packet emission ───────────────────────────────────
 
-    def _emit_pfb_packet(self, t_batch, dec):
-        """Generate and send one PFB packet (PFB_BATCH=64 time samples)."""
+    #: Time samples per PFB packet: the hardware sends 1000 complex
+    #: samples a packet, and the receiver reads exactly that many bytes
+    #: per datagram, so the mock cuts its stream the same way.
+    PFB_PACKET_SAMPLES = 1000
+
+    def _emit_pfb_frame(self, t_frame, dec):
+        """Generate one slow frame's worth of PFB samples in one physics
+        call and send whatever full packets that makes.
+
+        A frame is ``2**dec`` sub-batches of PFB_BATCH samples.  Pulse
+        triggers are checked on that sub-batch grid first, so a pulse
+        starts where it would have if each sub-batch were its own call;
+        the physics is then evaluated once across the frame.  The
+        remainder that does not fill a packet is carried to the next
+        frame, with the time of its first sample.
+        """
         channels = self.pfb_channels
         n_groups = len(channels)
-        N = PFB_BATCH  # 64 time samples
-
-        # ── Physics ───────────────────────────────────────────
+        n_sub = 2 ** dec
+        n_time = n_sub * PFB_BATCH
         cfg = getattr(self.mock_crs, '_physics_config', {}) or {}
         scale_factor = cfg.get('scale_factor', 2 ** 21)
         noise_level = cfg.get('udp_noise_level', 10.0)
         pfb_noise_scale = cfg.get('pfb_noise_scale', 64.0)
         full_scale = scale_factor * 256.0
-
         model = self.mock_crs._resonator_model
+        model.advance_pulses_to(t_frame + (n_sub - 1) * PFB_BATCH / PFB_RATE,
+                                n_sub, PFB_BATCH / PFB_RATE)
         responses = model.calculate_module_response_coupled(
             self.pfb_module,
-            num_samples=N,
+            num_samples=n_time,
             sample_rate=PFB_RATE,
-            start_time=t_batch,
-            pulse_time=t_batch,
+            start_time=t_frame,
+            pulse_time=t_frame,
         )
-
         # ── Interleave: [ch1_s0, ch2_s0, …, ch1_s1, …] ──────
-        total = N * n_groups
-        interleaved = np.zeros(total, dtype=np.complex128)
-
+        interleaved = np.zeros(n_time * n_groups, dtype=np.complex128)
         for slot_idx, ch in enumerate(channels):
             if ch in responses:
                 sig = responses[ch]
                 if not isinstance(sig, np.ndarray):
-                    sig = np.full(N, sig, dtype=np.complex128)
+                    sig = np.full(n_time, sig, dtype=np.complex128)
                 slot_data = sig * full_scale
             else:
-                slot_data = np.zeros(N, dtype=np.complex128)
-
+                slot_data = np.zeros(n_time, dtype=np.complex128)
             slot_noise = (
-                np.random.normal(0, noise_level * pfb_noise_scale, N)
-                + 1j * np.random.normal(0, noise_level * pfb_noise_scale, N)
+                np.random.normal(0, noise_level * pfb_noise_scale, n_time)
+                + 1j * np.random.normal(0, noise_level * pfb_noise_scale,
+                                        n_time)
             )
-            slot_data = slot_data + slot_noise
-            interleaved[slot_idx::n_groups] = slot_data
+            interleaved[slot_idx::n_groups] = slot_data + slot_noise
+        if self._pfb_buf is None or len(self._pfb_buf) == 0:
+            self._pfb_buf = interleaved
+            self._pfb_buf_t0 = t_frame
+        else:
+            self._pfb_buf = np.concatenate((self._pfb_buf, interleaved))
+        per_packet = (self.PFB_PACKET_SAMPLES // n_groups) * n_groups
+        while len(self._pfb_buf) >= per_packet and self.running:
+            self._send_pfb_packet(self._pfb_buf[:per_packet], n_groups,
+                                  self._pfb_buf_t0)
+            self._pfb_buf = self._pfb_buf[per_packet:]
+            self._pfb_buf_t0 += (per_packet // n_groups) / PFB_RATE
 
-        # ── Build PFBPacket ───────────────────────────────────
+    def _send_pfb_packet(self, interleaved, n_groups, t_first):
+        """Build and send one PFBPacket holding *interleaved* samples,
+        stamped with the time of its first sample."""
+        channels = self.pfb_channels
         pkt = PFBPacket()
         pkt.magic = PFB_PACKET_MAGIC
         pkt.version = 1
@@ -444,18 +472,16 @@ class MockCRSStreamer(threading.Thread):
         pkt.slot2 = channels[1] if len(channels) > 1 else 0
         pkt.slot3 = channels[2] if len(channels) > 2 else 0
         pkt.slot4 = channels[3] if len(channels) > 3 else 0
-        pkt.num_samples = total
+        pkt.num_samples = len(interleaved)
         pkt.module = self.pfb_module - 1  # 0-indexed
         pkt.seq = self.pfb_seq
-
         clipped = (
             np.clip(interleaved.real, -8388608, 8388607)
             + 1j * np.clip(interleaved.imag, -8388608, 8388607)
         )
         pkt[:] = clipped
-
         # ── Timestamp ─────────────────────────────────────────
-        pkt_dt = self.start_datetime + timedelta(seconds=t_batch)
+        pkt_dt = self.start_datetime + timedelta(seconds=t_first)
         ts = Timestamp(
             y=int(pkt_dt.year % 100),
             d=int(pkt_dt.timetuple().tm_yday),
@@ -469,14 +495,10 @@ class MockCRSStreamer(threading.Thread):
         )
         pkt.ts = ts
         self.mock_crs._last_timestamp = ts
-
         if self.pfb_socket:
             self.pfb_socket.sendto(bytes(pkt), (self.host, PFB_STREAMER_PORT))
-
         self.pfb_seq += 1
         self.pfb_packets_sent += 1
-
-    # ── Module detection ──────────────────────────────────────
 
     def _get_configured_modules(self):
         """Return sorted list of modules that have configured channels."""

@@ -78,6 +78,7 @@ from .detection import (
     PulseCapture,
     estimate_noise_stats,
 )
+from .decimation_delay import decimated_stream_delay_s
 from .analysis import (
     pulse_summary,
     storage_transform,
@@ -1280,6 +1281,7 @@ class DualPulseCaptureSession(_CallbackHost):
         match_window_s: float = 0.05,
         match_grace_s: float = 0.25,
         pair_window_wait_s: float = 3.0,
+        slow_time_offset_s: Optional[float] = None,
         on_noise: Optional[Callable] = None,
         on_pulse: Optional[Callable] = None,
         on_pair: Optional[Callable] = None,
@@ -1291,6 +1293,16 @@ class DualPulseCaptureSession(_CallbackHost):
         self.channels = list(channels)
         self.module = module
         self.config = config or PulseCaptureConfig()
+        #: Added to every slow timestamp before it reaches the engine,
+        #: the matcher or the file.  The decimated stream's timestamps
+        #: are late by its CIC group delay while the PFB stream's are
+        #: not, so by default the slow clock is pulled back by that
+        #: delay to put both streams on one axis.  Pass 0.0 to leave
+        #: the board's timestamps alone.  See decimation_delay.py —
+        #: TEMPORARY until the firmware corrects the timestamps itself.
+        self.slow_time_offset_s = float(
+            -decimated_stream_delay_s(slow_rate)
+            if slow_time_offset_s is None else slow_time_offset_s)
         # Both the writer AND the per-stream sessions need these: the
         # writer to record them, the sessions to rotate.  Handing them
         # to the writer alone made trigger_basis="df" silently degrade
@@ -1324,6 +1336,7 @@ class DualPulseCaptureSession(_CallbackHost):
                         "module": module,
                         "sample_rate_slow": slow_rate,
                         "sample_rate_fast": fast_rate,
+                        "slow_time_offset_s": self.slow_time_offset_s,
                     },
                     df_calibrations=df_calibrations)
             except Exception as e:
@@ -1392,6 +1405,8 @@ class DualPulseCaptureSession(_CallbackHost):
         self.fast.start()
 
     def feed_slow(self, ch: int, i: float, q: float, t) -> None:
+        if t is not None and self.slow_time_offset_s:
+            t = t + self.slow_time_offset_s
         self.slow.feed_sample(ch, i, q, t)
         self._advance_matcher("slow", t)
 
@@ -1416,6 +1431,9 @@ class DualPulseCaptureSession(_CallbackHost):
         20 ms of stream time anyway, so the per-sample calls bought
         nothing.
         """
+        if stream == "slow" and self.slow_time_offset_s:
+            timestamps = (np.asarray(timestamps, dtype=np.float64)
+                          + self.slow_time_offset_s)
         session.feed_block(ch, i_vals, q_vals, timestamps)
         stamps = np.asarray(timestamps, dtype=np.float64)
         usable = stamps[np.isfinite(stamps)]
@@ -1461,6 +1479,7 @@ class DualPulseCaptureSession(_CallbackHost):
             "pairs_unmatched": self.matcher.unmatched,
             "total_pulses": (self.slow.total_pulses
                              + self.fast.total_pulses),
+            "slow_time_offset_s": self.slow_time_offset_s,
             **self._stream_lag(),
         }
 

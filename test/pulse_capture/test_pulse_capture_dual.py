@@ -321,7 +321,8 @@ def test_stream_feeds_present_the_source_facade():
     and those need the acquisition tier — so pin the contract here."""
     dual = DualPulseCaptureSession(
         channels=[1, 2], slow_rate=1000.0, fast_rate=10000.0,
-        config=PulseCaptureConfig(max_pulse_ms=20.0, noise_train_ms=100.0))
+        config=PulseCaptureConfig(max_pulse_ms=20.0, noise_train_ms=100.0),
+        slow_time_offset_s=0.0)   # routing is under test, not the clock
     dual.start()
 
     for feed, session in ((dual.slow_feed, dual.slow),

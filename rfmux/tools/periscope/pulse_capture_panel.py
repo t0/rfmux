@@ -1750,6 +1750,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             self._set_status(text, colour)
             tooltip = tip[1] if tip else ""
             skew, n = s.get("stream_skew_s"), s.get("stream_skew_n", 0)
+            shift = s.get("slow_time_offset_s") or 0.0
+            if shift:
+                tooltip += (("\n\n" if tooltip else "")
+                            + f"Slow timestamps shifted by {shift*1e3:+.3f} "
+                              "ms to take out the decimated stream's CIC "
+                              "group delay (the PFB clock is the "
+                              "reference). The skew below is the residual.")
             if skew is not None and n:
                 tooltip += (("\n\n" if tooltip else "")
                             + f"Stream clock skew: slow − fast trigger time "

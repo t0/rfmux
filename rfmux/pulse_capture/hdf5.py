@@ -98,7 +98,7 @@ class _PulseFileWriter:
         (str, ("streamer_mode", "trigger_basis", "stored_units")),
         (float, ("threshold_sigma", "end_sigma", "margin_fraction",
                  "sample_rate_slow", "sample_rate_fast",
-                 "volts_per_count")),
+                 "volts_per_count", "slow_time_offset_s")),
         (int, ("min_pulse_samples", "module", "trigger_samples",
                "baseline_window", "edge_lookback", "max_capture_samples", "min_end_samples")),
         (bool, ("enable_pileup", "save_to_end_confirmed")),

@@ -225,20 +225,22 @@ class PulseCaptureConfig:
     #: the mock that widens the spread across identical injected pulses
     #: from roughly 1.3x to 5.6x.
     #:
-    #: Default on, because that variability is a property of the saved
-    #: TAIL and does not reach ``duration_ms``, which is measured from
-    #: the threshold crossings.  Turn it off when
-    #: the tail costs more than it is worth: PFB captures, where windows
-    #: already carry 64x the samples, or high count rates, where longer
-    #: windows overlap and raise the pileup fraction.
-    save_to_end_confirmed: bool = True
+    #: That variability is a property of the saved TAIL and does not
+    #: reach ``duration_ms``, which is measured from the threshold
+    #: crossings.  Default off: window length is then a property of the
+    #: pulse rather than of the baseline, files are shorter, and PFB
+    #: windows (already 64x the samples) and high count rates (longer
+    #: windows overlap and raise the pileup fraction) are not penalised.
+    #: Turn it on to keep the whole decay to the confirmation.
+    save_to_end_confirmed: bool = False
     #: Which basis the trigger tests: ``"iq"`` (the raw quadratures) or
     #: ``"df"`` (frequency and dissipation, rotated with the channel's
     #: df calibration).  A KID pulse moves the resonance frequency, so
     #: under "df" it lies along one axis instead of being split between
-    #: two by an angle nothing controls.  A channel with no calibration
-    #: cannot be rotated and stays on "iq".
-    trigger_basis: str = "iq"
+    #: two by an angle nothing controls.  Default "df": a channel with a
+    #: calibration is rotated; one without cannot be, and stays on the
+    #: quadratures, in volts (``stored_units`` says which happened).
+    trigger_basis: str = "df"
 
     #: Ring geometry, owned by pulse_detection so the engine's bare
     #: defaults and these derivations cannot disagree.
@@ -563,7 +565,7 @@ class PulseCaptureSession(_CallbackHost):
         min_pulse_samples: int = 0,
         trigger_samples: int = 2,
         enable_pileup: bool = True,
-        save_to_end_confirmed: bool = True,
+        save_to_end_confirmed: bool = False,
         min_end_samples: int = 10,
         buf_size: int = 5000,
         sample_rate: Optional[float] = None,
@@ -573,7 +575,7 @@ class PulseCaptureSession(_CallbackHost):
         max_capture_samples: Optional[int] = None,
         hdf5_path: Optional[str | Path] = None,
         df_calibrations: Optional[Dict[int, float]] = None,
-        trigger_basis: str = "iq",
+        trigger_basis: str = "df",
         histogram_flush_every: int = 50,
         histogram_flush_interval_s: float = 0.5,
         progress_interval_s: float = 0.1,

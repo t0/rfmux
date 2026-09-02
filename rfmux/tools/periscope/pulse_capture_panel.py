@@ -229,7 +229,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._hist_data: dict = {}
         self._capture_start_wall: Optional[float] = None
 
+        #: Set once the user picks a view; the frequency-view default
+        #: below is applied only until then.
+        self._view_chosen = False
         self._setup_ui()
+        self._apply_default_view()
         self._setup_shortcuts()
         self._set_run_state(False)
         self.apply_theme(dark_mode)
@@ -362,7 +366,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             "counts: raw ADC.  volts: the readout scale.  df: rotated "
             "into frequency and dissipation, in hertz — needs a df "
             "calibration for the channel.")
-        self.units_combo.currentTextChanged.connect(self._on_view_changed)
+        self.units_combo.currentTextChanged.connect(self._on_user_view_changed)
         h.addWidget(self.units_combo)
 
         self.btn_settings = QtWidgets.QPushButton("Settings…")
@@ -1256,6 +1260,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self._both_mode = (mode == "both")
         self._reset_results(channels)
+        self._apply_default_view()
         self._registered_export = False
         self.path_label.setText(f"HDF5: {path}")
         self._capture_start_wall = time.time()
@@ -1351,6 +1356,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 float(meta["capture_start"])).strftime("%H:%M:%S")
         self._both_mode = self.reader.dual
         self._reset_results(channels, started=started)
+        self._apply_default_view()
 
         if self.reader.dual:
             self._load_dual_review(channels, path)
@@ -1980,6 +1986,28 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _units_are_hz(self) -> bool:
         return self.units_combo.currentText() == UNITS_DF
+
+    def _on_user_view_changed(self, _text: str = "") -> None:
+        self._view_chosen = True
+        self._on_view_changed()
+
+    def _apply_default_view(self) -> None:
+        """Default to the frequency view once a calibration makes it
+        possible.
+
+        Applied wherever a calibration can become known -- construction,
+        capture start, opening a file -- and only until the user picks a
+        view, which then stands.  Volts is the only default that can
+        always be drawn, so it stays the fallback.
+        """
+        if self._view_chosen or self._units_are_hz():
+            return
+        if not self._any_channel_calibrated():
+            return
+        self.units_combo.blockSignals(True)
+        self.units_combo.setCurrentText(UNITS_DF)
+        self.units_combo.blockSignals(False)
+        self._on_view_changed()
 
     def _on_view_changed(self, _text: str = "") -> None:
         if (self.units_combo.currentText() == UNITS_DF

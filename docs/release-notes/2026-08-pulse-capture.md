@@ -79,9 +79,9 @@ run keeps whatever it had already seen.
 A capture opens when either quadrature crosses `threshold_sigma`. It closes
 when both quadratures come back inside `end_sigma` and stay there. The window
 that gets saved starts before the trigger, so the rising edge is not clipped,
-and by default it runs to that confirmation, so the decay tail is kept. Set
-`save_to_end_confirmed=False` to stop it a short margin after the signal drops
-back below threshold instead.
+and by default it stops a short margin after the signal drops back below
+threshold. Set `save_to_end_confirmed=True` to run it to that confirmation
+instead, keeping the decay tail.
 
 Two settings bound the result. `max_pulse_ms` sets the longest pulse you
 expect; a window still open at 1.2 times that is closed anyway and flagged

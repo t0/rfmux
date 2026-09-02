@@ -371,11 +371,11 @@ before the trigger — 10% by default, too small to draw legibly here — so the
 record keeps some pre-trigger baseline to measure against rather than starting
 exactly at the crossing.
 
-Where it *closes* is `save_to_end_confirmed`, on by default: the window runs to
-the end-of-pulse confirmation, keeping the whole decay tail. Those samples are
-already in the ring, so this costs disk rather than acquisition. Turn it off and
-the window stops a `margin_fraction` tail past the below-threshold instant
-instead: shorter files, and window length becomes a property of the pulse rather
+Where it *closes* is `save_to_end_confirmed`, off by default: the window stops a
+`margin_fraction` tail past the below-threshold instant. Turned on, the window
+runs to the end-of-pulse confirmation instead, keeping the whole decay tail. Those samples are
+already in the ring, so this costs disk rather than acquisition. Off, files
+are shorter, and window length becomes a property of the pulse rather
 than of the baseline, since how long the confirmation takes depends on where the
 baseline was wandering. On the mock at 19 kHz with a 1 ms decay, keeping the tail
 makes windows about 40% longer.

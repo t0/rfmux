@@ -611,6 +611,9 @@ def test_the_three_views(qt_app):
     panel = PulseCapturePanel(dark_mode=False,
                               df_calibrations={1: {1: cal}})
     panel.module_spin.setValue(1)
+    # The views are exercised from a capture stored on the quadratures.
+    from rfmux.pulse_capture import PulseCaptureConfig
+    panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
 
     # Exactly three, and no basis control to pair them with.
     items = [panel.units_combo.itemText(i)
@@ -933,6 +936,10 @@ def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
 
     runtime = _FakeRuntime()
     panel = _make_panel(qt_app, tmp_path, runtime)
+    # The end-confirmed mark is drawn only when the tail is saved.
+    from dataclasses import replace
+    panel.capture_config = replace(panel.capture_config,
+                                   save_to_end_confirmed=True)
     rng = np.random.default_rng(42)
     panel._on_start()
     for _ in range(1000):
@@ -1417,19 +1424,22 @@ def test_live_capture_knows_what_it_stored(qt_app):
                                 df_calibrations={1: {1: cal}})
     panel.module_spin.setValue(1)
 
-    # Default basis: quadratures, stored in volts.
-    assert panel._stored_state(1) == ("iq", "V")
-    panel.units_combo.setCurrentText(m.UNITS_DF)
-    assert panel._amp_scale(1) == pytest.approx(abs(cal))
-
-    # Capturing in the frequency basis stores hertz, so displaying df is
-    # a no-op rather than a second application of the calibration.
-    panel.capture_config = PulseCaptureConfig(trigger_basis="df")
+    # Default basis: frequency, so a calibrated channel is stored in
+    # hertz and the default df view is a no-op rather than a second
+    # application of the calibration.
     assert panel._stored_state(1) == ("df", "Hz")
+    assert panel.units_combo.currentText() == m.UNITS_DF
     assert panel._amp_scale(1) == pytest.approx(1.0)
     assert panel._axis_names(1) == ("df (Hz)", "dissipation (Hz)")
 
-    # And volts is reachable from there, by undoing the calibration.
+    # Capturing on the quadratures stores volts; the df view then
+    # applies the calibration, once.
+    panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
+    assert panel._stored_state(1) == ("iq", "V")
+    assert panel._amp_scale(1) == pytest.approx(abs(cal))
+
+    # And volts is reachable from a hertz capture, by undoing it.
+    panel.capture_config = PulseCaptureConfig(trigger_basis="df")
     panel.units_combo.setCurrentText(m.UNITS_VOLTS)
     assert panel._amp_scale(1) == pytest.approx(1.0 / abs(cal))
     assert panel._axis_names(1) == ("I (V)", "Q (V)")
@@ -1460,6 +1470,11 @@ def test_templates_are_rotated_not_just_scaled(qt_app):
     env = 100.0 * np.exp(-t / 0.02)
 
     panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    # Stored on the quadratures, viewed from volts: the state this test
+    # was written against, before df became the default for both.
+    from rfmux.pulse_capture import PulseCaptureConfig
+    panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
     panel.module_spin.setValue(1)
     panel._counts = {1: 10}
     panel._template_data = {
@@ -1538,6 +1553,11 @@ def test_noise_bands_follow_the_rotation(qt_app):
     ns = ChannelNoiseStats(mean_I=3.0, std_I=0.5, mean_Q=-7.0, std_Q=0.5)
 
     panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    # Stored on the quadratures, viewed from volts: the state this test
+    # was written against, before df became the default for both.
+    from rfmux.pulse_capture import PulseCaptureConfig
+    panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
     panel.module_spin.setValue(1)
     panel.noise_stats = {1: ns}
     panel._pulse_summaries[(1, 1)] = {
@@ -1602,6 +1622,11 @@ def test_noise_strip_follows_the_view(qt_app):
     ns = ChannelNoiseStats(mean_I=3.0, std_I=0.5, mean_Q=-7.0, std_Q=0.5)
 
     panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    # Stored on the quadratures, viewed from volts: the state this test
+    # was written against, before df became the default for both.
+    from rfmux.pulse_capture import PulseCaptureConfig
+    panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
     panel.module_spin.setValue(1)
     panel.noise_stats = {1: ns}
     panel._refresh_noise_label()        # what the arrival path does

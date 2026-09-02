@@ -168,7 +168,7 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
         f"never reached CAPTURING (state={capture_session.state}, " \
         f"errors={events['errors']})"
 
-    # PFB streamer was configured for our channels by the task
+    # The streamer this test configured is what the task reads.
     assert loop.run_until_complete(
         crs.get_pfb_streamer(module=1)) == channels
 
@@ -180,9 +180,9 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
         "task never finished"
     task.wait(5000)
 
-    # Teardown contract: PFB streamer disabled again
+    # The task uses the streamer as it finds it, and leaves it so.
     assert loop.run_until_complete(
-        crs.get_pfb_streamer(module=1)) is None
+        crs.get_pfb_streamer(module=1)) == channels
     assert not events["errors"], events["errors"]
 
     with PulseHDF5Reader(path) as reader:
@@ -300,8 +300,9 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     task.wait(5000)
     tap_thread.join(timeout=10)
 
+    # The task uses the streamer as it finds it, and leaves it so.
     assert loop.run_until_complete(
-        crs.get_pfb_streamer(module=1)) is None
+        crs.get_pfb_streamer(module=1)) == channels
     matched = [p for p in events["pairs"]
                if p["slow_idx"] and p["fast_idx"]]
     assert matched, "expected at least one matched pair"

@@ -421,6 +421,7 @@ class PulseCapture:
         self.buf: Dict[int, Dict[str, Circular]] = {}
         for c in self.channels:
             self.buf[c] = {k: Circular(buf_size) for k in ("I", "Q", "ts")}
+        _walk.warm_up()
 
         # Build channel → index lookup
         self._ch_set = set(self.channels)
@@ -619,6 +620,16 @@ class PulseCapture:
                 self._bulk_quiet(channel, st, I[seg:seg + first],
                                  Q[seg:seg + first], T[seg:seg + first])
                 pos = seg + first
+            if self.use_walk:
+                # One stretch from the first crossing to the last, gaps
+                # included: on a gap sample the walk does what
+                # _bulk_quiet does, and one call costs more than
+                # walking a gap of any length this side of a refresh.
+                # The quiet tail after the last crossing is the next
+                # segment's lead-in.
+                pos = self._walk_block(channel, st, I, Q, T, pos,
+                                       seg + int(hits[-1]) + 1)
+                continue
             h = 0
             nhits = hits.shape[0]
             while pos < seg + int(hits[-1]) + 1:
@@ -628,14 +639,6 @@ class PulseCapture:
                        and int(hits[h + 1]) - int(hits[h]) <= self._MERGE_GAP):
                     h += 1
                 walk_stop = seg + int(hits[h]) + 1
-                if self.use_walk:
-                    # The walk triggers and captures on its own; a
-                    # refresh cannot fall inside (the segment ends
-                    # before it).
-                    pos = self._walk_block(channel, st, I, Q, T, pos,
-                                           walk_stop)
-                    if st.capturing:
-                        break
                 while pos < walk_stop:
                     self.process_sample(channel, I[pos], Q[pos], T[pos])
                     pos += 1
@@ -732,8 +735,9 @@ class PulseCapture:
                        rI.buf, rQ.buf, rT.buf, rI.ptr, rI.count, rI.N,
                        bI, bQ, bptr, bcount, bN, self._bl_decim,
                        bl is not None,
-                       ns.mean_I, ns.mean_Q, ns.std_I, ns.std_Q,
-                       ns.jump_std_I, ns.jump_std_Q,
+                       float(ns.mean_I), float(ns.mean_Q),
+                       float(ns.std_I), float(ns.std_Q),
+                       float(ns.jump_std_I), float(ns.jump_std_Q),
                        float(self.threshold_sigma), float(self.end_sigma),
                        int(self.trigger_samples), int(self.edge_lookback),
                        int(self.min_end_samples), float(self.margin_fraction),

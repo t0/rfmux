@@ -14,6 +14,7 @@ import math
 import numpy as np
 import pytest
 
+from rfmux.pulse_capture import walk
 from rfmux.pulse_capture.detection import PulseCapture
 from rfmux.pulse_capture.sources import SlowIngest
 
@@ -69,7 +70,13 @@ def _sorted(records):
     return sorted(records, key=lambda r: (r[0], float(r[2]["trigger_time"])))
 
 
-def _records(channels, packets, *, blocks, use_walk, max_packets=64):
+def _records(channels, packets, *, blocks, use_walk, max_packets=64,
+             monkeypatch=None):
+    """use_walk: False for the loop, "python" for the walk uncompiled,
+    True for the walk as compiled."""
+    if use_walk == "python":
+        monkeypatch.setattr(walk, "walk", walk.walk.py_func)
+        use_walk = True
     records = []
     s = _session(channels, [], threshold_sigma=5.0, end_sigma=2.0,
                  max_capture_samples=HARD_STOP)
@@ -101,18 +108,23 @@ def _records(channels, packets, *, blocks, use_walk, max_packets=64):
 
 @pytest.mark.parametrize("channels", [(1,), (1, 2)])
 @pytest.mark.parametrize("max_packets", [1, 37, 4096])
-def test_walk_matches_process_sample(channels, max_packets):
+def test_walk_matches_process_sample(channels, max_packets, monkeypatch):
     packets = _stream(channels, np.random.default_rng(11))
     ref = _records(channels, packets, blocks=False, use_walk=False)
     loop = _records(channels, packets, blocks=True, use_walk=False,
                     max_packets=max_packets)
-    walked = _records(channels, packets, blocks=True, use_walk=True,
-                      max_packets=max_packets)
+    compiled = _records(channels, packets, blocks=True, use_walk=True,
+                        max_packets=max_packets)
+    with monkeypatch.context() as m:
+        python = _records(channels, packets, blocks=True,
+                          use_walk="python", max_packets=max_packets,
+                          monkeypatch=m)
     # Per-sample ingest interleaves channels within a packet; block
     # ingest finishes one channel's block before the next.  The records
     # are the same, their order across channels is not.
     assert _sorted(loop) == _sorted(ref)
-    assert _sorted(walked) == _sorted(ref)
+    assert _sorted(python) == _sorted(ref)
+    assert _sorted(compiled) == _sorted(ref)
 
     # The fixture must actually reach the branches it claims to.
     flags = [(r[2]["pileup"], r[2]["truncated"], float(r[2]["trigger_time"]))
@@ -124,3 +136,10 @@ def test_walk_matches_process_sample(channels, max_packets):
     assert any(2.7 <= t <= 3.1 for _, _, t in flags), \
         "no trigger on the drifted run"
     assert any(4.05 <= t <= 4.15 for _, _, t in flags)
+
+
+def test_walk_is_compiled_without_the_gil():
+    """While one engine walks, the receiver and the other stream's engine
+    must keep running: the walk is compiled and releases the lock."""
+    assert walk.walk.targetoptions.get("nogil") is True
+    assert walk.walk.signatures, "warm_up() has not compiled the walk"

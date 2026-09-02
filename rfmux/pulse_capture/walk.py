@@ -10,12 +10,17 @@ written and is the definition the tests hold this to.
 
 Two things never happen inside: a baseline refresh (the driver hands
 the one sample a refresh falls on to process_sample), and a save.
+
+Compiled with numba and released from the GIL: while one engine walks,
+the receiver, the other stream's engine, and the GUI keep running.
+``walk.py_func`` is the same function uncompiled.
 """
 from __future__ import annotations
 
 import math
 
 import numpy as np
+from numba import njit
 
 # ── Reasons a walk returns ──────────────────────────────────────────
 DONE = 0            # walked to *stop*
@@ -37,6 +42,7 @@ N_FLT = 8
 _SQRT2 = math.sqrt(2.0)
 
 
+@njit(nogil=True, cache=True)
 def _median3(a, b, c):
     """The middle of three, as sorted()[1] would give."""
     if a > b:
@@ -48,6 +54,7 @@ def _median3(a, b, c):
     return b
 
 
+@njit(nogil=True, cache=True)
 def walk(I, Q, T, start, stop,
          rI, rQ, rT, rptr, rcount, rN,
          bI, bQ, bptr, bcount, bN, bl_decim, baseline_on,
@@ -265,3 +272,13 @@ def walk(I, Q, T, start, stop,
     out[3] = rcount
     out[4] = bptr
     out[5] = bcount
+
+
+def warm_up() -> None:
+    """Compile, or load from cache, before the first block arrives."""
+    z = np.zeros(1, dtype=np.float64)
+    ring = np.zeros(2, dtype=np.float64)
+    walk(z, z, z, 0, 0, ring, ring, ring, 0, 0, 1, ring, ring, 0, 0, 1, 1,
+         True, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 5.0, 2.0, 2, 1, 1, 0.5, 0,
+         True, False, np.zeros(N_INT, dtype=np.int64),
+         np.zeros(N_FLT, dtype=np.float64), np.zeros(6, dtype=np.int64))

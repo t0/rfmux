@@ -39,6 +39,10 @@ pytestmark = pytest.mark.portable
 FR = 1.0e9
 QR = 1e4
 
+# The fitters take one module's envelope, so a ladder built here is indexed out
+# of the container the packer returns.
+MODULE_ID = "crs0030_rmod2"
+
 
 def a_resonator(fr=FR, Qr=QR, amp=0.5, a=0.0, npoints=201, noise=0.0, seed=0):
     """A synthetic sweep across one resonator: frequencies and complex IQ.
@@ -103,6 +107,7 @@ def a_ladder(directions=("upward", "downward")):
     }
     return pack_results(
         sweeps,
+        module_id=MODULE_ID,
         module=2,
         amp_schedule=schedule,
         directions=directions,
@@ -110,7 +115,7 @@ def a_ladder(directions=("upward", "downward")):
         npoints_per_sweep=201,
         nsamps=10,
         catalog=catalog,
-    )
+    )[MODULE_ID]
 
 
 # ─── the fits go beside the sweep they describe ───────────────────────────────

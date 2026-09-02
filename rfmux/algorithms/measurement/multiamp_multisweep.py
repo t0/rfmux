@@ -346,6 +346,7 @@ async def multiamp_multisweep(
 
     return pack_results(
         results,
+        module_id=crs.module[resolved_module].index(),
         module=resolved_module,
         amp_schedule=amp_schedule,
         directions=directions,

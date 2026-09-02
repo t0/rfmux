@@ -23,7 +23,9 @@ from .multisweep_amplitudes import AmplitudeSchedule, _named
 
 __all__ = [
     "RESULTS_SCHEMA_VERSION",
+    "pack_sweep",
     "pack_results",
+    "merge_modules",
     "collect_amplitude_iterations_for",
     "find_iteration_matching_amplitude",
     "get_amplitudes_at_iteration",
@@ -38,12 +40,187 @@ __all__ = [
 #    'df_calibration' and 'calibrated_tod_df'; 'iq_complex'/'iq_complex_volts'
 #    became 'iq_counts'/'iq_volts'; and call_params lost the three arguments
 #    that drove all of it.
-RESULTS_SCHEMA_VERSION = 2
+#
+# 3: a plain multisweep returns this shape too, and everything is wrapped in a
+#    dict keyed by module identifier. A single sweep is one iteration in one
+#    direction — which is what it is — so the nesting no longer says which macro
+#    produced it, and the multi-module form is keyed rather than a bare list.
+RESULTS_SCHEMA_VERSION = 3
+
+
+# The iteration a plain multisweep's one sweep sits at. Not a placeholder: one
+# call is one amplitude step, so 0 is its number in a ladder of length one.
+SINGLE_SWEEP_ITERATION = 0
+
+
+def _call_params(
+    *,
+    catalog,
+    center_frequencies,
+    names,
+    span_hz,
+    npoints_per_sweep,
+    nsamps,
+    requested_module,
+) -> dict:
+    """The ``call_params`` fields both macros record, recorded identically.
+
+    Verbatim throughout — what was asked for, not what was worked out from it —
+    including the ``None``s, which is why *requested_module* is separate from
+    the module that was actually swept.
+    """
+    return {
+        "catalog": catalog.to_dict() if catalog is not None else None,
+        "center_frequencies": (
+            [float(f) for f in center_frequencies]
+            if center_frequencies is not None
+            else None
+        ),
+        "names": list(names) if names is not None else None,
+        "span_hz": float(span_hz),
+        "npoints_per_sweep": int(npoints_per_sweep),
+        "nsamps": int(nsamps),
+        "module": requested_module,
+    }
+
+
+def _packed(module_id: str, module: int, call_params: dict, results: dict) -> dict:
+    """One module's envelope, in the container both macros return.
+
+    Always a container, even for the one module that is the usual case, so a
+    caller who writes ``for module_id, module_sweeps in sweeps.items():`` has
+    written the same code for one module and for four. A convenience that
+    flattened the single-module case would make the common script differ from
+    the general one.
+    """
+    return {
+        module_id: {
+            "schema_version": RESULTS_SCHEMA_VERSION,
+            "module": int(module),
+            "call_params": call_params,
+            "results": results,
+        }
+    }
+
+
+def pack_sweep(
+    sections: Mapping[str, dict],
+    *,
+    module_id: str,
+    module: int,
+    sweep_direction: str,
+    span_hz: float,
+    npoints_per_sweep: int,
+    nsamps: int,
+    amp=None,
+    catalog=None,
+    center_frequencies: Sequence[float] | None = None,
+    names: Sequence[str] | None = None,
+    requested_module: int | None = None,
+) -> dict:
+    """Assemble what a single ``multisweep`` returns.
+
+    The same shape :func:`pack_results` builds, holding the one iteration in the
+    one direction that a single sweep is. Reading it needs no knowledge of which
+    macro produced it, which is the point: the readers below and the fitters
+    take either without asking.
+
+    Args:
+        sections: ``{name: entry}`` — what the sweep measured.
+        module_id: the board-and-module identifier this comes back under, from
+            ``crs.module[m].index()``.
+        module: the module actually swept — resolved, never None.
+        sweep_direction: the direction this sweep was taken in, which is the key
+            *sections* sits under.
+        amp: the ``amp`` argument verbatim — None, a number, a list or a
+            mapping. What each resonator was actually probed at is already
+            ``sweep_amplitude`` in its own entry, so nothing is lost by not
+            resolving it here, and recording the request keeps *call_params*
+            meaning what was asked for.
+        requested_module: the ``module`` argument as the caller passed it, None
+            whenever it came from the catalog instead.
+
+    Returns:
+        dict: ``{module_id: envelope}``, the envelope holding
+        ``schema_version``, ``module``, ``call_params`` and ``results``.
+    """
+    call_params = _call_params(
+        catalog=catalog,
+        center_frequencies=center_frequencies,
+        names=names,
+        span_hz=span_hz,
+        npoints_per_sweep=npoints_per_sweep,
+        nsamps=nsamps,
+        requested_module=requested_module,
+    )
+    call_params["amp"] = amp
+    call_params["sweep_direction"] = sweep_direction
+
+    return _packed(
+        module_id,
+        module,
+        call_params,
+        {SINGLE_SWEEP_ITERATION: {sweep_direction: dict(sections)}},
+    )
+
+
+def merge_modules(containers) -> dict:
+    """One container from several, for a sweep that ran on several modules.
+
+    Each per-module call already returns a container of its own, so merging is a
+    union — and a keyed one, which is what the multi-module return used to lack:
+    it was a bare list, with nothing but argument order to say which element was
+    which module.
+
+    Raises:
+        ValueError: on a repeated module identifier, which would otherwise
+            overwrite a module's data with another's.
+    """
+    merged: dict = {}
+    for container in containers:
+        for module_id, envelope in container.items():
+            if module_id in merged:
+                raise ValueError(
+                    f"{module_id!r} appears twice. Each module comes back under "
+                    f"its own key, so a repeat would overwrite one module's "
+                    f"data with another's."
+                )
+            merged[module_id] = envelope
+    return merged
+
+
+def _is_container(obj) -> bool:
+    """Is this the whole return, keyed by module, rather than one envelope?
+
+    An envelope carries ``results`` and ``call_params`` at the top; a container
+    carries envelopes. Recognized only in order to be refused — nothing
+    dispatches on it, so there is still exactly one accepted input everywhere.
+    """
+    return (
+        isinstance(obj, Mapping)
+        and bool(obj)
+        and "results" not in obj
+        and all(
+            isinstance(v, Mapping) and "results" in v and "call_params" in v
+            for v in obj.values()
+        )
+    )
+
+
+def _refuse_container(obj) -> None:
+    """Raise if handed the container where one module's envelope was wanted."""
+    if _is_container(obj):
+        keys = list(obj)
+        raise TypeError(
+            f"This is the whole sweep result, keyed by module "
+            f"({_named(keys)}). Pass one module's data: sweeps[{keys[0]!r}]."
+        )
 
 
 def pack_results(
     sweeps: Mapping[int, Mapping[str, dict]],
     *,
+    module_id: str,
     module: int,
     amp_schedule: AmplitudeSchedule,
     directions: Sequence[str],
@@ -58,8 +235,10 @@ def pack_results(
     """Assemble what ``multiamp_multisweep`` returns.
 
     Args:
-        sweeps: ``{iteration: {direction: one multisweep return}}``, in the
-            order measured.
+        sweeps: ``{iteration: {direction: {name: entry}}}``, in the order
+            measured.
+        module_id: the board-and-module identifier this comes back under, from
+            ``crs.module[m].index()``.
         module: the module actually swept — resolved, never None.
         requested_module: the ``module`` argument as the caller passed it, which
             is None whenever it came from the catalog instead. Recorded as-is,
@@ -69,7 +248,8 @@ def pack_results(
             Snapshotted with ``to_dict`` for provenance.
 
     Returns:
-        dict: ``schema_version``, ``module``, ``call_params`` and ``results``.
+        dict: ``{module_id: envelope}``, the envelope holding
+        ``schema_version``, ``module``, ``call_params`` and ``results``.
 
         ``results`` is keyed by amplitude iteration, numbered from 0 in the
         order measured, and an iteration holds one entry per direction swept
@@ -83,36 +263,35 @@ def pack_results(
         at which point a top-level copy would be a lie while each sweep's own
         ``original_center_frequency`` cannot be.
     """
-    return {
-        "schema_version": RESULTS_SCHEMA_VERSION,
-        "module": module,
-        "call_params": {
-            "catalog": catalog.to_dict() if catalog is not None else None,
-            "center_frequencies": (
-                [float(f) for f in center_frequencies]
-                if center_frequencies is not None
-                else None
-            ),
-            "names": list(names) if names is not None else None,
-            "amp_schedule": amp_schedule.to_dict(),
-            "directions": list(directions),
-            "span_hz": float(span_hz),
-            "npoints_per_sweep": int(npoints_per_sweep),
-            "nsamps": int(nsamps),
-            "module": requested_module,
-        },
-        "results": {int(i): dict(by_direction) for i, by_direction in sweeps.items()},
-    }
+    call_params = _call_params(
+        catalog=catalog,
+        center_frequencies=center_frequencies,
+        names=names,
+        span_hz=span_hz,
+        npoints_per_sweep=npoints_per_sweep,
+        nsamps=nsamps,
+        requested_module=requested_module,
+    )
+    call_params["amp_schedule"] = amp_schedule.to_dict()
+    call_params["directions"] = list(directions)
+
+    return _packed(
+        module_id,
+        module,
+        call_params,
+        {int(i): dict(by_direction) for i, by_direction in sweeps.items()},
+    )
 
 
 def _iterations(results: Mapping) -> dict:
     """The ``results`` block, with a useful error when handed the wrong dict."""
+    _refuse_container(results)
     try:
         return results["results"]
     except (TypeError, KeyError):
         raise TypeError(
-            "Expected the dict multiamp_multisweep returned (with 'results' "
-            "and 'call_params'), not one of its parts."
+            "Expected one module's sweep result (with 'results' and "
+            "'call_params'), not one of its parts."
         ) from None
 
 
@@ -236,6 +415,12 @@ def find_iteration_matching_amplitude(
 
 def _bias_amplitude_of(results: Mapping, name: str) -> float:
     """*name*'s bias amplitude, from the catalog snapshot in call_params."""
+    # The one read that does not go through _iterations, so it needs its own
+    # guard: a container has no call_params of its own, and without this it
+    # would be reported as a sweep that had no catalog rather than as the
+    # wrong dict.
+    _refuse_container(results)
+
     catalog = results.get("call_params", {}).get("catalog")
     if catalog is None:
         raise ValueError(

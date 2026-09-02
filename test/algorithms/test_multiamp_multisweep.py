@@ -37,16 +37,29 @@ def a_catalog(amplitudes=(0.001, 0.002, 0.004)):
 drive_macro = multiamp_multisweep.__wrapped__
 
 
+class FakeReadoutModule:
+    """Enough of a ReadoutModule to name itself, which is how the driver gets
+    the module identifier its result is keyed by."""
+
+    def __init__(self, module):
+        self._module = module
+
+    def index(self):
+        return f"crs0030_rmod{self._module}"
+
+
 class FakeCRS:
     """A CRS that only knows how to be swept, and records how it was asked.
 
     The driver's only contact with a board is ``crs.multisweep``, so one async
-    method is the whole surface it needs.
+    method is nearly the whole surface it needs — plus ``crs.module[m].index()``
+    for the key its result comes back under.
     """
 
     def __init__(self, sweep_result=None):
         self.calls = []
         self._sweep_result = sweep_result
+        self.module = {m: FakeReadoutModule(m) for m in range(1, 9)}
 
     async def multisweep(self, catalog=None, **kwargs):
         self.calls.append({"catalog": catalog, **kwargs})
@@ -72,10 +85,24 @@ class FakeCRS:
 
 
 async def drive(crs, catalog=None, **kwargs):
-    """The macro's own defaults, minus the two every call needs."""
+    """The macro's own defaults, minus the two every call needs.
+
+    Returns the one module's envelope rather than the container the macro
+    returns, because these tests are about the driver's loop. That the result is
+    keyed by module at all is checked below, and the container's own behaviour —
+    merging, and being refused where an envelope was wanted — lives in
+    ``test/tuning/test_sweep_results.py``.
+    """
     kwargs.setdefault("span_hz", 200e3)
     kwargs.setdefault("npoints_per_sweep", 101)
-    return await drive_macro(crs, catalog, **kwargs)
+    container = await drive_macro(crs, catalog, **kwargs)
+    return container[module_id_of(container)]
+
+
+def module_id_of(container):
+    """The single module a driver call comes back under."""
+    (module_id,) = container
+    return module_id
 
 
 # ─── the loop: step outer, direction inner ────────────────────────────────────
@@ -446,7 +473,19 @@ async def test_center_frequencies_are_recorded_only_as_passed():
 @pytest.mark.asyncio
 async def test_the_result_carries_a_schema_version():
     result = await drive(FakeCRS(), a_catalog())
-    assert result["schema_version"] == 2
+    # A literal, not the constant: bumping the version should mean editing a
+    # test, because it is a claim that readers of older files need to know.
+    assert result["schema_version"] == 3
+
+
+@pytest.mark.asyncio
+async def test_the_result_is_keyed_by_the_module_it_was_swept_on():
+    container = await drive_macro(
+        FakeCRS(), a_catalog(), span_hz=200e3, npoints_per_sweep=101
+    )
+
+    assert list(container) == ["crs0030_rmod2"]
+    assert container["crs0030_rmod2"]["module"] == 2
 
 
 # ─── callbacks ────────────────────────────────────────────────────────────────

@@ -586,7 +586,7 @@ multiamp_ms = await crs.multiamp_multisweep(
     sweep_callback=report,
 )
 
-print(f"\nkeyed by module index: {list(multiamp_results)}")
+print(f"\nkeyed by module index: {list(multiamp_ms)}")
 ```
 
 The only difference is that there
@@ -625,7 +625,7 @@ documented within each sweep section's entry in the iterated multisweep results.
 
 There are also some convenience functions for extracting the data in various
 arrangements. They all take **a single module's outputs** — the thing
-`multiamp_results[crs.module[MODULE].index()]` gave us above — rather than the
+`multiamp_ms[crs.module[MODULE].index()]` gave us above — rather than the
 whole dict containing multiple modules.
 <!-- #endregion -->
 

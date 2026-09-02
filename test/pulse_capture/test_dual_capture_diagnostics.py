@@ -34,6 +34,7 @@ class _NeverFed:
         raise AssertionError("a silent socket must feed nothing")
 
 
+@pytest.mark.filterwarnings("ignore:PFB socket buffer")
 def test_silent_pfb_socket_is_an_error(monkeypatch):
     """Zero packets ever is a configuration problem, not an empty
     capture: returning 0.0 would end a dual capture as though it had
@@ -298,6 +299,7 @@ def test_a_stream_that_never_catches_up_does_not_strand_the_pair():
     d.stop()
 
 
+@pytest.mark.filterwarnings("ignore:PFB socket buffer")
 def test_pfb_batch_yields_to_the_loop(monkeypatch):
     """A long PFB batch turns the loop over every _PFB_YIELD_EVERY
     packets, so a capture walk cannot hold it for a whole batch."""

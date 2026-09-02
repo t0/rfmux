@@ -161,6 +161,7 @@ def _pfb_packet(module0, t_s=43200.0, seq=0, slots=(1,), values=None):
     return bytes(pkt)
 
 
+@pytest.mark.filterwarnings("ignore:PFB socket buffer")
 def test_pfb_source_keeps_only_its_module(monkeypatch):
     """Every module's PFB streamer shares the port; packets from another
     module are not this capture's samples."""
@@ -186,6 +187,7 @@ def test_pfb_source_keeps_only_its_module(monkeypatch):
     assert _Sink.fed == 600                   # six packets of 100
 
 
+@pytest.mark.filterwarnings("ignore:PFB socket buffer")
 def test_pfb_source_restores_sequence_order(monkeypatch):
     """Datagrams arrive slightly out of order; the samples are fed in
     sequence order, with per-sample times that never step back."""
@@ -269,6 +271,7 @@ def _run_pfb(monkeypatch, blobs, channels, stop_after):
     return sink
 
 
+@pytest.mark.filterwarnings("ignore:PFB socket buffer")
 def test_pfb_source_picks_its_channels_from_a_wider_stream(monkeypatch):
     """The streamer carries channels 3 and 7; the capture wants 7."""
     blobs = [_pfb_packet(1, t_s=43200.0 + k * 4.096e-4, seq=k,
@@ -279,6 +282,7 @@ def test_pfb_source_picks_its_channels_from_a_wider_stream(monkeypatch):
     assert sum(len(c[1]) for c in sink.calls) == 20 * 50
 
 
+@pytest.mark.filterwarnings("ignore:PFB socket buffer")
 def test_pfb_source_feeds_blocks_of_packets(monkeypatch):
     """Sixteen packets per engine call per channel, the tail at the end,
     in order."""
@@ -287,3 +291,21 @@ def test_pfb_source_feeds_blocks_of_packets(monkeypatch):
     assert [len(c[1]) for c in sink.calls] == [1600, 1600, 800]
     t = np.concatenate([c[2] for c in sink.calls])
     assert np.all(np.diff(t) > 0)
+
+
+def test_pfb_buffer_seconds_counts_a_four_channel_stream():
+    """The warning threshold is in seconds of stream: four channels at
+    2.44 MHz, 1000 samples per 8056-byte packet."""
+    import socket as _socket
+    import sys as _sys
+    from rfmux.pulse_capture import sources
+    bytes_per_s = 4 * 2441406.25 / 1000 * streamer.PFB_PACKET_SIZE
+
+    class Sock:
+        def getsockopt(self, level, opt):
+            held = int(bytes_per_s)         # exactly one second's worth
+            return held * 2 if _sys.platform == "linux" else held
+    assert abs(sources._pfb_buffer_seconds(Sock()) - 1.0) < 1e-6
+    if _sys.platform == "linux":
+        with open("/proc/sys/net/core/rmem_max") as f:
+            assert sources._rcvbuf_request() == int(f.read())

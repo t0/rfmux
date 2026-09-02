@@ -2184,3 +2184,16 @@ class TestDecisionMarks:
                     "end_confirm_samples", "end_confirm_target"):
             assert got[key] == d[key], key
         assert got["end_time"] == pytest.approx(d["end_time"])
+
+
+def test_window_by_time_skips_samples_without_a_timestamp():
+    """A sample fed without a timestamp holds NaN in the ring; it is
+    outside every window, and the mask that says so is vectorised."""
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    pc = PulseCapture(channels=[1], buf_size=64,
+                      noise_stats={1: ChannelNoiseStats()}, baseline_window=0)
+    for k in range(20):
+        pc.process_sample(1, 0.0, 0.0, None if k == 5 else k * 1e-3)
+    w = pc.get_window_by_time(1, 3e-3, 8e-3)
+    assert list(w["Time"]) == [3e-3, 4e-3, 6e-3, 7e-3, 8e-3]
+    assert pc.get_window_by_time(1, 1.0, 2.0) is None

@@ -1303,14 +1303,10 @@ class PulseCapture:
         if len(ts_data) == 0:
             return None
 
-        # Build a boolean mask for the requested time window.
-        # Timestamps may be None for samples that arrived before the
-        # reference was established; treat those as outside the window.
-        mask = np.zeros(len(ts_data), dtype=bool)
-        for idx in range(len(ts_data)):
-            t = ts_data[idx]
-            if t is not None and t_start <= t <= t_end:
-                mask[idx] = True
+        # A sample fed without a timestamp holds NaN, which fails both
+        # comparisons and so stays outside every window.
+        with np.errstate(invalid="ignore"):
+            mask = (ts_data >= t_start) & (ts_data <= t_end)
 
         if not np.any(mask):
             return None

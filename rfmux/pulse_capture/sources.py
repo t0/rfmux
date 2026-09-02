@@ -32,7 +32,10 @@ which is what live cross-stream pulse matching needs.
 from __future__ import annotations
 
 import asyncio
+import socket
+import sys
 import time
+import warnings
 from typing import Awaitable, Callable, List, Optional, Tuple
 
 import numpy as np
@@ -223,6 +226,32 @@ _PFB_YIELD_EVERY = 8
 #: PFB packets gathered per channel before one engine call.  Sixteen
 #: is 6.5 ms of stream.
 _PFB_FEED_PACKETS = 16
+# What the PFB socket's receive buffer holds, in seconds of a
+# four-channel stream: 1000 samples per packet, so four channels at
+# 2.44 MHz are 78 MB/s.  The socket asks for the largest buffer the
+# host allows -- the kernel charges memory only for packets actually
+# queued -- and warns below this much: a stall on the capture thread
+# longer than the buffer loses packets, where a longer buffer is lag
+# the source drains.
+_PFB_BUFFER_WARN_S = 1.0
+_PFB_BYTES_PER_SECOND = 4 * PFB_SAMPLING_FREQ / 1000 * streamer.PFB_PACKET_SIZE
+
+
+def _rcvbuf_request() -> Optional[int]:
+    """The largest receive buffer this host allows, or None where that
+    is not readable and the socket helper's own ladder applies."""
+    try:
+        with open("/proc/sys/net/core/rmem_max") as f:
+            return int(f.read())
+    except (OSError, ValueError):
+        return None
+
+
+def _pfb_buffer_seconds(sock) -> float:
+    held = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+    if sys.platform == "linux":
+        held //= 2                     # Linux reports double the request
+    return held / _PFB_BYTES_PER_SECOND
 #: Channel groups a packet interleaves, by its mode field.
 _PFB_GROUPS = {0: 1, 1: 2, 2: 4}
 
@@ -444,7 +473,14 @@ async def run_pfb_source(
         return duration_s is not None and elapsed >= duration_s
 
     with streamer.get_multicast_socket(
-            host, port=streamer.PFB_STREAMER_PORT) as sock:
+            host, port=streamer.PFB_STREAMER_PORT,
+            buffer_size=_rcvbuf_request()) as sock:
+        held_s = _pfb_buffer_seconds(sock)
+        if held_s < _PFB_BUFFER_WARN_S:
+            warnings.warn(
+                f"PFB socket buffer holds {held_s:.2f} s of a four-channel "
+                f"stream; a stall longer than that loses packets. Raise it "
+                f"with: sudo sysctl -w net.core.rmem_max=268435456")
         sock.setblocking(False)
         _flush(sock)
         done = False

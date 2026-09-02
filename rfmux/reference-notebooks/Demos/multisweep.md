@@ -21,6 +21,10 @@ parallel. In a typical array characterization / tuning flow, it is the step afte
 a network analysis: netanal finds roughly where the
 resonators are, multisweep looks at each one closely enough to characterise it.
 
+This notebook starts with the resonances already located, so that it is about
+multisweep rather than about finding them — the simulator is asked to tune
+itself, and section 2 reads its answers back.
+
 There are two ways to
 tell multisweep what to sweep, and they are identical once the measurement
 starts:
@@ -96,13 +100,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import rfmux
-from rfmux.tuning import find_resonances_in_netanal
 from rfmux.core.resonators import ResonatorCatalog
 
 MODULE = 1
 
 # The band the simulated array lives in.
-FMIN, FMAX = 0.6e9, 1.05e9
+FMIN, FMAX = 0.6e9, 1.0e9
 
 PROBE_AMPLITUDE = 0.001   # normalized DAC units
 
@@ -118,12 +121,9 @@ NSAMPS = 10               # averages per point
 Ten simulated LEKIDs on a fixed random seed, so this notebook produces the same
 array and the same numbers every time it runs.
 
-To run against real hardware instead, replace this one cell with a session on
-your board — everything after it is unchanged:
-
-    session = rfmux.load_session('!HardwareMap [ !CRS { serial: "0042" } ]')
-    crs = session.query(rfmux.CRS).one()
-    await crs.resolve()
+To run against real hardware instead, this cell and the tone readback in section
+2 are the two that change — section 2 shows what to put in their place.
+Everything from section 3 on is unchanged.
 
 Note that multisweep takes over the channels it sweeps — one per resonator,
 overwriting their frequency and amplitude, and zeroing them again when it
@@ -132,13 +132,18 @@ you have parked by hand survives the call. The flip side is that multisweep does
 not guarantee a quiet module: if something else is live and would intermodulate
 with the sweep, clear it first with `await crs.clear_channels(module=MODULE)`.
 
+`auto_bias_kids` has the simulator park a tone on each of its own resonators, so
+this notebook can start where a tuning run's second step starts. Section 2 reads
+those tones back instead of running a network analysis.
+
 ```python
 MOCK_CONFIG = {
     "num_resonances": 10,
-    "freq_start": 0.6e9,          # inside [FMIN, FMAX] so the sweep can see them
-    "freq_end": 1.0e9,
+    "freq_start": FMIN,           # the band the sweeps will look in
+    "freq_end": FMAX,
     "resonator_random_seed": 42,  # same array every run
-    "auto_bias_kids": False,      # nothing is tuned yet — that is the point
+    "auto_bias_kids": True,       # the simulator tunes itself, so we can skip ahead
+    "bias_amplitude": PROBE_AMPLITUDE,
 }
 
 from rfmux.mock.helpers import create_mock_crs
@@ -149,36 +154,47 @@ print(f"simulated CRS with {MOCK_CONFIG['num_resonances']} resonators "
       f"{MOCK_CONFIG['freq_end']/1e9:.2f} GHz")
 ```
 
-## 2. Find the resonances, and build a catalog
+## 2. Build a catalog
 
-The previous notebook's whole subject, in one cell: a network analysis across
-the band, the dips located in it, and the result seeded into a
-`ResonatorCatalog`.
+Finding the resonances is the previous notebook's whole subject — a network
+analysis across the band, the dips located in it, and the result seeded into a
+`ResonatorCatalog`. That is what
+`network_analyses_find_resonances_make_resonator_catalog.md` is for, and this
+notebook starts one step later.
+
+Since `auto_bias_kids` told the simulator to tune itself, we can read back where
+it parked its own tones and treat those as the frequencies a tuning run would
+have found. `get_frequency` reports relative to the NCO, so add it back:
+
+```python
+nco_frequency = await crs.get_nco_frequency(module=MODULE)
+
+bias_frequencies = [
+    nco_frequency + await crs.get_frequency(channel=channel, module=MODULE)
+    for channel in range(1, MOCK_CONFIG["num_resonances"] + 1)
+]
+```
+
+**On real hardware there is no such shortcut** — a board does not know where its
+resonators are, which is what the network analysis is for. Replace this cell and
+the simulator in section 1 with a session on your board and a catalog you built
+or loaded, and the rest of the notebook runs unchanged:
+
+    session = rfmux.load_session('!HardwareMap [ !CRS { serial: "0042" } ]')
+    crs = session.query(rfmux.CRS).one()
+    await crs.resolve()
+    catalog = ResonatorCatalog.from_csv(...)      # or from_frequencies(...)
 
 `from_frequencies` sorts by frequency, numbers the resonators `R0001…` in that
 order, assigns channels `1..N`, and parks every bias point at `PROBE_AMPLITUDE`.
 
-
 ```python
-netanal = await crs.take_netanal(
-    amp=PROBE_AMPLITUDE,
-    fmin=FMIN,
-    fmax=FMAX,
-    npoints=60_000,
-    nsamps=NSAMPS,
-    max_chans=1023,
-    module=MODULE,
-)
-
-found = find_resonances_in_netanal(netanal, min_dip_depth_db=1.0)
-
 catalog = ResonatorCatalog.from_frequencies(
-    found.resonance_frequencies_hz,
+    bias_frequencies,
     module=MODULE,
     amplitude=PROBE_AMPLITUDE,
 )
 
-print(f"{len(found.candidates)} resonances found")
 print(catalog)
 ```
 

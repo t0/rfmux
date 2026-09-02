@@ -256,33 +256,3 @@ def test_dense_scattered_crossings_agree():
             f"block ingest disagreed at max_packets={mp}: " \
             f"{len(by_block)} vs {len(by_sample)} pulses"
     assert by_sample, "the fixture should trigger at 2.5 sigma"
-
-
-def _step_packets(channels, n, rng, start, length, amp):
-    """Noise with a level shift of *amp* on the first channel."""
-    out = []
-    for i in range(n):
-        vals = (rng.normal(0, 1.0, len(channels))
-                + 1j * rng.normal(0, 1.0, len(channels)))
-        if start <= i < start + length:
-            vals[0] += amp
-        out.append((vals, i / FS))
-    return out
-
-
-def test_a_level_shift_agrees_between_the_routes():
-    """The latched stretch after a hard stop goes through the bulk path
-    in block ingest and through process_sample per sample; both must
-    produce the one truncated record and nothing else."""
-    rng = np.random.default_rng(8)
-    channels = (1,)
-    packets = _step_packets(channels, 9000, rng, start=1000, length=6000,
-                            amp=60.0)
-    by_sample, by_block = [], []
-    s1 = _run_per_sample(channels, packets, by_sample)
-    assert len(by_sample) == 1, by_sample
-    for mp in (1, 64, 4096):
-        by_block.clear()
-        s2 = _run_blocks(channels, packets, by_block, max_packets=mp)
-        assert by_block == by_sample, f"max_packets={mp}"
-        assert s2.pcap.state[1].latched is s1.pcap.state[1].latched

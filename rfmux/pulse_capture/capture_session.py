@@ -1567,7 +1567,8 @@ class DualPulseCaptureSession(_CallbackHost):
         # of the fast one.  A stream that never arrives is given
         # pair_window_wait_s of the other stream's time, then the pair
         # goes out with what there is.
-        self._pending_pairs.append((pair, self._union_window(pair), set()))
+        self._pending_pairs.append(
+            (pair, self._union_window(pair, 1.0 / self.slow.sample_rate), set()))
         self._release_pairs()
 
     def _release_pairs(self, force: bool = False) -> None:
@@ -1617,7 +1618,7 @@ class DualPulseCaptureSession(_CallbackHost):
             self._error(f"Union-window extraction failed: {e}")
 
     @staticmethod
-    def _union_window(pair: dict) -> Optional[tuple]:
+    def _union_window(pair: dict, slow_period: float = 0.0) -> Optional[tuple]:
         """[t0, t1] spanning every available SAVED record + 10% margin.
 
         The saved record rather than the core: ``duration_s`` is
@@ -1625,6 +1626,10 @@ class DualPulseCaptureSession(_CallbackHost):
         was kept.  And the saved record rather than the confirmed end,
         which lies past the window when the tail is not kept.  A summary
         without ``saved_end_time`` falls back to the core.
+
+        A window shorter than one slow sample (a fast event alone) may
+        hold no slow sample at all; it is widened to two slow samples
+        about its centre so the slow samples around the event show.
         """
         t0 = t1 = None
         for key in ("slow_summary", "fast_summary"):
@@ -1641,6 +1646,9 @@ class DualPulseCaptureSession(_CallbackHost):
             t1 = s1 if t1 is None else max(t1, s1)
         if t0 is None:
             return None
+        if slow_period and t1 - t0 < slow_period:
+            mid = (t0 + t1) / 2.0
+            t0, t1 = mid - slow_period, mid + slow_period
         margin = max((t1 - t0) * 0.1, 1e-4)
         return (t0 - margin, t1 + margin)
 

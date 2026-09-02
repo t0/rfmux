@@ -495,3 +495,31 @@ def test_both_mode_status_counts_samples_dropped_per_stream(qt_app):
     assert "slow 0" not in panel.status_label.text()
     panel.close()
     spin(qt_app)
+
+
+def test_a_fast_event_shorter_than_a_slow_sample_still_shows_slow_samples():
+    """A 0.3 ms fast record at a 1 kHz slow rate holds no slow sample;
+    its window widens to two slow samples about its centre."""
+    from rfmux.pulse_capture.capture_session import DualPulseCaptureSession as D
+    T = 43000.0
+    pair = {"slow_summary": None,
+            "fast_summary": {"timestamp": T, "start_time": T,
+                             "trigger_time": T + 0.0001, "duration_s": 0.0002,
+                             "saved_end_time": T + 0.0003}}
+    t0, t1 = D._union_window(pair, slow_period=0.001)
+    assert t1 - t0 >= 0.002
+    assert (t0 + t1) / 2 == pytest.approx(T + 0.00015)
+
+    d, pairs = _dual_for_deferral()
+    T0 = 43000.0
+    _feed_to(d, "slow", T0, T0 + 1.0, 1000.0)
+    _feed_to(d, "fast", T0, T0 + 1.0, 100000.0)
+    d._on_matcher_pair({"channel": 1, "pair_idx": 1, "slow_idx": None, "fast_idx": 1,
+                        "slow_summary": None,
+                        "fast_summary": {"timestamp": T0 + 0.5, "start_time": T0 + 0.5,
+                                         "trigger_time": T0 + 0.5001, "duration_s": 0.0002,
+                                         "saved_end_time": T0 + 0.5003},
+                        "time_offset": None})
+    assert pairs and pairs[0].get("slow_tod") is not None
+    assert 2 <= len(pairs[0]["slow_tod"]["Time"]) <= 3
+    d.stop()

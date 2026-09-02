@@ -430,14 +430,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
 
         self.pulse_tree = QtWidgets.QTreeWidget()
-        self.pulse_tree.setHeaderLabels(["Pulse", "Samples", "SNR"])
+        self.pulse_tree.setHeaderLabels(
+            ["Pulse", "Time (UTC)", "Samples", "SNR"])
         header = self.pulse_tree.header()
         header.setStretchLastSection(False)
+        # Sized to their contents as rows arrive, until the user drags
+        # a divider; from then on the widths are theirs.
         header.setSectionResizeMode(
-            0, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        for col in (1, 2):
-            header.setSectionResizeMode(
-                col, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            QtWidgets.QHeaderView.ResizeMode.Interactive)
+        self._tree_user_sized = False
+        self._tree_autosizing = False
+        header.sectionResized.connect(self._on_tree_section_resized)
         self.pulse_tree.itemDoubleClicked.connect(self._on_tree_double_click)
         splitter.addWidget(self.pulse_tree)
 
@@ -1607,6 +1610,26 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     f"module{self.task.session.module}")
             self._registered_export = True
 
+    def _on_tree_section_resized(self, *_) -> None:
+        if not self._tree_autosizing:
+            self._tree_user_sized = True
+
+    def _autosize_tree(self) -> None:
+        if self._tree_user_sized:
+            return
+        self._tree_autosizing = True
+        try:
+            for col in range(self.pulse_tree.columnCount()):
+                self.pulse_tree.resizeColumnToContents(col)
+        finally:
+            self._tree_autosizing = False
+
+    @staticmethod
+    def _clock(summary: dict) -> str:
+        """HH:MM:SS.ffffff from the decoded packet clock, or ''."""
+        utc = summary.get("trigger_utc") if summary else None
+        return utc[11:-1] if utc else ""
+
     def _add_pulse_row(self, channel: int, pulse_idx: int,
                        summary: dict) -> None:
         """Insert one pulse into the tree, newest first.
@@ -1622,7 +1645,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         label = ("\u2298" if truncated else "\u26a0" if pileup else "\u25c6") \
             + f" #{pulse_idx:06d}"
         item = QtWidgets.QTreeWidgetItem(
-            [label, str(summary.get("n_samples", "")),
+            [label, self._clock(summary), str(summary.get("n_samples", "")),
              f"{summary.get('snr', 0):.1f}\u03c3"])
         item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
                      ("pulse", channel, pulse_idx))
@@ -1630,9 +1653,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             colour = QtGui.QColor(
                 ("#3a2222" if self.dark_mode else "#ffd9d2") if truncated
                 else ("#3a3320" if self.dark_mode else "#fff3c2"))
-            for col in range(3):
+            for col in range(4):
                 item.setBackground(col, colour)
         parent.insertChild(0, item)
+        self._autosize_tree()
         parent.setText(0, f"\u25a4 Channel {channel} "
                           f"({self._counts[channel]})")
 
@@ -1692,15 +1716,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         parent = self._channel_items.get(ch)
         if parent is not None:
             item = QtWidgets.QTreeWidgetItem(
-                [label, detail, f"{summ.get('snr', 0):.1f}σ"])
+                [label, self._clock(summ), detail,
+                 f"{summ.get('snr', 0):.1f}σ"])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
                          ("pair", ch, pair_idx))
             if complement_missing:
-                for col in range(3):
+                for col in range(4):
                     item.setBackground(col, QtGui.QColor(
                         "#33251c" if self.dark_mode else "#ffe8d9"))
             parent.insertChild(0, item)
             parent.setText(0, f"▤ Channel {ch} ({self._counts[ch]} pairs)")
+            self._autosize_tree()
 
         if self.follow_check.isChecked() \
                 and not self._follow_timer.isActive():
@@ -1755,6 +1781,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             colour, tip = self._stream_lag_signal(s)
             if tip:                       # append the drift note when it bites
                 text += f"  —  {tip[0]}"
+            text += self._source_text(s.get("fast", {}).get("source"))
             self._set_status(text, colour)
             tooltip = tip[1] if tip else ""
             skew, n = s.get("stream_skew_s"), s.get("stream_skew_n", 0)
@@ -1798,7 +1825,27 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         drop_str = f" — {dropped} dropped (no timestamp)" if dropped else ""
         self._set_status(
             f"● Capturing — {total} pulses ({rate:.1f}/min) — {ch_str} — "
-            f"{hh:02d}:{mm:02d}:{ss:02d}{drop_str}", "#4CC38A")
+            f"{hh:02d}:{mm:02d}:{ss:02d}{drop_str}"
+            + self._source_text(s.get("source")), "#4CC38A")
+
+    @staticmethod
+    def _source_text(source) -> str:
+        """The fast socket's backlog and losses, once either has shown:
+        what the kernel holds for us right now, the most it has held,
+        the buffer it has, and the packets the reorder gave up on."""
+        if not source:
+            return ""
+        lost = source.get("lost_packets", 0)
+        peak = source.get("backlog_peak_s") or 0.0
+        if not lost and peak < 0.05:
+            return ""
+        buf = source.get("buffer_s")
+        text = (f" — fast backlog {source.get('backlog_s', 0.0):.2f} s "
+                f"(peak {peak:.2f}"
+                + (f" of {buf:.1f} s" if buf else "") + ")")
+        if lost:
+            text += f", {lost} packets lost"
+        return text
 
     def _flat_df_calibrations(self) -> Dict[int, Any]:
         """Calibrations for the selected module, as {channel: calibration}.
@@ -2224,6 +2271,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"peak {summary.get('peak_amp', 0):.4g} "f"{self._units_label(channel)} "
             f"({summary.get('snr', 0):.1f}σ)\n"
             f"derived τ = {tau_str}"
+            + (f"\ntrigger at {summary['trigger_utc']} (packet clock)"
+               if summary.get("trigger_utc") else "")
             + self._decision_text(wf))
 
         for plot in (self.pulse_plot_i, self.pulse_plot_q):
@@ -2281,6 +2330,30 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 thr=wf.get("threshold_sigma"), end=wf.get("end_sigma"),
                 end_ns=ns_end)
             self._annotate_decisions(plot, wf, t0, quad)
+
+    def _window_shortfall(self, meta: dict, fast_wf) -> str:
+        """A note when the fast window does not reach the union window
+        it was asked for: the missing stretch was never in the ring,
+        which on the fast stream means packets lost."""
+        window = meta.get("window")
+        if window is None or fast_wf is None:
+            return ""
+        times = np.asarray(fast_wf.get("Time", ()), dtype=float)
+        times = times[np.isfinite(times)]
+        if times.size == 0:
+            return ""
+        slow_period = 1.0 / self._current_sample_rate("slow")
+        head = float(times[0]) - window[0]
+        tail = window[1] - float(times[-1])
+        parts = []
+        if head > slow_period:
+            parts.append(f"first {head*1e3:.2f} ms")
+        if tail > slow_period:
+            parts.append(f"last {tail*1e3:.2f} ms")
+        if not parts:
+            return ""
+        return ("\nfast window incomplete: " + " and ".join(parts)
+                + " missing (packets lost)")
 
     def _show_pair(self, channel: int, pair_idx: int) -> None:
         """Matched-pair overlay: dense fast trace under slow markers,
@@ -2346,7 +2419,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                if dt is not None and np.isfinite(dt) else "")
             + (f"\nSNR {summ.get('snr', 0):.1f}σ, "
                f"τ = {tau_ms:.2f} ms"
-               if np.isfinite(tau_ms) else ""))
+               if np.isfinite(tau_ms) else "")
+            + (f"\ntrigger at {summ['trigger_utc']} (packet clock)"
+               if summ.get("trigger_utc") else "")
+            + self._window_shortfall(meta, fast_wf))
 
         for plot in (self.pulse_plot_i, self.pulse_plot_q):
             plot.clear()

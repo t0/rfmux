@@ -89,6 +89,8 @@ class PeriscopeRuntime:
         # Pulse capture tap callback (registered by PulseCapturePanel)
         if not hasattr(self, '_pulse_tap'):
             self._pulse_tap = None
+            self._pulse_tap_day_key = None
+            self._pulse_tap_day = None
         if not hasattr(self, '_pulse_tap_channels'):
             self._pulse_tap_channels = None
         if not hasattr(self, '_pulse_tap_cache'):
@@ -110,8 +112,10 @@ class PeriscopeRuntime:
         sample, so it must be fast (e.g. put into a queue).
 
         Signature: ``callback(channels: tuple[int, ...], values: np.ndarray,
-        timestamp: float | None)`` -- ``values`` holds one complex sample
-        per entry of ``channels``, in that order.
+        timestamp: float | None, day_epoch: float | None)`` -- ``values``
+        holds one complex sample per entry of ``channels``, in that
+        order; ``day_epoch`` is the UTC midnight the packet's
+        seconds-of-day count from.
 
         Handing over whole packets keeps the per-packet cost flat in the
         channel count.  The per-sample callback this replaced cost one
@@ -840,7 +844,14 @@ class PeriscopeRuntime:
                 if ts.recent else None
             channels, idx = self._pulse_tap_columns(len(pkt))
             if channels:
-                self._pulse_tap(channels, samples[idx], ts_abs)
+                day = None
+                if ts.recent:
+                    key = (ts.y, ts.d)
+                    if key != self._pulse_tap_day_key:
+                        self._pulse_tap_day_key = key
+                        self._pulse_tap_day = _streamer.ts_day_epoch(ts)
+                    day = self._pulse_tap_day
+                self._pulse_tap(channels, samples[idx], ts_abs, day)
 
 
     #: Cap on packets held before writing them into the rings.  Bounds

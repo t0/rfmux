@@ -171,3 +171,26 @@ def test_a_new_capture_does_not_show_the_last_runs_counts(qt_app):
         assert "57" not in panel.status_label.text()
     finally:
         panel.close()
+
+
+def test_pulse_tree_shows_the_clock_and_stays_resizable(qt_app):
+    """Columns size to their contents as rows arrive, until the user
+    drags a divider; the decoded packet clock has its own column."""
+    from PyQt6 import QtWidgets
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    tree = panel.pulse_tree
+    header = tree.header()
+    assert tree.columnCount() == 4
+    assert header.sectionResizeMode(0) == \
+        QtWidgets.QHeaderView.ResizeMode.Interactive
+    panel._reset_results([1], "now")
+    panel._add_pulse_row(1, 1, {"n_samples": 120, "snr": 7.0,
+                                "trigger_utc": "2026-09-02T16:14:05.123456Z"})
+    row = panel._channel_items[1].child(0)
+    assert row.text(1) == "16:14:05.123456"
+    assert not panel._tree_user_sized
+    header.resizeSection(1, 333)          # the user drags a divider
+    assert panel._tree_user_sized
+    panel._add_pulse_row(1, 2, {"n_samples": 5, "snr": 3.0})
+    assert header.sectionSize(1) == 333   # and keeps the width

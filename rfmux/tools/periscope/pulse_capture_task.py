@@ -101,6 +101,7 @@ class PulseCaptureTask(QtCore.QThread):
         self._tap_channels = None
         self._tap_values: list = []
         self._tap_stamps: list = []
+        self._tap_day = None
         self._tap_opened = 0.0
 
         self._cache_size = waveform_cache
@@ -153,12 +154,20 @@ class PulseCaptureTask(QtCore.QThread):
     #: ...but 256 packets is 430 ms at stage 6, so cap the wait too.
     _TAP_BATCH_MAX_S = 0.05
 
-    def enqueue_packet(self, channels, values, timestamp) -> None:
+    def enqueue_packet(self, channels, values, timestamp,
+                       day_epoch=None) -> None:
         """Tap callback — called from the GUI thread once per packet.
 
         ``values`` holds one complex sample per entry of ``channels``.
         Packets are gathered here and handed over in batches.
         """
+        if day_epoch is not None and day_epoch != self._tap_day:
+            self._tap_day = day_epoch
+            self.flush_tap()
+            try:
+                self.sample_queue.put_nowait(("__day__", day_epoch))
+            except queue.Full:
+                pass
         if channels != self._tap_channels:
             self.flush_tap()
             self._tap_channels = channels
@@ -428,6 +437,9 @@ class PulseCaptureTask(QtCore.QThread):
         if item[0] == "__reestimate__":
             if self.session.state is CaptureState.CAPTURING:
                 self.session.re_estimate_noise()
+            return True
+        if item[0] == "__day__":
+            self.session.set_time_origin(item[1])
             return True
         if item[0] == "__fetch__":
             _, ch, idx, stream = (item if len(item) == 4

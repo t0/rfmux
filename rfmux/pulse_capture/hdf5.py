@@ -34,6 +34,7 @@ from typing import Any, Dict, Iterator, List, Optional
 import h5py
 
 from .detection import ChannelNoiseStats
+from ..streamer import epoch_to_utc
 from .analysis import pulse_summary
 
 
@@ -184,6 +185,18 @@ class _PulseFileWriter:
             self.f.flush()
             self.f.close()
         self.f = None
+
+    def set_time_origin(self, day_epoch: float) -> None:
+        """Record the calendar day the stream's seconds-of-day count
+        from, once; the packet clock is the source, not this host."""
+        if not self.is_open:
+            return
+        meta = self.f["metadata"]
+        if "time_origin_epoch" in meta.attrs:
+            return
+        meta.attrs["time_origin_epoch"] = float(day_epoch)
+        meta.attrs["time_origin_utc"] = epoch_to_utc(day_epoch)
+        self.f.flush()
 
     @property
     def is_open(self) -> bool:
@@ -385,6 +398,12 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         pg.attrs["time_offset"] = (
             float(pair["time_offset"])
             if pair.get("time_offset") is not None else float("nan"))
+        # The union window each side was asked for, so a reader can
+        # tell a complete window from one the ring or the socket lost
+        # part of.
+        if pair.get("window") is not None:
+            pg.attrs["window_t0"] = float(pair["window"][0])
+            pg.attrs["window_t1"] = float(pair["window"][1])
         for side in ("slow_tod", "fast_tod"):
             tod = pair.get(side)
             if tod:
@@ -600,6 +619,9 @@ class PulseHDF5Reader:
             "time_offset": float(pg.attrs.get("time_offset",
                                               float("nan"))),
         }
+        if "window_t0" in pg.attrs:
+            pair["window"] = (float(pg.attrs["window_t0"]),
+                              float(pg.attrs["window_t1"]))
         for side in ("slow_tod", "fast_tod"):
             if f"{side}_Amp_I" in pg:
                 pair[side] = {
@@ -670,11 +692,12 @@ class PulseHDF5Reader:
 _PULSE_INT_MARKS = ("trigger_index", "end_index", "below_threshold_index",
                     "end_confirm_samples", "end_confirm_target")
 _PULSE_FLOAT_MARKS = ("trigger_time", "end_time", "below_threshold_time",
+                      "trigger_epoch",
                       "trigger_baseline_I", "trigger_baseline_Q",
                       "trigger_sigma_I", "trigger_sigma_Q",
                       "end_baseline_I", "end_baseline_Q",
                       "threshold_sigma", "end_sigma")
-_PULSE_STR_MARKS = ("trigger_quad",)
+_PULSE_STR_MARKS = ("trigger_quad", "trigger_utc")
 
 
 def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,

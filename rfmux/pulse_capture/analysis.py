@@ -228,6 +228,10 @@ def pulse_summary(
                            if len(valid_times) else timestamp),
         "tau_s": tau_s,
         "tau_ms": tau_s * 1e3,
+        # The packet clock decoded to a calendar time, when the session
+        # knew the day; absent otherwise.
+        **{k: pulse_data[k] for k in ("trigger_epoch", "trigger_utc")
+           if k in pulse_data},
     }
 
 

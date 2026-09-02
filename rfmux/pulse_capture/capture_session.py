@@ -80,6 +80,7 @@ from .detection import (
     estimate_noise_stats,
 )
 from . import walk
+from ..streamer import epoch_to_utc
 from .analysis import (
     pulse_summary,
     storage_transform,
@@ -668,6 +669,13 @@ class PulseCaptureSession(_CallbackHost):
         self.pulse_counts: Dict[int, int] = {c: 0 for c in self.channels}
         self.total_pulses = 0
         self.dropped_invalid_ts = 0
+        # What the source feeding this session reports about its
+        # transport: lost packets, socket backlog.  The source owns
+        # the keys; stats() copies them out.
+        self.source: Dict[str, Any] = {}
+        # Seconds since 1970 of the midnight the stream's seconds-of-day
+        # count from, decoded from the packets' own clock.
+        self.time_origin_epoch: Optional[float] = None
         self._first_ts: Optional[float] = None
         self._last_ts: Optional[float] = None
         self._pulses_since_flush = 0
@@ -683,6 +691,14 @@ class PulseCaptureSession(_CallbackHost):
         walk.warm_up()
         self._alloc_noise_buffers()
         self.state = CaptureState.ESTIMATING
+
+    def set_time_origin(self, day_epoch: Optional[float]) -> None:
+        """The calendar day the packet clock is in; the first wins."""
+        if day_epoch is None or self.time_origin_epoch is not None:
+            return
+        self.time_origin_epoch = float(day_epoch)
+        self._to_writer("set_time_origin", self.time_origin_epoch,
+                        what="time origin")
 
     def re_estimate_noise(self) -> None:
         """Freeze triggering and collect a fresh noise estimate.
@@ -966,6 +982,8 @@ class PulseCaptureSession(_CallbackHost):
             "elapsed_s": elapsed,
             "rate_per_min": rate_per_min,
             "dropped_invalid_ts": self.dropped_invalid_ts,
+            "source": dict(self.source),
+            "time_origin_epoch": self.time_origin_epoch,
             "hdf5_path": str(self.hdf5_path) if self.hdf5_path else None,
             "baseline_window": self.baseline_window,
             "baseline_window_ms": (
@@ -1066,6 +1084,8 @@ class PulseCaptureSession(_CallbackHost):
                     df_calibrations=self.df_calibrations,
                     stored_units=self.stored_units,
                 )
+                if self.time_origin_epoch is not None:
+                    self.writer.set_time_origin(self.time_origin_epoch)
             except Exception as e:
                 self.writer = None
                 self._error(f"Could not open HDF5 file {self.hdf5_path}: {e}")
@@ -1073,6 +1093,12 @@ class PulseCaptureSession(_CallbackHost):
     def _on_engine_pulse(self, channel: int, pulse_idx: int,
                          pulse_data: dict) -> None:
         ns = self.noise_stats.get(channel)
+        if self.time_origin_epoch is not None:
+            trig = pulse_data.get("trigger_time")
+            if trig is not None and math.isfinite(trig):
+                epoch = self.time_origin_epoch + float(trig)
+                pulse_data["trigger_epoch"] = epoch
+                pulse_data["trigger_utc"] = epoch_to_utc(epoch)
         summary = pulse_summary(pulse_data, ns, self.threshold_sigma)
 
         self.pulse_counts[channel] = self.pulse_counts.get(channel, 0) + 1
@@ -1316,6 +1342,7 @@ class DualPulseCaptureSession(_CallbackHost):
         self.on_error = on_error
 
         self.writer = None
+        self.time_origin_epoch: Optional[float] = None
         if hdf5_path is not None:
             try:
                 self.writer = DualPulseHDF5Writer(
@@ -1366,10 +1393,14 @@ class DualPulseCaptureSession(_CallbackHost):
         #: for callers that genuinely have one sample at a time.
         self.slow_feed = SimpleNamespace(channels=self.channels,
                                          feed_sample=self.feed_slow,
-                                         feed_block=self.feed_slow_block)
+                                         feed_block=self.feed_slow_block,
+                                         source=self.slow.source,
+                                         set_time_origin=self.set_time_origin)
         self.fast_feed = SimpleNamespace(channels=self.channels,
                                          feed_sample=self.feed_fast,
-                                         feed_block=self.feed_fast_block)
+                                         feed_block=self.feed_fast_block,
+                                         source=self.fast.source,
+                                         set_time_origin=self.set_time_origin)
 
     def _make_stream(self, stream: str,
                      sample_rate: float) -> PulseCaptureSession:
@@ -1450,6 +1481,14 @@ class DualPulseCaptureSession(_CallbackHost):
             self.matcher.advance_time(stream, t)
             self._release_pairs()
 
+    def set_time_origin(self, day_epoch: Optional[float]) -> None:
+        for session in (self.slow, self.fast):
+            session.set_time_origin(day_epoch)
+        if day_epoch is not None and self.time_origin_epoch is None:
+            self.time_origin_epoch = float(day_epoch)
+            self._to_writer("set_time_origin", self.time_origin_epoch,
+                            what="time origin")
+
     def flush_progress(self) -> None:
         """Release held training progress on both streams."""
         for session in (self.slow, self.fast):
@@ -1483,6 +1522,7 @@ class DualPulseCaptureSession(_CallbackHost):
                              + self.fast.total_pulses),
             "slow_time_offset_s": self.slow_time_offset_s,
             "match_window_s": self.match_window_s,
+            "time_origin_epoch": self.time_origin_epoch,
             **self._stream_lag(),
         }
 
@@ -1571,8 +1611,10 @@ class DualPulseCaptureSession(_CallbackHost):
         # of the fast one.  A stream that never arrives is given
         # pair_window_wait_s of the other stream's time, then the pair
         # goes out with what there is.
-        self._pending_pairs.append(
-            (pair, self._union_window(pair, 1.0 / self.slow.sample_rate), set()))
+        union = self._union_window(pair, 1.0 / self.slow.sample_rate)
+        if union is not None:
+            pair["window"] = (float(union[0]), float(union[1]))
+        self._pending_pairs.append((pair, union, set()))
         self._release_pairs()
 
     def _release_pairs(self, force: bool = False) -> None:

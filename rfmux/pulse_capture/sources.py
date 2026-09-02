@@ -247,6 +247,16 @@ def _rcvbuf_request() -> Optional[int]:
         return None
 
 
+def _rcvq_bytes(sock) -> Optional[int]:
+    """Bytes queued in the socket's receive buffer, or None where the
+    kernel does not say (SO_MEMINFO is Linux)."""
+    try:
+        raw = sock.getsockopt(socket.SOL_SOCKET, 55, 36)   # SO_MEMINFO
+        return int.from_bytes(raw[:4], sys.byteorder)      # rmem_alloc
+    except (OSError, AttributeError, TypeError, ValueError):
+        return None
+
+
 def _pfb_buffer_seconds(sock) -> float:
     held = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
     if sys.platform == "linux":
@@ -269,6 +279,7 @@ class _SeqReorder:
         self._pending = {}
         self._next = None
         self._highest = None
+        self.lost = 0            # sequence numbers given up on
 
     def push(self, seq: int, item) -> None:
         self._pending[seq] = item
@@ -283,7 +294,9 @@ class _SeqReorder:
                 out.append(self._pending.pop(self._next))
                 self._next += 1
             elif self._highest - self._next > self.window:
-                self._next = min(self._pending)
+                skip_to = min(self._pending)
+                self.lost += skip_to - self._next
+                self._next = skip_to
             else:
                 break
         return out
@@ -331,6 +344,7 @@ async def run_slow_source(
 
     Returns the sample time covered (seconds).
     """
+    origin_set = False
     loop = asyncio.get_running_loop()
     requested = list(capture_session.channels)
     ingest = SlowIngest(capture_session.feed_block, duration_s=duration_s)
@@ -358,6 +372,11 @@ async def run_slow_source(
                     continue
                 raw = np.array(pkt) / 256.0
                 ts = streamer.ts_to_seconds(pkt.ts)
+                if ts is not None and not origin_set:
+                    set_origin = getattr(capture_session, "set_time_origin", None)
+                    if set_origin is not None:
+                        set_origin(streamer.ts_day_epoch(pkt.ts))
+                    origin_set = True
                 if len(pkt) != width:
                     # Recomputed only when the packet mode changes, not
                     # per packet -- that would undo the point of
@@ -420,6 +439,9 @@ async def run_pfb_source(
     reorder = _SeqReorder()
     pending = {ch: [] for ch in channels}     # (I, Q, T) per packet
     pending_packets = 0
+    source = getattr(capture_session, "source", None)
+    set_origin = getattr(capture_session, "set_time_origin", None)
+    origin_set = False
 
     def flush_pending() -> None:
         nonlocal pending_packets
@@ -446,6 +468,10 @@ async def run_pfb_source(
         # 256x above slow samples for the same signal.
         raw = np.array(pkt) / 256.0
         ts = streamer.ts_to_seconds(pkt.ts)
+        nonlocal origin_set
+        if not origin_set and ts is not None and set_origin is not None:
+            set_origin(streamer.ts_day_epoch(pkt.ts))
+            origin_set = True
         time_samples = pkt.num_samples // n_groups
         # A whole packet per channel per call.  The packet interleaves
         # the streamed channels round-robin, so one channel is a
@@ -483,10 +509,22 @@ async def run_pfb_source(
                 f"with: sudo sysctl -w net.core.rmem_max=268435456")
         sock.setblocking(False)
         _flush(sock)
+        backlog_peak = 0.0
+        if source is not None:
+            source.update(buffer_s=held_s, backlog_s=0.0,
+                          backlog_peak_s=0.0, lost_packets=0)
         done = False
         while not done:
             if should_stop is not None and should_stop():
                 break
+            if source is not None:
+                queued = _rcvq_bytes(sock)
+                if queued is not None:
+                    backlog = queued / _PFB_BYTES_PER_SECOND
+                    backlog_peak = max(backlog_peak, backlog)
+                    source["backlog_s"] = backlog
+                    source["backlog_peak_s"] = backlog_peak
+                source["lost_packets"] = reorder.lost
             try:
                 data = await asyncio.wait_for(
                     loop.sock_recv(sock, streamer.PFB_PACKET_SIZE),

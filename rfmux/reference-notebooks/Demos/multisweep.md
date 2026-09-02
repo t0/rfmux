@@ -25,10 +25,14 @@ There are two ways to
 tell multisweep what to sweep, and they are identical once the measurement
 starts:
 
-| You have | You pass | Results keyed by |
+| You have | You pass | Sweep sections keyed by |
 |---|---|---|
 | Already done a netanal and used `find_resonances` to make a `ResonatorCatalog` | a `ResonatorCatalog` | resonator name (`"R0001"`) |
 | A list of frequencies | `center_frequencies=` + `amp=` | section name (`"S0001"`) |
+
+Those names key the sweep sections, which sit a few levels inside what the call
+returns — section 3 unpacks the shape, and it is the same shape for every sweep
+in this notebook.
 
 Unless you are starting completely from scratch, or looking at hardware that doesn't
 have resonances, you will likely pass a catalog. A catalog already knows
@@ -203,14 +207,62 @@ ms = await crs.multisweep(
     nsamps=NSAMPS,
 )
 
-print(f"{len(ms)} sweep sections, keyed by resonator name: {list(ms)[:4]} …")
+print(f"keyed by module: {list(ms)}")
+```
+
+### What comes back
+
+The outermost key is a **module identifier** — the board's serial and the readout
+module, as `crs.module[MODULE].index()` spells it. One key here, because this
+call swept one module; a call that swept four would have four, and the loop you
+write over them is the same either way.
+
+Inside is one **envelope** per module, holding the sweep sections and enough
+provenance to say what produced them. Pickle it a year from now and it still
+knows its module, its span, its point count and the catalog it came from:
+
+```python
+module_sweeps = ms[crs.module[MODULE].index()]
+
+print(f"envelope       {list(module_sweeps)}")
+print(f"module         {module_sweeps['module']}")
+print(f"span_hz        {module_sweeps['call_params']['span_hz']}")
+print(f"amplitude steps {list(module_sweeps['results'])}")
+print(f"directions     {list(module_sweeps['results'][0])}")
+```
+
+`results` is keyed by **amplitude step**, then by **direction**, then by section
+name. A single `multisweep` is one step in one direction, so it has exactly one
+of each — step `0`, and whichever direction you asked for. That is not a padded
+slot: one call really is one amplitude at one direction, and saying so means
+`multiamp_multisweep` (sections 5–8) returns the same shape with more steps in
+it. Nothing downstream has to ask which of the two produced a result.
+
+```python
+sweep_sections = module_sweeps["results"][0]["upward"]
+
+print(f"{len(sweep_sections)} sweep sections, keyed by resonator name: "
+      f"{list(sweep_sections)[:4]} …")
+```
+
+Reaching for the same four levels every time gets old, so name it once and reuse
+it — this is the one below, and every later cell uses it:
+
+```python
+def sections_of(sweeps, module=MODULE, step=0, direction="upward"):
+    """The {name: entry} sweep sections of one sweep, from what a macro returned.
+
+    Analysis functions take *one module's* envelope, never the whole dict, so
+    stepping into the module you mean is deliberate rather than guessed at.
+    """
+    return sweeps[crs.module[module].index()]["results"][step][direction]
 ```
 
 Each entry holds the sweep section data itself plus the bookkeeping needed to know what it
 is:
 
 ```python
-entry = ms["R0001"]
+entry = sweep_sections["R0001"]
 for key, value in entry.items():
     if isinstance(value, np.ndarray):
         print(f"{key:<30} ndarray{value.shape} {value.dtype}")
@@ -221,10 +273,10 @@ for key, value in entry.items():
 A look at the first four, in the IQ plane and in magnitude:
 
 ```python
-def plot_ms(ms, keys, title):
+def plot_ms(sections, keys, title):
     fig, axes = plt.subplots(2, len(keys), figsize=(3.0 * len(keys), 5.5))
     for column, key in enumerate(keys):
-        s = ms[key]
+        s = sections[key]
         centre = s["original_center_frequency"]
         offset_khz = (s["frequencies"] - centre) / 1e3
 
@@ -241,7 +293,7 @@ def plot_ms(ms, keys, title):
     plt.tight_layout()
     plt.show()
 
-plot_ms(ms, list(ms)[:4], "example multisweep")
+plot_ms(sweep_sections, list(sweep_sections)[:4], "example multisweep")
 ```
 
 ### Overriding the amplitude
@@ -265,9 +317,17 @@ ms_louder = await crs.multisweep(
 )
 
 print(f"catalog bias amplitude   {catalog['R0001'].bias.amplitude}")
-print(f"swept at (default)       {ms['R0001']['sweep_amplitude']}")
-print(f"swept at (override)      {ms_louder['R0001']['sweep_amplitude']}")
+print(f"swept at (default)       {sections_of(ms)['R0001']['sweep_amplitude']}")
+print(f"swept at (override)      {sections_of(ms_louder)['R0001']['sweep_amplitude']}")
 print(f"catalog after the sweep  {catalog['R0001'].bias.amplitude}  ← unchanged")
+
+# call_params records the amp you asked for, verbatim — a number here, None when
+# you let the catalog decide. What each resonator was *actually* probed at is
+# sweep_amplitude on its own entry, so nothing has to be stored twice.
+print(f"\ncall_params['amp'] (default)   "
+      f"{ms[crs.module[MODULE].index()]['call_params']['amp']}")
+print(f"call_params['amp'] (override)  "
+      f"{ms_louder[crs.module[MODULE].index()]['call_params']['amp']}")
 ```
 
 Or, using a per-resonator amplitude mapping:
@@ -285,8 +345,10 @@ mixed_amplitude_ms = await crs.multisweep(
     amp=per_resonator_amplitude_mapping,
 )
 
-for name in list(mixed_amplitude_ms)[:4]:
-    print(f"{name}  swept at {mixed_amplitude_ms[name]['sweep_amplitude']:.5f}")
+mixed_amplitude_sections = sections_of(mixed_amplitude_ms)
+
+for name in list(mixed_amplitude_sections)[:4]:
+    print(f"{name}  swept at {mixed_amplitude_sections[name]['sweep_amplitude']:.5f}")
 ```
 
 Note that a positional *list* of amplitudes is refused if provided alongside a catalog: it
@@ -329,8 +391,10 @@ no_catalog_ms = await crs.multisweep(
     module=MODULE,
 )
 
-print(f"keys: {list(no_catalog_ms)}")
-for section_name, s in no_catalog_ms.items():
+no_catalog_sections = sections_of(no_catalog_ms)
+
+print(f"keys: {list(no_catalog_sections)}")
+for section_name, s in no_catalog_sections.items():
     print(f"{section_name}  ch {s['channel']}  "
           f"{s['original_center_frequency']/1e6:.3f} MHz  "
           f"amp {s['sweep_amplitude']}")
@@ -339,7 +403,8 @@ for section_name, s in no_catalog_ms.items():
 (This data is "measured" off-resonance, so the S21's are flat.)
 
 ```python
-plot_ms(no_catalog_ms, list(no_catalog_ms), "multisweep done using a plain frequency list")
+plot_ms(no_catalog_sections, list(no_catalog_sections),
+        "multisweep done using a plain frequency list")
 ```
 
 #### No-catalog operation: passing a list of amplitudes
@@ -357,7 +422,7 @@ per_section_amplitude_ms = await crs.multisweep(
     module=MODULE,
 )
 
-for section_name, s in per_section_amplitude_ms.items():
+for section_name, s in sections_of(per_section_amplitude_ms).items():
     print(f"{section_name}  {s['original_center_frequency']/1e6:.3f} MHz  "
           f"amp {s['sweep_amplitude']:.5f}")
 ```
@@ -382,7 +447,7 @@ named_section_ms = await crs.multisweep(
     module=MODULE,
 )
 
-for section_name, s in named_section_ms.items():
+for section_name, s in sections_of(named_section_ms).items():
     print(f"{section_name:<12} ch {s['channel']}  "
           f"{s['original_center_frequency']/1e6:.3f} MHz  "
           f"amp {s['sweep_amplitude']:.5f}")
@@ -528,36 +593,48 @@ multiamp_results = await crs.multiamp_multisweep(
     sweep_callback=report,
 )
 
-print(f"\ntop-level keys: {list(multiamp_results)}")
-print(f"amplitude steps: {list(multiamp_results['results'])}")
+print(f"\nkeyed by module: {list(multiamp_results)}")
 ```
 
-The result is one dict:
+Which is the same shape section 3 unpacked — module identifier, then an envelope,
+then `results` by amplitude step and direction. The only difference is that there
+is now more than one step in it:
+
+```python
+multiamp_module_results = multiamp_results[crs.module[MODULE].index()]
+
+print(f"envelope        {list(multiamp_module_results)}")
+print(f"amplitude steps {list(multiamp_module_results['results'])}")
+print(f"directions      {list(multiamp_module_results['results'][0])}")
+```
 
 - `results` is keyed by **amplitude step**, numbered in the order measured, and
   each step holds one entry per **direction** swept and nothing else. Under a
-  direction is exactly what a single `multisweep` returns.
+  direction is the sweep sections of one `multisweep`.
 - `call_params` records what the driver was asked for — including the schedule,
   so a saved result can say what produced it.
 
 ```python
-first = multiamp_results["results"][0]["upward"]
-print(f"results[0]['upward'] is a normal multisweep return: {list(first)[:4]} …")
+first = sections_of(multiamp_results)
+print(f"step 0, upward: {list(first)[:4]} …")
 print(f"R0001 swept at {first['R0001']['sweep_amplitude']:.5f}")
 
-print(f"\ncall_params: {list(multiamp_results['call_params'])}")
-print(f"schedule as stored: {multiamp_results['call_params']['amp_schedule']}")
+print(f"\ncall_params: {list(multiamp_module_results['call_params'])}")
+print(f"schedule as stored: {multiamp_module_results['call_params']['amp_schedule']}")
 ```
 
 Note what is *not* in the call_params: no step-level copy of the amplitudes. These are
 documented within each sweep section's entry in the iterated multisweep results.
 
+`sections_of` works on this unchanged, because a ladder and a single sweep nest
+identically — pass `step=` to pick a rung out.
+
 ## 8. Reading the results back
 
 There are also some convenience functions for extracting the data in various
-arrangements.
-
-### Get one resonator across every amplitude
+arrangements. They all take **one module's envelope** — the thing
+`multiamp_results[crs.module[MODULE].index()]` gave us above — rather than the
+whole dict.
 
 ```python
 from rfmux.tuning import (
@@ -565,8 +642,22 @@ from rfmux.tuning import (
     find_iteration_matching_amplitude,
     get_amplitudes_at_iteration,
 )
+```
 
-iterations = collect_amplitude_iterations_for(multiamp_results, "R0001")
+Hand one the whole dict instead and it says so, and names the modules it found,
+rather than walking a container as though it were an envelope:
+
+```python
+try:
+    collect_amplitude_iterations_for(multiamp_results, "R0001")
+except TypeError as e:
+    print(f"TypeError: {e}")
+```
+
+### Get one resonator across every amplitude
+
+```python
+iterations = collect_amplitude_iterations_for(multiamp_module_results, "R0001")
 
 for iteration, by_direction in iterations.items():
     section = by_direction["upward"]
@@ -633,13 +724,15 @@ def plot_amplitude_iterations(results, name, direction="upward"):
     plt.show()
 
 
-plot_amplitude_iterations(multiamp_results, "R0001")
+plot_amplitude_iterations(multiamp_module_results, "R0001")
 ```
 
 ### Get every resonator's data at a particular amplitude step
 
 ```python
-for name, amplitude in list(get_amplitudes_at_iteration(multiamp_results, 2).items())[:4]:
+for name, amplitude in list(
+    get_amplitudes_at_iteration(multiamp_module_results, 2).items()
+)[:4]:
     print(f"{name}  {amplitude:.5f}")
 ```
 
@@ -693,7 +786,7 @@ def plot_sections_at_iteration(results, iteration, direction="upward", ncols=5):
     plt.show()
 
 
-plot_sections_at_iteration(multiamp_results, 2)
+plot_sections_at_iteration(multiamp_module_results, 2)
 ```
 
 ### determine which amplitude step used a particular amplitude
@@ -701,7 +794,7 @@ plot_sections_at_iteration(multiamp_results, 2)
 
 ```python
 for name in ("R0001", "R0002", "R0003"):
-    at_bias = find_iteration_matching_amplitude(multiamp_results, name)
+    at_bias = find_iteration_matching_amplitude(multiamp_module_results, name)
     bias = catalog[name].bias.amplitude
     print(f"{name}  bias {bias:.5f}  → step {at_bias}")
 ```
@@ -711,18 +804,20 @@ function needs a name at all. `R0001`, `R0002` and `R0003` are walking different
 ranges, so the same amplitude sits at a different rung of each:
 
 ```python
-print(f"{'':<8}" + "".join(f"{s:>10}" for s in multiamp_results["results"]))
+print(f"{'':<8}" + "".join(f"{s:>10}" for s in multiamp_module_results["results"]))
 for name in ("R0001", "R0002", "R0003"):
     amplitudes = [
         by_direction["upward"]["sweep_amplitude"]
-        for by_direction in collect_amplitude_iterations_for(multiamp_results, name).values()
+        for by_direction in collect_amplitude_iterations_for(
+            multiamp_module_results, name
+        ).values()
     ]
     print(f"{name:<8}" + "".join(f"{a:>10.5f}" for a in amplitudes))
 
 print()
 for name in ("R0001", "R0002", "R0003"):
-    step = find_iteration_matching_amplitude(multiamp_results, name, 0.002)
-    got = get_amplitudes_at_iteration(multiamp_results, step)[name]
+    step = find_iteration_matching_amplitude(multiamp_module_results, name, 0.002)
+    got = get_amplitudes_at_iteration(multiamp_module_results, step)[name]
     print(f"0.00200 for {name}  → step {step}  (actually {got:.5f})")
 ```
 
@@ -736,8 +831,8 @@ and the other two return their top rung regardless:
 
 ```python
 for name in ("R0001", "R0002", "R0003"):
-    step = find_iteration_matching_amplitude(multiamp_results, name, 0.016)
-    got = get_amplitudes_at_iteration(multiamp_results, step)[name]
+    step = find_iteration_matching_amplitude(multiamp_module_results, name, 0.016)
+    got = get_amplitudes_at_iteration(multiamp_module_results, step)[name]
     print(f"0.01600 for {name}  → step {step}  (actually {got:.5f})")
 ```
 
@@ -761,7 +856,9 @@ both_ways = await crs.multiamp_multisweep(
     directions=("upward", "downward"),
 )
 
-for step, by_direction in both_ways["results"].items():
+both_ways_module_results = both_ways[crs.module[MODULE].index()]
+
+for step, by_direction in both_ways_module_results["results"].items():
     for direction, sections in by_direction.items():
         print(f"step {step}  {direction:<9} "
               f"R0001 at {sections['R0001']['sweep_amplitude']:.5f}")
@@ -804,7 +901,7 @@ def plot_both_directions(results, name):
     plt.show()
 
 
-plot_both_directions(both_ways, "R0001")
+plot_both_directions(both_ways_module_results, "R0001")
 ```
 
 A step swept once and a step swept twice have the same shape — the directions
@@ -820,7 +917,8 @@ one_way = await crs.multiamp_multisweep(
     directions=("downward",),
 )
 
-print(f"directions present: {list(one_way['results'][0])}")
+print(f"directions present: "
+      f"{list(one_way[crs.module[MODULE].index()]['results'][0])}")
 ```
 
 ### A frequency list at several amplitudes
@@ -840,14 +938,16 @@ untuned_results = await crs.multiamp_multisweep(
     amp_schedule=AmplitudeSchedule.ramp(PROBE_AMPLITUDE, PROBE_AMPLITUDE * 4, 3),
 )
 
-for step, by_direction in untuned_results["results"].items():
+untuned_module_results = untuned_results[crs.module[MODULE].index()]
+
+for step, by_direction in untuned_module_results["results"].items():
     amplitude = by_direction["upward"]["S0001"]["sweep_amplitude"]
     print(f"step {step}  every section at {amplitude:.5f}")
 
 # The readers work on this exactly as they do on a catalog's results — the only
 # difference is the key. These sections are off-resonance, so the traces are
 # flat; what the plot shows is the three amplitudes, not a resonance.
-plot_amplitude_iterations(untuned_results, "S0001")
+plot_amplitude_iterations(untuned_module_results, "S0001")
 
 try:
     await crs.multiamp_multisweep(

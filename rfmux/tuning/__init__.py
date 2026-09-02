@@ -67,7 +67,9 @@ from .sweep_results import (
     collect_amplitude_iterations_for,
     find_iteration_matching_amplitude,
     get_amplitudes_at_iteration,
+    merge_modules,
     pack_results,
+    pack_sweep,
 )
 
 __all__ = [
@@ -93,5 +95,7 @@ __all__ = [
     "collect_amplitude_iterations_for",
     "find_iteration_matching_amplitude",
     "get_amplitudes_at_iteration",
+    "merge_modules",
     "pack_results",
+    "pack_sweep",
 ]

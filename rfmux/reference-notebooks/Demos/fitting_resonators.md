@@ -229,7 +229,7 @@ print(amplitude_schedule)
 for step in amplitude_schedule.steps(catalog):
     print(step)
 
-multiamp_results = await crs.multiamp_multisweep(
+ladder = await crs.multiamp_multisweep(
     catalog,
     span_hz=LADDER_SPAN_HZ,
     npoints_per_sweep=NPOINTS_PER_SWEEP,
@@ -238,7 +238,13 @@ multiamp_results = await crs.multiamp_multisweep(
     directions=("upward", "downward"),
 )
 
-print(f"\namplitude steps: {list(multiamp_results['results'])}")
+# A sweep comes back keyed by module — one key here, since a ladder is one
+# module per call. fit_sweeps takes one module's worth, so step into it now and
+# everything below is about this module.
+multiamp_results = ladder[crs.module[MODULE].index()]
+
+print(f"\nmodules:         {list(ladder)}")
+print(f"amplitude steps: {list(multiamp_results['results'])}")
 print(f"directions:      {list(multiamp_results['results'][0])}")
 print(f"resonators:      {list(multiamp_results['results'][0]['upward'])}")
 ```
@@ -249,15 +255,25 @@ section 5 much easier to read: 40 kHz over 201 points is a point every 200 Hz,
 which is a few points per linewidth on this array. The ladder's 200 kHz span
 only manages a point per kilohertz, which fits fine but looks like a spike.
 
+A single `multisweep` returns the same shape as the ladder above — one
+amplitude step, in one direction, which is what it is. So it is indexed the same
+way, and `fit_sweeps` takes it without being told which of the two it is:
+
 ```python
-fine_multisweep = await crs.multisweep(
+fine_multisweep = (await crs.multisweep(
     catalog,
     span_hz=FINE_SPAN_HZ,
     npoints_per_sweep=NPOINTS_PER_SWEEP,
     nsamps=NSAMPS,
-)
+))[crs.module[MODULE].index()]
 
-print(f"{len(fine_multisweep)} sweeps, "
+
+def sections_of(results, step=0, direction="upward"):
+    """The {name: entry} sweep sections of one step, out of one module's result."""
+    return results["results"][step][direction]
+
+
+print(f"{len(sections_of(fine_multisweep))} sweeps, "
       f"{FINE_SPAN_HZ / (NPOINTS_PER_SWEEP - 1):.0f} Hz between points")
 ```
 
@@ -276,7 +292,7 @@ def show_sweep_section(sweep_section, indent=""):
             print(f"{indent}{key:<28} {value!r}")
 
 
-show_sweep_section(multiamp_results["results"][0]["upward"]["R0001"])
+show_sweep_section(sections_of(multiamp_results)["R0001"])
 ```
 
 ## 3. Fitting the data
@@ -321,7 +337,7 @@ Here is the same sweep section entry we looked at in section 2, now with one
 extra key on it:
 
 ```python
-fitted_sweep_section = multiamp_results["results"][0]["upward"]["R0001"]
+fitted_sweep_section = sections_of(multiamp_results)["R0001"]
 
 show_sweep_section(fitted_sweep_section)
 ```
@@ -418,7 +434,7 @@ from rfmux.tuning import (
 
 def plot_skewed_fits(results, iteration=0, direction="upward", linewidths=6):
     """Every resonator at one amplitude step, with its skewed fit over it."""
-    sections = results["results"][iteration][direction]
+    sections = sections_of(results, iteration, direction)
 
     fig, axes = plt.subplots(
         1, len(sections), figsize=(3.1 * len(sections), 3.2),
@@ -476,13 +492,12 @@ to convince yourself the fitter is doing something sensible.
 Next, the nonlinear model. This one is fitted to the complex trace rather than
 just the magnitude, so the IQ plane is where you can see what it is doing. This
 is the plot that benefits from the finely-sampled sweep, so let's fit that one
-too. (`fit_sweeps` accepts a plain `multisweep` return as well as a ladder;
-section 9 says a bit more about that.)
+too — the same call, because a single sweep and a ladder are the same shape.
 
 ```python
 fit_sweeps(fine_multisweep)
 
-print(f"R0001 fits: {list(fine_multisweep['R0001']['fits'])}")
+print(f"R0001 fits: {list(sections_of(fine_multisweep)['R0001']['fits'])}")
 ```
 
 The middle panel below shows what the fitter actually worked with:
@@ -542,7 +557,7 @@ def plot_nonlinear_fit(sections, name="R0001"):
     plt.show()
 
 
-plot_nonlinear_fit(fine_multisweep)
+plot_nonlinear_fit(sections_of(fine_multisweep))
 ```
 
 `a` is the nonlinearity parameter: 0 corresponds to a linear resonator, and
@@ -600,7 +615,7 @@ def plot_circle_fit(sections, name="R0001"):
     plt.show()
 
 
-plot_circle_fit(fine_multisweep)
+plot_circle_fit(sections_of(fine_multisweep))
 ```
 
 ## 6. Choosing which sweeps to fit
@@ -848,7 +863,7 @@ def fitted_parameter(results, name, parameter, model="skewed", direction="upward
 
 def plot_fitted_parameters_vs_amplitude(results, model="skewed", direction="upward"):
     """fr shift, Qr, Qc and Qi against drive, one line per resonator."""
-    names = list(results["results"][0][direction])
+    names = list(sections_of(results, direction=direction))
     panels = [
         ("fr", "fr − fr(lowest drive) [kHz]", 1e-3),
         ("Qr", "Qr", 1.0),
@@ -949,20 +964,34 @@ A fit that never converged at all gets `params: None`, along with a note about
 what stopped it. Three hand-made sweeps below: one that is too short to fit five
 parameters, one that looks like a dead channel, and one real one for comparison.
 
-```python
-handmade_sweeps = {
-    "too_short": {
-        "frequencies": np.linspace(1e9, 1e9 + 1e3, 3),
-        "iq_counts": np.ones(3, dtype=complex),
-    },
-    "dead_channel": {
-        "frequencies": np.linspace(1e9, 1e9 + 1e5, 101),
-        "iq_counts": np.zeros(101, dtype=complex),
-    },
-    "fine": copy.deepcopy(multiamp_results["results"][0]["upward"]["R0001"]),
-}
+`pack_sweep` puts them in the shape a sweep comes back in, which is what
+`fit_sweeps` takes — the same function `multisweep` itself uses, so sweeps from
+somewhere else go through the same door as sweeps from a board:
 
-handmade_report = fit_sweeps(handmade_sweeps, models=("skewed", "nonlinear"))
+```python
+from rfmux.tuning import pack_sweep
+
+handmade = pack_sweep(
+    {
+        "too_short": {
+            "frequencies": np.linspace(1e9, 1e9 + 1e3, 3),
+            "iq_counts": np.ones(3, dtype=complex),
+        },
+        "dead_channel": {
+            "frequencies": np.linspace(1e9, 1e9 + 1e5, 101),
+            "iq_counts": np.zeros(101, dtype=complex),
+        },
+        "fine": copy.deepcopy(sections_of(multiamp_results)["R0001"]),
+    },
+    module_id=crs.module[MODULE].index(),
+    module=MODULE,
+    sweep_direction="upward",
+    span_hz=FINE_SPAN_HZ,
+    npoints_per_sweep=NPOINTS_PER_SWEEP,
+    nsamps=NSAMPS,
+)[crs.module[MODULE].index()]
+
+handmade_report = fit_sweeps(handmade, models=("skewed", "nonlinear"))
 
 print(handmade_report)
 print()
@@ -979,7 +1008,7 @@ helpful behaviour, but the nonlinear one does not — so it is worth checking th
 `errors` as well as the residual before believing a fit:
 
 ```python
-too_short_fit = handmade_sweeps["too_short"]["fits"]["nonlinear"]
+too_short_fit = sections_of(handmade)["too_short"]["fits"]["nonlinear"]
 print(f"residual  {too_short_fit['residual']:.2e}   ← looks great")
 print(f"Qr        {too_short_fit['params']['Qr']:.4g} "
       f"± {too_short_fit['errors']['Qr']:.4g}   ← but is unconstrained")
@@ -990,10 +1019,18 @@ than a reason to abandon the rest of the batch, which matters more when the
 batch has taken ten minutes to get through:
 
 ```python
-broken_batch = {
-    "not_a_sweep": {"frequencies": None, "iq_counts": None},
-    "fine": copy.deepcopy(multiamp_results["results"][0]["upward"]["R0001"]),
-}
+broken_batch = pack_sweep(
+    {
+        "not_a_sweep": {"frequencies": None, "iq_counts": None},
+        "fine": copy.deepcopy(sections_of(multiamp_results)["R0001"]),
+    },
+    module_id=crs.module[MODULE].index(),
+    module=MODULE,
+    sweep_direction="upward",
+    span_hz=FINE_SPAN_HZ,
+    npoints_per_sweep=NPOINTS_PER_SWEEP,
+    nsamps=NSAMPS,
+)[crs.module[MODULE].index()]
 
 print(fit_sweeps(broken_batch, models=("circle",)))
 ```
@@ -1012,41 +1049,56 @@ except FitFailed as e:
     print(f"FitFailed: {e}")
 ```
 
-## 9. Fitting a plain multisweep, and one entry at a time
+## 9. One module, one sweep, one entry
 
-Nearly everything above used a `multiamp_multisweep` result, which is probably
-the usual case. `fit_sweeps` will also take what a single `crs.multisweep`
-returns — the flat `{name: entry}` dict — and fit it as the single iteration
-that it is. This is what we did to `fine_multisweep` back in section 5:
+Everything above used a `multiamp_multisweep` result, which is probably the
+usual case, and `fine_multisweep` alongside it without either being singled out.
+That is the point: a single sweep is one amplitude step in one direction, so it
+nests exactly as a ladder does and the fitters never ask which of the two they
+were handed.
 
 ```python
-print(f"{len(fine_multisweep)} sweeps, keyed by resonator: {list(fine_multisweep)}")
-print(f"R0001 fits: {list(fine_multisweep['R0001']['fits'])}")
-
 single_report = fit_sweeps(fine_multisweep, models=("skewed",))
-print(f"\n{single_report}")
+
+print(single_report)
 print(f"coordinates: iteration={single_report.fits[0].iteration}, "
-      f"direction={single_report.fits[0].direction}")
+      f"direction={single_report.fits[0].direction!r}")
 ```
 
-There are no amplitude steps or directions to select between in that shape, so
-asking for one raises rather than silently fitting everything:
+So the selection arguments from section 6 apply here too — there is simply one
+of each to select:
 
 ```python
-try:
-    fit_sweeps(fine_multisweep, iterations=0)
-except ValueError as e:
-    print(f"ValueError: {e}")
+print(fit_sweeps(fine_multisweep, models=("skewed",), iterations=0, names="R0001"))
 ```
 
-A multi-module `multisweep` returns a *list* of these dicts, one per module.
-Fit them one at a time, so that each report refers to a single module:
+What `fit_sweeps` will *not* take is the whole dict a macro returns, keyed by
+module. Which module a report is about is your choice, not something to guess
+at, so it says so and names the ones it found:
 
 ```python
+whole_return = await crs.multisweep(
+    catalog,
+    span_hz=FINE_SPAN_HZ,
+    npoints_per_sweep=NPOINTS_PER_SWEEP,
+    nsamps=NSAMPS,
+)
+
 try:
-    fit_sweeps([fine_multisweep])
+    fit_sweeps(whole_return)
 except TypeError as e:
     print(f"TypeError: {e}")
+```
+
+The same is true of a sweep taken across several modules at once, which comes
+back with one key each rather than as a list you have to keep in order. Fitting
+them all is a loop, and the loop is the same one whether there is one module in
+it or four:
+
+```python
+for module_id, module_sweeps in whole_return.items():
+    report = fit_sweeps(module_sweeps, models=("circle",))
+    print(f"{module_id}: {len(report.fitted)}/{len(report)} fitted")
 ```
 
 And if you have a single sweep entry in hand — one pulled out with

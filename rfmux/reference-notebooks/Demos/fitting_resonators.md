@@ -19,10 +19,10 @@ A multisweep gives you one sweep trace per resonator. Fitting takes each of
 those traces and estimates the parameters of the resonator that produced it.
 
 Fitting is a separate step that you run yourself on multisweep data that
-already exists. By default, the sweep measurement does not fit anything as it
-goes. This means you can re-fit the same data with different parameters as many
-times as you like, and you can fit data loaded from disk exactly as you would
-fit a sweep you just took.
+already exists. By default, the sweep measurement does not fit anything as it goes.
+ This means you can re-fit the same data with
+different parameters as many times as you like, and you can fit data loaded from
+disk exactly as you would fit a sweep you just took.
 
 rfmux currently provides three models. They are independent of each other, so
 you can run any combination of them:
@@ -133,9 +133,9 @@ same array and the same numbers every time it runs.
 Normally you would find the resonances with a network analysis and build a
 catalog from them, but we can take a shortcut here. Setting
 `auto_bias_kids: True` asks the simulator to park a tone on each of its own
-resonators, at the actual S21 transmission minimum. Reading those tone
-frequencies back gives us roughly the frequencies a real tuning workflow would
-have found.
+resonators, at the actual S21 transmission minimum.
+ Reading those tone frequencies back gives us roughly the
+frequencies a real tuning workflow would have found.
 
 To run against real hardware instead, replace this one cell with a session on
 your board and a catalog you built or loaded. Everything after it is unchanged:
@@ -178,16 +178,15 @@ for frequency in bias_frequencies:
     print(f"  {frequency/1e6:.4f} MHz")
 ```
 
-`from_frequencies` sorts by frequency, numbers the resonators `R0001…` in that
-order, assigns channels `1..N`, and parks every bias point at
-`PROBE_AMPLITUDE`. On a real system, this catalog is the thing the previous two
-notebooks produce, and the thing you would save and reload.
+<!-- #region -->
+
 
 We then move two of the bias amplitudes off the default, just so that they are
 not all the same. Real arrays generally end up with a different bias amplitude
 per detector, and it makes section 6 more interesting: that section is about
 picking out the sweep taken at each resonator's own operating point, which is
 not much of a question if they all share one.
+<!-- #endregion -->
 
 ```python
 catalog = ResonatorCatalog.from_frequencies(
@@ -208,15 +207,18 @@ for resonator in catalog:
 
 ## 2. Something to fit
 
-Now we need some multisweep data. This is one `multiamp_multisweep` call: the
+Now we need some multisweep data. For example, let's look at the
 array swept at five amplitudes, in both frequency directions, which gives 40
-traces from four resonators. An amplitude ladder is a good thing to fit if you
-want to see how the resonators respond to drive, and section 7 plots that.
+traces from four resonators.
 
+This is one `multiamp_multisweep` call.
 `multisweep.md` covers this call in detail; here it is just the input to the
-fitting. The schedule below is *multiplicative*, so each resonator's steps are
+fitting. 
+
+Note that the amplitude schedule below is *multiplicative*, so each resonator's steps are
 multiples of its own bias amplitude — half of it, then one, two, four and eight
-times. That means step 1 is the step where each resonator is actually biased.
+times. That means step 1 (the second step, since they are zero-indexed)
+is the step where each resonator is actually biased.
 
 ```python
 amplitude_schedule = AmplitudeSchedule.multiplicative(0.5, 8.0, 5)
@@ -225,35 +227,168 @@ print(amplitude_schedule)
 for step in amplitude_schedule.steps(catalog):
     print(step)
 
-ladder = await crs.multiamp_multisweep(
+multiamp_ms = await crs.multiamp_multisweep(
     catalog,
     span_hz=LADDER_SPAN_HZ,
-    npoints_per_sweep=NPOINTS_PER_SWEEP,
+    npoints_per_sweep=NPOINTS_PER_SWEEP//2,
     nsamps=NSAMPS,
     amp_schedule=amplitude_schedule,
     directions=("upward", "downward"),
 )
 
-# A sweep comes back keyed by module — one key here, since a ladder is one
-# module per call. fit_sweeps takes one module's worth, so step into it now and
+# A sweep comes back keyed by module
+# fit_sweeps takes one module's output at a time, so we index into it and
 # everything below is about this module.
-multiamp_results = ladder[crs.module[MODULE].index()]
+multiamp_results = multiamp_ms[crs.module[MODULE].index()]
 
-print(f"\nmodules:         {list(ladder)}")
+print(f"\nmodules:         {list(multiamp_ms)}")
 print(f"amplitude steps: {list(multiamp_results['results'])}")
 print(f"directions:      {list(multiamp_results['results'][0])}")
 print(f"resonators:      {list(multiamp_results['results'][0]['upward'])}")
 ```
 
+### Looking at the traces before fitting them
+
+Printing the keys says what shape the data is; it does not say whether the
+measurement is any good. Worth a look before spending time fitting it.
+
+These are the plotters from `multisweep.md`, reproduced here so this notebook
+runs on its own: `plot_sections_at_iteration` for the whole array at one
+amplitude step, `plot_amplitude_iterations` for one resonator up the whole
+ladder, and `plot_ms` for a plain set of sweep sections. `amplitude_colours`
+underpins the first two, and section 7 re-uses it for the fitted versions of the
+same plots.
+
+Every sweep section is at a different amplitude to its neighbours here, so
+colour means amplitude throughout, and the traces are divided by their own drive
+so that their shapes can be compared rather than the loudest simply sitting on
+top.
+
+```python
+from rfmux.tuning import (
+    collect_amplitude_iterations_for,
+    get_amplitudes_at_iteration,
+)
+
+# gnuplot runs black → purple → red → orange → yellow, so it stays saturated
+# from end to end and every trace reads against a white background.
+AMPLITUDE_CMAP = plt.cm.gnuplot
+
+
+def amplitude_colours(amplitudes):
+    """One colour per amplitude, plus the mappable a colourbar needs.
+
+    Log-scaled, because an amplitude schedule is log-spaced by default and a
+    linear scale would bunch every low rung into one shade.
+    """
+    low, high = min(amplitudes), max(amplitudes)
+    if high > low:
+        norm = LogNorm(vmin=low, vmax=high)
+        colours = [AMPLITUDE_CMAP(norm(a)) for a in amplitudes]
+    else:
+        # One amplitude, or several identical ones: nothing to grade.
+        norm = LogNorm(vmin=low * 0.9, vmax=low * 1.1)
+        colours = [AMPLITUDE_CMAP(0.5)] * len(amplitudes)
+    return colours, plt.cm.ScalarMappable(norm=norm, cmap=AMPLITUDE_CMAP)
+
+
+def plot_sections_at_iteration(results, iteration, direction="upward", ncols=4):
+    """Every sweep section of one amplitude step, one panel each.
+
+    A panel apiece rather than one crowded axes: the sections sit at different
+    frequencies and have different depths, so overlaying them compares nothing.
+    """
+    sections = results["results"][iteration][direction]
+    amplitudes = get_amplitudes_at_iteration(results, iteration)
+    colours, mappable = amplitude_colours([amplitudes[n] for n in sections])
+
+    nrows = -(-len(sections) // ncols)   # ceiling division, no import needed
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(2.4 * ncols, 2.5 * nrows),
+        constrained_layout=True, squeeze=False,
+    )
+    panels = axes.ravel()
+
+    for panel, (name, sweep_section), colour in zip(panels, sections.items(), colours):
+        offset_khz = (
+            sweep_section["frequencies"] - sweep_section["original_center_frequency"]
+        ) / 1e3
+        iq = sweep_section["iq_counts"] / sweep_section["sweep_amplitude"]
+
+        panel.plot(offset_khz, 20 * np.log10(np.abs(iq)), lw=1.0, color=colour)
+        panel.set_title(f"{name}\n{amplitudes[name]:.5f}", fontsize=8)
+        panel.tick_params(labelsize=7)
+
+    # Axis labels only on the outer edge, and hide any panel left over when the
+    # section count does not fill the grid.
+    for panel in panels[len(sections):]:
+        panel.set_visible(False)
+    for panel in axes[-1, :]:
+        if panel.get_visible():
+            panel.set_xlabel("offset [kHz]", fontsize=8)
+    for panel in axes[:, 0]:
+        panel.set_ylabel("|S21| / drive [dB]", fontsize=8)
+
+    fig.colorbar(mappable, ax=axes, label="sweep amplitude")
+    fig.suptitle(f"all {len(sections)} sweep sections at amplitude step {iteration}")
+    plt.show()
+
+
+# Step 1 is the factor-of-1.0 rung, so this is the array as it sits at its own
+# bias amplitudes — four different amplitudes, hence four different colours.
+plot_sections_at_iteration(multiamp_results, 1)
+```
+
+And one resonator across the whole ladder. This is the measurement section 7
+fits: the resonance moving down in frequency and going shallow as the drive
+comes up is exactly what the fitted parameters are going to report as a number.
+
+```python
+def plot_amplitude_iterations(results, name, direction="upward"):
+    """One sweep section, at every amplitude it was measured at."""
+    iterations = collect_amplitude_iterations_for(results, name)
+    sections = [by_direction[direction] for by_direction in iterations.values()]
+    amplitudes = [s["sweep_amplitude"] for s in sections]
+    colours, mappable = amplitude_colours(amplitudes)
+
+    fig, (ax_mag, ax_iq) = plt.subplots(
+        1, 2, figsize=(11, 4), constrained_layout=True
+    )
+    for sweep_section, colour in zip(sections, colours):
+        offset_khz = (
+            sweep_section["frequencies"] - sweep_section["original_center_frequency"]
+        ) / 1e3
+        # Divide out the drive, so the shapes can be compared rather than just
+        # the one that was loudest sitting on top.
+        iq = sweep_section["iq_counts"] / sweep_section["sweep_amplitude"]
+
+        ax_mag.plot(offset_khz, 20 * np.log10(np.abs(iq)), lw=1.0, color=colour)
+        ax_iq.plot(iq.real, iq.imag, lw=1.0, color=colour)
+
+    ax_mag.set_xlabel("offset [kHz]")
+    ax_mag.set_ylabel("|S21| / drive [dB]")
+    ax_iq.set_xlabel("I / drive")
+    ax_iq.set_ylabel("Q / drive")
+    ax_iq.set_aspect("equal", "datalim")
+    fig.colorbar(mappable, ax=(ax_mag, ax_iq), label="sweep amplitude")
+    fig.suptitle(f"{name}, swept {direction} at {len(sections)} amplitudes")
+    plt.show()
+
+
+plot_amplitude_iterations(multiamp_results, "R0001")
+```
+
+<!-- #region -->
 We will also take one plain `multisweep` over the narrow span, at the bias
 amplitudes only. The fitting does not need this, but it makes the IQ plots in
 section 5 much easier to read: 40 kHz over 201 points is a point every 200 Hz,
-which is a few points per linewidth on this array. The ladder's 200 kHz span
-only manages a point per kilohertz, which fits fine but looks like a spike.
+which is a few points per linewidth on this array. The sweep that iterated over amplitudes used a fairly coarse
+point spacing - this is generally fine for fits, but doesn't look as nice.
 
-A single `multisweep` returns the same shape as the ladder above — one
-amplitude step, in one direction, which is what it is. So it is indexed the same
-way, and `fit_sweeps` takes it without being told which of the two it is:
+
+Note that a single `multisweep` returns the same shape as the iterative one above, just with a single amplitude iteration
+in a single direction.
+<!-- #endregion -->
 
 ```python
 fine_multisweep = (await crs.multisweep(
@@ -271,6 +406,40 @@ def sections_of(results, step=0, direction="upward"):
 
 print(f"{len(sections_of(fine_multisweep))} sweeps, "
       f"{FINE_SPAN_HZ / (NPOINTS_PER_SWEEP - 1):.0f} Hz between points")
+```
+
+Plotted with `plot_ms`, the plainest of the three: a set of sweep sections, in
+the IQ plane and in magnitude, with no amplitude colouring because a single
+`multisweep` is one amplitude per resonator. Compare the loops here against the
+IQ panel of the ladder plot above — same resonators, a fifth of the span, and
+the loop actually traced out rather than cut across.
+
+```python
+def plot_ms(sections, keys, title):
+    """A set of sweep sections: the IQ loop above, the magnitude below."""
+    fig, axes = plt.subplots(2, len(keys), figsize=(3.0 * len(keys), 5.5))
+    for column, key in enumerate(keys):
+        s = sections[key]
+        centre = s["original_center_frequency"]
+        offset_khz = (s["frequencies"] - centre) / 1e3
+
+        axes[0, column].plot(s["iq_counts"].real, s["iq_counts"].imag, lw=0.9)
+        axes[0, column].set_aspect("equal", "datalim")
+        axes[0, column].set_title(f"{key}\n{centre/1e6:.3f} MHz", fontsize=9)
+
+        axes[1, column].plot(offset_khz, 20 * np.log10(np.abs(s["iq_counts"])), lw=0.9)
+        axes[1, column].set_xlabel("offset [kHz]", fontsize=8)
+
+    axes[0, 0].set_ylabel("Q")
+    axes[1, 0].set_ylabel("|S21| [dB]")
+    fig.suptitle(title)
+    plt.tight_layout()
+    plt.show()
+
+
+fine_sections = sections_of(fine_multisweep)
+plot_ms(fine_sections, list(fine_sections),
+        f"fine multisweep, {FINE_SPAN_HZ/1e3:.0f} kHz span at the bias amplitudes")
 ```
 
 Before fitting anything, here is what one sweep section entry holds. Seven keys:
@@ -298,7 +467,7 @@ fits every sweep it finds in there, and writes each model's results back into
 the sweep entry it fitted, so that the fit parameters end up stored alongside
 the data they came from.
 
-Note that it does not return a copy of your data. What comes back is a report
+**Note that it does not return a copy of your data.** What comes back is a report
 describing what it did, which is handy when you are fitting a few thousand
 traces and want to know how it went.
 
@@ -310,11 +479,63 @@ fit_report = fit_sweeps(multiamp_results)
 print(fit_report)
 ```
 
+### What you can ask fit_sweeps for
+
+That call took every default, which is why it fitted all three models to all 40
+traces. In practice you will often want less than that, so here is the whole set
+of arguments in one place. They are all keyword-only.
+
+The first four choose **which sweeps get fitted**. Each takes a single value or
+an iterable of them, and `None` — the default — means all of them:
+
+| Argument | Selects |
+|---|---|
+| `models` | which of the three models to run. Only want Q values? `models=("skewed",)` and you have skipped the expensive one |
+| `names` | which resonators, or which sections for a bare frequency list |
+| `iterations` | which amplitude steps |
+| `directions` | `"upward"`, `"downward"`, or both |
+
+Section 6 is where these get used in earnest, including the case they cannot
+express: fitting each resonator at *its own* bias amplitude, which is a
+different amplitude step per resonator.
+
+The rest control **how each fit is done**. The circle fit takes none of them —
+it is a linear solve with nothing to tune:
+
+| Argument | Model | Does |
+|---|---|---|
+| `approx_Qr` | skewed | the initial guess for `Qr`. Worth setting if your array is far from the default and the fits are missing |
+| `normalize` | skewed | divide each trace by its last point before fitting, so `A` comes out near 1 and the model is in units of the off-resonance level. This changes the units `skewed_model_magnitude` returns — section 5 |
+| `fr_limit_hz` | skewed | how far `fr` is allowed to move from the sweep centre. `None` means 37.5% of the span, which stops the fit wandering onto a neighbouring resonator that leaked into the edge |
+| `fit_nonlinearity` | nonlinear | fit `a`, or hold it at zero and fit a linear resonator on the same seven-parameter machinery |
+| `n_extrema_points` | nonlinear | how many points at each end of the sweep are averaged to estimate the readout gain |
+| `max_residual` | nonlinear | the ceiling above which a converged fit is reported as a bad one. Section 8 abuses this to make fits fail on purpose |
+
+And two about **how it runs**, which change nothing about the answers:
+
+| Argument | Does |
+|---|---|
+| `max_workers` | threads to fit on. One sweep is one job, so all of a sweep's models run on the same thread. `None` uses `min(4, cpu_count)` |
+| `progress_callback` | called `(completed, total)` after each sweep, where *total* counts sweeps rather than fits. For driving a progress bar |
+
+The defaults, from the function itself rather than from this table, so they
+cannot quietly drift apart:
+
+```python
+import inspect
+
+for parameter in inspect.signature(fit_sweeps).parameters.values():
+    if parameter.default is not inspect.Parameter.empty:
+        print(f"{parameter.name:<20} {parameter.default!r}")
+```
+
 The report counts each model separately. It also carries a `settings` dict
-recording what the fitters were asked for. These are not stored on the
-individual entries, since they would be the same values repeated on every
-resonator, so the report is where to look if you want to know how a given set of
-fits was produced.
+recording what the fitters were asked for — the second table above, the
+arguments that change the answers. These are not stored on the individual
+entries, since they would be the same values repeated on every resonator, so the
+report is where to look if you want to know how a given set of fits was
+produced. The selection arguments are not in there: which sweeps you picked is
+already visible in which entries came back fitted.
 
 ```python
 print(f"total fits    {len(fit_report)}")
@@ -395,7 +616,7 @@ no model curves in there, no gain-corrected trace and no re-centred IQ loop.
 Each of those is just a function of the stored parameters and the arrays the
 entry already carries, so storing them as well would mostly be a way for a saved
 file to end up internally inconsistent. There are four reader functions that
-recompute them for you instead, and section 5 uses all four:
+recompute them for you instead, and section 5 demonstrates all four:
 
 | Reader | Recomputes |
 |---|---|
@@ -408,6 +629,19 @@ recompute them for you instead, and section 5 uses all four:
 
 Below is each of the three models drawn over the trace it was fitted to, using
 the readers from the table above.
+
+A fit is a continuous model, and the measurement is a coarse sampling of it, so
+the two want drawing differently: points for what was measured, a smooth line
+for what was fitted. The readers evaluate on the entry's own `frequencies`,
+which is what you want for a residual but makes the model look as jagged as the
+data. A sweep entry is a plain dict, though, so handing a reader a copy with a
+denser frequency axis gets the model's real shape out of it — the fit
+parameters it reads are the stored ones either way. `model_on_a_finer_grid`
+below does that, and every model curve in this notebook goes through it.
+
+It is worth watching what this shows. The amplitude steps were measured at
+2 kHz between points, which is coarse enough that the dip is a handful of
+samples, and the fitted curve still runs through them.
 
 Starting with the skewed Lorentzian, in magnitude. One thing to watch out for:
 `skewed_model_magnitude` returns the model in whatever units the fit worked in.
@@ -426,6 +660,20 @@ from rfmux.tuning import (
     nonlinear_model_iq,
     skewed_model_magnitude,
 )
+
+
+def model_on_a_finer_grid(reader, sweep_section, oversample=25):
+    """(frequencies, model) from a reader, on a denser axis than was measured.
+
+    Returns the frequencies too, since they are no longer the entry's own and
+    the model has to be plotted against them.
+    """
+    frequencies = np.linspace(
+        sweep_section["frequencies"][0],
+        sweep_section["frequencies"][-1],
+        oversample * len(sweep_section["frequencies"]),
+    )
+    return frequencies, reader({**sweep_section, "frequencies": frequencies})
 
 
 def plot_skewed_fits(results, iteration=0, direction="upward", linewidths=6):
@@ -450,8 +698,13 @@ def plot_skewed_fits(results, iteration=0, direction="upward", linewidths=6):
         skewed_fit = sweep_section["fits"]["skewed"]
         if skewed_fit["failed_because"] is None:
             params = skewed_fit["params"]
-            model = skewed_model_magnitude(sweep_section)
-            panel.plot(offset_khz, 20 * np.log10(model), lw=1.4,
+            model_frequencies, model = model_on_a_finer_grid(
+                skewed_model_magnitude, sweep_section
+            )
+            model_offset_khz = (
+                model_frequencies - sweep_section["original_center_frequency"]
+            ) / 1e3
+            panel.plot(model_offset_khz, 20 * np.log10(model), lw=1.4,
                        color="crimson", label="skewed fit")
             panel.set_title(
                 f"{name}\nQr {params['Qr']:.3g}   Qi {params['Qi']:.3g}",
@@ -486,9 +739,8 @@ they should be roughly comparable to the fitted `Qi` values above — a quick wa
 to convince yourself the fitter is doing something sensible.
 
 Next, the nonlinear model. This one is fitted to the complex trace rather than
-just the magnitude, so the IQ plane is where you can see what it is doing. This
-is the plot that benefits from the finely-sampled sweep, so let's fit that one
-too — the same call, because a single sweep and a ladder are the same shape.
+just the magnitude, so the IQ plane is where you can see what it is doing. Let's apply
+this one to the more finely sampled sweep.
 
 ```python
 fit_sweeps(fine_multisweep)
@@ -511,10 +763,18 @@ def plot_nonlinear_fit(sections, name="R0001"):
         return
 
     measured = sweep_section["iq_counts"]
-    model = nonlinear_model_iq(sweep_section)
     corrected = gain_corrected_iq(sweep_section)
     offset_khz = (
         sweep_section["frequencies"] - sweep_section["original_center_frequency"]
+    ) / 1e3
+
+    # The model on a finer axis than the measurement: in the IQ plane a coarse
+    # one would cut the loop into chords, and it is the loop we are looking at.
+    model_frequencies, model = model_on_a_finer_grid(
+        nonlinear_model_iq, sweep_section
+    )
+    model_offset_khz = (
+        model_frequencies - sweep_section["original_center_frequency"]
     ) / 1e3
 
     fig, (ax_iq, ax_corrected, ax_mag) = plt.subplots(
@@ -539,7 +799,8 @@ def plot_nonlinear_fit(sections, name="R0001"):
 
     ax_mag.plot(offset_khz, 20 * np.log10(np.abs(measured)), lw=0, marker=".",
                 ms=2.5, color="0.45")
-    ax_mag.plot(offset_khz, 20 * np.log10(np.abs(model)), lw=1.4, color="teal")
+    ax_mag.plot(model_offset_khz, 20 * np.log10(np.abs(model)), lw=1.4,
+                color="teal")
     ax_mag.set_xlabel("offset [kHz]")
     ax_mag.set_ylabel("|S21| [dB]")
     ax_mag.set_title("magnitude", fontsize=9)
@@ -558,13 +819,13 @@ plot_nonlinear_fit(sections_of(fine_multisweep))
 
 `a` is the nonlinearity parameter: 0 corresponds to a linear resonator, and
 bifurcation is expected around `a ≈ 0.77`. At this array's bias amplitude it
-comes out near zero, which is generally what you would hope for at an operating
-point. Section 7 drives the resonators harder than this.
+comes out near zero.
 
 Finally, the circle fit, which stores just a centre and a radius. `centered_iq`
 uses the centre to shift the IQ loop so that it sits around the origin. You
-usually want to do this before taking a phase, since a phase measured about the
-origin of the raw data reflects the readout chain as much as the resonator.
+will need to do this before talking about the "phase" direction for a resonator,
+ since a phase measured about the
+origin of the raw data reflects the readout chain much more then the resonator.
 
 ```python
 def plot_circle_fit(sections, name="R0001"):
@@ -620,7 +881,7 @@ plot_circle_fit(sections_of(fine_multisweep))
 but on a 1,000-resonator array swept at eight amplitudes in two directions it
 would be 16,000 traces, and you often want rather less than that.
 
-For this section we will work on a copy of the ladder with the `fits` stripped
+For this section we will work on a copy of the iterated multiple with the `fits` stripped
 back off it, so that you can see which entries each selection actually touched:
 
 ```python
@@ -664,27 +925,17 @@ print(one_trace_report)
 print(f"\nfitted now: {which_are_fitted(unfitted_results)}")
 ```
 
-Asking for something that was not swept raises, and tells you what was there
-instead, rather than quietly fitting nothing:
-
-```python
-for wrong in ({"names": "R9999"}, {"iterations": 99}):
-    try:
-        fit_sweeps(unfitted_results, **wrong)
-    except ValueError as e:
-        print(f"ValueError: {e}\n")
-```
-
 ### By model
 
-`models` takes any subset of the three. `nonlinear` is much the most expensive
+`models` takes any subset of the three. `nonlinear` is by far the most expensive
 of them: it is a seven-parameter fit to the complex data, run up to three times
 per trace, where `skewed` is a five-parameter fit to the magnitude and `circle`
-is just a linear solve. If you only want Q values, it is worth leaving the
+is just a linear solve. If you only want Q values, and you are operating at moderate or
+low readout amplitude, it is worth leaving the
 nonlinear model out.
 
 Since running one model leaves the other models' results alone, you can fit
-`skewed` across the whole ladder and then run `nonlinear` only where you
+`skewed` across the whole multiamp multisweep and then run `nonlinear` only where you
 actually need it:
 
 ```python
@@ -698,14 +949,14 @@ print(f"after circle:            {list(sweep_section['fits'])}  ← skewed kept"
 
 ### At the amplitude each resonator is biased at
 
-This is a common thing to want after running a ladder. The other steps were
-measured in order to *find* a sensible operating point, and it is the operating
-point itself that you want fitted. `fit_sweeps_at_bias_amplitude` works out that
+This is a common thing to want after running a multiamp multisweep measurement. The multiple amplitude steps were
+measured in order to find a sensible operating amplitude (the process of selecting this operating amplitude is documented TODO ELSEWHERE), and it is the operating
+amplitude itself that you now want fitted. `fit_sweeps_at_bias_amplitude` works out that
 step for each resonator individually, reading each one's bias amplitude from the
 catalog snapshot that `multiamp_multisweep` recorded in `call_params`.
 
 ```python
-from rfmux.tuning import fit_sweeps_at_bias_amplitude, get_amplitudes_at_iteration
+from rfmux.tuning import fit_sweeps_at_bias_amplitude
 
 at_bias_report = fit_sweeps_at_bias_amplitude(
     unfitted_results,
@@ -722,7 +973,7 @@ for fit in at_bias_report.fits:
 ```
 
 Every resonator came back on step 1 here. That is expected for this particular
-ladder: because it is multiplicative, its steps are the same set of factors
+amplitude schedule: because it is multiplicative, its steps are the same set of factors
 applied to whatever each resonator was biased at, so the factor-of-1.0 step has
 the same index for all of them. The *amplitudes* at that step differ, since
 these are different resonators at different bias points, but the step number
@@ -760,36 +1011,24 @@ step, so it will give you an answer even when nothing in the ladder is
 particularly close to what you asked for. If the match needs to be a good one,
 check it against `get_amplitudes_at_iteration`, as above.
 
-## 7. Fitted parameters across the amplitude ladder
+## 7. Fitted parameters across all amplitude steps
 
 Fitting a whole ladder is mostly worth doing so that you can look at how the
 parameters move with drive. Driving a resonator harder tends to pull its
 resonance down in frequency and degrade its Q, and the fits condense those 40
 traces into a handful of curves showing that.
 
+The first plot is `plot_amplitude_iterations` from section 2 again — same
+resonator, same colour scale — with each trace's skewed fit drawn over it, and
+zoomed in to where the resonance actually moved to.
+
+Notice that the fitted curves go deeper than the measured points do. That is not
+the fit overshooting: at 2 kHz between points, no sample lands on the true
+bottom of a dip this narrow, and the model is telling you where the bottom
+actually is. It is the clearest illustration in this notebook of why fitting
+beats reading numbers off the trace.
+
 ```python
-from rfmux.tuning import collect_amplitude_iterations_for
-
-# gnuplot runs black → purple → red → orange → yellow, so it stays saturated
-# from end to end and every trace reads against a white background.
-AMPLITUDE_CMAP = plt.cm.gnuplot
-
-
-def amplitude_colours(amplitudes):
-    """One colour per amplitude, plus the mappable a colourbar needs.
-
-    Log-scaled, because an amplitude schedule is log-spaced by default.
-    """
-    low, high = min(amplitudes), max(amplitudes)
-    if high > low:
-        norm = LogNorm(vmin=low, vmax=high)
-        colours = [AMPLITUDE_CMAP(norm(a)) for a in amplitudes]
-    else:
-        norm = LogNorm(vmin=low * 0.9, vmax=low * 1.1)
-        colours = [AMPLITUDE_CMAP(0.5)] * len(amplitudes)
-    return colours, plt.cm.ScalarMappable(norm=norm, cmap=AMPLITUDE_CMAP)
-
-
 def plot_fitted_traces(results, name="R0001", direction="upward", linewidths=8):
     """One resonator at every amplitude, each trace with its skewed fit over it."""
     iterations = collect_amplitude_iterations_for(results, name)
@@ -813,9 +1052,12 @@ def plot_fitted_traces(results, name="R0001", direction="upward", linewidths=8):
         skewed_fit = sweep_section["fits"]["skewed"]
         if skewed_fit["failed_because"] is None:
             params = skewed_fit["params"]
-            ax.plot(offset_khz,
-                    20 * np.log10(skewed_model_magnitude(sweep_section)),
-                    lw=1.3, color=colour)
+            model_frequencies, model = model_on_a_finer_grid(
+                skewed_model_magnitude, sweep_section
+            )
+            ax.plot((model_frequencies
+                     - sweep_section["original_center_frequency"]) / 1e3,
+                    20 * np.log10(model), lw=1.3, color=colour)
             fitted_centres_khz.append(
                 (params["fr"] - sweep_section["original_center_frequency"]) / 1e3
             )
@@ -957,162 +1199,8 @@ print(f"residual        {rejected_fit['residual']:.2e}")
 ```
 
 A fit that never converged at all gets `params: None`, along with a note about
-what stopped it. Three hand-made sweeps below: one that is too short to fit five
-parameters, one that looks like a dead channel, and one real one for comparison.
+what stopped it. 
 
-`pack_sweep` puts them in the shape a sweep comes back in, which is what
-`fit_sweeps` takes — the same function `multisweep` itself uses, so sweeps from
-somewhere else go through the same door as sweeps from a board:
-
-```python
-from rfmux.tuning import pack_sweep
-
-handmade = pack_sweep(
-    {
-        "too_short": {
-            "frequencies": np.linspace(1e9, 1e9 + 1e3, 3),
-            "iq_counts": np.ones(3, dtype=complex),
-        },
-        "dead_channel": {
-            "frequencies": np.linspace(1e9, 1e9 + 1e5, 101),
-            "iq_counts": np.zeros(101, dtype=complex),
-        },
-        "fine": copy.deepcopy(sections_of(multiamp_results)["R0001"]),
-    },
-    module_id=crs.module[MODULE].index(),
-    module=MODULE,
-    sweep_direction="upward",
-    span_hz=FINE_SPAN_HZ,
-    npoints_per_sweep=NPOINTS_PER_SWEEP,
-    nsamps=NSAMPS,
-)[crs.module[MODULE].index()]
-
-handmade_report = fit_sweeps(handmade, models=("skewed", "nonlinear"))
-
-print(handmade_report)
-print()
-for fit in handmade_report.fits:
-    print(f"{fit.where:<14} {fit.model:<10} "
-          f"{fit.failed_because or 'fitted'}")
-```
-
-Worth looking at the one that did *not* fail there. The nonlinear model will
-happily fit three points: it has seven parameters, it will find values for all
-of them, and a flat trace is easy to match, so the residual comes out very
-small. The skewed fitter refuses this outright, which is arguably the more
-helpful behaviour, but the nonlinear one does not — so it is worth checking the
-`errors` as well as the residual before believing a fit:
-
-```python
-too_short_fit = sections_of(handmade)["too_short"]["fits"]["nonlinear"]
-print(f"residual  {too_short_fit['residual']:.2e}   ← looks great")
-print(f"Qr        {too_short_fit['params']['Qr']:.4g} "
-      f"± {too_short_fit['errors']['Qr']:.4g}   ← but is unconstrained")
-```
-
-An entry that is not a valid sweep at all is treated as one bad sweep rather
-than a reason to abandon the rest of the batch, which matters more when the
-batch has taken ten minutes to get through:
-
-```python
-broken_batch = pack_sweep(
-    {
-        "not_a_sweep": {"frequencies": None, "iq_counts": None},
-        "fine": copy.deepcopy(sections_of(multiamp_results)["R0001"]),
-    },
-    module_id=crs.module[MODULE].index(),
-    module=MODULE,
-    sweep_direction="upward",
-    span_hz=FINE_SPAN_HZ,
-    npoints_per_sweep=NPOINTS_PER_SWEEP,
-    nsamps=NSAMPS,
-)[crs.module[MODULE].index()]
-
-print(fit_sweeps(broken_batch, models=("circle",)))
-```
-
-The single-trace fitters underneath behave differently: they raise `FitFailed`
-rather than reporting. When you have called one directly you are asking about
-exactly one trace, so an exception is harder to miss than a return value:
-
-```python
-from rfmux.tuning import FitFailed
-from rfmux.tuning.fits import fit_skewed
-
-try:
-    fit_skewed(np.linspace(1e9, 1e9 + 1e3, 3), np.ones(3, dtype=complex))
-except FitFailed as e:
-    print(f"FitFailed: {e}")
-```
-
-## 9. One module, one sweep, one entry
-
-Everything above used a `multiamp_multisweep` result, which is probably the
-usual case, and `fine_multisweep` alongside it without either being singled out.
-That is the point: a single sweep is one amplitude step in one direction, so it
-nests exactly as a ladder does and the fitters never ask which of the two they
-were handed.
-
-```python
-single_report = fit_sweeps(fine_multisweep, models=("skewed",))
-
-print(single_report)
-print(f"coordinates: iteration={single_report.fits[0].iteration}, "
-      f"direction={single_report.fits[0].direction!r}")
-```
-
-So the selection arguments from section 6 apply here too — there is simply one
-of each to select:
-
-```python
-print(fit_sweeps(fine_multisweep, models=("skewed",), iterations=0, names="R0001"))
-```
-
-What `fit_sweeps` will *not* take is the whole dict a macro returns, keyed by
-module. Which module a report is about is your choice, not something to guess
-at, so it says so and names the ones it found:
-
-```python
-whole_return = await crs.multisweep(
-    catalog,
-    span_hz=FINE_SPAN_HZ,
-    npoints_per_sweep=NPOINTS_PER_SWEEP,
-    nsamps=NSAMPS,
-)
-
-try:
-    fit_sweeps(whole_return)
-except TypeError as e:
-    print(f"TypeError: {e}")
-```
-
-The same is true of a sweep taken across several modules at once, which comes
-back with one key each rather than as a list you have to keep in order. Fitting
-them all is a loop, and the loop is the same one whether there is one module in
-it or four:
-
-```python
-for module_id, module_sweeps in whole_return.items():
-    report = fit_sweeps(module_sweeps, models=("circle",))
-    print(f"{module_id}: {len(report.fitted)}/{len(report)} fitted")
-```
-
-And if you have a single sweep entry in hand — one pulled out with
-`collect_amplitude_iterations_for`, say, or one you assembled yourself —
-`fit_section` fits just that entry and returns its `fits` subdict:
-
-```python
-from rfmux.tuning import fit_section
-
-one_section = copy.deepcopy(
-    collect_amplitude_iterations_for(multiamp_results, "R0003")[0]["upward"]
-)
-
-fits = fit_section(one_section, models=("skewed",))
-
-print(f"returned the entry's own subdict: {fits is one_section['fits']}")
-print(f"Qr {fits['skewed']['params']['Qr']:.4g}")
-```
 
 ## 10. What is not here yet
 

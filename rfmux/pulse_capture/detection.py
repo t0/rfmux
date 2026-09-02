@@ -1003,31 +1003,45 @@ class PulseCapture:
             # Both results, and near_vals with them, feed nothing but
             # the pileup split below — so with splitting off this is
             # six ring reads per sample of every capture, discarded.
+            # Both are judged on the length of the deviation vector,
+            # (dev_I, dev_Q) in sigma units, not per quadrature.  A
+            # pulse rotates in the IQ plane as it settles -- on the PFB
+            # stream Q overshoots and settles while I swings the other
+            # way -- and per quadrature that reads as decay on one axis
+            # and a rise on the other, which is the split signature.
+            # The length is the same whichever way the vector points.
+            # Jumps are scaled by the larger of the two lag-K jump-sigmas,
+            # in sigma units.
             if (self.enable_pileup and self.edge_lookback > 0
                     and since_fire >= 1):
                 span = min(self.edge_lookback, since_fire,
                            bI.count - 1,
                            st.ch_sample_n - st.epoch_start - 1)
                 if span >= 1:
-                    hi_I = hi_Q = 0.0
+                    sI = max(ns.std_I, 1e-30)
+                    sQ = max(ns.std_Q, 1e-30)
+                    jn = max(js_I / sI, js_Q / sQ, 1e-30)
+                    mag = math.hypot(dev_I, dev_Q)
+                    hi = 0.0
                     for tap in (span, span // 2, span // 4):
                         if tap >= 1:
-                            hi_I = max(hi_I,
-                                       abs(bI.recent(tap) - ns.mean_I))
-                            hi_Q = max(hi_Q,
-                                       abs(bQ.recent(tap) - ns.mean_Q))
-                    decaying_now = (
-                        (raw_I - hi_I) / max(js_I, 1e-30)
-                        < -self.threshold_sigma
-                        or (raw_Q - hi_Q) / max(js_Q, 1e-30)
-                        < -self.threshold_sigma)
-                    near = max(1, min(self.edge_lookback // 4, span))
+                            hi = max(hi, math.hypot(
+                                (bI.recent(tap) - ns.mean_I) / sI,
+                                (bQ.recent(tap) - ns.mean_Q) / sQ))
+                    decaying_now = (mag - hi) / jn < -self.threshold_sigma
+                    # The pulse's own recent level: as many samples back
+                    # as the decay evidence had to wait, so a pulse still
+                    # growing past its confirmation level is not "rising
+                    # above" its trigger instant for the next quarter
+                    # lookback -- 6 ms on the PFB stream, longer than the
+                    # pulses it split.
+                    near = max(1, min(self.min_end_samples, span))
                     near_vals = (bI.recent(near), bQ.recent(near))
+                    near_mag = math.hypot(
+                        (near_vals[0] - ns.mean_I) / sI,
+                        (near_vals[1] - ns.mean_Q) / sQ)
                     rising_above_self = (
-                        (raw_I - abs(near_vals[0] - ns.mean_I))
-                        / max(js_I, 1e-30) > self.threshold_sigma
-                        or (raw_Q - abs(near_vals[1] - ns.mean_Q))
-                        / max(js_Q, 1e-30) > self.threshold_sigma)
+                        (mag - near_mag) / jn > self.threshold_sigma)
 
             # ── Baseline-free return test ─────────────────────────
             # Back at the pre-pulse anchor on BOTH quadratures.  The

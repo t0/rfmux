@@ -207,20 +207,24 @@ def walk(I, Q, T, start, stop,
                 if ch_n - si[EPOCH] - 1 < span:
                     span = ch_n - si[EPOCH] - 1
                 if span >= 1:
-                    hi_I = 0.0
-                    hi_Q = 0.0
+                    # On the length of the deviation vector in sigma
+                    # units; see process_sample.
+                    jn = js_I / sI
+                    if js_Q / sQ > jn:
+                        jn = js_Q / sQ
+                    if jn < 1e-30:
+                        jn = 1e-30
+                    mag = math.hypot(dev_I, dev_Q)
+                    hi = 0.0
                     for tap in (span, span // 2, span // 4):
                         if tap >= 1:
                             idx = (rptr - 1 - tap) % rN
-                            d = abs(rI[idx] - mean_I)
-                            if d > hi_I:
-                                hi_I = d
-                            d = abs(rQ[idx] - mean_Q)
-                            if d > hi_Q:
-                                hi_Q = d
-                    decaying_now = ((raw_I - hi_I) / jI < -thr
-                                    or (raw_Q - hi_Q) / jQ < -thr)
-                    near = edge_lookback // 4
+                            d = math.hypot((rI[idx] - mean_I) / sI,
+                                           (rQ[idx] - mean_Q) / sQ)
+                            if d > hi:
+                                hi = d
+                    decaying_now = (mag - hi) / jn < -thr
+                    near = min_end
                     if span < near:
                         near = span
                     if near < 1:
@@ -229,9 +233,9 @@ def walk(I, Q, T, start, stop,
                     sf[NEAR_I] = rI[idx]
                     sf[NEAR_Q] = rQ[idx]
                     have_near = True
-                    rising_above_self = (
-                        (raw_I - abs(sf[NEAR_I] - mean_I)) / jI > thr
-                        or (raw_Q - abs(sf[NEAR_Q] - mean_Q)) / jQ > thr)
+                    near_mag = math.hypot((sf[NEAR_I] - mean_I) / sI,
+                                          (sf[NEAR_Q] - mean_Q) / sQ)
+                    rising_above_self = (mag - near_mag) / jn > thr
             returned = (abs(i_val - sf[ANCHOR_I]) < end_sigma * sI
                         and abs(q_val - sf[ANCHOR_Q]) < end_sigma * sQ)
             if max_dev < thr or returned:

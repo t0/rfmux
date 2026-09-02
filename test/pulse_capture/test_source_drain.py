@@ -5,6 +5,7 @@ the loop schedules it."""
 import asyncio
 import contextlib
 import socket
+import sys
 import threading
 import time
 
@@ -309,3 +310,43 @@ def test_pfb_buffer_seconds_counts_a_four_channel_stream():
     if _sys.platform == "linux":
         with open("/proc/sys/net/core/rmem_max") as f:
             assert sources._rcvbuf_request() == int(f.read())
+
+
+@pytest.mark.filterwarnings("ignore:PFB socket buffer")
+def test_pfb_source_discards_to_bound_its_lag(monkeypatch):
+    """When the session says the fast stream is further behind the
+    slow one than the bound, the source drops packets by their stamps
+    until it is within half the bound, and counts them."""
+    with _loopback_pair() as (recv, send, port):
+        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
+        monkeypatch.setattr(src, "_flush", lambda sock: None)
+        step = 4.096e-5
+        for k in range(200):
+            send.sendto(_pfb_packet(1, t_s=43200.0 + k * step, seq=k),
+                        ("127.0.0.1", port))
+        time.sleep(0.1)
+        calls = []
+
+        def lag():
+            # Behind by 1 ms once the first batch is in; fine after.
+            calls.append(1)
+            return 1e-3 if len(calls) == 1 else 0.0
+
+        class _Sink:
+            channels = [1]
+            source = {}
+            stream_lag = staticmethod(lag)
+            fed = 0
+
+            def feed_block(self, ch, i, q, t):
+                _Sink.fed += len(i)
+
+        deadline = time.monotonic() + 2.0
+        asyncio.run(src.run_pfb_source(
+            _Sink(), "127.0.0.1", [1], module=2, max_lag_s=0.5e-3,
+            should_stop=lambda: time.monotonic() > deadline))
+    flushed = _Sink.source["flushed_packets"]
+    # 1 ms behind with a 0.5 ms bound: drop until within 0.25 ms, which
+    # is 0.75 ms of packets at one per 41 us.
+    assert 15 <= flushed <= 22, flushed
+    assert _Sink.fed == (200 - flushed) * 100

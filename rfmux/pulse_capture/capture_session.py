@@ -1400,7 +1400,8 @@ class DualPulseCaptureSession(_CallbackHost):
                                          feed_sample=self.feed_fast,
                                          feed_block=self.feed_fast_block,
                                          source=self.fast.source,
-                                         set_time_origin=self.set_time_origin)
+                                         set_time_origin=self.set_time_origin,
+                                         stream_lag=self.stream_lag_s)
 
     def _make_stream(self, stream: str,
                      sample_rate: float) -> PulseCaptureSession:
@@ -1525,6 +1526,11 @@ class DualPulseCaptureSession(_CallbackHost):
             "time_origin_epoch": self.time_origin_epoch,
             **self._stream_lag(),
         }
+
+    def stream_lag_s(self) -> Optional[float]:
+        """Slow clock minus fast clock, positive when the fast stream
+        is behind; None until both have a clock."""
+        return self._stream_lag()["stream_lag_s"]
 
     def _stream_lag(self) -> Dict[str, Any]:
         """How far the fast stream's processed time trails the slow one.

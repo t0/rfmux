@@ -441,6 +441,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._tree_user_sized = False
         self._tree_autosizing = False
         header.sectionResized.connect(self._on_tree_section_resized)
+        self.pulse_tree.viewport().installEventFilter(self)
         self.pulse_tree.itemDoubleClicked.connect(self._on_tree_double_click)
         splitter.addWidget(self.pulse_tree)
 
@@ -1615,14 +1616,30 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             self._tree_user_sized = True
 
     def _autosize_tree(self) -> None:
+        """Size the value columns to their contents and give the name
+        column the rest of the width, until the user sizes them."""
         if self._tree_user_sized:
             return
         self._tree_autosizing = True
         try:
-            for col in range(self.pulse_tree.columnCount()):
-                self.pulse_tree.resizeColumnToContents(col)
+            tree = self.pulse_tree
+            header = tree.header()
+            used = 0
+            for col in range(1, tree.columnCount()):
+                tree.resizeColumnToContents(col)
+                used += header.sectionSize(col)
+            tree.resizeColumnToContents(0)
+            rest = tree.viewport().width() - used
+            if rest > header.sectionSize(0):
+                header.resizeSection(0, rest)
         finally:
             self._tree_autosizing = False
+
+    def eventFilter(self, obj, event) -> bool:
+        if (obj is self.pulse_tree.viewport()
+                and event.type() == QtCore.QEvent.Type.Resize):
+            self._autosize_tree()
+        return super().eventFilter(obj, event)
 
     @staticmethod
     def _clock(summary: dict) -> str:
@@ -1836,15 +1853,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if not source:
             return ""
         lost = source.get("lost_packets", 0)
+        flushed = source.get("flushed_packets", 0)
         peak = source.get("backlog_peak_s") or 0.0
-        if not lost and peak < 0.05:
+        if not lost and not flushed and peak < 0.05:
             return ""
-        buf = source.get("buffer_s")
-        text = (f" — fast backlog {source.get('backlog_s', 0.0):.2f} s "
-                f"(peak {peak:.2f}"
-                + (f" of {buf:.1f} s" if buf else "") + ")")
-        if lost:
-            text += f", {lost} packets lost"
+        busy = source.get("busy")
+        text = (f" — fast source {busy*100:.0f}% busy, " if busy is not None
+                else " — fast ")
+        text += (f"kernel queue {source.get('backlog_s', 0.0):.2f} s "
+                 f"(peak {peak:.2f} s)")
+        if lost or flushed:
+            text += f", {max(lost, flushed)} packets lost"
+        if flushed:
+            text += f" ({flushed} flushed to stay current)"
         return text
 
     def _flat_df_calibrations(self) -> Dict[int, Any]:

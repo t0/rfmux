@@ -234,6 +234,16 @@ _PFB_FEED_PACKETS = 16
 # longer than the buffer loses packets, where a longer buffer is lag
 # the source drains.
 _PFB_BUFFER_WARN_S = 1.0
+# The most the fast stream is let fall behind the slow one, in stream
+# time, where the session measures the two clocks.  Past this the
+# source reads and discards packets, looking only at their stamps,
+# until the fast clock is within half the bound, and counts them: a
+# bounded lag with the loss in the open, rather than a lag that grows
+# to the socket buffer and leaves every pair without its fast window.
+# The kernel's own account of the queue (SO_MEMINFO) is shown but not
+# acted on: UDP releases receive memory in steps of a quarter of the
+# buffer, so it reads high by up to that much.
+_PFB_MAX_LAG_S = 0.25
 _PFB_BYTES_PER_SECOND = 4 * PFB_SAMPLING_FREQ / 1000 * streamer.PFB_PACKET_SIZE
 
 
@@ -255,6 +265,28 @@ def _rcvq_bytes(sock) -> Optional[int]:
         return int.from_bytes(raw[:4], sys.byteorder)      # rmem_alloc
     except (OSError, AttributeError, TypeError, ValueError):
         return None
+
+
+def _discard_until(sock, size: int, t_target: float, module,
+                   limit: int = 1 << 20):
+    """Read and drop datagrams stamped before *t_target*, at most
+    *limit* of them.  Returns (dropped, the first kept datagram or
+    None): the first one at or past the target is handed back so it
+    is not lost with the rest."""
+    dropped = 0
+    while dropped < limit:
+        try:
+            data = sock.recv(size)
+        except BlockingIOError:
+            return dropped, None
+        pkt = streamer.PFBPacket(data)
+        if module is not None and pkt.module != module - 1:
+            continue
+        ts = streamer.ts_to_seconds(pkt.ts)
+        if ts is not None and ts >= t_target:
+            return dropped, data
+        dropped += 1
+    return dropped, None
 
 
 def _pfb_buffer_seconds(sock) -> float:
@@ -408,6 +440,7 @@ async def run_pfb_source(
     duration_s: Optional[float] = None,
     should_stop: Optional[Callable[[], bool]] = None,
     sample_rate: float = PFB_SAMPLING_FREQ,
+    max_lag_s: float = _PFB_MAX_LAG_S,
 ) -> float:
     """Feed *capture_session* from the fast/PFB stream until stopped.
 
@@ -441,7 +474,9 @@ async def run_pfb_source(
     pending_packets = 0
     source = getattr(capture_session, "source", None)
     set_origin = getattr(capture_session, "set_time_origin", None)
+    stream_lag = getattr(capture_session, "stream_lag", None)
     origin_set = False
+    last_ts = None                 # newest stamp fed, the fast clock here
 
     def flush_pending() -> None:
         nonlocal pending_packets
@@ -468,7 +503,9 @@ async def run_pfb_source(
         # 256x above slow samples for the same signal.
         raw = np.array(pkt) / 256.0
         ts = streamer.ts_to_seconds(pkt.ts)
-        nonlocal origin_set
+        nonlocal origin_set, last_ts
+        if ts is not None:
+            last_ts = ts
         if not origin_set and ts is not None and set_origin is not None:
             set_origin(streamer.ts_day_epoch(pkt.ts))
             origin_set = True
@@ -510,25 +547,51 @@ async def run_pfb_source(
         sock.setblocking(False)
         _flush(sock)
         backlog_peak = 0.0
+        flushed = 0
+        carried = None             # a datagram a discard handed back
+        # Busy fraction: time from a batch's arrival to the end of its
+        # processing, over wall time, per second.  Near 1 the capture
+        # thread is saturated; well under 1 while the backlog grows,
+        # something else holds the interpreter.
+        busy = 0.0
+        window_t = time.monotonic()
         if source is not None:
             source.update(buffer_s=held_s, backlog_s=0.0,
-                          backlog_peak_s=0.0, lost_packets=0)
+                          backlog_peak_s=0.0, lost_packets=0,
+                          flushed_packets=0, busy=0.0)
         done = False
         while not done:
             if should_stop is not None and should_stop():
                 break
+            if (stream_lag is not None and last_ts is not None
+                    and max_lag_s > 0):
+                lag = stream_lag()
+                if lag is not None and lag > max_lag_s:
+                    n, carried = _discard_until(
+                        sock, streamer.PFB_PACKET_SIZE,
+                        last_ts + lag - max_lag_s / 2, module)
+                    flushed += n
+            queued = _rcvq_bytes(sock)
+            if queued is not None and source is not None:
+                backlog = queued / _PFB_BYTES_PER_SECOND
+                backlog_peak = max(backlog_peak, backlog)
+                source["backlog_s"] = backlog
+                source["backlog_peak_s"] = backlog_peak
             if source is not None:
-                queued = _rcvq_bytes(sock)
-                if queued is not None:
-                    backlog = queued / _PFB_BYTES_PER_SECOND
-                    backlog_peak = max(backlog_peak, backlog)
-                    source["backlog_s"] = backlog
-                    source["backlog_peak_s"] = backlog_peak
                 source["lost_packets"] = reorder.lost
+                source["flushed_packets"] = flushed
+                now = time.monotonic()
+                if now - window_t >= 1.0:
+                    source["busy"] = min(1.0, busy / (now - window_t))
+                    busy = 0.0
+                    window_t = now
             try:
-                data = await asyncio.wait_for(
-                    loop.sock_recv(sock, streamer.PFB_PACKET_SIZE),
-                    streamer.STREAMER_TIMEOUT)
+                if carried is not None:
+                    data, carried = carried, None
+                else:
+                    data = await asyncio.wait_for(
+                        loop.sock_recv(sock, streamer.PFB_PACKET_SIZE),
+                        streamer.STREAMER_TIMEOUT)
             except asyncio.TimeoutError:
                 if not got_any:
                     raise TimeoutError(
@@ -539,6 +602,7 @@ async def run_pfb_source(
                         "thinks), and that nothing tore it down.")
                 break
             got_any = True
+            batch_t = time.monotonic()
             for k, data in enumerate(_drain(sock, data,
                                             streamer.PFB_PACKET_SIZE,
                                             _PFB_DRAIN_CAP)):
@@ -554,6 +618,7 @@ async def run_pfb_source(
                         break
                 if done:
                     break
+            busy += time.monotonic() - batch_t
             # An explicit turn for whatever shares the loop -- in a dual
             # capture, the slow stream.  The drain cap above bounds how
             # long this coroutine held it.

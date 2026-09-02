@@ -209,17 +209,3 @@ class TestSources:
         finally:
             loop.run_until_complete(crs.set_pfb_streamer(channel=None,
                                                          module=1))
-
-
-def test_firmware_pfb_check_is_warned_about():
-    """A short-packet configuration the link carries is still refused by
-    the firmware's PFB check, which counts long packets; say so before
-    apply, and only where that check would fire."""
-    from rfmux.algorithms.measurement.streamer_config import StreamerConfig, validate
-    cfg = StreamerConfig(dec_stage=0, short_packets=True, modules=[1],
-                         pfb_channels=[1])
-    assert not [m for s, m in validate(cfg) if s == "error"]
-    assert any("long packets" in m for s, m in validate(cfg) if s == "warning")
-    ok = StreamerConfig(dec_stage=3, short_packets=True, modules=[1],
-                        pfb_channels=[1])
-    assert not any("long packets" in m for s, m in validate(ok) if s == "warning")

@@ -122,6 +122,7 @@ def test_dual_session_end_to_end(tmp_path):
     dual = DualPulseCaptureSession(
         channels=[1], slow_rate=SLOW_FS, fast_rate=FAST_FS,
         config=cfg, hdf5_path=path, match_grace_s=0.25,
+        slow_time_offset_s=0.0,   # synthetic streams on one clock
         on_pair=lambda p: events["pairs"].append(p),
         on_pulse=lambda s, ch, idx, summ, _d:
             events["pulses"].append((s, ch, idx)),
@@ -337,3 +338,23 @@ def test_stream_feeds_present_the_source_facade():
     assert dual._last_advance["slow"] == 1.0
     assert dual._last_advance["fast"] == 1.0
     dual.stop()
+
+
+def test_triggers_pair_only_within_one_slow_sample():
+    """Two triggers further apart than a slow sample are two events."""
+    pairs = []
+    d = DualPulseCaptureSession(channels=[1], slow_rate=1000.0,
+                                fast_rate=10000.0, on_pair=pairs.append,
+                                slow_time_offset_s=0.0)
+    assert d.match_window_s == pytest.approx(0.001)
+    T = 43000.0
+    d.matcher.add("slow", 1, 1, {"trigger_time": T + 0.0009, "duration_s": 0.005})
+    d.matcher.add("fast", 1, 1, {"trigger_time": T, "duration_s": 0.001})
+    assert d.matcher.matched == 1
+    d.matcher.add("slow", 1, 2, {"trigger_time": T + 0.100, "duration_s": 0.005})
+    d.matcher.add("fast", 1, 2, {"trigger_time": T + 0.102, "duration_s": 0.001})
+    assert d.matcher.matched == 1
+    assert len(d.matcher._pending["slow"][1]) == 1
+    assert len(d.matcher._pending["fast"][1]) == 1
+    d.stop()
+    assert d.stats()["match_window_s"] == pytest.approx(0.001)

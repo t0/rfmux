@@ -1269,7 +1269,7 @@ class DualPulseCaptureSession(_CallbackHost):
         config: Optional[PulseCaptureConfig] = None,
         hdf5_path=None,
         df_calibrations: Optional[Dict[int, float]] = None,
-        match_window_s: float = 0.05,
+        match_window_s: Optional[float] = None,
         match_grace_s: float = 0.25,
         pair_window_wait_s: float = 3.0,
         slow_time_offset_s: Optional[float] = None,
@@ -1334,8 +1334,14 @@ class DualPulseCaptureSession(_CallbackHost):
                 self._error(f"Could not open HDF5 file "
                             f"{hdf5_path}: {e}")
 
+        # One event triggers both streams at its edge, and the slow
+        # trigger can land up to one slow sample after it.  Triggers
+        # further apart than that are different events, each reported
+        # with the other stream's samples over its own window.
+        self.match_window_s = (1.0 / slow_rate if match_window_s is None
+                               else float(match_window_s))
         self.matcher = IncrementalPulseMatcher(
-            window_s=match_window_s, grace_s=match_grace_s,
+            window_s=self.match_window_s, grace_s=match_grace_s,
             on_pair=self._on_matcher_pair)
         self._last_advance: Dict[str, float] = {}
         # Pairs whose union window one of the rings has not reached yet,
@@ -1472,6 +1478,7 @@ class DualPulseCaptureSession(_CallbackHost):
             "total_pulses": (self.slow.total_pulses
                              + self.fast.total_pulses),
             "slow_time_offset_s": self.slow_time_offset_s,
+            "match_window_s": self.match_window_s,
             **self._stream_lag(),
         }
 

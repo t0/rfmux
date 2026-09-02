@@ -97,7 +97,9 @@ def test_without_the_shift_the_slow_trigger_is_late_by_the_delay():
     shows slow − fast ≈ +delay."""
     fs = decimation_to_sampling(6)
     late = decimated_stream_delay_s(sampling_to_decimation(fs))
-    d, cfg, pairs = _dual(fs, slow_time_offset_s=0.0)
+    # Uncorrected, the slow trigger lands ~3 slow samples late, so the
+    # one-sample default window would not pair it: widen it to measure.
+    d, cfg, pairs = _dual(fs, slow_time_offset_s=0.0, match_window_s=0.05)
     _feed_both(d, cfg, fs, slow_late_by=late)
     assert d.slow_time_offset_s == 0.0
     assert pairs

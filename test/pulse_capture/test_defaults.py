@@ -103,3 +103,18 @@ def test_settings_dialog_learns_whether_df_is_available(qt_app, monkeypatch):
         assert seen["df_available"] is True
     finally:
         panel.close()
+
+
+def test_uncalibrated_channel_is_shown_as_volts_on_the_quadratures(qt_app):
+    """With trigger_basis="df" and no calibration the engine stores the
+    quadratures in volts, and the axes must say so."""
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    try:
+        assert panel.capture_config.trigger_basis == "df"
+        assert panel._stored_state(1) == ("iq", "V")
+        assert panel._axis_names(1) == ("I (V)", "Q (V)")
+        panel.df_calibrations = {1: {1: 2.0e6 + 0j}}
+        assert panel._stored_state(1) == ("df", "Hz")
+    finally:
+        panel.close()

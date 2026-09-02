@@ -1815,24 +1815,23 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def _stored_state(self, channel: int) -> Tuple[str, str]:
         """(basis, units) the samples for *channel* are held in.
 
-        A finished capture says so in the file.  A live one is derived
-        from the same storage_transform the session applies, rather than
-        from state the panel would have to be told about and could be
-        told wrongly -- which is what happened: the two attributes this
-        used to read were never assigned, so a live capture in the
-        frequency basis was displayed as though it were quadratures in
+        A finished capture says so in the file; a live one follows the
+        same storage_transform the session applies.  The units decide
+        the basis: a channel is in hertz only once it has been rotated,
+        so a df capture of an uncalibrated channel is quadratures in
         volts.
         """
+        units = None
         if self.reader is not None:
             try:
-                return self.reader.trigger_basis(), \
-                    self.reader.stored_units(channel)
+                units = self.reader.stored_units(channel)
             except Exception:
                 pass
-        basis = getattr(self.capture_config, "trigger_basis", "iq")
-        _factor, units = storage_transform(
-            self._flat_df_calibrations().get(channel), basis)
-        return basis, units
+        if units is None:
+            _factor, units = storage_transform(
+                self._flat_df_calibrations().get(channel),
+                self.capture_config.trigger_basis)
+        return ("df" if units == "Hz" else "iq"), units
 
     def _view_state(self) -> Tuple[str, str]:
         """(basis, units) for the selected view.

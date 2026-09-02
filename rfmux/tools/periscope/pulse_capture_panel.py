@@ -2394,6 +2394,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if pair is not None:
             slow_wf = pair.get("slow_tod")
             fast_wf = pair.get("fast_tod")
+        elif self.task is not None:
+            # Evicted from the task's cache: bring it back from the
+            # file with its windows, and show the records meanwhile.
+            key = ("pair", channel, pair_idx)
+            if self._pending_fetch != key:
+                self._pending_fetch = key
+                self.task.request_pair(channel, pair_idx)
+            loading = True
         if slow_wf is None and meta.get("slow_idx") is not None:
             slow_wf = self._get_waveform(channel, meta["slow_idx"],
                                          "slow")

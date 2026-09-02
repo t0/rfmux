@@ -225,6 +225,14 @@ class PulseCaptureTask(QtCore.QThread):
         with self._cache_lock:
             return self._pair_cache.get((channel, pair_idx))
 
+    def request_pair(self, channel: int, pair_idx: int) -> None:
+        """Ask the worker to load an evicted pair, windows and all, from
+        the live file; ``waveform_ready`` fires when it is cached."""
+        try:
+            self.sample_queue.put_nowait(("__fetch_pair__", channel, pair_idx))
+        except queue.Full:
+            pass
+
     def request_waveform(self, channel: int, pulse_idx: int,
                          stream: Optional[str] = None) -> None:
         """Ask the worker to load an evicted waveform from the live HDF5
@@ -440,6 +448,21 @@ class PulseCaptureTask(QtCore.QThread):
             return True
         if item[0] == "__day__":
             self.session.set_time_origin(item[1])
+            return True
+        if item[0] == "__fetch_pair__":
+            _, ch, idx = item
+            pair = None
+            writer = self.session.writer
+            if writer is not None:
+                try:
+                    pair = writer.read_match(ch, idx)
+                except Exception as e:
+                    self.signals.error.emit(
+                        f"Pair read failed for ch{ch} pair {idx}: {e}")
+            if pair is not None:
+                with self._cache_lock:
+                    self._pair_cache[(ch, idx)] = pair
+            self.signals.waveform_ready.emit(ch, idx)
             return True
         if item[0] == "__fetch__":
             _, ch, idx, stream = (item if len(item) == 4

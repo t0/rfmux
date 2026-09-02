@@ -106,3 +106,24 @@ def test_a_dual_capture_file_records_the_day(tmp_path):
             "2026-09-02T00:00:00.000000Z"
     assert d.slow.time_origin_epoch == day
     assert d.stats()["time_origin_epoch"] == day
+
+
+def test_a_pair_reads_back_with_its_windows(tmp_path):
+    """The live viewer fetches an evicted pair from the file it is
+    writing; what comes back is what the session emitted, windows and
+    union bounds included."""
+    from rfmux.pulse_capture.hdf5 import DualPulseHDF5Writer
+    w = DualPulseHDF5Writer(tmp_path / "p.h5", [1],
+                            capture_params={"streamer_mode": "both"})
+    t = np.linspace(1.0, 1.001, 11)
+    pair = {"pair_idx": 1, "channel": 1, "slow_idx": 2, "fast_idx": None,
+            "time_offset": None, "window": (0.9995, 1.0015),
+            "slow_tod": {"Amp_I": t * 0, "Amp_Q": t * 0 + 1, "Time": t}}
+    w.append_match(1, pair)
+    back = w.read_match(1, 1)
+    assert back["slow_idx"] == 2 and back["fast_idx"] is None
+    assert back["window"] == (0.9995, 1.0015)
+    assert list(back["slow_tod"]["Time"]) == list(t)
+    assert "fast_tod" not in back
+    assert w.read_match(1, 2) is None
+    w.finalize()

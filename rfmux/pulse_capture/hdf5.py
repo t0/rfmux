@@ -422,6 +422,17 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         return self._read_pulse_at(
             f"{stream}/channel_{channel}/pulse_{pulse_idx:06d}")
 
+    def read_match(self, channel: int,
+                   pair_idx: int) -> Optional[Dict[str, Any]]:
+        """A pair back out of the live file, with its windows, for a
+        viewer whose cache has let it go."""
+        if not self.is_open:
+            return None
+        key = f"matched/channel_{channel}/pair_{pair_idx:06d}"
+        if key not in self.f:
+            return None
+        return _pair_from_group(self.f[key], channel, pair_idx)
+
     def update_histograms(self, stream: str,
                           histogram_data: Dict[str, np.ndarray]) -> None:
         self._replace_datasets(f"histograms/{stream}", histogram_data)
@@ -608,28 +619,7 @@ class PulseHDF5Reader:
         key = f"matched/channel_{channel}/pair_{pair_idx:06d}"
         if key not in self.f:
             return None
-        pg = self.f[key]
-        slow_idx = int(pg.attrs.get("slow_idx", -1))
-        fast_idx = int(pg.attrs.get("fast_idx", -1))
-        pair: Dict[str, Any] = {
-            "pair_idx": pair_idx,
-            "channel": channel,
-            "slow_idx": slow_idx if slow_idx >= 0 else None,
-            "fast_idx": fast_idx if fast_idx >= 0 else None,
-            "time_offset": float(pg.attrs.get("time_offset",
-                                              float("nan"))),
-        }
-        if "window_t0" in pg.attrs:
-            pair["window"] = (float(pg.attrs["window_t0"]),
-                              float(pg.attrs["window_t1"]))
-        for side in ("slow_tod", "fast_tod"):
-            if f"{side}_Amp_I" in pg:
-                pair[side] = {
-                    "Amp_I": np.array(pg[f"{side}_Amp_I"]),
-                    "Amp_Q": np.array(pg[f"{side}_Amp_Q"]),
-                    "Time": np.array(pg[f"{side}_Time"]),
-                }
-        return pair
+        return _pair_from_group(self.f[key], channel, pair_idx)
 
     def iter_matches(self, channel: int) -> Iterator[Dict[str, Any]]:
         for idx in range(1, self.pair_count(channel) + 1):
@@ -753,6 +743,32 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
     else:
         pulse_grp.attrs["peak_snr_I"] = 0.0
         pulse_grp.attrs["peak_snr_Q"] = 0.0
+
+
+def _pair_from_group(pg, channel: int, pair_idx: int) -> Dict[str, Any]:
+    """One matched pair as the session emitted it: indices (None =
+    one-sided), time offset, the union window, and the stored
+    cross-stream windows (reader/writer shared)."""
+    slow_idx = int(pg.attrs.get("slow_idx", -1))
+    fast_idx = int(pg.attrs.get("fast_idx", -1))
+    pair: Dict[str, Any] = {
+        "pair_idx": pair_idx,
+        "channel": channel,
+        "slow_idx": slow_idx if slow_idx >= 0 else None,
+        "fast_idx": fast_idx if fast_idx >= 0 else None,
+        "time_offset": float(pg.attrs.get("time_offset", float("nan"))),
+    }
+    if "window_t0" in pg.attrs:
+        pair["window"] = (float(pg.attrs["window_t0"]),
+                          float(pg.attrs["window_t1"]))
+    for side in ("slow_tod", "fast_tod"):
+        if f"{side}_Amp_I" in pg:
+            pair[side] = {
+                "Amp_I": np.array(pg[f"{side}_Amp_I"]),
+                "Amp_Q": np.array(pg[f"{side}_Amp_Q"]),
+                "Time": np.array(pg[f"{side}_Time"]),
+            }
+    return pair
 
 
 def _pulse_dict_from_group(grp) -> dict:

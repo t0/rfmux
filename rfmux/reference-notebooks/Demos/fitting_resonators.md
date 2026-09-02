@@ -16,15 +16,13 @@ jupyter:
 # Fitting resonators
 
 A multisweep gives you one sweep trace per resonator. Fitting takes each of
-those traces and estimates the parameters of the resonator that produced it:
-roughly, where it resonates, how sharp it is, how much of its loss is internal,
-and how hard the probe tone is driving it.
+those traces and estimates the parameters of the resonator that produced it.
 
-Fitting is a separate step that you run yourself, on multisweep data that
-already exists. The sweep measurement does not fit anything as it goes, and the
-fitters do not measure anything. This means you can re-fit the same data with
-different parameters as many times as you like, and you can fit data loaded from
-disk exactly as you would fit a sweep you just took.
+Fitting is a separate step that you run yourself on multisweep data that
+already exists. By default, the sweep measurement does not fit anything as it
+goes. This means you can re-fit the same data with different parameters as many
+times as you like, and you can fit data loaded from disk exactly as you would
+fit a sweep you just took.
 
 rfmux currently provides three models. They are independent of each other, so
 you can run any combination of them:
@@ -32,8 +30,8 @@ you can run any combination of them:
 | Model | Fitted to | Gives you |
 |---|---|---|
 | `skewed` | `\|S21\|` | `fr`, `Qr`, `Qc`, `Qi` |
-| `nonlinear` | the complex trace, with the readout gain divided out | the same, plus `a`, which indicates how close the drive has pushed the resonator towards bifurcation |
-| `circle` | the IQ loop | a centre and a radius, which is generally what you want to subtract before looking at IQ data |
+| `nonlinear` | the complex `S21`, with the readout gain divided out | the same, plus `a`, which indicates how close the drive has pushed the resonator towards bifurcation |
+| `circle` | the IQ loop | a centre and a radius, which you may or may not want to subtract before looking at IQ data |
 
 | Piece | Module |
 |---|---|
@@ -135,11 +133,9 @@ same array and the same numbers every time it runs.
 Normally you would find the resonances with a network analysis and build a
 catalog from them, but we can take a shortcut here. Setting
 `auto_bias_kids: True` asks the simulator to park a tone on each of its own
-resonators, at the actual S21 transmission minimum. (That minimum sits about a
-megahertz away from the impedance resonance, because of the coupling geometry,
-so it is worth using the simulator's own answer rather than the nominal
-frequencies.) Reading those tone frequencies back gives us roughly the
-frequencies a real tuning workflow would have found.
+resonators, at the actual S21 transmission minimum. Reading those tone
+frequencies back gives us roughly the frequencies a real tuning workflow would
+have found.
 
 To run against real hardware instead, replace this one cell with a session on
 your board and a catalog you built or loaded. Everything after it is unchanged:

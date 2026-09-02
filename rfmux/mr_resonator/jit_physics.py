@@ -700,6 +700,21 @@ def compute_s21_parallel(
     return S21
 
 
+@jit(nopython=True, cache=True, fastmath=True)
+def compute_s21_batch(fc, Vin, L2d, C2d, R2d, Cc_array,
+                      ZLNA, GLNA, input_atten_dB, system_termination):
+    """compute_s21_parallel for each row of (L2d, C2d, R2d): one
+    dispatch per batch of samples instead of one per sample.  The
+    per-row arithmetic is the same function."""
+    n = L2d.shape[0]
+    out = np.zeros(n, dtype=np.complex128)
+    for k in range(n):
+        out[k] = compute_s21_parallel(fc, Vin, L2d[k], C2d[k], R2d[k],
+                                      Cc_array, ZLNA, GLNA, input_atten_dB,
+                                      system_termination)
+    return out
+
+
 # ============================================================================
 # Helper Functions
 # ============================================================================

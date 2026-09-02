@@ -204,7 +204,12 @@ class TLSNoiseGenerator:
         return value
 
     def values_at(self, times: np.ndarray) -> np.ndarray:
-        """Vectorised :meth:`value_at` — returns ``(len(times), n_res)``."""
+        """Vectorised :meth:`value_at` — returns ``(len(times), n_res)``.
+
+        The same arithmetic as value_at, row by row, so a batch and the
+        per-sample calls it replaces agree bit for bit; and the same
+        memo afterwards, as if the last time had been queried alone.
+        """
         times = np.asarray(times, dtype=np.float64)
         if times.size == 0:
             return np.zeros((0, self.n_resonators))
@@ -212,8 +217,14 @@ class TLSNoiseGenerator:
         if t_max > self._last_query:
             self._last_query = t_max
         self._extend_to(t_max)
-        grid_t = self._t0 + np.arange(len(self._values)) * self.dt
-        out = np.empty((times.size, self.n_resonators))
-        for i in range(self.n_resonators):
-            out[:, i] = np.interp(times, grid_t, self._values[:, i])
+        vals = self._values
+        last = len(vals) - 1
+        pos = (times - self._t0) / self.dt
+        k = np.clip(pos.astype(np.int64), 0, max(last - 1, 0))
+        frac = (pos - k)[:, None]
+        interp = vals[k] * (1.0 - frac) + vals[np.minimum(k + 1, last)] * frac
+        out = np.where((times <= self._t0)[:, None], vals[0][None, :],
+                       np.where((pos.astype(np.int64) >= last)[:, None],
+                                vals[last][None, :], interp))
+        self._memo_t, self._memo_v = float(times[-1]), out[-1].copy()
         return out

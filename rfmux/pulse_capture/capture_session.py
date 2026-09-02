@@ -79,6 +79,7 @@ from .detection import (
     PulseCapture,
     estimate_noise_stats,
 )
+from . import walk
 from .analysis import (
     pulse_summary,
     storage_transform,
@@ -677,6 +678,9 @@ class PulseCaptureSession(_CallbackHost):
         """Begin the session: enter noise estimation."""
         if self.state is not CaptureState.IDLE:
             raise RuntimeError(f"start() called in state {self.state.name}")
+        # Before any packet is queued: the engine is built at the end of
+        # noise estimation, with the stream already flowing.
+        walk.warm_up()
         self._alloc_noise_buffers()
         self.state = CaptureState.ESTIMATING
 

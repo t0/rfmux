@@ -171,9 +171,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 584 tests, ~1 min, zero skips
+pytest --tier=quick                 # Edit loop: 602 tests, ~1 min, zero skips
 pytest --tier=portable              # No CRS, no GUI: 37 tests, ~9 s
-pytest --tier=full                  # All 600 that run without a board, ~4 min
+pytest --tier=full                  # All 618 that run without a board, ~4 min
 pytest --tier=acquisition           # MockCRS server + real UDP: 16 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem
@@ -184,7 +184,7 @@ python -m rfmux.tools.periscope     # Launch Periscope
 `hardware`/`all` excludes the board tests, so they report zero skips. Markers
 tag tests: `portable`, `slow_acquisition`, `hardware` — the last applied
 automatically to anything using the `crs`/`live_session`/`serial` fixtures,
-so don't add it by hand. A bare `pytest` still runs 600 + ~75 hardware skips.
+so don't add it by hand. A bare `pytest` still runs 618 + ~75 hardware skips.
 `full` contains `acquisition`; running both pays the slow set twice.
 
 `test/` is organized into subdirectories mirroring the package under test

@@ -71,15 +71,14 @@ def _sorted(records):
 
 
 def _records(channels, packets, *, blocks, use_walk, max_packets=64,
-             monkeypatch=None):
+             monkeypatch=None, **kw):
     """use_walk: False for the loop, "python" for the walk uncompiled,
     True for the walk as compiled."""
     if use_walk == "python":
         monkeypatch.setattr(walk, "walk", walk.walk.py_func)
         use_walk = True
     records = []
-    s = _session(channels, [], threshold_sigma=5.0, end_sigma=2.0,
-                 max_capture_samples=HARD_STOP)
+    s = _session(channels, [], max_capture_samples=HARD_STOP, **kw)
     s.on_pulse = lambda ch, idx, summary, data: records.append(
         (ch, idx, _norm(summary), _norm(data)))
     PulseCapture.use_walk = use_walk
@@ -106,19 +105,32 @@ def _records(channels, packets, *, blocks, use_walk, max_packets=64,
     return records
 
 
+# A rolling baseline of 60 samples refreshes many times inside a
+# 300-sample capture: each refresh is a walk re-entry through
+# process_sample.  2.5 sigma puts the threshold in the noise: crossings
+# everywhere, splits at every boundary.
 @pytest.mark.parametrize("channels", [(1,), (1, 2)])
 @pytest.mark.parametrize("max_packets", [1, 37, 4096])
-def test_walk_matches_process_sample(channels, max_packets, monkeypatch):
+@pytest.mark.parametrize("baseline_window", [0, 60])
+@pytest.mark.parametrize("threshold", [5.0, 2.5])
+def test_walk_matches_process_sample(channels, max_packets, baseline_window,
+                                     threshold, monkeypatch):
+    kw = dict(threshold_sigma=threshold, end_sigma=threshold * 0.4,
+              baseline_window=baseline_window)
+    if baseline_window:
+        pc = PulseCapture(channels=[1], buf_size=1024, noise_stats={},
+                          baseline_window=baseline_window)
+        assert pc._bl_decim * pc._bl_refresh < HARD_STOP
     packets = _stream(channels, np.random.default_rng(11))
-    ref = _records(channels, packets, blocks=False, use_walk=False)
+    ref = _records(channels, packets, blocks=False, use_walk=False, **kw)
     loop = _records(channels, packets, blocks=True, use_walk=False,
-                    max_packets=max_packets)
+                    max_packets=max_packets, **kw)
     compiled = _records(channels, packets, blocks=True, use_walk=True,
-                        max_packets=max_packets)
+                        max_packets=max_packets, **kw)
     with monkeypatch.context() as m:
         python = _records(channels, packets, blocks=True,
                           use_walk="python", max_packets=max_packets,
-                          monkeypatch=m)
+                          monkeypatch=m, **kw)
     # Per-sample ingest interleaves channels within a packet; block
     # ingest finishes one channel's block before the next.  The records
     # are the same, their order across channels is not.
@@ -129,10 +141,15 @@ def test_walk_matches_process_sample(channels, max_packets, monkeypatch):
     # The fixture must actually reach the branches it claims to.
     flags = [(r[2]["pileup"], r[2]["truncated"], float(r[2]["trigger_time"]))
              for r in ref if r[0] == channels[0]]
-    assert any(p for p, _, _ in flags), "no pileup split"
-    assert any(t for _, t, _ in flags), "no hard stop"
     assert not any(FREEZE[0] * DT <= t < FREEZE[1] * DT
                    for _, _, t in flags), "a trigger fired while frozen"
+    # A rolling baseline absorbs the step and the drift, and 2.5 sigma
+    # triggers on noise: the branches below are reached as designed
+    # only with the fixed baseline at 5 sigma.
+    if threshold < 5.0 or baseline_window:
+        return
+    assert any(p for p, _, _ in flags), "no pileup split"
+    assert any(t for _, t, _ in flags), "no hard stop"
     assert any(2.7 <= t <= 3.1 for _, _, t in flags), \
         "no trigger on the drifted run"
     assert any(4.05 <= t <= 4.15 for _, _, t in flags)
@@ -141,5 +158,6 @@ def test_walk_matches_process_sample(channels, max_packets, monkeypatch):
 def test_walk_is_compiled_without_the_gil():
     """While one engine walks, the receiver and the other stream's engine
     must keep running: the walk is compiled and releases the lock."""
+    walk.warm_up()
     assert walk.walk.targetoptions.get("nogil") is True
-    assert walk.walk.signatures, "warm_up() has not compiled the walk"
+    assert walk.walk.signatures

@@ -635,11 +635,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if self._saves_full_tail():
             marks.append(("end_index", "end_time", "#CC3366",
                           "end confirmed"))
+        # Each label sits one step below the last mark's, across both
+        # streams, so marks that land close together stay readable.
+        n_marks = sum(isinstance(it, pg.InfiniteLine)
+                      for it in plot.getPlotItem().items)
         for idx_key, time_key, color, label in marks:
             label = f"{prefix}{label}"
             x = _t_at(idx_key, time_key)
             if x is None:
                 continue
+            position = 0.95 - 0.06 * (n_marks % 10)
+            n_marks += 1
             plot.addItem(pg.InfiniteLine(
                 pos=x, angle=90,
                 pen=pg.mkPen(color, width=1.4,
@@ -647,7 +653,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 # Label only on the top plot; the two are x-linked, so
                 # repeating it underneath is noise.
                 label=label if quad == "I" else None,
-                labelOpts={"position": 0.95, "color": color,
+                labelOpts={"position": position, "color": color,
                            "fill": (0, 0, 0, 120), "movable": False}))
 
     def _set_pulse_x_axis(self, label: str, units: str | None = None) -> None:

@@ -523,3 +523,25 @@ def test_a_fast_event_shorter_than_a_slow_sample_still_shows_slow_samples():
     assert pairs and pairs[0].get("slow_tod") is not None
     assert 2 <= len(pairs[0]["slow_tod"]["Time"]) <= 3
     d.stop()
+
+
+def test_decision_labels_step_down_so_they_do_not_overlap(qt_app):
+    import pyqtgraph as pg
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.capture_config.save_to_end_confirmed = True
+    T = 43000.0
+    wf = {"Time": T + np.arange(20) / 1000.0,
+          "trigger_index": 2, "trigger_time": T + 0.002,
+          "below_threshold_index": 6, "below_threshold_time": T + 0.006,
+          "end_index": 9, "end_time": T + 0.009}
+    panel.pulse_plot_i.clear()
+    panel._annotate_decisions(panel.pulse_plot_i, wf, T, "I", prefix="slow ")
+    panel._annotate_decisions(panel.pulse_plot_i, wf, T, "I", prefix="fast ")
+    positions = [it.label.orthoPos for it in panel.pulse_plot_i.getPlotItem().items
+                 if isinstance(it, pg.InfiniteLine) and it.label is not None]
+    assert len(positions) == 6
+    assert len(set(round(p, 3) for p in positions)) == 6
+    assert positions == sorted(positions, reverse=True)
+    panel.close()
+    spin(qt_app)

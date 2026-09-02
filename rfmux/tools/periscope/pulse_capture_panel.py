@@ -431,8 +431,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self.pulse_tree = QtWidgets.QTreeWidget()
         self.pulse_tree.setHeaderLabels(["Pulse", "Samples", "SNR"])
-        self.pulse_tree.setColumnWidth(0, 110)
-        self.pulse_tree.setColumnWidth(1, 60)
+        header = self.pulse_tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for col in (1, 2):
+            header.setSectionResizeMode(
+                col, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.pulse_tree.itemDoubleClicked.connect(self._on_tree_double_click)
         splitter.addWidget(self.pulse_tree)
 
@@ -2329,8 +2334,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"Pair #{pair_idx:04d} — Channel {channel}   "
             f"[{provenance}]\n"
             f"slow #{meta.get('slow_idx')} / fast #{meta.get('fast_idx')}"
-            + (f"   Δt(trigger) = {dt*1e6:+.0f} µs  (slow − fast: the "
-               f"streams' clocks on this event)"
+            + (f"   Δt(trigger) = {dt*1e6:+.0f} µs  (slow − fast; paired "
+               f"as one event within a slow sample, "
+               f"{1e6 / self._current_sample_rate('slow'):.0f} µs)"
                if dt is not None and np.isfinite(dt) else "")
             + (f"\nSNR {summ.get('snr', 0):.1f}σ, "
                f"τ = {tau_ms:.2f} ms"

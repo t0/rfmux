@@ -11,6 +11,7 @@ from sqlalchemy.orm.collections import attribute_mapped_collection
 from . import hardware_map
 from .hardware_map import Boolean, HWMResource, HWMQuery
 
+import re
 import sqlalchemy
 import tuber
 
@@ -197,6 +198,44 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
             "I need serial or crate information."
         )
 
+    def index(self):
+        """A short, stable string naming this board, in the form 'crs0030'.
+
+        The identity of the board, not the route to it — which is why this
+        prefers the serial where ``tuber_hostname`` prefers the hostname. The
+        two answer different questions, and an explicit hostname that overrides
+        a serial for *connecting* does not make the board a different board.
+        The standard mock map carries both (``!CRS { serial: "0000", hostname:
+        "127.0.0.1" }``), and it should name itself after the serial that is
+        sitting right there.
+
+        A board with no serial is reachable — Periscope's "just type an IP"
+        path builds one (``tools/periscope/__main__.py:337``) — so the fallbacks
+        exist to keep this from rendering the word "None" into a dict key or a
+        filename. Each form says what identified it:
+
+            crs0030             a serial
+            crate001_slot3      a crate and slot
+            host127-0-0-1       a hostname, punctuation flattened to dashes
+        """
+
+        if self.serial:
+            return f"crs{self.serial}"
+
+        if self.slot and self.crate:
+            return f"crate{self.crate.serial}_slot{self.slot}"
+
+        if self.hostname:
+            flattened = re.sub(r"[^A-Za-z0-9]+", "-", self.hostname).strip("-")
+            return f"host{flattened}"
+
+        # Unreachable for a constructed CRS: __init__ goes through
+        # tuber_hostname, which raises on exactly this state.
+        raise NameError(
+            "Couldn't figure out an identifier for this board! "
+            "I need serial, crate or hostname information."
+        )
+
     async def resolve(self):
         await self.tuber_resolve()
 
@@ -224,9 +263,14 @@ class ReadoutModule(HWMResource):
         """
         A shorthand string representation for this readout module, in the form:
         'crs0030_rmod1'
+
+        Built from the board's own :meth:`CRS.index`, so a board with no serial
+        names itself by crate/slot or hostname rather than rendering "None".
+        The ``_rmod{N}`` suffix is constant across all of those forms, which is
+        the part anything grouping or parsing these should rely on.
         """
 
-        return "crs%s_rmod%d" % (self.crs.serial, self.module)
+        return f"{self.crs.index()}_rmod{self.module}"
 
     # Boilerplate
     _cls = Column(String, nullable=False)

@@ -1,312 +1,55 @@
 """
-Analysis functions for rfmux, including resonance fitting and IQ circle manipulation.
+The legacy dict-walking analysis surface for multisweep data.
+
+The resonance finder and the resonator fitters that used to live here have
+moved to :mod:`rfmux.tuning.find_resonances` and :mod:`rfmux.tuning.fits`.
+They are analysis over two arrays rather than board operations, so they belong
+with the other pure layers, and they are re-exported below so callers reaching
+for ``fitting.s21_skewed`` still find it.
+
+What is left in this module is the old *dict-walking* API — the functions that
+take a whole multisweep return and write their results back into it. Every one
+of them reads the pre-schema-2 contract: ``iq_complex``,
+``original_center_frequency``, integer keys. ``multisweep`` returns
+``iq_counts`` keyed by resonator name and has done since the sweep stopped
+doing anything but measure, so these work on files saved before that change and
+on nothing else.
+
+For sweeps taken since, use :func:`rfmux.tuning.fit_sweeps`, which reads
+``iq_counts`` and writes each model's results into the sweep entry's ``fits``
+subdict rather than flat beside the measurement.
 """
 
 import numpy as np
-from scipy.optimize import curve_fit
 import warnings
-from typing import Dict, Tuple, List, Optional, Union
-import pickle # Moved import pickle to top level
+from typing import Dict, Optional, Union
+import pickle
 
-def s21_skewed(f, f0, Qr, Qcre, Qcim, A):
-    """
-    Skewed Lorentzian model for S21 magnitude.
-    Based on hidfmux implementation.
+# Re-exported for callers that reach for them by attribute — Periscope does.
+# The implementations live in rfmux/tuning/fits.py.
+from ...tuning.fits import (
+    FitFailed,
+    center_resonance_iq_circle,
+    circle_fit_pratt,
+    fit_skewed,
+    s21_skewed,
+)
 
-    Uses soft penalty for near-unphysical parameters instead of hard cutoff.
-
-    Args:
-        f (np.ndarray): Frequency array (Hz).
-        f0 (float): Resonance frequency (Hz).
-        Qr (float): Resonator quality factor.
-        Qcre (float): Real part of complex coupling quality factor Qc.
-        Qcim (float): Imaginary part of complex coupling quality factor Qc.
-        A (float): Amplitude scaling factor.
-
-    Returns:
-        np.ndarray: Modelled S21 magnitude with soft penalty for unphysical parameters.
-    """
-    # Basic parameter validation
-    if Qcre <= 1e-9 or Qr <= 1e-9 or abs(f0) < 1e-12:
-        return np.full_like(f, np.inf)
-    
-    Qe = Qcre + 1j * Qcim
-    Qc_eff = abs(Qe)**2 / Qcre
-    
-    # Calculate soft penalty factor for near-unphysical parameters
-    # Allow parameters slightly below the hard boundary
-    penalty_factor = 1.0
-    if Qc_eff < Qr * 1.05:  # Within 5% of boundary
-        # Smooth penalty that increases as we approach unphysical regime
-        ratio = Qc_eff / Qr
-        if ratio < 0.5:  # Far into unphysical regime
-            return np.full_like(f, np.inf)
-        elif ratio < 1.0:  # Unphysical but not extreme
-            # Quadratic penalty that grows smoothly
-            penalty_factor = 1 + 100 * (1 - ratio)**2
-        else:  # Near boundary but physical (1.0 <= ratio < 1.05)
-            # Mild penalty to discourage but not prohibit
-            penalty_factor = 1 + 5 * (1.05 - ratio)**2
-    
-    # Calculate S21
-    x = (f - f0) / f0
-    with np.errstate(divide='ignore', invalid='ignore'):
-        s21_complex = A * (1 - (Qr / Qe) / (1 + 2j * Qr * x))
-    
-    # Apply penalty to magnitude
-    magnitude = np.abs(s21_complex) * penalty_factor
-    
-    # Handle any numerical issues
-    magnitude[~np.isfinite(magnitude)] = np.inf
-    
-    return magnitude
-
-def fit_skewed(freq, s21_iq, approxQr=1e4, normalize=True, fr_lim=None):
-    """
-    Fits the s21_skewed model to complex S21 data using scipy.optimize.curve_fit.
-    Based on hidfmux implementation.
-
-    Args:
-        freq (np.ndarray): Frequency array (Hz).
-        s21_iq (np.ndarray): Complex S21 array.
-        approxQr (float): Initial guess for Qr. Defaults to 1e4.
-        normalize (bool): Normalize s21_iq to its last point before fitting. Defaults to True.
-        fr_lim (float, optional): Fit fr only within +/- fr_lim Hz of the center frequency. Defaults to None (use full range).
-
-    Returns:
-        dict: Dictionary of fitted parameters ('fr', 'Qr', 'Qc', 'Qi', 'Qcre', 'Qcim', 'A')
-              and their errors ('_err'), or 'nan' string values on failure.
-    """
-    param_names = ['fr', 'Qr', 'Qc', 'Qi', 'Qcre', 'Qcim', 'A']
-    fit_dict = {}
-    bad_fit_flag = False
-
-    freq = np.asarray(freq)
-    s21_iq = np.asarray(s21_iq)
-
-    if len(freq) < 5: # Need sufficient points for fitting
-        warnings.warn("Skewed fit failed: Not enough data points.")
-        bad_fit_flag = True
-
-    # Normalize S21 data if requested and possible
-    s21_iq_norm = s21_iq
-    if normalize:
-        if len(s21_iq) > 0 and np.abs(s21_iq[-1]) > 1e-15:
-            s21_iq_norm = s21_iq / s21_iq[-1]
-        else:
-            # Cannot normalize if last point is zero or data is empty
-            warnings.warn("Could not normalize S21 data (last point near zero or data empty). Using unnormalized data for fit.")
-            # Proceed with unnormalized data, but the 'A' parameter might be less meaningful
-
-    s21_mag = np.abs(s21_iq_norm)
-
-    if not bad_fit_flag:
-        # Determine frequency bounds for fr fit
-        f_center = freq[len(freq)//2]
-        if fr_lim is not None:
-            fr_lbound = max(min(freq), f_center - fr_lim)
-            fr_ubound = min(max(freq), f_center + fr_lim)
-        else:
-            fr_lbound = min(freq)
-            fr_ubound = max(freq)
-
-        # Initial guess for fr is the minimum magnitude point within bounds
-        search_indices = np.where((freq >= fr_lbound) & (freq <= fr_ubound))[0]
-        if len(search_indices) > 0:
-             fr_guess_idx = search_indices[np.argmin(s21_mag[search_indices])]
-             fr_guess = freq[fr_guess_idx]
-        else:
-             fr_guess = f_center # Fallback if bounds are too narrow or no points within bounds
-
-        # Initial guesses and bounds for curve_fit
-        # p0 = [fr, Qr, Qcre, Qcim, A]
-        # Use Qcre = 1.5 * approxQr to ensure initial Qc > Qr
-        init = [fr_guess, approxQr, 1.5 * approxQr, 0., np.mean(s21_mag[search_indices]) if len(search_indices) > 0 else 1.0]
-        # Bounds: ([fr_low, Qr_low, Qcre_low, Qcim_low, A_low], [fr_high, Qr_high, Qcre_high, Qcim_high, A_high])
-        # Ensure Qcre lower bound > Qr to help maintain physical validity
-        bounds = ([fr_lbound, 1e2, 1.5e2, -np.inf, 0], [fr_ubound, 1e9, 1e9, np.inf, np.inf])
-
-        try:
-            # Fit the magnitude data
-            s21fitp, s21cov = curve_fit(s21_skewed, freq, s21_mag, p0=init, bounds=bounds, maxfev=5000) # Increased maxfev
-            # Check if covariance calculation was successful
-            if not np.all(np.isfinite(s21cov)):
-                 raise ValueError("Covariance matrix calculation failed (contains inf/nan).")
-            errs = np.sqrt(np.diag(s21cov)) # This can fail if cov is not positive definite
-
-            f0, Qr_fit = s21fitp[0:2]
-            Qe_re, Qe_im = s21fitp[2:4]
-            A_fit = s21fitp[4]
-            Qe = Qe_re + 1j * Qe_im
-
-            # Calculate derived Q values, handle potential division by zero or invalid results
-            # Ensure denominators are not zero and results are physical
-            if Qe_re > 1e-9 and Qr_fit > 1e-9 and abs(Qe)**2 / Qe_re >= Qr_fit: # Check physical validity
-                 Qc_fit = abs(Qe)**2 / Qe_re
-                 # Use np.errstate to prevent warnings/errors for 1/inf or 1/0
-                 with np.errstate(divide='ignore'):
-                      inv_Qr = 1.0 / Qr_fit
-                      inv_Qc = 1.0 / Qc_fit
-                      inv_Qi = inv_Qr - inv_Qc
-                      # Check if Qi would be negative or zero
-                      if inv_Qi <= 1e-15: # Allow for small numerical errors near Qi=inf
-                           Qi_fit = np.inf
-                      else:
-                           Qi_fit = 1.0 / inv_Qi
-
-                 if not np.isfinite(Qi_fit): Qi_fit = np.inf # Handle infinite Qi explicitly
-            else: # Unphysical result from fit
-                 Qc_fit = np.nan
-                 Qi_fit = np.nan
-                 bad_fit_flag = True # Mark as bad if derived Qs are unphysical
-
-            param_vals = [f0, Qr_fit, Qc_fit, Qi_fit, Qe_re, Qe_im, A_fit]
-
-            # Calculate errors, handle potential issues with derived values
-            errf0, errQr, errQere, errQeim, errA = errs[[0, 1, 2, 3, 4]]
-            try:
-                 # Error propagation for Qc, Qi is complex and sensitive.
-                 # Providing NaN as a placeholder, as simple propagation can be misleading.
-                 # Proper error requires Jacobian/delta method or MC simulation.
-                 errQc = np.nan
-                 errQi = np.nan
-            except Exception:
-                 errQc, errQi = np.nan, np.nan
-
-            param_errs = [errf0, errQr, errQc, errQi, errQere, errQeim, errA]
-
-            # Final check for non-finite results in primary fitted parameters
-            if not np.all(np.isfinite(s21fitp)): bad_fit_flag = True
-            # Check derived Qs as well
-            if not np.isfinite(Qc_fit) or not np.isfinite(Qi_fit):
-                 # Allow infinite Qi, but NaN Qc or NaN Qi (other than inf) is bad
-                 if not (np.isinf(Qi_fit) and np.isfinite(Qc_fit)):
-                      bad_fit_flag = True
-
-
-        except (RuntimeError, ValueError) as e:
-            # Catch fit failures (convergence, bounds, etc.) or cov issues
-            warnings.warn(f"Skewed fit failed for resonance near {fr_guess*1e-6:.3f} MHz: {e}")
-            bad_fit_flag = True
-        except Exception as e: # Catch other potential errors like linalg errors in curve_fit
-            warnings.warn(f"Skewed fit failed near {fr_guess*1e-6:.3f} MHz with unexpected error: {e}")
-            bad_fit_flag = True
-
-    # Populate dictionary with results or 'nan' strings
-    if bad_fit_flag:
-        for name in param_names:
-            fit_dict[name] = 'nan'
-            fit_dict[f'{name}_err'] = 'nan'
-    else:
-        for i, name in enumerate(param_names):
-            # Store finite numbers, replace inf with 'inf' string for consistency if needed, nan with 'nan'
-            val = param_vals[i]
-            err = param_errs[i]
-            fit_dict[name] = val if np.isfinite(val) else ('inf' if np.isinf(val) else 'nan')
-            fit_dict[f'{name}_err'] = err if np.isfinite(err) else 'nan' # Errors usually shouldn't be inf
-
-    return fit_dict
-
-
-# Circle fitting using Pratt's method (hyper-LMS)
-# Adapted from various online sources, e.g., based on Chernov's implementation notes
-def circle_fit_pratt(x, y):
-    """
-    Fits a circle to a set of points using Pratt's method (hyper-LMS).
-
-    Args:
-        x (np.ndarray): Real components (I).
-        y (np.ndarray): Imaginary components (Q).
-
-    Returns:
-        tuple: (xc, yc, R) - Center coordinates and radius, or (None, None, None) on failure.
-    """
-    n = len(x)
-    if n < 3:
-        warnings.warn("Circle fit failed: Need at least 3 points.")
-        return None, None, None
-
-    # Calculate moments
-    x = np.asarray(x)
-    y = np.asarray(y)
-    x_mean = np.mean(x)
-    y_mean = np.mean(y)
-    x_c = x - x_mean
-    y_c = y - y_mean
-
-    Suu = np.sum(x_c**2)
-    Svv = np.sum(y_c**2)
-    Suv = np.sum(x_c * y_c)
-    Suuu = np.sum(x_c**3)
-    Svvv = np.sum(y_c**3)
-    Suuv = np.sum(x_c**2 * y_c)
-    Suvv = np.sum(x_c * y_c**2)
-
-    # Form the linear system matrix B and vector C
-    B = np.array([
-        [Suu, Suv],
-        [Suv, Svv]
-    ])
-    C = np.array([
-        0.5 * (Suuu + Suvv),
-        0.5 * (Svvv + Suuv)
-    ])
-
-    # Solve B * [xc, yc]^T = C for the center relative to the mean
-    try:
-        # Use pseudo-inverse for robustness if B is near singular
-        B_inv = np.linalg.pinv(B)
-        xc_rel, yc_rel = B_inv @ C
-    except np.linalg.LinAlgError:
-        warnings.warn("Circle fit failed: Linear system solution failed.")
-        return None, None, None
-
-    # Calculate absolute center coordinates
-    xc = xc_rel + x_mean
-    yc = yc_rel + y_mean
-
-    # Calculate radius
-    # R^2 = xc_rel^2 + yc_rel^2 + (Suu + Svv)/n
-    R_sq = xc_rel**2 + yc_rel**2 + (Suu + Svv) / n
-    if R_sq < 0:
-        # This can happen with noisy data or poor fits
-        warnings.warn("Circle fit failed: Calculated radius squared is negative.")
-        return None, None, None
-    R = np.sqrt(R_sq)
-
-    # Check for NaN results which indicate failure
-    if not (np.isfinite(xc) and np.isfinite(yc) and np.isfinite(R)):
-         warnings.warn("Circle fit failed: Result contains non-finite values.")
-         return None, None, None
-
-    return xc, yc, R
-
-
-def center_resonance_iq_circle(s21_iq):
-    """
-    Centers the resonance loop in the IQ plane by fitting a circle
-    and subtracting its center.
-
-    Args:
-        s21_iq (np.ndarray): Complex S21 array.
-
-    Returns:
-        np.ndarray: Centered complex S21 array, or the original array if circle fitting fails.
-    """
-    if len(s21_iq) < 3: # Need at least 3 points to fit a circle
-         warnings.warn("Cannot center circle: less than 3 data points.")
-         return s21_iq # Return original data
-
-    xc, yc, R = circle_fit_pratt(s21_iq.real, s21_iq.imag)
-
-    if xc is not None and yc is not None:
-        # Fit successful, subtract the center
-        iq_centered = s21_iq - (xc + 1j * yc)
-        return iq_centered
-    else:
-        # Circle fit failed, return original data
-        warnings.warn("Circle centering failed; returning original IQ data.")
-        return s21_iq
+# Listed so a linter reports the imports above as re-exports rather than as
+# five unused names, and so this module's surface is stated in one place.
+__all__ = [
+    # Re-exported from rfmux.tuning.fits.
+    "FitFailed",
+    "center_resonance_iq_circle",
+    "circle_fit_pratt",
+    "fit_skewed",
+    "s21_skewed",
+    # Still implemented here.
+    "identify_bifurcation",
+    "find_resonances",
+    "fit_skewed_multisweep",
+    "add_bifurcation_flags_to_multisweep_data",
+]
 
 
 def identify_bifurcation(iq_complex: np.ndarray, threshold_factor: float = 5.0, min_peak_prominence_factor: float = 0.5, min_points_for_detection: int = 10) -> bool:
@@ -485,6 +228,38 @@ def find_resonances(
     }
 
 
+
+def _legacy_skewed_params(
+    frequencies, iq_complex, approx_Q_for_fit, normalize_fit, fr_lim_fit
+) -> dict:
+    """The dict ``fit_skewed`` used to return, rebuilt from the one it returns now.
+
+    It raises :class:`~rfmux.tuning.fits.FitFailed` with a reason these days
+    rather than filling all fourteen fields with the string ``'nan'``. The
+    deprecated walker below is the only thing that still reads the old shape,
+    so the translation lives with it rather than in the new module.
+    """
+    names = ("fr", "Qr", "Qc", "Qi", "Qcre", "Qcim", "A")
+    try:
+        params, errors = fit_skewed(
+            frequencies,
+            iq_complex,
+            approx_Qr=approx_Q_for_fit,
+            normalize=normalize_fit,
+            fr_limit_hz=fr_lim_fit,
+        )
+    except FitFailed as exc:
+        warnings.warn(f"Skewed fit failed: {exc}")
+        return {key: "nan" for name in names for key in (name, f"{name}_err")}
+
+    legacy = {}
+    for name in names:
+        legacy[name] = params[name]
+        # Qc and Qi are derived rather than fitted, so they have no error.
+        legacy[f"{name}_err"] = errors.get(name, "nan")
+    return legacy
+
+
 def fit_skewed_multisweep(
     multisweep_data: dict | list[dict],
     approx_Q_for_fit: float = 1e4,
@@ -494,8 +269,18 @@ def fit_skewed_multisweep(
     fr_lim_fit: float | None = None
 ):
     """
-    Processes the output of the multisweep measurement function to add fitting
-    and IQ centering results.
+    Deprecated. Use :func:`rfmux.tuning.fit_sweeps` instead.
+
+    Reads ``iq_complex`` and ``original_center_frequency`` off each entry and
+    expects integer keys — the contract multisweep had before it stopped doing
+    anything but measure. It works on data saved under that contract and
+    nothing newer.
+
+    It also writes flat: ``fit_params`` and ``iq_centered`` land beside the
+    measurement they describe, where the replacement puts them under ``fits``
+    keyed by model. And it stores the centred trace, where the replacement
+    stores the circle's centre and rebuilds the trace on request — one complex
+    number instead of an N-point copy of data the entry already has.
 
     Args:
         multisweep_data (dict | list[dict]): The data returned by the
@@ -518,17 +303,43 @@ def fit_skewed_multisweep(
         dict | list[dict]: The input `multisweep_data` with 'fit_params' and 'iq_centered'
                            added to each resonance data dictionary if the respective operations were performed.
     """
+    warnings.warn(
+        "fitting.fit_skewed_multisweep is deprecated; use "
+        "rfmux.tuning.fit_sweeps, which reads iq_counts and writes its results "
+        "into each sweep entry's 'fits' subdict.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _fit_skewed_multisweep(
+        multisweep_data,
+        approx_Q_for_fit,
+        fit_resonances,
+        center_iq_circle,
+        normalize_fit,
+        fr_lim_fit,
+    )
+
+
+def _fit_skewed_multisweep(
+    multisweep_data,
+    approx_Q_for_fit,
+    fit_resonances,
+    center_iq_circle,
+    normalize_fit,
+    fr_lim_fit,
+):
+    """:func:`fit_skewed_multisweep` without the warning, so recursing is quiet."""
     # Handle multi-module case (list of dictionaries)
     if isinstance(multisweep_data, list):
-        return [fit_skewed_multisweep(
+        return [_fit_skewed_multisweep(
             module_data, approx_Q_for_fit, fit_resonances, center_iq_circle, normalize_fit, fr_lim_fit
         ) for module_data in multisweep_data]
-    
+
     # Handle single module case (dictionary)
     if not isinstance(multisweep_data, dict):
         warnings.warn("fit_skewed_multisweep: input is not a dictionary or list. Returning as is.")
         return multisweep_data
-    
+
     # Process each resonance in the multisweep data
     for res_key, resonance_data in multisweep_data.items():
         if not isinstance(resonance_data, dict):
@@ -543,8 +354,7 @@ def fit_skewed_multisweep(
         frequencies = resonance_data.get('frequencies')
         iq_complex = resonance_data.get('iq_complex')
         original_cf = resonance_data.get('original_center_frequency')
-        bias_freq = resonance_data.get('bias_frequency', original_cf)
-        
+
         if original_cf is None:
             warnings.warn(f"fit_skewed_multisweep: 'original_center_frequency' missing for index {res_key}. Skipping.")
             continue
@@ -559,9 +369,6 @@ def fit_skewed_multisweep(
 
         if fit_resonances:
             try:
-                # Use the bias frequency for fitting constraints
-                fit_center_freq = bias_freq if bias_freq is not None else original_cf
-                
                 # Set fr_lim based on the sweep span if not provided and we have frequency data
                 if fr_lim_fit is None and len(frequencies) > 1:
                     freq_span = frequencies[-1] - frequencies[0]
@@ -570,22 +377,10 @@ def fit_skewed_multisweep(
                 else:
                     auto_fr_lim = fr_lim_fit
 
-                fit_params_result = fit_skewed(
-                    frequencies, iq_complex,
-                    approxQr=approx_Q_for_fit,
-                    normalize=normalize_fit,
-                    fr_lim=auto_fr_lim
+                resonance_data['fit_params'] = _legacy_skewed_params(
+                    frequencies, iq_complex, approx_Q_for_fit, normalize_fit, auto_fr_lim
                 )
-                resonance_data['fit_params'] = fit_params_result
-                
-                # Log successful fit for debugging
-                if fit_params_result.get('fr') != 'nan':
-                    fitted_freq = fit_params_result.get('fr', 'nan')
-                    fitted_Qr = fit_params_result.get('Qr', 'nan')
-                    # if fitted_freq != 'nan' and fitted_Qr != 'nan':
-                    #     print(f"Fitted resonance: original_cf={original_cf*1e-6:.3f} MHz, "
-                    #           f"fitted_fr={fitted_freq*1e-6:.3f} MHz, Qr={fitted_Qr:.0f}")
-                        
+
             except Exception as e:
                 warnings.warn(f"Fitting failed for resonance at {original_cf*1e-6:.3f} MHz during post-processing: {e}")
                 # resonance_data['fit_params'] remains None
@@ -593,356 +388,14 @@ def fit_skewed_multisweep(
         if center_iq_circle:
             try:
                 # Always center the current iq_complex data
-                iq_centered_result = center_resonance_iq_circle(iq_complex)
-                resonance_data['iq_centered'] = iq_centered_result
-                
-                # Provide some feedback on centering
-                if iq_centered_result is not None and len(iq_centered_result) > 0:
-                    # Calculate how much the centering moved the data
-                    original_mean = np.mean(iq_complex)
-                    centered_mean = np.mean(iq_centered_result)
-                    shift_magnitude = abs(original_mean - centered_mean)
-                    # if shift_magnitude > 1e-6:  # Only log if significant shift
-                    #     print(f"IQ centering applied to {original_cf*1e-6:.3f} MHz: "
-                    #           f"shifted by {shift_magnitude:.6f} units")
-                        
+                resonance_data['iq_centered'] = center_resonance_iq_circle(iq_complex)
+
             except Exception as e:
                 warnings.warn(f"IQ centering failed for resonance at {original_cf*1e-6:.3f} MHz during post-processing: {e}")
                 # resonance_data['iq_centered'] remains None
-                
+
     return multisweep_data
 
-
-# --- Testing Functions ---
-
-def generate_test_resonator_skewed(
-    fr: float = 100e6,
-    Qr: float = 1e4,
-    Qc: float = 2e4,
-    phi: float = 0.1,
-    n_points: int = 201,
-    span_factor: float = 6.0,
-    noise_level: float = 0.01,
-    gain_mag: float = 0.8,
-    gain_phase: float = 0.2
-):
-    """
-    Generate synthetic linear resonator data for testing skewed Lorentzian fitting.
-    
-    Parameters
-    ----------
-    fr : float
-        Resonance frequency in Hz
-    Qr : float 
-        Resonator quality factor (loaded Q)
-    Qc : float
-        Coupling quality factor  
-    phi : float
-        Impedance mismatch phase
-    n_points : int
-        Number of frequency points
-    span_factor : float
-        Frequency span as multiple of fr/Qr
-    noise_level : float
-        Fractional noise level
-    gain_mag : float
-        Overall gain magnitude
-    gain_phase : float
-        Overall gain phase in radians
-        
-    Returns
-    -------
-    frequencies : np.ndarray
-        Frequency array
-    iq_data : np.ndarray
-        Complex S21 data with gain and noise
-    true_params : dict
-        True parameter values
-    """
-    # Generate frequency array
-    span = span_factor * fr / Qr
-    frequencies = np.linspace(fr - span/2, fr + span/2, n_points)
-    
-    # Calculate derived parameters
-    Qcre = Qc * np.cos(phi)
-    Qcim = Qc * np.sin(phi)
-    amp = gain_mag
-    
-    # For synthetic data, use a simple model that generates physically valid data
-    # without the constraints of the s21_skewed function
-    x = (frequencies - fr) / fr
-    
-    # Generate complex S21 directly using standard resonator model
-    # S21 = A * (1 - (Qr/Qc) * exp(j*phi) / (1 + 2j*Qr*x))
-    Qc_complex = Qcre + 1j * Qcim
-    resonator_response = 1 - (Qr / Qc_complex) / (1 + 2j * Qr * x)
-    
-    # Apply gain
-    s21_ideal = amp * resonator_response * np.exp(1j * gain_phase)
-    
-    # Add noise
-    noise_real = np.random.normal(0, noise_level * gain_mag, n_points)
-    noise_imag = np.random.normal(0, noise_level * gain_mag, n_points)
-    iq_data = s21_ideal + noise_real + 1j * noise_imag
-    
-    # Calculate Qi from Qr and Qc
-    Qi = 1 / (1/Qr - 1/Qc)
-    
-    true_params = {
-        'fr': fr,
-        'Qr': Qr,
-        'Qc': Qc,
-        'Qi': Qi,
-        'Qcre': Qcre,
-        'Qcim': Qcim,
-        'A': amp,
-        'phi': phi,
-        'gain_mag': gain_mag,
-        'gain_phase': gain_phase
-    }
-    
-    return frequencies, iq_data, true_params
-
-
-def test_fit_skewed():
-    """Test the skewed Lorentzian fitting function."""
-    print("\nTesting skewed Lorentzian fitting...")
-    print("=" * 50)
-    
-    # Test 1: High Q resonator
-    print("\nTest 1: High Q resonator")
-    f, z, true_params = generate_test_resonator_skewed(
-        fr=150e6, Qr=10000, Qc=20000, phi=0.05,
-        noise_level=0.005, gain_mag=0.9
-    )
-    
-    # Fit the data
-    fit_result = fit_skewed(f, z, approxQr=1e4, normalize=True)
-    
-    print(f"\nTrue vs Fitted parameters:")
-    fr_fit = fit_result.get('fr', 'nan')
-    Qr_fit = fit_result.get('Qr', 'nan')
-    Qc_fit = fit_result.get('Qc', 'nan')
-    Qi_fit = fit_result.get('Qi', 'nan')
-    
-    fr_fit_str = f"{fr_fit*1e-6:.3f} MHz" if isinstance(fr_fit, (int, float)) else str(fr_fit)
-    Qr_fit_str = f"{Qr_fit:.0f}" if isinstance(Qr_fit, (int, float)) else str(Qr_fit)
-    Qc_fit_str = f"{Qc_fit:.0f}" if isinstance(Qc_fit, (int, float)) else str(Qc_fit)
-    Qi_fit_str = f"{Qi_fit:.0f}" if isinstance(Qi_fit, (int, float)) else str(Qi_fit)
-    
-    print(f"  fr: {true_params['fr']*1e-6:.3f} MHz vs {fr_fit_str}")
-    print(f"  Qr: {true_params['Qr']:.0f} vs {Qr_fit_str}")
-    print(f"  Qc: {true_params['Qc']:.0f} vs {Qc_fit_str}")
-    print(f"  Qi: {true_params['Qi']:.0f} vs {Qi_fit_str}")
-    
-    # Test 2: Low Q resonator
-    print("\n" + "="*50)
-    print("\nTest 2: Low Q resonator")
-    f, z, true_params = generate_test_resonator_skewed(
-        fr=200e6, Qr=1000, Qc=2000, phi=-0.1,
-        noise_level=0.01, gain_mag=1.1
-    )
-    
-    fit_result = fit_skewed(f, z, approxQr=1e3, normalize=True)
-    
-    print(f"\nTrue vs Fitted parameters:")
-    fr_fit = fit_result.get('fr', 'nan')
-    Qr_fit = fit_result.get('Qr', 'nan')
-    Qc_fit = fit_result.get('Qc', 'nan')
-    
-    fr_fit_str = f"{fr_fit*1e-6:.3f} MHz" if isinstance(fr_fit, (int, float)) else str(fr_fit)
-    Qr_fit_str = f"{Qr_fit:.0f}" if isinstance(Qr_fit, (int, float)) else str(Qr_fit)
-    Qc_fit_str = f"{Qc_fit:.0f}" if isinstance(Qc_fit, (int, float)) else str(Qc_fit)
-    
-    print(f"  fr: {true_params['fr']*1e-6:.3f} MHz vs {fr_fit_str}")
-    print(f"  Qr: {true_params['Qr']:.0f} vs {Qr_fit_str}")
-    print(f"  Qc: {true_params['Qc']:.0f} vs {Qc_fit_str}")
-
-
-def test_circle_fitting():
-    """Test circle fitting and IQ centering functions."""
-    print("\nTesting circle fitting...")
-    print("=" * 50)
-    
-    # Generate a circle in IQ plane with offset
-    n_points = 100
-    theta = np.linspace(0, 2*np.pi, n_points)
-    radius = 0.3
-    center_x = 0.5
-    center_y = -0.2
-    
-    # Ideal circle
-    x_ideal = center_x + radius * np.cos(theta)
-    y_ideal = center_y + radius * np.sin(theta)
-    
-    # Add noise
-    noise_level = 0.02
-    x_noisy = x_ideal + np.random.normal(0, noise_level, n_points)
-    y_noisy = y_ideal + np.random.normal(0, noise_level, n_points)
-    
-    # Fit circle
-    xc_fit, yc_fit, r_fit = circle_fit_pratt(x_noisy, y_noisy)
-    
-    print(f"\nTrue vs Fitted circle parameters:")
-    xc_str = f"{xc_fit:.3f}" if xc_fit is not None else "None"
-    yc_str = f"{yc_fit:.3f}" if yc_fit is not None else "None"
-    r_str = f"{r_fit:.3f}" if r_fit is not None else "None"
-    
-    print(f"  Center X: {center_x:.3f} vs {xc_str}")
-    print(f"  Center Y: {center_y:.3f} vs {yc_str}")
-    print(f"  Radius: {radius:.3f} vs {r_str}")
-    
-    # Test IQ centering
-    iq_data = x_noisy + 1j * y_noisy
-    iq_centered = center_resonance_iq_circle(iq_data)
-    
-    if iq_centered is not None:
-        center_original = np.mean(iq_data)
-        center_after = np.mean(iq_centered)
-        print(f"\nIQ Centering:")
-        print(f"  Original center: {center_original:.3f}")
-        print(f"  Center after: {center_after:.3f}")
-        print(f"  Improvement: {abs(center_after) / abs(center_original):.1%} reduction")
-
-
-def test_find_resonances():
-    """Test resonance finding function."""
-    print("\nTesting resonance finding...")
-    print("=" * 50)
-    
-    # Generate multiple resonances
-    freq_start = 100e6
-    freq_stop = 500e6
-    n_points = 2000  # More points for better resolution
-    frequencies = np.linspace(freq_start, freq_stop, n_points)
-    
-    # Create multiple resonances with good separation
-    resonance_freqs = [150e6, 250e6, 350e6, 450e6]
-    resonance_Qrs = [5000, 8000, 6000, 7000]
-    
-    # Generate S21 data with properly deep resonances
-    # Apply resonances individually to avoid cumulative baseline effects
-    s21 = np.ones(n_points, dtype=complex)
-    
-    for i, (fr, Qr) in enumerate(zip(resonance_freqs, resonance_Qrs)):
-        # Use critical coupling (Qc = Qr) for deep dips
-        # This gives theoretically infinite dB dips at resonance
-        # But we'll limit it to avoid numerical issues
-        Qc = Qr * 1.01  # Just slightly undercoupled for ~40 dB dips
-        x = (frequencies - fr) / fr
-        
-        # Standard resonator model
-        resonator_response = 1 - (Qr / Qc) / (1 + 2j * Qr * x)
-        s21 *= resonator_response
-    
-    # Apply overall cable loss
-    s21 *= 0.9  # -0.9 dB cable loss
-    
-    # Add realistic noise
-    noise = 0.0005 * (np.random.normal(0, 1, n_points) + 1j * np.random.normal(0, 1, n_points))
-    s21 += noise
-    
-    # Find resonances with slightly relaxed parameters for robustness
-    result = find_resonances(
-        frequencies, s21,
-        expected_resonances=4,
-        min_dip_depth_db=0.5,  # Slightly relaxed for test robustness
-        min_Q=3000,  # Slightly relaxed
-        max_Q=2e7
-    )
-    
-    print(f"\nExpected {len(resonance_freqs)} resonances:")
-    for i, fr in enumerate(resonance_freqs):
-        print(f"  {i+1}: {fr*1e-6:.1f} MHz")
-    
-    print(f"\nFound {len(result['resonance_frequencies'])} resonances:")
-    found_freqs = result['resonance_frequencies']
-    
-    # Check if we found the right resonances (within 1 MHz tolerance)
-    matches = 0
-    for expected_fr in resonance_freqs:
-        for found_fr in found_freqs:
-            if abs(expected_fr - found_fr) < 1e6:  # 1 MHz tolerance
-                matches += 1
-                break
-    
-    if matches == len(resonance_freqs):
-        print(f"\n✓ All {len(resonance_freqs)} expected resonances were found!")
-    else:
-        print(f"\n✗ Only {matches} out of {len(resonance_freqs)} expected resonances were found.")
-    
-    # Show details
-    for i, res in enumerate(result['resonances_details']):
-        print(f"  {i+1}: {res['frequency']*1e-6:.1f} MHz, Q≈{res['q_estimated']:.0f}, depth={res['prominence_db']:.1f} dB")
-
-
-def test_fit_skewed_multisweep():
-    """Test the multisweep fitting function."""
-    print("\nTesting fit_skewed_multisweep...")
-    print("=" * 50)
-    
-    # Create synthetic multisweep data
-    test_multisweep_data = {}
-    
-    # Add three resonances
-    for i, (fr, Qr, Qc) in enumerate([
-        (100e6, 5000, 10000),
-        (150e6, 8000, 16000),
-        (200e6, 10000, 20000)
-    ]):
-        f, z, _ = generate_test_resonator_skewed(
-            fr=fr, Qr=Qr, Qc=Qc, phi=0.05,
-            noise_level=0.01, gain_mag=0.9
-        )
-        
-        # Simulate multisweep output format
-        test_multisweep_data[fr] = {
-            'frequencies': f,
-            'iq_complex': z,
-            'original_center_frequency': fr,
-            'recalculation_method_applied': 'none',
-            'key_frequency_is_recalculated': False,
-            'rotation_tod': None,
-            'applied_rotation_degrees': 0.0,
-            'sweep_direction': 'upward'
-        }
-    
-    # Process with fitting
-    fitted_data = fit_skewed_multisweep(
-        test_multisweep_data,
-        approx_Q_for_fit=1e4,
-        fit_resonances=True,
-        center_iq_circle=True
-    )
-    
-    print("\nFitting results:")
-    for cf, data in fitted_data.items():
-        if data['fit_params'] and data['fit_params'].get('fr') != 'nan':
-            print(f"\n  Resonance at {cf*1e-6:.0f} MHz:")
-            print(f"    Fitted fr: {data['fit_params']['fr']*1e-6:.3f} MHz")
-            print(f"    Qr: {data['fit_params']['Qr']:.0f}")
-            print(f"    Qc: {data['fit_params']['Qc']:.0f}")
-            print(f"    Qi: {data['fit_params']['Qi']:.0f}")
-            print(f"    IQ centered: {'Yes' if data['iq_centered'] is not None else 'No'}")
-
-
-def run_all_tests():
-    """Run all test functions."""
-    print("Running all fitting.py tests...")
-    print("="*60)
-    
-    test_fit_skewed()
-    test_circle_fitting()
-    test_find_resonances()
-    test_fit_skewed_multisweep()
-    
-    print("\n" + "="*60)
-    print("All tests completed!")
-
-
-# Run tests if executed directly
-if __name__ == "__main__":
-    run_all_tests()
 
 def add_bifurcation_flags_to_multisweep_data(
     pickle_filepath_or_data: Union[str, Dict], 

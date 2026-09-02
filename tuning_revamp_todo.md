@@ -110,8 +110,9 @@ back *for*:
    the next step, decided by whatever analysis found the dip — not a
    `bias_frequency` reported out of a sweep. The bias frequency lives in the
    catalog's `BiasPoint`.
-2. **df calibration**, from the fitting layer that has yet to be written, off
-   the sweep it was fit to.
+2. **df calibration**, off the sweep it was fit to. The fitting layer it comes
+   from now exists — `rfmux/tuning/fits.py` — so this is unblocked; see the
+   fitting entry below.
 
 ### Consumers still reading the old contract
 
@@ -124,10 +125,12 @@ loudly, so check them off when their rewrite lands:
   `crs.multisweep`; `app_runtime.py:2365` builds the same pair. Both are now a
   `TypeError`. `multisweep_dialog.py` has the checkbox and combo that produce
   them, and `multisweep_panel.py` plots `iq_complex`. Part of step 5.
-* **The legacy analysis stack** — `fitting.fit_skewed_multisweep`,
-  `fitting_nonlinear.fit_nonlinear_iq_multisweep` and `bias_kids` all read
-  `iq_complex` and `bias_frequency` off a multisweep entry. They are being
-  replaced rather than ported, so they were left alone.
+* **The legacy analysis stack** — `fitting.fit_skewed_multisweep` and
+  `fitting_nonlinear.fit_nonlinear_iq_multisweep` have been replaced by
+  `rfmux/tuning/fits.py` and now carry a `DeprecationWarning`; they still read
+  `iq_complex`, so they work on pre-schema-2 pickles and nothing newer. See the
+  fitting entry below for what is left. `bias_kids` still reads `iq_complex`
+  and `bias_frequency` and has not been touched.
 * **`reference-notebooks/Demos/simplified_tuning_flow.{py,md}`** passes the
   removed kwargs and then indexes results by integer, which the catalog revamp
   had already broken. `test/algorithms/test_measurement_flow.py` keeps passing
@@ -175,14 +178,43 @@ through it. Once both move, the shim and everything below it goes.
    `{'resonance_frequencies': …, 'resonances_details': …}` dicts in
    `test/algorithms/test_measurement_flow.py` (lines 71, 124, 250, 320).
 
-## `fitting.test_find_resonances` is dead
+## Retire the legacy fit walkers
 
-`algorithms/measurement/fitting.py:862`. It plants four resonators of width
-~30 kHz on a 200 kHz grid, so each dip is a fraction of a sample and the finder
-returns nothing — it reports "0 out of 4" and `print`s a ✗ instead of asserting,
-which is why it went unnoticed. It behaves identically on the pre-revamp code,
-so this is not a regression. Delete it with the shim, or rebuild it at sampling
-that resolves a dip (`test/tuning/test_find_resonances.py` does).
+`rfmux/tuning/fits.py` is the fitting layer. It fits sweeps that already exist,
+by hand, and writes each model's results into the sweep entry's `fits` subdict
+keyed by model — `skewed`, `nonlinear`, `circle`. The per-trace maths moved
+there wholesale; `algorithms/measurement/fitting.py` and `fitting_nonlinear.py`
+re-export it and keep only their old dict-walking API, now deprecated. Also
+deleted on the way past: the ad-hoc `test_*` / `run_all_tests` functions in both
+modules, including the dead `fitting.test_find_resonances` that used to have its
+own entry here — it planted 30 kHz dips on a 200 kHz grid and `print`ed a ✗
+instead of asserting. `test/tuning/test_fits.py` covers the replacement.
+
+What is left:
+
+1. **Periscope.** `MultisweepTask._apply_fitting_analysis`
+   (`tools/periscope/tasks.py:818`) fits inline during the sweep, through the
+   deprecated walkers, and writes flat keys that `detector_digest_panel`,
+   `parameter_histograms_panel` and `multisweep_dialog` all read. It becomes a
+   call to `fit_sweeps` on a finished multisweep, on a button rather than on
+   every sweep — `fit_sweeps` takes a `progress_callback(completed, total)` for
+   the progress UI. The panels then read `entry["fits"][model]["params"]`, and
+   the model curves they cache come from `skewed_model_magnitude` /
+   `nonlinear_model_iq` instead of a stored array. Part of step 5.
+2. **df calibration**, which §11 of the design doc wants off the fit — the
+   piece `multisweep` gave up when it stopped calibrating on the way past.
+   Nothing in `fits.py` computes it yet.
+3. **`add_bifurcation_flags_to_multisweep_data`** and `identify_bifurcation`
+   (`algorithms/measurement/fitting.py`) were left where they are: they are
+   sweep analysis rather than fitting, and `identify_bifurcation` is what
+   Periscope calls today. Note the nonlinear fit's `a` answers the same
+   question better — bifurcation is at `a ≈ 0.77` — so the flag may not survive
+   the rewire at all.
+4. **A flag on `multiamp_multisweep`** to fit as it goes. Deliberately not
+   built: the driver measures, and a caller who wants the ladder fitted calls
+   `fit_sweeps` on what came back. If it is ever added it should take the
+   fitting arguments and hand them straight over, so there is one fitter and
+   not two.
 
 ## Decide whether the width window earns its keep at real sampling
 

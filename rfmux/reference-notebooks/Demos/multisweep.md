@@ -865,8 +865,10 @@ except ValueError as e:
 - **Choosing the operating amplitude.** Iterating over amplitudes gives you the
   data to see where each detector bifurcates; deciding which step to bias at, and
   writing that back into the catalog, is `find_bias_points` and is not ported yet.
-- **Fitting.** It consumes multisweep output, and is the other thing that will
-  write results back into the catalog.
+- **Fitting.** Not missing any more — `rfmux.tuning.fit_sweeps` takes what
+  `multiamp_multisweep` returned and writes each model's answers into the sweep
+  entry it fitted, under `fits`. `fitting_resonators.md` is the notebook.
+  Writing the results back into the *catalog* is still to come.
 - **Saving to disk.** `pickle.dump` on the returned dict works today — it is
   plain builtins and ndarrays throughout — but a proper `store.py` with a file
   layout is still to come.

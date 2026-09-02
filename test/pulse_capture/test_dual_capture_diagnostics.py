@@ -135,18 +135,26 @@ def _task_with_pfb(active):
     return t, errors, calls
 
 
-@pytest.mark.parametrize("active, ok", [
-    ([1, 2], True), ([2, 1], True), (None, False), ([], False),
-    ([1], False), ([1, 2, 3], False)])
-def test_capture_uses_the_streamer_as_configured(active, ok):
+@pytest.mark.parametrize("active, wanted, ok", [
+    ([1, 2], [1, 2], True), ([2, 1], [1, 2], True), (None, [1, 2], False),
+    ([], [1, 2], False), ([1], [1, 2], False), ([1, 2, 3], [1, 2], False),
+    (1, [1], True), (2, [1], False)])
+def test_capture_uses_the_streamer_as_configured(active, wanted, ok):
     """The capture reads what the board streams and never sets it: the
-    streamed channel set must be the captured set, in any order."""
+    streamed channel set must be the captured set, in any order.  The
+    board reports a single channel as a bare integer."""
     t, errors, calls = _task_with_pfb(active)
-    problem = asyncio.run(t._pfb_mismatch([1, 2]))
+    problem = asyncio.run(t._pfb_mismatch(wanted))
     assert (problem is None) is ok
     if not ok:
         assert "Streamer Configuration" in problem
     assert calls == []
+
+
+def test_an_unreadable_streamer_report_is_named():
+    t, errors, calls = _task_with_pfb(object())
+    problem = asyncio.run(t._pfb_mismatch([1]))
+    assert problem and "get_pfb_streamer" in problem
 
 
 def test_a_mode_the_streamer_cannot_feed_fails_before_running(monkeypatch):

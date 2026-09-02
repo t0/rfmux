@@ -279,10 +279,18 @@ class PulseCaptureTask(QtCore.QThread):
         board is streaming.  PFB packet slots are positional, so the
         streamed channel set must be the captured set exactly.
         """
-        active = await self.crs.get_pfb_streamer(module=self.module)
+        raw = await self.crs.get_pfb_streamer(module=self.module)
+        active = raw
         if isinstance(active, dict):
             active = active.get("channel", active.get("channels"))
-        active = [int(c) for c in (active or [])]
+        if isinstance(active, (int, float)):     # one channel, as the board reports it
+            active = [active]
+        try:
+            active = [int(c) for c in (active or [])]
+        except TypeError:
+            return (f"get_pfb_streamer(module={self.module}) returned "
+                    f"{raw!r}, which this capture cannot read as a "
+                    "channel list.")
         if set(active) == set(channels):
             return None
         have = (f"streaming channels {active}" if active else "off")

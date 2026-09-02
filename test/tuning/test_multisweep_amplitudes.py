@@ -16,9 +16,11 @@ import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.tuning.multisweep_amplitudes import (
-    RESULTS_SCHEMA_VERSION,
     AmplitudeSchedule,
     AmplitudeStep,
+)
+from rfmux.tuning.sweep_results import (
+    RESULTS_SCHEMA_VERSION,
     collect_amplitude_iterations_for,
     find_iteration_matching_amplitude,
     get_amplitudes_at_iteration,

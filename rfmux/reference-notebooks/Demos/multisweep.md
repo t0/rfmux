@@ -403,7 +403,8 @@ sensible way.
 | Piece | Module |
 |---|---|
 | The driver that iteratively calls `multisweep`  | `rfmux.algorithms.measurement.multiamp_multisweep` (`crs.multiamp_multisweep`) |
-| Coordinating the amplitudes, and reading the results | `rfmux.tuning.multisweep_amplitudes` |
+| Coordinating the amplitudes | `rfmux.tuning.multisweep_amplitudes` |
+| Reading the results back out | `rfmux.tuning.sweep_results` |
 
 The amplitude iteration options are specified using a `AmplitudeSchedule` object. An amplitude
 schedule has two key components for every resonator in the catalog: the **base** amplitude, 

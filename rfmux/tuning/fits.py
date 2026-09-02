@@ -84,7 +84,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import OptimizeWarning, curve_fit
 
-from .multisweep_amplitudes import find_iteration_matching_amplitude
+from .sweep_results import find_iteration_matching_amplitude
 
 __all__ = [
     "MODELS",
@@ -358,7 +358,7 @@ def fit_sweeps_at_bias_amplitude(
         FitReport: as :func:`fit_sweeps`.
 
     Nearest wins, as in
-    :func:`~rfmux.tuning.multisweep_amplitudes.find_iteration_matching_amplitude`
+    :func:`~rfmux.tuning.sweep_results.find_iteration_matching_amplitude`
     — floats from a ladder rarely compare equal. Check the match with
     ``get_amplitudes_at_iteration`` if it has to be close.
     """

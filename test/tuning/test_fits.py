@@ -31,7 +31,8 @@ from rfmux.tuning.fits import (
     remove_gain,
     skewed_model_magnitude,
 )
-from rfmux.tuning.multisweep_amplitudes import AmplitudeSchedule, pack_results
+from rfmux.tuning.multisweep_amplitudes import AmplitudeSchedule
+from rfmux.tuning.sweep_results import pack_results
 
 pytestmark = pytest.mark.portable
 

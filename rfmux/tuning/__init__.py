@@ -14,6 +14,7 @@ The layers, in the order a tuning run uses them::
 
     find_resonances       locate the dips in a network-analysis sweep
     multisweep_amplitudes decide the amplitude steps of a multi-amplitude sweep
+    sweep_results         pack what a sweep measured, and read it back out
     fits                  fit resonator models to the sweeps that came back
 
 The array bookkeeping those steps pass between each other —
@@ -60,6 +61,9 @@ from .fits import (
 from .multisweep_amplitudes import (
     AmplitudeSchedule,
     AmplitudeStep,
+)
+from .sweep_results import (
+    RESULTS_SCHEMA_VERSION,
     collect_amplitude_iterations_for,
     find_iteration_matching_amplitude,
     get_amplitudes_at_iteration,
@@ -85,6 +89,7 @@ __all__ = [
     "skewed_model_magnitude",
     "AmplitudeSchedule",
     "AmplitudeStep",
+    "RESULTS_SCHEMA_VERSION",
     "collect_amplitude_iterations_for",
     "find_iteration_matching_amplitude",
     "get_amplitudes_at_iteration",

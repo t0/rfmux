@@ -162,11 +162,23 @@ ladder's — it is every sweep's — so leaving the packer there misfiles it.
 Move the shape-owning code to a new `rfmux/tuning/sweep_results.py`: the schema
 version, the packers, and the four readers (`_iterations`, `_section_names`,
 `collect_amplitude_iterations_for`, `get_amplitudes_at_iteration`,
-`find_iteration_matching_amplitude`, `_bias_amplitude_of`). A pure move —
-`multisweep_amplitudes.py` keeps `AmplitudeSchedule` and re-exports the rest, and
-`tuning/__init__.py` (which already exports all four readers plus
-`pack_results` and `RESULTS_SCHEMA_VERSION`, at `__init__.py:60`) is unchanged
-from outside.
+`find_iteration_matching_amplitude`, `_bias_amplitude_of`). `tuning/__init__.py`
+re-exports the same names it does today, so the public path is unchanged from
+outside.
+
+**Landed, with one correction.** The move was going to leave re-exports behind in
+`multisweep_amplitudes.py`, but that would have been a cycle: `pack_results`
+calls `amp_schedule.to_dict()` and both it and `_bias_amplitude_of` use the
+`_named` error-message helper, so `sweep_results` imports *from*
+`multisweep_amplitudes` and the arrow cannot also point back. `_named` straddles
+the two halves (three uses in the schedule, two in the readers) and stayed where
+it is rather than being moved or duplicated.
+
+So the direction is `sweep_results → multisweep_amplitudes`, and the four
+importers were updated instead of shimmed: `tuning/__init__.py`, `fits.py`,
+`multiamp_multisweep.py`, and two test modules. That is the honest arrangement —
+the shape depends on the schedule, and a re-export would have hidden which way
+round that goes.
 
 Two packers, since the two macros have different `call_params`:
 
@@ -188,8 +200,9 @@ fallback cascade so it never renders `None`.
 **`tuning/sweep_results.py`** (new) — the moved shape code, plus `pack_sweep`.
 `RESULTS_SCHEMA_VERSION` 2 → 3.
 
-**`tuning/multisweep_amplitudes.py`** — keeps `AmplitudeSchedule`, re-exports
-the moved names.
+**`tuning/multisweep_amplitudes.py`** — keeps `AmplitudeSchedule`; the four
+importers of the moved names point at `sweep_results` instead. No re-exports;
+see §5.
 
 **`algorithms/measurement/multisweep.py`** — returns
 `pack_sweep(results, ...)` instead of the flat dict (`multisweep.py:608`). The

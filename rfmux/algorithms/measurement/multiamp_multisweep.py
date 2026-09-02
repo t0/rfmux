@@ -5,11 +5,12 @@ walks the amplitude steps an
 :class:`~rfmux.tuning.multisweep_amplitudes.AmplitudeSchedule` produces, sweeps
 each one in each requested direction, and returns every sweep in one dict.
 
-Everything it *decides* is computed in :mod:`rfmux.tuning.multisweep_amplitudes`,
-which needs no board; everything it *does* goes through ``crs.multisweep``,
-which is the only hardware call in this module.  What is left here is the loop,
-the packing, and the callbacks — which is the point: a driver that also knew how
-to build a ladder would be two things.
+Everything it *decides* is computed in :mod:`rfmux.tuning.multisweep_amplitudes`
+and everything it *returns* is shaped by :mod:`rfmux.tuning.sweep_results`,
+neither of which needs a board; everything it *does* goes through
+``crs.multisweep``, which is the only hardware call in this module.  What is left
+here is the loop and the callbacks — which is the point: a driver that also knew
+how to build a ladder would be two things.
 
 Step outer, direction inner.  Each step's up-and-down pair is measured together
 and the amplitude marches monotonically, which is what a bifurcation walk wants.
@@ -23,7 +24,8 @@ from collections.abc import Sequence
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.resonators import ResonatorCatalog
-from ...tuning.multisweep_amplitudes import AmplitudeSchedule, pack_results
+from ...tuning.multisweep_amplitudes import AmplitudeSchedule
+from ...tuning.sweep_results import pack_results
 from .multisweep import _resolve_section_names
 
 DIRECTIONS = ("upward", "downward")
@@ -236,7 +238,7 @@ async def multiamp_multisweep(
         order measured, and an iteration holds one entry per direction swept and
         nothing else. Under a direction is exactly what ``multisweep`` returns.
 
-        :func:`~rfmux.tuning.multisweep_amplitudes.pack_results` owns this shape
+        :func:`~rfmux.tuning.sweep_results.pack_results` owns this shape
         and documents it in full; the readers beside it —
         ``collect_amplitude_iterations_for``,
         ``find_iteration_matching_amplitude`` and

@@ -213,10 +213,14 @@ class TLSNoiseGenerator:
         times = np.asarray(times, dtype=np.float64)
         if times.size == 0:
             return np.zeros((0, self.n_resonators))
-        t_max = float(np.max(times))
-        if t_max > self._last_query:
-            self._last_query = t_max
-        self._extend_to(t_max)
+        # Extend towards each uncovered time in turn, as the sequential
+        # calls would, so the grid grows in the same chunks and holds
+        # the same draws.
+        for t in np.sort(times[times > self.t_end]):
+            if t > self.t_end:
+                self._last_query = max(self._last_query, float(t))
+                self._extend_to(float(t))
+        self._last_query = max(self._last_query, float(times.max()))
         vals = self._values
         last = len(vals) - 1
         pos = (times - self._t0) / self.dt

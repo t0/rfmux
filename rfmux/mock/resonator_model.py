@@ -2,6 +2,7 @@
 Mock CRS Device - Resonator Physics Model.
 Encapsulates the logic for resonator physics simulation, including S21 response.
 """
+import heapq
 import numpy as np
 import threading
 
@@ -1629,85 +1630,47 @@ class MockResonatorModel:
             self._packet_timing_counter = 0
         self._packet_timing_counter += 1
         
-        # Convert to numpy arrays for vectorization
-        tone_freqs = np.array(active_tone_freqs)  # Shape: (n_tones,)
-        tone_amps = np.array(active_tone_amps)     # Shape: (n_tones,)
-        obs_freqs_arr = np.array(obs_freqs)        # Shape: (n_obs,)
-        
-        # Step 2: Vectorized calculation of all frequency differences
-        # Broadcasting: (n_obs, 1) - (1, n_tones) = (n_obs, n_tones)
-        freq_diffs = tone_freqs[np.newaxis, :] - obs_freqs_arr[:, np.newaxis]
-        
-        # Step 3: Determine which tones are within bandwidth for each observer
-        within_bandwidth = np.abs(freq_diffs) <= bandwidth
-        
-        # Step 4: Calculate responses for single time point (most common case)
+        tone_freqs = np.array(active_tone_freqs)
+        tone_amps = np.array(active_tone_amps)
+        n_obs = len(obs_channels)
+        n_tones = len(active_tone_freqs)
+
+        # Which tones each observer sees: those within the CIC bandwidth
+        # of its own frequency, with the droop at that offset.
+        obs_idx, tone_idx, diff = self._coupled_pairs(
+            obs_freqs, tone_freqs, bandwidth)
+        cic = np.array([self._get_cached_cic_response(d, dec_stage)
+                        for d in diff])
+        pairs = (obs_idx, tone_idx, diff, cic)
+
         if num_samples == 1:
-            t = start_time
-            
-            # Vectorized beat frequency calculation
-            # Phase for each tone-observer pair at time t
-            phases = 2 * np.pi * freq_diffs * t
-            
-            # Complex exponentials for all pairs
-            beat_factors = np.exp(1j * phases)
-            
-            # Apply proper CIC filter response for each frequency difference
-            # This emulates the actual hardware filter behavior with droop
-            cic_responses = np.zeros_like(freq_diffs)
-            for i in range(len(obs_channels)):
-                for j in range(len(tone_freqs)):
-                    if within_bandwidth[i, j]:
-                        # Use the proper CIC response calculation
-                        cic_responses[i, j] = self._get_cached_cic_response(freq_diffs[i, j], dec_stage)
-            
-            # Calculate contributions: (n_obs, n_tones)
-            contributions = tone_amps[np.newaxis, :] * beat_factors * cic_responses
-            
-            # Mask out tones outside bandwidth
-            contributions = np.where(within_bandwidth, contributions, 0)
-            
-            # Sum contributions for each observer
-            signals = np.sum(contributions, axis=1)  # Shape: (n_obs,)
-            
-            # Build response dictionary
+            beat = np.exp(2j * np.pi * diff * start_time)
+            signals = self._mix_pairs(pairs, tone_amps, beat, n_obs)[:, 0]
             responses = {}
             for i, ch in enumerate(obs_channels):
                 responses[ch] = complex(signals[i])
-        
+
         else:
             t = start_time + np.arange(num_samples) / sample_rate
-            n_obs = len(obs_channels)
-            n_tones = len(active_tone_freqs)
 
             # Per-tone invariants, hoisted out of the sample loop.
             tone_mag = np.abs(np.asarray(active_tone_amps))
             tone_phase = np.exp(1j * np.angle(np.asarray(active_tone_amps)))
 
-            # CIC response depends only on (freq_diff, dec_stage), both
-            # fixed for the batch — evaluate the (n_obs, n_tones) grid once
-            # rather than once per sample.
-            cic_grid = np.zeros((n_obs, n_tones))
-            for i in range(n_obs):
-                for j in range(n_tones):
-                    if within_bandwidth[i, j]:
-                        cic_grid[i, j] = self._get_cached_cic_response(
-                            freq_diffs[i, j], dec_stage)
-            is_dc = np.abs(freq_diffs) < 0.1
+            observed = np.zeros(n_tones, dtype=bool)
+            observed[tone_idx] = True
 
             phys = getattr(self.mock_crs, '_physics_config', {}) or {}
             mode = phys.get('physics_batch_mode', 'hoisted')
             with self._physics_lock:
                 if mode == 'reference':
                     signals = self._batch_response_reference(
-                        active_tone_freqs, tone_mag, tone_phase, freq_diffs,
-                        within_bandwidth, cic_grid, is_dc, t, pulse_time,
-                        sample_rate, n_obs, n_tones)
+                        active_tone_freqs, tone_mag, tone_phase, pairs,
+                        observed, t, pulse_time, sample_rate, n_obs, n_tones)
                 else:
                     signals = self._batch_response_hoisted(
-                        active_tone_freqs, tone_mag, tone_phase, freq_diffs,
-                        within_bandwidth, cic_grid, is_dc, t, pulse_time,
-                        sample_rate, n_obs, n_tones)
+                        active_tone_freqs, tone_mag, tone_phase, pairs,
+                        observed, t, pulse_time, sample_rate, n_obs, n_tones)
 
             responses = {}
             for i, ch in enumerate(obs_channels):
@@ -1715,10 +1678,57 @@ class MockResonatorModel:
 
         return responses
 
+    @staticmethod
+    def _coupled_pairs(obs_freqs, tone_freqs, bandwidth):
+        """(obs_idx, tone_idx, freq_diff) for every observer/tone pair
+        within *bandwidth*.
+
+        Found through the sorted tones rather than the full grid: with
+        a module fully configured the grid has a million entries and
+        only the diagonal survives.  The window is widened by a few ulp
+        and the grid's own predicate applied to the candidates, so the
+        pair set is the grid's exactly.
+        """
+        obs = np.asarray(obs_freqs, dtype=np.float64)
+        tones = np.asarray(tone_freqs, dtype=np.float64)
+        order = np.argsort(tones, kind="stable")
+        sorted_tones = tones[order]
+        slack = bandwidth * (1.0 + 1e-9) + 1e-9
+        lo = np.searchsorted(sorted_tones, obs - slack, side="left")
+        hi = np.searchsorted(sorted_tones, obs + slack, side="right")
+        counts = hi - lo
+        total = int(counts.sum())
+        obs_idx = np.repeat(np.arange(len(obs)), counts)
+        first = np.repeat(np.cumsum(counts) - counts, counts)
+        pos = np.repeat(lo, counts) + (np.arange(total) - first)
+        tone_idx = order[pos]
+        diff = tones[tone_idx] - obs[obs_idx]
+        keep = np.abs(diff) <= bandwidth
+        return obs_idx[keep], tone_idx[keep], diff[keep]
+
+    @staticmethod
+    def _mix_pairs(pairs, tone_amp, beat, n_obs):
+        """Each observer's signal: the sum over its coupled tones of
+        amplitude x CIC droop x beat factor, as (n_obs, N).
+
+        *tone_amp* is (n_tones,) for one instant or (n_tones, N);
+        *beat* is per pair, (n_pairs,) or (n_pairs, N).
+        """
+        obs_idx, tone_idx, _diff, cic = pairs
+        amp = np.asarray(tone_amp)
+        if amp.ndim == 1:
+            amp = amp[:, None]
+        beat = np.asarray(beat)
+        if beat.ndim == 1:
+            beat = beat[:, None]
+        contrib = amp[tone_idx] * cic[:, None] * beat
+        signals = np.zeros((n_obs, contrib.shape[1]), dtype=complex)
+        np.add.at(signals, obs_idx, contrib)
+        return signals
+
     def _batch_response_reference(self, active_tone_freqs, tone_mag,
-                                  tone_phase, freq_diffs, within_bandwidth,
-                                  cic_grid, is_dc, t, pulse_time,
-                                  sample_rate, n_obs, n_tones):
+                                  tone_phase, pairs, observed, t,
+                                  pulse_time, sample_rate, n_obs, n_tones):
         """The per-sample loop: S21 for every (sample, tone), through the
         same path the slow stream uses one sample at a time.  Kept as the
         reference the hoisted path is checked against, and selectable
@@ -1729,6 +1739,7 @@ class MockResonatorModel:
         """
         num_samples = len(t)
         signals = np.zeros((n_obs, num_samples), dtype=complex)
+        diff = pairs[2]
         # Samples OUTER, channels INNER: every tone at a given instant
         # then shares one QP-state evaluation (the memo in
         # _s21_lc_response_internal); the other way round the time
@@ -1742,16 +1753,15 @@ class MockResonatorModel:
             # which channel observes it — evaluate once per tone.
             s21_by_tone = np.zeros(n_tones, dtype=complex)
             for j in range(n_tones):
-                if tone_mag[j] > 0 and within_bandwidth[:, j].any():
+                if tone_mag[j] > 0 and observed[j]:
                     s21_by_tone[j] = self._s21_lc_response_internal(
                         active_tone_freqs[j], tone_mag[j],
                         pulse_time=sample_pulse_time)
             tone_amp_fresh = tone_mag * s21_by_tone * tone_phase
-            beat = np.where(
-                is_dc, 1.0,
-                np.exp(2j * np.pi * freq_diffs * t[sample_idx]))
-            signals[:, sample_idx] = np.sum(
-                tone_amp_fresh[np.newaxis, :] * cic_grid * beat, axis=1)
+            beat = np.where(np.abs(diff) < 0.1, 1.0,
+                            np.exp(2j * np.pi * diff * t[sample_idx]))
+            signals[:, sample_idx] = self._mix_pairs(
+                pairs, tone_amp_fresh, beat, n_obs)[:, 0]
         return signals
 
     def _batch_nqp(self, t_arr):
@@ -1788,14 +1798,12 @@ class MockResonatorModel:
         return cached[2]
 
     def _batch_response_hoisted(self, active_tone_freqs, tone_mag,
-                                tone_phase, freq_diffs, within_bandwidth,
-                                cic_grid, is_dc, t, pulse_time,
+                                tone_phase, pairs, observed, t, pulse_time,
                                 sample_rate, n_obs, n_tones):
         """The reference loop with everything constant across the batch
         hoisted out of it.  Same arithmetic, same noise draws in the same
-        order, same convergence-cache decisions and the same end state;
-        what remains per (sample, tone) is one dictionary lookup, and
-        the convergence on a miss.  Assumes _physics_lock held.
+        order, same convergence-cache decisions and the same end state.
+        Assumes _physics_lock held.
 
         With pulse_time None every sample shares one instant (the
         reference loop's memo made them share one QP state and one noise
@@ -1813,13 +1821,12 @@ class MockResonatorModel:
         row = (np.arange(num_samples) if pulse_time is not None
                else np.zeros(num_samples, dtype=np.int64))
 
-        # ── QP state per instant: pulses, noise, Lk/R ────────────
+        # ── QP state per instant: pulses, noise, Lk/R, TLS ──────────
         reuse0 = (self._nqp_state_t is not None
                   and t_states[0] == self._nqp_state_t)
         nqp = self._batch_nqp(t_states)                       # (S, n_res)
-        noisy = self.nqp_noise_enabled and self.nqp_noise_std_factor > 0
         eps = None
-        if noisy:
+        if self.nqp_noise_enabled and self.nqp_noise_std_factor > 0:
             eps = np.empty((S, n_res))
             first = 0
             if reuse0 and self._nqp_state_noise is not None:
@@ -1829,9 +1836,8 @@ class MockResonatorModel:
                 eps[first:] = np.random.normal(
                     0.0, self.nqp_noise_std_factor, (S - first, n_res))
         n_cr = len(self.mr_complex_resonators)
-        tiled = self._nqp_const_tiled(S)
         R_nqp, Lk_nqp = jit_physics.vectorized_update_params_from_nqp(
-            nqp[:, :n_cr].ravel(), *tiled)
+            nqp[:, :n_cr].ravel(), *self._nqp_const_tiled(S))
         R_nqp = R_nqp.reshape(S, n_cr)
         Lk_nqp = Lk_nqp.reshape(S, n_cr)
         y = (self._tls_generator.values_at(t_states)
@@ -1866,11 +1872,13 @@ class MockResonatorModel:
                     lek.L = L_v[i]
                     lek.alpha_k = lek.Lk / lek.L
 
-        # Per-tone constants: the cache-key memo, the quantized frequency
-        # and amplitude keys, and the QP column the key is taken from.
+        # ── Per tone: cache-key parameters and the runs of one key ────
+        # The key is the quantized QP density; within a run of one key
+        # the reference converges at the first sample and hits that
+        # entry for the rest, so a run is one lookup.
         tones = []
         for j in range(n_tones):
-            if not (tone_mag[j] > 0 and within_bandwidth[:, j].any()):
+            if not (tone_mag[j] > 0 and observed[j]):
                 continue
             frequency = active_tone_freqs[j]
             amplitude = tone_mag[j]
@@ -1882,114 +1890,161 @@ class MockResonatorModel:
                     self._cache_key_params.clear()
                 self._cache_key_params[frequency] = keys
             _, nearest_idx, freq_step, amp_step, qp_step = keys
-            freq_key = round(frequency / freq_step) * freq_step
-            amp_key = round(amplitude / amp_step) * amp_step
             qp_col = (nqp[:, nearest_idx] if 0 <= nearest_idx < n_res
                       else np.zeros(S))
-            tones.append((j, frequency, amplitude, nearest_idx, qp_step,
-                          freq_key, amp_key, qp_col))
+            qp_keys = np.round(qp_col / qp_step) * qp_step
+            starts = np.flatnonzero(np.r_[True, qp_keys[1:] != qp_keys[:-1]])
+            tones.append({
+                'j': j, 'frequency': frequency, 'amplitude': amplitude,
+                'nearest_idx': nearest_idx,
+                'freq_key': round(frequency / freq_step) * freq_step,
+                'amp_key': round(amplitude / amp_step) * amp_step,
+                'qp_keys': qp_keys, 'starts': starts, 'states': []})
 
-        # Convergence decisions in the reference order -- samples OUTER,
-        # tones INNER -- because each convergence starts from the state
-        # the previous one left in the lekids, and a different order
-        # gives different iterates within the solver's tolerance.  State
-        # a cache hit would restore is only written when something reads
-        # the lekids: a convergence, or the end of the batch.
-        L_s = np.empty((n_tones, S, n_res))
-        R_s = np.empty((n_tones, S, n_res))
-        Lk_s = np.empty((n_tones, S, n_res))
-        pending = None
-        for s in range(S):
-            for (j, frequency, amplitude, nearest_idx, qp_step,
-                 freq_key, amp_key, qp_col) in tones:
-                qp_key = round(float(qp_col[s]) / qp_step) * qp_step
-                cache_key = (nearest_idx, freq_key, amp_key, qp_key)
-                cached = self._convergence_cache.get(cache_key)
-                hit = (cached is not None and cached.get('gen') == gen
-                       and cached.get('lekid_count') == n_res)
-                self._convergence_stats['last_reason'] = (
-                    'hit' if hit else 'miss' if cached is None
-                    else 'gen_changed' if cached.get('gen') != gen
-                    else 'count_changed')
-                self._recent_cache_results.append(hit)
-                if len(self._recent_cache_results) > 100:
-                    self._recent_cache_results.pop(0)
-                self._stats_counter += 1
-                if log_enabled and self._stats_counter % log_every == 0:
-                    recent_hits = sum(self._recent_cache_results)
-                    recent_total = len(self._recent_cache_results)
-                    print(f"[Cache Stats] Last {recent_total} calls: "
-                          f"{recent_hits / recent_total * 100:.1f}% cache hits "
-                          f"({recent_hits} hits, {recent_total - recent_hits} misses)")
-                if hit:
-                    state = (cached['L_values'], cached['R_values'],
-                             cached['Lk_values'])
-                    pending = state
-                    self._convergence_stats['skipped'] += 1
-                else:
-                    if pending is not None:
-                        restore(pending)
-                        pending = None
-                    set_base(s)
-                    self.update_lekids_for_current(frequency, amplitude)
-                    max_size = phys.get('convergence_cache_max_size',
-                                        self._convergence_cache_max_size)
-                    if isinstance(max_size, int) and max_size > 0:
-                        self._convergence_cache_max_size = max_size
-                    state = ([lk.L for lk in self.mr_lekids],
-                             [lk.R for lk in self.mr_lekids],
-                             [lk.Lk for lk in self.mr_lekids])
-                    self._convergence_cache[cache_key] = {
-                        'Lk_values': state[2], 'R_values': state[1],
-                        'L_values': state[0], 'frequency': frequency,
-                        'amplitude': amplitude, 'qp_key': qp_key,
-                        'nearest_idx': nearest_idx, 'gen': gen,
-                        'lekid_count': n_res}
-                    if len(self._convergence_cache) > self._convergence_cache_max_size:
-                        del self._convergence_cache[next(iter(self._convergence_cache))]
-                    self._convergence_stats['full'] += 1
-                L_s[j, s] = state[0][:n_res]
-                R_s[j, s] = state[1][:n_res]
-                Lk_s[j, s] = state[2][:n_res]
+        def state_at(k, s):
+            """The state tone k's run covering sample s holds."""
+            tone = tones[k]
+            r = int(np.searchsorted(tone['starts'], s, side='right')) - 1
+            return tone['states'][r]
 
-        # Per tone, over all instants at once: the white QP noise as a
-        # post-cache perturbation, the TLS wander on C, and S21 -- the
-        # same expressions as _s21_from_current_state.
+        # ── Convergence decisions, one per run, in the reference order ──
+        # Samples outer, tones inner: each convergence starts from the
+        # state the step before it left in the lekids, which is the
+        # previous tone's run at this sample or, for the first tone, the
+        # last tone's run at the previous sample.  The cache is a FIFO
+        # of bounded size, so an insertion can evict the entry a run in
+        # progress is hitting; the reference then converges again at
+        # that tone's next step, and so does this, by splitting the run.
+        events = [(int(st), k) for k, tone in enumerate(tones)
+                  for st in tone['starts']]
+        heapq.heapify(events)
+        for tone in tones:
+            tone['starts'] = []
+        live = {}                       # cache key -> tone index of the run using it
+        max_size = phys.get('convergence_cache_max_size',
+                            self._convergence_cache_max_size)
+        if isinstance(max_size, int) and max_size > 0:
+            self._convergence_cache_max_size = max_size
+        last_reason = self._convergence_stats.get('last_reason')
+        misses = set()
+        while events:
+            s, k = heapq.heappop(events)
+            tone = tones[k]
+            if tone['starts'] and tone['starts'][-1] == s:
+                continue                # a split landing on a run start
+            qp_key = float(tone['qp_keys'][s])
+            cache_key = (tone['nearest_idx'], tone['freq_key'],
+                         tone['amp_key'], qp_key)
+            cached = self._convergence_cache.get(cache_key)
+            hit = (cached is not None and cached.get('gen') == gen
+                   and cached.get('lekid_count') == n_res)
+            if hit:
+                state = (cached['L_values'], cached['R_values'],
+                         cached['Lk_values'])
+                last_reason = 'hit'
+            else:
+                if k > 0:
+                    restore(state_at(k - 1, s))
+                elif s > 0:
+                    restore(state_at(len(tones) - 1, s - 1))
+                set_base(s)
+                self.update_lekids_for_current(tone['frequency'],
+                                               tone['amplitude'])
+                state = ([lk.L for lk in self.mr_lekids],
+                         [lk.R for lk in self.mr_lekids],
+                         [lk.Lk for lk in self.mr_lekids])
+                self._convergence_cache[cache_key] = {
+                    'Lk_values': state[2], 'R_values': state[1],
+                    'L_values': state[0], 'frequency': tone['frequency'],
+                    'amplitude': tone['amplitude'], 'qp_key': qp_key,
+                    'nearest_idx': tone['nearest_idx'], 'gen': gen,
+                    'lekid_count': n_res}
+                self._convergence_stats['full'] += 1
+                misses.add((s, k))
+                last_reason = ('miss' if cached is None
+                               else 'gen_changed' if cached.get('gen') != gen
+                               else 'count_changed')
+                if len(self._convergence_cache) > self._convergence_cache_max_size:
+                    evicted = next(iter(self._convergence_cache))
+                    del self._convergence_cache[evicted]
+                    k_ev = live.pop(evicted, None)
+                    if k_ev is not None:
+                        # That tone looks the key up again at its next
+                        # step: this sample if it comes later in the
+                        # tone order, otherwise the next sample.
+                        s_ev = s if k_ev > k else s + 1
+                        if s_ev < S:
+                            heapq.heappush(events, (s_ev, k_ev))
+            tone['starts'].append(s)
+            tone['states'].append(state)
+            live[cache_key] = k
+        self._convergence_stats['last_reason'] = last_reason
+
+        # The per-step statistics the reference keeps, from the runs: a
+        # step is one (sample, tone), a run's first step is a miss when
+        # it converged, every other step is a hit.  Samples sharing one
+        # instant are separate steps of which only the first can miss.
+        n_steps = num_samples * len(tones)
+        self._convergence_stats['skipped'] += n_steps - len(misses)
+        first = np.full(S, num_samples)
+        np.minimum.at(first, row, np.arange(num_samples))
+        recent = [not (n == first[row[n]] and (int(row[n]), k) in misses)
+                  for n in range(num_samples) for k in range(len(tones))][-100:]
+        self._recent_cache_results.extend(recent)
+        del self._recent_cache_results[:-100]
+        before = self._stats_counter // log_every
+        self._stats_counter += n_steps
+        if log_enabled and self._stats_counter // log_every > before:
+            hits = sum(self._recent_cache_results)
+            total = len(self._recent_cache_results)
+            print(f"[Cache Stats] Last {total} calls: "
+                  f"{hits / total * 100:.1f}% cache hits "
+                  f"({hits} hits, {total - hits} misses)")
+
+        # ── Per tone, over all instants: noise and TLS perturbations, S21 ──
         s21 = np.zeros((n_tones, S), dtype=complex)
-        for (j, frequency, amplitude, *_rest) in tones:
-            Lj, Rj, Lkj = L_s[j], R_s[j], Lk_s[j]
+        for tone in tones:
+            L_s = np.empty((S, n_res))
+            R_s = np.empty((S, n_res))
+            Lk_s = np.empty((S, n_res))
+            starts = tone['starts']
+            for r, state in enumerate(tone['states']):
+                sl = slice(int(starts[r]),
+                           int(starts[r + 1]) if r + 1 < len(starts) else S)
+                L_s[sl] = state[0][:n_res]
+                R_s[sl] = state[1][:n_res]
+                Lk_s[sl] = state[2][:n_res]
             if eps is not None:
                 m = min(n_res, eps.shape[1], len(s_Lk), len(s_R))
                 if m:
-                    alpha_k = Lkj[:, :m] / Lj[:, :m]
-                    Lj[:, :m] = Lj[:, :m] * (
+                    alpha_k = Lk_s[:, :m] / L_s[:, :m]
+                    L_s[:, :m] = L_s[:, :m] * (
                         1.0 + alpha_k * s_Lk[None, :m] * eps[:, :m])
-                    Rj[:, :m] = np.maximum(
-                        0.0, Rj[:, :m] * (1.0 + s_R[None, :m] * eps[:, :m]))
+                    R_s[:, :m] = np.maximum(
+                        0.0, R_s[:, :m] * (1.0 + s_R[None, :m] * eps[:, :m]))
             C_s = np.tile(C_const, (S, 1))
             if y is not None:
                 n = min(n_res, y.shape[1])
                 C_s[:, :n] = C_s[:, :n] * (1.0 - 2.0 * y[:, :n])
-            s21[j] = jit_physics.compute_s21_batch(
-                float(frequency), float(amplitude), Lj, C_s, Rj, Cc_const,
-                complex(lekid0.ZLNA), lekid0.GLNA, lekid0.input_atten_dB,
-                lekid0.system_termination)
+            s21[tone['j']] = jit_physics.compute_s21_batch(
+                float(tone['frequency']), float(tone['amplitude']),
+                L_s, C_s, R_s, Cc_const, complex(lekid0.ZLNA), lekid0.GLNA,
+                lekid0.input_atten_dB, lekid0.system_termination)
 
-        # ── End state: what the loop leaves behind after its last sample ──
-        if pending is not None:
-            restore(pending)
+        # ── End state: what the reference leaves after its last sample ──
+        if tones:
+            restore(state_at(len(tones) - 1, S - 1))
         set_base(S - 1)
         self._nqp_state_t = float(t_states[-1])
         self._nqp_state_noise = (eps[-1] if eps is not None else None)
         self._nqp_state_values = nqp[-1].tolist()
 
         # ── Mix: tones into observers, per sample ────────────────
-        tone_amp_fresh = (tone_mag[:, None] * s21 * tone_phase[:, None])[:, row]
-        beat = np.where(is_dc[:, :, None], 1.0,
-                        np.exp(2j * np.pi * freq_diffs[:, :, None] * t[None, None, :]))
-        signals = np.sum(tone_amp_fresh[None, :, :] * cic_grid[:, :, None] * beat,
-                         axis=1)
-        return signals
+        tone_amp = (tone_mag[:, None] * s21 * tone_phase[:, None])[:, row]
+        diff = pairs[2]
+        beat = np.where(np.abs(diff)[:, None] < 0.1, 1.0,
+                        np.exp(2j * np.pi * diff[:, None] * t[None, :]))
+        return self._mix_pairs(pairs, tone_amp, beat, n_obs)
 
     def calculate_channel_response(self, module, channel, frequency, amplitude, phase_degrees):
         """

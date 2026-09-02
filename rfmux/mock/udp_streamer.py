@@ -7,19 +7,21 @@ eliminating lock contention and ensuring perfect time synchronization.
 Architecture
 ------------
 The streamer always emits slow ReadoutPackets at the decimation-determined
-cadence.  When PFB is enabled (via ``enable_pfb()``), it also emits
-PFBPackets in fixed batches of ``PFB_BATCH`` = 64 time samples — the
-natural ratio between PFB rate and the dec-0 slow rate.
+cadence.  When PFB is enabled (via ``enable_pfb()``), it also generates
+the PFB samples of each slow frame in one physics call and sends them as
+1000-sample PFBPackets, the size the hardware sends, carrying any
+remainder into the next frame.
 
-At decimation stage *d*, there are ``2^d`` PFB batches per slow sample:
+At decimation stage *d*, a slow frame holds ``2^d`` sub-batches of
+``PFB_BATCH`` = 64 PFB samples, the grid on which pulse triggers are
+checked:
 
     PFB rate:  625 MHz / 256  ≈ 2.44 MHz  (complex samples)
     Slow rate: 625 MHz / 256 / 64 / 2^d
-    Ratio:     64 × 2^d  PFB samples per slow sample
-    Batches:   2^d  (each of 64 PFB samples)
+    Frame:     64 × 2^d  PFB samples per slow sample
 
-Both packet types share the same simulation clock, giving perfect
-timestamp synchronization with zero physics-lock contention.
+Both packet types share the same simulation clock, so their timestamps
+agree, and one thread means no physics-lock contention between them.
 """
 
 import asyncio
@@ -81,12 +83,10 @@ class MockCRSStreamer(threading.Thread):
     """Unified mock streamer: emits slow and/or PFB packets from one thread.
 
     Always emits slow ReadoutPackets at the decimation-determined cadence.
-    When PFB is enabled (via ``enable_pfb()``), also emits PFBPackets at
-    ``PFB_RATE`` in fixed batches of ``PFB_BATCH`` = 64 samples.
-
-    At decimation stage *d*, there are ``2^d`` PFB batches per slow frame.
-    Both packet types share the same simulation clock, giving perfect
-    timestamp synchronization with zero lock contention.
+    When PFB is enabled (via ``enable_pfb()``), also generates each slow
+    frame's PFB samples in one physics call and sends them as
+    1000-sample PFBPackets.  Both packet types share one simulation
+    clock, so their timestamps agree.
     """
 
     def __init__(self, mock_crs, host='239.192.0.2', port=STREAMER_PORT,

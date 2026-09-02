@@ -139,10 +139,11 @@ def test_many_datagrams_per_wake(monkeypatch):
         f"{awaited['n']} awaited receives for {N} packets"
 
 
-def _pfb_packet(module0, t_s=43200.0):
+def _pfb_packet(module0, t_s=43200.0, seq=0):
     pkt = streamer.PFBPacket()
     pkt.magic = streamer.PFB_PACKET_MAGIC
     pkt.module = module0                     # 0-indexed on the wire
+    pkt.seq = seq
     pkt.num_samples = 100
     pkt[:] = np.zeros(100, dtype=complex)
     h = int(t_s // 3600); m = int(t_s % 3600 // 60); s_ = int(t_s % 60)
@@ -159,7 +160,7 @@ def test_pfb_source_keeps_only_its_module(monkeypatch):
         _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
         monkeypatch.setattr(src, "_flush", lambda sock: None)
         for k in range(12):
-            send.sendto(_pfb_packet(k % 2, t_s=43200.0 + k * 1e-4),
+            send.sendto(_pfb_packet(k % 2, t_s=43200.0 + k * 1e-4, seq=k),
                         ("127.0.0.1", port))
         time.sleep(0.1)
 
@@ -175,3 +176,60 @@ def test_pfb_source_keeps_only_its_module(monkeypatch):
             _Sink(), "127.0.0.1", [1], module=2,
             should_stop=lambda: time.monotonic() > deadline or _Sink.fed >= 6))
     assert _Sink.fed == 6
+
+
+def test_pfb_source_restores_sequence_order(monkeypatch):
+    """Datagrams arrive slightly out of order; the samples are fed in
+    sequence order, with per-sample times that never step back."""
+    with _loopback_pair() as (recv, send, port):
+        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
+        monkeypatch.setattr(src, "_flush", lambda sock: None)
+        order = list(range(40))
+        for i in range(1, 40, 4):            # swap neighbours, as seen on the wire
+            order[i], order[i + 1] = order[i + 1], order[i]
+        for k in order:
+            send.sendto(_pfb_packet(1, t_s=43200.0 + k * 4.096e-4, seq=1000 + k),
+                        ("127.0.0.1", port))
+        time.sleep(0.1)
+
+        stamps = []
+
+        class _Sink:
+            channels = [1]
+
+            def feed_block(self, ch, i, q, t):
+                stamps.append(float(t[0]))
+
+        deadline = time.monotonic() + 3.0
+        asyncio.run(src.run_pfb_source(
+            _Sink(), "127.0.0.1", [1], module=2,
+            should_stop=lambda: time.monotonic() > deadline or len(stamps) >= 40))
+    assert len(stamps) == 40
+    assert np.all(np.diff(stamps) > 0), "packets fed out of order"
+
+
+def test_seq_reorder_skips_a_real_loss():
+    r = src._SeqReorder(window=4)
+    for s in (10, 11, 13, 14, 15, 16):
+        r.push(s, s)
+    assert r.ready() == [10, 11]              # 12 may still come
+    for s in (17, 18):
+        r.push(s, s)
+    assert r.ready() == [13, 14, 15, 16, 17, 18]   # 12 is lost: move on
+    r.push(19, 19)
+    assert r.ready() == [19] and r.flush() == []
+
+
+def test_slow_ingest_feeds_blocks_in_time_order():
+    fed = []
+    ingest = src.SlowIngest(lambda ch, i, q, t: fed.append(np.asarray(t)),
+                            max_packets=8, max_age_s=1e9)
+    order = list(range(20))
+    for i in range(1, 20, 4):
+        order[i], order[i + 1] = order[i + 1], order[i]
+    for k in order:
+        ingest.add((1,), np.array([complex(k, 0)]), 43200.0 + k / 596.0)
+    ingest.flush()
+    stamps = np.concatenate(fed)
+    assert np.array_equal(stamps, 43200.0 + np.arange(20) / 596.0)
+    assert ingest.elapsed == pytest.approx(19 / 596.0)

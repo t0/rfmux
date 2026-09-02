@@ -90,6 +90,11 @@ class SlowIngest:
     #: Timestamp steps outside this are treated as discontinuities
     #: rather than elapsed time.  See :meth:`advance`.
     MAX_PLAUSIBLE_STEP_S = 5.0
+    #: Packets kept back at a size- or age-triggered flush.  Datagrams
+    #: arrive slightly out of order at high rates; a block is fed in
+    #: timestamp order, and the newest few wait for any straggler that
+    #: belongs before them.  An explicit flush releases them.
+    HOLD_BACK = 4
 
     def __init__(self, feed, *, duration_s: Optional[float] = None,
                  max_packets: int = DEFAULT_MAX_PACKETS,
@@ -127,6 +132,10 @@ class SlowIngest:
             delta = timestamp - self._prev_ts
             if 0.0 < delta < self.MAX_PLAUSIBLE_STEP_S:
                 self.elapsed += delta
+            elif -self.MAX_PLAUSIBLE_STEP_S < delta <= 0.0:
+                # A straggler from before the newest time seen: it
+                # counts for nothing, and the newest time stands.
+                return
         self._prev_ts = timestamp
 
     @property
@@ -158,7 +167,7 @@ class SlowIngest:
         self._stamps.append(float("nan") if timestamp is None
                             else float(timestamp))
         if self.ready:
-            self.flush()
+            self.flush(final=False)
 
     @property
     def ready(self) -> bool:
@@ -166,14 +175,25 @@ class SlowIngest:
             len(self._values) >= self.max_packets
             or time.monotonic() - self._opened >= self.max_age_s)
 
-    def flush(self) -> None:
-        """Hand everything buffered to the session, one block per channel."""
+    def flush(self, final: bool = True) -> None:
+        """Hand what is buffered to the session in time order, one block
+        per channel.  Unless *final*, the newest HOLD_BACK packets stay
+        buffered for stragglers."""
         if not self._values:
             return
-        values = np.stack(self._values)          # (packets, channels)
-        stamps = np.asarray(self._stamps, dtype=np.float64)
-        self._values = []
-        self._stamps = []
+        order = np.argsort(self._stamps, kind="stable")   # NaN sorts last
+        keep = 0 if final else min(self.HOLD_BACK, len(order) - 1)
+        if keep:
+            order, held = order[:-keep], order[-keep:]
+        values = np.stack(self._values)[order]            # (packets, channels)
+        stamps = np.asarray(self._stamps, dtype=np.float64)[order]
+        if keep:
+            self._values = [self._values[i] for i in held]
+            self._stamps = [self._stamps[i] for i in held]
+            self._opened = time.monotonic()
+        else:
+            self._values = []
+            self._stamps = []
         for column, channel in enumerate(self.channels):
             samples = values[:, column]
             self._feed(channel, samples.real, samples.imag, stamps)
@@ -200,6 +220,44 @@ _PFB_DRAIN_CAP = 64
 #: a full drain would hold the loop for ~150 ms; eight packets bound it
 #: to ~20 ms, and the extra no-op yields cost nothing.
 _PFB_YIELD_EVERY = 8
+
+
+class _SeqReorder:
+    """Puts datagrams back in sequence order across a short window.
+
+    Datagrams arrive slightly out of order at high rates.  A packet is
+    released once every earlier one has been, or once the stream has
+    run *window* packets past it, which is a real loss.
+    """
+
+    def __init__(self, window: int = 16):
+        self.window = window
+        self._pending = {}
+        self._next = None
+        self._highest = None
+
+    def push(self, seq: int, item) -> None:
+        self._pending[seq] = item
+        self._highest = seq if self._highest is None else max(self._highest, seq)
+
+    def ready(self) -> list:
+        out = []
+        while self._pending:
+            if self._next is None:
+                self._next = min(self._pending)
+            if self._next in self._pending:
+                out.append(self._pending.pop(self._next))
+                self._next += 1
+            elif self._highest - self._next > self.window:
+                self._next = min(self._pending)
+            else:
+                break
+        return out
+
+    def flush(self) -> list:
+        out = [self._pending[k] for k in sorted(self._pending)]
+        self._pending.clear()
+        return out
 
 
 def _drain(sock, first: bytes, size: int, cap: int) -> list:
@@ -321,6 +379,42 @@ async def run_pfb_source(
     n_groups = max(1, len(channels))
     elapsed = 0.0
     got_any = False
+    reorder = _SeqReorder()
+
+    def feed_packet(pkt) -> bool:
+        """Feed one packet's samples; True once duration_s is covered."""
+        nonlocal elapsed
+        # Match the slow stream's 16-bit ADC scale: np.array(pkt)
+        # applies the packetizer /256; the second /256 brings the
+        # 24-bit datapath down to ADC counts (same convention as the
+        # slow readout path).  Without it, fast samples sit exactly
+        # 256x above slow samples for the same signal.
+        raw = np.array(pkt) / 256.0
+        ts = streamer.ts_to_seconds(pkt.ts)
+        time_samples = pkt.num_samples // n_groups
+        # A whole packet per channel per call.  The packet interleaves
+        # the streamed channels round-robin, so one channel is a
+        # strided slice; feeding those arrays straight through is what
+        # lets the engine absorb quiet stretches with numpy rather than
+        # 1.22 million Python calls a second.  NaN where the packet has
+        # no usable timestamp -- the session drops and counts those,
+        # exactly as the per-sample path did with None.
+        t0 = ts if ts is not None else float("nan")
+        times = t0 + np.arange(time_samples) / sample_rate
+        for slot, ch in enumerate(channels):
+            v = raw[slot:time_samples * n_groups:n_groups]
+            if v.shape[0] == 0:
+                continue
+            n_ok = min(v.shape[0], times.shape[0])
+            # Every session and facade exposes feed_block, and there is
+            # deliberately no per-sample fallback: it would put the
+            # fast stream on the path this function exists to avoid.
+            capture_session.feed_block(ch, v[:n_ok].real, v[:n_ok].imag,
+                                       times[:n_ok])
+        # Exact per-packet span -- independent of timestamp
+        # discontinuities across rate changes.
+        elapsed += time_samples / sample_rate
+        return duration_s is not None and elapsed >= duration_s
 
     with streamer.get_multicast_socket(
             host, port=streamer.PFB_STREAMER_PORT) as sock:
@@ -352,46 +446,19 @@ async def run_pfb_source(
                 pkt = streamer.PFBPacket(data)
                 if module is not None and pkt.module != module - 1:
                     continue
-                # Match the slow stream's 16-bit ADC scale: np.array(pkt)
-                # applies the packetizer /256; the second /256 brings the
-                # 24-bit datapath down to ADC counts (same convention as
-                # the slow readout path).  Without it, fast samples sit
-                # exactly 256x above slow samples for the same signal.
-                raw = np.array(pkt) / 256.0
-                ts = streamer.ts_to_seconds(pkt.ts)
-                time_samples = pkt.num_samples // n_groups
-                # A whole packet per channel per call.  The packet
-                # interleaves the streamed channels round-robin, so one
-                # channel is a strided slice; feeding those arrays
-                # straight through is what lets the engine absorb quiet
-                # stretches with numpy rather than 1.22 million Python
-                # calls a second.  NaN where the packet has no usable
-                # timestamp — the session drops and counts those,
-                # exactly as the per-sample path did with None.
-                t0 = ts if ts is not None else float("nan")
-                times = t0 + np.arange(time_samples) / sample_rate
-                for slot, ch in enumerate(channels):
-                    v = raw[slot:time_samples * n_groups:n_groups]
-                    if v.shape[0] == 0:
-                        continue
-                    n_ok = min(v.shape[0], times.shape[0])
-                    # Every session and facade exposes feed_block, and
-                    # there is deliberately no per-sample fallback: it
-                    # would put the fast stream on the path this
-                    # function exists to avoid.
-                    capture_session.feed_block(ch, v[:n_ok].real,
-                                               v[:n_ok].imag,
-                                               times[:n_ok])
-                # Exact per-packet span — independent of timestamp
-                # discontinuities across rate changes.
-                elapsed += time_samples / sample_rate
-                if duration_s is not None and elapsed >= duration_s:
-                    done = True
+                reorder.push(pkt.seq, pkt)
+                for pkt in reorder.ready():
+                    if feed_packet(pkt):
+                        done = True
+                        break
+                if done:
                     break
             # An explicit turn for whatever shares the loop -- in a dual
             # capture, the slow stream.  The drain cap above bounds how
             # long this coroutine held it.
             await asyncio.sleep(0)
+        for pkt in reorder.flush():
+            feed_packet(pkt)
     return elapsed
 
 

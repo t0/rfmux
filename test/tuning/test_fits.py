@@ -32,7 +32,7 @@ from rfmux.tuning.fits import (
     skewed_model_magnitude,
 )
 from rfmux.tuning.multisweep_amplitudes import AmplitudeSchedule
-from rfmux.tuning.sweep_results import pack_results
+from rfmux.tuning.sweep_results import pack_results, pack_sweep
 
 pytestmark = pytest.mark.portable
 
@@ -85,6 +85,27 @@ def a_catalog():
         ],
         module=2,
     )
+
+
+def a_multisweep(sections=None, direction="upward"):
+    """One module's worth of a single multisweep return.
+
+    Through the real packer, so these tests cannot drift from the shape a macro
+    actually produces — which is how the flat {name: entry} dicts they used to
+    build by hand went on passing after that shape stopped existing.
+    """
+    if sections is None:
+        sections = {"R0001": a_sweep()}
+    return pack_sweep(
+        sections,
+        module_id=MODULE_ID,
+        module=2,
+        sweep_direction=direction,
+        span_hz=600e3,
+        npoints_per_sweep=201,
+        nsamps=10,
+        catalog=a_catalog(),
+    )[MODULE_ID]
 
 
 def a_ladder(directions=("upward", "downward")):
@@ -166,11 +187,13 @@ def test_nothing_derivable_from_the_stored_numbers_is_stored():
 
 
 def test_the_settings_come_back_on_the_report_rather_than_on_every_entry():
-    sweeps = {"R0001": a_sweep()}
+    sweeps = a_multisweep()
     report = fit_sweeps(sweeps, models=("skewed",), approx_Qr=3e4)
 
     assert report.settings["approx_Qr"] == 3e4
-    assert "settings" not in sweeps["R0001"]["fits"]["skewed"]
+    assert report.settings["module"] == 2
+    entry = sweeps["results"][0]["upward"]["R0001"]
+    assert "settings" not in entry["fits"]["skewed"]
 
 
 # ─── the fitters find what was planted ────────────────────────────────────────
@@ -260,7 +283,9 @@ def test_a_converged_fit_above_max_residual_keeps_its_parameters_and_says_so():
 
 
 def test_one_malformed_entry_does_not_throw_away_the_rest_of_the_batch():
-    sweeps = {"good": a_sweep(), "bad": {"frequencies": None, "iq_counts": None}}
+    sweeps = a_multisweep(
+        {"good": a_sweep(), "bad": {"frequencies": None, "iq_counts": None}}
+    )
 
     report = fit_sweeps(sweeps, models=("circle",))
 
@@ -338,14 +363,16 @@ def test_reading_a_model_that_did_not_converge_gives_the_reason():
 # ─── what gets fitted ─────────────────────────────────────────────────────────
 
 
-def test_a_bare_multisweep_return_is_fitted_as_one_iteration():
-    sweeps = {"R0001": a_sweep(), "R0002": a_sweep()}
+def test_a_single_multisweep_is_fitted_as_one_iteration():
+    """Which is what it is: one amplitude step, in one direction."""
+    sweeps = a_multisweep({"R0001": a_sweep(), "R0002": a_sweep()},
+                          direction="downward")
 
     report = fit_sweeps(sweeps, models=("circle",))
 
     assert len(report) == 2
-    assert {f.iteration for f in report.fits} == {None}
-    assert {f.direction for f in report.fits} == {None}
+    assert {f.iteration for f in report.fits} == {0}
+    assert {f.direction for f in report.fits} == {"downward"}
 
 
 def test_a_packed_ladder_is_fitted_across_every_iteration_and_direction():
@@ -389,24 +416,47 @@ def test_a_filter_that_selects_nothing_says_what_there_was():
         fit_sweeps(a_ladder(), iterations=99)
 
 
-def test_iterations_are_refused_on_a_sweep_that_has_only_one():
-    with pytest.raises(ValueError, match="single multisweep return"):
-        fit_sweeps({"R0001": a_sweep()}, iterations=0)
+def test_iteration_zero_selects_the_one_sweep_a_multisweep_has():
+    """Rather than being refused as a filter that does not apply: a single
+    sweep has an iteration like any other, it just has one."""
+    report = fit_sweeps(a_multisweep(), models=("circle",), iterations=0)
+
+    assert {f.iteration for f in report.fits} == {0}
 
 
-def test_a_multi_module_return_is_refused_one_module_at_a_time():
-    with pytest.raises(TypeError, match="one module at a time"):
-        fit_sweeps([{"R0001": a_sweep()}])
+def test_an_iteration_a_single_sweep_does_not_have_says_what_it_has():
+    with pytest.raises(ValueError, match=r"iterations=99.*\[0\]"):
+        fit_sweeps(a_multisweep(), models=("circle",), iterations=99)
+
+
+def test_the_whole_container_is_refused_with_the_subscript_to_use():
+    whole = pack_sweep(
+        {"R0001": a_sweep()},
+        module_id=MODULE_ID,
+        module=2,
+        sweep_direction="upward",
+        span_hz=600e3,
+        npoints_per_sweep=201,
+        nsamps=10,
+    )
+
+    with pytest.raises(TypeError, match="keyed by module"):
+        fit_sweeps(whole)
+
+
+def test_something_that_is_not_a_sweep_result_says_so():
+    with pytest.raises(TypeError, match="no 'results'"):
+        fit_sweeps({"R0001": a_sweep()})
 
 
 def test_a_bare_string_of_models_is_refused_rather_than_read_as_characters():
     with pytest.raises(TypeError, match="not a single string"):
-        fit_sweeps({"R0001": a_sweep()}, models="skewed")
+        fit_sweeps(a_multisweep(), models="skewed")
 
 
 def test_an_unknown_model_names_the_ones_that_exist():
     with pytest.raises(ValueError, match="Unknown model"):
-        fit_sweeps({"R0001": a_sweep()}, models=("lorentzian",))
+        fit_sweeps(a_multisweep(), models=("lorentzian",))
 
 
 # ─── fitting where each resonator is biased ───────────────────────────────────
@@ -433,9 +483,12 @@ def test_an_explicit_amplitude_overrides_the_catalogs_bias_amplitudes():
     assert {f.iteration for f in report.fits} == {0}
 
 
-def test_a_single_multisweep_has_no_amplitudes_to_match_between():
-    with pytest.raises(TypeError, match="nothing to match"):
-        fit_sweeps_at_bias_amplitude({"R0001": a_sweep()})
+def test_a_single_multisweep_matches_the_one_iteration_it_has():
+    """Nearest wins over a set of one, as it does over a ladder that does not
+    bracket the bias amplitude — see find_iteration_matching_amplitude."""
+    report = fit_sweeps_at_bias_amplitude(a_multisweep(), models=("circle",))
+
+    assert {f.iteration for f in report.fits} == {0}
 
 
 # ─── the report ───────────────────────────────────────────────────────────────
@@ -452,13 +505,13 @@ def test_the_report_counts_each_model_separately():
 
 
 def test_the_report_says_where_a_failure_was_as_well_as_why():
-    sweeps = {"R0001": {"frequencies": None, "iq_counts": None}}
+    sweeps = a_multisweep({"R0001": {"frequencies": None, "iq_counts": None}})
 
     report = fit_sweeps(sweeps, models=("circle",))
 
     assert isinstance(report, FitReport)
     assert report.fitted == []
-    assert report.failed[0].where == "R0001"
+    assert report.failed[0].where == "R0001@0 upward"
     assert "failed" in repr(report)
 
 

@@ -4,8 +4,16 @@ Fit resonator models to sweeps that have already been measured.
 Fitting is a separate step, run by hand on data that exists::
 
     sweeps = await crs.multiamp_multisweep(catalog, span_hz=200e3, npoints_per_sweep=101)
-    report = fit_sweeps(sweeps)
-    sweeps["results"][0]["upward"]["R0001"]["fits"]["skewed"]["params"]["Qr"]
+
+    module_sweeps = sweeps[crs.module[2].index()]
+    report = fit_sweeps(module_sweeps)
+    module_sweeps["results"][0]["upward"]["R0001"]["fits"]["skewed"]["params"]["Qr"]
+
+A sweep result is keyed by module, and everything here takes *one module's*
+value out of it. Stepping into the module you mean is the caller's job: a
+``module=`` argument would put a coordinate in every signature that the data
+structure already carries, and would make the one-module script differ from the
+loop that handles four.
 
 Nothing measures on your behalf and no sweep fits itself on the way past. A
 sweep that quietly fitted would be a sweep whose output nobody can reason
@@ -84,7 +92,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import OptimizeWarning, curve_fit
 
-from .sweep_results import find_iteration_matching_amplitude
+from .sweep_results import _refuse_container, find_iteration_matching_amplitude
 
 __all__ = [
     "MODELS",
@@ -165,8 +173,8 @@ class SweepFit:
 
     name: str  # resonator or section
     model: str  # one of MODELS
-    iteration: int | None  # amplitude iteration; None for a bare multisweep
-    direction: str | None  # "upward"/"downward"; None for a bare multisweep
+    iteration: int  # amplitude iteration; 0 for a single multisweep
+    direction: str  # "upward"/"downward"
     failed_because: str | None
 
     @property
@@ -175,9 +183,11 @@ class SweepFit:
 
     @property
     def where(self) -> str:
-        """A short label for messages: ``R0001`` or ``R0001@2 downward``."""
-        if self.iteration is None:
-            return self.name
+        """A short label for messages: ``R0001@2 downward``.
+
+        Always both coordinates, because every sweep has both — a single one is
+        ``R0001@0 upward``, which is where it was taken.
+        """
         return f"{self.name}@{self.iteration} {self.direction}"
 
 
@@ -254,12 +264,13 @@ def fit_sweeps(
     nonlinear model after the skewed one does not throw the skewed one away.
 
     Args:
-        sweeps: what ``multiamp_multisweep`` returned (the packed dict with
-            ``results`` and ``call_params``), or what a single ``multisweep``
-            returned (``{name: entry}``). Either way the entries are written in
-            place. A *list* of multisweep returns — the multi-module form — is
-            refused: fit one module at a time, so the report is about one
-            module.
+        sweeps: **one module's** value out of what ``multisweep`` or
+            ``multiamp_multisweep`` returned —
+            ``sweeps[crs.module[m].index()]``. The two macros return the same
+            shape, so either is fitted the same way, and the entries are
+            written in place. The whole dict, keyed by module, is refused with
+            a message naming the modules it holds: a report is about one
+            module, and which one is your choice to make.
         models: which models to run, from :data:`MODELS`. All three by default.
             ``nonlinear`` is much the most expensive: it is a seven-parameter
             complex fit run up to three times per sweep, where ``skewed`` is
@@ -268,8 +279,8 @@ def fit_sweeps(
         names: which resonators or sections to fit. A single name, an iterable
             of them, or None for all of them.
         iterations: which amplitude iterations to fit. A single iteration, an
-            iterable of them, or None for all. Ignored — and refused if given —
-            for a bare multisweep return, which has only one.
+            iterable of them, or None for all. A single ``multisweep`` has just
+            iteration 0, so this selects everything or nothing there.
             :func:`fit_sweeps_at_bias_amplitude` covers the common case of "the
             iteration where each resonator is actually biased", which is a
             different iteration per resonator under a relative ladder and so
@@ -311,6 +322,7 @@ def fit_sweeps(
     )
     return _fit(
         sections,
+        module=sweeps.get("module"),
         models=models,
         approx_Qr=approx_Qr,
         normalize=normalize,
@@ -362,14 +374,6 @@ def fit_sweeps_at_bias_amplitude(
     — floats from a ladder rarely compare equal. Check the match with
     ``get_amplitudes_at_iteration`` if it has to be close.
     """
-    if not _is_packed(sweeps):
-        raise TypeError(
-            "fit_sweeps_at_bias_amplitude needs what multiamp_multisweep "
-            "returned (with 'results' and 'call_params'). A single multisweep "
-            "has one amplitude per resonator, so there is nothing to match — "
-            "fit it with fit_sweeps."
-        )
-
     all_sections = list(_walk(sweeps))
     wanted = _filter_names(names, {s.name for s in all_sections})
     at_bias = {
@@ -390,7 +394,7 @@ def fit_sweeps_at_bias_amplitude(
             f"Nothing to fit: no sweep of {sorted(wanted)[:4]} at its bias "
             f"amplitude survived directions={directions!r}."
         )
-    return _fit(sections, **settings)
+    return _fit(sections, module=sweeps.get("module"), **settings)
 
 
 def fit_section(
@@ -561,51 +565,37 @@ class _Section:
     """One sweep, and the coordinates it was found at."""
 
     name: str
-    iteration: int | None
-    direction: str | None
+    iteration: int
+    direction: str
     entry: dict
 
 
-def _is_packed(sweeps) -> bool:
-    """Is this the dict multiamp_multisweep returned, rather than one sweep?"""
-    return (
-        isinstance(sweeps, Mapping)
-        and "results" in sweeps
-        and "call_params" in sweeps
-    )
-
-
 def _walk(sweeps):
-    """Every sweep in either accepted shape, with its coordinates."""
-    if isinstance(sweeps, (list, tuple)):
-        raise TypeError(
-            "This looks like a multi-module multisweep return (a list of "
-            "dicts). Fit one module at a time, so a report is about one "
-            "module: fit_sweeps(sweeps[0]), fit_sweeps(sweeps[1]), …"
-        )
+    """Every sweep in one module's result, with its coordinates.
+
+    One nesting, because there is only one shape: a single ``multisweep`` and a
+    whole ``multiamp_multisweep`` ladder nest identically, the sweep simply
+    being the ladder of length one that it is.
+    """
+    _refuse_container(sweeps)
+
     if not isinstance(sweeps, Mapping):
         raise TypeError(
-            f"Expected what multisweep or multiamp_multisweep returned, got "
+            f"Expected one module's sweep result — what multisweep or "
+            f"multiamp_multisweep returned, indexed by module — got "
             f"{type(sweeps).__name__}."
         )
+    if "results" not in sweeps:
+        raise TypeError(
+            "This is not a sweep result: it has no 'results'. A sweep macro "
+            "returns {module_id: {'results': ..., 'call_params': ...}}, so "
+            "fitting one module means fit_sweeps(sweeps[module_id])."
+        )
 
-    if _is_packed(sweeps):
-        for iteration, by_direction in sweeps["results"].items():
-            for direction, sections in by_direction.items():
-                for name, entry in sections.items():
-                    yield _Section(name, int(iteration), direction, entry)
-        return
-
-    for name, entry in sweeps.items():
-        if not isinstance(entry, Mapping):
-            raise TypeError(
-                f"{name!r} is not a sweep entry but a "
-                f"{type(entry).__name__}. If this is the dict "
-                f"multiamp_multisweep returned it should have 'results' and "
-                f"'call_params'; if it is a single multisweep return, every "
-                f"value should be one sweep."
-            )
-        yield _Section(name, None, None, entry)
+    for iteration, by_direction in sweeps["results"].items():
+        for direction, sections in by_direction.items():
+            for name, entry in sections.items():
+                yield _Section(name, int(iteration), direction, entry)
 
 
 def _as_filter(wanted, what: str) -> set | None:
@@ -647,15 +637,6 @@ def _select(sweeps, *, names, iterations, directions) -> list[_Section]:
     sections = list(_walk(sweeps))
     if not sections:
         raise ValueError("There are no sweeps in this result to fit.")
-
-    bare = sections[0].iteration is None
-    if bare and (iterations is not None or directions is not None):
-        raise ValueError(
-            "iterations and directions apply to a multiamp_multisweep result, "
-            "which has more than one of each. This is a single multisweep "
-            "return: it is one iteration in one direction, so there is nothing "
-            "to select between."
-        )
 
     keep_names = _filter_names(names, {s.name for s in sections})
     keep_iterations = _as_filter(iterations, "iterations")
@@ -705,6 +686,7 @@ def _resolve_models(models) -> tuple[str, ...]:
 def _fit(
     sections: list[_Section],
     *,
+    module: int | None = None,
     models: Sequence[str] = MODELS,
     approx_Qr: float = 1e4,
     normalize: bool = True,
@@ -719,6 +701,11 @@ def _fit(
 
     One sweep is one job, so a sweep's models all run on the same thread and no
     two threads ever write to the same entry.
+
+    *module* is recorded in the report's settings and nowhere else. A report is
+    about one module by construction — the caller indexed one out — so it is a
+    constant across every fit in it, and putting it on each ``SweepFit`` would
+    be the same string repeated a thousand times.
     """
     models = _resolve_models(models)
     settings = {
@@ -732,6 +719,10 @@ def _fit(
     }
     per_section = dict(settings)
     del per_section["models"]
+
+    # After per_section, so it reaches the report without being handed to the
+    # fitters as a keyword they do not take.
+    settings["module"] = module
 
     def fit_one(section: _Section) -> dict:
         return fit_section(section.entry, models=models, **per_section)

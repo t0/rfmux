@@ -234,9 +234,8 @@ currently carries whatever `multisweep` returned.
 * `FitReport.settings` records the module id, read off the envelope, so a
   printed report says which module without the caller threading it.
 * `_select`'s `bare` guard and `fit_sweeps_at_bias_amplitude`'s `_is_packed`
-  refusal are **left alone for now** — deliberately. See the entry in
-  `tuning_revamp_todo.md`; both become unreachable-as-written and need a
-  decision each, not a silent deletion.
+  refusal were to be left alone, pending a decision each. **The shape change
+  made both unreachable, so there was nothing left to decide** — see §11.
 
 **Tests** — `test/algorithms/test_multiamp_multisweep.py:51`'s fake CRS must
 return the envelope shape, or the driver's unwrapping has nothing to unwrap.
@@ -296,7 +295,7 @@ subscripts.
 
 Steps 4 and 5 must land together or the driver breaks; the rest are separable.
 
-**Steps 1-5 have landed.** Two corrections worth carrying forward:
+**Steps 1-6 have landed.** Corrections worth carrying forward:
 
 * Step 3 was not separable after all. Changing `pack_results`' signature
   necessarily touches its only caller, so the driver's packing half landed with
@@ -306,12 +305,12 @@ Steps 4 and 5 must land together or the driver breaks; the rest are separable.
   tier, which `addopts` deselects by default. It indexed the old flat return and
   would have rotted silently through a green default run. Anything touching a
   macro's return shape needs `pytest -m slow_acquisition` as well.
+* The two `fits.py` guards did not need deciding after all — the shape change
+  had already made them unreachable. See §11.
 
 ---
 
 ## 9. Deliberately out of scope
-
-* The two `fits.py` guards — tracked in `tuning_revamp_todo.md`.
 * Periscope's rewire, which is step 5 of
   `tuning_multisweep_amplitudes_plan.md`.
 * `store.py` and how a container is written to disk. The container is what it
@@ -331,3 +330,29 @@ Steps 4 and 5 must land together or the driver breaks; the rest are separable.
   say which modules it holds and raises well on a missing key? A plain dict for
   now — it loops with `.items()`, which is the whole point, and a class is a
   later wrapper rather than a different shape.
+
+---
+
+## 11. What happened to the two deferred `fits.py` guards
+
+They were deferred as open questions and then answered by the shape change
+itself, before step 6 touched them. Both were only still *passing their tests*
+because those tests fed hand-built dicts in a shape no macro returns any more.
+
+**`_select`'s `bare` guard** — refused `iterations=` / `directions=` on a
+"single multisweep return", detected as `sections[0].iteration is None`. With
+one nesting, `_walk` always yields an `int` iteration, so the condition is
+constantly false and the error cannot fire. Deleted. `iterations=0` on a single
+sweep now simply selects its one sweep, and `iterations=99` falls through to the
+generic message, which names the iterations that exist.
+
+**`fit_sweeps_at_bias_amplitude`'s refusal** — `if not _is_packed(sweeps)`,
+where `_is_packed` meant "has `results` and `call_params`". Every envelope has
+both now, whichever macro produced it, so the refusal stopped firing at step 4,
+not step 6: a real single-sweep result had already been silently accepted for
+two commits. Deleted with `_is_packed`. Matching a bias amplitude against one
+iteration is nearest-wins over a set of one, which is the behaviour a ladder
+that does not bracket the bias amplitude already had and already documents.
+
+The lesson worth keeping: a guard whose test constructs its own input can outlive
+the shape it was guarding, and say nothing when it does.

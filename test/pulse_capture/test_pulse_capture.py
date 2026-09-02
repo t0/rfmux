@@ -1899,6 +1899,40 @@ class TestHardStop:
             max(10, int(0.1 * (below - d["trigger_index"]))) + 2, \
             "the stalled confirmation stretch must not be saved"
 
+    def test_a_level_shift_is_one_truncated_record(self):
+        """A step that stays above threshold past the hard stop is saved
+        once, flagged truncated, and the channel does not trigger again
+        until the signal returns below threshold; a pulse after the
+        return triggers normally."""
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=2000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.5)
+        rng = np.random.default_rng(6)
+        k = 0
+
+        def feed(n, offset):
+            nonlocal k
+            for _ in range(n):
+                pcap.process_sample(1, float(rng.normal(0, 1.0) + offset),
+                                    float(rng.normal(0, 1.0)), k * 1e-3)
+                k += 1
+
+        feed(300, 0.0)
+        feed(6 * pcap.max_capture_samples, 60.0)     # the step
+        assert pcap.pulse_count[1] == 1
+        assert pcap.pulses["Channel 1"][1]["truncated"] is True
+        assert pcap.state[1].latched
+        feed(300, 0.0)
+        assert not pcap.state[1].latched
+        assert pcap.pulse_count[1] == 1
+        for j in range(200):                          # a pulse
+            v = rng.normal(0, 1.0) + 60.0 * np.exp(-j / 20.0)
+            pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
+                                (k + j) * 1e-3)
+        assert pcap.pulse_count[1] == 2
+        assert pcap.pulses["Channel 1"][2]["truncated"] is False
+
     def test_stalled_confirmation_is_kept_when_saving_to_confirmed(self):
         """Same stall, saving to the confirmation: the stretch IS saved,
         and the pulse is still not truncated.  This is the case the

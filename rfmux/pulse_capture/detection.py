@@ -201,6 +201,10 @@ class _ChState:
     # to the start of the run, not to the sample that confirmed it.
     above_run: int = 0
     run_start_abs: int = 0
+    # A hard-stopped capture whose signal is still above threshold: a
+    # level shift, not a pulse train.  No trigger until the signal
+    # returns below threshold, so an excursion is one truncated record.
+    latched: bool = False
     # First sample of the current statistics epoch: lag-K references
     # never reach past it (see reset_edge_history).
     epoch_start: int = 0
@@ -478,13 +482,13 @@ class PulseCapture:
                     Q: np.ndarray, T: np.ndarray) -> None:
         """Absorb a run of samples that provably cannot do anything.
 
-        Valid only when the engine is not capturing, no sample in the
-        run reaches ``threshold_sigma``, and the baseline mean does not
-        move within it.  Under those three conditions process_sample's
-        entire body reduces to: append to the ring, feed the decimated
-        baseline reservoir, and advance the counters.  No trigger can
-        fire, no capture can end, and the edge detector — which only
-        runs on eligible samples — never looks.
+        Valid only when the engine is not capturing, the baseline mean
+        does not move within the run, and either no sample in it reaches
+        ``threshold_sigma`` or the channel is latched.  Under those
+        conditions process_sample's entire body reduces to: append to
+        the ring, feed the decimated baseline reservoir, and advance the
+        counters.  No trigger can fire, no capture can end, and the edge
+        detector — which only runs on eligible samples — never looks.
         """
         n = I.shape[0]
         bufs = self.buf[channel]
@@ -578,6 +582,19 @@ class PulseCapture:
             above = ((np.abs(seg_I - ns.mean_I) / si > self.threshold_sigma)
                      | (np.abs(seg_Q - ns.mean_Q) / sq
                         > self.threshold_sigma))
+            if st.latched:
+                # Above threshold decides nothing while latched; the
+                # first sample below it unlatches, through process_sample.
+                below = np.flatnonzero(~above)
+                stop = end if below.shape[0] == 0 else pos + int(below[0])
+                if stop > pos:
+                    self._bulk_quiet(channel, st, I[pos:stop], Q[pos:stop],
+                                     T[pos:stop])
+                    pos = stop
+                if pos < end:
+                    self.process_sample(channel, I[pos], Q[pos], T[pos])
+                    pos += 1
+                continue
 
             hits = np.flatnonzero(above)
             if hits.shape[0] == 0:
@@ -715,6 +732,10 @@ class PulseCapture:
             st.above_run += 1
         else:
             st.above_run = 0
+        if st.latched:
+            if max_dev > self.threshold_sigma:
+                return
+            st.latched = False
         eligible = st.above_run >= self.trigger_samples
 
         # ── Edge detector (lag-K outward jump) ────────────────────
@@ -828,7 +849,11 @@ class PulseCapture:
         #     drifted during the capture can push the end_sigma band off
         #     the settled signal; without this bound that capture would
         #     run forever while the ring silently wraps over the rising
-        #     edge.  Worst case is now one max-pulse of dead time.
+        #     edge.  Worst case is now one max-pulse of dead time.  If
+        #     the signal is still above threshold at the hard stop the
+        #     channel latches: a level shift is one truncated record,
+        #     not a train of them, and the samples until it returns
+        #     below threshold cost nothing.
         #
         # Counting down rather than resetting is what makes an isolated
         # noisy sample harmless.  That matters most on the PFB stream,
@@ -964,6 +989,7 @@ class PulseCapture:
             elif (self.max_capture_samples > 0
                     and since_trig >= self.max_capture_samples):
                 self._save_pulse(channel, truncated=True)
+                st.latched = st.above_run > 0
 
     # ── Internal helpers ──────────────────────────────────────────
 

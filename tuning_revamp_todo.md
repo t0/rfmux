@@ -136,6 +136,35 @@ loudly, so check them off when their rewrite lands:
   had already broken. `test/algorithms/test_measurement_flow.py` keeps passing
   because it mocks `crs.multisweep`, so CI will not catch either.
 
+## Two `fits.py` guards become dead letters once the sweep shapes unify
+
+When `multisweep` returns the same envelope as `multiamp_multisweep` — one
+shape, `results[iteration][direction][name]`, with a single sweep sitting at
+iteration 0 in its own direction — two errors that exist only to explain the
+difference between the shapes stop being reachable. Both were deliberately
+skipped when the unification landed. Decide each on its own merits:
+
+1. **`iterations=` / `directions=` filters on a single sweep.** `_select`
+   (`tuning/fits.py:651`) raises "This is a single multisweep return: it is one
+   iteration in one direction, so there is nothing to select between." Once
+   there is always an iteration and always a direction, `iterations=0` is
+   simply true and `iterations=5` falls through to the generic "selected none
+   of the N sweeps" message, which already names what is available. Probably
+   just delete the guard — but it is a deliberate deletion, not a silent one.
+2. **`fit_sweeps_at_bias_amplitude` on a single sweep.** The `_is_packed` check
+   at `tuning/fits.py:365` refuses it outright: one amplitude per resonator,
+   nothing to match. Unified, it would work and always land on iteration 0,
+   because nearest-wins over a set of one. That is arguably right — a ladder
+   that does not bracket the bias amplitude already behaves this way, and the
+   docstring says so — but "the iteration nearest your bias amplitude" quietly
+   meaning "the only one you took" is worth a decision rather than a
+   side-effect. `test/tuning/test_fits.py:387` guards the current behaviour and
+   goes with it.
+
+Related: `SweepFit.iteration` and `.direction` (`tuning/fits.py:167`) are
+`int | None` / `str | None` purely for the bare case, and `where` branches on
+it. Both can lose the `None` once every sweep has coordinates.
+
 ## Retire the legacy resonance finder
 
 `algorithms/measurement/fitting.py:394` `find_resonances` is now a deprecating

@@ -474,8 +474,7 @@ class PulseCaptureTask(QtCore.QThread):
                 self._pair_cache.popitem(last=False)
         lean = {k: pair.get(k) for k in
                 ("channel", "pair_idx", "slow_idx", "fast_idx",
-                 "time_offset", "trigger_offset",
-                 "slow_summary", "fast_summary")}
+                 "time_offset", "slow_summary", "fast_summary")}
         lean["has_slow_tod"] = pair.get("slow_tod") is not None
         lean["has_fast_tod"] = pair.get("fast_tod") is not None
         self.signals.pair_matched.emit(lean)

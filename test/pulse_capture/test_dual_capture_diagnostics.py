@@ -330,9 +330,10 @@ def test_union_window_spans_the_saved_record():
     assert t1 == pytest.approx(T + 0.004 + 0.0004, abs=1e-6)
 
 
-def test_matcher_anchors_on_the_trigger_not_the_record_start():
-    """Two records of one event start at different pre-margins; the
-    matcher anchors on the trigger so they still pair."""
+def test_matcher_pairs_on_the_trigger_instant():
+    """Two records of one event start at different pre-margins and have
+    different core lengths; the matcher pairs on the trigger, and the
+    offset it reports is trigger to trigger."""
     from rfmux.pulse_capture.capture_session import IncrementalPulseMatcher
     pairs = []
     m = IncrementalPulseMatcher(window_s=0.05, grace_s=0.25,
@@ -340,11 +341,12 @@ def test_matcher_anchors_on_the_trigger_not_the_record_start():
     T = 43000.0
     # Record starts 115 ms apart, outside the 50 ms window; one trigger.
     m.add("slow", 1, 1, {"timestamp": T - 0.005, "trigger_time": T,
-                         "duration_s": 0.004})
-    m.add("fast", 1, 1, {"timestamp": T - 0.120, "trigger_time": T,
-                         "duration_s": 0.004})
+                         "duration_s": 0.010})
+    m.add("fast", 1, 1, {"timestamp": T - 0.120, "trigger_time": T - 0.0016,
+                         "duration_s": 0.002})
     assert m.matched == 1 and pairs and pairs[0]["slow_idx"] == 1 \
         and pairs[0]["fast_idx"] == 1, "one event, two records, no match"
+    assert pairs[0]["time_offset"] == pytest.approx(0.0016, abs=1e-9)
 
 
 def test_band_pair_is_one_legend_entry_that_hides_both(qt_app):
@@ -428,23 +430,6 @@ def test_review_mode_restores_the_full_tail_setting(qt_app, tmp_path):
     spin(qt_app)
 
 
-def test_matched_pair_reports_trigger_to_trigger_skew():
-    """The pair carries slow-minus-fast trigger time, which the midpoint
-    offset is not: that folds in half of each stream's core."""
-    from rfmux.pulse_capture.capture_session import IncrementalPulseMatcher
-    pairs = []
-    m = IncrementalPulseMatcher(window_s=0.05, grace_s=0.25,
-                                on_pair=lambda p: pairs.append(p))
-    T = 43000.0
-    m.add("slow", 1, 1, {"timestamp": T - 0.005, "trigger_time": T,
-                         "duration_s": 0.010})
-    m.add("fast", 1, 1, {"timestamp": T - 0.0016 - 0.02,
-                         "trigger_time": T - 0.0016, "duration_s": 0.002})
-    assert pairs and pairs[0]["slow_idx"] and pairs[0]["fast_idx"]
-    assert pairs[0]["trigger_offset"] == pytest.approx(0.0016, abs=1e-9)
-    assert pairs[0]["time_offset"] != pytest.approx(0.0016, abs=1e-4)
-
-
 def test_dual_stats_carry_the_median_skew():
     d, pairs = _dual_for_deferral()
     T0 = 43000.0
@@ -455,7 +440,7 @@ def test_dual_stats_carry_the_median_skew():
         for key in ("slow_summary", "fast_summary"):
             p[key].update(duration_s=0.01, start_time=T0 + 0.3,
                           saved_end_time=T0 + 0.32)
-        p["trigger_offset"] = off
+        p["time_offset"] = off
         d._on_matcher_pair(p)
     st = d.stats()
     assert st["stream_skew_n"] == 3

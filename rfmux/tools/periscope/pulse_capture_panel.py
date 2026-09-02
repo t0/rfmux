@@ -1662,14 +1662,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if matched:
             label = (f"◆ Pair #{pair_idx:04d}  "
                      f"s#{pair['slow_idx']}/f#{pair['fast_idx']}")
-            # Trigger to trigger: the streams' clocks on one event.  The
-            # midpoint offset also carries each stream's core length.
-            toff = pair.get("trigger_offset")
-            if toff is not None and np.isfinite(toff):
-                detail = f"Δt(trig)={toff*1e6:+.0f}µs"
-            else:
-                dt = pair.get("time_offset") or 0.0
-                detail = f"Δt={dt*1e6:+.0f}µs"
+            dt = pair.get("time_offset") or 0.0
+            detail = f"Δt(trig)={dt*1e6:+.0f}µs"
         else:
             side = "slow" if pair["slow_idx"] is not None else "fast"
             other = "fast" if side == "slow" else "slow"
@@ -2315,17 +2309,15 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 if (slow_wf is not None) else \
                 "fast-triggered (slow window unavailable)"
         dt = meta.get("time_offset")
-        toff = meta.get("trigger_offset")
         summ = meta.get("slow_summary") or meta.get("fast_summary") or {}
         tau_ms = summ.get("tau_ms", float("nan"))
         self.pulse_info.setText(
             f"Pair #{pair_idx:04d} — Channel {channel}   "
             f"[{provenance}]\n"
             f"slow #{meta.get('slow_idx')} / fast #{meta.get('fast_idx')}"
-            + (f"   Δt(trigger) = {toff*1e6:+.0f} µs  (slow − fast: the "
+            + (f"   Δt(trigger) = {dt*1e6:+.0f} µs  (slow − fast: the "
                f"streams' clocks on this event)"
-               if toff is not None and np.isfinite(toff)
-               else (f"   Δt = {dt*1e6:+.0f} µs" if dt is not None else ""))
+               if dt is not None and np.isfinite(dt) else "")
             + (f"\nSNR {summ.get('snr', 0):.1f}σ, "
                f"τ = {tau_ms:.2f} ms"
                if np.isfinite(tau_ms) else ""))

@@ -1114,7 +1114,7 @@ class PulseCaptureSession(_CallbackHost):
 @dataclass
 class _Pending:
     pulse_idx: int
-    mid: float
+    t: float          # trigger instant
     summary: dict
 
 
@@ -1165,36 +1165,35 @@ class IncrementalPulseMatcher:
 
     def add(self, stream: str, channel: int, pulse_idx: int,
             summary: dict) -> None:
-        # Midpoint of the core, anchored on the trigger.  The record
-        # start sits a pre-margin before it, and that margin is a
-        # fraction of each stream's own saved length, so it differs
-        # between the two streams' records of one event.
-        anchor = summary.get("trigger_time", summary.get("timestamp", 0.0))
-        mid = anchor + summary.get("duration_s", 0.0) / 2.0
-        if not math.isfinite(mid):
+        # Pulses pair on their trigger instants: both streams trigger
+        # on the rise of one event, and the streams' clocks agree.  The
+        # record start sits a pre-margin before the trigger and the
+        # core length differs per stream, so neither would do.
+        t = summary.get("trigger_time", summary.get("timestamp", 0.0))
+        if not math.isfinite(t):
             return
 
         latest = self._latest[stream]
-        if latest is None or mid > latest:
-            self._latest[stream] = mid
+        if latest is None or t > latest:
+            self._latest[stream] = t
 
         # Best partner in the other stream's pending list
         others = self._pending[self._other(stream)].setdefault(channel, [])
         best_i, best_diff = -1, self.window_s
         for i, cand in enumerate(others):
-            diff = abs(cand.mid - mid)
+            diff = abs(cand.t - t)
             if diff <= best_diff:
                 best_i, best_diff = i, diff
         if best_i >= 0:
             partner = others.pop(best_i)
-            mine = _Pending(pulse_idx, mid, summary)
+            mine = _Pending(pulse_idx, t, summary)
             slow, fast = ((mine, partner) if stream == "slow"
                           else (partner, mine))
             self.matched += 1
             self._emit(channel, slow=slow, fast=fast)
         else:
             self._pending[stream].setdefault(channel, []).append(
-                _Pending(pulse_idx, mid, summary))
+                _Pending(pulse_idx, t, summary))
 
         self._expire()
 
@@ -1216,7 +1215,7 @@ class IncrementalPulseMatcher:
             for channel, pend in self._pending[stream].items():
                 keep: List[_Pending] = []
                 for p in pend:
-                    if p.mid < cutoff:
+                    if p.t < cutoff:
                         self.unmatched += 1
                         self._emit(channel,
                                    slow=p if stream == "slow" else None,
@@ -1235,18 +1234,9 @@ class IncrementalPulseMatcher:
             "fast_idx": fast.pulse_idx if fast else None,
             "slow_summary": slow.summary if slow else None,
             "fast_summary": fast.summary if fast else None,
-            "time_offset": (slow.mid - fast.mid)
-            if slow and fast else None,
-            # Trigger-to-trigger: the two streams' clocks disagreeing
-            # on ONE physical event.  time_offset above is midpoint to
-            # midpoint and folds in each stream's own core length, so
-            # it reads several ms even on identical clocks.
-            "trigger_offset": (
-                slow.summary["trigger_time"] - fast.summary["trigger_time"]
-                if slow and fast
-                and slow.summary.get("trigger_time") is not None
-                and fast.summary.get("trigger_time") is not None
-                else None),
+            # Slow minus fast trigger time: the two streams' clocks on
+            # one event.
+            "time_offset": (slow.t - fast.t) if slow and fast else None,
         }
         if self.on_pair is not None:
             self.on_pair(pair)
@@ -1355,7 +1345,7 @@ class DualPulseCaptureSession(_CallbackHost):
         self._pair_window_wait_s = pair_window_wait_s
         #: slow-minus-fast trigger time of every matched pair: the
         #: board's inter-stream clock skew, one sample per event.
-        self._trigger_offsets: List[float] = []
+        self._time_offsets: List[float] = []
 
         self.slow = self._make_stream("slow", slow_rate)
         self.fast = self._make_stream("fast", fast_rate)
@@ -1503,7 +1493,7 @@ class DualPulseCaptureSession(_CallbackHost):
         if self.slow.sample_rate and self.fast.sample_rate:
             overlap = min(self.slow.buf_size / self.slow.sample_rate,
                           self.fast.buf_size / self.fast.sample_rate)
-        offs = self._trigger_offsets
+        offs = self._time_offsets
         return {"stream_lag_s": lag, "ring_overlap_s": overlap,
                 # Median slow-minus-fast trigger time over matched pairs.
                 "stream_skew_s": (float(np.median(offs)) if offs else None),
@@ -1602,9 +1592,9 @@ class DualPulseCaptureSession(_CallbackHost):
                         break          # still waiting on a ring
                     # Waited out: the missing window stays absent.
             self._pending_pairs.pop(0)
-            off = pair.get("trigger_offset")
+            off = pair.get("time_offset")
             if off is not None and math.isfinite(off):
-                self._trigger_offsets.append(float(off))
+                self._time_offsets.append(float(off))
             self._to_writer("append_match", pair["channel"], pair,
                             what="match write")
             self._callback(self.on_pair, pair)

@@ -88,7 +88,7 @@ def test_pulse_at_one_true_time_pairs_with_no_skew():
     assert pairs, "the pulse did not pair"
     # Residual skew is within one slow sample of zero: the slow trigger
     # can only land on a sample.
-    assert abs(pairs[0]["trigger_offset"]) < 1.0 / fs
+    assert abs(pairs[0]["time_offset"]) < 1.0 / fs
     assert abs(pairs[0]["slow_summary"]["trigger_time"] - T) < 1.0 / fs
 
 
@@ -101,7 +101,7 @@ def test_without_the_shift_the_slow_trigger_is_late_by_the_delay():
     _feed_both(d, cfg, fs, slow_late_by=late)
     assert d.slow_time_offset_s == 0.0
     assert pairs
-    assert pairs[0]["trigger_offset"] == pytest.approx(late, abs=1.0 / fs)
+    assert pairs[0]["time_offset"] == pytest.approx(late, abs=1.0 / fs)
 
 
 def test_shift_reaches_ring_record_and_single_sample_path():

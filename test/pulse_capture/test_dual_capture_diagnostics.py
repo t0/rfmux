@@ -477,3 +477,19 @@ def test_dual_stats_carry_the_median_skew():
     assert st["stream_skew_n"] == 3
     assert st["stream_skew_s"] == pytest.approx(0.0016)
     d.stop()
+
+
+def test_both_mode_status_counts_samples_dropped_per_stream(qt_app):
+    """A stream whose packets carry no usable timestamp loses every
+    sample; the status line says which stream and how many."""
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._both_mode = True
+    panel._last_stats = {"pairs_matched": 0, "pairs_unmatched": 0,
+                         "slow": {"total_pulses": 1, "dropped_invalid_ts": 0},
+                         "fast": {"total_pulses": 0, "dropped_invalid_ts": 24000}}
+    panel._refresh_status_line()
+    assert "fast 24000 dropped (no timestamp)" in panel.status_label.text()
+    assert "slow 0" not in panel.status_label.text()
+    panel.close()
+    spin(qt_app)

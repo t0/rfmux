@@ -1734,6 +1734,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             text = (f"● Capturing — slow {slow_n} | fast {fast_n} pulses — "
                     f"{s['pairs_matched']} matched / "
                     f"{s['pairs_unmatched']} single-trigger pairs")
+            dropped = {name: s.get(name, {}).get("dropped_invalid_ts", 0)
+                       for name in ("slow", "fast")}
+            if any(dropped.values()):
+                text += " — " + " / ".join(
+                    f"{name} {n} dropped (no timestamp)"
+                    for name, n in dropped.items() if n)
             colour, tip = self._stream_lag_signal(s)
             if tip:                       # append the drift note when it bites
                 text += f"  —  {tip[0]}"

@@ -6,6 +6,7 @@
 #include <memory>
 #include <vector>
 #include <deque>
+#include <functional>
 #include <map>
 #include <queue>
 #include <tuple>
@@ -176,6 +177,10 @@ namespace packets {
 
 		std::optional<Packet> pop(std::optional<int> timeout_ms = std::nullopt);
 		std::optional<Packet> try_pop();
+		// Pop up to max_packets into *out* under one lock, stopping
+		// at the first packet *accept* refuses (it is left queued).
+		size_t pop_while(std::vector<Packet>& out, size_t max_packets,
+		                 const std::function<bool(const Packet&)>& accept);
 		void push(Packet&& packet);
 		void clear();
 

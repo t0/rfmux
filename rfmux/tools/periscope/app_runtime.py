@@ -84,6 +84,7 @@ class PeriscopeRuntime:
         # ring buffers in one go.  See _flush_display_batch.
         self._display_values: list = []
         self._display_times: list = []
+        self._display_rows = 0
         self._display_width: int = -1
 
         # Pulse capture tap callback (registered by PulseCapturePanel)
@@ -745,6 +746,24 @@ class PeriscopeRuntime:
 
         deadline = time.monotonic() + self._DRAIN_DEADLINE_S
 
+        pop_batch = getattr(self.receiver.queue, "pop_readout_batch", None)
+        if pop_batch is not None:
+            while True:
+                batch = pop_batch(self._DRAIN_BATCH_MAX)
+                if batch is None:
+                    break
+                self._ingest_batch(*batch)
+                if time.monotonic() >= deadline:
+                    self.drain_overruns += 1
+                    break
+            self._flush_display_batch()
+            frame_end = getattr(self, "_pulse_tap_frame_end", None)
+            if frame_end is not None:
+                frame_end()
+            return
+
+        # A receiver built without the batched getter: one packet at a
+        # time, which the batched path is held equal to.
         while not self.receiver.queue.empty():
             # Get packet from C++ queue (returns type-erased Packet)
             packet = self.receiver.queue.try_pop()
@@ -779,6 +798,31 @@ class PeriscopeRuntime:
         if frame_end is not None:
             frame_end()
 
+    #: Packets per batched pop: 100 ms of stage 0.
+    _DRAIN_BATCH_MAX = 4096
+
+    def _ingest_batch(self, samples, seconds, recent, fir_stage, seq,
+                      year, yday) -> None:
+        """One popped batch: what the per-packet loop does per packet,
+        done once for the batch."""
+        n = samples.shape[0]
+        self.pkt_cnt += n
+        stage = int(fir_stage[-1])
+        self.actual_dec_stage = stage & 0x7
+        self.is_short_packet = bool(stage & 0x8)
+        # The display's small forward shift, applied per packet before
+        # the offset from the first stamp; undisciplined stamps stay NaN.
+        t_now = seconds + 0.02
+        if self.start_time is None and recent.any():
+            self.start_time = float(t_now[np.flatnonzero(recent)[0]])
+        t_rel = (t_now - self.start_time if self.start_time is not None
+                 else np.full(n, np.nan))
+        self._update_buffers_batch(samples, t_rel, seconds, recent,
+                                   (int(year), int(yday)))
+        if self.is_mock_mode and recent.any():
+            self._update_sim_time_tracking(
+                float(t_rel[np.flatnonzero(recent)[-1]]))
+
     def _calculate_relative_timestamp(self, pkt) -> float | None:
         """
         Calculate a relative timestamp for a packet.
@@ -803,56 +847,59 @@ class PeriscopeRuntime:
         return None
 
     def _update_buffers(self, pkt, t_rel: float | None):
-        """
-        Update data buffers with I, Q, and Magnitude values from a packet.
+        """One packet into the display batch and the pulse tap: the
+        batch form with one row.  The per-packet reference path."""
+        samples = np.array(pkt)                 # packetizer gain out
+        ts = pkt.ts
+        recent = bool(ts.recent)
+        seconds = (ts.h * 3600 + ts.m * 60 + ts.s
+                   + ts.ss / _streamer.SS_PER_SECOND) if recent else np.nan
+        self._update_buffers_batch(
+            samples[None, :],
+            np.array([np.nan if t_rel is None else t_rel]),
+            np.array([seconds]), np.array([recent]),
+            (ts.y, ts.d) if recent else None)
 
-        Args:
-            pkt: The incoming packet object.
-            t_rel (float | None): The relative timestamp for this packet.
-        """
-        # Convert 24-bit datapath to 16-bit ADC scale
-        # np.array(pkt) applies the first /256 (packetizer gain);
-        # the second /256 brings 24-bit values down to 16-bit ADC scale.
-        samples = np.array(pkt) / 256
+    def _update_buffers_batch(self, samples, t_rel, seconds, recent,
+                              day_key) -> None:
+        """A batch (packets, channels) into the display batch and the
+        pulse tap.
 
-        # Buffer for the frame rather than writing per channel now.
-        # Four Circular.add calls per displayed channel per packet was
-        # the dominant per-packet cost at stage 0, and it scaled with
-        # the number of channels on screen; a frame at a time it is a
-        # couple of numpy copies per channel.  The packet width is part
-        # of the batch, so a decimation or packet-mode change flushes
-        # rather than trying to stack ragged rows.
-        width = len(pkt)
+        Convert 24-bit datapath to 16-bit ADC scale: the packetizer's
+        /256 is already out; the second /256 brings 24-bit values down
+        to 16-bit ADC scale.  The packet width is part of the display
+        batch, so a decimation or packet-mode change flushes rather
+        than trying to stack ragged rows.
+        """
+        samples = samples / 256
+        width = samples.shape[1]
         if width != self._display_width:
             self._flush_display_batch()
             self._display_width = width
         self._display_values.append(samples)
         self._display_times.append(t_rel)
-        if len(self._display_values) >= self._DISPLAY_BATCH_MAX:
+        self._display_rows += samples.shape[0]
+        if self._display_rows >= self._DISPLAY_BATCH_MAX:
             self._flush_display_batch()
 
         # Pulse capture tap: forward the requested channels' raw I/Q.
         # The packet carries every streamed channel, so capture is
-        # independent of which channels are displayed.
-        # Timestamps are ABSOLUTE packet time (seconds of day) — the
-        # same clock the PFB stream uses — so both-mode cross-stream
-        # matching sees one time base (display t_rel is display-only).
+        # independent of which channels are displayed.  Timestamps are
+        # ABSOLUTE packet time (seconds of day), the same clock the PFB
+        # stream uses, so both-mode cross-stream matching sees one time
+        # base (display t_rel is display-only).
         if self._pulse_tap is not None:
-            ts = pkt.ts
-            ts_abs = (ts.h * 3600 + ts.m * 60 + ts.s
-                      + ts.ss / _streamer.SS_PER_SECOND) \
-                if ts.recent else None
-            channels, idx = self._pulse_tap_columns(len(pkt))
+            channels, idx = self._pulse_tap_columns(width)
             if channels:
                 day = None
-                if ts.recent:
-                    key = (ts.y, ts.d)
-                    if key != self._pulse_tap_day_key:
-                        self._pulse_tap_day_key = key
-                        self._pulse_tap_day = _streamer.ts_day_epoch(ts)
+                if day_key is not None:
+                    if day_key != self._pulse_tap_day_key:
+                        self._pulse_tap_day_key = day_key
+                        self._pulse_tap_day = _streamer.ts_day_epoch(
+                            SimpleNamespace(y=day_key[0], d=day_key[1],
+                                            recent=True))
                     day = self._pulse_tap_day
-                self._pulse_tap(channels, samples[idx], ts_abs, day)
-
+                self._pulse_tap(channels, samples[:, idx], seconds, day)
 
     #: Cap on packets held before writing them into the rings.  Bounds
     #: the transient memory (packets x channels complex128) without
@@ -864,12 +911,11 @@ class PeriscopeRuntime:
         """Write the buffered packets into the per-channel rings."""
         if not self._display_values:
             return
-        values = np.stack(self._display_values)       # (packets, width)
-        # None means "no recent timestamp"; float64 turns that into NaN,
-        # exactly as Circular.add did with it one at a time.
-        times = np.asarray(self._display_times, dtype=float)
+        values = np.concatenate(self._display_values)  # (packets, width)
+        times = np.concatenate(self._display_times)
         self._display_values = []
         self._display_times = []
+        self._display_rows = 0
 
         width = values.shape[1]
         for ch_val in self.all_chs:

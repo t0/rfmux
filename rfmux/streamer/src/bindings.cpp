@@ -6,6 +6,7 @@
 #include <pybind11/complex.h>
 #include <pybind11/numpy.h>
 #include <fmt/format.h>
+#include <limits>
 
 #include "packets.hpp"
 
@@ -459,6 +460,69 @@ PYBIND11_MODULE(_receiver, m) {
 		}, "timeout_ms"_a = py::none(),
 		   "Pop packet from queue (blocks, releases GIL)")
 		.def("try_pop", &PacketQueue::try_pop, "Try to pop packet (non-blocking)")
+		.def("pop_readout_batch", [](PacketQueue& self, size_t max_packets) -> py::object {
+			/* A drain's worth of readout packets demuxed at once, so a
+			 * consumer touches one object per frame rather than one per
+			 * packet.  Returns (samples, seconds, recent, fir_stage, seq,
+			 * year, yday) or None when the queue is empty:
+			 *   samples   complex128 (packets, channels), the packetizer
+			 *             gain taken out (/256) exactly as np.array(pkt)
+			 *   seconds   float64 seconds of day per packet, NaN when the
+			 *             timestamp is not disciplined
+			 *   recent    bool per packet
+			 *   fir_stage uint8, seq uint32 per packet
+			 *   year/yday of the first packet's timestamp
+			 * A batch holds one packet width: it stops short at a size
+			 * change, which stays queued for the next call. */
+			std::vector<Packet> got;
+			got.reserve(std::min<size_t>(max_packets, 4096));
+			{
+				py::gil_scoped_release release;
+				self.pop_while(got, max_packets, [&got](const Packet& p) {
+					if (p.size() != LONG_PACKET_SIZE && p.size() != SHORT_PACKET_SIZE)
+						return false;
+					return got.empty() || p.size() == got.front().size();
+				});
+			}
+			const py::ssize_t n = static_cast<py::ssize_t>(got.size());
+			if (n == 0)
+				return py::none();
+			const size_t size = got.front().size();
+			const py::ssize_t width = (size == LONG_PACKET_SIZE)
+				? LONG_PACKET_CHANNELS : SHORT_PACKET_CHANNELS;
+
+			py::array_t<std::complex<double>> samples({n, width});
+			py::array_t<double> seconds(n);
+			py::array_t<bool> recent(n);
+			py::array_t<uint8_t> fir(n);
+			py::array_t<uint32_t> seq(n);
+			auto S = samples.mutable_unchecked<2>();
+			auto T = seconds.mutable_unchecked<1>();
+			auto R = recent.mutable_unchecked<1>();
+			auto F = fir.mutable_unchecked<1>();
+			auto Q = seq.mutable_unchecked<1>();
+			int32_t year = 0, yday = 0;
+			for (py::ssize_t i = 0; i < n; i++) {
+				const char* data = static_cast<const char*>(got[i].data());
+				const auto* hdr = reinterpret_cast<const readout_packet_header*>(data);
+				const auto* raw = reinterpret_cast<const int32_t*>(
+					data + sizeof(readout_packet_header));
+				const Timestamp ts(*reinterpret_cast<const irigb_timestamp*>(
+					data + sizeof(readout_packet_header) + width * 8));
+				for (py::ssize_t ch = 0; ch < width; ch++)
+					S(i, ch) = std::complex<double>(raw[2*ch], raw[2*ch+1]) / 256.;
+				const bool rec = ts.is_recent();
+				R(i) = rec;
+				T(i) = rec ? (ts.h * 3600.0 + ts.m * 60.0 + ts.s
+				              + ts.ss / static_cast<double>(SS_PER_SECOND))
+				           : std::numeric_limits<double>::quiet_NaN();
+				F(i) = hdr->fir_stage;
+				Q(i) = hdr->seq;
+				if (i == 0) { year = ts.y; yday = ts.d; }
+			}
+			return py::make_tuple(samples, seconds, recent, fir, seq, year, yday);
+		}, "max_packets"_a = 4096,
+		   "Pop up to max_packets readout packets demuxed into arrays")
 		.def("empty", &PacketQueue::empty)
 		.def("size", &PacketQueue::size)
 		.def("clear", &PacketQueue::clear, "Clear all packets from queue")

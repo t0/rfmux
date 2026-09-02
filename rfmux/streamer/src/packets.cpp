@@ -261,6 +261,18 @@ namespace packets {
 		return packet;
 	}
 
+	size_t PacketQueue::pop_while(std::vector<Packet>& out, size_t max_packets,
+	                              const std::function<bool(const Packet&)>& accept) {
+		std::lock_guard<std::mutex> lock(mutex_);
+		size_t n = 0;
+		while (n < max_packets && !queue_.empty() && accept(queue_.front())) {
+			out.push_back(std::move(queue_.front()));
+			queue_.pop_front();
+			n++;
+		}
+		return n;
+	}
+
 	void PacketQueue::push(Packet&& packet) {
 		std::lock_guard<std::mutex> lock(mutex_);
 

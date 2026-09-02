@@ -256,3 +256,45 @@ def test_dense_scattered_crossings_agree():
             f"block ingest disagreed at max_packets={mp}: " \
             f"{len(by_block)} vs {len(by_sample)} pulses"
     assert by_sample, "the fixture should trigger at 2.5 sigma"
+
+
+def _run_block_adds(channels, packets, pulses, rows=64, max_packets=256, **kw):
+    """Blocks of *rows* packets through SlowIngest.add_block."""
+    s = _session(channels, pulses, **kw)
+    s.start()
+    acc = SlowIngest(s.feed_block, max_packets=max_packets, max_age_s=1e9)
+    for k in range(0, len(packets), rows):
+        chunk = packets[k:k + rows]
+        acc.add_block(channels, np.stack([v for v, _ in chunk]),
+                      np.array([t for _, t in chunk]))
+    acc.flush()
+    s.stop()
+    return s
+
+
+@pytest.mark.parametrize("rows", [1, 7, 64, 5000])
+def test_block_adds_agree_with_packet_adds(rows):
+    """add_block, the batched tap's entry, is add over the block."""
+    rng = np.random.default_rng(9)
+    channels = (1, 2, 3)
+    packets = _packets(channels, 2400, rng, pulse_starts=(600, 1500))
+    by_packet, by_block = [], []
+    _run_blocks(channels, packets, by_packet)
+    _run_block_adds(channels, packets, by_block, rows=rows)
+    assert sorted(by_block) == sorted(by_packet)
+    assert by_packet
+
+
+def test_the_block_clock_is_the_packet_clock():
+    """advance over a block, compiled, matches advance per packet with
+    stragglers, a missing stamp, and a day boundary in the stream."""
+    from rfmux.pulse_capture.sources import _advance_block
+    stamps = [1.0, 1.001, 1.0005, 1.002, float("nan"), 1.003, 0.5, 1.004,
+              86399.9, 0.0001, 0.0002, 1.0, 1.001]
+    a = SlowIngest(lambda *args: None)
+    for t in stamps:
+        a.advance(None if t != t else t)
+    prev, elapsed = _advance_block(np.array(stamps), float("nan"), 0.0,
+                                   SlowIngest.MAX_PLAUSIBLE_STEP_S)
+    assert prev == a._prev_ts
+    assert elapsed == pytest.approx(a.elapsed)

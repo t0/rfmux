@@ -40,8 +40,27 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 
 import numpy as np
 
+from numba import njit
+
 from .. import streamer
 from ..core.transferfunctions import PFB_SAMPLING_FREQ
+
+
+@njit(cache=True)
+def _advance_block(stamps, prev, elapsed, max_step):
+    """SlowIngest.advance over a block of stamps, packet by packet:
+    (prev, elapsed) after the last.  NaN stamps are no timestamp."""
+    for t in stamps:
+        if t != t:
+            continue
+        if prev == prev:
+            delta = t - prev
+            if 0.0 < delta < max_step:
+                elapsed += delta
+            elif -max_step < delta <= 0.0:
+                continue
+        prev = t
+    return prev, elapsed
 
 
 def columns_for_width(channels, width: int):
@@ -108,8 +127,9 @@ class SlowIngest:
         self.max_age_s = max_age_s
         self.channels: Optional[Tuple[int, ...]] = None
         self.elapsed = 0.0
-        self._values: List[np.ndarray] = []
+        self._values: List[np.ndarray] = []     # rows, or (rows, channels) blocks
         self._stamps: List[float] = []
+        self._rows = 0
         self._opened = 0.0
         self._prev_ts: Optional[float] = None
 
@@ -165,6 +185,7 @@ class SlowIngest:
         if not self._values:
             self._opened = time.monotonic()
         self._values.append(values)
+        self._rows += 1
         # No usable timestamp becomes NaN; feed_block drops and counts
         # those exactly as feed_sample did.
         self._stamps.append(float("nan") if timestamp is None
@@ -172,10 +193,35 @@ class SlowIngest:
         if self.ready:
             self.flush(final=False)
 
+    def add_block(self, channels, values, stamps) -> None:
+        """:meth:`add` for a block: *values* (packets, channels), one
+        stamp per row, NaN where a packet had no usable timestamp."""
+        values = np.asarray(values)
+        stamps = np.asarray(stamps, dtype=np.float64)
+        if stamps.size:
+            prev = float("nan") if self._prev_ts is None else self._prev_ts
+            prev, self.elapsed = _advance_block(
+                stamps, prev, self.elapsed, self.MAX_PLAUSIBLE_STEP_S)
+            if prev == prev:
+                self._prev_ts = prev
+        channels = tuple(channels)
+        if not channels or values.shape[0] == 0:
+            return
+        if channels != self.channels:
+            self.flush()
+            self.channels = channels
+        if not self._values:
+            self._opened = time.monotonic()
+        self._values.append(values)
+        self._stamps.extend(stamps.tolist())
+        self._rows += values.shape[0]
+        if self.ready:
+            self.flush(final=False)
+
     @property
     def ready(self) -> bool:
         return bool(self._values) and (
-            len(self._values) >= self.max_packets
+            self._rows >= self.max_packets
             or time.monotonic() - self._opened >= self.max_age_s)
 
     def flush(self, final: bool = True) -> None:
@@ -188,15 +234,18 @@ class SlowIngest:
         keep = 0 if final else min(self.HOLD_BACK, len(order) - 1)
         if keep:
             order, held = order[:-keep], order[-keep:]
-        values = np.stack(self._values)[order]            # (packets, channels)
+        rows = np.concatenate([np.atleast_2d(v) for v in self._values])
+        values = rows[order]                              # (packets, channels)
         stamps = np.asarray(self._stamps, dtype=np.float64)[order]
         if keep:
-            self._values = [self._values[i] for i in held]
+            self._values = [rows[i] for i in held]
             self._stamps = [self._stamps[i] for i in held]
+            self._rows = int(keep)
             self._opened = time.monotonic()
         else:
             self._values = []
             self._stamps = []
+            self._rows = 0
         for column, channel in enumerate(self.channels):
             samples = values[:, column]
             self._feed(channel, samples.real, samples.imag, stamps)

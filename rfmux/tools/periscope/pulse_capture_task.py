@@ -21,6 +21,7 @@ can display events without opening the HDF5 file the writer holds.
 
 from __future__ import annotations
 
+import numpy as np
 import asyncio
 import queue
 import threading
@@ -101,6 +102,7 @@ class PulseCaptureTask(QtCore.QThread):
         self._tap_channels = None
         self._tap_values: list = []
         self._tap_stamps: list = []
+        self._tap_rows = 0
         self._tap_day = None
         self._tap_opened = 0.0
 
@@ -156,7 +158,9 @@ class PulseCaptureTask(QtCore.QThread):
 
     def enqueue_packet(self, channels, values, timestamp,
                        day_epoch=None) -> None:
-        """Tap callback — called from the GUI thread once per packet.
+        """Tap callback — called from the GUI thread once per packet,
+        or once per batch with ``values`` (packets, channels) and one
+        stamp per row, NaN for none.
 
         ``values`` holds one complex sample per entry of ``channels``.
         Packets are gathered here and handed over in batches.
@@ -173,9 +177,15 @@ class PulseCaptureTask(QtCore.QThread):
             self._tap_channels = channels
         if not self._tap_values:
             self._tap_opened = time.monotonic()
+        values = np.asarray(values)
+        if values.ndim == 1:
+            values = values[None, :]
+            timestamp = np.array([float("nan") if timestamp is None
+                                  else float(timestamp)])
         self._tap_values.append(values)
-        self._tap_stamps.append(timestamp)
-        if (len(self._tap_values) >= self._TAP_BATCH_PACKETS
+        self._tap_stamps.append(np.asarray(timestamp, dtype=np.float64))
+        self._tap_rows += values.shape[0]
+        if (self._tap_rows >= self._TAP_BATCH_PACKETS
                 or (time.monotonic() - self._tap_opened
                     >= self._TAP_BATCH_MAX_S)):
             self.flush_tap()
@@ -193,10 +203,11 @@ class PulseCaptureTask(QtCore.QThread):
         item = (self._tap_channels, self._tap_values, self._tap_stamps)
         self._tap_values = []
         self._tap_stamps = []
+        self._tap_rows = 0
         try:
             self.sample_queue.put_nowait(item)
         except queue.Full:
-            self.dropped_overflow += len(item[1]) * len(item[0])
+            self.dropped_overflow += sum(v.shape[0] for v in item[1]) * len(item[0])
 
     def request_stop(self) -> None:
         """Ask the worker to finish; session.stop() runs in the worker."""
@@ -284,8 +295,8 @@ class PulseCaptureTask(QtCore.QThread):
             if self._handle_control(item):
                 continue
             channels, values, stamps = item
-            for packet, stamp in zip(values, stamps):
-                ingest.add(channels, packet, stamp)
+            for block, block_stamps in zip(values, stamps):
+                ingest.add_block(channels, block, block_stamps)
         ingest.flush()
 
     async def _pfb_mismatch(self, channels) -> Optional[str]:
@@ -423,8 +434,8 @@ class PulseCaptureTask(QtCore.QThread):
             if self._handle_control(item):
                 continue
             channels, values, stamps = item
-            for packet, stamp in zip(values, stamps):
-                ingest.add(channels, packet, stamp)
+            for block, block_stamps in zip(values, stamps):
+                ingest.add_block(channels, block, block_stamps)
             fed += len(values)
         ingest.flush()
         return ingest.elapsed

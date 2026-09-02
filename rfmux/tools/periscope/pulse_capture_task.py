@@ -276,8 +276,8 @@ class PulseCaptureTask(QtCore.QThread):
         or None.
 
         The capture never configures the streamer; it reads what the
-        board is streaming.  PFB packet slots are positional, so the
-        streamed channel set must be the captured set exactly.
+        board is streaming, and every captured channel must be among
+        the streamed ones.
         """
         raw = await self.crs.get_pfb_streamer(module=self.module)
         active = raw
@@ -291,7 +291,7 @@ class PulseCaptureTask(QtCore.QThread):
             return (f"get_pfb_streamer(module={self.module}) returned "
                     f"{raw!r}, which this capture cannot read as a "
                     "channel list.")
-        if set(active) == set(channels):
+        if set(channels) <= set(active):
             return None
         have = (f"streaming channels {active}" if active else "off")
         return (f"The PFB streamer on module {self.module} is {have}; "

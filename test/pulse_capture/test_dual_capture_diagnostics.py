@@ -137,12 +137,12 @@ def _task_with_pfb(active):
 
 @pytest.mark.parametrize("active, wanted, ok", [
     ([1, 2], [1, 2], True), ([2, 1], [1, 2], True), (None, [1, 2], False),
-    ([], [1, 2], False), ([1], [1, 2], False), ([1, 2, 3], [1, 2], False),
-    (1, [1], True), (2, [1], False)])
+    ([], [1, 2], False), ([1], [1, 2], False), ([1, 2, 3, 4], [1], True),
+    ([1, 2, 3], [1, 2], True), (1, [1], True), (2, [1], False)])
 def test_capture_uses_the_streamer_as_configured(active, wanted, ok):
-    """The capture reads what the board streams and never sets it: the
-    streamed channel set must be the captured set, in any order.  The
-    board reports a single channel as a bare integer."""
+    """The capture reads what the board streams and never sets it: every
+    captured channel must be among the streamed ones.  The board
+    reports a single channel as a bare integer."""
     t, errors, calls = _task_with_pfb(active)
     problem = asyncio.run(t._pfb_mismatch(wanted))
     assert (problem is None) is ok
@@ -311,6 +311,8 @@ def test_pfb_batch_yields_to_the_loop(monkeypatch):
     port = sock.getsockname()[1]
     pkt = streamer.PFBPacket()
     pkt.magic = streamer.PFB_PACKET_MAGIC
+    pkt.mode = 0
+    pkt.slot1 = 1
     pkt.num_samples = 100
     blob = bytes(pkt)
     N = 40

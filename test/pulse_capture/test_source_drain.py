@@ -139,13 +139,21 @@ def test_many_datagrams_per_wake(monkeypatch):
         f"{awaited['n']} awaited receives for {N} packets"
 
 
-def _pfb_packet(module0, t_s=43200.0, seq=0):
+def _pfb_packet(module0, t_s=43200.0, seq=0, slots=(1,), values=None):
+    """A PFB packet whose slots carry *slots*' channels, interleaved;
+    *values* gives one constant per slot."""
     pkt = streamer.PFBPacket()
     pkt.magic = streamer.PFB_PACKET_MAGIC
     pkt.module = module0                     # 0-indexed on the wire
     pkt.seq = seq
+    pkt.mode = {1: 0, 2: 1, 4: 2}[len(slots)]
+    for i, ch in enumerate(slots):
+        setattr(pkt, f"slot{i + 1}", ch)
     pkt.num_samples = 100
-    pkt[:] = np.zeros(100, dtype=complex)
+    data = np.zeros(100, dtype=complex)
+    for i, v in enumerate(values or ()):
+        data[i::len(slots)] = v
+    pkt[:] = data
     h = int(t_s // 3600); m = int(t_s % 3600 // 60); s_ = int(t_s % 60)
     ss = int((t_s % 1) * streamer.SS_PER_SECOND)
     pkt.ts = Timestamp(y=26, d=244, h=h, m=m, s=s_, ss=ss, c=0, sbs=0,
@@ -166,16 +174,16 @@ def test_pfb_source_keeps_only_its_module(monkeypatch):
 
         class _Sink:
             channels = [1]
-            fed = 0
+            fed = 0                           # samples
 
             def feed_block(self, ch, i, q, t):
-                _Sink.fed += 1
+                _Sink.fed += len(i)
 
         deadline = time.monotonic() + 3.0
         asyncio.run(src.run_pfb_source(
             _Sink(), "127.0.0.1", [1], module=2,
-            should_stop=lambda: time.monotonic() > deadline or _Sink.fed >= 6))
-    assert _Sink.fed == 6
+            should_stop=lambda: time.monotonic() > deadline or _Sink.fed >= 600))
+    assert _Sink.fed == 600                   # six packets of 100
 
 
 def test_pfb_source_restores_sequence_order(monkeypatch):
@@ -198,14 +206,14 @@ def test_pfb_source_restores_sequence_order(monkeypatch):
             channels = [1]
 
             def feed_block(self, ch, i, q, t):
-                stamps.append(float(t[0]))
+                stamps.extend(np.asarray(t).tolist())
 
         deadline = time.monotonic() + 3.0
         asyncio.run(src.run_pfb_source(
             _Sink(), "127.0.0.1", [1], module=2,
-            should_stop=lambda: time.monotonic() > deadline or len(stamps) >= 40))
-    assert len(stamps) == 40
-    assert np.all(np.diff(stamps) > 0), "packets fed out of order"
+            should_stop=lambda: time.monotonic() > deadline or len(stamps) >= 4000))
+    assert len(stamps) == 4000
+    assert np.all(np.diff(stamps) > 0), "samples fed out of order"
 
 
 def test_seq_reorder_skips_a_real_loss():
@@ -233,3 +241,49 @@ def test_slow_ingest_feeds_blocks_in_time_order():
     stamps = np.concatenate(fed)
     assert np.array_equal(stamps, 43200.0 + np.arange(20) / 596.0)
     assert ingest.elapsed == pytest.approx(19 / 596.0)
+
+
+class _Sink:
+    def __init__(self):
+        self.channels = [1]
+        self.calls = []                       # (channel, I values)
+
+    def feed_block(self, ch, i, q, t):
+        self.calls.append((ch, np.asarray(i).copy(), np.asarray(t).copy()))
+
+
+def _run_pfb(monkeypatch, blobs, channels, stop_after):
+    with _loopback_pair() as (recv, send, port):
+        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
+        monkeypatch.setattr(src, "_flush", lambda sock: None)
+        for b in blobs:
+            send.sendto(b, ("127.0.0.1", port))
+        time.sleep(0.1)
+        sink = _Sink()
+        sink.channels = channels
+        deadline = time.monotonic() + 3.0
+        fed = lambda: sum(len(c[1]) for c in sink.calls)
+        asyncio.run(src.run_pfb_source(
+            sink, "127.0.0.1", channels, module=2,
+            should_stop=lambda: time.monotonic() > deadline or fed() >= stop_after))
+    return sink
+
+
+def test_pfb_source_picks_its_channels_from_a_wider_stream(monkeypatch):
+    """The streamer carries channels 3 and 7; the capture wants 7."""
+    blobs = [_pfb_packet(1, t_s=43200.0 + k * 4.096e-4, seq=k,
+                         slots=(3, 7), values=(3 + 0j, 7 + 0j)) for k in range(20)]
+    sink = _run_pfb(monkeypatch, blobs, [7], stop_after=1000)
+    assert {c[0] for c in sink.calls} == {7}
+    assert all(np.all(c[1] == 7.0 / 256.0) for c in sink.calls)
+    assert sum(len(c[1]) for c in sink.calls) == 20 * 50
+
+
+def test_pfb_source_feeds_blocks_of_packets(monkeypatch):
+    """Sixteen packets per engine call per channel, the tail at the end,
+    in order."""
+    blobs = [_pfb_packet(1, t_s=43200.0 + k * 4.096e-4, seq=k) for k in range(40)]
+    sink = _run_pfb(monkeypatch, blobs, [1], stop_after=4000)
+    assert [len(c[1]) for c in sink.calls] == [1600, 1600, 800]
+    t = np.concatenate([c[2] for c in sink.calls])
+    assert np.all(np.diff(t) > 0)

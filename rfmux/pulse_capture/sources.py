@@ -220,6 +220,11 @@ _PFB_DRAIN_CAP = 64
 #: a full drain would hold the loop for ~150 ms; eight packets bound it
 #: to ~20 ms, and the extra no-op yields cost nothing.
 _PFB_YIELD_EVERY = 8
+#: PFB packets gathered per channel before one engine call.  Sixteen
+#: is 6.5 ms of stream.
+_PFB_FEED_PACKETS = 16
+#: Channel groups a packet interleaves, by its mode field.
+_PFB_GROUPS = {0: 1, 1: 2, 2: 4}
 
 
 class _SeqReorder:
@@ -359,7 +364,12 @@ async def run_pfb_source(
     """Feed *capture_session* from the fast/PFB stream until stopped.
 
     Every module's PFB streamer sends to the same port; with *module*
-    given, packets from any other module are ignored.
+    given, packets from any other module are ignored.  A packet names
+    the channel in each of its slots, so *channels* may be any subset
+    of what the streamer carries.  Packets are gathered into blocks of
+    _PFB_FEED_PACKETS per channel before the engine sees them: the
+    engine's cost per call is fixed, and one call per packet per
+    channel is most of a core at four channels before any pulse.
 
     ``channels`` must match the order given to ``set_pfb_streamer`` —
     PFB packets interleave the streamed channels round-robin in that
@@ -376,14 +386,28 @@ async def run_pfb_source(
         though it had been stopped.
     """
     loop = asyncio.get_running_loop()
-    n_groups = max(1, len(channels))
     elapsed = 0.0
     got_any = False
     reorder = _SeqReorder()
+    pending = {ch: [] for ch in channels}     # (I, Q, T) per packet
+    pending_packets = 0
+
+    def flush_pending() -> None:
+        nonlocal pending_packets
+        for ch, parts in pending.items():
+            if parts:
+                capture_session.feed_block(
+                    ch, np.concatenate([p[0] for p in parts]),
+                    np.concatenate([p[1] for p in parts]),
+                    np.concatenate([p[2] for p in parts]))
+                parts.clear()
+        pending_packets = 0
 
     def feed_packet(pkt) -> bool:
-        """Feed one packet's samples; True once duration_s is covered."""
-        nonlocal elapsed
+        """Gather one packet's samples; True once duration_s is covered."""
+        nonlocal elapsed, pending_packets
+        n_groups = _PFB_GROUPS.get(pkt.mode, 4)
+        slots = (pkt.slot1, pkt.slot2, pkt.slot3, pkt.slot4)[:n_groups]
         # Match the slow stream's 16-bit ADC scale: np.array(pkt)
         # applies the packetizer /256; the second /256 brings the
         # 24-bit datapath down to ADC counts (same convention as the
@@ -401,16 +425,17 @@ async def run_pfb_source(
         # exactly as the per-sample path did with None.
         t0 = ts if ts is not None else float("nan")
         times = t0 + np.arange(time_samples) / sample_rate
-        for slot, ch in enumerate(channels):
-            v = raw[slot:time_samples * n_groups:n_groups]
-            if v.shape[0] == 0:
+        for ch in channels:
+            if ch not in slots:
                 continue
+            v = raw[slots.index(ch):time_samples * n_groups:n_groups]
             n_ok = min(v.shape[0], times.shape[0])
-            # Every session and facade exposes feed_block, and there is
-            # deliberately no per-sample fallback: it would put the
-            # fast stream on the path this function exists to avoid.
-            capture_session.feed_block(ch, v[:n_ok].real, v[:n_ok].imag,
-                                       times[:n_ok])
+            if n_ok:
+                pending[ch].append((v[:n_ok].real, v[:n_ok].imag,
+                                    times[:n_ok]))
+        pending_packets += 1
+        if pending_packets >= _PFB_FEED_PACKETS:
+            flush_pending()
         # Exact per-packet span -- independent of timestamp
         # discontinuities across rate changes.
         elapsed += time_samples / sample_rate
@@ -459,6 +484,7 @@ async def run_pfb_source(
             await asyncio.sleep(0)
         for pkt in reorder.flush():
             feed_packet(pkt)
+        flush_pending()
     return elapsed
 
 

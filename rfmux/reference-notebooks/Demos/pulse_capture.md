@@ -682,7 +682,7 @@ try:
     )
     fast_session.start()
     covered = await run_pfb_source(fast_session, host, CHANNELS,
-                                   duration_s=0.25)
+                                   module=MODULE, duration_s=0.25)
     fast_session.stop()
     print(f"{fast_session.total_pulses} pulses over {covered*1e3:.0f} ms")
 finally:

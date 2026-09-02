@@ -313,7 +313,7 @@ class PulseCaptureTask(QtCore.QThread):
         pump = asyncio.ensure_future(self._control_pump())
         try:
             await run_pfb_source(self.session, self.host, channels,
-                                 should_stop=stop)
+                                 module=self.module, should_stop=stop)
         finally:
             pump.cancel()
             try:

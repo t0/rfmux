@@ -293,11 +293,15 @@ async def run_pfb_source(
     host: str,
     channels: List[int],
     *,
+    module: Optional[int] = None,
     duration_s: Optional[float] = None,
     should_stop: Optional[Callable[[], bool]] = None,
     sample_rate: float = PFB_SAMPLING_FREQ,
 ) -> float:
     """Feed *capture_session* from the fast/PFB stream until stopped.
+
+    Every module's PFB streamer sends to the same port; with *module*
+    given, packets from any other module are ignored.
 
     ``channels`` must match the order given to ``set_pfb_streamer`` —
     PFB packets interleave the streamed channels round-robin in that
@@ -346,6 +350,8 @@ async def run_pfb_source(
                 if k and k % _PFB_YIELD_EVERY == 0:
                     await asyncio.sleep(0)
                 pkt = streamer.PFBPacket(data)
+                if module is not None and pkt.module != module - 1:
+                    continue
                 # Match the slow stream's 16-bit ADC scale: np.array(pkt)
                 # applies the packetizer /256; the second /256 brings the
                 # 24-bit datapath down to ADC counts (same convention as
@@ -455,7 +461,7 @@ async def run_dual_source(
         nonlocal finished
         try:
             return await run_pfb_source(
-                capture_session.fast_feed, host, channels,
+                capture_session.fast_feed, host, channels, module=module,
                 duration_s=duration_s, should_stop=_stop)
         finally:
             finished = True

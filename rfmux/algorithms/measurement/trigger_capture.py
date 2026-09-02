@@ -367,7 +367,8 @@ async def _run_single(result, host, channels, module, streamer_mode,
     try:
         if is_fast:
             stream.elapsed_s = await run_pfb_source(
-                capture_session, host, channels, duration_s=duration_s)
+                capture_session, host, channels, module=module,
+                duration_s=duration_s)
         else:
             stream.elapsed_s = await run_slow_source(
                 capture_session, host, module=module, duration_s=duration_s)

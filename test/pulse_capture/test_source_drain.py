@@ -137,3 +137,41 @@ def test_many_datagrams_per_wake(monkeypatch):
     # rest synchronously.  One per wake would need ~N.
     assert awaited["n"] <= 3, \
         f"{awaited['n']} awaited receives for {N} packets"
+
+
+def _pfb_packet(module0, t_s=43200.0):
+    pkt = streamer.PFBPacket()
+    pkt.magic = streamer.PFB_PACKET_MAGIC
+    pkt.module = module0                     # 0-indexed on the wire
+    pkt.num_samples = 100
+    pkt[:] = np.zeros(100, dtype=complex)
+    h = int(t_s // 3600); m = int(t_s % 3600 // 60); s_ = int(t_s % 60)
+    ss = int((t_s % 1) * streamer.SS_PER_SECOND)
+    pkt.ts = Timestamp(y=26, d=244, h=h, m=m, s=s_, ss=ss, c=0, sbs=0,
+                       source=TimestampSource.TEST, recent=True)
+    return bytes(pkt)
+
+
+def test_pfb_source_keeps_only_its_module(monkeypatch):
+    """Every module's PFB streamer shares the port; packets from another
+    module are not this capture's samples."""
+    with _loopback_pair() as (recv, send, port):
+        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
+        monkeypatch.setattr(src, "_flush", lambda sock: None)
+        for k in range(12):
+            send.sendto(_pfb_packet(k % 2, t_s=43200.0 + k * 1e-4),
+                        ("127.0.0.1", port))
+        time.sleep(0.1)
+
+        class _Sink:
+            channels = [1]
+            fed = 0
+
+            def feed_block(self, ch, i, q, t):
+                _Sink.fed += 1
+
+        deadline = time.monotonic() + 3.0
+        asyncio.run(src.run_pfb_source(
+            _Sink(), "127.0.0.1", [1], module=2,
+            should_stop=lambda: time.monotonic() > deadline or _Sink.fed >= 6))
+    assert _Sink.fed == 6

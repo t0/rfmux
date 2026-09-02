@@ -130,11 +130,25 @@ class PeriscopeRuntime:
             needs this: without it the tail of a batch waits for a
             packet that may not come until the stream resumes.
         """
+        # Packets already queued predate this capture.  Delivered at the
+        # display's pace they would put its clock behind from the start.
+        self._drop_queued_packets()
         self._pulse_tap_channels = (
             sorted(set(int(c) for c in channels)) if channels else None)
         self._pulse_tap_cache = None
         self._pulse_tap_frame_end = on_frame_end
         self._pulse_tap = callback
+
+    def _drop_queued_packets(self) -> int:
+        """Discard what the receiver has queued and the display has not
+        drawn yet; returns how many."""
+        q = getattr(getattr(self, "receiver", None), "queue", None)
+        n = 0
+        if q is not None:
+            while not q.empty():
+                q.try_pop()
+                n += 1
+        return n
 
     def unregister_pulse_tap(self):
         """Remove the pulse capture tap callback."""

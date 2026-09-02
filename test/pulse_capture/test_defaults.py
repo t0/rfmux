@@ -134,3 +134,27 @@ def test_the_tap_is_released_however_the_worker_ends(qt_app):
         assert panel._tap_registered is False
     finally:
         panel.close()
+
+
+def test_a_new_capture_starts_from_the_newest_packets():
+    """Registering the tap discards the receiver's backlog, so the slow
+    stream's clock starts current instead of behind."""
+    from types import SimpleNamespace
+    from rfmux.tools.periscope.app_runtime import PeriscopeRuntime
+
+    class _Q:
+        def __init__(self, n):
+            self.n = n
+
+        def empty(self):
+            return self.n == 0
+
+        def try_pop(self):
+            self.n -= 1
+
+    rt = PeriscopeRuntime.__new__(PeriscopeRuntime)
+    rt.receiver = SimpleNamespace(queue=_Q(37))
+    rt.register_pulse_tap(lambda *a: None)
+    assert rt.receiver.queue.n == 0
+    assert rt._pulse_tap is not None
+    assert PeriscopeRuntime.__new__(PeriscopeRuntime)._drop_queued_packets() == 0

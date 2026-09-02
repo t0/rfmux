@@ -159,7 +159,7 @@ async def run_capture_flow(crs, host, is_mock) -> int:
             **CONFIG.session_kwargs(PFB_SAMPLING_FREQ))
         capture_session.start()
         covered = await run_pfb_source(capture_session, host, CHANNELS,
-                                       duration_s=FAST_S)
+                                       module=MODULE, duration_s=FAST_S)
         capture_session.stop()
         print(f"fast: {capture_session.total_pulses} pulses in "
               f"{covered*1e3:.0f} ms → pulse_flow_fast.h5")

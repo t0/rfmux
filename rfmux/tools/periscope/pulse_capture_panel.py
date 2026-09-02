@@ -2443,8 +2443,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"[{provenance}]\n"
             f"slow #{meta.get('slow_idx')} / fast #{meta.get('fast_idx')}"
             + (f"   Δt(trigger) = {dt*1e6:+.0f} µs  (slow − fast; paired "
-               f"as one event within a slow sample, "
-               f"{1e6 / self._current_sample_rate('slow'):.0f} µs)"
+               f"as one event within half the CIC response, "
+               f"{1e6 * 3 / self._current_sample_rate('slow'):.0f} µs)"
                if dt is not None and np.isfinite(dt) else "")
             + (f"\nSNR {summ.get('snr', 0):.1f}σ, "
                f"τ = {tau_ms:.2f} ms"

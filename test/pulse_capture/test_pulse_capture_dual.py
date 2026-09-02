@@ -340,21 +340,23 @@ def test_stream_feeds_present_the_source_facade():
     dual.stop()
 
 
-def test_triggers_pair_only_within_one_slow_sample():
-    """Two triggers further apart than a slow sample are two events."""
+def test_triggers_pair_within_half_the_cic_response():
+    """The slow trigger can lead or lag the fast one by up to three
+    slow samples, half of CIC2's six-sample response; further apart
+    they are two events."""
     pairs = []
     d = DualPulseCaptureSession(channels=[1], slow_rate=1000.0,
                                 fast_rate=10000.0, on_pair=pairs.append,
                                 slow_time_offset_s=0.0)
-    assert d.match_window_s == pytest.approx(0.001)
+    assert d.match_window_s == pytest.approx(0.003)
     T = 43000.0
-    d.matcher.add("slow", 1, 1, {"trigger_time": T + 0.0009, "duration_s": 0.005})
+    d.matcher.add("slow", 1, 1, {"trigger_time": T - 0.0029, "duration_s": 0.005})
     d.matcher.add("fast", 1, 1, {"trigger_time": T, "duration_s": 0.001})
     assert d.matcher.matched == 1
     d.matcher.add("slow", 1, 2, {"trigger_time": T + 0.100, "duration_s": 0.005})
-    d.matcher.add("fast", 1, 2, {"trigger_time": T + 0.102, "duration_s": 0.001})
+    d.matcher.add("fast", 1, 2, {"trigger_time": T + 0.104, "duration_s": 0.001})
     assert d.matcher.matched == 1
     assert len(d.matcher._pending["slow"][1]) == 1
     assert len(d.matcher._pending["fast"][1]) == 1
     d.stop()
-    assert d.stats()["match_window_s"] == pytest.approx(0.001)
+    assert d.stats()["match_window_s"] == pytest.approx(0.003)

@@ -65,6 +65,7 @@ import numpy as np
 
 from .. import streamer
 from ..core.transferfunctions import (
+    CIC2_STAGES,
     decimated_stream_delay_s, sampling_to_decimation,
     PFB_SAMPLING_FREQ,
     VOLTS_PER_ROC,
@@ -1365,11 +1366,16 @@ class DualPulseCaptureSession(_CallbackHost):
                 self._error(f"Could not open HDF5 file "
                             f"{hdf5_path}: {e}")
 
-        # One event triggers both streams at its edge, and the slow
-        # trigger can land up to one slow sample after it.  Triggers
-        # further apart than that are different events, each reported
-        # with the other stream's samples over its own window.
-        self.match_window_s = (1.0 / slow_rate if match_window_s is None
+        # One event triggers both streams at its edge.  The fast stream
+        # dates it to the sample; the slow stream's CIC spreads the
+        # edge over its response, six slow samples for CIC2, and the
+        # timestamps are shifted to the response's centre, so a bright
+        # pulse trips the slow trigger up to three slow samples early
+        # and a faint one that late.  Triggers further apart than that
+        # are different events, each reported with the other stream's
+        # samples over its own window.
+        self.match_window_s = (CIC2_STAGES / 2 / slow_rate
+                               if match_window_s is None
                                else float(match_window_s))
         self.matcher = IncrementalPulseMatcher(
             window_s=self.match_window_s, grace_s=match_grace_s,

@@ -158,3 +158,16 @@ def test_a_new_capture_starts_from_the_newest_packets():
     assert rt.receiver.queue.n == 0
     assert rt._pulse_tap is not None
     assert PeriscopeRuntime.__new__(PeriscopeRuntime)._drop_queued_packets() == 0
+
+
+def test_a_new_capture_does_not_show_the_last_runs_counts(qt_app):
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    try:
+        panel._last_stats = {"total_pulses": 57, "rate_per_min": 12.0,
+                             "elapsed_s": 300, "per_channel": {1: 57}}
+        panel._reset_results([1])
+        panel._refresh_status_line()
+        assert "57" not in panel.status_label.text()
+    finally:
+        panel.close()

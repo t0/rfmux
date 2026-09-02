@@ -1478,6 +1478,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._pair_meta.clear()
         self._stream_counts = {"slow": 0, "fast": 0}
         self._noise_by_stream = {}
+        self._last_stats = {}      # the status line must not show the last run
         self._hist_data_by_stream = {}
         self._template_data = {}
         self._template_data_by_stream = {}

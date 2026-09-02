@@ -1301,7 +1301,7 @@ class DualPulseCaptureSession(_CallbackHost):
         hdf5_path=None,
         df_calibrations: Optional[Dict[int, float]] = None,
         match_window_s: Optional[float] = None,
-        match_grace_s: float = 0.25,
+        match_grace_s: Optional[float] = None,
         pair_window_wait_s: float = 3.0,
         slow_time_offset_s: Optional[float] = None,
         on_noise: Optional[Callable] = None,
@@ -1377,8 +1377,18 @@ class DualPulseCaptureSession(_CallbackHost):
         self.match_window_s = (CIC2_STAGES / 2 / slow_rate
                                if match_window_s is None
                                else float(match_window_s))
+        # A pulse reaches the matcher when its capture ends, and a
+        # capture whose end confirmation stalls runs to the hard stop
+        # before it is released.  Its partner has to wait at least that
+        # long, or a stalled confirmation on one stream splits every
+        # such event in two.
+        if match_grace_s is None:
+            hard_stop_s = (self.config.max_capture_samples(slow_rate)
+                           / slow_rate)
+            match_grace_s = hard_stop_s + 0.05
+        self.match_grace_s = float(match_grace_s)
         self.matcher = IncrementalPulseMatcher(
-            window_s=self.match_window_s, grace_s=match_grace_s,
+            window_s=self.match_window_s, grace_s=self.match_grace_s,
             on_pair=self._on_matcher_pair)
         self._last_advance: Dict[str, float] = {}
         # Pairs whose union window one of the rings has not reached yet,
@@ -1529,6 +1539,7 @@ class DualPulseCaptureSession(_CallbackHost):
                              + self.fast.total_pulses),
             "slow_time_offset_s": self.slow_time_offset_s,
             "match_window_s": self.match_window_s,
+            "match_grace_s": self.match_grace_s,
             "time_origin_epoch": self.time_origin_epoch,
             **self._stream_lag(),
         }

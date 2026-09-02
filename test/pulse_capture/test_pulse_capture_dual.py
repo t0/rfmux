@@ -360,3 +360,23 @@ def test_triggers_pair_within_half_the_cic_response():
     assert len(d.matcher._pending["fast"][1]) == 1
     d.stop()
     assert d.stats()["match_window_s"] == pytest.approx(0.003)
+
+
+def test_a_partner_released_at_the_hard_stop_still_pairs():
+    """A capture whose end confirmation stalls is released at the hard
+    stop, 0.3 s after its trigger with the default settings; the other
+    stream's pulse must still be waiting for it then."""
+    pairs = []
+    d = DualPulseCaptureSession(channels=[1], slow_rate=1000.0,
+                                fast_rate=10000.0, on_pair=pairs.append,
+                                slow_time_offset_s=0.0)
+    hard_stop = d.config.max_capture_samples(1000.0) / 1000.0
+    assert d.match_grace_s == pytest.approx(hard_stop + 0.05)
+    assert d.match_grace_s > 0.25
+    T = 43000.0
+    d.matcher.add("fast", 1, 1, {"trigger_time": T, "duration_s": 0.001})
+    d.matcher.advance_time("slow", T + hard_stop - 0.01)   # still capturing
+    assert d.matcher.unmatched == 0
+    d.matcher.add("slow", 1, 1, {"trigger_time": T, "duration_s": 0.3})
+    assert d.matcher.matched == 1
+    d.stop()

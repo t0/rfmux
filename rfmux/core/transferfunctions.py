@@ -26,6 +26,15 @@ COMB_SAMPLING_FREQ = 625e6
 #: complex, so this is the full complex bandwidth.
 PFB_SAMPLING_FREQ = COMB_SAMPLING_FREQ / 256
 
+# The decimated readout path: two cascaded CIC filters after the PFB.
+# CIC1 is fixed; CIC2's rate change is the decimation stage.  Both the
+# spectral droop correction and the group delay below are derived from
+# these, so they are stated once.
+CIC1_STAGES = 3
+CIC1_DECIMATION = 64
+CIC2_STAGES = 6
+CIC1_SAMPLING_FREQ = PFB_SAMPLING_FREQ / CIC1_DECIMATION   # CIC2's input rate
+
 #: Nyquist frequency of PFB_SAMPLING_FREQ -- the single-sided bandwidth,
 #: and numerically also the PFB bin spacing (512 bins across
 #: COMB_SAMPLING_FREQ).  NOT a sample rate: dividing a sample count by
@@ -165,7 +174,47 @@ def decimation_to_sampling(dec_stage):
     float
         Sampling rate in Hz
     """
-    return 625e6 / 256 / 64 / 2**dec_stage
+    return CIC1_SAMPLING_FREQ / 2**dec_stage
+
+
+def sampling_to_decimation(sample_rate):
+    """The decimation stage nearest a slow-stream sample rate, 0-6.
+
+    The inverse of :func:`decimation_to_sampling`, for callers that were
+    handed a rate rather than the stage that produced it.  Rates that
+    match no stage round to the nearest one.
+    """
+    if not sample_rate or sample_rate <= 0:
+        raise ValueError(f"sample_rate must be positive, got {sample_rate!r}")
+    stage = int(round(np.log2(CIC1_SAMPLING_FREQ / sample_rate)))
+    return min(6, max(0, stage))
+
+
+def cic_group_delay(stages, rate_change):
+    """Group delay of an N-stage boxcar CIC, in its INPUT samples: N(R-1)/2."""
+    return stages * (rate_change - 1) / 2.0
+
+
+def decimated_stream_delay_s(dec_stage):
+    """Seconds the decimated (slow) stream lags the PFB stream.
+
+    The slow stream passes CIC1 and CIC2, the PFB stream neither, and the
+    firmware does not correct the slow packet timestamps for the filters'
+    group delay: a feature the PFB stream shows at time T appears in the
+    slow stream at T + this.  Output-referred, CIC2 contributes
+    3(R-1)/R slow samples — 2.81 at stage 4, 2.91 at stage 5, 2.95 at
+    stage 6 — and CIC1 a fixed 38.7 µs (1.5 samples at stage 0).
+
+    A property of the firmware, stated here beside the CIC droop
+    correction that uses the same filters.  Where it is acted on —
+    DualPulseCaptureSession pulling the slow clock back, and the mock
+    stamping its slow packets late — is marked TEMPORARY, to be removed
+    when the RTL timestamps the decimated stream at its filter centroid.
+    This function stays: it describes the filters either way.
+    """
+    r2 = 2 ** int(dec_stage)
+    return (cic_group_delay(CIC1_STAGES, CIC1_DECIMATION) / PFB_SAMPLING_FREQ
+            + cic_group_delay(CIC2_STAGES, r2) / CIC1_SAMPLING_FREQ)
 
 
 def _general_single_cic_correction(frequencies, f_in, R=64, N=6):
@@ -256,19 +305,20 @@ def compensate_psd_for_cics(frequencies, psd, dec_stage=6, spectrum_cutoff=0.9):
 
     Arrays (frequencies, corrected_psd)"""
 
-    # Define CIC decimation parameters
-    R1 = 64
+    R1 = CIC1_DECIMATION
     R2 = 2**dec_stage
-    f_in1 = 625e6 / 256.0  # Original samplerate before 1st CIC
-    f_in2 = f_in1 / R1     # Samplerate before 2nd CIC
-    fs = f_in2 / R2        # Final sample rate
+    f_in1 = PFB_SAMPLING_FREQ    # Original samplerate before 1st CIC
+    f_in2 = CIC1_SAMPLING_FREQ   # Samplerate before 2nd CIC
+    fs = f_in2 / R2              # Final sample rate
 
     # The CIC corrections are symmetric, take abs in case this is a dual-sideband PSD
     freq_abs = np.abs(frequencies)
 
     # Apply CIC correction for both CIC stages
-    cic1_corr_c = _general_single_cic_correction(freq_abs, f_in1, R=R1, N=3)
-    cic2_corr_c = _general_single_cic_correction(freq_abs, f_in2, R=R2, N=6)
+    cic1_corr_c = _general_single_cic_correction(freq_abs, f_in1, R=R1,
+                                                 N=CIC1_STAGES)
+    cic2_corr_c = _general_single_cic_correction(freq_abs, f_in2, R=R2,
+                                                 N=CIC2_STAGES)
     correction = cic1_corr_c * cic2_corr_c
     psd_corrected = psd / correction**2
 

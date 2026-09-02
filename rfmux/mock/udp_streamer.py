@@ -40,7 +40,8 @@ from ..streamer import (
     SS_PER_SECOND,
     STREAMER_PORT, PFB_STREAMER_PORT,
 )
-from ..core.transferfunctions import PFB_SAMPLING_FREQ
+from ..core.transferfunctions import (
+    PFB_SAMPLING_FREQ, decimated_stream_delay_s)
 
 # ── Global cleanup registry ──────────────────────────────────────
 
@@ -334,6 +335,12 @@ class MockCRSStreamer(threading.Thread):
         # ── Timestamp ─────────────────────────────────────────
         total_elapsed = (self.total_elapsed_time.get(module_num, 0.0)
                          + seq / slow_rate)
+        # The samples describe the frame time; the hardware stamps the
+        # packet later by the CIC group delay, so the mock does too.
+        # TEMPORARY firmware behaviour: delete this term when the RTL
+        # timestamps the decimated stream at its filter centroid (and
+        # zero the default in DualPulseCaptureSession alongside).
+        total_elapsed += decimated_stream_delay_s(dec)
         pkt_dt = self.start_datetime + timedelta(seconds=total_elapsed)
         ts = Timestamp(
             y=int(pkt_dt.year % 100),

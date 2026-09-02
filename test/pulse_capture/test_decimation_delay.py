@@ -1,15 +1,17 @@
 """The decimated stream's timestamps are late by its CIC group delay;
 in "both" mode the dual session pulls them back so the two streams
-share the PFB clock.  TEMPORARY until the firmware corrects the
-timestamps — see rfmux/pulse_capture/decimation_delay.py.
+share the PFB clock, and the mock stamps its slow packets late the
+same way.  TEMPORARY until the firmware corrects the timestamps — see
+decimated_stream_delay_s in rfmux/core/transferfunctions.py.
 """
 import numpy as np
 import pytest
 
-from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ, decimation_to_sampling
+from rfmux.core.transferfunctions import (
+    PFB_SAMPLING_FREQ, decimated_stream_delay_s, decimation_to_sampling,
+    sampling_to_decimation)
 from rfmux.pulse_capture.capture_session import (
     DualPulseCaptureSession, PulseCaptureConfig)
-from rfmux.pulse_capture.decimation_delay import decimated_stream_delay_s
 
 CIC1_S = 94.5 / PFB_SAMPLING_FREQ          # 3 stages, R=64, at the PFB rate
 
@@ -19,18 +21,22 @@ CIC1_S = 94.5 / PFB_SAMPLING_FREQ          # 3 stages, R=64, at the PFB rate
 def test_cic2_delay_is_about_2_9_output_samples(dec, cic2_samples):
     """Joshua's numbers: 3(R-1)/R output samples of CIC2, plus CIC1."""
     fs = decimation_to_sampling(dec)
-    assert decimated_stream_delay_s(fs) == pytest.approx(
+    assert decimated_stream_delay_s(sampling_to_decimation(fs)) == pytest.approx(
         CIC1_S + cic2_samples / fs)
 
 
 def test_dec0_is_cic1_alone():
     fs = decimation_to_sampling(0)
-    assert decimated_stream_delay_s(fs) == pytest.approx(CIC1_S)
-    assert decimated_stream_delay_s(fs) * fs == pytest.approx(94.5 / 64)
+    assert decimated_stream_delay_s(sampling_to_decimation(fs)) == pytest.approx(CIC1_S)
+    assert decimated_stream_delay_s(sampling_to_decimation(fs)) * fs == pytest.approx(94.5 / 64)
 
 
-def test_nonsense_rate_gives_no_shift():
-    assert decimated_stream_delay_s(0.0) == 0.0
+def test_rate_to_stage_round_trips_and_rounds():
+    for dec in range(7):
+        assert sampling_to_decimation(decimation_to_sampling(dec)) == dec
+    assert sampling_to_decimation(1000.0) == 5      # nearest stage
+    with pytest.raises(ValueError):
+        sampling_to_decimation(0.0)
 
 
 def _dual(slow_rate, **kw):
@@ -76,7 +82,7 @@ def _feed_both(d, cfg, slow_rate, slow_late_by):
 @pytest.mark.parametrize("dec", [4, 6])
 def test_pulse_at_one_true_time_pairs_with_no_skew(dec):
     fs = decimation_to_sampling(dec)
-    late = decimated_stream_delay_s(fs)
+    late = decimated_stream_delay_s(sampling_to_decimation(fs))
     d, cfg, pairs = _dual(fs)
     T = _feed_both(d, cfg, fs, slow_late_by=late)
     assert d.slow_time_offset_s == pytest.approx(-late)
@@ -91,7 +97,7 @@ def test_without_the_shift_the_slow_trigger_is_late_by_the_delay():
     """Sign pin: the board stamps slow late, so an uncorrected capture
     shows slow − fast ≈ +delay."""
     fs = decimation_to_sampling(6)
-    late = decimated_stream_delay_s(fs)
+    late = decimated_stream_delay_s(sampling_to_decimation(fs))
     d, cfg, pairs = _dual(fs, slow_time_offset_s=0.0)
     _feed_both(d, cfg, fs, slow_late_by=late)
     assert d.slow_time_offset_s == 0.0
@@ -130,5 +136,5 @@ def test_the_file_says_how_much_was_shifted(tmp_path):
         d.start(); d.stop()
         meta = PulseHDF5Reader(str(tmp_path / name)).metadata
         assert meta["slow_time_offset_s"] == pytest.approx(
-            -decimated_stream_delay_s(fs) if not kw else 0.0)
+            -decimated_stream_delay_s(sampling_to_decimation(fs)) if not kw else 0.0)
         assert d.stats()["slow_time_offset_s"] == meta["slow_time_offset_s"]

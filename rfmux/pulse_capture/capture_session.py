@@ -65,6 +65,7 @@ import numpy as np
 
 from .. import streamer
 from ..core.transferfunctions import (
+    decimated_stream_delay_s, sampling_to_decimation,
     PFB_SAMPLING_FREQ,
     VOLTS_PER_ROC,
     apply_iq_conversion,
@@ -78,7 +79,6 @@ from .detection import (
     PulseCapture,
     estimate_noise_stats,
 )
-from .decimation_delay import decimated_stream_delay_s
 from .analysis import (
     pulse_summary,
     storage_transform,
@@ -1298,10 +1298,14 @@ class DualPulseCaptureSession(_CallbackHost):
         #: are late by its CIC group delay while the PFB stream's are
         #: not, so by default the slow clock is pulled back by that
         #: delay to put both streams on one axis.  Pass 0.0 to leave
-        #: the board's timestamps alone.  See decimation_delay.py —
-        #: TEMPORARY until the firmware corrects the timestamps itself.
+        #: the board's timestamps alone.
+        #: TEMPORARY firmware compensation: when the RTL timestamps the
+        #: decimated stream at its filter centroid, make this default
+        #: to 0.0 (see decimated_stream_delay_s in core.transferfunctions,
+        #: and the matching stamp in mock/udp_streamer.py).  Keep the
+        #: slow_time_offset_s file attribute: older files carry it.
         self.slow_time_offset_s = float(
-            -decimated_stream_delay_s(slow_rate)
+            -decimated_stream_delay_s(sampling_to_decimation(slow_rate))
             if slow_time_offset_s is None else slow_time_offset_s)
         # Both the writer AND the per-stream sessions need these: the
         # writer to record them, the sessions to rotate.  Handing them

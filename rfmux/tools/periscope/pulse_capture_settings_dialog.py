@@ -20,6 +20,14 @@ from ...pulse_capture.capture_session import (
 )
 
 
+def _rows_html(rows) -> str:
+    """A label's worth of name/value pairs, one per line, names aligned."""
+    body = "".join(
+        f"<tr><td style='padding-right:10px; color:#777'>{name}</td>"
+        f"<td>{value}</td></tr>" for name, value in rows)
+    return f"<table cellspacing='0' cellpadding='1'>{body}</table>"
+
+
 class PulseCaptureSettingsDialog(QtWidgets.QDialog):
     """Edit a PulseCaptureConfig with live unit conversions."""
 
@@ -27,13 +35,15 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
                  config: PulseCaptureConfig | None = None,
                  sample_rate: float = 596.0464477539062,
                  mode: str = "slow",
-                 n_channels: int = 2):
+                 n_channels: int = 2,
+                 df_available: bool = True):
         super().__init__(parent)
         self.setWindowTitle("Pulse Capture Settings")
         self.setModal(True)
         self.sample_rate = float(sample_rate)
         self.mode = mode
         self.n_channels = max(1, n_channels)
+        self.df_available = bool(df_available)
         config = config or PulseCaptureConfig()
         self._updating = False
 
@@ -199,7 +209,16 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.basis_combo.addItems(["I/Q (quadratures)",
                                    "df/dissipation (rotated)"])
         self.basis_combo.setCurrentIndex(
-            1 if config.trigger_basis == "df" else 0)
+            1 if config.trigger_basis == "df" and self.df_available else 0)
+        if not self.df_available:
+            # Nothing to rotate with: the item stays visible so the
+            # option is known, but cannot be chosen.
+            item = self.basis_combo.model().item(1)
+            item.setEnabled(False)
+            item.setToolTip(
+                "No df calibration for these channels.  Run a multisweep "
+                "and Bias KIDs (or bias_kids headlessly), then reopen "
+                "these settings.")
         self.basis_combo.setToolTip(
             "What the threshold is applied to.\n\n"
             "A pulse moves the resonance frequency, so it lies along one "
@@ -270,7 +289,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             save_to_end_confirmed=self.end_confirmed_check.isChecked(),
             min_end_samples=int(self.min_end_spin.value()),
             trigger_basis=("df" if self.basis_combo.currentIndex() == 1
-                           else "iq"),
+                           and self.df_available else "iq"),
         )
 
     def _update_dependent_values(self):
@@ -291,29 +310,31 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             def _ms(ms):
                 return f"{ms/1000:.3g} s" if ms >= 1000 else f"{ms:.3g} ms"
 
-            self.pulse_derived_label.setText(
-                f"ring buffer {d['buf_samples']:,} samples "
-                f"({d['buf_mb_per_channel']:.2f} MB/ch, "
-                f"{d['buf_mb_total']:.2f} MB total) · "
-                f"hard stop at {_ms(d['max_capture_ms'])} "
-                f"(1.2× — a stuck capture is saved and flagged "
-                f"truncated) · "
-                f"noise training {_ms(d['noise_train_actual_ms'])} "
-                f"({d['noise_samples']:,} samples) · "
-                f"baseline median over {_ms(d['baseline_window_ms'])} · "
-                f"edge lookback {_ms(d['edge_lookback_ms'])} "
-                f"({d['edge_lookback']:,} samples) · "
-                f"end floor {d['min_end_samples']} samples "
-                f"({_ms(d['min_end_ms'])})"
-                + (f" · min pulse {d['min_pulse_samples']} samples"
-                   if cfg.min_pulse_ms > 0 else ""))
-            self.sigma_derived_label.setText(
-                f"confirmation {d['trigger_samples']} sample"
-                f"{'s' if d['trigger_samples'] != 1 else ''} "
-                f"(accidentals ≈ {acc_str} per channel) · "
-                f"edge jump > {cfg.threshold_sigma:g} jump-σ over the "
-                f"lookback (≈ {d['edge_floor_sigma']:.1f}σ amplitude "
-                f"floor in white noise)")
+            rows = [
+                ("ring buffer", f"{d['buf_samples']:,} samples "
+                                f"({d['buf_mb_per_channel']:.2f} MB/ch, "
+                                f"{d['buf_mb_total']:.2f} MB total)"),
+                ("hard stop", f"{_ms(d['max_capture_ms'])} (1.2×; a stuck "
+                              "capture is saved and flagged truncated)"),
+                ("noise training", f"{_ms(d['noise_train_actual_ms'])} "
+                                   f"({d['noise_samples']:,} samples)"),
+                ("baseline median", _ms(d['baseline_window_ms'])),
+                ("edge lookback", f"{_ms(d['edge_lookback_ms'])} "
+                                  f"({d['edge_lookback']:,} samples)"),
+                ("end floor", f"{d['min_end_samples']} samples "
+                              f"({_ms(d['min_end_ms'])})"),
+            ]
+            if cfg.min_pulse_ms > 0:
+                rows.append(("min pulse", f"{d['min_pulse_samples']} samples"))
+            self.pulse_derived_label.setText(_rows_html(rows))
+            n_conf = d['trigger_samples']
+            self.sigma_derived_label.setText(_rows_html([
+                ("confirmation", f"{n_conf} sample{'s' if n_conf != 1 else ''}; "
+                                 f"accidentals ≈ {acc_str} per channel"),
+                ("edge jump", f"> {cfg.threshold_sigma:g} jump-σ over the "
+                              f"lookback (≈ {d['edge_floor_sigma']:.1f}σ "
+                              "amplitude floor in white noise)"),
+            ]))
 
             issues = cfg.validate(self.sample_rate)
             apply_issue_banner(

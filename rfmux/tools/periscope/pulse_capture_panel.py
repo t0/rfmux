@@ -1093,6 +1093,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             sample_rate=self._current_sample_rate(mode),
             mode=mode,
             n_channels=len(channels),
+            df_available=any(self._channel_cal(ch) is not None
+                             for ch in channels),
         )
         if dlg.exec():
             self.capture_config = dlg.get_config()

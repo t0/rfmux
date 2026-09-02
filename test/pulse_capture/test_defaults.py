@@ -77,3 +77,29 @@ def test_a_late_calibration_switches_an_untouched_view(qt_app):
         assert panel.units_combo.currentText() == UNITS_DF
     finally:
         panel.close()
+
+
+def test_settings_dialog_learns_whether_df_is_available(qt_app, monkeypatch):
+    """The panel tells the dialog whether the named channels have a
+    calibration, so the rotated basis is only offered when it can act."""
+    from rfmux.tools.periscope import pulse_capture_panel as m
+    seen = {}
+
+    class _Dialog:
+        def __init__(self, parent, **kw):
+            seen.update(kw)
+
+        def exec(self):
+            return 0
+    monkeypatch.setattr(m, "PulseCaptureSettingsDialog", _Dialog)
+
+    panel = m.PulseCapturePanel(dark_mode=False)
+    try:
+        panel.channels_edit.setText("1,2")
+        panel._on_capture_settings()
+        assert seen["df_available"] is False
+        panel.df_calibrations = {1: {2: 2.0e6 + 0j}}
+        panel._on_capture_settings()
+        assert seen["df_available"] is True
+    finally:
+        panel.close()

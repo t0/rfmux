@@ -16,6 +16,12 @@ from rfmux.tools.periscope.pulse_capture_settings_dialog import (  # noqa: E402
 )
 
 
+def _plain(label) -> str:
+    """A derived label's text with its table markup stripped."""
+    import re
+    return " ".join(re.sub(r"<[^>]+>", " ", label.text()).split())
+
+
 
 def _ok(dlg):
     return dlg.buttons.button(
@@ -26,13 +32,13 @@ def test_derived_labels_follow_rate(qt_app):
     cfg = PulseCaptureConfig(min_pulse_ms=1.0)
     slow = PulseCaptureSettingsDialog(
         config=cfg, sample_rate=19073.486328125, mode="slow")
-    assert "min pulse 19 samples" in slow.pulse_derived_label.text()
+    assert "min pulse 19 samples" in _plain(slow.pulse_derived_label)
     slow.close()
 
     fast = PulseCaptureSettingsDialog(
         config=cfg, sample_rate=1220703.125, mode="fast")
-    assert "min pulse 1,221 samples" in fast.pulse_derived_label.text() or \
-        "min pulse 1221 samples" in fast.pulse_derived_label.text()
+    assert "min pulse 1,221 samples" in _plain(fast.pulse_derived_label) or \
+        "min pulse 1221 samples" in _plain(fast.pulse_derived_label)
     fast.close()
 
 
@@ -73,7 +79,7 @@ def test_rolling_baseline_span_is_shown(qt_app):
     dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
     assert not hasattr(dlg, "baseline_spin")
     assert not hasattr(dlg, "baseline_auto_check")
-    assert "baseline median" in dlg.pulse_derived_label.text()
+    assert "baseline median" in _plain(dlg.pulse_derived_label)
     dlg.close()
 
 
@@ -101,8 +107,8 @@ def test_derived_readouts_split_by_driving_knob(qt_app):
     assert "300 ms" in pulse_txt
     assert "25 ms" in pulse_txt
     dlg.max_pulse_spin.setValue(500.0)
-    assert "600 ms" in dlg.pulse_derived_label.text()
-    assert "50 ms" in dlg.pulse_derived_label.text()
+    assert "600 ms" in _plain(dlg.pulse_derived_label)
+    assert "50 ms" in _plain(dlg.pulse_derived_label)
     dlg.close()
 
 def test_max_pulse_is_a_primary_control_and_drives_training(qt_app):
@@ -149,10 +155,43 @@ def test_end_floor_is_exposed_and_round_trips(qt_app):
     says what it is in time at this rate."""
     dlg = PulseCaptureSettingsDialog(sample_rate=596.0)
     assert dlg.min_end_spin.value() == 10
-    assert "end floor 10 samples" in dlg.pulse_derived_label.text()
-    assert "16.8 ms" in dlg.pulse_derived_label.text()
+    assert "end floor 10 samples" in _plain(dlg.pulse_derived_label)
+    assert "16.8 ms" in _plain(dlg.pulse_derived_label)
     dlg.min_end_spin.setValue(4)
     assert dlg.get_config().min_end_samples == 4
-    assert "end floor 4 samples" in dlg.pulse_derived_label.text()
+    assert "end floor 4 samples" in _plain(dlg.pulse_derived_label)
     assert "bucket" in dlg.min_end_spin.toolTip()
+    dlg.close()
+
+
+def test_df_basis_needs_a_calibration(qt_app):
+    """Without a df calibration the rotated basis cannot be chosen, and
+    a config that asked for it comes back on the quadratures."""
+    from rfmux.pulse_capture.capture_session import PulseCaptureConfig
+    dlg = PulseCaptureSettingsDialog(
+        config=PulseCaptureConfig(trigger_basis="df"), sample_rate=596.0,
+        df_available=False)
+    assert dlg.basis_combo.currentIndex() == 0
+    assert not dlg.basis_combo.model().item(1).isEnabled()
+    assert "calibration" in dlg.basis_combo.model().item(1).toolTip()
+    dlg.basis_combo.setCurrentIndex(1)
+    assert dlg.get_config().trigger_basis == "iq"
+    dlg.close()
+
+    dlg = PulseCaptureSettingsDialog(
+        config=PulseCaptureConfig(trigger_basis="df"), sample_rate=596.0)
+    assert dlg.basis_combo.currentIndex() == 1
+    assert dlg.basis_combo.model().item(1).isEnabled()
+    assert dlg.get_config().trigger_basis == "df"
+    dlg.close()
+
+
+def test_derived_values_are_one_per_line(qt_app):
+    dlg = PulseCaptureSettingsDialog(sample_rate=596.0)
+    for label in (dlg.pulse_derived_label, dlg.sigma_derived_label):
+        text = label.text()
+        assert text.startswith("<table")
+        assert "·" not in text
+    assert dlg.pulse_derived_label.text().count("<tr>") == 6
+    assert dlg.sigma_derived_label.text().count("<tr>") == 2
     dlg.close()

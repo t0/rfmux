@@ -296,6 +296,17 @@ subscripts.
 
 Steps 4 and 5 must land together or the driver breaks; the rest are separable.
 
+**Steps 1-5 have landed.** Two corrections worth carrying forward:
+
+* Step 3 was not separable after all. Changing `pack_results`' signature
+  necessarily touches its only caller, so the driver's packing half landed with
+  it. Harmless — the driver still stored flat `{name: entry}` dicts per
+  direction at that point, which is what `pack_results` wanted.
+* `test/algorithms/test_multisweep_channels.py` is in the `slow_acquisition`
+  tier, which `addopts` deselects by default. It indexed the old flat return and
+  would have rotted silently through a green default run. Anything touching a
+  macro's return shape needs `pytest -m slow_acquisition` as well.
+
 ---
 
 ## 9. Deliberately out of scope

@@ -136,6 +136,20 @@ loudly, so check them off when their rewrite lands:
   had already broken. `test/algorithms/test_measurement_flow.py` keeps passing
   because it mocks `crs.multisweep`, so CI will not catch either.
 
+All of the above now have a second layer to absorb: a sweep no longer returns
+`{name: entry}` at all. It returns `{module_id: {..., "results": {iteration:
+{direction: {name: entry}}}}}` — see `tuning_sweep_result_shape_plan.md`. So
+each rewrite starts with `sweeps[crs.module[m].index()]["results"][…]`, or
+better, the readers in `rfmux/tuning/sweep_results.py`. `bias_kids.py:231`
+reaching for `multisweep_results['results_by_detector']` is the oldest of these
+and pre-dates even the catalog revamp.
+
+A trap worth knowing about while doing any of it: `test_multisweep_channels.py`
+is in the `slow_acquisition` tier, which `addopts` deselects by default, so it
+went on passing vacuously while asserting on a return shape that no longer
+existed. Anything that changes what a macro returns needs
+`pytest -m slow_acquisition test/` as well as a default run.
+
 ## Two `fits.py` guards become dead letters once the sweep shapes unify
 
 When `multisweep` returns the same envelope as `multiamp_multisweep` — one

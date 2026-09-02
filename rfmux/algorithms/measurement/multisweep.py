@@ -38,6 +38,7 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.resonators import ResonatorCatalog
 from ...core.transferfunctions import convert_roc_to_volts
+from ...tuning.sweep_results import merge_modules, pack_sweep
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +253,9 @@ async def multisweep(
 
         catalog = ResonatorCatalog.from_frequencies(found, module=2, amplitude=1e-3)
         sweeps = await crs.multisweep(catalog, span_hz=200e3, npoints_per_sweep=101)
-        sweeps["R0001"]["iq_counts"]
+
+        module_sweeps = sweeps[crs.module[2].index()]
+        module_sweeps["results"][0]["upward"]["R0001"]["iq_counts"]
 
     Or with a bare list of frequencies, for anything that is not a tuned array
     yet::
@@ -263,7 +266,7 @@ async def multisweep(
             names=["low", "high"],    # optional; default is S0001, S0002
             span_hz=200e3, npoints_per_sweep=101, module=2,
         )
-        sweeps["low"]["iq_counts"]
+        sweeps[crs.module[2].index()]["results"][0]["upward"]["low"]["iq_counts"]
 
     Args:
         crs (CRS): The CRS object (injected by macro).
@@ -323,28 +326,62 @@ async def multisweep(
             sliced to the points measured so far.
 
     Returns:
-        dict: keyed by resonator name with a catalog, or by section name with
-              a bare frequency list. Each value is a dictionary containing:
-              {
-                  'channel': int,                 # hardware channel swept on
-                  'frequencies': np.ndarray (Hz), # Sweep frequencies
-                  'iq_counts': np.ndarray (complex),  # Sweep IQ, in readout counts
-                  'iq_volts': np.ndarray (complex),   # The same, in volts at the
-                                                      # board input port
-                  'original_center_frequency': float, # Sweep centre, as requested
-                  'sweep_direction': str, # "upward" or "downward"
-                  'sweep_amplitude': float, # Normalized amplitude used in this sweep
-              }
+        dict: keyed by module identifier — ``crs.module[m].index()``, e.g.
+        ``crs0042_rmod2`` — with one entry per module swept::
 
-              A sweep does not say what it is *of*: no phase, no fit, no bias
-              frequency, no df calibration. Phase is ``np.angle(iq_counts)``
-              wherever it is wanted, and calling it phase in here invites
-              reading it as the resonator's rather than the readout chain's.
-              The entry carries no ``name`` either — it is already keyed by one.
+            {
+                "crs0042_rmod2": {
+                    "schema_version": 3,
+                    "module": 2,           # resolved, never None
+                    "call_params": {...},  # verbatim, as this macro was called
+                    "results": {
+                        0: {"upward": {"R0001": {...}, "R0002": {...}}},
+                    },
+                },
+            }
 
-              If running on multiple modules (center_frequencies only),
-              returns a list of these dictionaries.
+        Always keyed by module, including for the one module that is the usual
+        case, so a caller who writes ``for module_id, module_sweeps in
+        sweeps.items():`` has written the same code for one module and for four.
+
+        A list of modules sweeps them concurrently and merges the results into
+        one dict of this shape. Each envelope then records its own module in
+        ``call_params["module"]`` rather than the list that was passed: the call
+        that produced it really was a call for that module, and an envelope is
+        meant to stand on its own once lifted out.
+
+        ``results`` is the shape ``multiamp_multisweep`` returns, and one sweep
+        is one iteration in one direction — which is what it is, not a padded
+        slot. So nothing downstream has to ask which macro produced a result:
+        the readers in :mod:`rfmux.tuning.sweep_results` and the fitters in
+        :mod:`rfmux.tuning.fits` take either. They take *one module's* value,
+        not the whole dict — ``fit_sweeps(sweeps["crs0042_rmod2"])`` — and say
+        so if handed the container.
+
+        Under a direction is one entry per resonator, keyed by resonator name
+        with a catalog or by section name with a bare frequency list::
+
+            {
+                'channel': int,                 # hardware channel swept on
+                'frequencies': np.ndarray (Hz), # Sweep frequencies
+                'iq_counts': np.ndarray (complex),  # Sweep IQ, in readout counts
+                'iq_volts': np.ndarray (complex),   # The same, in volts at the
+                                                    # board input port
+                'original_center_frequency': float, # Sweep centre, as requested
+                'sweep_direction': str, # "upward" or "downward"
+                'sweep_amplitude': float, # Normalized amplitude used in this sweep
+            }
+
+        A sweep does not say what it is *of*: no phase, no fit, no bias
+        frequency, no df calibration. Phase is ``np.angle(iq_counts)`` wherever
+        it is wanted, and calling it phase in here invites reading it as the
+        resonator's rather than the readout chain's. The entry carries no
+        ``name`` either — it is already keyed by one.
     """
+
+    # What call_params records: the argument as passed, before the catalog or
+    # the list branch below rewrites it into the module actually swept.
+    requested_module = module
 
     # --- Resolve module ------------------------------------------------------
     if catalog is not None:
@@ -391,17 +428,39 @@ async def multisweep(
                 progress_callback=progress_callback,
                 data_callback=data_callback,
             ))
-        # Results will be a list of dictionaries, one per module
-        results_list = await asyncio.gather(*tasks)
-        return results_list
+        # Each of those returns a container of its own, keyed by module, so the
+        # several modules merge into one rather than stacking into a list whose
+        # order was the only thing saying which element was which.
+        return merge_modules(await asyncio.gather(*tasks))
     # --- End parallel execution handling ---
 
     # --- Resolve what to sweep ----------------------------------------------
     targets = _resolve_sweep_targets(catalog, center_frequencies, names, amp)
 
+    def packed(sections):
+        """This sweep, in the shape every sweep comes back in."""
+        return pack_sweep(
+            sections,
+            module_id=crs.module[module].index(),
+            module=module,
+            sweep_direction=sweep_direction,
+            span_hz=span_hz,
+            npoints_per_sweep=npoints_per_sweep,
+            nsamps=nsamps,
+            amp=amp,
+            catalog=catalog,
+            center_frequencies=center_frequencies,
+            names=names,
+            requested_module=requested_module,
+        )
+
     if not targets:
-        warnings.warn("Nothing to sweep. Returning empty dictionary.")
-        return {}
+        # Still a well-formed result, with no sections in it. A bare {} would
+        # be indistinguishable from a caller's own empty dict, and the
+        # provenance of a sweep that measured nothing is worth as much as any
+        # other's.
+        warnings.warn("Nothing to sweep. Returning a result with no sections.")
+        return packed({})
 
     # --- Validate inputs for single module execution ---
     # Check if number of resonances exceeds maximum channels
@@ -605,4 +664,4 @@ async def multisweep(
     except Exception as e:
         warnings.warn(f"Hardware cleanup failed for module {module}: {e}")
 
-    return results
+    return packed(results)

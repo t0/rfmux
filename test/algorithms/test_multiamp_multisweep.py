@@ -11,6 +11,7 @@ import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.tuning import AmplitudeSchedule
+from rfmux.tuning.sweep_results import pack_sweep
 from rfmux.algorithms.measurement.multiamp_multisweep import multiamp_multisweep
 
 pytestmark = pytest.mark.portable
@@ -63,11 +64,15 @@ class FakeCRS:
 
     async def multisweep(self, catalog=None, **kwargs):
         self.calls.append({"catalog": catalog, **kwargs})
+        return self._packed(self._sections(catalog, kwargs), kwargs)
+
+    def _sections(self, catalog, kwargs):
+        """The {name: entry} a sweep measured, or whatever a test substituted."""
         if callable(self._sweep_result):
             return self._sweep_result(catalog, kwargs)
         if self._sweep_result is not None:
             return self._sweep_result
-        # Stand in for one multisweep return: keyed by name, and carrying the
+        # Stand in for one sweep's measurement: keyed by name, and carrying the
         # amplitude it was asked for, as the real one does.
         names = (
             [r.name for r in catalog]
@@ -82,6 +87,20 @@ class FakeCRS:
             }
             for name in names
         }
+
+    def _packed(self, sections, kwargs):
+        """Through the real packer, so the fake cannot drift from the shape the
+        driver actually has to unwrap."""
+        return pack_sweep(
+            sections,
+            module_id=self.module[kwargs["module"]].index(),
+            module=kwargs["module"],
+            sweep_direction=kwargs["sweep_direction"],
+            span_hz=kwargs["span_hz"],
+            npoints_per_sweep=kwargs["npoints_per_sweep"],
+            nsamps=kwargs["nsamps"],
+            amp=kwargs["amp"],
+        )
 
 
 async def drive(crs, catalog=None, **kwargs):
@@ -412,7 +431,10 @@ async def test_under_a_direction_is_exactly_what_multisweep_returned():
 
     result = await drive(crs, a_catalog())
 
-    assert result["results"][0]["upward"] is sentinel
+    # Equal, and entry-for-entry the same objects: the driver files what the
+    # sweep measured, and does not touch it on the way past.
+    assert result["results"][0]["upward"] == sentinel
+    assert result["results"][0]["upward"]["R0001"] is sentinel["R0001"]
 
 
 @pytest.mark.asyncio

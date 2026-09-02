@@ -139,7 +139,9 @@ async def multiamp_multisweep(
             amp_schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 6),
             directions=("upward", "downward"),
         )
-        results["results"][0]["upward"]["R0001"]["iq_counts"]
+
+        module_results = results[crs.module[2].index()]
+        module_results["results"][0]["upward"]["R0001"]["iq_counts"]
 
     Omitting *amp_schedule* sweeps the catalog at its own amplitudes, once — so
     the useful degenerate call is an up-and-down pair with nothing else said::
@@ -159,7 +161,7 @@ async def multiamp_multisweep(
             span_hz=200e3, npoints_per_sweep=101,
             amp_schedule=AmplitudeSchedule.ramp(1e-4, 1e-2, 5),
         )
-        results["results"][0]["upward"]["S0001"]["iq_counts"]
+        results[crs.module[2].index()]["results"][0]["upward"]["S0001"]["iq_counts"]
 
     Args:
         crs (CRS): The CRS object (injected by macro).
@@ -219,31 +221,44 @@ async def multiamp_multisweep(
             reason this macro does not need to return partial results on
             failure: every sweep that finished has already been handed over.
 
+            ``data`` is the bare ``{name: entry}`` for that one sweep, not the
+            envelope ``multisweep`` returns — the module, the span and the rest
+            are the same for every sweep in the ladder, and a hand-over is not
+            a result. The coordinates that *do* vary are the record's own
+            ``step`` and ``direction``.
+
     Returns:
-        dict:
+        dict: the same shape ``multisweep`` returns, keyed by module identifier
+        — one key here, because this driver is one module per call.
 
         .. code-block:: python
 
             {
-                "schema_version": 1,
-                "module": 2,                # resolved, never None
-                "call_params": {...},       # verbatim, as this driver was called
-                "results": {
-                    0: {"upward": {...}, "downward": {...}},   # one multisweep
-                    1: {"upward": {...}, "downward": {...}},   # return each
+                "crs0042_rmod2": {
+                    "schema_version": 3,
+                    "module": 2,            # resolved, never None
+                    "call_params": {...},   # verbatim, as this driver was called
+                    "results": {
+                        0: {"upward": {...}, "downward": {...}},
+                        1: {"upward": {...}, "downward": {...}},
+                    },
                 },
             }
 
         ``results`` is keyed by amplitude iteration, numbered from 0 in the
         order measured, and an iteration holds one entry per direction swept and
-        nothing else. Under a direction is exactly what ``multisweep`` returns.
+        nothing else. Under a direction is what one ``multisweep`` measured:
+        ``{name: entry}``, unwrapped from the envelope it arrived in, since the
+        module and the sweep parameters are the same for every rung and the
+        amplitude is already on each entry.
 
         :func:`~rfmux.tuning.sweep_results.pack_results` owns this shape
         and documents it in full; the readers beside it —
         ``collect_amplitude_iterations_for``,
         ``find_iteration_matching_amplitude`` and
         ``get_amplitudes_at_iteration`` — are the supported way back out, so
-        callers need not walk the nesting by hand.
+        callers need not walk the nesting by hand. They take *one module's*
+        value, not the whole dict, and say so if handed the container.
 
     Raises:
         ValueError: for an empty or unknown *directions*, a module list, a
@@ -291,6 +306,10 @@ async def multiamp_multisweep(
     # scale on step 5 is a ValueError now rather than after four steps of data.
     steps = amp_schedule.steps(target)
 
+    # Every sweep this call makes comes back under this one key, and the ladder
+    # is packed under it too — the driver is one module per call by construction.
+    module_id = crs.module[resolved_module].index()
+
     total = len(steps) * len(directions)
     completed = 0
     results: dict[int, dict[str, dict]] = {}
@@ -320,13 +339,20 @@ async def multiamp_multisweep(
                 data_callback=inner_data_callback,
             )
             if catalog is not None:
-                data = await crs.multisweep(catalog, **sweep_kwargs)
+                swept = await crs.multisweep(catalog, **sweep_kwargs)
             else:
-                data = await crs.multisweep(
+                swept = await crs.multisweep(
                     center_frequencies=center_frequencies,
                     names=section_names,
                     **sweep_kwargs,
                 )
+
+            # One sweep, in the same shape this driver is about to return: its
+            # own module, its one iteration, its one direction. Unwrapped to the
+            # sections rather than nested whole, because the envelope's
+            # call_params would then be repeated once per step per direction,
+            # differing only in the amplitude the entries already carry.
+            data = swept[module_id]["results"][0][direction]
 
             per_direction[direction] = data
             completed += 1
@@ -346,7 +372,7 @@ async def multiamp_multisweep(
 
     return pack_results(
         results,
-        module_id=crs.module[resolved_module].index(),
+        module_id=module_id,
         module=resolved_module,
         amp_schedule=amp_schedule,
         directions=directions,

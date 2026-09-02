@@ -77,7 +77,9 @@ async def test_a_tone_the_caller_parked_elsewhere_survives_the_sweep(crs_mock):
         npoints_per_sweep=9,
         nsamps=2,
     )
-    assert sorted(sweeps) == ["R0001", "R0002", "R0003"]
+    assert list(sweeps) == [crs.module[MODULE].index()]
+    sections = sweeps[crs.module[MODULE].index()]["results"][0]["upward"]
+    assert sorted(sections) == ["R0001", "R0002", "R0003"]
 
     assert await crs.get_amplitude(
         channel=FOREIGN_CHANNEL, module=MODULE

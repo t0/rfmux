@@ -13,7 +13,7 @@ jupyter:
     name: python3
 ---
 
-# Multisweep: two ways to say what to sweep
+# Multisweep
 
 `crs.multisweep()` measures a narrow, high-resolution sweep around each of many
 frequencies at once — one hardware channel per frequency, all of them swept in
@@ -22,8 +22,7 @@ a network analysis: netanal finds roughly where the
 resonators are, multisweep looks at each one closely enough to characterise it.
 
 This notebook starts with the resonances already located, so that it is about
-multisweep rather than about finding them — the simulator is asked to tune
-itself, and section 2 reads its answers back.
+multisweep rather than about finding them.
 
 There are two ways to
 tell multisweep what to sweep, and they are identical once the measurement
@@ -35,7 +34,7 @@ starts:
 | A list of frequencies | `center_frequencies=` + `amp=` | section name (`"S0001"`) |
 
 Those names key the sweep sections, which sit a few levels inside what the call
-returns — section 3 unpacks the shape, and it is the same shape for every sweep
+returns — section 2 unpacks the shape, and it is the same shape for every sweep
 in this notebook.
 
 Unless you are starting completely from scratch, or looking at hardware that doesn't
@@ -54,7 +53,7 @@ that yet and are unfamiliar with the workflow, start there, then come back here.
 
 One `multisweep` call is always *one* sweep, at one amplitude per resonator, in
 one direction. Iterating the same array over several amplitudes is a layer on
-top, `crs.multiamp_multisweep()`, and it is the subject of sections 5 to 8.
+top, `crs.multiamp_multisweep()`, and it is the subject of sections 4 to 7.
 
 ## How to use this document
 
@@ -116,14 +115,23 @@ NPOINTS_PER_SWEEP = 101   # points measured across that width
 NSAMPS = 10               # averages per point
 ```
 
-## 1. Simulate a board
+## 1. A simulated board, and a catalog
 
-Ten simulated LEKIDs on a fixed random seed, so this notebook produces the same
-array and the same numbers every time it runs.
+Ten simulated LEKIDs on a fixed random seed, told to tune themselves, with the
+tones they parked read back into a `ResonatorCatalog`. That is where
+`network_analyses_find_resonances_make_resonator_catalog.md` leaves off, so this
+notebook picks up from there and is about multisweep rather than about finding
+resonances. (The simulator biases at the S21 dip rather than the nominal
+resonance — the two differ by up to ~1 MHz — so reading its tones back gives
+roughly the frequencies a real tuning run would have found.)
 
-To run against real hardware instead, this cell and the tone readback in section
-2 are the two that change — section 2 shows what to put in their place.
-Everything from section 3 on is unchanged.
+To run against real hardware, replace this one cell with a session on your board
+and a catalog you built or loaded. Everything after it is unchanged:
+
+    session = rfmux.load_session('!HardwareMap [ !CRS { serial: "0042" } ]')
+    crs = session.query(rfmux.CRS).one()
+    await crs.resolve()
+    catalog = ResonatorCatalog.from_csv(...)      # or from_frequencies(...)
 
 Note that multisweep takes over the channels it sweeps — one per resonator,
 overwriting their frequency and amplitude, and zeroing them again when it
@@ -132,63 +140,30 @@ you have parked by hand survives the call. The flip side is that multisweep does
 not guarantee a quiet module: if something else is live and would intermodulate
 with the sweep, clear it first with `await crs.clear_channels(module=MODULE)`.
 
-`auto_bias_kids` has the simulator park a tone on each of its own resonators, so
-this notebook can start where a tuning run's second step starts. Section 2 reads
-those tones back instead of running a network analysis.
-
 ```python
+from rfmux.mock.helpers import create_mock_crs
+
 MOCK_CONFIG = {
     "num_resonances": 10,
-    "freq_start": FMIN,           # the band the sweeps will look in
+    "freq_start": FMIN,
     "freq_end": FMAX,
     "resonator_random_seed": 42,  # same array every run
     "auto_bias_kids": True,       # the simulator tunes itself, so we can skip ahead
     "bias_amplitude": PROBE_AMPLITUDE,
 }
 
-from rfmux.mock.helpers import create_mock_crs
-
 crs = await create_mock_crs(module=MODULE, config=MOCK_CONFIG, verbose=False)
-print(f"simulated CRS with {MOCK_CONFIG['num_resonances']} resonators "
-      f"between {MOCK_CONFIG['freq_start']/1e9:.2f} and "
-      f"{MOCK_CONFIG['freq_end']/1e9:.2f} GHz")
-```
 
-## 2. Build a catalog
-
-Finding the resonances is the previous notebook's whole subject — a network
-analysis across the band, the dips located in it, and the result seeded into a
-`ResonatorCatalog`. That is what
-`network_analyses_find_resonances_make_resonator_catalog.md` is for, and this
-notebook starts one step later.
-
-Since `auto_bias_kids` told the simulator to tune itself, we can read back where
-it parked its own tones and treat those as the frequencies a tuning run would
-have found. `get_frequency` reports relative to the NCO, so add it back:
-
-```python
+# Where the simulator parked its own tones: one channel per resonator, and
+# get_frequency reports relative to the NCO.
 nco_frequency = await crs.get_nco_frequency(module=MODULE)
-
 bias_frequencies = [
     nco_frequency + await crs.get_frequency(channel=channel, module=MODULE)
     for channel in range(1, MOCK_CONFIG["num_resonances"] + 1)
 ]
-```
 
-**On real hardware there is no such shortcut** — a board does not know where its
-resonators are, which is what the network analysis is for. Replace this cell and
-the simulator in section 1 with a session on your board and a catalog you built
-or loaded, and the rest of the notebook runs unchanged:
-
-    session = rfmux.load_session('!HardwareMap [ !CRS { serial: "0042" } ]')
-    crs = session.query(rfmux.CRS).one()
-    await crs.resolve()
-    catalog = ResonatorCatalog.from_csv(...)      # or from_frequencies(...)
-
-`from_frequencies` sorts by frequency, numbers the resonators `R0001…` in that
-order, assigns channels `1..N`, and parks every bias point at `PROBE_AMPLITUDE`.
-
-```python
+# from_frequencies sorts by frequency, numbers the resonators R0001… in that
+# order, assigns channels 1..N, and parks every bias point at PROBE_AMPLITUDE.
 catalog = ResonatorCatalog.from_frequencies(
     bias_frequencies,
     module=MODULE,
@@ -198,7 +173,7 @@ catalog = ResonatorCatalog.from_frequencies(
 print(catalog)
 ```
 
-## 3. Do a multisweep using the resonator catalog
+## 2. Do a multisweep using the resonator catalog
 
 The catalog carries everything multisweep needs (the centre frequencies of
 each sweep section, the amplitudes to sweep them at, etc), so the call says almost nothing
@@ -251,7 +226,7 @@ print(f"directions     {list(module_sweeps['results'][0])}")
 name. A single `multisweep` is one step in one direction, so it has exactly one
 of each — step `0`, and whichever direction you asked for. That is not a padded
 slot: one call really is one amplitude at one direction, and saying so means
-`multiamp_multisweep` (sections 5–8) returns the same shape with more steps in
+`multiamp_multisweep` (sections 4–7) returns the same shape with more steps in
 it. Nothing downstream has to ask which of the two produced a result.
 
 ```python
@@ -383,7 +358,7 @@ except TypeError as e:
     print(f"TypeError: {e}")
 ```
 
-## 4. No catalog? Multisweep using a plain list of frequencies
+## 3. No catalog? Multisweep using a plain list of frequencies
 
 No catalog required. For when you have a few frequencies from somewhere and you want to look at them.
 
@@ -471,7 +446,7 @@ for section_name, s in sections_of(named_section_ms).items():
 
 <!-- #region -->
 
-## 5. Iterating over amplitudes
+## 4. Iterating over amplitudes
 
 rfmux provides various ways of iteratively running `multisweep` at different amplitudes. 
 Note that every tone's amplitude can be different, so this allows quite a bit of freedom.
@@ -552,7 +527,7 @@ for label, schedule in [("multiplicative (relative)", relative), ("ramp (absolut
         print(f"  step {step.step}  {shown}")
 ```
 
-## 6. Checking a schedule before you spend an hour on it
+## 5. Checking a schedule before you spend an hour on it
 
 Iterating over amplitudes is a slow measurement, so it is worth checking what the
 algorithm is going to do before starting the actual iteration. `describe()` gives the derived numbers, and `validate()` returns
@@ -584,7 +559,7 @@ for severity, message in too_loud.validate(catalog):
     print(f"{severity:>7}: {message}")
 ```
 
-## 7. Running the amplitude iteration
+## 6. Running the amplitude iteration
 
 The call looks like `multisweep`'s, plus `amp_schedule` and `directions`. Note that
 `amp_schedule` replaces `amp`.
@@ -612,7 +587,7 @@ multiamp_results = await crs.multiamp_multisweep(
 print(f"\nkeyed by module: {list(multiamp_results)}")
 ```
 
-Which is the same shape section 3 unpacked — module identifier, then an envelope,
+Which is the same shape section 2 unpacked — module identifier, then an envelope,
 then `results` by amplitude step and direction. The only difference is that there
 is now more than one step in it:
 
@@ -645,7 +620,7 @@ documented within each sweep section's entry in the iterated multisweep results.
 `sections_of` works on this unchanged, because a ladder and a single sweep nest
 identically — pass `step=` to pick a rung out.
 
-## 8. Reading the results back
+## 7. Reading the results back
 
 There are also some convenience functions for extracting the data in various
 arrangements. They all take **one module's envelope** — the thing
@@ -977,7 +952,7 @@ except ValueError as e:
     print(f"\nValueError: {e}")
 ```
 
-## 9. What is not here yet
+## 8. What is not here yet
 
 - **Choosing the operating amplitude.** Iterating over amplitudes gives you the
   data to see where each detector bifurcates; deciding which step to bias at, and

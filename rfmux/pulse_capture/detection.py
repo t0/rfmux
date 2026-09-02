@@ -45,6 +45,8 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
+from . import walk as _walk
+
 _SQRT2 = math.sqrt(2.0)
 
 # ── Ring geometry ───────────────────────────────────────────────────
@@ -300,6 +302,11 @@ class PulseCapture:
         silently lose its rising edge.  0 disables the stop.
     """
 
+    #: Walk blocks with the transcribed state machine (walk.walk) rather
+    #: than process_sample per sample.  False keeps the per-sample path,
+    #: which is the reference the tests hold the walk to.
+    use_walk = True
+
     #: Crossings closer than this, in samples, are walked as one island
     #: by process_block rather than bulked apart.
     _MERGE_GAP = 32
@@ -551,8 +558,17 @@ class PulseCapture:
         while pos < n:
             if st.capturing:
                 # Mid-pulse: every sample can end the capture, split it,
-                # or hit the hard stop.  Sequential, and worth it — this
-                # is the part of the stream we are here for.
+                # or hit the hard stop.  Walked, up to the sample a
+                # baseline refresh falls on, which process_sample takes.
+                if self.use_walk:
+                    until = self._samples_until_refresh(st)
+                    if until == 1:
+                        self.process_sample(channel, I[pos], Q[pos], T[pos])
+                        pos += 1
+                        continue
+                    stop = n if until <= 0 else min(n, pos + until - 1)
+                    pos = self._walk_block(channel, st, I, Q, T, pos, stop)
+                    continue
                 self.process_sample(channel, I[pos], Q[pos], T[pos])
                 pos += 1
                 continue
@@ -612,6 +628,14 @@ class PulseCapture:
                        and int(hits[h + 1]) - int(hits[h]) <= self._MERGE_GAP):
                     h += 1
                 walk_stop = seg + int(hits[h]) + 1
+                if self.use_walk:
+                    # The walk triggers and captures on its own; a
+                    # refresh cannot fall inside (the segment ends
+                    # before it).
+                    pos = self._walk_block(channel, st, I, Q, T, pos,
+                                           walk_stop)
+                    if st.capturing:
+                        break
                 while pos < walk_stop:
                     self.process_sample(channel, I[pos], Q[pos], T[pos])
                     pos += 1
@@ -627,6 +651,122 @@ class PulseCapture:
                     self._bulk_quiet(channel, st, I[pos:nxt],
                                      Q[pos:nxt], T[pos:nxt])
                     pos = nxt
+
+    _QUAD = {"": 0, "I": 1, "Q": 2}
+    _QUAD_NAMES = ("", "I", "Q")
+
+    def _pack_state(self, st: "_ChState"):
+        si = np.empty(_walk.N_INT, dtype=np.int64)
+        sf = np.empty(_walk.N_FLT, dtype=np.float64)
+        si[_walk.CAPTURING] = 1 if st.capturing else 0
+        si[_walk.END_PTR] = st.end_ptr_count
+        si[_walk.TRIG_ABS] = -1 if st.trig_abs is None else st.trig_abs
+        si[_walk.FIRE_ABS] = st.fire_abs
+        si[_walk.RUN_QUAD] = self._QUAD[st.run_quad]
+        si[_walk.TRIG_QUAD] = self._QUAD[st.trig_quad]
+        si[_walk.PILEUP_CHILD] = 1 if st.pileup_child else 0
+        si[_walk.CH_N] = st.ch_sample_n
+        si[_walk.RETRIG] = 1 if st.re_trigger_ready else 0
+        si[_walk.ACTIVE_DUR] = (-1 if st.active_duration is None
+                                else st.active_duration)
+        si[_walk.ABOVE_RUN] = st.above_run
+        si[_walk.RUN_START] = st.run_start_abs
+        si[_walk.EPOCH] = st.epoch_start
+        si[_walk.DECIM_N] = st.decim_n
+        si[_walk.SINCE_REFRESH] = st.since_refresh
+        sf[_walk.ANCHOR_I] = st.anchor_I
+        sf[_walk.ANCHOR_Q] = st.anchor_Q
+        sf[_walk.TMEAN_I] = st.trig_mean_I
+        sf[_walk.TMEAN_Q] = st.trig_mean_Q
+        sf[_walk.TSTD_I] = st.trig_std_I
+        sf[_walk.TSTD_Q] = st.trig_std_Q
+        sf[_walk.NEAR_I] = math.nan
+        sf[_walk.NEAR_Q] = math.nan
+        return si, sf
+
+    def _unpack_state(self, st: "_ChState", si, sf) -> None:
+        st.capturing = bool(si[_walk.CAPTURING])
+        st.end_ptr_count = int(si[_walk.END_PTR])
+        st.trig_abs = None if si[_walk.TRIG_ABS] < 0 else int(si[_walk.TRIG_ABS])
+        st.fire_abs = int(si[_walk.FIRE_ABS])
+        st.run_quad = self._QUAD_NAMES[int(si[_walk.RUN_QUAD])]
+        st.trig_quad = self._QUAD_NAMES[int(si[_walk.TRIG_QUAD])]
+        st.pileup_child = bool(si[_walk.PILEUP_CHILD])
+        st.ch_sample_n = int(si[_walk.CH_N])
+        st.re_trigger_ready = bool(si[_walk.RETRIG])
+        st.active_duration = (None if si[_walk.ACTIVE_DUR] < 0
+                              else int(si[_walk.ACTIVE_DUR]))
+        st.above_run = int(si[_walk.ABOVE_RUN])
+        st.run_start_abs = int(si[_walk.RUN_START])
+        st.epoch_start = int(si[_walk.EPOCH])
+        st.decim_n = int(si[_walk.DECIM_N])
+        st.since_refresh = int(si[_walk.SINCE_REFRESH])
+        st.anchor_I = float(sf[_walk.ANCHOR_I])
+        st.anchor_Q = float(sf[_walk.ANCHOR_Q])
+        st.trig_mean_I = float(sf[_walk.TMEAN_I])
+        st.trig_mean_Q = float(sf[_walk.TMEAN_Q])
+        st.trig_std_I = float(sf[_walk.TSTD_I])
+        st.trig_std_Q = float(sf[_walk.TSTD_Q])
+
+    def _walk_block(self, channel: int, st: "_ChState", I, Q, T,
+                    start: int, stop: int) -> int:
+        """process_sample over samples start..stop-1 through walk.walk,
+        handling what the walk returns for.  Returns the index to
+        continue from."""
+        bufs = self.buf[channel]
+        rI, rQ, rT = bufs["I"], bufs["Q"], bufs["ts"]
+        bl = self._bl.get(channel) if self.baseline_window > 0 else None
+        ns = self.noise_stats.get(channel, ChannelNoiseStats())
+        si, sf = self._pack_state(st)
+        out = np.zeros(6, dtype=np.int64)
+        pos = start
+        while pos < stop:
+            if bl is not None:
+                bI, bQ = bl["I"].buf, bl["Q"].buf
+                bptr, bcount, bN = bl["I"].ptr, bl["I"].count, bl["I"].N
+            else:
+                bI = bQ = rI.buf
+                bptr = bcount = 0
+                bN = 1
+            _walk.walk(I, Q, T, pos, stop,
+                       rI.buf, rQ.buf, rT.buf, rI.ptr, rI.count, rI.N,
+                       bI, bQ, bptr, bcount, bN, self._bl_decim,
+                       bl is not None,
+                       ns.mean_I, ns.mean_Q, ns.std_I, ns.std_Q,
+                       ns.jump_std_I, ns.jump_std_Q,
+                       float(self.threshold_sigma), float(self.end_sigma),
+                       int(self.trigger_samples), int(self.edge_lookback),
+                       int(self.min_end_samples), float(self.margin_fraction),
+                       int(self.max_capture_samples), bool(self.enable_pileup),
+                       bool(self.freeze_triggers), si, sf, out)
+            k, reason = int(out[0]), int(out[1])
+            rI.ptr = rQ.ptr = rT.ptr = int(out[2])
+            rI.count = rQ.count = rT.count = int(out[3])
+            if bl is not None:
+                bl["I"].ptr = bl["Q"].ptr = int(out[4])
+                bl["I"].count = bl["Q"].count = int(out[5])
+            self.abs_n += k - pos if reason == _walk.DONE else k - pos + 1
+            self._unpack_state(st, si, sf)
+            if reason == _walk.DONE:
+                return stop
+            if reason == _walk.END:
+                self._save_pulse(channel)
+            elif reason == _walk.HARD_STOP:
+                self._save_pulse(channel, truncated=True)
+            elif reason == _walk.SPLIT:
+                self._save_pulse(channel, pileup=True)
+                if not self.freeze_triggers:
+                    self._begin_capture(st, ns)
+                    st.trig_abs = max(
+                        st.run_start_abs,
+                        st.ch_sample_n - max(1, self.edge_lookback // 4))
+                    if math.isfinite(sf[_walk.NEAR_I]):
+                        st.anchor_I = float(sf[_walk.NEAR_I])
+                        st.anchor_Q = float(sf[_walk.NEAR_Q])
+                    st.pileup_child = True
+            si, sf = self._pack_state(st)
+            pos = k + 1
+        return stop
 
     @staticmethod
     def _begin_capture(st: "_ChState", ns: ChannelNoiseStats) -> None:

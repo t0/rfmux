@@ -140,6 +140,19 @@ def validate(cfg: StreamerConfig) -> List[Tuple[str, str]]:
             f"{d['total_mbps']:.0f} Mbps exceeds the firmware's ~"
             f"{DERATED_LINK_MBPS:.0f} Mbps derated budget — expect "
             f"refusal or packet loss."))
+    elif cfg.pfb_channels and cfg.short_packets:
+        # Firmware r1.6 checks the PFB budget against long packets
+        # whatever the packet format, so a short-packet configuration
+        # the link carries can still be refused.
+        as_long = (streamer.LONG_PACKET_CHANNELS * 8 * 8 * d["sample_rate_hz"]
+                   * d["n_modules"] / 1e6)
+        if as_long + d["pfb_mbps"] > DERATED_LINK_MBPS:
+            issues.append((
+                "warning",
+                f"The firmware's PFB budget check counts the readout as "
+                f"long packets ({as_long:.0f} Mbps here) and will refuse "
+                f"this although the link has room. Enable the PFB "
+                f"streamer at stage 3 or above."))
 
     if cfg.dec_stage <= 1:
         issues.append((

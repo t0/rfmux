@@ -270,13 +270,10 @@ class PulseCaptureTask(QtCore.QThread):
                 ingest.add(channels, packet, stamp)
         ingest.flush()
 
-    #: Generation of the most recent PFB enable in this process.  The
-    #: enable and its teardown belong to one capture; a STALE teardown --
-    #: an old task's finally running after a new capture has enabled the
-    #: streamer -- otherwise turns the stream off underneath the running
-    #: capture.  That leaves a board that everyone believes is streaming
-    #: fast, and a dual capture that counts pulses and never pairs them,
-    #: which is the state a live board was found in.
+    #: Generation of the most recent PFB enable in this process.  A
+    #: teardown disables the streamer only if no newer capture has
+    #: enabled it since: an old task's finally block can run after the
+    #: next capture has started.
     _pfb_epoch = 0
 
     async def _claim_pfb(self, channels) -> int:
@@ -356,11 +353,7 @@ class PulseCaptureTask(QtCore.QThread):
 
         Both streams have to finish noise training before either may
         trigger (freeze in _sync_capture_start), so a stream stuck in
-        ESTIMATING silences the whole capture -- and the fast stream's
-        processing load can starve the slow one to a fraction of real
-        time, stretching a one-second training to many minutes.  This
-        was watched live: 0.8 s of slow sample time accumulated over
-        300 s of wall time, no trigger ever armed, and nothing said why.
+        ESTIMATING silences the whole capture without saying why.
         """
         waited = 0.0
         while not stop():
@@ -378,9 +371,8 @@ class PulseCaptureTask(QtCore.QThread):
                 f"{waited:.0f} s"
                 + (f" ({', '.join(done)} finished; no stream may trigger "
                    "until both have)" if done else "")
-                + ". The fast stream's processing load can starve the "
-                "slow one -- if this persists, capture the streams "
-                "separately.")
+                + ". Check that the stream is being sent and that its "
+                "training length fits the capture.")
 
     async def _slow_tap_pump(self, stop) -> float:
         """Drain tap-fed slow samples + control items into the dual

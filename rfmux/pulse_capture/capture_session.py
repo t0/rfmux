@@ -1165,11 +1165,10 @@ class IncrementalPulseMatcher:
 
     def add(self, stream: str, channel: int, pulse_idx: int,
             summary: dict) -> None:
-        # Midpoint of the pulse's core, anchored on the TRIGGER: the
-        # record start (``timestamp``) sits a pre-margin before it, and
-        # that margin is a fraction of each stream's own saved length --
-        # so anchoring there would shift the two streams' midpoints
-        # apart by however differently their tails were kept.
+        # Midpoint of the core, anchored on the trigger.  The record
+        # start sits a pre-margin before it, and that margin is a
+        # fraction of each stream's own saved length, so it differs
+        # between the two streams' records of one event.
         anchor = summary.get("trigger_time", summary.get("timestamp", 0.0))
         mid = anchor + summary.get("duration_s", 0.0) / 2.0
         if not math.isfinite(mid):
@@ -1309,12 +1308,8 @@ class DualPulseCaptureSession(_CallbackHost):
         self.slow_time_offset_s = float(
             -decimated_stream_delay_s(sampling_to_decimation(slow_rate))
             if slow_time_offset_s is None else slow_time_offset_s)
-        # Both the writer AND the per-stream sessions need these: the
-        # writer to record them, the sessions to rotate.  Handing them
-        # to the writer alone made trigger_basis="df" silently degrade
-        # to volts on both streams -- storage_transform falls back per
-        # channel when it has no calibration -- while the single-stream
-        # path rotated properly.
+        # Both the writer and the per-stream sessions need these: the
+        # writer records them, the sessions rotate with them.
         self.df_calibrations = df_calibrations
         # Parity with PulseCaptureSession (panel/task read this)
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
@@ -1354,8 +1349,9 @@ class DualPulseCaptureSession(_CallbackHost):
             on_pair=self._on_matcher_pair)
         self._last_advance: Dict[str, float] = {}
         # Pairs whose union window one of the rings has not reached yet,
-        # in emission order.  See _on_matcher_pair.
-        self._pending_pairs: List[Tuple[dict, Optional[tuple]]] = []
+        # in emission order, with the streams whose window has been
+        # taken.  See _on_matcher_pair.
+        self._pending_pairs: List[Tuple[dict, Optional[tuple], set]] = []
         self._pair_window_wait_s = pair_window_wait_s
         #: slow-minus-fast trigger time of every matched pair: the
         #: board's inter-stream clock skew, one sample per event.
@@ -1565,21 +1561,15 @@ class DualPulseCaptureSession(_CallbackHost):
         # computed on the physically-triggered cores only; the union
         # windows are the pair's display/analysis data.
         #
-        # Each stream's window is taken the moment THAT stream's ring
-        # has reached the end of it -- not all at once when the pair
-        # forms.  A match is emitted the instant the second trigger
-        # lands, and the second stream is usually the fast one, which
-        # has just spent a capture walking samples one at a time while
-        # the slow stream sat behind it on the same loop.  Taken then,
-        # the slow window stopped at the ring's newest sample --
-        # mid-pulse, short of the end mark -- though the samples were
-        # on their way.  Waiting for BOTH rings before taking either is
-        # no good either: the fast ring holds under half a second, and
-        # by the time the slow one caught up the window had slid out of
-        # it.  So the leading ring is read now, the lagging one when it
-        # arrives, and the pair goes out once it has both.  A stream
-        # that never arrives is given pair_window_wait_s of the other
-        # stream's time, then the pair goes out with what there is.
+        # Each stream's window is taken once that stream's clock has
+        # passed the window's end, not when the pair forms: the second
+        # trigger usually lands while the other ring is still behind,
+        # and a window read then stops at the ring's newest sample.
+        # The two are taken separately because the fast ring is short:
+        # held until both rings covered the window, it could slide out
+        # of the fast one.  A stream that never arrives is given
+        # pair_window_wait_s of the other stream's time, then the pair
+        # goes out with what there is.
         self._pending_pairs.append((pair, self._union_window(pair), set()))
         self._release_pairs()
 
@@ -1633,15 +1623,11 @@ class DualPulseCaptureSession(_CallbackHost):
     def _union_window(pair: dict) -> Optional[tuple]:
         """[t0, t1] spanning every available SAVED record + 10% margin.
 
-        The saved record, not the core: ``duration_s`` is deliberately
-        trigger-to-below-threshold so histograms measure the pulse and
-        not the baseline, but as a display extent it stopped the drawn
-        data mid-pulse while the marks -- read from the record -- ran
-        on to end-confirmed.  And the SAVED record, not the confirmed
-        end: with save_to_end_confirmed off the confirmation instant
-        lies past the window, and an extent reaching it would pull the
-        discarded tail back out of the ring.  A summary from before
-        ``saved_end_time`` was carried falls back to the core.
+        The saved record rather than the core: ``duration_s`` is
+        trigger-to-below-threshold, a measure of the pulse, not of what
+        was kept.  And the saved record rather than the confirmed end,
+        which lies past the window when the tail is not kept.  A summary
+        without ``saved_end_time`` falls back to the core.
         """
         t0 = t1 = None
         for key in ("slow_summary", "fast_summary"):

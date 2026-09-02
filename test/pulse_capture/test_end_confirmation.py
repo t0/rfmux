@@ -57,7 +57,7 @@ def test_floor_reaches_the_engine_through_the_config():
     rng = np.random.default_rng(1)
     s.feed_block(1, rng.normal(0, 1, 200), rng.normal(0, 1, 200),
                  np.arange(200) / FS)
-    assert s.pcap is not None and s.pcap._MIN_END_SAMPLES == 25
+    assert s.pcap is not None and s.pcap.min_end_samples == 25
     s.stop()
 
 

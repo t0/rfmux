@@ -188,24 +188,17 @@ def _flush(sock) -> None:
             return
 
 
-#: Datagrams drained per event-loop wake.  One-per-wake made a stream's
-#: throughput proportional to how often the loop scheduled it: with two
-#: streams sharing the loop and per-packet processing measured in
-#: milliseconds, the loop manages a few hundred task steps a second and
-#: the slow stream -- needing 596 of them -- starved to a fraction of
-#: real time (0.8 s of sample time over 300 s of wall time, live).
-#: Draining a bounded batch per wake divorces throughput from scheduling
-#: fairness: the slow stream needs ~2 wakes a second at stage 6.  The
-#: caps bound how long one wake may hold the loop.
+#: Datagrams drained per event-loop wake.  One per wake ties a stream's
+#: throughput to how often the loop schedules it, and two streams on one
+#: loop with millisecond packet processing starve the slower one.  A
+#: bounded batch per wake makes throughput a function of the data rate
+#: instead; the caps bound how long one wake holds the loop.
 _SLOW_DRAIN_CAP = 256
 _PFB_DRAIN_CAP = 64
-#: PFB packets processed between turns of the loop.  A packet is 1000
-#: samples, and while the engine is capturing every one of them walks
-#: through process_sample: 64 packets is ~150 ms of held loop, during
-#: which the slow stream sits in its queue and its ring falls behind --
-#: measured live as "slow stream 0.4s behind" at every pulse.  Eight is
-#: ~20 ms of walking at worst, and ~300 extra no-op yields a second at
-#: best, which is nothing.
+#: PFB packets processed between turns of the loop.  While the engine is
+#: capturing, every sample of a packet walks through process_sample, so
+#: a full drain would hold the loop for ~150 ms; eight packets bound it
+#: to ~20 ms, and the extra no-op yields cost nothing.
 _PFB_YIELD_EVERY = 8
 
 
@@ -316,11 +309,9 @@ async def run_pfb_source(
     Raises
     ------
     TimeoutError
-        If not a single packet arrives.  A silent PFB socket is a
-        configuration problem -- the fast streamer is off, or the wrong
-        module -- and quietly returning 0.0 made a dual capture end as
-        though someone had pressed stop, with per-stream counters that
-        kept the user watching for pairs that could never come.
+        If no packet ever arrives: the fast streamer is off or on the
+        wrong module, and returning 0.0 would end a dual capture as
+        though it had been stopped.
     """
     loop = asyncio.get_running_loop()
     n_groups = max(1, len(channels))

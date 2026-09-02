@@ -1900,14 +1900,16 @@ class TestHardStop:
             "the stalled confirmation stretch must not be saved"
 
     def test_stalled_confirmation_is_kept_when_saving_to_confirmed(self):
-        """Same stall, default save policy: the stretch IS saved, and
-        the pulse is still not truncated.  This is the case the option
-        exists for — the samples are in the ring either way, and which
-        of them reach disk is a policy choice, not a detection one."""
+        """Same stall, saving to the confirmation: the stretch IS saved,
+        and the pulse is still not truncated.  This is the case the
+        option exists for — the samples are in the ring either way, and
+        which of them reach disk is a policy choice, not a detection
+        one."""
         ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
                                    mean_Q=0.0, std_Q=1.0)}
         pcap = _collecting_capture(buf_size=2000, channels=[1], noise_stats=ns,
-                                   threshold_sigma=5.0, end_sigma=1.5)
+                                   threshold_sigma=5.0, end_sigma=1.5,
+                                   save_to_end_confirmed=True)
         rng = np.random.default_rng(5)
         for k in range(3000):
             v = rng.normal(0, 1.0)

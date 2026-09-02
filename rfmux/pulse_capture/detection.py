@@ -179,17 +179,17 @@ class _ChState:
     # is decisive evidence the pulse is over, however stale the mean.
     anchor_I: float = 0.0
     anchor_Q: float = 0.0
-    # The rolling band the trigger was tested against, frozen at the
-    # trigger.  The stats object keeps re-centring after the pulse, so
-    # a band drawn from it later is not the band that fired: a sample
-    # that cleared 5.0σ at the trigger sits under a line drawn at 5.5σ
-    # once the median has wandered, and the mark looks a sample early.
+    # The band the trigger was tested against, frozen at the trigger:
+    # the baseline refresh re-centres the stats object afterwards, so
+    # it no longer says what the trigger saw.
     trig_mean_I: float = 0.0
     trig_mean_Q: float = 0.0
     trig_std_I: float = 0.0
     trig_std_Q: float = 0.0
-    trig_quad: str = ""
+    # The quadrature whose deviation started the current above-threshold
+    # run, and the one the capture triggered on.
     run_quad: str = ""
+    trig_quad: str = ""
     # This capture began at a pileup split, so it sits on the previous
     # pulse's decaying tail: its peak and tau are pedestal-biased, and
     # it carries the pileup flag when saved however it ends.
@@ -300,12 +300,9 @@ class PulseCapture:
         silently lose its rising edge.  0 disables the stop.
     """
 
-    # Floor under the end-confirmation count.  ``end_ptr_count`` counts up
-    # while both quadratures are settled and down when they are not, so an
-    # isolated noisy sample does not restart the confirmation.  Without a
-    # floor, a very short pulse or a tiny margin_fraction would end a
-    # capture almost as soon as it began.
-    _MIN_END_SAMPLES: int = 10
+    #: Crossings closer than this, in samples, are walked as one island
+    #: by process_block rather than bulked apart.
+    _MERGE_GAP = 32
 
     #: Entries kept for the rolling-baseline median.  Fixed, so cost and
     #: memory do not scale with the window: a decimated reservoir tracks
@@ -345,7 +342,7 @@ class PulseCapture:
         min_pulse_samples: int = 0,
         trigger_samples: int = 2,
         enable_pileup: bool = True,
-        save_to_end_confirmed: bool = True,
+        save_to_end_confirmed: bool = False,
         min_end_samples: int = 10,
         on_pulse: Optional[Callable[[int, int, dict], None]] = None,
         baseline_window: int = 0,
@@ -361,10 +358,13 @@ class PulseCapture:
         self.trigger_samples = max(1, int(trigger_samples))
         self.enable_pileup = enable_pileup
         self.save_to_end_confirmed = save_to_end_confirmed
-        # The end-confirmation floor, in samples.  A class default is
-        # kept for the docstring; at 596 Hz ten samples is 17 ms, on the
-        # PFB stream 4 us, so it is a per-stream decision.
-        self._MIN_END_SAMPLES = max(1, int(min_end_samples))
+        # Floor under the end-confirmation count.  end_ptr_count counts
+        # up while both quadratures are settled and down when they are
+        # not, so an isolated noisy sample does not restart the
+        # confirmation; without a floor a very short pulse would end its
+        # capture almost as soon as it began.  A sample count: 17 ms at
+        # 596 Hz, 4 us on the PFB stream.
+        self.min_end_samples = max(1, int(min_end_samples))
 
         if edge_lookback is None:
             edge_lookback = self.default_edge_lookback(buf_size,
@@ -585,30 +585,18 @@ class PulseCapture:
                 pos = end
                 continue
 
-            # Absorb the quiet lead-in, then walk only the hit ISLANDS
-            # and bulk the provably-quiet gaps between them.  Walking the
-            # whole span from the first crossing to the last -- as this
-            # did -- costs ~2.3us of interpreter time per sample even
-            # where the mask already proved the sample is below
-            # threshold.  At a hunting threshold the crossings scatter
-            # across the block, so that span is almost all gap: at 2.5
-            # sigma the engine ran at ~15% of real time here, purely on
-            # gap samples it did not need to walk.
-            #
-            # A gap sample, not capturing and below threshold, does
-            # exactly what _bulk_quiet does: reset the trigger run, feed
-            # the ring and the baseline reservoir, advance the counters.
-            # The edge detector never looks at it (it runs only on
-            # eligible, above-threshold samples), and its lag-K lookback
-            # still reaches back through the bulked samples because they
-            # are in the ring.  So bulking a gap equals walking it --
-            # the same equivalence the lead-in bulk above already
-            # relies on, applied to the interior too.
-            #
-            # Crossings closer together than MERGE_GAP stay in one
-            # island: bulking a handful of samples costs more than
-            # walking them.
-            MERGE_GAP = 32
+            # Absorb the quiet lead-in, walk only the hit ISLANDS, and
+            # bulk the provably-quiet gaps between them.  A gap sample,
+            # not capturing and below threshold, does exactly what
+            # _bulk_quiet does: reset the trigger run, feed the ring and
+            # the baseline reservoir, advance the counters.  The edge
+            # detector never looks at it (it runs only on eligible,
+            # above-threshold samples), and its lag-K lookback reaches
+            # back through bulked samples because they are in the ring.
+            # So bulking a gap equals walking it, the same equivalence
+            # the lead-in relies on.  Crossings closer than _MERGE_GAP
+            # stay in one island: bulking a handful of samples costs
+            # more than walking them.
             seg = pos
             first = int(hits[0])
             if first > 0:
@@ -621,7 +609,7 @@ class PulseCapture:
                 # pos sits at a crossing (an island start).  Extend the
                 # island while the next crossing is within MERGE_GAP.
                 while (h + 1 < nhits
-                       and int(hits[h + 1]) - int(hits[h]) <= MERGE_GAP):
+                       and int(hits[h + 1]) - int(hits[h]) <= self._MERGE_GAP):
                     h += 1
                 walk_stop = seg + int(hits[h]) + 1
                 while pos < walk_stop:
@@ -639,6 +627,16 @@ class PulseCapture:
                     self._bulk_quiet(channel, st, I[pos:nxt],
                                      Q[pos:nxt], T[pos:nxt])
                     pos = nxt
+
+    @staticmethod
+    def _begin_capture(st: "_ChState", ns: ChannelNoiseStats) -> None:
+        """Open a capture on *st*, keeping the band it was decided against."""
+        st.capturing = True
+        st.end_ptr_count = 0
+        st.fire_abs = st.ch_sample_n
+        st.trig_mean_I, st.trig_mean_Q = ns.mean_I, ns.mean_Q
+        st.trig_std_I, st.trig_std_Q = ns.std_I, ns.std_Q
+        st.trig_quad = st.run_quad
 
     def process_sample(
         self,
@@ -787,12 +785,7 @@ class PulseCapture:
         else:
             trigger_ok = st.above_run == self.trigger_samples
         if not st.capturing and not self.freeze_triggers and trigger_ok:
-            st.capturing = True
-            st.end_ptr_count = 0
-            st.fire_abs = st.ch_sample_n
-            st.trig_mean_I, st.trig_mean_Q = ns.mean_I, ns.mean_Q
-            st.trig_std_I, st.trig_std_Q = ns.std_I, ns.std_Q
-            st.trig_quad = st.run_quad
+            self._begin_capture(st, ns)
             # Pre-pulse anchor: the level the pulse rose from, as the
             # median of the edge taps.  Baseline-free — the end tests
             # compare against where the signal actually WAS, so a mean
@@ -918,7 +911,7 @@ class PulseCapture:
                 if st.active_duration is None:
                     st.active_duration = since_trig
             elif (decaying_now and not st.re_trigger_ready
-                    and since_fire > self._MIN_END_SAMPLES):
+                    and since_fire > self.min_end_samples):
                 st.re_trigger_ready = True
 
             # ── Pileup split ──────────────────────────────────────
@@ -929,12 +922,7 @@ class PulseCapture:
                     and rising_above_self):
                 self._save_pulse(channel, pileup=True)
                 if not self.freeze_triggers:
-                    st.capturing = True
-                    st.end_ptr_count = 0
-                    st.fire_abs = st.ch_sample_n
-                    st.trig_mean_I, st.trig_mean_Q = ns.mean_I, ns.mean_Q
-                    st.trig_std_I, st.trig_std_Q = ns.std_I, ns.std_Q
-                    st.trig_quad = st.run_quad
+                    self._begin_capture(st, ns)
                     # The new rise happened within the nearest tap's
                     # window — the run may date back to the previous
                     # pulse's onset if the tail never crossed below
@@ -968,7 +956,7 @@ class PulseCapture:
             # Use frozen active_duration for stable end target
             ref_duration = st.active_duration or since_trig
             adaptive_end = max(
-                self._MIN_END_SAMPLES,
+                self.min_end_samples,
                 int(self.margin_fraction * ref_duration))
 
             if st.end_ptr_count > adaptive_end:
@@ -1019,7 +1007,7 @@ class PulseCapture:
             # only, and no longer stretches the data.  A capture stopped
             # because drift stalled the confirmation still holds a
             # complete pulse, so it is NOT flagged truncated.
-            tail = max(self._MIN_END_SAMPLES,
+            tail = max(self.min_end_samples,
                        int(self.margin_fraction * core))
             post = min(raw_post, core + tail)
             truncated = False
@@ -1084,10 +1072,9 @@ class PulseCapture:
             "end_index": int(end_index),
             "trigger_time": float(ts_all[trig_fifo]),
             "end_time": float(ts_all[L - 1]),
-            # The bands each decision was made against.  The trigger
-            # tested the rolling band of that instant; the end tests
-            # against the pre-pulse anchor.  Neither survives in the
-            # stats object, which keeps re-centring after the pulse.
+            # The bands each decision was made against: the trigger's
+            # rolling band of that instant, and the end's pre-pulse
+            # anchor.  The stats object keeps neither.
             "trigger_baseline_I": float(st.trig_mean_I),
             "trigger_baseline_Q": float(st.trig_mean_Q),
             "trigger_sigma_I": float(st.trig_std_I),
@@ -1099,7 +1086,7 @@ class PulseCapture:
             "end_sigma": float(self.end_sigma),
             "end_confirm_samples": int(st.end_ptr_count),
             "end_confirm_target": int(max(
-                self._MIN_END_SAMPLES,
+                self.min_end_samples,
                 int(self.margin_fraction * (
                     st.active_duration
                     if st.active_duration is not None

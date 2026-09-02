@@ -755,7 +755,7 @@ if two_sided:
                  ms=4, lw=1, label=label)
     plt.xlabel("time (ms)"); plt.ylabel("I (counts)")
     plt.title(f"ch{p['channel']} pair #{p['pair_idx']} — "
-              f"trigger offset {p['time_offset']*1e6:+.0f} µs")
+              f"trigger offset {(p.get('trigger_offset') or 0.0)*1e6:+.0f} µs")
     plt.legend(); plt.show()
 ```
 

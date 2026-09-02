@@ -23,7 +23,6 @@ import datetime
 import time
 from pathlib import Path
 from dataclasses import replace
-from rfmux.pulse_capture.detection import ChannelNoiseStats
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -54,12 +53,12 @@ from ...core.transferfunctions import (
     PFB_SAMPLING_FREQ,
     decimation_to_sampling,
 )
+from ...pulse_capture.detection import ChannelNoiseStats
 from ...pulse_capture.analysis import (
     display_transform,
     storage_transform,
 )
 
-# Fast/PFB stream overlay colors (darker variants, HUD convention)
 # The fast stream keeps the quadrature hue family but sits apart from
 # the slow one on the same plot: blue/purple, orange/red.
 FAST_IQ_COLORS = {"I": "#7A3FBF", "Q": "#CC3333"}
@@ -487,12 +486,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def _decision_noise(self, wf, ns):
         """The bands a record was decided against: (trigger, end).
 
-        The live stats object keeps re-centring after a pulse, so a band
-        drawn from it later is not the band that fired — the sample that
-        cleared the threshold at the trigger can sit under a line drawn
-        once the median has wandered on.  A record made since the engine
-        began writing them says where each band was; older records fall
-        back to the stats, and the end band to the trigger band.
+        The live stats object is re-centred after every pulse, so a band
+        drawn from it is not the band the engine tested.  Records carry
+        their bands; older records fall back to the stats, and the end
+        band to the trigger band.
         """
         if not isinstance(wf, dict) or "trigger_baseline_I" not in wf:
             return ns, ns
@@ -552,10 +549,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                  f"±{thr:g}σ trigger"),
                 (end_mean, end, QtCore.Qt.PenStyle.DotLine,
                  f"±{end:g}σ end")):
-            # The +/- pair is ONE item, joined by a NaN gap: one legend
-            # entry that hides and shows both lines.  Two items with one
-            # named left the unnamed twin behind when the entry was
-            # switched off.
+            # One item per +/- pair, joined by a NaN gap, so one legend
+            # entry hides and shows both lines.
             band = centre + level * std
             plot.plot(
                 np.array([x0, x1, np.nan, x0, x1], dtype=float),
@@ -596,8 +591,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         Live, from the configured capture; in review, restored from the
         file's capture parameters when it was opened.
         """
-        return bool(getattr(self.capture_config,
-                            "save_to_end_confirmed", True))
+        return bool(self.capture_config.save_to_end_confirmed)
 
     def _annotate_decisions(self, plot, wf, t0, quad,
                             prefix="") -> None:
@@ -631,12 +625,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             ("below_threshold_index", "below_threshold_time", "#CCAA33",
              "below threshold"),
         ]
-        # The confirmation instant is only a fact about the saved data
-        # when the tail was kept to it.  With "save the full tail" off
-        # the data stops a margin past below-threshold and the
-        # confirmation happened somewhere past the end of what is
-        # drawn -- a mark there answers a question the setting said
-        # not to ask.
+        # The confirmation instant is drawn only when the tail was kept
+        # to it; otherwise it lies past the end of the saved data.
         if self._saves_full_tail():
             marks.append(("end_index", "end_time", "#CC3366",
                           "end confirmed"))
@@ -1670,9 +1660,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if matched:
             label = (f"◆ Pair #{pair_idx:04d}  "
                      f"s#{pair['slow_idx']}/f#{pair['fast_idx']}")
-            # Trigger to trigger, when known: the streams' clocks on one
-            # event.  The midpoint offset also carries each stream's
-            # core length, which is not what a reader wants here.
+            # Trigger to trigger: the streams' clocks on one event.  The
+            # midpoint offset also carries each stream's core length.
             toff = pair.get("trigger_offset")
             if toff is not None and np.isfinite(toff):
                 detail = f"Δt(trig)={toff*1e6:+.0f}µs"
@@ -1707,13 +1696,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 and not self._follow_timer.isActive():
             self._follow_timer.start()
 
-    #: The fast engine is one event loop away from the slow one, so if
-    #: it cannot keep real time it processes older and older data and
-    #: its ring drifts behind the slow ring.  Past the ring overlap the
-    #: two no longer share a time span and cross-stream windows go
-    #: unavailable -- the same failure as dropped packets, and worth the
-    #: same kind of visible warning.  Amber at half the overlap (drift
-    #: is starting), red once it exceeds the overlap (windows failing).
+    #: The fast engine shares the event loop with the slow one; when it
+    #: cannot keep real time its ring drifts behind the slow ring, and
+    #: past the ring overlap cross-stream windows go unavailable.  Amber
+    #: at half the overlap, red once the lag exceeds it.
     _LAG_WARN_FRACTION = 0.5
 
     def _stream_lag_signal(self, stats: dict):

@@ -100,7 +100,8 @@ class _PulseFileWriter:
                  "sample_rate_slow", "sample_rate_fast",
                  "volts_per_count", "slow_time_offset_s")),
         (int, ("min_pulse_samples", "module", "trigger_samples",
-               "baseline_window", "edge_lookback", "max_capture_samples", "min_end_samples")),
+               "baseline_window", "edge_lookback", "max_capture_samples",
+               "min_end_samples")),
         (bool, ("enable_pileup", "save_to_end_confirmed")),
     )
 
@@ -664,6 +665,18 @@ class PulseHDF5Reader:
 
 # ── Helpers ───────────────────────────────────────────────────────
 
+#: Per-pulse decision attributes, by type: where the engine triggered
+#: and ended, and the bands it decided against.
+_PULSE_INT_MARKS = ("trigger_index", "end_index", "below_threshold_index",
+                    "end_confirm_samples", "end_confirm_target")
+_PULSE_FLOAT_MARKS = ("trigger_time", "end_time", "below_threshold_time",
+                      "trigger_baseline_I", "trigger_baseline_Q",
+                      "trigger_sigma_I", "trigger_sigma_Q",
+                      "end_baseline_I", "end_baseline_Q",
+                      "threshold_sigma", "end_sigma")
+_PULSE_STR_MARKS = ("trigger_quad",)
+
+
 def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
                  noise_stats: Optional[ChannelNoiseStats],
                  threshold_sigma: Optional[float]) -> None:
@@ -687,19 +700,11 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
     # Where the engine triggered and where the end condition confirmed
     # the end — kept so a saved capture can be reviewed against the
     # decisions that produced it, not just its samples.
-    for key in ("trigger_index", "end_index", "below_threshold_index",
-                "end_confirm_samples", "end_confirm_target"):
-        if key in pulse_data:
-            pulse_grp.attrs[key] = int(pulse_data[key])
-    for key in ("trigger_time", "end_time", "below_threshold_time",
-                "trigger_baseline_I", "trigger_baseline_Q",
-                "trigger_sigma_I", "trigger_sigma_Q",
-                "end_baseline_I", "end_baseline_Q",
-                "threshold_sigma", "end_sigma"):
-        if key in pulse_data:
-            pulse_grp.attrs[key] = float(pulse_data[key])
-    if "trigger_quad" in pulse_data:
-        pulse_grp.attrs["trigger_quad"] = str(pulse_data["trigger_quad"])
+    for cast, keys in ((int, _PULSE_INT_MARKS), (float, _PULSE_FLOAT_MARKS),
+                       (str, _PULSE_STR_MARKS)):
+        for key in keys:
+            if key in pulse_data:
+                pulse_grp.attrs[key] = cast(pulse_data[key])
 
     # Every scalar below comes from pulse_summary(), the same call the
     # histograms, the live on_pulse callback and the GUI derive from.
@@ -730,13 +735,7 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
 def _pulse_dict_from_group(grp) -> dict:
     """Waveforms + scalar attrs for one pulse group (reader/writer shared)."""
     marks = {k: _convert_attr(grp.attrs[k])
-             for k in ("trigger_index", "end_index", "below_threshold_index",
-                       "end_confirm_samples", "end_confirm_target",
-                       "trigger_time", "end_time", "below_threshold_time",
-                       "trigger_baseline_I", "trigger_baseline_Q",
-                       "trigger_sigma_I", "trigger_sigma_Q", "trigger_quad",
-                       "end_baseline_I", "end_baseline_Q",
-                       "threshold_sigma", "end_sigma")
+             for k in _PULSE_INT_MARKS + _PULSE_FLOAT_MARKS + _PULSE_STR_MARKS
              if k in grp.attrs}
     return {
         **marks,

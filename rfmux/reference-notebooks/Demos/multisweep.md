@@ -16,13 +16,13 @@ jupyter:
 # Multisweep
 
 `crs.multisweep()` measures a narrow, high-resolution sweep around each of many
-frequencies at once — one hardware channel per frequency, all of them swept in
+frequencies at once — one hardware channel per frequency section, all of them swept in
 parallel. In a typical array characterization / tuning flow, it is the step after 
 a network analysis: netanal finds roughly where the
 resonators are, multisweep looks at each one closely enough to characterise it.
 
-This notebook starts with the resonances already located, so that it can
-concentrate on multisweep rather than on finding them.
+This notebook starts with the resonances already located, so that it is about
+multisweep rather than about finding them.
 
 There are two ways to
 tell multisweep what to sweep, and they are identical once the measurement
@@ -33,9 +33,9 @@ starts:
 | Already done a netanal and used `find_resonances` to make a `ResonatorCatalog` | a `ResonatorCatalog` | resonator name (`"R0001"`) |
 | A list of frequencies | `center_frequencies=` + `amp=` | section name (`"S0001"`) |
 
-Those names key the sweep sections, which sit a few levels down inside what the
-call returns. Section 2 unpacks that shape, and it is the same shape for every
-sweep in this notebook.
+Those names key the sweep sections, which sit a few levels inside what the call
+returns — section 2 unpacks the shape, and it is the same shape for every sweep
+in this notebook.
 
 Unless you are starting completely from scratch, or looking at hardware that doesn't
 have resonances, you will likely pass a catalog. A catalog already knows
@@ -115,15 +115,15 @@ NPOINTS_PER_SWEEP = 101   # points measured across that width
 NSAMPS = 10               # averages per point
 ```
 
-## 1. A simulated board, and a catalog
+## 1. Starting with a simulated board and a pre-made resonator catalog
 
-Ten simulated LEKIDs on a fixed random seed, asked to tune themselves, with the
-tones they parked read back into a `ResonatorCatalog`. That is roughly where
-`network_analyses_find_resonances_make_resonator_catalog.md` leaves off, so we
-can pick up from there rather than repeating the resonance finding here. (The
-simulator biases at the S21 dip rather than the nominal resonance, and the two
-can differ by up to a megahertz or so, so reading its tones back gives us
-something close to what a real tuning run would have found.)
+We'll use ten simulated pre-tuned MKIDs. The mock mode session uses a fixed random seed,
+so every time we regenerate the array the results will be the same.
+The KIDs are already biased, so we can just read back their bias information to make a `ResonatorCatalog`.
+That is where
+`network_analyses_find_resonances_make_resonator_catalog.md` leaves off, so this
+notebook picks up from there and is about multisweep rather than about finding
+resonances. 
 
 To run against real hardware, replace this one cell with a session on your board
 and a catalog you built or loaded. Everything after it is unchanged:
@@ -137,7 +137,7 @@ Note that multisweep takes over the channels it sweeps — one per resonator,
 overwriting their frequency and amplitude, and zeroing them again when it
 finishes. Other channels on the module are left exactly as they were, so a tone
 you have parked by hand survives the call. The flip side is that multisweep does
-not guarantee a quiet module: if something else is live and would intermodulate
+not guarantee a quiet module: if something else is live and would interfere
 with the sweep, clear it first with `await crs.clear_channels(module=MODULE)`.
 
 ```python
@@ -183,8 +183,7 @@ beyond specifying the sweep bandwidth and resolution:
 - each resonator's **probe amplitude** is its `bias.amplitude`
 - each resonator's **hardware channel** is its `channel`
 
-The catalog even knows its own module, so `module=` is optional here — pass it
-only if you want the mismatch checked.
+The catalog even knows its own module.
 
 **Multisweep does not modify the catalog.** 
 
@@ -203,15 +202,13 @@ print(f"keyed by module: {list(ms)}")
 
 ### What comes back
 
-The outermost key is a **module identifier**: the board's serial plus the
-readout module, which is what `crs.module[MODULE].index()` gives you. There is
-one key here because this call swept one module. A call that swept four would
-have four, and you would loop over them the same way.
+The outermost key is a **module identifier** — the board's serial and the readout
+module, as `crs.module[MODULE].index()` spells it. In this case, there is only one key here, because this
+call swept one module; a call that swept four modules would have four. Any loops you
+write over them is the same either way.
 
-Inside each of those is an **envelope** holding that module's sweep sections,
-along with some provenance describing how they were taken. This means a result
-you pickle and come back to later can still tell you which module it came from,
-what span and point count were used, and which catalog it was swept from:
+Inside are the outputs per module, which includes the data itself and some bookkeeping
+to say what produced it.
 
 ```python
 module_sweeps = ms[crs.module[MODULE].index()]
@@ -223,12 +220,12 @@ print(f"amplitude steps {list(module_sweeps['results'])}")
 print(f"directions     {list(module_sweeps['results'][0])}")
 ```
 
-`results` is keyed by **amplitude step**, then by **direction**, then by section
-name. A single `multisweep` is one step in one direction, so it has exactly one
-of each: step `0`, and whichever direction you asked for. The extra nesting is
-not padding — `multiamp_multisweep` (sections 4 to 7) returns this same shape
-with more steps in it, so code that can read one can read the other without
-having to check which it was given.
+`results` is keyed by **amplitude step**, then by **frequency sweep direction**, then by section
+name. A single `multisweep` measurement is one amplitude step in one direction, so it has exactly one
+of each — step `0`, and whichever direction you asked for. 
+The outer zero key is superfluous here because we are not iteratively calling the multisweep algorithm,
+but its role will become more apparent once we start discussing 
+`multiamp_multisweep` (sections 4–7). Keeping the formats the same means that nothing downstream has to ask which of the two produced a result.
 
 ```python
 sweep_sections = module_sweeps["results"][0]["upward"]
@@ -237,20 +234,21 @@ print(f"{len(sweep_sections)} sweep sections, keyed by resonator name: "
       f"{list(sweep_sections)[:4]} …")
 ```
 
-Reaching down those four levels every time gets tedious, so it is worth naming a
-helper once. The one below is what every later cell in this notebook uses:
+Yes, this does make for a lot of nested dictionaries. But we have a lot of modules and a lot of resonators and we are going to want to do a lot of iterative multisweeping.
+
+Here is a convenience function to extract the sweep sections of a particular measurement:
 
 ```python
 def sections_of(sweeps, module=MODULE, step=0, direction="upward"):
     """The {name: entry} sweep sections of one sweep, from what a macro returned.
 
-    The analysis functions take *one module's* envelope rather than the whole
-    dict, so you do have to say which module you mean.
+    Analysis functions take *one module's* envelope, never the whole dict, so
+    stepping into the module you mean is deliberate rather than guessed at.
     """
     return sweeps[crs.module[module].index()]["results"][step][direction]
 ```
 
-Each entry holds the sweep section data itself plus the bookkeeping needed to know what it
+Within a given multisweep measurement, each data entry under `'results'` holds the sweep section data itself plus the bookkeeping needed to know what it
 is:
 
 ```python
@@ -565,9 +563,12 @@ for severity, message in too_loud.validate(catalog):
 The call looks like `multisweep`'s, plus `amp_schedule` and `directions`. Note that
 `amp_schedule` replaces `amp`.
 
-`sweep_callback` fires once per completed sweep, which is what to hook a
-progress bar or a live plot to. It also hands back intermediate sweeps,
-so that in case something fails, not all the data is lost.
+The output format for a multiamplitude multisweep is the same as for a regular multisweep:
+the outer level of the dictionary is keyed by the readout module's index (e.g. `crs.module[1].index()`),
+which contains all the outputs of that module.
+
+
+
 
 ```python
 def report(record):
@@ -576,7 +577,7 @@ def report(record):
           f"step {record['step']} {record['direction']:<8} "
           f"R0001 at {amplitudes['R0001']:.5f}")
 
-multiamp_results = await crs.multiamp_multisweep(
+multiamp_ms = await crs.multiamp_multisweep(
     catalog,
     span_hz=SPAN_HZ,
     npoints_per_sweep=NPOINTS_PER_SWEEP,
@@ -585,48 +586,48 @@ multiamp_results = await crs.multiamp_multisweep(
     sweep_callback=report,
 )
 
-print(f"\nkeyed by module: {list(multiamp_results)}")
+print(f"\nkeyed by module index: {list(multiamp_results)}")
 ```
 
-That is the same shape section 2 unpacked: module identifier, then an envelope,
-then `results` keyed by amplitude step and direction. The only difference is
-that there is now more than one step in it:
+The only difference is that there
+is now more than one step in it:
 
 ```python
-multiamp_module_results = multiamp_results[crs.module[MODULE].index()]
+multiamp_module_results = multiamp_ms[crs.module[MODULE].index()]
 
-print(f"envelope        {list(multiamp_module_results)}")
-print(f"amplitude steps {list(multiamp_module_results['results'])}")
-print(f"directions      {list(multiamp_module_results['results'][0])}")
+print(f"full module output    {list(multiamp_module_results)}")
+print(f"amplitude steps       {list(multiamp_module_results['results'])}")
+print(f"directions            {list(multiamp_module_results['results'][0])}")
 ```
 
 - `results` is keyed by **amplitude step**, numbered in the order measured, and
   each step holds one entry per **direction** swept and nothing else. Under a
-  direction are the sweep sections of one `multisweep`.
+  direction is the sweep sections of one `multisweep`.
 - `call_params` records what the driver was asked for — including the schedule,
   so a saved result can say what produced it.
 
 ```python
-first = sections_of(multiamp_results)
-print(f"step 0, upward: {list(first)[:4]} …")
-print(f"R0001 swept at {first['R0001']['sweep_amplitude']:.5f}")
+first_sweep_iteration_sections = sections_of(multiamp_ms)
+print(f"step 0, upward: {list(first_sweep_iteration_sections)[:4]} …")
+print(f"R0001 swept at {first_sweep_iteration_sections['R0001']['sweep_amplitude']:.5f}")
 
 print(f"\ncall_params: {list(multiamp_module_results['call_params'])}")
 print(f"schedule as stored: {multiamp_module_results['call_params']['amp_schedule']}")
 ```
 
+<!-- #region -->
 Note what is *not* in the call_params: no step-level copy of the amplitudes. These are
 documented within each sweep section's entry in the iterated multisweep results.
 
-`sections_of` works on this unchanged, since a ladder and a single sweep nest
-the same way. Pass `step=` to pick a particular step out.
 
-## 7. Reading the results back
+
+## 7. Convenience functions for reading the results back
 
 There are also some convenience functions for extracting the data in various
-arrangements. They all take **one module's envelope**, i.e. the thing
-`multiamp_results[crs.module[MODULE].index()]` gave us above, rather than the
-whole dict.
+arrangements. They all take **a single module's outputs** — the thing
+`multiamp_results[crs.module[MODULE].index()]` gave us above — rather than the
+whole dict containing multiple modules.
+<!-- #endregion -->
 
 ```python
 from rfmux.tuning import (
@@ -636,30 +637,19 @@ from rfmux.tuning import (
 )
 ```
 
-If you hand one the whole dict by mistake, it raises and names the modules it
-found, rather than trying to walk the container as though it were an envelope:
-
-```python
-try:
-    collect_amplitude_iterations_for(multiamp_results, "R0001")
-except TypeError as e:
-    print(f"TypeError: {e}")
-```
-
 ### Get one resonator across every amplitude
 
 ```python
-iterations = collect_amplitude_iterations_for(multiamp_module_results, "R0001")
+iterations_of_a_resonator = collect_amplitude_iterations_for(multiamp_module_results, "R0001")
 
-for iteration, by_direction in iterations.items():
-    section = by_direction["upward"]
+for iteration, by_direction in iterations_of_a_resonator.items():
+    section = by_direction["upward"] # get the actual sweep section for that resonator at that iteration
     print(f"iteration {iteration}  {section['sweep_amplitude']:.5f}")
 ```
 
-Which is the shape a plot wants. Colouring the traces by amplitude keeps the
-progression readable without needing a ten-entry legend, and the same helper is
-reused by every plot below so that the colourbar means the same thing
-throughout:
+This is generally the shape that a plotter will want.
+
+### Example plotter
 
 ```python
 from matplotlib.colors import LogNorm
@@ -672,8 +662,8 @@ AMPLITUDE_CMAP = plt.cm.gnuplot
 def amplitude_colours(amplitudes):
     """One colour per amplitude, plus the mappable a colourbar needs.
 
-    Log-scaled, since an amplitude schedule is log-spaced by default and a
-    linear scale would bunch all the low steps into one shade.
+    Log-scaled, because an amplitude schedule is log-spaced by default and a
+    linear scale would bunch every low rung into one shade.
     """
     lo, hi = min(amplitudes), max(amplitudes)
     if hi > lo:
@@ -700,8 +690,8 @@ def plot_amplitude_iterations(results, name, direction="upward"):
         offset_khz = (
             section["frequencies"] - section["original_center_frequency"]
         ) / 1e3
-        # Divide out the drive, so that the shapes can be compared instead of
-        # the loudest trace simply sitting on top of the rest.
+        # Divide out the drive, so the shapes can be compared rather than just
+        # the one that was loudest sitting on top.
         iq = section["iq_counts"] / section["sweep_amplitude"]
 
         ax_mag.plot(offset_khz, 20 * np.log10(np.abs(iq)), lw=1.0, color=colour)
@@ -729,20 +719,19 @@ for name, amplitude in list(
     print(f"{name}  {amplitude:.5f}")
 ```
 
-Plotted, that is the whole array at one amplitude step. A panel per sweep
-section rather than one crowded axes, since they sit at different frequencies
-and have different depths, so overlaying them would not tell you much. With
-*multiplicative* steps each section is at its own amplitude, so the panels take
-a spread of colours; with *ramp* steps they would all be the same colour, having
-all been probed at the same amplitude:
+Plotted, that is the whole array as one amplitude step saw it — a panel per
+sweep section, since they sit at different frequencies and have different
+depths, so overlaying them would compare nothing. With *multiplicative* steps
+every section is at its own amplitude, so the panels take a spread of colours;
+with *ramp* steps they would all be one colour, because they were all probed at
+the same amplitude:
 
 ```python
 def plot_sections_at_iteration(results, iteration, direction="upward", ncols=5):
     """Every sweep section of one amplitude step, one panel each.
 
-    A panel apiece rather than one crowded axes, since the sections sit at
-    different frequencies and have different depths — overlaying them would not
-    tell you much.
+    A panel apiece rather than one crowded axes: the sections sit at different
+    frequencies and have different depths, so overlaying them compares nothing.
     """
     sections = results["results"][iteration][direction]
     amplitudes = get_amplitudes_at_iteration(results, iteration)
@@ -793,9 +782,9 @@ for name in ("R0001", "R0002", "R0003"):
     print(f"{name}  bias {bias:.5f}  → step {at_bias}")
 ```
 
-Ask for a *fixed* amplitude instead and the three answers diverge, which is why
-the function needs a name at all: `R0001`, `R0002` and `R0003` are walking
-different ranges, so the same amplitude sits at a different step of each:
+Ask for a *fixed* amplitude instead and the three part company, which is why the
+function needs a name at all. `R0001`, `R0002` and `R0003` are walking different
+ranges, so the same amplitude sits at a different iteration step for each:
 
 ```python
 print(f"{'':<8}" + "".join(f"{s:>10}" for s in multiamp_module_results["results"]))
@@ -815,12 +804,13 @@ for name in ("R0001", "R0002", "R0003"):
     print(f"0.00200 for {name}  → step {step}  (actually {got:.5f})")
 ```
 
-Note that the matching is on *nearest*, not exact. Since there is always a
-nearest step, the function will still answer even when nothing in the ladder is
-remotely close to what you asked for.
+Note that the matching is on *nearest*, not exact.
 
-For example, asking for an amplitude that only `R0002` ever reaches — the other
-two just return their top step:
+The corollary is that there is *always* a nearest, so the function answers even
+when nothing is remotely close.
+
+For example, if you for an amplitude only `R0002` ever reaches
+and the other two return their top rung regardless:
 
 ```python
 for name in ("R0001", "R0002", "R0003"):
@@ -857,10 +847,10 @@ for step, by_direction in both_ways_module_results["results"].items():
               f"R0001 at {sections['R0001']['sweep_amplitude']:.5f}")
 ```
 
-Both directions of one section, on one pair of axes, with amplitude as colour
-and direction as line style. On a simulated array the two directions lie on top
-of each other. On real detectors driven hard enough to bifurcate they separate,
-and that separation is generally what you are looking for:
+Both directions of one section, on one pair of axes — amplitude as colour,
+direction as line style. On a simulated array the two directions lie on top of
+each other; on real detectors driven hard enough to bifurcate, they part
+company, and that gap is the thing you are looking for:
 
 ```python
 def plot_both_directions(results, name):
@@ -897,8 +887,8 @@ def plot_both_directions(results, name):
 plot_both_directions(both_ways_module_results, "R0001")
 ```
 
-A step swept once and a step swept twice have the same shape; the directions
-present are just the ones you asked for:
+A step swept once and a step swept twice have the same shape — the directions
+present are simply the ones you asked for:
 
 ```python
 one_way = await crs.multiamp_multisweep(
@@ -916,10 +906,10 @@ print(f"directions present: "
 
 ### A frequency list at several amplitudes
 
-The bare-frequency form works here too, which is how you would go looking for a
-sensible probe amplitude before anything is tuned. There is no bias amplitude to
-scale in that case, so the schedule has to carry its own: `ramp` and `explicit`
-do by construction, while `multiplicative` would need an explicit `base`.
+The bare-frequency form works here too — this is how you find a sensible probe
+amplitude *before* anything is tuned. There is no bias amplitude to scale, so
+the schedule has to carry its own: `ramp` and `explicit` do by construction,
+while `multiplicative` would need an explicit `base`.
 
 ```python
 untuned_results = await crs.multiamp_multisweep(
@@ -959,13 +949,16 @@ except ValueError as e:
 - **Choosing the operating amplitude.** Iterating over amplitudes gives you the
   data to see where each detector bifurcates; deciding which step to bias at, and
   writing that back into the catalog, is `find_bias_points` and is not ported yet.
-- **Fitting.** This one does exist now: `rfmux.tuning.fit_sweeps` takes what
-  `multiamp_multisweep` returned and writes each model's results into the sweep
-  entry it fitted, under `fits`. See `fitting_resonators.md` for that. Writing
-  those results back into the *catalog* is still to come.
+- **Fitting.** Not missing any more — `rfmux.tuning.fit_sweeps` takes what
+  `multiamp_multisweep` returned and writes each model's answers into the sweep
+  entry it fitted, under `fits`. `fitting_resonators.md` is the notebook.
+  Writing the results back into the *catalog* is still to come.
 - **Saving to disk.** `pickle.dump` on the returned dict works today — it is
   plain builtins and ndarrays throughout — but a proper `store.py` with a file
   layout is still to come.
 
 One cleanup note: multisweep silences the channels it swept, but only those. If
 you parked tones on this module by hand, they are still live.
+
+
+

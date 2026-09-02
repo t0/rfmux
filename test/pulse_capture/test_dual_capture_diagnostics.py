@@ -312,7 +312,7 @@ def test_pfb_batch_yields_to_the_loop(monkeypatch):
     pkt = streamer.PFBPacket()
     pkt.magic = streamer.PFB_PACKET_MAGIC
     pkt.mode = 0
-    pkt.slot1 = 1
+    pkt.slot1 = 0                            # channel 1, 0-indexed on the wire
     pkt.num_samples = 100
     blob = bytes(pkt)
     N = 40

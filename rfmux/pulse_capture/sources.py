@@ -407,7 +407,9 @@ async def run_pfb_source(
         """Gather one packet's samples; True once duration_s is covered."""
         nonlocal elapsed, pending_packets
         n_groups = _PFB_GROUPS.get(pkt.mode, 4)
-        slots = (pkt.slot1, pkt.slot2, pkt.slot3, pkt.slot4)[:n_groups]
+        # Slot fields are 0-indexed on the wire, like the module field.
+        slots = tuple(s + 1 for s in
+                      (pkt.slot1, pkt.slot2, pkt.slot3, pkt.slot4)[:n_groups])
         # Match the slow stream's 16-bit ADC scale: np.array(pkt)
         # applies the packetizer /256; the second /256 brings the
         # 24-bit datapath down to ADC counts (same convention as the

@@ -148,7 +148,7 @@ def _pfb_packet(module0, t_s=43200.0, seq=0, slots=(1,), values=None):
     pkt.seq = seq
     pkt.mode = {1: 0, 2: 1, 4: 2}[len(slots)]
     for i, ch in enumerate(slots):
-        setattr(pkt, f"slot{i + 1}", ch)
+        setattr(pkt, f"slot{i + 1}", ch - 1)      # 0-indexed on the wire
     pkt.num_samples = 100
     data = np.zeros(100, dtype=complex)
     for i, v in enumerate(values or ()):

@@ -468,10 +468,11 @@ class MockCRSStreamer(threading.Thread):
             if self.mock_crs._serial and self.mock_crs._serial.isdigit()
             else 0
         )
-        pkt.slot1 = channels[0] if len(channels) > 0 else 0
-        pkt.slot2 = channels[1] if len(channels) > 1 else 0
-        pkt.slot3 = channels[2] if len(channels) > 2 else 0
-        pkt.slot4 = channels[3] if len(channels) > 3 else 0
+        # Slot fields are 0-indexed on the wire, like the module field.
+        pkt.slot1 = channels[0] - 1 if len(channels) > 0 else 0
+        pkt.slot2 = channels[1] - 1 if len(channels) > 1 else 0
+        pkt.slot3 = channels[2] - 1 if len(channels) > 2 else 0
+        pkt.slot4 = channels[3] - 1 if len(channels) > 3 else 0
         pkt.num_samples = len(interleaved)
         pkt.module = self.pfb_module - 1  # 0-indexed
         pkt.seq = self.pfb_seq

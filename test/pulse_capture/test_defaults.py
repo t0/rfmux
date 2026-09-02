@@ -118,3 +118,19 @@ def test_uncalibrated_channel_is_shown_as_volts_on_the_quadratures(qt_app):
         assert panel._stored_state(1) == ("df", "Hz")
     finally:
         panel.close()
+
+
+def test_the_tap_is_released_however_the_worker_ends(qt_app):
+    from types import SimpleNamespace
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    released = []
+    runtime = SimpleNamespace(unregister_pulse_tap=lambda: released.append(True))
+    panel = PulseCapturePanel(periscope=runtime, dark_mode=False)
+    try:
+        panel._tap_registered = True
+        panel.task = None
+        panel._on_task_finished()
+        assert released == [True]
+        assert panel._tap_registered is False
+    finally:
+        panel.close()

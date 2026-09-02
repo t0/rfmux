@@ -52,6 +52,7 @@ class PulseCaptureSignals(QtCore.QObject):
     templates_updated = pyqtSignal(dict)    # trigger-aligned stack arrays
     waveform_ready = pyqtSignal(int, int)   # channel, pulse_idx (cache warmed)
     error = pyqtSignal(str)
+    failed = pyqtSignal(str)                # the capture cannot run; finished follows
     finished = pyqtSignal()
 
 
@@ -239,7 +240,7 @@ class PulseCaptureTask(QtCore.QThread):
             else:
                 self._run_slow_loop()
         except Exception as e:
-            self.signals.error.emit(f"Pulse capture worker failed: {e}")
+            self.signals.failed.emit(f"Pulse capture worker failed: {e}")
         finally:
             try:
                 self.session.stop()
@@ -270,59 +271,54 @@ class PulseCaptureTask(QtCore.QThread):
                 ingest.add(channels, packet, stamp)
         ingest.flush()
 
-    #: Generation of the most recent PFB enable in this process.  A
-    #: teardown disables the streamer only if no newer capture has
-    #: enabled it since: an old task's finally block can run after the
-    #: next capture has started.
-    _pfb_epoch = 0
+    async def _pfb_mismatch(self, channels) -> Optional[str]:
+        """Why the PFB streamer as configured cannot feed this capture,
+        or None.
 
-    async def _claim_pfb(self, channels) -> int:
-        """Enable the PFB streamer and take ownership of it."""
-        await self.crs.set_pfb_streamer(channel=channels,
-                                        module=self.module)
-        PulseCaptureTask._pfb_epoch += 1
-        return PulseCaptureTask._pfb_epoch
-
-    async def _release_pfb(self, claim: int) -> None:
-        """Disable the PFB streamer -- unless a newer capture owns it."""
-        if PulseCaptureTask._pfb_epoch != claim:
-            return
-        try:
-            await self.crs.set_pfb_streamer(channel=None,
-                                            module=self.module)
-        except Exception as e:
-            self.signals.error.emit(f"PFB teardown failed: {e}")
+        The capture never configures the streamer; it reads what the
+        board is streaming.  PFB packet slots are positional, so the
+        streamed channel set must be the captured set exactly.
+        """
+        active = await self.crs.get_pfb_streamer(module=self.module)
+        if isinstance(active, dict):
+            active = active.get("channel", active.get("channels"))
+        active = [int(c) for c in (active or [])]
+        if set(active) == set(channels):
+            return None
+        have = (f"streaming channels {active}" if active else "off")
+        return (f"The PFB streamer on module {self.module} is {have}; "
+                f"this capture needs channels {list(channels)}.  Set it "
+                "under Streamer Configuration, then start again.")
 
     async def _run_fast(self) -> None:
-        """PFB capture: configure the fast streamer, run the shared
-        source, keep servicing control requests, always tear down."""
+        """PFB capture: check the fast streamer carries these channels,
+        run the shared source, keep servicing control requests."""
         from ...pulse_capture.sources import run_pfb_source
 
         channels = list(self.session.channels)
-        claim = await self._claim_pfb(channels)
-        await asyncio.sleep(0.3)  # settle (trigger_capture precedent)
+        problem = await self._pfb_mismatch(channels)
+        if problem:
+            self.signals.failed.emit(problem)
+            return
+        stop = (lambda: self._stop_requested
+                or self.isInterruptionRequested())
+        pump = asyncio.ensure_future(self._control_pump())
         try:
-            stop = (lambda: self._stop_requested
-                    or self.isInterruptionRequested())
-            pump = asyncio.ensure_future(self._control_pump())
-            try:
-                await run_pfb_source(self.session, self.host, channels,
-                                     should_stop=stop)
-            finally:
-                pump.cancel()
-                try:
-                    await pump
-                except asyncio.CancelledError:
-                    pass
+            await run_pfb_source(self.session, self.host, channels,
+                                 should_stop=stop)
         finally:
-            await self._release_pfb(claim)
+            pump.cancel()
+            try:
+                await pump
+            except asyncio.CancelledError:
+                pass
 
     async def _run_both(self) -> None:
         """Concurrent slow+fast capture (DualPulseCaptureSession).
 
         The gather, the shared stop and the fast socket all live in
-        run_dual_source — this adds only the PFB streamer lifecycle and
-        the tap-fed slow side.  The slow side comes from the Periscope
+        run_dual_source — this adds only the streamer check and the
+        tap-fed slow side.  The slow side comes from the Periscope
         tap because this process already holds every slow packet: a
         second socket would cost kernel copies and another drain thread
         in a GUI that is GIL-bound at stage 0.  Both routes drive
@@ -333,20 +329,19 @@ class PulseCaptureTask(QtCore.QThread):
         )
 
         channels = list(self.session.channels)
-        claim = await self._claim_pfb(channels)
-        await asyncio.sleep(0.3)
+        problem = await self._pfb_mismatch(channels)
+        if problem:
+            self.signals.failed.emit(problem)
+            return
+        stop = (lambda: self._stop_requested
+                or self.isInterruptionRequested())
+        watchdog = asyncio.ensure_future(self._dual_watchdog(stop))
         try:
-            stop = (lambda: self._stop_requested
-                    or self.isInterruptionRequested())
-            watchdog = asyncio.ensure_future(self._dual_watchdog(stop))
-            try:
-                await run_dual_source(
-                    self.session, self.host, channels, module=self.module,
-                    should_stop=stop, slow_source=self._slow_tap_pump)
-            finally:
-                watchdog.cancel()
+            await run_dual_source(
+                self.session, self.host, channels, module=self.module,
+                should_stop=stop, slow_source=self._slow_tap_pump)
         finally:
-            await self._release_pfb(claim)
+            watchdog.cancel()
 
     async def _dual_watchdog(self, stop) -> None:
         """Report a dual capture that is training instead of capturing.

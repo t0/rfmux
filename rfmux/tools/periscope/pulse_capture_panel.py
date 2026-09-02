@@ -1162,8 +1162,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             if crs is None or host in (None, "OFFLINE"):
                 QtWidgets.QMessageBox.warning(
                     self, "Pulse Capture",
-                    f"{mode} mode needs a CRS connection to configure "
-                    "the PFB streamer.")
+                    f"{mode} mode needs a CRS connection to check the "
+                    "PFB streamer.")
                 return
         if mode in ("slow", "both"):
             if getattr(runtime, "_pulse_tap", None) is not None:
@@ -1243,6 +1243,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.signals.templates_updated.connect(self._on_templates, conn)
         self.signals.waveform_ready.connect(self._on_waveform_ready, conn)
         self.signals.error.connect(self._on_error, conn)
+        self.signals.failed.connect(self._on_failed, conn)
         self.signals.finished.connect(self._on_task_finished, conn)
 
         # A fresh capture replaces any file we were browsing
@@ -1277,6 +1278,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_start.setEnabled(False)  # until finished arrives
 
     def _on_task_finished(self) -> None:
+        self._unregister_tap()   # however the worker ended
         finalized_path = None
         if self.task is not None:
             finalized_path = self.task.session.hdf5_path
@@ -2044,6 +2046,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_label.setToolTip(message)
         self._set_status(f"● Error: {message}", "#E5484D")
         print(f"[PulseCapture] ERROR: {message}")
+
+    def _on_failed(self, message: str) -> None:
+        """The capture cannot run or has died: say so in a dialog, not
+        only the status line.  finished follows and cleans up."""
+        self._on_error(message)
+        QtWidgets.QMessageBox.warning(self, "Pulse Capture", message)
 
     def _show_noise_segment(self, stream: str | None = None) -> None:
         """Plot the noise-training segment with the fitted baselines and

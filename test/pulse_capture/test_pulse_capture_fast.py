@@ -157,6 +157,7 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
 
     # Registered so the task stops (and releases port 9877) even if an
     # assertion below fails; see stream_guard.
+    loop.run_until_complete(crs.set_pfb_streamer(channel=channels, module=1))
     task = stream_guard.task(
         PulseCaptureTask(capture_session, signals, mode="fast", crs=crs,
                          host="127.0.0.1", module=1))
@@ -227,6 +228,7 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
 
     # Registered so the task stops (releasing port 9877) even if an assertion
     # below fails; see stream_guard.
+    loop.run_until_complete(crs.set_pfb_streamer(channel=channels, module=1))
     task = stream_guard.task(
         PulseCaptureTask(dual, signals, mode="both", crs=crs,
                          host="127.0.0.1", module=1))

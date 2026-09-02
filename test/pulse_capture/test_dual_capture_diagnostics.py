@@ -110,34 +110,57 @@ def test_dual_streams_receive_the_calibrations():
     assert d.fast.stored_units.get(1) == "Hz", d.fast.stored_units
 
 
-def test_stale_teardown_does_not_disable_a_newer_capture():
-    """The PFB enable and its teardown belong to one capture: an old
-    task's teardown arriving after a newer enable is skipped."""
+def _task_with_pfb(active):
+    """A PulseCaptureTask stripped to the streamer check."""
     from rfmux.tools.periscope.pulse_capture_task import PulseCaptureTask
 
     calls = []
 
     class _CRS:
+        async def get_pfb_streamer(self, module=1):
+            return active
+
         async def set_pfb_streamer(self, channel=None, module=1):
             calls.append(channel)
 
-    def make():
-        t = PulseCaptureTask.__new__(PulseCaptureTask)
-        t.crs = _CRS()
-        t.module = 2
-        t.signals = _Signals([])
-        return t
+    t = PulseCaptureTask.__new__(PulseCaptureTask)
+    t.crs = _CRS()
+    t.module = 2
+    t.host = "127.0.0.1"
+    t._stop_requested = False
+    t.isInterruptionRequested = lambda: False
+    errors = []
+    t.signals = _Signals(errors)
+    t.signals.failed = t.signals.error
+    return t, errors, calls
 
-    async def scenario():
-        old, new = make(), make()
-        old_claim = await old._claim_pfb([1])
-        new_claim = await new._claim_pfb([1])
-        await old._release_pfb(old_claim)
-        assert calls == [[1], [1]], calls
-        await new._release_pfb(new_claim)
-        assert calls == [[1], [1], None], calls
 
-    asyncio.run(scenario())
+@pytest.mark.parametrize("active, ok", [
+    ([1, 2], True), ([2, 1], True), (None, False), ([], False),
+    ([1], False), ([1, 2, 3], False)])
+def test_capture_uses_the_streamer_as_configured(active, ok):
+    """The capture reads what the board streams and never sets it: the
+    streamed channel set must be the captured set, in any order."""
+    t, errors, calls = _task_with_pfb(active)
+    problem = asyncio.run(t._pfb_mismatch([1, 2]))
+    assert (problem is None) is ok
+    if not ok:
+        assert "Streamer Configuration" in problem
+    assert calls == []
+
+
+def test_a_mode_the_streamer_cannot_feed_fails_before_running(monkeypatch):
+    from types import SimpleNamespace
+    from rfmux.pulse_capture import sources
+    t, errors, calls = _task_with_pfb(None)
+    t.session = SimpleNamespace(channels=[1])
+
+    async def never(*a, **k):
+        raise AssertionError("must not start a source")
+    monkeypatch.setattr(sources, "run_dual_source", never)
+    asyncio.run(t._run_both())
+    assert errors and "off" in errors[0]
+    assert calls == []
 
 
 def test_stream_lag_is_reported_in_stats():

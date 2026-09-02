@@ -1470,8 +1470,8 @@ def test_templates_are_rotated_not_just_scaled(qt_app):
     env = 100.0 * np.exp(-t / 0.02)
 
     panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
-    # Stored on the quadratures, viewed from volts: the state this test
-    # was written against, before df became the default for both.
+    # Stored on the quadratures and viewed in volts, the state this
+    # test exercises.
     from rfmux.pulse_capture import PulseCaptureConfig
     panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
     panel.units_combo.setCurrentText(m.UNITS_VOLTS)
@@ -1553,8 +1553,8 @@ def test_noise_bands_follow_the_rotation(qt_app):
     ns = ChannelNoiseStats(mean_I=3.0, std_I=0.5, mean_Q=-7.0, std_Q=0.5)
 
     panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
-    # Stored on the quadratures, viewed from volts: the state this test
-    # was written against, before df became the default for both.
+    # Stored on the quadratures and viewed in volts, the state this
+    # test exercises.
     from rfmux.pulse_capture import PulseCaptureConfig
     panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
     panel.units_combo.setCurrentText(m.UNITS_VOLTS)
@@ -1622,8 +1622,8 @@ def test_noise_strip_follows_the_view(qt_app):
     ns = ChannelNoiseStats(mean_I=3.0, std_I=0.5, mean_Q=-7.0, std_Q=0.5)
 
     panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
-    # Stored on the quadratures, viewed from volts: the state this test
-    # was written against, before df became the default for both.
+    # Stored on the quadratures and viewed in volts, the state this
+    # test exercises.
     from rfmux.pulse_capture import PulseCaptureConfig
     panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
     panel.units_combo.setCurrentText(m.UNITS_VOLTS)

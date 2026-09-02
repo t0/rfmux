@@ -20,12 +20,13 @@ DT = 1.0 / FS
 NOISE = 400
 
 
-def _session(channels, pulses):
+def _session(channels, pulses, **kw):
     return PulseCaptureSession(
         channels=list(channels), sample_rate=FS, noise_samples=NOISE,
         hdf5_path=None,
         on_pulse=lambda ch, idx, summary, data: pulses.append(
             (ch, idx, round(float(summary["timestamp"]), 9))),
+        **kw,
     )
 
 
@@ -45,8 +46,8 @@ def _packets(channels, n, rng, pulse_starts=(600, 900), tau=15, amp=80.0):
     return out
 
 
-def _run_per_sample(channels, packets, pulses):
-    s = _session(channels, pulses)
+def _run_per_sample(channels, packets, pulses, **kw):
+    s = _session(channels, pulses, **kw)
     s.start()
     for values, ts in packets:
         for column, ch in enumerate(channels):
@@ -56,8 +57,8 @@ def _run_per_sample(channels, packets, pulses):
     return s
 
 
-def _run_blocks(channels, packets, pulses, max_packets=256):
-    s = _session(channels, pulses)
+def _run_blocks(channels, packets, pulses, max_packets=256, **kw):
+    s = _session(channels, pulses, **kw)
     s.start()
     acc = SlowIngest(s.feed_block, max_packets=max_packets,
                                max_age_s=1e9)   # size-driven only
@@ -226,36 +227,6 @@ def test_held_tail_is_not_transformed_twice():
             "the engine with the conversion applied more than once")
 
 
-def _run_per_sample_cfg(channels, packets, pulses, **kw):
-    s = PulseCaptureSession(channels=list(channels), sample_rate=FS,
-                            noise_samples=NOISE, hdf5_path=None,
-                            on_pulse=lambda ch, idx, summ, data: pulses.append(
-                                (ch, idx, round(float(summ["timestamp"]), 9))),
-                            **kw)
-    s.start()
-    for values, ts in packets:
-        for column, ch in enumerate(channels):
-            v = values[column]
-            s.feed_sample(ch, float(v.real), float(v.imag), ts)
-    s.stop()
-    return s
-
-
-def _run_blocks_cfg(channels, packets, pulses, max_packets=256, **kw):
-    s = PulseCaptureSession(channels=list(channels), sample_rate=FS,
-                            noise_samples=NOISE, hdf5_path=None,
-                            on_pulse=lambda ch, idx, summ, data: pulses.append(
-                                (ch, idx, round(float(summ["timestamp"]), 9))),
-                            **kw)
-    s.start()
-    acc = SlowIngest(s.feed_block, max_packets=max_packets, max_age_s=1e9)
-    for values, ts in packets:
-        acc.add(channels, values, ts)
-    acc.flush()
-    s.stop()
-    return s
-
-
 def test_dense_scattered_crossings_agree():
     """Block and per-sample ingest agree when crossings scatter.
 
@@ -275,12 +246,12 @@ def test_dense_scattered_crossings_agree():
     kw = dict(threshold_sigma=2.5, end_sigma=1.5)
 
     by_sample, by_block = [], []
-    _run_per_sample_cfg(channels, packets, by_sample, **kw)
+    _run_per_sample(channels, packets, by_sample, **kw)
     # Vary the block boundaries: the gaps must not depend on where a
     # block happens to split.
     for mp in (1, 7, 64, 256, 4096):
         by_block.clear()
-        _run_blocks_cfg(channels, packets, by_block, max_packets=mp, **kw)
+        _run_blocks(channels, packets, by_block, max_packets=mp, **kw)
         assert sorted(by_block) == sorted(by_sample), \
             f"block ingest disagreed at max_packets={mp}: " \
             f"{len(by_block)} vs {len(by_sample)} pulses"

@@ -1,10 +1,9 @@
-"""The end-confirmation floor is a real setting, not a hidden constant.
+"""The end-confirmation floor.
 
 A capture ends once the confirmation bucket exceeds
 ``max(min_end_samples, margin_fraction * core)``.  For a short pulse the
 floor wins, so it alone decides how far past below-threshold the end
-mark lands -- seen live as an end mark 16.8 ms after a 5 ms pulse at
-596 Hz, which is ten samples, which was a class constant.
+mark lands.
 """
 
 import numpy as np
@@ -93,11 +92,9 @@ def _short_pulse_summary(save_full_tail):
 
 
 def test_saved_extent_follows_the_full_tail_setting():
-    """With full-tail saving OFF, the summary's saved extent ends where
-    the saved data ends -- before the confirmation instant.  A display
-    extent built on the confirmation instant drew the discarded tail
-    straight back out of the ring, so the checkbox changed nothing on
-    screen."""
+    """With full-tail saving off the summary's saved extent ends where
+    the saved data ends, before the confirmation instant; with it on,
+    at the confirmation."""
     summ, data = _short_pulse_summary(save_full_tail=False)
     last_saved = float(np.max(data["Time"]))
     assert summ["saved_end_time"] == pytest.approx(last_saved)

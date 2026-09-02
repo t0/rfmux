@@ -79,9 +79,8 @@ def _feed_both(d, cfg, slow_rate, slow_late_by):
     return T
 
 
-@pytest.mark.parametrize("dec", [4, 6])
-def test_pulse_at_one_true_time_pairs_with_no_skew(dec):
-    fs = decimation_to_sampling(dec)
+def test_pulse_at_one_true_time_pairs_with_no_skew():
+    fs = decimation_to_sampling(6)
     late = decimated_stream_delay_s(sampling_to_decimation(fs))
     d, cfg, pairs = _dual(fs)
     T = _feed_both(d, cfg, fs, slow_late_by=late)

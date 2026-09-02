@@ -8,16 +8,11 @@ from rfmux.pulse_capture.capture_session import (
     PulseCaptureConfig, PulseCaptureSession)
 
 
-def test_config_defaults():
-    cfg = PulseCaptureConfig()
-    assert cfg.trigger_basis == "df"
-    assert cfg.save_to_end_confirmed is False
-
-
-def test_session_defaults_match_the_config():
-    s = PulseCaptureSession(channels=[1], sample_rate=1000.0)
-    assert s.trigger_basis == "df"
-    assert s.save_to_end_confirmed is False
+def test_config_and_session_defaults():
+    for obj in (PulseCaptureConfig(),
+                PulseCaptureSession(channels=[1], sample_rate=1000.0)):
+        assert obj.trigger_basis == "df"
+        assert obj.save_to_end_confirmed is False
 
 
 @pytest.mark.parametrize("cal, units", [(None, "V"), (2.0e6 + 0.5e6j, "Hz")])

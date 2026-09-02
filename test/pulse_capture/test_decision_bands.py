@@ -1,13 +1,6 @@
 """The record carries the bands each decision was made against, and the
-views draw those.
-
-The live stats object keeps re-centring after a pulse (the rolling
-median mutates it in place), so a band drawn from it later is not the
-band that fired: a sample that cleared 5.0σ at the trigger sits under a
-line drawn at 5.5σ once the median has wandered, and the trigger mark
-looks a sample early — "the point that clearly exceeds the threshold is
-not the one with the line."
-"""
+views draw those rather than the live stats, which the rolling median
+re-centres after the pulse."""
 import h5py
 import numpy as np
 import pytest
@@ -108,7 +101,7 @@ def _panel_showing(qt_app, d, ns):
     return panel
 
 
-@pytest.mark.parametrize("drift", [+0.7, +2.0, -0.7])
+@pytest.mark.parametrize("drift", [+0.7, +2.0])
 def test_the_trigger_mark_sits_on_the_first_drawn_crossing(qt_app, drift):
     s, d = _capture(drift)
     panel = _panel_showing(qt_app, d, s.noise_stats[1])

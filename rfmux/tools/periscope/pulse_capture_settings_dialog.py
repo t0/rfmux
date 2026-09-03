@@ -278,7 +278,8 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         adv_box.setChecked(False)
         adv_box.toggled.emit(False)
         self._update_dependent_values()
-        self.resize(520, 400)
+        self.setMinimumWidth(520)
+        self._fit_height()
 
     def get_config(self) -> PulseCaptureConfig:
         return PulseCaptureConfig(
@@ -347,3 +348,12 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
                 issues)
         finally:
             self._updating = False
+        self._fit_height()
+
+    def _fit_height(self) -> None:
+        """Tall enough for the derived tables, which wrap to the width
+        and grow with the settings; never shorter than they need."""
+        self.layout().activate()
+        want = self.layout().totalHeightForWidth(self.width()) \
+            if self.layout().hasHeightForWidth() else self.sizeHint().height()
+        self.resize(self.width(), max(want, self.sizeHint().height()))

@@ -29,6 +29,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from .layouts import ElidedLabel, FlowLayout, labelled
 from .utils import (
     ClickableViewBox,
     ScreenshotMixin,
@@ -290,8 +291,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _setup_toolbar(self, layout: QtWidgets.QVBoxLayout) -> None:
         bar = QtWidgets.QWidget()
-        h = QtWidgets.QHBoxLayout(bar)
-        h.setContentsMargins(5, 5, 5, 5)
+        # Wraps into rows as the width requires: this many controls in
+        # one row is wider than a laptop screen.
+        h = FlowLayout(bar)
 
         self.btn_start = QtWidgets.QPushButton("▶ Start")
         self.btn_start.clicked.connect(self._on_start_stop)
@@ -303,7 +305,6 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_reestimate.clicked.connect(self._on_reestimate)
         h.addWidget(self.btn_reestimate)
 
-        h.addWidget(QtWidgets.QLabel("Mode:"))
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["slow", "fast", "both"])
         self.mode_combo.setToolTip(
@@ -312,30 +313,26 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             "configures the fast streamer automatically)\n"
             "both: concurrent slow+fast with live pulse matching — the "
             "tree lists matched pairs")
-        h.addWidget(self.mode_combo)
+        h.addWidget(labelled("Mode:", self.mode_combo))
 
-        h.addWidget(QtWidgets.QLabel("Channels:"))
         self.channels_edit = QtWidgets.QLineEdit("1,2")
         self.channels_edit.setFixedWidth(90)
         self.channels_edit.setToolTip(
             "1-indexed channels: \"1,2\", ranges \"2-19\", or a mix\n"
             "\"1,5-8,20\".  \"all\" takes every channel on this module\n"
             "that has a bias set.")
-        h.addWidget(self.channels_edit)
+        h.addWidget(labelled("Channels:", self.channels_edit))
 
-        h.addWidget(QtWidgets.QLabel("Module:"))
         self.module_spin = QtWidgets.QSpinBox()
         self.module_spin.setRange(1, 8)
-        h.addWidget(self.module_spin)
+        h.addWidget(labelled("Module:", self.module_spin))
 
-        h.addWidget(QtWidgets.QLabel("Thresh σ:"))
         self.threshold_spin = QtWidgets.QDoubleSpinBox()
         self.threshold_spin.setRange(0.5, 1000.0)
         self.threshold_spin.setValue(5.0)
         self.threshold_spin.setSingleStep(0.5)
-        h.addWidget(self.threshold_spin)
+        h.addWidget(labelled("Thresh σ:", self.threshold_spin))
 
-        h.addWidget(QtWidgets.QLabel("End σ:"))
         self.end_spin = QtWidgets.QDoubleSpinBox()
         self.end_spin.setRange(0.1, 100.0)
         self.end_spin.setValue(1.5)
@@ -344,7 +341,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             "Pulse end requires BOTH I and Q within this band.  Below "
             "~1.2σ the end condition confirms only by chance on Gaussian "
             "noise — 1.5σ recommended.")
-        h.addWidget(self.end_spin)
+        h.addWidget(labelled("End σ:", self.end_spin))
 
         self.pileup_check = QtWidgets.QCheckBox("Pileup")
         self.pileup_check.setChecked(True)
@@ -352,7 +349,6 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                                      "re-triggers during the decay")
         h.addWidget(self.pileup_check)
 
-        h.addWidget(QtWidgets.QLabel("Units:"))
         self.units_combo = QtWidgets.QComboBox()
         # The same three the main window offers, and for the same reason:
         # basis and scale are not independent in any useful way.  Hertz is
@@ -366,7 +362,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             "into frequency and dissipation, in hertz — needs a df "
             "calibration for the channel.")
         self.units_combo.currentTextChanged.connect(self._on_user_view_changed)
-        h.addWidget(self.units_combo)
+        h.addWidget(labelled("Units:", self.units_combo))
 
         self.btn_settings = QtWidgets.QPushButton("Settings…")
         self.btn_settings.setToolTip(
@@ -381,17 +377,16 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_streamer.clicked.connect(self._on_streamer_config)
         h.addWidget(self.btn_streamer)
 
-        self.path_label = QtWidgets.QLabel("HDF5: (session)")
-        self.path_label.setTextInteractionFlags(
-            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        # The file name only, elided if even that is long; the whole
+        # path is the tooltip.  A path in the row is what made the
+        # panel wider than a screen.
+        self.path_label = ElidedLabel("HDF5: (session)")
         h.addWidget(self.path_label)
         self.btn_browse = QtWidgets.QPushButton("…")
         self.btn_browse.setFixedWidth(28)
         self.btn_browse.setToolTip("Choose the output HDF5 file")
         self.btn_browse.clicked.connect(self._on_browse)
         h.addWidget(self.btn_browse)
-
-        h.addStretch(1)
 
         self.btn_export = QtWidgets.QPushButton("Export…")
         self.btn_export.setToolTip(
@@ -405,6 +400,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         h.addWidget(screenshot_btn)
 
         layout.addWidget(bar)
+
+    def _show_path(self, path) -> None:
+        """The file's name in the toolbar, its whole path on hover."""
+        self.path_label.setText(f"HDF5: {Path(str(path)).name}")
+        self.path_label.setToolTip(str(path))
 
     def _setup_status(self, layout: QtWidgets.QVBoxLayout) -> None:
         strip = QtWidgets.QWidget()
@@ -472,6 +472,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         v.addLayout(nav)
 
         self.pulse_info = QtWidgets.QLabel("No pulse selected")
+        self.pulse_info.setWordWrap(True)
+        self.pulse_info.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                      QtWidgets.QSizePolicy.Policy.Preferred)
         self.pulse_info.setTextInteractionFlags(
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.pulse_info)
@@ -716,6 +719,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         controls = QtWidgets.QHBoxLayout()
         self.template_info = QtWidgets.QLabel("No pulses stacked yet")
+        self.template_info.setWordWrap(True)
+        self.template_info.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred)
         controls.addWidget(self.template_info)
         controls.addStretch(1)
         self.template_residual_check = QtWidgets.QCheckBox(
@@ -1139,7 +1146,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             if files:
                 self.hdf5_path = Path(files[0])
                 self._browse_dir = str(self.hdf5_path.parent)
-                self.path_label.setText(f"HDF5: {self.hdf5_path}")
+                self._show_path(self.hdf5_path)
 
         dlg.accepted.connect(_chosen)
         dlg.open()  # non-modal — modal exec() can hang on Linux
@@ -1270,7 +1277,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._reset_results(channels)
         self._apply_default_view()
         self._registered_export = False
-        self.path_label.setText(f"HDF5: {path}")
+        self._show_path(path)
         self._capture_start_wall = time.time()
 
         self.task.start()
@@ -1467,7 +1474,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                   self.threshold_spin, self.end_spin, self.pileup_check,
                   self.btn_browse):
             w.setEnabled(False)
-        self.path_label.setText(f"HDF5: {path}")
+        self._show_path(path)
         self._set_status(
             f"● Review Mode — {what} — {Path(path).name}", "#3366CC")
         self.follow_check.setChecked(False)

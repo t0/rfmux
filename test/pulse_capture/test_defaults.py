@@ -194,3 +194,22 @@ def test_pulse_tree_shows_the_clock_and_stays_resizable(qt_app):
     assert panel._tree_user_sized
     panel._add_pulse_row(1, 2, {"n_samples": 5, "snr": 3.0})
     assert header.sectionSize(1) == 333   # and keeps the width
+
+
+def test_the_panel_fits_a_laptop_screen(qt_app):
+    """The toolbar wraps into rows when the panel is narrow, the file
+    label shows the name with the path on hover, and none of it asks
+    for more width than a 1080p display has."""
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._show_path("/very/long/session/directory/that/goes/on/and/on/"
+                     "session_20260902_180701/pulse_module2_180833.h5")
+    assert panel.path_label.text() == "HDF5: pulse_module2_180833.h5"
+    assert panel.path_label.toolTip().endswith("pulse_module2_180833.h5")
+    bar = panel.btn_start.parentWidget()
+    flow = bar.layout()
+    assert flow.heightForWidth(700) > flow.heightForWidth(1900)
+    assert panel.minimumSizeHint().width() < 900
+    panel.resize(1000, 600)
+    qt_app.processEvents()
+    assert panel.width() == 1000

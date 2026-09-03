@@ -983,8 +983,55 @@ class MockResonatorModel:
         )
         
         t_vout = time.perf_counter()
-        
+
         return s21_total
+
+    def s21_sweep(self, frequencies, amplitude):
+        """Noise-free |S21| over *frequencies*, the state re-converged at
+        each point as it is when the tone actually sits there.
+
+        The dip search wants thousands of points.  Through s21_lc_response
+        each one pays the whole single-point path (lock, cache lookup,
+        list rebuilds), eight times the two kernels it comes down to; and
+        the state cannot be converged once for the grid, since a frozen
+        state shows a far deeper dip a few linewidths off that moves away
+        as soon as the tone follows it.  Warm-started from the previous
+        point, convergence takes a few iterations.  The lekids keep the
+        Lk/R/L they had; the QP-state memo and the parameter arrays are
+        refreshed the way any single-point call refreshes them.
+        """
+        with self._physics_lock:
+            if not self.mr_lekids:
+                return np.ones(len(frequencies))
+            # The base Lk/R the single-point path converges from are the
+            # ones the QP state for this instant installs, not the
+            # generation-time values a fresh model still holds.
+            t = self.last_update_time
+            if self._nqp_state_t is None or t != self._nqp_state_t:
+                self._nqp_state_noise = self._compute_nqp_state(t)
+                self._nqp_state_t = t
+            self._extract_param_arrays()
+            n = len(self.mr_lekids)
+            base_Lk = np.array([self.base_lekid_params[i]['Lk'] for i in range(n)])
+            base_Lg = np.array([self.base_lekid_params[i]['Lg'] for i in range(n)])
+            L, R = self.L_array.copy(), self.R_array.copy()
+            C, Cc = self.C_array, self.Cc_array
+            k0 = self.mr_lekids[0]
+            tolerance = self.mock_crs._physics_config.get(
+                'convergence_tolerance', 1e-9)
+            out = np.empty(len(frequencies))
+            for i, f in enumerate(frequencies):
+                f = float(f)
+                L, R, _, _ = jit_physics.converged_lekid_parameters(
+                    f, amplitude, L, R, C, Cc, base_Lk, base_Lg,
+                    self.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA),
+                    self.Istar, tolerance, 500, damp=0.1)
+                out[i] = abs(jit_physics.compute_s21_parallel(
+                    fc=f, Vin=amplitude, L_array=L, C_array=C, R_array=R,
+                    Cc_array=Cc, ZLNA=complex(k0.ZLNA), GLNA=k0.GLNA,
+                    input_atten_dB=k0.input_atten_dB,
+                    system_termination=k0.system_termination))
+            return out
 
     def update_lekids_for_current(self, frequency, amplitude):
         """

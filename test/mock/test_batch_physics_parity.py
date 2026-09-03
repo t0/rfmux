@@ -56,6 +56,9 @@ def test_hoisted_dispatches_once_per_batch(monkeypatch):
     per batch, where the loop made one per sample."""
     from rfmux.mr_resonator import jit_physics
     crs, m = _model(11, "hoisted")
+    # One-time work (the noise-sensitivity finite difference) lands in
+    # the first batch; the claim is about the per-batch cost after it.
+    _run(crs, m, 1, 7)
     calls = {"n": 0}
     real = jit_physics.vectorized_update_params_from_nqp
 

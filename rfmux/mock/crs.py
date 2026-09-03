@@ -336,15 +336,8 @@ class ServerMockCRS:
 
         model: MockResonatorModel = self._resonator_model
         freqs = _np.linspace(nominal_freq - search_width, nominal_freq + search_width, n_points)
-        s21_mag = _np.zeros(n_points)
 
-        for idx, f in enumerate(freqs):
-            s21_val = model.s21_lc_response(f, amplitude)
-            s21_mag[idx] = abs(s21_val)
-
-        min_idx = _np.argmin(s21_mag)
-        dip_freq = freqs[min_idx]
-        return float(dip_freq)
+        return float(freqs[_np.argmin(model.s21_sweep(freqs, amplitude))])
 
     async def _auto_bias_kids(self, config, resonance_frequencies, amplitude=None):
         """Automatically configure channels at resonator frequencies (bias KIDs).

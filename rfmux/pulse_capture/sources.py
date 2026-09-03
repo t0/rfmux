@@ -37,7 +37,6 @@ import sys
 import threading
 import time
 import warnings
-from types import SimpleNamespace
 from typing import Awaitable, Callable, List, Optional, Tuple
 
 import numpy as np
@@ -143,25 +142,19 @@ class SlowIngest:
         Monotone and clamped per packet, so it is immune to the
         discontinuities a plain last-minus-first would turn into a
         nonsense duration: a decimation change restarts the clock, and
-        the day boundary wraps it to zero.  Both are invisible in mock
-        runs -- simulated captures are short and never cross midnight --
-        which is exactly why this is a plain method with its own tests
-        rather than something only a live socket can reach.
-
-        Call this for packets that carry none of the wanted channels
-        too: they are still time passing.  :meth:`add` calls it for you.
+        the day boundary wraps it to zero.  Call this for packets that
+        carry none of the wanted channels too: they are still time
+        passing.  :meth:`add` calls it for you.
         """
-        if timestamp is None:
-            return
-        if self._prev_ts is not None:
-            delta = timestamp - self._prev_ts
-            if 0.0 < delta < self.MAX_PLAUSIBLE_STEP_S:
-                self.elapsed += delta
-            elif -self.MAX_PLAUSIBLE_STEP_S < delta <= 0.0:
-                # A straggler from before the newest time seen: it
-                # counts for nothing, and the newest time stands.
-                return
-        self._prev_ts = timestamp
+        self._advance(np.array([np.nan if timestamp is None
+                                else float(timestamp)]))
+
+    def _advance(self, stamps: np.ndarray) -> None:
+        prev = float("nan") if self._prev_ts is None else self._prev_ts
+        prev, self.elapsed = _advance_block(
+            stamps, prev, self.elapsed, self.MAX_PLAUSIBLE_STEP_S)
+        if prev == prev:
+            self._prev_ts = prev
 
     @property
     def complete(self) -> bool:
@@ -173,27 +166,11 @@ class SlowIngest:
 
     def add(self, channels, values, timestamp) -> None:
         """The whole per-packet duty: buffer, flush if ready, keep time.
-
         A change of channel set flushes what came before, so columns
-        never straddle two different layouts.
-        """
-        self.advance(timestamp)
-        channels = tuple(channels)
-        if not channels:
-            return
-        if channels != self.channels:
-            self.flush()
-            self.channels = channels
-        if not self._values:
-            self._opened = time.monotonic()
-        self._values.append(values)
-        self._rows += 1
-        # No usable timestamp becomes NaN; feed_block drops and counts
-        # those exactly as feed_sample did.
-        self._stamps.append(float("nan") if timestamp is None
-                            else float(timestamp))
-        if self.ready:
-            self.flush(final=False)
+        never straddle two different layouts.  No usable timestamp
+        becomes NaN; feed_block drops and counts those."""
+        self.add_block(channels, np.asarray(values)[None, :],
+                       [np.nan if timestamp is None else timestamp])
 
     def add_block(self, channels, values, stamps) -> None:
         """:meth:`add` for a block: *values* (packets, channels), one
@@ -201,11 +178,7 @@ class SlowIngest:
         values = np.asarray(values)
         stamps = np.asarray(stamps, dtype=np.float64)
         if stamps.size:
-            prev = float("nan") if self._prev_ts is None else self._prev_ts
-            prev, self.elapsed = _advance_block(
-                stamps, prev, self.elapsed, self.MAX_PLAUSIBLE_STEP_S)
-            if prev == prev:
-                self._prev_ts = prev
+            self._advance(stamps)
         channels = tuple(channels)
         if not channels or values.shape[0] == 0:
             return
@@ -266,37 +239,34 @@ def _flush(sock) -> None:
 #: throughput to how often the loop schedules it, and two streams on one
 #: loop with millisecond packet processing starve the slower one.  A
 #: bounded batch per wake makes throughput a function of the data rate
-#: instead; the caps bound how long one wake holds the loop.
+#: instead; the cap bounds how long one wake holds the loop.
 _SLOW_DRAIN_CAP = 256
-# What the PFB socket's receive buffer holds, in seconds of a
-# four-channel stream: 1000 samples per packet, so four channels at
-# 2.44 MHz are 78 MB/s.  The socket asks for the largest buffer the
-# host allows -- the kernel charges memory only for packets actually
-# queued -- and warns below this much: a stall on the capture thread
-# longer than the buffer loses packets, where a longer buffer is lag
-# the source drains.
-_PFB_BUFFER_WARN_S = 1.0
-# The most the fast stream is let fall behind the slow one, in stream
-# time, where the session measures the two clocks.  Past this the
-# source reads and discards packets, looking only at their stamps,
-# until the fast clock is within half the bound, and counts them: a
-# bounded lag with the loss in the open, rather than a lag that grows
-# to the socket buffer and leaves every pair without its fast window.
-# The kernel's own account of the queue (SO_MEMINFO) is shown but not
-# acted on: UDP releases receive memory in steps of a quarter of the
-# buffer, so it reads high by up to that much.
+#: Bytes per second of a four-channel PFB stream, for the socket's
+#: receive buffer in seconds: 1000 samples per packet, so four
+#: channels at 2.44 MHz are 78 MB/s.  The socket asks for the largest
+#: buffer the host allows; the kernel charges memory only for packets
+#: actually queued.
+#: The most the fast stream is let fall behind the slow one, in stream
+#: time, where the session measures the two clocks.  Past this the
+#: source discards packets by their stamps until the fast clock is
+#: within half the bound, and counts them: a bounded lag with the loss
+#: in the open, rather than a lag that grows to the socket buffer and
+#: leaves every pair without its fast window.  The kernel's own account
+#: of the queue (SO_MEMINFO) is shown but not acted on: UDP releases
+#: receive memory in steps of a quarter of the buffer, so it reads
+#: high by up to that much.
 _PFB_MAX_LAG_S = 0.25
-# The C++ PFB receiver: packets held to put arrivals in order (6.5 ms
-# at four channels; the stream arrives a few packets out of order),
-# how many more before the excess is released, the queue's bound
-# (its oldest go first when it fills, though the lag bound acts long
-# before), and packets per pop, which is the block the engine gets.
+#: The C++ PFB receiver: packets held to put arrivals in order (6.5 ms
+#: at four channels; the stream arrives a few packets out of order),
+#: how many more before the excess is released, the queue's bound
+#: (its oldest go first when it fills, though the lag bound acts long
+#: before), and packets per pop, which is the block the engine gets.
 _PFB_REORDER_WINDOW = 64
 _PFB_FLUSH_EVERY = 16
 _PFB_QUEUE_MAX = 8192
 _PFB_POP_MAX = 256
-PFBPACKET_NSAMP_MAX = 1000          # samples per PFB packet
-_PFB_BYTES_PER_SECOND = 4 * PFB_SAMPLING_FREQ / 1000 * streamer.PFB_PACKET_SIZE
+_PFB_BYTES_PER_SECOND = (4 * PFB_SAMPLING_FREQ / streamer.PFBPACKET_NSAMP_MAX
+                         * streamer.PFB_PACKET_SIZE)
 
 
 def _rcvbuf_request() -> Optional[int]:
@@ -325,7 +295,6 @@ def _pfb_buffer_seconds(sock) -> float:
         held //= 2                     # Linux reports double the request
     return held / _PFB_BYTES_PER_SECOND
 #: Channel groups a packet interleaves, by its mode field.
-_PFB_GROUPS = {0: 1, 1: 2, 2: 4}
 
 
 def _drain(sock, first: bytes, size: int, cap: int) -> list:
@@ -420,6 +389,31 @@ async def run_slow_source(
     return ingest.elapsed
 
 
+async def pfb_streamer_mismatch(crs, module: int, channels) -> Optional[str]:
+    """Why the PFB streamer as configured cannot feed a capture of
+    *channels* on *module*, or None.  A capture never configures the
+    streamer; it reads what the board streams, and every captured
+    channel must be among the streamed ones.  The board reports one
+    channel as an integer and several as a list."""
+    raw = await crs.get_pfb_streamer(module=module)
+    active = raw
+    if isinstance(active, dict):
+        active = active.get("channel", active.get("channels"))
+    if isinstance(active, (int, float)):
+        active = [active]
+    try:
+        active = [int(c) for c in (active or [])]
+    except TypeError:
+        return (f"get_pfb_streamer(module={module}) returned {raw!r}, "
+                "which this capture cannot read as a channel list.")
+    if set(channels) <= set(active):
+        return None
+    have = f"streaming channels {active}" if active else "off"
+    return (f"The PFB streamer on module {module} is {have}; this "
+            f"capture needs channels {list(channels)}.  Set it under "
+            "Streamer Configuration, then start again.")
+
+
 async def run_pfb_source(
     capture_session,
     host: str,
@@ -441,10 +435,8 @@ async def run_pfb_source(
     demuxed, up to _PFB_POP_MAX at a time, and each pop is one engine
     call per channel.
 
-    ``channels`` must match the order given to ``set_pfb_streamer`` —
-    PFB packets interleave the streamed channels round-robin in that
-    order.  Each sample gets a timestamp extrapolated from the packet
-    timestamp at the PFB rate.
+    Each sample gets a timestamp extrapolated from the packet timestamp
+    at the PFB rate.
 
     Returns the sample time covered (seconds).
 
@@ -461,13 +453,14 @@ async def run_pfb_source(
     stream_lag = getattr(capture_session, "stream_lag", None)
     origin_set = False
     last_ts = None                 # newest stamp fed, the fast clock here
-    packet_s = PFBPACKET_NSAMP_MAX / sample_rate   # stream time per packet
+    packet_s = streamer.PFBPACKET_NSAMP_MAX / sample_rate   # per packet
 
     def feed_batch(batch) -> bool:
         """One popped batch to the session, a block per channel; True
         once duration_s is covered."""
         nonlocal elapsed, origin_set, last_ts, packet_s
-        samples, seconds, recent, seq, mode, slots, num_samples, year, yday = batch
+        (samples, seconds, recent, _seq, _mode, slots, num_samples,
+         year, yday) = batch
         groups = samples.shape[0]
         time_samples = num_samples // groups
         packet_s = time_samples / sample_rate
@@ -476,8 +469,7 @@ async def run_pfb_source(
         if recent.any():
             last_ts = float(seconds[recent][-1])
             if not origin_set and set_origin is not None:
-                set_origin(streamer.ts_day_epoch(
-                    SimpleNamespace(y=year, d=yday, recent=True)))
+                set_origin(streamer.day_epoch(year, yday))
                 origin_set = True
         # Per-sample times from each packet's stamp; NaN where a packet
         # has no usable one, which the session drops and counts.
@@ -500,11 +492,6 @@ async def run_pfb_source(
             host, port=streamer.PFB_STREAMER_PORT,
             buffer_size=_rcvbuf_request()) as sock:
         held_s = _pfb_buffer_seconds(sock)
-        if held_s < _PFB_BUFFER_WARN_S:
-            warnings.warn(
-                f"PFB socket buffer holds {held_s:.2f} s of a four-channel "
-                f"stream; a stall longer than that loses packets. Raise it "
-                f"with: sudo sysctl -w net.core.rmem_max=268435456")
         sock.setblocking(False)
         _flush(sock)
         # The receiver reads, validates, and orders packets on its own
@@ -531,7 +518,7 @@ async def run_pfb_source(
         rx.start()
 
         def find_queue():
-            for serial, mod, q in receiver.get_all_queues():
+            for _serial, mod, q in receiver.get_all_queues():
                 if module is None or mod == module - 1:
                     return q
             return None
@@ -575,9 +562,13 @@ async def run_pfb_source(
                         flushed += queue.drop_pfb_before(
                             last_ts + lag - max_lag_s / 2)
                 if source is not None:
+                    # Lost: never arrived, dropped by the full queue, or
+                    # discarded here for the lag bound; the last also
+                    # on its own.
                     stats = queue.get_stats()
                     source["lost_packets"] = (stats.packets_missing
-                                              + stats.packets_dropped)
+                                              + stats.packets_dropped
+                                              + flushed)
                     source["flushed_packets"] = flushed
                     backlog = queue.size() * packet_s
                     queued = _rcvq_bytes(sock)
@@ -593,8 +584,7 @@ async def run_pfb_source(
                         window_t = now
                 batch = queue.pop_pfb_batch(_PFB_POP_MAX)
                 if batch is None:
-                    # A stream that has gone quiet for the streamer
-                    # timeout has ended, as the socket loop treated it.
+                    # A stream quiet for the streamer timeout has ended.
                     if time.monotonic() - last_batch_t > streamer.STREAMER_TIMEOUT:
                         break
                     await asyncio.sleep(0.002)
@@ -609,7 +599,8 @@ async def run_pfb_source(
         finally:
             stop_rx.set()
             rx.join(1.0)
-            # What the reorder stage still held belongs to the capture.
+            # What the receiver's reorder window still held belongs to
+            # the capture.
             receiver.flush_all()
             if queue is None:
                 queue = find_queue()

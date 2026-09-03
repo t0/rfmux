@@ -315,3 +315,19 @@ def _basis_units_factor(df_calibration, basis: str, units: str):
     else:
         return None
     return rotation * scale
+
+
+def window_shortfall(times, window, tolerance: float) -> tuple:
+    """How much of *window* (t0, t1) the samples at *times* fail to
+    cover, as (seconds missing at the start, seconds missing at the
+    end); zero where the gap is within *tolerance*.  A fast window
+    that falls short of the union window it was asked for was never
+    in the ring: on the fast stream, packets lost."""
+    t = np.asarray(times, dtype=float)
+    t = t[np.isfinite(t)]
+    if t.size == 0 or window is None:
+        return 0.0, 0.0
+    head = float(t[0]) - window[0]
+    tail = window[1] - float(t[-1])
+    return (head if head > tolerance else 0.0,
+            tail if tail > tolerance else 0.0)

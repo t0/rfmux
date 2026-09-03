@@ -43,7 +43,7 @@ import math
 
 import numpy as np
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from . import walk as _walk
 
@@ -308,7 +308,8 @@ class PulseCapture:
     use_walk = True
 
     #: Crossings closer than this, in samples, are walked as one island
-    #: by process_block rather than bulked apart.
+    #: by process_block's per-sample path (use_walk off) rather than
+    #: bulked apart.
     _MERGE_GAP = 32
 
     #: Entries kept for the rolling-baseline median.  Fixed, so cost and
@@ -525,24 +526,15 @@ class PulseCapture:
         """Ingest many samples at once, identically to calling
         :meth:`process_sample` on each in turn.
 
-        Exists because process_sample costs ~2.3 us of interpreter time
-        per sample however tightly it is written, and the PFB stream
-        delivers 2.44 MHz per channel — about 5x more than one Python
-        loop can absorb.  There is no hot spot left to shave; the fix
-        has to be doing less Python per sample, not faster Python.
-
-        So the work is split by what a sample can possibly do.  A sample
-        that does not reach ``threshold_sigma``, arriving while no
-        capture is open, cannot trigger, cannot end anything, and is
-        never looked at by the edge detector: all it does is enter the
-        ring and the baseline reservoir.  Whole runs of those are
-        absorbed with numpy in :meth:`_bulk_quiet`.  Everything else
-        still goes through process_sample, one sample at a time, with
-        exactly the semantics it always had.
-
-        At 5 sigma on Gaussian noise, 99.9% of 1000-sample packets
-        contain no crossing at all, so the sequential path runs almost
-        only where the interesting samples are.
+        Split by what a sample can do.  A run in which no sample reaches
+        ``threshold_sigma``, with no capture open and no baseline
+        refresh inside, cannot trigger, cannot end anything, and is
+        never looked at by the edge detector: it enters the ring and the
+        baseline reservoir, which :meth:`_bulk_quiet` does with numpy.
+        Everything else is walked by :func:`walk.walk`, the state
+        machine compiled, or by process_sample when ``use_walk`` is
+        off.  A baseline refresh falls on exactly one sample, and that
+        sample always goes through process_sample.
         """
         if channel not in self._ch_set:
             return
@@ -658,7 +650,7 @@ class PulseCapture:
     _QUAD = {"": 0, "I": 1, "Q": 2}
     _QUAD_NAMES = ("", "I", "Q")
 
-    def _pack_state(self, st: "_ChState"):
+    def _pack_state(self, st: "_ChState") -> Tuple[np.ndarray, np.ndarray]:
         si = np.empty(_walk.N_INT, dtype=np.int64)
         sf = np.empty(_walk.N_FLT, dtype=np.float64)
         si[_walk.CAPTURING] = 1 if st.capturing else 0
@@ -711,8 +703,9 @@ class PulseCapture:
         st.trig_std_I = float(sf[_walk.TSTD_I])
         st.trig_std_Q = float(sf[_walk.TSTD_Q])
 
-    def _walk_block(self, channel: int, st: "_ChState", I, Q, T,
-                    start: int, stop: int) -> int:
+    def _walk_block(self, channel: int, st: "_ChState", I: np.ndarray,
+                    Q: np.ndarray, T: np.ndarray, start: int,
+                    stop: int) -> int:
         """process_sample over samples start..stop-1 through walk.walk,
         handling what the walk returns for.  Returns the index to
         continue from."""
@@ -760,17 +753,26 @@ class PulseCapture:
             elif reason == _walk.SPLIT:
                 self._save_pulse(channel, pileup=True)
                 if not self.freeze_triggers:
-                    self._begin_capture(st, ns)
-                    st.trig_abs = max(
-                        st.run_start_abs,
-                        st.ch_sample_n - max(1, self.edge_lookback // 4))
-                    if math.isfinite(sf[_walk.NEAR_I]):
-                        st.anchor_I = float(sf[_walk.NEAR_I])
-                        st.anchor_Q = float(sf[_walk.NEAR_Q])
-                    st.pileup_child = True
+                    anchor = ((float(sf[_walk.NEAR_I]),
+                               float(sf[_walk.NEAR_Q]))
+                              if math.isfinite(sf[_walk.NEAR_I]) else None)
+                    self._rearm_after_split(st, ns, anchor)
             si, sf = self._pack_state(st)
             pos = k + 1
         return stop
+
+    def _rearm_after_split(self, st: "_ChState", ns: ChannelNoiseStats,
+                           anchor) -> None:
+        """Open a capture for the pulse that rose on the tail of the
+        one just saved: dated where the nearest tap saw that tail,
+        anchored on it (it decays onto the previous pulse's tail, not
+        the pre-pulse level), and marked a fragment of a chain."""
+        self._begin_capture(st, ns)
+        st.trig_abs = max(st.run_start_abs,
+                          st.ch_sample_n - max(1, self.min_end_samples))
+        if anchor is not None:
+            st.anchor_I, st.anchor_Q = anchor
+        st.pileup_child = True
 
     @staticmethod
     def _begin_capture(st: "_ChState", ns: ChannelNoiseStats) -> None:
@@ -1029,12 +1031,8 @@ class PulseCapture:
                                 (bI.recent(tap) - ns.mean_I) / sI,
                                 (bQ.recent(tap) - ns.mean_Q) / sQ))
                     decaying_now = (mag - hi) / jn < -self.threshold_sigma
-                    # The pulse's own recent level: as many samples back
-                    # as the decay evidence had to wait, so a pulse still
-                    # growing past its confirmation level is not "rising
-                    # above" its trigger instant for the next quarter
-                    # lookback -- 6 ms on the PFB stream, longer than the
-                    # pulses it split.
+                    # The pulse's own recent level: min_end_samples
+                    # back, as far as the decay evidence had to wait.
                     near = max(1, min(self.min_end_samples, span))
                     near_vals = (bI.recent(near), bQ.recent(near))
                     near_mag = math.hypot(
@@ -1080,22 +1078,7 @@ class PulseCapture:
                     and rising_above_self):
                 self._save_pulse(channel, pileup=True)
                 if not self.freeze_triggers:
-                    self._begin_capture(st, ns)
-                    # The new rise happened within the nearest tap's
-                    # window — the run may date back to the previous
-                    # pulse's onset if the tail never crossed below
-                    # threshold.
-                    st.trig_abs = max(
-                        st.run_start_abs,
-                        st.ch_sample_n - max(1, self.edge_lookback // 4))
-                    # The piled-up pulse decays onto the previous
-                    # pulse's tail, not the pre-pulse level: anchor on
-                    # the tail just before the new rise.
-                    if near_vals is not None:
-                        st.anchor_I, st.anchor_Q = near_vals
-                    # Every fragment of a chain is pileup-affected —
-                    # this one sits on the previous pulse's pedestal.
-                    st.pileup_child = True
+                    self._rearm_after_split(st, ns, near_vals)
                 return
 
             # ── Normal end: baseline confirmation ─────────────────

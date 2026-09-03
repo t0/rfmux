@@ -63,7 +63,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .. import streamer
 from ..core.transferfunctions import (
     CIC2_STAGES,
     decimated_stream_delay_s, sampling_to_decimation,
@@ -1153,7 +1152,7 @@ class IncrementalPulseMatcher:
     """Streaming version of trigger_capture's ``_match_pulses``.
 
     Pulses from the two streams are paired per channel when their
-    midpoint times fall within ``window_s`` (best match wins).  A pulse
+    trigger times fall within ``window_s`` (best match wins).  A pulse
     that finds no partner within ``grace_s`` of stream time is emitted
     as a one-sided pair.  ``on_pair`` receives dicts::
 

@@ -130,24 +130,29 @@ def ts_to_seconds(ts):
 	return ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / SS_PER_SECOND
 
 
-def ts_day_epoch(ts):
-	"""Seconds since 1970 of the UTC midnight of the day a packet
-	Timestamp names (two-digit year, day of year), or None if not recent.
+def day_epoch(year: int, yday: int) -> float:
+	"""Seconds since 1970 of the UTC midnight of a packet clock's day:
+	a two-digit year and a day of year.
 
 	Packet clocks are UTC when disciplined; the test source counts from
 	whatever the mock was started with, which is still a valid date.
 	"""
+	day = _datetime.datetime(2000 + int(year), 1, 1,
+	                         tzinfo=_datetime.timezone.utc)
+	return (day + _datetime.timedelta(days=int(yday) - 1)).timestamp()
+
+
+def ts_day_epoch(ts) -> float | None:
+	"""day_epoch of a packet Timestamp, or None if not recent."""
 	if not ts.recent:
 		return None
-	day = _datetime.datetime(2000 + int(ts.y), 1, 1,
-	                         tzinfo=_datetime.timezone.utc)
-	day += _datetime.timedelta(days=int(ts.d) - 1)
-	return day.timestamp()
+	return day_epoch(ts.y, ts.d)
 
 
-def epoch_to_utc(epoch):
+def epoch_to_utc(epoch: float) -> str:
 	"""ISO 8601 with microseconds, e.g. 2026-09-02T16:14:05.123456Z."""
-	dt = _datetime.datetime.fromtimestamp(float(epoch), tz=_datetime.timezone.utc)
+	dt = _datetime.datetime.fromtimestamp(float(epoch),
+	                                      tz=_datetime.timezone.utc)
 	return dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
@@ -469,6 +474,7 @@ __all__ = [
 	'STREAMER_PORT',
 	'PFB_STREAMER_PORT',
 	'ts_day_epoch',
+	'day_epoch',
 	'epoch_to_utc',
 	'LONG_PACKET_SIZE',
 	'SHORT_PACKET_SIZE',

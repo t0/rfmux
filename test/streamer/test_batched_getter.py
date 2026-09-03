@@ -34,32 +34,35 @@ SENTINEL_SEQ = 1 << 20
 
 def _receive(packets):
     """Send *packets* through a receiver on a loopback port; returns
-    its queue once every packet is in.  The receiver's reorder stage
-    holds the newest packet until a later one arrives, so a sentinel
-    follows them; the tests drop it by its sequence number."""
+    its queue once every packet is in.  Sent in small bursts, each
+    received before the next, so no kernel buffer size is assumed.
+    The receiver's reorder stage holds the newest packet until a later
+    one arrives, so a sentinel follows them; the tests drop it by its
+    sequence number."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 << 20)
     sock.bind(("127.0.0.1", 0))
     sock.settimeout(0.2)
     port = sock.getsockname()[1]
     send = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    for pkt in packets:
-        send.sendto(bytes(pkt), ("127.0.0.1", port))
-    send.sendto(bytes(_packet(SENTINEL_SEQ, packets[-1].version,
-                              np.random.default_rng(0))),
-                ("127.0.0.1", port))
-    send.close()
     receiver = streamer.ReadoutPacketReceiver(sock, reorder_window=1,
                                               queue_max_size=10000,
                                               flush_threshold=1)
-    deadline = time.monotonic() + 3.0
+    sentinel = _packet(SENTINEL_SEQ, packets[-1].version,
+                       np.random.default_rng(0))
+    todo = list(packets) + [sentinel]
     queue = None
-    while time.monotonic() < deadline:
-        receiver.receive_batch(batch_size=256, timeout_ms=50)
-        for serial, module, q in receiver.get_all_queues():
-            queue = q
-        if queue is not None and queue.size() >= len(packets):
-            break
+    deadline = time.monotonic() + 10.0
+    for k in range(0, len(todo), 8):
+        for pkt in todo[k:k + 8]:
+            send.sendto(bytes(pkt), ("127.0.0.1", port))
+        want = min(k + 8, len(todo)) - 1       # the newest is held back
+        while time.monotonic() < deadline:
+            receiver.receive_batch(batch_size=256, timeout_ms=50)
+            for serial, module, q in receiver.get_all_queues():
+                queue = q
+            if queue is not None and queue.size() >= want:
+                break
+    send.close()
     # The sentinel itself may still be held by the reorder stage.
     assert queue is not None and queue.size() >= len(packets), \
         f"{None if queue is None else queue.size()} of {len(packets)} arrived"

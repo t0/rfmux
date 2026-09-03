@@ -81,7 +81,7 @@ async def _capture(path):
     # Trigger in the frequency basis: the rotation happens before
     # thresholding, so a pulse lands on one axis instead of both.
     capture_config = PulseCaptureConfig(
-        threshold_sigma=5.0, end_sigma=1.5, min_pulse_ms=0.2,
+        threshold_sigma=5.0, end_sigma=1.0, min_pulse_ms=0.2,
         max_pulse_ms=150.0, noise_train_ms=400.0, enable_pileup=True,
         trigger_basis="df")
 

@@ -23,7 +23,7 @@ result = await crs.trigger_capture(
     module=1,
     streamer_mode="slow",
     time_run=15.0,
-    config=PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5),
+    config=PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.0),
     hdf5_path="capture.h5",
 )
 

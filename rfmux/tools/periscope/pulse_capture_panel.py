@@ -336,12 +336,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self.end_spin = QtWidgets.QDoubleSpinBox()
         self.end_spin.setRange(0.1, 100.0)
-        self.end_spin.setValue(1.5)
+        self.end_spin.setValue(1.0)
         self.end_spin.setSingleStep(0.1)
         self.end_spin.setToolTip(
-            "Pulse end requires BOTH I and Q within this band.  Below "
-            "~1.2σ the end condition confirms only by chance on Gaussian "
-            "noise — 1.5σ recommended.")
+            "Pulse end requires BOTH axes back within this band of the "
+            "baseline for the confirmation count.  A tighter band keeps "
+            "more of the tail and lengthens the capture: 1.0σ runs about "
+            "a fifth longer than 1.5σ.")
         h.addWidget(labelled("End σ:", self.end_spin))
 
         self.pileup_check = QtWidgets.QCheckBox("Pileup")

@@ -64,7 +64,7 @@ _SQRT2 = math.sqrt(2.0)
 #: PulseCapture and PulseCaptureSession said 1.0, PulseCaptureConfig
 #: said 1.5, so constructing the engine directly behaved differently
 #: from going through the config.
-DEFAULT_END_SIGMA = 1.5
+DEFAULT_END_SIGMA = 1.0
 
 BUFFER_SAFETY: float = 1.5
 
@@ -1337,17 +1337,17 @@ def _robust_std(x: np.ndarray) -> float:
     return robust if robust > 0 else float(np.std(x))
 
 
-def _block_median_baseline(x: np.ndarray, window: int) -> np.ndarray:
-    """The record's slow baseline: medians of consecutive *window*-long
-    blocks, interpolated between block centres and held at the ends.
+def _block_median_baseline(x: np.ndarray, block: int) -> np.ndarray:
+    """The record's slow baseline: medians of consecutive *block*-long
+    stretches, interpolated between block centres and held at the ends.
 
     A median per block ignores pulses while they are a minority of it,
     as the engine's rolling median does, and the whole thing is one pass
-    over the record whatever the window.  ``window`` 0 means a frozen
-    baseline, one median for the record.
+    over the record whatever the block.  ``block`` 0, or one longer than
+    half the record, means one median for the whole record.
     """
     n = len(x)
-    block = n if window <= 0 else int(window)
+    block = n if block <= 0 else int(block)
     block = max(64, min(block, n))
     nb = n // block
     if nb < 2:
@@ -1362,7 +1362,7 @@ def estimate_noise_stats(
     samples_by_channel: Dict[int, np.ndarray],
     channels: List[int],
     jump_lag: int = 0,
-    baseline_window: int = 0,
+    baseline_block: int = 0,
 ) -> tuple[Dict[int, ChannelNoiseStats], Dict[int, np.ndarray]]:
     """Estimate per-channel noise statistics independently for I and Q.
 
@@ -1383,10 +1383,13 @@ def estimate_noise_stats(
         the filter correlation and 1/f power actually present at that
         lag.  Records too short for the lag fall back to the
         white-noise value √2·σ.
-    baseline_window : int
-        The engine's rolling-baseline span, in samples.  σ is the
-        scatter of the samples about a baseline of that span, which is
-        what the engine thresholds them against.
+    baseline_block : int
+        Samples per block of the baseline σ is measured against: long
+        compared with a pulse, so a pulse stays a minority of its
+        block's median, and short compared with the record, so wander
+        slower than a few pulses is baseline rather than noise.  The
+        session passes three captures.  0 means one median for the
+        record.
 
     Returns
     -------
@@ -1411,18 +1414,18 @@ def estimate_noise_stats(
         # Baseline mean: median is robust to asymmetric pulse
         # contamination (up to 50% outliers).
         # Noise σ: the MAD of the samples about a block-median
-        # baseline of the engine's own span.  The baseline removes
-        # drift and pulse tails, and the MAD ignores the pulses
-        # themselves.  Not the σ of adjacent differences over √2:
-        # that is exact only for white noise, and the CIC decimators
-        # correlate neighbouring slow-stream samples enough to read
-        # it 1.3x (stage 0) to 1.6x (stages above) low.
+        # baseline a few pulses long.  The baseline removes drift and
+        # pulse tails, and the MAD ignores the pulses themselves.  Not
+        # the σ of adjacent differences over √2: that is exact only
+        # for white noise, and the CIC decimators correlate
+        # neighbouring slow-stream samples enough to read it 1.3x
+        # (stage 0) to 1.6x (stages above) low.
         robust_mean_I = float(np.median(arr.real))
         robust_mean_Q = float(np.median(arr.imag))
         robust_std_I = _robust_std(
-            arr.real - _block_median_baseline(arr.real, baseline_window))
+            arr.real - _block_median_baseline(arr.real, baseline_block))
         robust_std_Q = _robust_std(
-            arr.imag - _block_median_baseline(arr.imag, baseline_window))
+            arr.imag - _block_median_baseline(arr.imag, baseline_block))
 
         # Refine baseline mean using the now-correct σ to clip
         # pulse outliers.  The median can be biased when pulses

@@ -31,7 +31,7 @@ ANATOMY_PATHS = (
     ROOT / "docs" / "release-notes" / "images" / "capture-window-anatomy.png",
 )
 
-THRESH, END = 5.0, 1.5
+THRESH, END = 5.0, 1.0
 
 
 def capture_window_anatomy(path):
@@ -55,50 +55,55 @@ def capture_window_anatomy(path):
 
     ax.plot(t, trace, color="#3366CC", lw=1.1, zorder=3)
 
-    # Trigger: first sample above threshold, then confirmation
+    # Trigger: first sample above threshold, then confirmation.
     trig = t[np.argmax(trace > THRESH)]
-    # End: signal back inside the end band and staying there
+    # Back below threshold: one past the last sample above it.
+    above = np.where((trace > THRESH) & (t >= trig))[0]
+    below = t[above[-1] + 1]
+    # End band: back inside end_sigma and staying there.
     back = np.where((np.abs(trace) < END) & (t > trig))[0]
     end = t[back[0]] if len(back) else t[-1]
-
-    margin = 0.1 * (end - trig)
-    # The bucket needs a stretch of samples inside the band before it calls
-    # the pulse over.  Drawn generously here; in a capture it is
-    # max(10 samples, margin_fraction x core).
+    # The confirmation count needs a stretch of samples inside the band
+    # before it calls the pulse over.  Drawn generously here.
     confirmed = end + 0.45 * (end - trig)
 
-    # The window runs from before the trigger to the end-of-pulse
-    # confirmation, which is what the detector saves.  One band, no
-    # sub-divisions: save_to_end_confirmed is the only thing that would
-    # shorten it, and splitting the shading for it made the default window
-    # read as ending early.
-    ax.axvspan(trig - margin, confirmed, color="#3366CC", alpha=0.10,
+    # What the detector saves by default: margin_fraction of the core
+    # before the trigger, and the same past the below-threshold instant,
+    # floored at min_end_samples.  The end confirmation bounds the state
+    # machine, not the record; save_to_end_confirmed=True extends the
+    # window to it.
+    core = below - trig
+    pre = 0.1 * core
+    tail = max(0.1 * core, 2.0)
+    ax.axvspan(trig - pre, below + tail, color="#3366CC", alpha=0.10,
                zorder=0)
     ax.axvline(trig, color="#CC6633", lw=1.6, zorder=4)
+    ax.axvline(below, color="#CC3333", lw=1.2, ls=":", zorder=4)
     ax.axvline(end, color="#33884D", lw=1.6, ls=":", zorder=4)
     ax.axvline(confirmed, color="#33884D", lw=1.2, ls="--", zorder=4)
 
-    # Labels are kept sparse on purpose: margin_fraction is 10% of an 18 ms
-    # window here, far too small to annotate legibly, so the prose covers it.
-    ax.text((trig - margin + confirmed) / 2, -3.3, "saved window",
+    ax.text((trig - pre + below + tail) / 2, -3.3, "saved\nwindow",
             ha="center", fontsize=9, color="#3366CC", weight="bold")
-    ax.annotate("end confirmed",
-                xy=(confirmed, 7.4), xytext=(confirmed + 2.0, 8.4),
-                fontsize=8, color="#33884D", va="center",
-                arrowprops=dict(arrowstyle="->", color="#33884D", lw=1))
-
-    ax.annotate("trigger", xy=(trig, THRESH), xytext=(trig + 7, 9.2),
+    ax.annotate("trigger", xy=(trig, THRESH), xytext=(trig - 15, 8.2),
                 fontsize=9, color="#CC6633",
                 arrowprops=dict(arrowstyle="->", color="#CC6633", lw=1.1))
-    # Placed past the confirmation line: at end + 4 the text ran across it.
-    ax.annotate("both quadratures back\ninside end_sigma", xy=(end, END),
-                xytext=(confirmed + 3.5, 4.2), fontsize=8, color="#33884D",
+    ax.annotate("back below\nthreshold_sigma", xy=(below, THRESH),
+                xytext=(below + 5, 7.6), fontsize=8, color="#CC3333",
+                va="center",
+                arrowprops=dict(arrowstyle="->", color="#CC3333", lw=1))
+    ax.annotate("both axes back\ninside end_sigma", xy=(end, END),
+                xytext=(confirmed + 3.5, 3.2), fontsize=8, color="#33884D",
                 va="top",
+                arrowprops=dict(arrowstyle="->", color="#33884D", lw=1))
+    ax.annotate("end confirmed\n(save_to_end_confirmed=True\n"
+                "extends the window to here)",
+                xy=(confirmed, 5.4), xytext=(confirmed + 2.0, 5.6),
+                fontsize=8, color="#33884D", va="top",
                 arrowprops=dict(arrowstyle="->", color="#33884D", lw=1))
 
     ax.axvline(hard_stop, color="#7A5AA8", lw=1.4, ls="-.")
-    ax.annotate("hard stop\n(1.2 x max_pulse_ms)\ncloses it anyway,\n"
-                "flagged truncated",
+    ax.annotate("hard stop\n(1.2 x max_pulse_ms)\ncloses it anyway;\n"
+                "truncated only if\nstill above threshold",
                 xy=(hard_stop, 9.4), xytext=(hard_stop - 1.5, 9.4),
                 ha="right", va="top", fontsize=8, color="#7A5AA8")
 

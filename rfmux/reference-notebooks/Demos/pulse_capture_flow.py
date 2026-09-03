@@ -49,7 +49,7 @@ PULSE_TAU_S = 1e-3        # expected decay constant; sets the decimation
 
 CONFIG = PulseCaptureConfig(
     threshold_sigma=5.0,
-    end_sigma=1.5,
+    end_sigma=1.0,
     min_pulse_ms=0.2,
     max_pulse_ms=50.0,
     noise_train_ms=50.0,

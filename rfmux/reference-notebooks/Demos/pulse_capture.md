@@ -399,7 +399,7 @@ inconsistent settings before you spend a capture on them.
 ```python
 capture_config = PulseCaptureConfig(
     threshold_sigma=5.0,    # trigger when I or Q leaves ±5σ
-    end_sigma=1.5,          # close when BOTH are back inside ±1.5σ
+    end_sigma=1.0,          # close when BOTH are back inside ±1σ
     min_pulse_ms=0.2,       # glitch filter: drop anything shorter
     max_pulse_ms=50.0,      # longest recordable pulse — sizes the ring
     noise_train_ms=50.0,    # 0 would derive this from max_pulse_ms
@@ -453,7 +453,7 @@ res = await crs.trigger_capture(
     streamer_mode="slow",
     time_run=2.0,               # seconds of SAMPLE time, not wall clock
     threshold_sigma=5.0,
-    end_sigma=1.5,
+    end_sigma=1.0,
 )
 
 for ch in res.channels:

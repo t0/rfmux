@@ -221,7 +221,7 @@ async def trigger_capture(
         training.
     config : PulseCaptureConfig, optional
         Full detection configuration.  ``threshold_sigma`` (5.0),
-        ``end_sigma`` (1.5) and ``max_pulse_ms`` override individual
+        ``end_sigma`` (1.0) and ``max_pulse_ms`` override individual
         fields of it, so passing a config and one shortcut does what it
         looks like.  Previously the shortcuts were silently ignored
         whenever a config was given.

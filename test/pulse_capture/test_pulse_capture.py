@@ -851,9 +851,9 @@ class TestPulseCaptureSession:
             channels=[1],
             threshold_sigma=5.0,
             # 1.5σ: the end-confirmation count increments when BOTH
-            # I and Q are within end_sigma.  At 1.0σ that probability is
-            # ~0.47 on Gaussian noise (negative drift — termination only
-            # by lucky random walk); at 1.5σ it is ~0.75 (prompt).
+            # I and Q are within end_sigma, ~0.75 per sample here on
+            # white noise, so termination is prompt and these tests
+            # stay about what they assert rather than about the end.
             end_sigma=1.5,
             margin_fraction=0.2,
             buf_size=4000,
@@ -1057,11 +1057,16 @@ class TestPulseCaptureConfig:
         assert any(s == "error" for s, _ in cfg.validate())
 
     def test_validate_low_end_sigma_warns(self):
-        cfg = PulseCaptureConfig(end_sigma=1.0)
+        cfg = PulseCaptureConfig(end_sigma=0.8)
         issues = cfg.validate()
-        assert any(s == "warning" and "random walk" in m
+        assert any(s == "warning" and "hard stop" in m
                    for s, m in issues)
         assert not any(s == "error" for s, _ in issues)
+
+    def test_validate_default_end_sigma_is_clean(self):
+        """The default (1.0) is measured to close captures on both
+        streams; the config must not warn about itself."""
+        assert not any("End σ" in m for _, m in PulseCaptureConfig().validate())
 
     def test_validate_min_above_max_is_error(self):
         cfg = PulseCaptureConfig(min_pulse_ms=300.0, max_pulse_ms=100.0)

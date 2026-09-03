@@ -441,13 +441,17 @@ class PulseCaptureConfig:
                            "End σ must sit below the trigger threshold "
                            f"({self.end_sigma:g} ≥ "
                            f"{self.threshold_sigma:g})."))
-        elif self.end_sigma < 1.2:
+        elif self.end_sigma < 1.0:
+            # Both axes inside ±1σ at once is a 47% per-sample event on
+            # white noise, the break-even for the count-up/count-down
+            # confirmation; the streams' correlated noise carries 1.0
+            # (measured: no hard stops on either stream), lower does not.
             issues.append((
                 "warning",
-                f"End σ {self.end_sigma:g} < 1.2: the end condition "
-                "needs BOTH I and Q inside the band (~47% per sample at "
-                "1.0σ on Gaussian noise) — pulse termination becomes a "
-                "random walk. 1.5σ recommended."))
+                f"End σ {self.end_sigma:g} < 1.0: both axes are inside the "
+                "band less than half the time on noise alone, so the end "
+                "confirmation cannot climb and captures run to the hard "
+                "stop."))
         if self.threshold_sigma < 3:
             issues.append(("warning",
                            f"Threshold {self.threshold_sigma:g}σ will "
@@ -1016,9 +1020,15 @@ class PulseCaptureSession(_CallbackHost):
 
         samples = {c: self._noise_buf[c][:self._noise_n[c]]
                    for c in self.channels}
+        # Three captures, about 3.6 pulse lengths: a max-length pulse
+        # is under a third of a block and a default 20-pulse record
+        # holds five of them.  Not the ring, which has a floor that can
+        # exceed the whole record at slow rates.
+        block = (3 * self.max_capture_samples if self.max_capture_samples
+                 else 2 * self.buf_size)
         self.noise_stats, self.noise_data = estimate_noise_stats(
             samples, self.channels, jump_lag=self.edge_lookback,
-            baseline_window=self.baseline_window)
+            baseline_block=block)
 
         if self.pcap is None:
             self._build_engine_and_writer()

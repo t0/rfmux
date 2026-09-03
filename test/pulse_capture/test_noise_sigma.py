@@ -40,7 +40,7 @@ def _sigma(arr, **kw):
 def test_white_noise_is_unchanged():
     rng = np.random.default_rng(1)
     s_i, s_q = _sigma(_complex(rng.normal(0, 1, N), rng.normal(0, 2, N)),
-                      baseline_window=2000)
+                      baseline_block=2000)
     assert s_i == pytest.approx(1.0, rel=0.03)
     assert s_q == pytest.approx(2.0, rel=0.03)
 
@@ -51,7 +51,7 @@ def test_correlated_noise_reads_its_true_scatter():
     rng = np.random.default_rng(2)
     x = _cic_noise(rng, N)
     assert np.std(x) == pytest.approx(1.0, rel=0.05), "fixture"
-    s_i, _ = _sigma(_complex(x, rng.normal(0, 1, N)), baseline_window=2000)
+    s_i, _ = _sigma(_complex(x, rng.normal(0, 1, N)), baseline_block=2000)
     assert s_i == pytest.approx(1.0, rel=0.05)
 
 
@@ -64,7 +64,7 @@ def test_drift_and_pulses_are_not_noise():
     # so a few percent of inflation is the true answer, not an error.
     for start in rng.integers(0, N - 120, 10):
         x[start:start + 120] += 12.0 * np.exp(-np.arange(120) / 80)
-    s_i, _ = _sigma(_complex(x, rng.normal(0, 1, N)), baseline_window=1000)
+    s_i, _ = _sigma(_complex(x, rng.normal(0, 1, N)), baseline_block=1000)
     assert s_i == pytest.approx(1.0, rel=0.08)
 
 

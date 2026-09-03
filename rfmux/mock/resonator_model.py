@@ -55,6 +55,7 @@ class MockResonatorModel:
         self._nqp_state_noise = None
         self._nqp_state_values = []
         self._nqp_const_arrays = None
+        self._nqp_tiled_cache = None
         self._cache_key_params = {}
         self.tls_noise_enabled = default_config.get('tls_noise_enabled',
                                                     False)
@@ -318,6 +319,7 @@ class MockResonatorModel:
         self._nqp_state_noise = None
         self._nqp_state_values = []
         self._nqp_const_arrays = None
+        self._nqp_tiled_cache = None
         self._cache_key_params = {}
 
         self.nqp_noise_enabled = config.get('nqp_noise_enabled', True)
@@ -702,7 +704,6 @@ class MockResonatorModel:
         # The pulse sum for this one instant, through the same array
         # formula the batch path uses, so the two quantize identically
         # for the convergence-cache key.
-        base_nqp_array = np.array(self.base_nqp_values, dtype=np.float64)
         effective_nqp_array = self._batch_nqp(
             np.array([t_for_pulses], dtype=np.float64))[0]
 
@@ -718,7 +719,7 @@ class MockResonatorModel:
         # -> 4% at a 10% noise level, a 12x slowdown).
         if self.nqp_noise_enabled and self.nqp_noise_std_factor > 0:
             nqp_noise_frac = np.random.normal(
-                0.0, self.nqp_noise_std_factor, len(base_nqp_array))
+                0.0, self.nqp_noise_std_factor, len(self.base_nqp_values))
         else:
             nqp_noise_frac = None
         
@@ -745,6 +746,19 @@ class MockResonatorModel:
                 phys.get('cache_freq_step'),
                 phys.get('cache_amp_step'),
                 phys.get('cache_qp_step'))
+
+    def _cache_keys_for(self, frequency):
+        """The cache-key parameters for a tone frequency, memoised per
+        frequency and refreshed when the resonators or the config
+        change; the memo is bounded."""
+        keys = self._cache_key_params.get(frequency)
+        if keys is None or keys[0] != self._cache_key_gen():
+            keys = ((self._cache_key_gen(),)
+                    + self._compute_cache_key_params(frequency))
+            if len(self._cache_key_params) > 4096:
+                self._cache_key_params.clear()
+            self._cache_key_params[frequency] = keys
+        return keys
 
     def _compute_cache_key_params(self, frequency):
         """(nearest_idx, freq_step, amp_step, qp_step) for a tone."""
@@ -803,12 +817,7 @@ class MockResonatorModel:
         # lookups) once per PFB sample cost more than the physics itself, so
         # they are memoised per tone frequency and refreshed only when the
         # resonators or the config actually change.
-        keys = self._cache_key_params.get(frequency)
-        if keys is None or keys[0] != self._cache_key_gen():
-            keys = (self._cache_key_gen(),) + self._compute_cache_key_params(frequency)
-            if len(self._cache_key_params) > 4096:
-                self._cache_key_params.clear()
-            self._cache_key_params[frequency] = keys
+        keys = self._cache_keys_for(frequency)
         _, nearest_idx, freq_step, amp_step, qp_step = keys
 
         freq_key = round(frequency / freq_step) * freq_step
@@ -1196,84 +1205,21 @@ class MockResonatorModel:
         self._cache_valid = False
     
     def update_qp_densities_for_time(self, current_time):
-        """Update all resonator QP densities based on active pulses.
-        
-        Parameters
-        ----------
-        current_time : float
-            Current time in seconds since streaming started
-        """
-        # Only update if time has advanced
+        """Advance every resonator's QP density to *current_time*
+        under the active pulses; a monotonic ratchet, so an earlier
+        time is a no-op."""
         if current_time <= self.last_update_time:
             return
-        
-        dt = current_time - self.last_update_time
-        self.last_update_time = current_time
+        self.advance_pulses_to(current_time, 1, 0.0)
 
-        # Everything below mutates state the per-sample QP memo depends
-        # on (new pulses, pruned pulses, base_lekid_params), so drop it.
-        self._nqp_state_t = None
-
-        # Check if we should trigger new pulses
-        self._check_trigger_pulses(current_time, dt)
-        
-        # Calculate QP densities for all resonators based on active pulses
-        pulse_nqp_values = []
-        
-        for i in range(len(self.mr_lekids)):
-            # Get base nqp for this resonator
-            base_nqp = self.base_nqp_values[i] if i < len(self.base_nqp_values) else 0
-            
-            # Calculate total excess QP contribution from all active pulses
-            excess_qp = 0
-            
-            # Filter active pulses for this resonator
-            for pulse in self.pulse_events:
-                if pulse['resonator_index'] == i:
-                    # Calculate pulse contribution at current time
-                    pulse_dt = current_time - pulse['start_time']
-                    if pulse_dt >= 0:
-                        # Exponential rise and decay model
-                        if pulse_dt < pulse['tau_rise']:  # Rising edge
-                            time_factor = (1 - np.exp(-pulse_dt / pulse['tau_rise']))
-                        else:  # Decay phase
-                            rise_time = pulse['tau_rise']
-                            decay_dt = pulse_dt - rise_time
-                            time_factor = np.exp(-decay_dt / pulse['tau_decay'])
-                        
-                        # Calculate excess QP relative to base_nqp
-                        # amplitude=2.0 means total_nqp = base_nqp + 1.0*base_nqp = 2*base_nqp
-                        excess_factor = (pulse['amplitude'] - 1.0) * time_factor
-                        excess_qp += excess_factor * base_nqp
-            
-            # Calculate total absolute QP density
-            total_nqp = base_nqp + excess_qp
-            
-            # Ensure non-negative QP density
-            total_nqp = max(0, total_nqp)
-            
-            pulse_nqp_values.append(total_nqp)
-        
-        # Update base parameters using physics-based method (same as noise)
-        if pulse_nqp_values:
-            self.update_base_params_from_nqp(pulse_nqp_values)
-            self.invalidate_caches()
-        
-        # Clean up old pulses (after 15 decay constants).
-        self.pulse_events = [p for p in self.pulse_events 
-                           if current_time - p['start_time'] < p['tau_rise'] + p['tau_decay'] * 15]
-    
     def advance_pulses_to(self, t_to, n_steps, dt):
         """The bookkeeping of update_qp_densities_for_time, with the
         trigger checks made at *n_steps* instants *dt* apart ending at
         *t_to* rather than at one.
 
-        Lets the PFB emitter evaluate a whole frame's physics in one
-        call while pulses still start on the same sub-batch grid they
-        did when every batch was its own call: a pulse contributes
-        nothing before its start, so checking every instant first and
-        then evaluating the frame gives the samples each batch would
-        have produced on its own.
+        Trigger checks at every grid instant, then one evaluation
+        across the frame: a pulse contributes nothing before its start,
+        so the frame's samples equal a per-instant evaluation.
         """
         t_from = t_to - (n_steps - 1) * dt
         for k in range(n_steps):
@@ -1685,7 +1631,7 @@ class MockResonatorModel:
 
         Found through the sorted tones rather than the full grid: with
         a module fully configured the grid has a million entries and
-        only the diagonal survives.  The window is widened by a few ulp
+        only the diagonal survives.  The window is widened by a relative 1e-9
         and the grid's own predicate applied to the candidates, so the
         pair set is the grid's exactly.
         """
@@ -1774,8 +1720,7 @@ class MockResonatorModel:
             if i >= len(base):
                 continue
             dt = t_arr - pulse['start_time']
-            rise = 1.0 - np.exp(-np.minimum(dt, 0.0) * 0.0
-                                - np.maximum(dt, 0.0) / pulse['tau_rise'])
+            rise = 1.0 - np.exp(-np.maximum(dt, 0.0) / pulse['tau_rise'])
             decay = np.exp(-np.maximum(dt - pulse['tau_rise'], 0.0)
                            / pulse['tau_decay'])
             tf = np.where(dt < pulse['tau_rise'], rise, decay)
@@ -1787,10 +1732,10 @@ class MockResonatorModel:
         """The per-resonator material arrays repeated S times, so one
         kernel dispatch covers S instants."""
         n = len(self.mr_complex_resonators)
-        self.update_base_params_from_nqp(self.base_nqp_values[:n]) \
-            if self._nqp_const_arrays is None else None
+        if self._nqp_const_arrays is None:
+            self.update_base_params_from_nqp(self.base_nqp_values[:n])
         const = self._nqp_const_arrays
-        cached = getattr(self, '_nqp_tiled_cache', None)
+        cached = self._nqp_tiled_cache
         if cached is None or cached[0] != (S, n) or cached[1] is not const:
             tiled = tuple(np.tile(a, S) for a in const[1:])
             cached = ((S, n), const, tiled)
@@ -1806,8 +1751,8 @@ class MockResonatorModel:
         Assumes _physics_lock held.
 
         With pulse_time None every sample shares one instant (the
-        reference loop's memo made them share one QP state and one noise
-        draw), so the state is evaluated once and broadcast.
+        reference loop's memo makes them share one QP state and one
+        noise draw), so the state is evaluated once and broadcast.
         """
         num_samples = len(t)
         n_res = len(self.mr_lekids)
@@ -1882,13 +1827,7 @@ class MockResonatorModel:
                 continue
             frequency = active_tone_freqs[j]
             amplitude = tone_mag[j]
-            keys = self._cache_key_params.get(frequency)
-            if keys is None or keys[0] != self._cache_key_gen():
-                keys = ((self._cache_key_gen(),)
-                        + self._compute_cache_key_params(frequency))
-                if len(self._cache_key_params) > 4096:
-                    self._cache_key_params.clear()
-                self._cache_key_params[frequency] = keys
+            keys = self._cache_keys_for(frequency)
             _, nearest_idx, freq_step, amp_step, qp_step = keys
             qp_col = (nqp[:, nearest_idx] if 0 <= nearest_idx < n_res
                       else np.zeros(S))
@@ -1988,8 +1927,13 @@ class MockResonatorModel:
         self._convergence_stats['skipped'] += n_steps - len(misses)
         first = np.full(S, num_samples)
         np.minimum.at(first, row, np.arange(num_samples))
-        recent = [not (n == first[row[n]] and (int(row[n]), k) in misses)
-                  for n in range(num_samples) for k in range(len(tones))][-100:]
+        # The last hundred steps' hit/miss, for the statistics.
+        n_live = len(tones)
+        recent = []
+        for step in range(max(0, n_steps - 100), n_steps):
+            n, k = divmod(step, n_live)
+            recent.append(not (n == first[row[n]]
+                               and (int(row[n]), k) in misses))
         self._recent_cache_results.extend(recent)
         del self._recent_cache_results[:-100]
         before = self._stats_counter // log_every

@@ -42,9 +42,9 @@ def test_one_physics_call_per_frame_and_hardware_sized_packets(dec, channels, mo
     stamps = []
     real_send = st._send_pfb_packet
 
-    def spy(interleaved, n_groups, t_first):
+    def spy(interleaved, t_first):
         stamps.append((len(interleaved), t_first))
-        real_send(interleaved, n_groups, t_first)
+        real_send(interleaved, t_first)
     monkeypatch.setattr(st, "_send_pfb_packet", spy)
 
     frame_time = 1.0 / (625e6 / 256 / 64 / 2 ** dec)

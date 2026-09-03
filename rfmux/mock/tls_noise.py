@@ -206,9 +206,9 @@ class TLSNoiseGenerator:
     def values_at(self, times: np.ndarray) -> np.ndarray:
         """Vectorised :meth:`value_at` — returns ``(len(times), n_res)``.
 
-        The same arithmetic as value_at, row by row, so a batch and the
-        per-sample calls it replaces agree bit for bit; and the same
-        memo afterwards, as if the last time had been queried alone.
+        Row by row the same arithmetic as value_at, so batched and
+        sequential queries agree bit for bit; the memo is left as if
+        the last time had been queried alone.
         """
         times = np.asarray(times, dtype=np.float64)
         if times.size == 0:

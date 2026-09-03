@@ -324,9 +324,10 @@ class MockCRSStreamer(threading.Thread):
         model = self.mock_crs._resonator_model
         # pulse_time is explicit (same escape hatch the PFB emitter uses):
         # update_qp_densities_for_time is a monotonic ratchet, and with
-        # PFB enabled its batches have already advanced last_update_time
-        # past t_frame — without this the slow stream would be evaluated
-        # at the PFB's time, skewing it by up to one frame.
+        # PFB enabled advance_pulses_to has already moved
+        # last_update_time to the end of the frame — without this the
+        # slow stream would be evaluated at the PFB's time, skewing it
+        # by up to one frame.
         channel_responses = model.calculate_module_response_coupled(
             module_num, num_samples=1, sample_rate=slow_rate,
             start_time=t_frame, pulse_time=t_frame,
@@ -401,10 +402,10 @@ class MockCRSStreamer(threading.Thread):
         """Generate one slow frame's worth of PFB samples in one physics
         call and send whatever full packets that makes.
 
-        A frame is ``2**dec`` sub-batches of PFB_BATCH samples.  Pulse
-        triggers are checked on that sub-batch grid first, so a pulse
-        starts where it would have if each sub-batch were its own call;
-        the physics is then evaluated once across the frame.  The
+        A frame is ``2**dec`` sub-batches of PFB_BATCH samples.  Trigger
+        checks run on that grid before the physics, so pulse start
+        times do not depend on the frame length; the physics is then
+        evaluated once across the frame.  The
         remainder that does not fill a packet is carried to the next
         frame, with the time of its first sample.
         """
@@ -450,15 +451,16 @@ class MockCRSStreamer(threading.Thread):
             self._pfb_buf = np.concatenate((self._pfb_buf, interleaved))
         per_packet = (self.PFB_PACKET_SAMPLES // n_groups) * n_groups
         while len(self._pfb_buf) >= per_packet and self.running:
-            self._send_pfb_packet(self._pfb_buf[:per_packet], n_groups,
+            self._send_pfb_packet(self._pfb_buf[:per_packet],
                                   self._pfb_buf_t0)
             self._pfb_buf = self._pfb_buf[per_packet:]
             self._pfb_buf_t0 += (per_packet // n_groups) / PFB_RATE
 
-    def _send_pfb_packet(self, interleaved, n_groups, t_first):
+    def _send_pfb_packet(self, interleaved, t_first):
         """Build and send one PFBPacket holding *interleaved* samples,
         stamped with the time of its first sample."""
         channels = self.pfb_channels
+        n_groups = len(channels)
         pkt = PFBPacket()
         pkt.magic = PFB_PACKET_MAGIC
         pkt.version = 1

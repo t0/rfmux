@@ -6,25 +6,19 @@
 
 ### Core Components
 - **Python API** (`rfmux/core/`): Hardware abstraction for CRS boards
-- **Algorithms** (`rfmux/algorithms/`): KID measurement algorithms (network analysis, multisweep, pulse capture)
+- **Algorithms** (`rfmux/algorithms/`): KID measurement algorithms (network analysis, multisweep)
+- **Pulse capture** (`rfmux/pulse_capture/`): the trigger engine, its compiled walk, the stream sources, the dual-stream session, and the HDF5 record
 - **Periscope** (`rfmux/tools/periscope/`): Real-time PyQt6 GUI for data visualization
 - **Streamer** (`rfmux/streamer/`): C++ extension for high-performance packet reception
 - **Mock System** (`rfmux/mock/`): Physics-based CRS simulator with Numba JIT
 
 ## Current Active Work
 
-**Branch**: `buffer_exploration`
-**Project**: Pulse Capture → Periscope Integration
-
-Integrating real-time pulse detection into Periscope with:
-- Streaming HDF5 persistence (write-as-you-go)
-- Live histogram visualization
-- Callback-driven PulseCapture engine
-- Session browser integration
-
-**Phase 1** (next): Callback-driven PulseCapture refactor + PulseHDF5Writer/Reader + PulseHistogramSet
-
-See `memory-bank/pulse_capture_periscope_integration.md` for full specification.
+**Branch**: `buffer_exploration`, pulse capture in Periscope: dual-stream
+(slow + PFB) capture with live pair matching, streaming HDF5, histograms
+and templates, and the session browser.  The C++ PFB receiver path is
+verified in mock and on loopback only; tag
+`checkpoint-validate-pfb-receiver` marks where to validate it on a board.
 
 ## Development Setup
 
@@ -36,7 +30,7 @@ pip install -e .
 sudo apt-get install libxcb-cursor0
 
 # Optional: Increase UDP buffer for long captures
-sudo sysctl net.core.rmem_max=67108864
+sudo sysctl net.core.rmem_max=268435456
 ```
 
 ## Code Style & Conventions
@@ -141,8 +135,9 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 - Reproducibility requires concrete `resonator_random_seed` in config
 
 ### Streaming
-- Slow stream: ~38 kHz at dec=1, port 9876, `ReadoutPacket`
-- PFB stream: ~1.22 MHz, port 9877, `PFBPacket`
+- Slow stream: ~38 kHz at dec=0, halving per stage, port 9876, `ReadoutPacket`
+- PFB stream: ~2.44 MHz, port 9877, `PFBPacket`
+- The C++ receiver hands Periscope and the PFB source one demuxed array per drain (`pop_readout_batch`, `pop_pfb_batch`); the per-packet conversions remain the reference
 - `get_multicast_socket()` uses `SO_REUSEPORT` — multiple listeners OK
 - Mock streams to the same multicast group as hardware, with TTL 0 so it
   cannot leave the host. If multicast does not work on the machine it
@@ -159,7 +154,8 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 ```
 rfmux/
 ├── core/           # CRS, session, hardware_map, schema
-├── algorithms/     # measurement/ (fitting, multisweep, pulse_detection)
+├── algorithms/     # measurement/ (fitting, multisweep, streamer config)
+├── pulse_capture/  # detection engine, walk, sources, session, hdf5
 ├── tools/
 │   └── periscope/  # GUI panels, dialogs, tasks, utils
 ├── mock/           # MockCRS, resonator physics
@@ -171,9 +167,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 629 tests, ~1 min, zero skips
+pytest --tier=quick                 # Edit loop: 623 tests, ~1 min, zero skips
 pytest --tier=portable              # No CRS, no GUI: 37 tests, ~9 s
-pytest --tier=full                  # All 645 that run without a board, ~4 min
+pytest --tier=full                  # All 639 that run without a board, ~4 min
 pytest --tier=acquisition           # MockCRS server + real UDP: 16 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem
@@ -184,7 +180,7 @@ python -m rfmux.tools.periscope     # Launch Periscope
 `hardware`/`all` excludes the board tests, so they report zero skips. Markers
 tag tests: `portable`, `slow_acquisition`, `hardware` — the last applied
 automatically to anything using the `crs`/`live_session`/`serial` fixtures,
-so don't add it by hand. A bare `pytest` still runs 645 + ~75 hardware skips.
+so don't add it by hand. A bare `pytest` still runs 639 + ~75 hardware skips.
 `full` contains `acquisition`; running both pays the slow set twice.
 
 `test/` is organized into subdirectories mirroring the package under test

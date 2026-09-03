@@ -8,11 +8,11 @@ developer laptop.
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
 | `pytest --tier=portable` | 37 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 629 | ~1 min | Default while editing. |
+| `pytest --tier=quick` | 623 | ~1 min | Default while editing. |
 | `pytest --tier=acquisition` | 16 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 645 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=full` | 639 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 720 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 714 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem
@@ -101,7 +101,7 @@ Directories mirror the package under test.
 | Directory | Covers |
 | --- | --- |
 | `core/` | `rfmux/core/` — API surface, schema, threading |
-| `streamer/` | `rfmux/streamer/` — packet decode, port conflict probes |
+| `streamer/` | `rfmux/streamer/` — packet decode, the batched getters, port conflict probes |
 | `mock/` | `rfmux/mock/` — simulator fidelity, config plumbing, TLS noise, JIT dispatch, multicast selection |
 | `algorithms/` | `rfmux/algorithms/measurement/` — measurement flows, streamer config |
 | `periscope/` | `rfmux/tools/periscope/` — panels, dialogs, receiver, shutdown |

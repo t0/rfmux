@@ -311,13 +311,14 @@ with.
 ## Known limitations
 
 - The noise σ is estimated from adjacent-sample differences, which is exact
-  for white noise. The decimation filter leaves adjacent slow-stream samples
-  correlated at stages above 0, so there the estimate reads about 1.7× below
-  the samples' actual scatter: a threshold stated as 5σ sits nearer 3σ of the
-  data, accidental triggers are more frequent than `max_accidental_per_min`
-  promises, and reported SNRs are high by the same factor. Stage 0 and the
-  fast stream are unaffected, as is the edge test, whose σ is measured at
-  its own lag.
+  for white noise. The CIC decimators leave adjacent slow-stream samples
+  correlated, so the estimate reads below the samples' actual scatter: by
+  about 1.3× at stage 0 (CIC1 alone) and about 1.6× at every stage above it
+  (CIC2's six stages), from the filters' kernels. A threshold stated as 5σ
+  therefore sits nearer 3 to 4σ of the data, accidental triggers are more
+  frequent than `max_accidental_per_min` promises, and reported SNRs are
+  high by the same factor. The edge test is unaffected, since its σ is
+  measured at its own lag.
 - In `"both"` mode the two detection engines share one event loop, so a slow
   host that cannot keep up with the fast stream also delays the slow one.
 

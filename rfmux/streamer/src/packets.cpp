@@ -553,6 +553,20 @@ namespace packets {
 		}
 	}
 
+	void PacketReceiver::flush_all() {
+		for (auto& [key, reorder_buf] : reorder_buffers_) {
+			auto [serial, module] = key;
+			if (queues_.find(key) == queues_.end())
+				queues_[key] = std::make_shared<PacketQueue>(queue_max_size_);
+			auto& out_queue = *queues_[key];
+			while (!reorder_buf.empty()) {
+				Packet pkt = reorder_buf.top();
+				reorder_buf.pop();
+				out_queue.push(std::move(pkt));
+			}
+		}
+	}
+
 	// Concrete packet type implementations
 	class ReadoutPacketTypeImpl : public PacketType {
 	public:

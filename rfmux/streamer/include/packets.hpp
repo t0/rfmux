@@ -223,6 +223,12 @@ namespace packets {
 
 		size_t receive_batch(size_t batch_size = 256, std::optional<int> timeout_ms = std::nullopt);
 
+		// Every held packet to its queue, ordered.  For the end of a
+
+		// stream, once receive_batch is no longer being called.
+
+		void flush_all();
+
 		std::shared_ptr<PacketQueue> get_queue(uint16_t serial, uint8_t module);
 
 		// Get all active queues as (serial, module, queue) tuples

@@ -65,6 +65,10 @@ def _patched_socket(monkeypatch, sock_by_port):
     # A quiet socket otherwise holds the source for the 60 s production
     # timeout after the senders finish.
     monkeypatch.setattr(src.streamer, "STREAMER_TIMEOUT", 0.3)
+    # The receiver holds its newest reorder_window packets until more
+    # arrive; a finite burst must not sit in it until the stop.
+    monkeypatch.setattr(src, "_PFB_REORDER_WINDOW", 1)
+    monkeypatch.setattr(src, "_PFB_FLUSH_EVERY", 1)
 
 
 def test_slow_drain_is_lossless_and_ordered(monkeypatch):
@@ -219,18 +223,6 @@ def test_pfb_source_restores_sequence_order(monkeypatch):
     assert np.all(np.diff(stamps) > 0), "samples fed out of order"
 
 
-def test_seq_reorder_skips_a_real_loss():
-    r = src._SeqReorder(window=4)
-    for s in (10, 11, 13, 14, 15, 16):
-        r.push(s, s)
-    assert r.ready() == [10, 11]              # 12 may still come
-    for s in (17, 18):
-        r.push(s, s)
-    assert r.ready() == [13, 14, 15, 16, 17, 18]   # 12 is lost: move on
-    r.push(19, 19)
-    assert r.ready() == [19] and r.flush() == []
-
-
 def test_slow_ingest_feeds_blocks_in_time_order():
     fed = []
     ingest = src.SlowIngest(lambda ch, i, q, t: fed.append(np.asarray(t)),
@@ -264,6 +256,7 @@ def _run_pfb(monkeypatch, blobs, channels, stop_after):
         time.sleep(0.1)
         sink = _Sink()
         sink.channels = channels
+        sink.source = {}
         deadline = time.monotonic() + 3.0
         fed = lambda: sum(len(c[1]) for c in sink.calls)
         asyncio.run(src.run_pfb_source(
@@ -284,14 +277,25 @@ def test_pfb_source_picks_its_channels_from_a_wider_stream(monkeypatch):
 
 
 @pytest.mark.filterwarnings("ignore:PFB socket buffer")
-def test_pfb_source_feeds_blocks_of_packets(monkeypatch):
-    """Sixteen packets per engine call per channel, the tail at the end,
-    in order."""
+def test_pfb_source_feeds_whole_batches_in_order(monkeypatch):
+    """Every packet's samples reach the engine, in stream order, in
+    blocks that are whole packets."""
     blobs = [_pfb_packet(1, t_s=43200.0 + k * 4.096e-4, seq=k) for k in range(40)]
     sink = _run_pfb(monkeypatch, blobs, [1], stop_after=4000)
-    assert [len(c[1]) for c in sink.calls] == [1600, 1600, 800]
+    assert sum(len(c[1]) for c in sink.calls) == 4000
+    assert all(len(c[1]) % 100 == 0 for c in sink.calls)
     t = np.concatenate([c[2] for c in sink.calls])
     assert np.all(np.diff(t) > 0)
+
+
+def test_pfb_source_counts_lost_packets(monkeypatch):
+    """A hole in the sequence numbers is counted from the receiver's
+    own statistics, missing packets individually."""
+    seqs = [k for k in range(40) if not 10 <= k < 17]      # 7 never sent
+    blobs = [_pfb_packet(1, t_s=43200.0 + k * 4.096e-4, seq=k) for k in seqs]
+    sink = _run_pfb(monkeypatch, blobs, [1], stop_after=3300)
+    assert sum(len(c[1]) for c in sink.calls) == 3300
+    assert sink.source["lost_packets"] == 7
 
 
 def test_pfb_buffer_seconds_counts_a_four_channel_stream():
@@ -342,6 +346,7 @@ def test_pfb_source_discards_to_bound_its_lag(monkeypatch):
                 _Sink.fed += len(i)
 
         deadline = time.monotonic() + 2.0
+        monkeypatch.setattr(src, "_PFB_POP_MAX", 20)   # pops small enough to see
         asyncio.run(src.run_pfb_source(
             _Sink(), "127.0.0.1", [1], module=2, max_lag_s=0.5e-3,
             should_stop=lambda: time.monotonic() > deadline))

@@ -16,7 +16,6 @@ from rfmux import streamer
 from rfmux.pulse_capture.capture_session import (
     DualPulseCaptureSession, PulseCaptureConfig, PulseCaptureSession)
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
-from rfmux.pulse_capture.sources import _SeqReorder
 
 from test.pulse_capture.test_block_ingest_equivalence import (
     DT, FS, _packets)
@@ -76,20 +75,6 @@ def test_without_a_day_records_have_no_calendar_time():
         s.feed_sample(1, float(values[0].real), float(values[0].imag), ts)
     s.stop()
     assert got and "trigger_utc" not in got[0]
-
-
-def test_the_reorder_counts_what_it_gave_up_on():
-    r = _SeqReorder(window=4)
-    out = []
-    for seq in (0, 1, 2, 4, 5, 6, 7, 8, 9):    # 3 never arrives
-        r.push(seq, seq)
-        out += r.ready()
-    assert out == [0, 1, 2, 4, 5, 6, 7, 8, 9]
-    assert r.lost == 1
-    for seq in (20, 21, 22, 23, 24, 25):       # 10..19 never arrive
-        r.push(seq, seq)
-        out += r.ready()
-    assert r.lost == 11
 
 
 def test_a_dual_capture_file_records_the_day(tmp_path):

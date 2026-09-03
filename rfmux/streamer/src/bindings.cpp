@@ -523,6 +523,106 @@ PYBIND11_MODULE(_receiver, m) {
 			return py::make_tuple(samples, seconds, recent, fir, seq, year, yday);
 		}, "max_packets"_a = 4096,
 		   "Pop up to max_packets readout packets demuxed into arrays")
+		.def("pop_pfb_batch", [](PacketQueue& self, size_t max_packets) -> py::object {
+			/* A drain's worth of PFB packets demuxed at once.  Returns
+			 * (samples, seconds, recent, seq, mode, slots, num_samples,
+			 * year, yday) or None when the queue is empty:
+			 *   samples     complex128 (groups, packets * time_samples):
+			 *               row g is the g-th interleaved channel, the
+			 *               packetizer gain taken out (/256) as np.array
+			 *   seconds     float64 seconds of day per packet, NaN when
+			 *               the stamp is not disciplined; recent bool
+			 *   seq         uint32 per packet
+			 *   mode/slots/num_samples of the batch, shared by every
+			 *               packet in it; year/yday of the first stamp
+			 * A batch holds one layout: it stops short where the mode,
+			 * slots or sample count change, which stays queued. */
+			std::vector<Packet> got;
+			got.reserve(std::min<size_t>(max_packets, 4096));
+			auto layout = [](const Packet& p) {
+				const auto* h = static_cast<const pfb_packet_header*>(p.data());
+				return std::make_tuple(p.size(), h->mode, h->slot1, h->slot2,
+				                       h->slot3, h->slot4, h->num_samples);
+			};
+			{
+				py::gil_scoped_release release;
+				self.pop_while(got, max_packets, [&got, &layout](const Packet& p) {
+					if (p.size() < sizeof(pfb_packet_header) + sizeof(irigb_timestamp))
+						return false;
+					return got.empty() || layout(p) == layout(got.front());
+				});
+			}
+			const py::ssize_t n = static_cast<py::ssize_t>(got.size());
+			if (n == 0)
+				return py::none();
+			const auto* first = static_cast<const pfb_packet_header*>(got.front().data());
+			const int groups = first->mode == 0 ? 1 : first->mode == 1 ? 2 : 4;
+			const py::ssize_t num_samples = first->num_samples;
+			const py::ssize_t time_samples = num_samples / groups;
+
+			py::array_t<std::complex<double>> samples({static_cast<py::ssize_t>(groups),
+			                                           n * time_samples});
+			py::array_t<double> seconds(n);
+			py::array_t<bool> recent(n);
+			py::array_t<uint32_t> seq(n);
+			auto S = samples.mutable_unchecked<2>();
+			auto T = seconds.mutable_unchecked<1>();
+			auto R = recent.mutable_unchecked<1>();
+			auto Q = seq.mutable_unchecked<1>();
+			int32_t year = 0, yday = 0;
+			bool have_day = false;
+			for (py::ssize_t i = 0; i < n; i++) {
+				const char* data = static_cast<const char*>(got[i].data());
+				const auto* hdr = reinterpret_cast<const pfb_packet_header*>(data);
+				const auto* raw = reinterpret_cast<const int32_t*>(
+					data + sizeof(pfb_packet_header));
+				const Timestamp ts(*reinterpret_cast<const irigb_timestamp*>(
+					data + sizeof(pfb_packet_header) + num_samples * 8));
+				for (py::ssize_t k = 0; k < time_samples * groups; k++)
+					S(k % groups, i * time_samples + k / groups) =
+						std::complex<double>(raw[2*k], raw[2*k+1]) / 256.;
+				const bool rec = ts.is_recent();
+				R(i) = rec;
+				T(i) = rec ? (ts.h * 3600.0 + ts.m * 60.0 + ts.s
+				              + ts.ss / static_cast<double>(SS_PER_SECOND))
+				           : std::numeric_limits<double>::quiet_NaN();
+				Q(i) = hdr->seq;
+				if (rec && !have_day) { year = ts.y; yday = ts.d; have_day = true; }
+			}
+			return py::make_tuple(samples, seconds, recent, seq,
+			                      static_cast<int>(first->mode),
+			                      py::make_tuple(first->slot1, first->slot2,
+			                                     first->slot3, first->slot4),
+			                      static_cast<int>(num_samples), year, yday);
+		}, "max_packets"_a = 256,
+		   "Pop up to max_packets PFB packets demuxed into arrays")
+		.def("drop_pfb_before", [](PacketQueue& self, double t_target, size_t limit) -> size_t {
+			/* Pop and discard PFB packets stamped before t_target seconds
+			 * of day (undisciplined stamps count as before), at most
+			 * limit of them; the first at or past it stays queued. */
+			std::vector<Packet> gone;
+			gone.reserve(64);
+			size_t dropped = 0;
+			{
+				py::gil_scoped_release release;
+				self.pop_while(gone, limit, [t_target](const Packet& p) {
+					if (p.size() < sizeof(pfb_packet_header) + sizeof(irigb_timestamp))
+						return true;
+					const char* data = static_cast<const char*>(p.data());
+					const auto* hdr = reinterpret_cast<const pfb_packet_header*>(data);
+					const Timestamp ts(*reinterpret_cast<const irigb_timestamp*>(
+						data + sizeof(pfb_packet_header) + hdr->num_samples * 8));
+					if (!ts.is_recent())
+						return true;
+					const double t = ts.h * 3600.0 + ts.m * 60.0 + ts.s
+					                 + ts.ss / static_cast<double>(SS_PER_SECOND);
+					return t < t_target;
+				});
+				dropped = gone.size();
+			}
+			return dropped;
+		}, "t_target"_a, "limit"_a = 1 << 20,
+		   "Discard PFB packets stamped before t_target seconds of day")
 		.def("empty", &PacketQueue::empty)
 		.def("size", &PacketQueue::size)
 		.def("clear", &PacketQueue::clear, "Clear all packets from queue")
@@ -548,6 +648,8 @@ PYBIND11_MODULE(_receiver, m) {
 		.def("get_queue", &PacketReceiver::get_queue,
 			 "serial"_a, "module"_a,
 			 "Get queue for specific module")
+		.def("flush_all", &PacketReceiver::flush_all,
+			 "Every held packet to its queue, in order; call once receive_batch has stopped")
 		.def("get_all_queues", &PacketReceiver::get_all_queues,
 			 "Get all active queues as (serial, module, queue) tuples")
 		.def("get_stats", &PacketReceiver::get_stats)

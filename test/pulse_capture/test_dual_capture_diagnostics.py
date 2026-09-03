@@ -24,6 +24,9 @@ def _private_pfb_socket(monkeypatch):
     def fake(host, port=None, **kw):
         yield sock
     monkeypatch.setattr(streamer, "get_multicast_socket", fake)
+    from rfmux.pulse_capture import sources as _src
+    monkeypatch.setattr(_src, "_PFB_REORDER_WINDOW", 1)
+    monkeypatch.setattr(_src, "_PFB_FLUSH_EVERY", 1)
     return sock
 
 
@@ -300,15 +303,16 @@ def test_a_stream_that_never_catches_up_does_not_strand_the_pair():
 
 
 @pytest.mark.filterwarnings("ignore:PFB socket buffer")
-def test_pfb_batch_yields_to_the_loop(monkeypatch):
-    """A long PFB batch turns the loop over every _PFB_YIELD_EVERY
-    packets, so a capture walk cannot hold it for a whole batch."""
+def test_pfb_source_turns_the_loop_over_per_batch(monkeypatch):
+    """Each popped batch is followed by a turn of the loop, so a dual
+    capture's slow side runs between fast batches."""
     import time
 
     from rfmux.pulse_capture import sources as src
 
     sock = _private_pfb_socket(monkeypatch)
     monkeypatch.setattr(streamer, "STREAMER_TIMEOUT", 0.3)
+    monkeypatch.setattr(src, "_PFB_POP_MAX", 8)
     send = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     port = sock.getsockname()[1]
     pkt = streamer.PFBPacket()
@@ -316,10 +320,10 @@ def test_pfb_batch_yields_to_the_loop(monkeypatch):
     pkt.mode = 0
     pkt.slot1 = 0                            # channel 1, 0-indexed on the wire
     pkt.num_samples = 100
-    blob = bytes(pkt)
     N = 40
-    for _ in range(N):
-        send.sendto(blob, ("127.0.0.1", port))
+    for k in range(N):
+        pkt.seq = k
+        send.sendto(bytes(pkt), ("127.0.0.1", port))
     monkeypatch.setattr(src, "_flush", lambda s: None)
     time.sleep(0.05)
 
@@ -337,15 +341,15 @@ def test_pfb_batch_yields_to_the_loop(monkeypatch):
         fed = 0
 
         def feed_block(self, ch, i, q, t):
-            _Sink.fed += 1
+            _Sink.fed += len(i)
 
     asyncio.run(src.run_pfb_source(
         _Sink(), "127.0.0.1", [1],
-        should_stop=lambda: _Sink.fed >= N))
+        should_stop=lambda: _Sink.fed >= N * 100))
     send.close()
-    # 40 packets in one drain: yields at k=8,16,24,32 plus one after.
+    assert _Sink.fed == N * 100
+    # 40 packets in pops of at most 8: at least five turns.
     assert yields["n"] >= 4, f"only {yields['n']} yields for {N} packets"
-
 
 def test_union_window_spans_the_saved_record():
     """The pair's window covers the saved record, not the core, and a

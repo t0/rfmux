@@ -7,6 +7,7 @@
 #include <vector>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <map>
 #include <queue>
 #include <tuple>
@@ -66,6 +67,8 @@ namespace packets {
 		}
 
 		Timestamp normalized() const;
+		// Seconds of day; NaN when the stamp is not disciplined.
+		double seconds_of_day() const;
 		void renormalize() { *this = normalized(); }
 	};
 
@@ -222,11 +225,8 @@ namespace packets {
 		PacketReceiver& operator=(const PacketReceiver&) = delete;
 
 		size_t receive_batch(size_t batch_size = 256, std::optional<int> timeout_ms = std::nullopt);
-
-		// Every held packet to its queue, ordered.  For the end of a
-
-		// stream, once receive_batch is no longer being called.
-
+		// Every held packet to its queue, ordered.  Packets received
+		// afterwards are held again, so call once receive_batch has stopped.
 		void flush_all();
 
 		std::shared_ptr<PacketQueue> get_queue(uint16_t serial, uint8_t module);
@@ -249,7 +249,8 @@ namespace packets {
 
 	private:
 		void process_packet(std::vector<char>&& data);
-		void flush_reorder_buffer(uint16_t serial, uint8_t module);
+		// Release all but *keep* of the packets held for (serial, module).
+		void flush_reorder_buffer(uint16_t serial, uint8_t module, size_t keep);
 
 		std::shared_ptr<PacketType> type_;
 		int sockfd_;

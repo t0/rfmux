@@ -6,6 +6,7 @@
 #include <pybind11/complex.h>
 #include <pybind11/numpy.h>
 #include <fmt/format.h>
+#include <cmath>
 #include <limits>
 
 #include "packets.hpp"
@@ -13,6 +14,14 @@
 namespace py = pybind11;
 using namespace packets;
 using namespace py::literals;
+
+/* One interleaved I/Q pair as complex, the packetizer gain (256) taken out. */
+static inline std::complex<double> iq_at(const int32_t* raw, py::ssize_t k) {
+	return std::complex<double>(raw[2*k], raw[2*k+1]) / 256.;
+}
+static inline std::complex<double> iq_at(const std::vector<int32_t>& raw, py::ssize_t k) {
+	return iq_at(raw.data(), k);
+}
 
 PYBIND11_MODULE(_receiver, m) {
 	py::class_<Timestamp>(m, "Timestamp")
@@ -117,7 +126,7 @@ PYBIND11_MODULE(_receiver, m) {
 		py::array_t<std::complex<double>> result(num_samples);
 		auto out = result.mutable_unchecked<1>();
 		for (py::ssize_t i = 0; i < num_samples; i++)
-			out(i) = std::complex<double>(raw[2*i], raw[2*i+1]) / 256.;
+			out(i) = iq_at(raw, i);
 		return result;
 	};
 
@@ -193,7 +202,7 @@ PYBIND11_MODULE(_receiver, m) {
 				if (idx < 0 || idx >= num_channels)
 					throw py::index_error("channel index out of range");
 				return py::cast(
-					std::complex<double>(raw[2*idx], raw[2*idx+1]) / 256.
+					iq_at(raw, idx)
 				);
 			}
 
@@ -207,7 +216,7 @@ PYBIND11_MODULE(_receiver, m) {
 				auto out = result.mutable_unchecked<1>();
 				for (py::ssize_t i = 0; i < length; i++) {
 					py::ssize_t ch = start + i * step;
-					out(i) = std::complex<double>(raw[2*ch], raw[2*ch+1]) / 256.;
+					out(i) = iq_at(raw, ch);
 				}
 				return result;
 			}
@@ -227,7 +236,7 @@ PYBIND11_MODULE(_receiver, m) {
 				if (ch < 0) ch += num_channels;
 				if (ch < 0 || ch >= num_channels)
 					throw py::index_error("channel index out of range");
-				out(i) = std::complex<double>(raw[2*ch], raw[2*ch+1]) / 256.;
+				out(i) = iq_at(raw, ch);
 			}
 			return result;
 		})
@@ -343,7 +352,7 @@ PYBIND11_MODULE(_receiver, m) {
 				if (idx < 0 || idx >= num_samples)
 					throw py::index_error("sample index out of range");
 				return py::cast(
-					std::complex<double>(raw[2*idx], raw[2*idx+1]) / 256.
+					iq_at(raw, idx)
 				);
 			}
 
@@ -357,7 +366,7 @@ PYBIND11_MODULE(_receiver, m) {
 				auto out = result.mutable_unchecked<1>();
 				for (py::ssize_t i = 0; i < length; i++) {
 					py::ssize_t s = start + i * step;
-					out(i) = std::complex<double>(raw[2*s], raw[2*s+1]) / 256.;
+					out(i) = iq_at(raw, s);
 				}
 				return result;
 			}
@@ -376,7 +385,7 @@ PYBIND11_MODULE(_receiver, m) {
 				if (s < 0) s += num_samples;
 				if (s < 0 || s >= num_samples)
 					throw py::index_error("sample index out of range");
-				out(i) = std::complex<double>(raw[2*s], raw[2*s+1]) / 256.;
+				out(i) = iq_at(raw, s);
 			}
 			return result;
 		})
@@ -471,7 +480,7 @@ PYBIND11_MODULE(_receiver, m) {
 			 *             timestamp is not disciplined
 			 *   recent    bool per packet
 			 *   fir_stage uint8, seq uint32 per packet
-			 *   year/yday of the first packet's timestamp
+			 *   year/yday of the first disciplined stamp, 0 when none
 			 * A batch holds one packet width: it stops short at a size
 			 * change, which stays queued for the next call. */
 			std::vector<Packet> got;
@@ -479,8 +488,6 @@ PYBIND11_MODULE(_receiver, m) {
 			{
 				py::gil_scoped_release release;
 				self.pop_while(got, max_packets, [&got](const Packet& p) {
-					if (p.size() != LONG_PACKET_SIZE && p.size() != SHORT_PACKET_SIZE)
-						return false;
 					return got.empty() || p.size() == got.front().size();
 				});
 			}
@@ -502,23 +509,20 @@ PYBIND11_MODULE(_receiver, m) {
 			auto F = fir.mutable_unchecked<1>();
 			auto Q = seq.mutable_unchecked<1>();
 			int32_t year = 0, yday = 0;
+			bool have_day = false;
 			for (py::ssize_t i = 0; i < n; i++) {
 				const char* data = static_cast<const char*>(got[i].data());
 				const auto* hdr = reinterpret_cast<const readout_packet_header*>(data);
 				const auto* raw = reinterpret_cast<const int32_t*>(
 					data + sizeof(readout_packet_header));
-				const Timestamp ts(*reinterpret_cast<const irigb_timestamp*>(
-					data + sizeof(readout_packet_header) + width * 8));
+				const Timestamp ts = got[i].timestamp();
 				for (py::ssize_t ch = 0; ch < width; ch++)
-					S(i, ch) = std::complex<double>(raw[2*ch], raw[2*ch+1]) / 256.;
-				const bool rec = ts.is_recent();
-				R(i) = rec;
-				T(i) = rec ? (ts.h * 3600.0 + ts.m * 60.0 + ts.s
-				              + ts.ss / static_cast<double>(SS_PER_SECOND))
-				           : std::numeric_limits<double>::quiet_NaN();
+					S(i, ch) = iq_at(raw, ch);
+				R(i) = ts.is_recent();
+				T(i) = ts.seconds_of_day();
 				F(i) = hdr->fir_stage;
 				Q(i) = hdr->seq;
-				if (i == 0) { year = ts.y; yday = ts.d; }
+				if (ts.is_recent() && !have_day) { year = ts.y; yday = ts.d; have_day = true; }
 			}
 			return py::make_tuple(samples, seconds, recent, fir, seq, year, yday);
 		}, "max_packets"_a = 4096,
@@ -541,14 +545,12 @@ PYBIND11_MODULE(_receiver, m) {
 			got.reserve(std::min<size_t>(max_packets, 4096));
 			auto layout = [](const Packet& p) {
 				const auto* h = static_cast<const pfb_packet_header*>(p.data());
-				return std::make_tuple(p.size(), h->mode, h->slot1, h->slot2,
-				                       h->slot3, h->slot4, h->num_samples);
+				return std::make_tuple(h->mode, h->slot1, h->slot2, h->slot3,
+				                       h->slot4, h->num_samples);
 			};
 			{
 				py::gil_scoped_release release;
 				self.pop_while(got, max_packets, [&got, &layout](const Packet& p) {
-					if (p.size() < sizeof(pfb_packet_header) + sizeof(irigb_timestamp))
-						return false;
 					return got.empty() || layout(p) == layout(got.front());
 				});
 			}
@@ -576,18 +578,13 @@ PYBIND11_MODULE(_receiver, m) {
 				const auto* hdr = reinterpret_cast<const pfb_packet_header*>(data);
 				const auto* raw = reinterpret_cast<const int32_t*>(
 					data + sizeof(pfb_packet_header));
-				const Timestamp ts(*reinterpret_cast<const irigb_timestamp*>(
-					data + sizeof(pfb_packet_header) + num_samples * 8));
+				const Timestamp ts = got[i].timestamp();
 				for (py::ssize_t k = 0; k < time_samples * groups; k++)
-					S(k % groups, i * time_samples + k / groups) =
-						std::complex<double>(raw[2*k], raw[2*k+1]) / 256.;
-				const bool rec = ts.is_recent();
-				R(i) = rec;
-				T(i) = rec ? (ts.h * 3600.0 + ts.m * 60.0 + ts.s
-				              + ts.ss / static_cast<double>(SS_PER_SECOND))
-				           : std::numeric_limits<double>::quiet_NaN();
+					S(k % groups, i * time_samples + k / groups) = iq_at(raw, k);
+				R(i) = ts.is_recent();
+				T(i) = ts.seconds_of_day();
 				Q(i) = hdr->seq;
-				if (rec && !have_day) { year = ts.y; yday = ts.d; have_day = true; }
+				if (ts.is_recent() && !have_day) { year = ts.y; yday = ts.d; have_day = true; }
 			}
 			return py::make_tuple(samples, seconds, recent, seq,
 			                      static_cast<int>(first->mode),
@@ -601,26 +598,11 @@ PYBIND11_MODULE(_receiver, m) {
 			 * of day (undisciplined stamps count as before), at most
 			 * limit of them; the first at or past it stays queued. */
 			std::vector<Packet> gone;
-			gone.reserve(64);
-			size_t dropped = 0;
-			{
-				py::gil_scoped_release release;
-				self.pop_while(gone, limit, [t_target](const Packet& p) {
-					if (p.size() < sizeof(pfb_packet_header) + sizeof(irigb_timestamp))
-						return true;
-					const char* data = static_cast<const char*>(p.data());
-					const auto* hdr = reinterpret_cast<const pfb_packet_header*>(data);
-					const Timestamp ts(*reinterpret_cast<const irigb_timestamp*>(
-						data + sizeof(pfb_packet_header) + hdr->num_samples * 8));
-					if (!ts.is_recent())
-						return true;
-					const double t = ts.h * 3600.0 + ts.m * 60.0 + ts.s
-					                 + ts.ss / static_cast<double>(SS_PER_SECOND);
-					return t < t_target;
-				});
-				dropped = gone.size();
-			}
-			return dropped;
+			py::gil_scoped_release release;
+			return self.pop_while(gone, limit, [t_target](const Packet& p) {
+				const double t = p.timestamp().seconds_of_day();
+				return std::isnan(t) || t < t_target;
+			});
 		}, "t_target"_a, "limit"_a = 1 << 20,
 		   "Discard PFB packets stamped before t_target seconds of day")
 		.def("empty", &PacketQueue::empty)

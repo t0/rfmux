@@ -33,6 +33,12 @@ namespace packets {
 		return type_->to_python(data(), size());
 	}
 
+	double Timestamp::seconds_of_day() const {
+		if (!is_recent())
+			return std::numeric_limits<double>::quiet_NaN();
+		return h * 3600.0 + m * 60.0 + s + ss / static_cast<double>(SS_PER_SECOND);
+	}
+
 	Timestamp Timestamp::normalized() const {
 		Timestamp result = *this;
 		if (!result.is_recent())
@@ -477,7 +483,7 @@ namespace packets {
 			for (auto& [key, reorder_buf] : reorder_buffers_) {
 				if (reorder_buf.size() >= reorder_window_ + flush_threshold_) {
 					auto [serial, module] = key;
-					flush_reorder_buffer(serial, module);
+					flush_reorder_buffer(serial, module, reorder_window_);
 				}
 			}
 		}
@@ -530,7 +536,7 @@ namespace packets {
 		reorder_buffers_[key].push(std::move(packet));
 	}
 
-	void PacketReceiver::flush_reorder_buffer(uint16_t serial, uint8_t module) {
+	void PacketReceiver::flush_reorder_buffer(uint16_t serial, uint8_t module, size_t keep) {
 		auto key = std::make_tuple(serial, module);
 
 		if (queues_.find(key) == queues_.end())
@@ -539,9 +545,8 @@ namespace packets {
 		auto& reorder_buf = reorder_buffers_[key];
 		auto& out_queue = *queues_[key];
 
-		// Flush excess packets while maintaining reorder_window_ for reordering
 		size_t current_size = reorder_buf.size();
-		size_t to_pop = (current_size > reorder_window_) ? (current_size - reorder_window_) : 0;
+		size_t to_pop = (current_size > keep) ? (current_size - keep) : 0;
 
 		while (to_pop && !reorder_buf.empty()) {
 			// Can't move from priority_queue::top() because it's const
@@ -554,16 +559,10 @@ namespace packets {
 	}
 
 	void PacketReceiver::flush_all() {
+		std::lock_guard<std::mutex> lock(queues_mutex_);
 		for (auto& [key, reorder_buf] : reorder_buffers_) {
 			auto [serial, module] = key;
-			if (queues_.find(key) == queues_.end())
-				queues_[key] = std::make_shared<PacketQueue>(queue_max_size_);
-			auto& out_queue = *queues_[key];
-			while (!reorder_buf.empty()) {
-				Packet pkt = reorder_buf.top();
-				reorder_buf.pop();
-				out_queue.push(std::move(pkt));
-			}
+			flush_reorder_buffer(serial, module, 0);
 		}
 	}
 

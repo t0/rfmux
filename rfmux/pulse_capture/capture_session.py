@@ -1017,7 +1017,8 @@ class PulseCaptureSession(_CallbackHost):
         samples = {c: self._noise_buf[c][:self._noise_n[c]]
                    for c in self.channels}
         self.noise_stats, self.noise_data = estimate_noise_stats(
-            samples, self.channels, jump_lag=self.edge_lookback)
+            samples, self.channels, jump_lag=self.edge_lookback,
+            baseline_window=self.baseline_window)
 
         if self.pcap is None:
             self._build_engine_and_writer()

@@ -1344,6 +1344,14 @@ class DualPulseCaptureSession(_CallbackHost):
         self.writer = None
         self.time_origin_epoch: Optional[float] = None
         if hdf5_path is not None:
+            # The same self-description a single-stream file carries:
+            # both streams store in the basis and units the calibration
+            # decides, converted with the same constant.
+            basis = self.config.trigger_basis
+            cals = df_calibrations or {}
+            stored_units = {ch: storage_transform(cals.get(ch), basis)[1]
+                            for ch in self.channels}
+            units = set(stored_units.values())
             try:
                 self.writer = DualPulseHDF5Writer(
                     hdf5_path, self.channels,
@@ -1359,8 +1367,13 @@ class DualPulseCaptureSession(_CallbackHost):
                         "sample_rate_slow": slow_rate,
                         "sample_rate_fast": fast_rate,
                         "slow_time_offset_s": self.slow_time_offset_s,
+                        "trigger_basis": basis,
+                        "stored_units": (units.pop() if len(units) == 1
+                                         else "mixed"),
+                        "volts_per_count": VOLTS_PER_ROC,
                     },
-                    df_calibrations=df_calibrations)
+                    df_calibrations=df_calibrations,
+                    stored_units=stored_units)
             except Exception as e:
                 self._error(f"Could not open HDF5 file "
                             f"{hdf5_path}: {e}")

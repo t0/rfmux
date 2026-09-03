@@ -1380,6 +1380,11 @@ class TestDetectionParamsPlumbing:
         assert not missing, f"dropped on the way to the file: {missing}"
         for name in DETECTION_PARAMS:
             assert attrs[name] == pytest.approx(getattr(capture_session, name))
+        # The samples are stored converted, so the constant they were
+        # converted with travels with them.
+        from rfmux.core.transferfunctions import VOLTS_PER_ROC
+        assert attrs["volts_per_count"] == VOLTS_PER_ROC
+        assert attrs["stored_units"] == "V"
 
 
 # ───────────────────────── Template stacking ────────────────────────

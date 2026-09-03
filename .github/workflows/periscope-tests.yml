@@ -1,15 +1,22 @@
 name: Periscope tests
 
+# Only READMEs and docs/ are ignored: the jupytext notebooks under
+# test/notebooks/ and rfmux/reference-notebooks/Demos/ are .md files
+# that the tests execute, so a change to one must run CI.
 on:
   push:
     branches: [ main ]
     paths-ignore:
-     - '**/*.md'
+     - '**/README.md'
+     - 'CLAUDE.md'
+     - 'CHANGELOG.md'
      - 'docs/**'
   pull_request:
     branches: [ main ]
     paths-ignore:
-     - '**/*.md'
+     - '**/README.md'
+     - 'CLAUDE.md'
+     - 'CHANGELOG.md'
      - 'docs/**'
   workflow_dispatch:
 

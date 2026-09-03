@@ -33,59 +33,88 @@ for ch in result.channels:
 
 The call estimates the noise on each channel first, then triggers at
 `threshold_sigma` above that baseline. Nothing needs to be known in advance
-about the pulse height.
-
-Pass `df_calibrations={channel: calibration}` from `bias_kids` and the capture
-is stored in physical units: volts, or hertz for a channel that has been
-rotated into the frequency basis. The file records the calibration, the
-counts-to-volts constant and the units per channel, so a reader needs nothing
-from this library to interpret it.
-
-### Triggering on frequency instead of the quadratures
-
-A pulse moves the resonance frequency, so it lies along one direction in the
-IQ plane. That direction is set by the bias point and the cable delay, and has
-nothing to do with the I and Q axes. Thresholding the raw quadratures
-therefore tests an arbitrary basis: at 45 degrees each one sees the pulse
-divided by the square root of two while carrying the full noise.
-
-```python
-result = await crs.trigger_capture(
-    channel=[1], module=1, streamer_mode="slow", time_run=10.0,
-    df_calibrations=df_cals,
-    trigger_basis="df",        # rotate first, then threshold
-)
-```
-
-The calibration's phase is the rotation; its magnitude is the hertz-per-count
-scale. On synthetic data, a 7σ pulse at 45 degrees against a 4σ threshold: 18
-of 19 detected rotated, 3 of 19 on the quadratures. The edge test compounds
-it, because an instant rise gives A/√2 jump-sigmas either way.
-
-A channel with no calibration cannot be rotated, so it stays on the
-quadratures and in volts. One capture can hold both.
-
-This makes the calibration matter for detection rather than only for labelling
-an axis: a wrong one costs sensitivity.
+about the pulse height. Training takes twenty times `max_pulse_ms`, five
+seconds at the default, and is not charged against `time_run`.
 
 `result` carries the pulses, their summaries and the noise statistics. The
 same content is written to `hdf5_path` as the capture runs, so an interrupted
 run keeps whatever it had already seen.
 
+## Units, calibration and the frequency basis
+
+Samples are stored in physical units, never in ADC counts. Without a
+calibration a channel is stored in volts, on the I and Q axes. With one it is
+stored in hertz, along the frequency direction:
+
+```python
+result = await crs.trigger_capture(
+    channel=[1], module=1, streamer_mode="slow", time_run=10.0,
+    df_calibrations=df_cals,   # {channel: complex}, from bias_kids
+)
+```
+
+The calibration is the complex `df_calibration` that `bias_kids` reports per
+detector. Its phase is the angle from the (I, Q) axes to the frequency
+direction; its magnitude is hertz per volt. A pulse moves the resonance
+frequency, so it lies along that one direction in the IQ plane, at an angle
+set by the bias point and the cable delay. Thresholding the raw quadratures
+tests an arbitrary basis instead: at 45 degrees each one sees the pulse
+divided by the square root of two while carrying the full noise. On synthetic
+data, a 7σ pulse at 45 degrees against a 4σ threshold: 18 of 19 detected
+rotated, 3 of 19 on the quadratures.
+
+Rotating before thresholding is therefore the default wherever a calibration
+exists. Pass `trigger_basis="iq"` to threshold the raw quadratures anyway. A
+channel with no calibration cannot be rotated, so it stays on the quadratures
+and in volts, and one capture can hold both kinds.
+
+Every file records what it holds, so a reader needs nothing from this
+library to interpret it:
+
+| Attribute | Where | Meaning |
+|---|---|---|
+| `volts_per_count` | file metadata | the counts-to-volts constant the samples were converted with |
+| `trigger_basis` | file metadata | `"df"` or `"iq"`: what the capture triggered on |
+| `stored_units` | each channel group | `"Hz"` or `"V"` for that channel's samples |
+| `df_calibration` | each channel group | the calibration used, if any |
+
+`PulseHDF5Reader` exposes each of these, and the Periscope Units control
+converts between counts, volts and hertz from them, so either view is exact
+whatever the capture triggered on.
+
 ## How a pulse is detected
 
 ![Anatomy of one capture window](images/capture-window-anatomy.png)
 
-A capture opens when either quadrature crosses `threshold_sigma`. It closes
-when both quadratures come back inside `end_sigma` and stay there. The window
-that gets saved starts before the trigger, so the rising edge is not clipped,
-and by default it stops a short margin after the signal drops back below
-threshold. Set `save_to_end_confirmed=True` to run it to that confirmation
-instead, keeping the decay tail.
+A capture opens when one axis leaves `threshold_sigma` and stays out for
+`trigger_samples` in a row, and is higher than it was `edge_lookback` samples
+earlier. The second condition is what keeps a slowly wandering baseline from
+triggering: it compares two raw samples, so drift cancels out and only a fast
+rise counts. Both counts are derived from the stream rate; at 596 Hz one
+sample is ample evidence, at 2.44 MHz it is not.
 
-Two settings bound the result. `max_pulse_ms` sets the longest pulse you
-expect; a window still open at 1.2 times that is closed anyway and flagged
-truncated. `min_pulse_ms` discards anything too short to be real.
+The capture closes when both axes are back inside `end_sigma` and stay there,
+for at least `min_end_samples`. The window that gets saved starts before the
+trigger, so the rising edge is not clipped, and by default it stops a short
+margin after the signal drops back below threshold. Set
+`save_to_end_confirmed=True` to run it to that confirmation instead, keeping
+the decay tail.
+
+`max_pulse_ms` sets the longest pulse you expect. A capture still open at 1.2
+times that is closed anyway. It is flagged `truncated` only when the signal
+had not yet come back below threshold; a capture stopped because drift stalled
+the end confirmation holds a complete pulse and is not flagged.
+`min_pulse_ms` discards anything too short to be real.
+
+Two overlapping pulses are split when the deviation, measured as the length of
+the (df, dissipation) vector, rises sharply again while a capture is open.
+
+## When each pulse happened
+
+Every pulse carries `trigger_epoch` and `trigger_utc`, decoded from the packet
+timestamps rather than the host clock, and the file records
+`time_origin_epoch` and `time_origin_utc` for the capture as a whole. The
+Periscope pulse list shows the UTC time of each trigger.
 
 ## See them live in Periscope
 
@@ -95,10 +124,10 @@ the toolbar, and press Start.
 
 ![Pulse Capture panel reviewing a capture file](images/pulse-capture-panel-review.png)
 
-The left pane lists every pulse with its length and signal-to-noise. The plot
-stacks the two axes against a common time axis, and markers show the trigger
-sample, where the signal fell back below threshold, and where the end was
-confirmed.
+The left pane lists every pulse with its length, signal-to-noise and trigger
+time. The plot stacks the two axes against a common time axis, and markers
+show the trigger sample, where the signal fell back below threshold, and
+where the end was confirmed.
 
 The capture above was triggered in the frequency basis, so the axes are df and
 dissipation rather than I and Q, and the amplitudes are in hertz. The pulse is
@@ -109,6 +138,11 @@ The panel also opens a finished file. Point it at an `.h5` and it enters
 review mode, which is what the screenshot above shows. Captures written into
 a session folder appear in the Session Browser and open from there.
 
+For a fast or dual capture the panel does not configure the PFB streamer
+itself. Set it up first through the Streamer Configuration dialog on the
+toolbar; if the board is streaming different channels than the capture asks
+for, the panel says so and stops rather than capturing the wrong ones.
+
 ### Histograms while you capture
 
 ![Histogram tab](images/pulse-capture-panel-histograms.png)
@@ -118,10 +152,8 @@ accumulated over every pulse and updated live. Ranges expand as new pulses
 arrive, so there is nothing to configure up front.
 
 One Units control in the toolbar drives the waveforms, the histograms and the
-templates together, and it is independent of what the capture triggered on:
-the file carries the basis, the units and the calibration, so either view is
-exact. It offers counts, volts, and df in hertz -- the last is a property of
-the frequency axis, so it needs a calibrated channel; the other two do not.
+templates together. It offers counts, volts, and df in hertz; the last needs
+a calibrated channel, the other two do not.
 
 ## Read the file back
 
@@ -129,12 +161,15 @@ the frequency axis, so it needs a calibrated channel; the other two do not.
 from rfmux.pulse_capture import PulseHDF5Reader
 
 reader = PulseHDF5Reader("capture.h5")
+print(reader.trigger_basis(), reader.volts_per_count())
 
 for ch in reader.channels:
-    print(ch, reader.pulse_count(ch), "pulses,", reader.noise_stats(ch))
+    print(ch, reader.pulse_count(ch), "pulses in", reader.stored_units(ch),
+          reader.noise_stats(ch))
 
     for meta in reader.iter_pulse_metadata(ch):
-        print(meta["pulse_idx"], meta["snr"], meta["duration_s"])
+        print(meta["pulse_idx"], meta["snr"], meta["duration_s"],
+              meta.get("trigger_utc"))
 ```
 
 `iter_pulse_metadata` reads only the summary fields, so it stays fast on a
@@ -153,10 +188,22 @@ result = await crs.trigger_capture(
 )
 ```
 
-The PFB stream runs at 2.44 MHz per channel, roughly sixty times the fastest
-slow-stream rate. Four channels at once is the firmware's limit, not a
-software one. It is also a lot of data, so a quarter of a second is usually
-enough.
+The PFB stream runs at `PFB_SAMPLING_FREQ`, 2.44 MHz per channel, roughly
+sixty times the fastest slow-stream rate. Four channels at once is the
+firmware's limit, not a software one. It is also a lot of data, so a quarter
+of a second is usually enough.
+
+The receiver keeps up with that rate in C++, but the detection engine behind
+it can still fall behind on a busy host. Rather than let the lag grow, the
+source discards fast packets more than a quarter of a second old and counts
+them: `lost_packets` and `flushed_packets` in the session's `source`
+statistics, shown on the panel's status line alongside how busy the source
+is. A capture that receives no fast packets at all raises `TimeoutError`
+instead of waiting.
+
+The socket asks the kernel for the largest receive buffer it allows, so raise
+`net.core.rmem_max` before a long fast capture; the
+[Networking Guide](../guides/networking.md) has the numbers.
 
 ## Both streams at once
 
@@ -177,6 +224,22 @@ The matching is the reason to run both. The slow stream gives a long clean
 baseline, and the fast stream resolves the rise. The pairs tie the two views
 of one event together.
 
+Two triggers pair when they fall within three slow samples of each other,
+half the slow stream's filter response. A trigger with no partner is held
+until the longest capture could have closed, plus 50 ms, then released as a
+one-sided pair. Every pair, one-sided or not, carries both streams over one
+common interval, the union of the two records, written as `window_t0` and
+`window_t1`; metrics are still computed from each stream's own triggered
+samples.
+
+The slow stream's timestamps are late by its decimation filter's group delay
+while the fast stream's are not, so the slow clock is shifted back by that
+delay before matching and before writing. The shift is recorded as
+`slow_time_offset_s`, which is what to add back if you compare against raw
+packet timestamps. `window_shortfall` in `rfmux.pulse_capture.analysis`
+reports when a pair's fast record is shorter than its window, which is what
+lost fast packets look like.
+
 ## Check the link budget before you configure
 
 Streaming two PFB channels alongside four modules of slow data does not fit in
@@ -185,14 +248,17 @@ Streaming two PFB channels alongside four modules of slow data does not fit in
 ```python
 from rfmux.algorithms.measurement.streamer_config import StreamerConfig, validate
 
-cfg = StreamerConfig(dec_stage=0, pfb_channels=[1, 2], pfb_module=1)
+cfg = StreamerConfig(dec_stage=0, short_packets=True,
+                     pfb_channels=[1, 2], pfb_module=1)
 
 for severity, message in validate(cfg):
     print(severity, message)
 ```
 
-Periscope exposes the same check through the Streamer Configuration dialog,
-reachable from the Pulse Capture toolbar.
+Stage 0 needs short packets: at the full 38 kHz a long packet of 1024
+channels is ten times what the link carries. Periscope exposes the same check
+through the Streamer Configuration dialog, reachable from the Pulse Capture
+toolbar.
 
 ## Try it without a board
 
@@ -212,8 +278,7 @@ crs = await create_mock_crs(module=1, config={
     "pulse_tau_decay": 25e-3,
 
     # A spread of heights rather than one repeated event.  Leave these
-    # out and every pulse is "pulse_amplitude", which now defaults to
-    # the fixed mode so that setting it does something.
+    # out and every pulse is "pulse_amplitude".
     "pulse_random_amp_mode": "uniform",
     "pulse_random_amp_min": 1.1,
     "pulse_random_amp_max": 1.5,
@@ -228,50 +293,30 @@ spike rather than a pulse.
 
 `periscope --mock` gives the same simulation behind the GUI. The screenshots
 in this document were taken from a mock capture, triggered in the frequency
-basis, by `docs/make_release_note_screenshots.py` -- the config above is the
-one it uses. The mock's `auto_bias_kids` skips the sweep-and-fit that produces
-a calibration on hardware, so the script calls `measure_df_calibrations`
-first, which is that sweep on its own.
+basis, by `docs/make_release_note_screenshots.py`, with the config above. The
+mock's `auto_bias_kids` skips the sweep-and-fit that produces a calibration
+on hardware, so the script calls `measure_df_calibrations` first, which is
+that sweep on its own.
 
 The mock generates both streams in one process, so fast and dual captures run
 slower than real time: two PFB channels is 4.9 M complex samples a second to
 synthesise. Slow-stream captures keep up. This affects only the simulation.
 
-The mock also gained TLS noise this release. Resonators now carry 1/f
-frequency wander with a configurable amplitude and corner, which is what a
-real detector looks like at low frequency. It is set from the same config
-dictionary and from the Mock Configuration dialog.
+Resonators in the mock carry 1/f frequency wander with a configurable
+amplitude and corner, which is what a real detector looks like at low
+frequency. It is set from the same config dictionary and from the Mock
+Configuration dialog, and it is what the baseline tracking above has to cope
+with.
 
-## Behaviour changes
+## Known limitations
 
-**The PFB stream is 2.44 MHz, not 1.22 MHz.** An earlier constant in this
-branch described the PFB rate as 1.22 MHz. That number is the Nyquist
-frequency, and also the bin spacing, but not the sample rate. Anything that
-divided a PFB sample count by it got twice the true elapsed time, and the
-link budget under-counted PFB load by half. Both constants now exist and say
-what they are:
-
-```python
-from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ, PFB_NYQUIST_FREQ
-
-PFB_SAMPLING_FREQ   # 2441406.25 Hz, the per-channel complex sample rate
-PFB_NYQUIST_FREQ    # 1220703.125 Hz, the single-sided bandwidth
-```
-
-If you carried the old number into your own code, durations computed from PFB
-sample counts were wrong by a factor of two.
-
-**`rfmux.streamer.PFB_SAMPLE_RATE` is gone.** It held the same incorrect
-value and was never used inside the package. Use `PFB_SAMPLING_FREQ` from
-`rfmux.core.transferfunctions`.
-
-**The mock's `pulse_amplitude` now does something.** `pulse_random_amp_mode`
-defaulted to `"uniform"`, and the amplitude sampler only reads
-`pulse_amplitude` in its fixed branch -- so setting it in the config or the
-Mock Configuration dialog changed nothing. The default is `"fixed"`, which
-makes the direct parameter direct; ask for `"uniform"` or `"lognormal"` to get
-a spread. The uniform range also moves from 1.5-3.0 to 1.1-1.5, closer to the
-threshold where a detection actually has to work for its living.
+- The C++ fast-stream receiver has been validated against the mock and on
+  loopback, not yet on a board.
+- At decimation stages above 0 the slow-stream noise estimate reads low by
+  about 1.7×, so a threshold stated as 5σ acts nearer 3σ there. Stage 0 and
+  the fast stream are unaffected.
+- In `"both"` mode the two detection engines share one event loop, so a slow
+  host that cannot keep up with the fast stream also delays the slow one.
 
 ## Where to go next
 

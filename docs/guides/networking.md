@@ -6,11 +6,17 @@ This guide covers network tuning and troubleshooting for optimal rfmux performan
 
 For reliable long-duration data captures, increase your system's UDP receive buffer size.
 
+The PFB (fast) stream is about 78 MB/s at its four-channel limit. On Linux
+the pulse-capture source asks for a buffer as large as `rmem_max` allows, so
+that limit decides how much of a stall a capture can ride out: 256 MB
+(268435456 bytes) holds about three seconds. The other platforms' values
+below are the ones that have been exercised there.
+
 ### Linux
 
 **Temporary (until reboot):**
 ```bash
-sudo sysctl net.core.rmem_max=67108864
+sudo sysctl net.core.rmem_max=268435456
 ```
 
 **Permanent configuration:**
@@ -18,7 +24,7 @@ sudo sysctl net.core.rmem_max=67108864
 Add to `/etc/sysctl.conf` or create a file in `/etc/sysctl.d/` (e.g., `/etc/sysctl.d/99-rfmux.conf`):
 
 ```bash
-net.core.rmem_max=67108864
+net.core.rmem_max=268435456
 ```
 
 Then reload:
@@ -208,7 +214,7 @@ For optimal performance:
 
 ```bash
 # Increase UDP buffers
-sudo sysctl -w net.core.rmem_max=134217728
+sudo sysctl -w net.core.rmem_max=268435456
 
 # Set jumbo frames (if supported)
 sudo ip link set eth0 mtu 9000

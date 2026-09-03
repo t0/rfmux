@@ -132,7 +132,9 @@ async def run_capture_flow(crs, host, is_mock) -> int:
 
     # ── Step 4. Capture the slow stream ────────────────────────────
     # notebook §6.  Build a session, start it, feed it from a source,
-    # stop it.  Every capture below is the same four calls.
+    # stop it.  Every capture below is the same four calls.  No
+    # df_calibrations are passed, so the files hold volts on the I/Q
+    # axes; with them, trigger_basis defaults to "df" and hertz.
     capture_session = PulseCaptureSession(
         channels=CHANNELS, module=MODULE, streamer_mode="slow",
         sample_rate=fs, hdf5_path="pulse_flow_slow.h5",

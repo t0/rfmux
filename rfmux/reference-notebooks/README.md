@@ -25,7 +25,8 @@ jupytext -o pulse_capture.ipynb pulse_capture.md
 
 Each has a `.py` counterpart beside it showing the same sequence as a plain
 script. This is intended as a reference for writing your own code against the API.
-It is also a quick way to smoke-test a change against `MOCK`.
+It is also a quick way to smoke-test a change against `MOCK`, by hand: the
+notebooks are executed by the test suite, the scripts are not.
 
 ## Connecting
 

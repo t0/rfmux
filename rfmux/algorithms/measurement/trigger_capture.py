@@ -60,12 +60,6 @@ from ...pulse_capture.detection import ChannelNoiseStats
 from ...pulse_capture.sources import run_dual_source, run_pfb_source, run_slow_source
 from ...core.transferfunctions import PFB_SAMPLING_FREQ, decimation_to_sampling
 
-#: Default longest-pulse estimate for a one-shot capture.  Deliberately
-#: shorter than PulseCaptureConfig's own default: that one is sized for
-#: an open-ended run, whereas a one-shot capture is usually seconds long
-#: and cannot afford a training window measured in tens of seconds.
-DEFAULT_MAX_PULSE_MS = 20.0
-
 
 @dataclass
 class StreamResult:
@@ -73,11 +67,19 @@ class StreamResult:
 
     sample_rate: float
     noise: Dict[int, ChannelNoiseStats] = field(default_factory=dict)
-    #: ``{channel: {pulse_idx: {"Amp_I", "Amp_Q", "Time", ...}}}``
+    #: ``{channel: {pulse_idx: {"Amp_I", "Amp_Q", "Time", ...}}}``;
+    #: every captured channel has an entry, empty if it saw nothing.
     pulses: Dict[int, Dict[int, dict]] = field(default_factory=dict)
     #: ``{channel: {pulse_idx: pulse_summary(...)}}`` — same keys as pulses
     summaries: Dict[int, Dict[int, dict]] = field(default_factory=dict)
     elapsed_s: float = 0.0
+
+    @classmethod
+    def for_channels(cls, sample_rate: float,
+                     channels: List[int]) -> "StreamResult":
+        return cls(sample_rate=sample_rate,
+                   pulses={ch: {} for ch in channels},
+                   summaries={ch: {} for ch in channels})
 
     @property
     def total_pulses(self) -> int:
@@ -352,7 +354,7 @@ async def _run_single(result, host, channels, module, streamer_mode,
                       verbose) -> None:
     is_fast = streamer_mode == "fast"
     rate = PFB_SAMPLING_FREQ if is_fast else slow_rate
-    stream = StreamResult(sample_rate=rate)
+    stream = StreamResult.for_channels(rate, channels)
 
     capture_session = PulseCaptureSession(
         channels=channels, module=module, streamer_mode=streamer_mode,
@@ -387,8 +389,8 @@ async def _run_single(result, host, channels, module, streamer_mode,
 async def _run_dual(result, host, channels, module, slow_rate,
                     duration_s, hdf5_path, df_calibrations,
                     verbose) -> None:
-    slow = StreamResult(sample_rate=slow_rate)
-    fast = StreamResult(sample_rate=PFB_SAMPLING_FREQ)
+    slow = StreamResult.for_channels(slow_rate, channels)
+    fast = StreamResult.for_channels(PFB_SAMPLING_FREQ, channels)
     collectors = {"slow": _collector(slow), "fast": _collector(fast)}
 
     capture_session = DualPulseCaptureSession(

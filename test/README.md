@@ -118,7 +118,8 @@ Two kinds, both executed as tests rather than checked in as `.ipynb`:
 
 Both are jupytext markdown; edit them in JupyterLab or as text. A demo that
 writes output must write to a temp directory, since the reference copies are
-provisioned read-only.
+provisioned read-only. The `.py` scripts beside the demos are not executed by
+any test; run one against `MOCK` by hand when its notebook changes.
 
 ## Platform skips
 

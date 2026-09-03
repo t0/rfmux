@@ -205,6 +205,15 @@ def test_dual_session_end_to_end(tmp_path):
                       ["amplitude_counts_ch1"]) == 3
         ns = reader.noise_stats(1, "slow")
         assert ns.std_I > 0
+        # A dual file describes its own samples the way a single-stream
+        # file does: no calibration here, so volts on the quadratures,
+        # and the constant they were converted with.
+        from rfmux.core.transferfunctions import VOLTS_PER_ROC
+        assert reader.trigger_basis() == cfg.trigger_basis
+        assert reader.stored_units(1, "slow") == "V"
+        assert reader.stored_units(1, "fast") == "V"
+        assert reader.metadata["stored_units"] == "V"
+        assert reader.volts_per_count() == VOLTS_PER_ROC
 
 
 class TestAdvanceTime:

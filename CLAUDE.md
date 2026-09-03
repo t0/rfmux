@@ -6,7 +6,7 @@
 
 ### Core Components
 - **Python API** (`rfmux/core/`): Hardware abstraction for CRS boards
-- **Algorithms** (`rfmux/algorithms/`): KID measurement algorithms (network analysis, multisweep)
+- **Algorithms** (`rfmux/algorithms/`): KID measurement algorithms (network analysis, multisweep, df calibration, streamer configuration, one-shot `trigger_capture`)
 - **Pulse capture** (`rfmux/pulse_capture/`): the trigger engine, its compiled walk, the stream sources, the dual-stream session, and the HDF5 record
 - **Periscope** (`rfmux/tools/periscope/`): Real-time PyQt6 GUI for data visualization
 - **Streamer** (`rfmux/streamer/`): C++ extension for high-performance packet reception
@@ -52,7 +52,9 @@ class MyPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._setup_ui()  # Calls _setup_toolbar(), _setup_plot_area()
 ```
 
-**Toolbars**: Plain `QWidget` with `QHBoxLayout` (not QToolBar)
+**Toolbars**: Plain `QWidget` with `FlowLayout` from `layouts.py` (not
+QToolBar), so controls wrap on a laptop screen; `grouped`/`labelled` there
+keep a label with its control
 
 **Tasks**: `QThread` subclasses with signal objects:
 ```python

@@ -12,10 +12,11 @@ End-to-end pulse capture from the Python API: configure the streamers, detect
 pulses live, persist them, and analyse them — **without opening Periscope**.
 
 Everything here is the same code path Periscope's *Pulse Capture* panel drives.
-The panel builds a `PulseCaptureSession`, feeds it from the streamers, and draws
-the callbacks; this notebook builds the same session, feeds it with the same
-source functions, and prints or plots instead. There is no capability in the GUI
-that is unavailable here.
+The panel builds a `PulseCaptureSession`, feeds the slow stream from its own
+packet tap and the fast stream from `run_pfb_source`, and draws the callbacks;
+this notebook builds the same session, feeds it with the source functions, and
+prints or plots instead. There is no capability in the GUI that is unavailable
+here.
 
 Everything under `rfmux.pulse_capture` is also re-exported from the package
 itself, so `from rfmux.pulse_capture import PulseCaptureSession` works and is
@@ -339,10 +340,12 @@ span of rates from the decimated slow stream to the PFB stream.
 
 How pulse detection works:
 
-- **A capture opens on either I or Q, and closes only when both have settled.**
-  It opens when either leaves ±`threshold_sigma`, and closes when both are back
-  inside ±`end_sigma`. `end_sigma` must sit below `threshold_sigma`, or a
-  capture would end where it began.
+- **A capture opens on either axis, and closes only when both have settled.**
+  The axes are df and dissipation for a channel with a calibration (section 7),
+  I and Q otherwise. It opens when either leaves ±`threshold_sigma`, and closes
+  when both are back inside ±`end_sigma` for at least `min_end_samples`.
+  `end_sigma` must sit below `threshold_sigma`, or a capture would end where it
+  began.
 - **Triggers must be confirmed.** `trigger_samples` consecutive samples have to
   clear the threshold. Left at 0 it is *derived from the stream rate* to hold
   accidental triggers under `max_accidental_per_min`: at 596 Hz one sample is
@@ -360,9 +363,10 @@ How pulse detection works:
   after it, and sets the floor under the baseline window and the noise training
   length. Estimate it *generously*: a
   capture that outlasts the ring silently loses its own rising edge.
-- **A capture that never ends is cut off.** If the signal never comes back
-  below `end_sigma`, the capture stops at 1.2 × `max_pulse_ms` and is flagged
-  `truncated`.
+- **A capture that never ends is cut off.** A capture still open at
+  1.2 × `max_pulse_ms` stops there. It is flagged `truncated` only if the
+  signal had not yet come back below `threshold_sigma`; one that was merely
+  waiting for the end confirmation holds a complete pulse and is not.
 
 ![Anatomy of one capture window](pulse_capture_anatomy.png)
 
@@ -453,9 +457,12 @@ res = await crs.trigger_capture(
 for ch in res.channels:
     n = res.noise[ch]
     print(f"ch{ch}: {len(res.pulses[ch])} pulses, "
-          f"I={n.mean_I:.0f}±{n.std_I:.2f}")
+          f"I={n.mean_I:.3g}±{n.std_I:.3g} V")
 res
 ```
+
+No calibration was passed, so the samples are in volts on the I and Q axes;
+section 7 shows what a calibration changes.
 
 Because it is a session underneath, `hdf5_path=` makes the one-shot call write a
 real capture file, which includes pulses, histograms and templates, openable in Periscope.
@@ -477,7 +484,7 @@ t_ms = (pulse["Time"] - pulse["Time"][0]) * 1e3
 plt.figure(figsize=(8, 3))
 plt.plot(t_ms, pulse["Amp_I"], label="I")
 plt.plot(t_ms, pulse["Amp_Q"], label="Q")
-plt.xlabel("time (ms)"); plt.ylabel("counts")
+plt.xlabel("time (ms)"); plt.ylabel("V")
 plt.title("One captured pulse"); plt.legend(); plt.show()
 ```
 
@@ -545,13 +552,16 @@ print("threshold_sigma:", reader.metadata["threshold_sigma"],
 for ch in reader.channels:
     n = reader.noise_stats(ch)
     print(f"  ch{ch}: {reader.pulse_count(ch)} pulses, "
-          f"noise I={n.mean_I:.0f}±{n.std_I:.2f}, Q={n.mean_Q:.0f}±{n.std_Q:.2f}")
+          f"noise I={n.mean_I:.3g}±{n.std_I:.3g}, "
+          f"Q={n.mean_Q:.3g}±{n.std_Q:.3g} {reader.stored_units(ch)}")
 
-# Per-pulse metadata without loading any waveforms
+# Per-pulse metadata without loading any waveforms.  trigger_utc is
+# decoded from the packet timestamps, not from the host clock.
 for meta in list(reader.iter_pulse_metadata(reader.channels[0]))[:5]:
     print(f"  #{meta['pulse_idx']:04d} snr={meta.get('snr', 0):.0f}σ "
           f"dur={meta.get('duration_s', 0)*1e3:.2f} ms "
-          f"τ={meta.get('tau_s', float('nan'))*1e3:.2f} ms")
+          f"τ={meta.get('tau_s', float('nan'))*1e3:.2f} ms "
+          f"at {meta.get('trigger_utc', '?')}")
 ```
 
 Histograms accumulate as the capture runs and expand their ranges automatically
@@ -564,7 +574,7 @@ hist = reader.get_histograms()
 fig, axes = plt.subplots(1, 3, figsize=(13, 3))
 for ax, metric, xlabel in zip(
         axes, ["snr", "amplitude", "tau_ms"],
-        ["peak deviation (σ)", "amplitude (counts)", "derived τ (ms)"]):
+        ["peak deviation (σ)", "amplitude (V)", "derived τ (ms)"]):
     edges = hist.get(f"{metric}_edges")
     for ch in reader.channels:
         counts = hist.get(f"{metric}_counts_ch{ch}")
@@ -600,7 +610,7 @@ for ch in reader.channels:
     if resid is not None:
         plt.fill_between(t * 1e3, mean - resid, mean + resid, alpha=0.25)
 plt.axvline(0, color="k", lw=0.8, ls=":")
-plt.xlabel("time from trigger (ms)"); plt.ylabel("I (counts)")
+plt.xlabel("time from trigger (ms)"); plt.ylabel("I (V)")
 plt.title("Trigger-aligned template"); plt.legend(); plt.show()
 ```
 
@@ -612,21 +622,22 @@ a count projected onto the frequency axis is a combination of two ADC readings
 and means nothing on its own.
 
 The calibration comes from `bias_kids`, which returns a complex
-`df_calibration` per detector. Its magnitude is the hertz-per-count scale and
-its phase is the angle between the quadratures and the frequency direction.
-Hand them to the session and they are written into the file with the pulses:
+`df_calibration` per detector. Its magnitude is hertz per volt and its phase
+is the angle between the quadratures and the frequency direction. Hand them
+to the session and they are written into the file with the pulses:
 
     bias_results = await bias_kids(crs=crs, multisweep_results=...,
                                    module=MODULE)
     df_cals = {ch: d["df_calibration"] for ch, d in bias_results.items()
                if "df_calibration" in d}
 
-    capture_session = PulseCaptureSession(..., df_calibrations=df_cals,
-                                          trigger_basis="df")
+    capture_session = PulseCaptureSession(..., df_calibrations=df_cals)
 
-`trigger_basis="df"` rotates before thresholding, so a pulse lands on one axis
-instead of being split between two by an angle nothing controls. It needs a
-calibration; a channel without one stays on the quadratures, and in volts.
+A calibrated channel is rotated before thresholding by default
+(`trigger_basis="df"`), so a pulse lands on one axis instead of being split
+between two by an angle nothing controls. A channel without a calibration
+stays on the quadratures, and in volts. Pass `trigger_basis="iq"` to threshold
+the raw quadratures even where a calibration exists.
 
 `auto_bias_kids` skips the sweep-and-fit, so a simulated array has no
 calibration yet. `measure_df_calibrations` is that measurement on its own: a
@@ -644,7 +655,7 @@ for ch, cal in sorted(df_cals.items()):
 
 Every capture is self-describing — the units per channel, the counts-to-volts
 constant and the calibration are all in the file, so nothing has to assume
-this library's constants:
+this library's constants. Dual files (section 9) carry the same attributes:
 
 ```python
 print(f"trigger basis: {reader.trigger_basis()}   "
@@ -652,8 +663,9 @@ print(f"trigger basis: {reader.trigger_basis()}   "
 for ch in reader.channels:
     units = reader.stored_units(ch)
     cal = reader.df_calibration(ch)
-    peak = reader.get_pulse_metadata(ch, 1).get("peak_amp", float("nan"))
-    note = "uncalibrated" if cal is None else f"|cal| = {abs(cal):.3g} Hz/count"
+    first = next(reader.iter_pulse_metadata(ch), {})
+    peak = first.get("peak_amp", float("nan"))
+    note = "uncalibrated" if cal is None else f"|cal| = {abs(cal):.3g} Hz/V"
     print(f"  ch{ch}: peak {peak:.4g} {units}   ({note})")
 
 reader.close()
@@ -693,16 +705,25 @@ finally:
 ## 9. Both streams at once, with matched pairs
 
 `DualPulseCaptureSession` runs two independent pulse detection engines for fast
-and slow samples, each with its own noise training and rate-appropriate parameters.
-It and matches their pulses by trigger time. `run_dual_source` drives both sockets
-concurrently; whichever side finishes first stops the other, since a matcher fed by one stream
-alone just accumulates one-sided pulses.
+and slow samples, each with its own noise training and rate-appropriate
+parameters, and matches their pulses by trigger time: two triggers pair when
+they fall within three slow samples of each other, half the slow stream's
+filter response. A trigger with no partner is held until the longest capture
+could have closed, plus 50 ms, then released as a one-sided pair.
+`run_dual_source` drives both sockets concurrently; whichever side finishes
+first stops the other, since a matcher fed by one stream alone just
+accumulates one-sided pulses.
 
-Each matched pair also stores a common time span: the widest interval either
-trigger covers, taken from both ring buffers. That gives you the same event at
-19 kHz and at 2.44 MHz over the same interval, which is what makes the two
-comparable. Metrics are still computed from each stream's own triggered samples,
-so the wider span does not affect them.
+Every pair, one-sided or not, stores both streams over one common interval:
+the union of the two saved records, recorded as `window_t0`/`window_t1`. That
+gives you the same event at 19 kHz and at 2.44 MHz over the same interval,
+which is what makes the two comparable. Metrics are still computed from each
+stream's own triggered samples, so the wider span does not affect them.
+
+The slow stream's timestamps are late by its decimation filter's group delay
+while the fast stream's are not, so the session shifts the slow clock back by
+that delay before matching and before writing. The shift is in the file as
+`slow_time_offset_s`; add it back if you compare against raw packet stamps.
 
 ```python
 pairs = []
@@ -753,9 +774,9 @@ if two_sided:
         plt.plot((t - np.nanmin(t)) * 1e3, tod["Amp_I"],
                  marker="." if key == "slow_tod" else None,
                  ms=4, lw=1, label=label)
-    plt.xlabel("time (ms)"); plt.ylabel("I (counts)")
+    plt.xlabel("time (ms)"); plt.ylabel("I (V)")
     plt.title(f"ch{p['channel']} pair #{p['pair_idx']} — "
-              f"trigger offset {(p.get('trigger_offset') or 0.0)*1e6:+.0f} µs")
+              f"trigger offset {(p.get('time_offset') or 0.0)*1e6:+.0f} µs")
     plt.legend(); plt.show()
 ```
 

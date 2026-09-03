@@ -10,6 +10,7 @@ import traceback
 import time
 
 # Imports from within the 'periscope' subpackage
+from .layouts import FlowLayout
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
     AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
@@ -159,8 +160,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         """Creates and configures the toolbar with controls (using QWidget instead of QToolBar)."""
         # Use QWidget container instead of QToolBar for QWidget compatibility
         toolbar = QtWidgets.QWidget()
-        toolbar_layout = QtWidgets.QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(5, 5, 5, 5)
+        # Wraps into rows as the panel narrows; the batch controls and
+        # the subplot controls each stay together.
+        toolbar_layout = FlowLayout(toolbar)
 
         # Export Data Button
         self.export_btn = QtWidgets.QPushButton("💾")
@@ -188,44 +190,51 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
         toolbar_layout.addWidget(self.noise_spectrum_btn)
         
-        # Spacer to push subsequent items to the right
-        toolbar_layout.addStretch(1)
-        
         # Batch navigation controls (for sweep tabs)
+        batch_nav = QtWidgets.QWidget()
+        batch_nav_layout = QtWidgets.QHBoxLayout(batch_nav)
+        batch_nav_layout.setContentsMargins(0, 0, 0, 0)
+        batch_nav_layout.setSpacing(4)
         self.batch_label = QtWidgets.QLabel("Batch:")
-        toolbar_layout.addWidget(self.batch_label)
+        batch_nav_layout.addWidget(self.batch_label)
         
         self.prev_batch_btn = QtWidgets.QPushButton("◀")
         self.prev_batch_btn.setToolTip("Previous batch")
         self.prev_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
         self.prev_batch_btn.clicked.connect(self._prev_batch)
-        toolbar_layout.addWidget(self.prev_batch_btn)
+        batch_nav_layout.addWidget(self.prev_batch_btn)
         
         self.batch_info_label = QtWidgets.QLabel("1 of 1")
         self.batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.batch_info_label.setMinimumWidth(40)
-        toolbar_layout.addWidget(self.batch_info_label)
+        batch_nav_layout.addWidget(self.batch_info_label)
         
         self.next_batch_btn = QtWidgets.QPushButton("▶")
         self.next_batch_btn.setToolTip("Next batch")
         self.next_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
         self.next_batch_btn.clicked.connect(self._next_batch)
-        toolbar_layout.addWidget(self.next_batch_btn)
-        
+        batch_nav_layout.addWidget(self.next_batch_btn)
+        toolbar_layout.addWidget(batch_nav)
+
+        subplots = QtWidgets.QWidget()
+        subplots_layout = QtWidgets.QHBoxLayout(subplots)
+        subplots_layout.setContentsMargins(0, 0, 0, 0)
+        subplots_layout.setSpacing(4)
         self.batch_size_label = QtWidgets.QLabel("Subplots:")
-        toolbar_layout.addWidget(self.batch_size_label)
+        subplots_layout.addWidget(self.batch_size_label)
         
         self.batch_size_spin = QtWidgets.QSpinBox()
         self.batch_size_spin.setRange(1, 200)
         self.batch_size_spin.setValue(self.batch_size)
         self.batch_size_spin.setSingleStep(1)
         self.batch_size_spin.setToolTip("Detectors per batch (press Update to apply)")
-        toolbar_layout.addWidget(self.batch_size_spin)
+        subplots_layout.addWidget(self.batch_size_spin)
         
         self.batch_update_btn = QtWidgets.QPushButton("Update")
         self.batch_update_btn.setToolTip("Apply new batch size and regenerate plots")
         self.batch_update_btn.clicked.connect(self._apply_batch_size)
-        toolbar_layout.addWidget(self.batch_update_btn)
+        subplots_layout.addWidget(self.batch_update_btn)
+        toolbar_layout.addWidget(subplots)
 
         # Normalization Checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")

@@ -1,6 +1,7 @@
 """Main plot panel for Periscope - contains TOD/IQ/FFT/PSD plots with controls."""
 
 from .utils import *
+from .layouts import FlowLayout, labelled
 
 class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
     """
@@ -50,30 +51,29 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _add_toolbar(self, layout, chan_str):
         """Add the toolbar with channel/buffer controls and plot type checkboxes."""
         toolbar_widget = QtWidgets.QWidget()
-        toolbar_layout = QtWidgets.QHBoxLayout(toolbar_widget)
-        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        # Wraps into rows as the window narrows; a caption stays with
+        # its control, and the unit radios stay together.
+        toolbar_layout = FlowLayout(toolbar_widget, margin=0, h_spacing=10)
 
         # Use references from parent Periscope window
-        toolbar_layout.addWidget(QtWidgets.QLabel("Channels:"))
-        toolbar_layout.addWidget(self.periscope.e_ch)
-        toolbar_layout.addSpacing(20)
-        toolbar_layout.addWidget(QtWidgets.QLabel("Buffer:"))
-        toolbar_layout.addWidget(self.periscope.e_buf)
+        toolbar_layout.addWidget(labelled("Channels:", self.periscope.e_ch))
+        toolbar_layout.addWidget(labelled("Buffer:", self.periscope.e_buf))
         toolbar_layout.addWidget(self.periscope.b_pause)
-        toolbar_layout.addSpacing(30)
-        
-        # Add unit radio buttons
-        toolbar_layout.addWidget(QtWidgets.QLabel("Units:"))
-        toolbar_layout.addWidget(self.periscope.rb_counts)
-        toolbar_layout.addWidget(self.periscope.rb_real_units)
-        toolbar_layout.addWidget(self.periscope.rb_df_units)
-        toolbar_layout.addSpacing(30)
-        
+
+        units = QtWidgets.QWidget()
+        units_layout = QtWidgets.QHBoxLayout(units)
+        units_layout.setContentsMargins(0, 0, 0, 0)
+        units_layout.setSpacing(4)
+        units_layout.addWidget(QtWidgets.QLabel("Units:"))
+        units_layout.addWidget(self.periscope.rb_counts)
+        units_layout.addWidget(self.periscope.rb_real_units)
+        units_layout.addWidget(self.periscope.rb_df_units)
+        toolbar_layout.addWidget(units)
+
         # Add plot type checkboxes
         for cb in (self.periscope.cb_time, self.periscope.cb_iq, self.periscope.cb_fft, 
                    self.periscope.cb_ssb, self.periscope.cb_dsb, self.periscope.cb_hist):
             toolbar_layout.addWidget(cb)
-        toolbar_layout.addStretch(1)
         
         layout.addWidget(toolbar_widget)
     
@@ -81,8 +81,7 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
         """Add the configuration panel with action buttons."""
         # Action buttons row
         action_buttons_widget = QtWidgets.QWidget()
-        action_buttons_layout = QtWidgets.QHBoxLayout(action_buttons_widget)
-        action_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        action_buttons_layout = FlowLayout(action_buttons_widget, margin=0)
 
         # Add all the action buttons from parent
         action_buttons_layout.addWidget(self.periscope.btn_init_crs)

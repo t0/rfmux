@@ -2,6 +2,7 @@
 
 # Imports from within the 'periscope' subpackage
 from .utils import *
+from .layouts import FlowLayout
 from .tasks import SetCableLengthSignals # Added import
 # from .tasks import * # Not directly used by this class, dialogs will import what they need.
 
@@ -80,8 +81,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # Toolbar 1: Global Controls (Top Row)
         # Use QWidget container instead of QToolBar for compatibility with QWidget base class
         toolbar_global = QtWidgets.QWidget()
-        toolbar_global_layout = QtWidgets.QHBoxLayout(toolbar_global)
-        toolbar_global_layout.setContentsMargins(5, 5, 5, 5)
+        # Both rows wrap as the panel narrows.
+        toolbar_global_layout = FlowLayout(toolbar_global)
 
         # Export button
         export_btn = QtWidgets.QPushButton("💾")
@@ -109,9 +110,6 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.edit_resonances_cb.toggled.connect(self._toggle_resonance_edit_mode)
         toolbar_global_layout.addWidget(self.edit_resonances_cb)
 
-        # Add spacer to push the unit controls to the far right
-        toolbar_global_layout.addStretch(1)
-
         # Normalize Magnitudes checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Magnitudes")
         self.normalize_checkbox.setChecked(False)
@@ -136,8 +134,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
 
         # Toolbar 2: Module-Specific Controls (Bottom Row)
         toolbar_module = QtWidgets.QWidget()
-        toolbar_module_layout = QtWidgets.QHBoxLayout(toolbar_module)
-        toolbar_module_layout.setContentsMargins(5, 5, 5, 5)
+        toolbar_module_layout = FlowLayout(toolbar_module)
 
         # Cable length control
         self.cable_length_label = QtWidgets.QLabel("Cable Length (m):")
@@ -146,8 +143,13 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.cable_length_spin.setValue(DEFAULT_CABLE_LENGTH)
         self.cable_length_spin.setSingleStep(0.05)
         self.cable_length_spin.valueChanged.connect(self._on_cable_length_changed)
-        toolbar_module_layout.addWidget(self.cable_length_label)
-        toolbar_module_layout.addWidget(self.cable_length_spin)
+        cable = QtWidgets.QWidget()
+        cable_layout = QtWidgets.QHBoxLayout(cable)
+        cable_layout.setContentsMargins(0, 0, 0, 0)
+        cable_layout.setSpacing(4)
+        cable_layout.addWidget(self.cable_length_label)
+        cable_layout.addWidget(self.cable_length_spin)
+        toolbar_module_layout.addWidget(cable)
 
         # Unwrap Cable Delay button
         unwrap_button = QtWidgets.QPushButton("Unwrap Cable Delay")
@@ -167,8 +169,6 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.take_multisweep_btn.clicked.connect(self._show_multisweep_dialog)
         self.take_multisweep_btn.setEnabled(False) # Initially disabled
         toolbar_module_layout.addWidget(self.take_multisweep_btn)
-        
-        toolbar_module_layout.addStretch(1)
         
         layout.addWidget(toolbar_module)
 

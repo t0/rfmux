@@ -42,7 +42,7 @@ run keeps whatever it had already seen.
 
 ## Units, calibration and the frequency basis
 
-Samples are stored in physical units, never in ADC counts. Without a
+Samples are stored in physical units, never in ADC counts. Without a df
 calibration a channel is stored in volts, on the I and Q axes. With one it is
 stored in hertz, along the frequency direction:
 
@@ -310,11 +310,14 @@ with.
 
 ## Known limitations
 
-- The C++ fast-stream receiver has been validated against the mock and on
-  loopback, not yet on a board.
-- At decimation stages above 0 the slow-stream noise estimate reads low by
-  about 1.7×, so a threshold stated as 5σ acts nearer 3σ there. Stage 0 and
-  the fast stream are unaffected.
+- The noise σ is estimated from adjacent-sample differences, which is exact
+  for white noise. The decimation filter leaves adjacent slow-stream samples
+  correlated at stages above 0, so there the estimate reads about 1.7× below
+  the samples' actual scatter: a threshold stated as 5σ sits nearer 3σ of the
+  data, accidental triggers are more frequent than `max_accidental_per_min`
+  promises, and reported SNRs are high by the same factor. Stage 0 and the
+  fast stream are unaffected, as is the edge test, whose σ is measured at
+  its own lag.
 - In `"both"` mode the two detection engines share one event loop, so a slow
   host that cannot keep up with the fast stream also delays the slow one.
 

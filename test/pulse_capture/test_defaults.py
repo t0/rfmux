@@ -146,18 +146,14 @@ def test_a_new_capture_starts_from_the_newest_packets():
         def __init__(self, n):
             self.n = n
 
-        def empty(self):
-            return self.n == 0
-
-        def try_pop(self):
-            self.n -= 1
+        def clear(self):
+            self.n = 0
 
     rt = PeriscopeRuntime.__new__(PeriscopeRuntime)
     rt.receiver = SimpleNamespace(queue=_Q(37))
     rt.register_pulse_tap(lambda *a: None)
     assert rt.receiver.queue.n == 0
-    assert rt._pulse_tap is not None
-    assert PeriscopeRuntime.__new__(PeriscopeRuntime)._drop_queued_packets() == 0
+    PeriscopeRuntime.__new__(PeriscopeRuntime)._discard_packets()  # no receiver yet
 
 
 def test_a_new_capture_does_not_show_the_last_runs_counts(qt_app):

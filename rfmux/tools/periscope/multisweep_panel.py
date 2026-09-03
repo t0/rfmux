@@ -10,7 +10,7 @@ import traceback
 import time
 
 # Imports from within the 'periscope' subpackage
-from .layouts import FlowLayout
+from .layouts import FlowLayout, grouped
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
     AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
@@ -191,50 +191,40 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         toolbar_layout.addWidget(self.noise_spectrum_btn)
         
         # Batch navigation controls (for sweep tabs)
-        batch_nav = QtWidgets.QWidget()
-        batch_nav_layout = QtWidgets.QHBoxLayout(batch_nav)
-        batch_nav_layout.setContentsMargins(0, 0, 0, 0)
-        batch_nav_layout.setSpacing(4)
         self.batch_label = QtWidgets.QLabel("Batch:")
-        batch_nav_layout.addWidget(self.batch_label)
         
         self.prev_batch_btn = QtWidgets.QPushButton("◀")
         self.prev_batch_btn.setToolTip("Previous batch")
         self.prev_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
         self.prev_batch_btn.clicked.connect(self._prev_batch)
-        batch_nav_layout.addWidget(self.prev_batch_btn)
         
         self.batch_info_label = QtWidgets.QLabel("1 of 1")
         self.batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.batch_info_label.setMinimumWidth(40)
-        batch_nav_layout.addWidget(self.batch_info_label)
         
         self.next_batch_btn = QtWidgets.QPushButton("▶")
         self.next_batch_btn.setToolTip("Next batch")
         self.next_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
         self.next_batch_btn.clicked.connect(self._next_batch)
-        batch_nav_layout.addWidget(self.next_batch_btn)
-        toolbar_layout.addWidget(batch_nav)
+        # The batch controls wrap as one item, and hide as one.
+        self.batch_nav = grouped(self.batch_label, self.prev_batch_btn,
+                                 self.batch_info_label, self.next_batch_btn)
+        toolbar_layout.addWidget(self.batch_nav)
 
-        subplots = QtWidgets.QWidget()
-        subplots_layout = QtWidgets.QHBoxLayout(subplots)
-        subplots_layout.setContentsMargins(0, 0, 0, 0)
-        subplots_layout.setSpacing(4)
         self.batch_size_label = QtWidgets.QLabel("Subplots:")
-        subplots_layout.addWidget(self.batch_size_label)
         
         self.batch_size_spin = QtWidgets.QSpinBox()
         self.batch_size_spin.setRange(1, 200)
         self.batch_size_spin.setValue(self.batch_size)
         self.batch_size_spin.setSingleStep(1)
         self.batch_size_spin.setToolTip("Detectors per batch (press Update to apply)")
-        subplots_layout.addWidget(self.batch_size_spin)
         
         self.batch_update_btn = QtWidgets.QPushButton("Update")
         self.batch_update_btn.setToolTip("Apply new batch size and regenerate plots")
         self.batch_update_btn.clicked.connect(self._apply_batch_size)
-        subplots_layout.addWidget(self.batch_update_btn)
-        toolbar_layout.addWidget(subplots)
+        self.subplot_controls = grouped(
+            self.batch_size_label, self.batch_size_spin, self.batch_update_btn)
+        toolbar_layout.addWidget(self.subplot_controls)
 
         # Normalization Checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
@@ -523,13 +513,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Batch controls visible for sweep tabs (0, 1), hidden for combined tab (2)
         is_sweep_tab = index in (0, 1)
         
-        self.batch_label.setVisible(is_sweep_tab)
-        self.prev_batch_btn.setVisible(is_sweep_tab)
-        self.batch_info_label.setVisible(is_sweep_tab)
-        self.next_batch_btn.setVisible(is_sweep_tab)
-        self.batch_size_label.setVisible(is_sweep_tab)
-        self.batch_size_spin.setVisible(is_sweep_tab)
-        self.batch_update_btn.setVisible(is_sweep_tab)
+        self.batch_nav.setVisible(is_sweep_tab)
+        self.subplot_controls.setVisible(is_sweep_tab)
         
         # Redraw the active tab's plots if we have data
         if self.results_by_detector:

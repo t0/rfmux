@@ -17,7 +17,7 @@ class FlowLayout(QtWidgets.QLayout):
     requires; the height follows from the width."""
 
     def __init__(self, parent=None, margin: int = 5,
-                 h_spacing: int = 6, v_spacing: int = 4):
+                 h_spacing: int = 6, v_spacing: int = 4) -> None:
         super().__init__(parent)
         self._items: list = []
         self._h = h_spacing
@@ -79,21 +79,25 @@ class FlowLayout(QtWidgets.QLayout):
         return y + row_h - rect.y() + m.bottom()
 
 
-def labelled(text: str, widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
-    """*widget* with a caption to its left, as one item that wraps
-    together."""
+def grouped(*widgets: QtWidgets.QWidget) -> QtWidgets.QWidget:
+    """*widgets* in one row, as one item that wraps together."""
     box = QtWidgets.QWidget()
     h = QtWidgets.QHBoxLayout(box)
     h.setContentsMargins(0, 0, 0, 0)
     h.setSpacing(4)
-    h.addWidget(QtWidgets.QLabel(text))
-    h.addWidget(widget)
+    for w in widgets:
+        h.addWidget(w)
     return box
+
+
+def labelled(text: str, widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
+    """*widget* with a caption to its left."""
+    return grouped(QtWidgets.QLabel(text), widget)
 
 
 class ElidedLabel(QtWidgets.QLabel):
     """A label that never asks for more width than it is given: the
-    text is elided in the middle to fit, and shown whole on hover."""
+    text is elided in the middle to fit."""
 
     def __init__(self, text: str = "", parent=None, max_width: int = 320):
         super().__init__(text, parent)
@@ -101,16 +105,11 @@ class ElidedLabel(QtWidgets.QLabel):
         self.setMaximumWidth(max_width)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
                            QtWidgets.QSizePolicy.Policy.Preferred)
-        self.setToolTip(text)
 
     def setText(self, text: str) -> None:
         self._full = text
-        self.setToolTip(text)
         super().setText(text)
         self.updateGeometry()
-
-    def fullText(self) -> str:
-        return self._full
 
     def minimumSizeHint(self) -> QtCore.QSize:
         hint = super().minimumSizeHint()

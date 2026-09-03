@@ -1,7 +1,7 @@
 """Main plot panel for Periscope - contains TOD/IQ/FFT/PSD plots with controls."""
 
 from .utils import *
-from .layouts import FlowLayout, labelled
+from .layouts import FlowLayout, grouped, labelled
 
 class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
     """
@@ -60,15 +60,9 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
         toolbar_layout.addWidget(labelled("Buffer:", self.periscope.e_buf))
         toolbar_layout.addWidget(self.periscope.b_pause)
 
-        units = QtWidgets.QWidget()
-        units_layout = QtWidgets.QHBoxLayout(units)
-        units_layout.setContentsMargins(0, 0, 0, 0)
-        units_layout.setSpacing(4)
-        units_layout.addWidget(QtWidgets.QLabel("Units:"))
-        units_layout.addWidget(self.periscope.rb_counts)
-        units_layout.addWidget(self.periscope.rb_real_units)
-        units_layout.addWidget(self.periscope.rb_df_units)
-        toolbar_layout.addWidget(units)
+        toolbar_layout.addWidget(grouped(
+            QtWidgets.QLabel("Units:"), self.periscope.rb_counts,
+            self.periscope.rb_real_units, self.periscope.rb_df_units))
 
         # Add plot type checkboxes
         for cb in (self.periscope.cb_time, self.periscope.cb_iq, self.periscope.cb_fft, 

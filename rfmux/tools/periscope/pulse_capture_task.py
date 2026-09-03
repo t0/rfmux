@@ -21,11 +21,12 @@ can display events without opening the HDF5 file the writer holds.
 
 from __future__ import annotations
 
-import numpy as np
 import asyncio
 import queue
 import threading
 import time
+
+import numpy as np
 from collections import OrderedDict
 from typing import Any, Dict, Optional, Tuple
 
@@ -36,7 +37,7 @@ from ...pulse_capture.capture_session import (
     CaptureState,
     PulseCaptureSession,
 )
-from ...pulse_capture.sources import SlowIngest
+from ...pulse_capture.sources import SlowIngest, pfb_streamer_mismatch
 
 
 class PulseCaptureSignals(QtCore.QObject):
@@ -68,10 +69,9 @@ class PulseCaptureTask(QtCore.QThread):
     signals : PulseCaptureSignals
         Signal bundle constructed by the caller.
     queue_size : int
-        Bounded queue capacity, counted in PACKETS -- one entry holds a
-        whole packet's worth of channels, so this is not the sample
-        count it used to be.  8k is ~0.2 s of backlog at decimation
-        stage 0; overflow drops packets and counts the samples lost.
+        Bounded queue capacity, counted in packets.  8k is ~0.2 s of
+        backlog at decimation stage 0; overflow drops packets and
+        counts the samples lost.
     waveform_cache : int
         Number of recent pulse waveforms kept for :meth:`get_pulse`.
     """
@@ -146,32 +146,23 @@ class PulseCaptureTask(QtCore.QThread):
 
     # ── GUI-thread API ────────────────────────────────────────────
 
-    #: Packets gathered before one hand-off to the worker.  A queue
-    #: put and a matching get per PACKET is 38k of each per second at
-    #: decimation stage 0, and the two threads then spend their time
-    #: taking the lock from each other rather than working: measured on
-    #: a board with 128 channels captured, 302,908 of 481,852 packets
-    #: were lost to this queue filling.  Batched, none were.
+    #: Rows gathered before one hand-off to the worker: a queue put per
+    #: packet contends with the worker's get.
     _TAP_BATCH_PACKETS = 256
     #: ...but 256 packets is 430 ms at stage 6, so cap the wait too.
     _TAP_BATCH_MAX_S = 0.05
 
-    def enqueue_packet(self, channels, values, timestamp,
-                       day_epoch=None) -> None:
-        """Tap callback — called from the GUI thread once per packet,
-        or once per batch with ``values`` (packets, channels) and one
-        stamp per row, NaN for none.
-
-        ``values`` holds one complex sample per entry of ``channels``.
-        Packets are gathered here and handed over in batches.
+    def enqueue_packet(self, channels, values: np.ndarray, timestamp,
+                       day_epoch: Optional[float] = None) -> None:
+        """Tap callback, from the GUI thread once per batch: ``values``
+        is (packets, channels) with one stamp per row, NaN for none, or
+        one packet's row with its stamp.  Rows are gathered here and
+        handed over in batches.
         """
         if day_epoch is not None and day_epoch != self._tap_day:
             self._tap_day = day_epoch
             self.flush_tap()
-            try:
-                self.sample_queue.put_nowait(("__day__", day_epoch))
-            except queue.Full:
-                pass
+            self._send_control(("__day__", day_epoch))
         if channels != self._tap_channels:
             self.flush_tap()
             self._tap_channels = channels
@@ -219,11 +210,7 @@ class PulseCaptureTask(QtCore.QThread):
 
     def request_noise_reestimate(self) -> None:
         """Queue a noise re-estimation (executed in the worker thread)."""
-        try:
-            self.sample_queue.put_nowait(("__reestimate__",))
-        except queue.Full:
-            self.signals.error.emit("Sample queue full — could not "
-                                    "request noise re-estimation")
+        self._send_control(("__reestimate__",))
 
     def get_pulse(self, channel: int, pulse_idx: int,
                   stream: Optional[str] = None) -> Optional[dict]:
@@ -236,25 +223,29 @@ class PulseCaptureTask(QtCore.QThread):
         with self._cache_lock:
             return self._pair_cache.get((channel, pair_idx))
 
+    def _send_control(self, item: tuple) -> None:
+        """A control item to the worker; a full queue is reported, not
+        swallowed, since a dropped one is a request that never runs."""
+        try:
+            self.sample_queue.put_nowait(item)
+        except queue.Full:
+            self.signals.error.emit(
+                f"Capture worker queue full; dropped {item[0]}")
+
+    def _should_stop(self) -> bool:
+        return self._stop_requested or self.isInterruptionRequested()
+
     def request_pair(self, channel: int, pair_idx: int) -> None:
         """Ask the worker to load an evicted pair, windows and all, from
         the live file; ``waveform_ready`` fires when it is cached."""
-        try:
-            self.sample_queue.put_nowait(("__fetch_pair__", channel, pair_idx))
-        except queue.Full:
-            pass
+        self._send_control(("__fetch_pair__", channel, pair_idx))
 
     def request_waveform(self, channel: int, pulse_idx: int,
                          stream: Optional[str] = None) -> None:
         """Ask the worker to load an evicted waveform from the live HDF5
         file (writer's own handle, writer's thread).  ``waveform_ready``
         fires when the cache has been warmed (or the fetch failed)."""
-        try:
-            self.sample_queue.put_nowait(
-                ("__fetch__", channel, pulse_idx, stream))
-        except queue.Full:
-            self.signals.error.emit("Sample queue full — could not "
-                                    "request waveform load")
+        self._send_control(("__fetch__", channel, pulse_idx, stream))
 
     # ── Worker thread ─────────────────────────────────────────────
 
@@ -300,31 +291,7 @@ class PulseCaptureTask(QtCore.QThread):
         ingest.flush()
 
     async def _pfb_mismatch(self, channels) -> Optional[str]:
-        """Why the PFB streamer as configured cannot feed this capture,
-        or None.
-
-        The capture never configures the streamer; it reads what the
-        board is streaming, and every captured channel must be among
-        the streamed ones.
-        """
-        raw = await self.crs.get_pfb_streamer(module=self.module)
-        active = raw
-        if isinstance(active, dict):
-            active = active.get("channel", active.get("channels"))
-        if isinstance(active, (int, float)):     # one channel, as the board reports it
-            active = [active]
-        try:
-            active = [int(c) for c in (active or [])]
-        except TypeError:
-            return (f"get_pfb_streamer(module={self.module}) returned "
-                    f"{raw!r}, which this capture cannot read as a "
-                    "channel list.")
-        if set(channels) <= set(active):
-            return None
-        have = (f"streaming channels {active}" if active else "off")
-        return (f"The PFB streamer on module {self.module} is {have}; "
-                f"this capture needs channels {list(channels)}.  Set it "
-                "under Streamer Configuration, then start again.")
+        return await pfb_streamer_mismatch(self.crs, self.module, channels)
 
     async def _run_fast(self) -> None:
         """PFB capture: check the fast streamer carries these channels,
@@ -336,8 +303,7 @@ class PulseCaptureTask(QtCore.QThread):
         if problem:
             self.signals.failed.emit(problem)
             return
-        stop = (lambda: self._stop_requested
-                or self.isInterruptionRequested())
+        stop = self._should_stop
         pump = asyncio.ensure_future(self._control_pump())
         try:
             await run_pfb_source(self.session, self.host, channels,
@@ -369,8 +335,7 @@ class PulseCaptureTask(QtCore.QThread):
         if problem:
             self.signals.failed.emit(problem)
             return
-        stop = (lambda: self._stop_requested
-                or self.isInterruptionRequested())
+        stop = self._should_stop
         watchdog = asyncio.ensure_future(self._dual_watchdog(stop))
         try:
             await run_dual_source(
@@ -441,7 +406,7 @@ class PulseCaptureTask(QtCore.QThread):
         return ingest.elapsed
 
     async def _control_pump(self) -> None:
-        """Service __reestimate__/__fetch__ requests while a socket
+        """Service control items (see _handle_control) while a socket
         source owns the sample flow (fast mode)."""
         while True:
             try:
@@ -462,38 +427,35 @@ class PulseCaptureTask(QtCore.QThread):
             return True
         if item[0] == "__fetch_pair__":
             _, ch, idx = item
-            pair = None
-            writer = self.session.writer
-            if writer is not None:
-                try:
-                    pair = writer.read_match(ch, idx)
-                except Exception as e:
-                    self.signals.error.emit(
-                        f"Pair read failed for ch{ch} pair {idx}: {e}")
-            if pair is not None:
-                with self._cache_lock:
-                    self._pair_cache[(ch, idx)] = pair
-            self.signals.waveform_ready.emit(ch, idx)
+            self._fetch(self._pair_cache, (ch, idx),
+                        lambda w: w.read_match(ch, idx),
+                        f"Pair read failed for ch{ch} pair {idx}", ch, idx)
             return True
         if item[0] == "__fetch__":
             _, ch, idx, stream = (item if len(item) == 4
                                   else (*item, None))
-            wf = None
-            writer = self.session.writer
-            if writer is not None:
-                try:
-                    wf = (writer.read_pulse(stream, ch, idx)
-                          if self.mode == "both"
-                          else writer.read_pulse(ch, idx))
-                except Exception as e:
-                    self.signals.error.emit(
-                        f"Waveform read failed for ch{ch}#{idx}: {e}")
-            if wf is not None:
-                with self._cache_lock:
-                    self._cache[(stream, ch, idx)] = wf
-            self.signals.waveform_ready.emit(ch, idx)
+            self._fetch(self._cache, (stream, ch, idx),
+                        lambda w: (w.read_pulse(stream, ch, idx)
+                                   if self.mode == "both"
+                                   else w.read_pulse(ch, idx)),
+                        f"Waveform read failed for ch{ch}#{idx}", ch, idx)
             return True
         return False
+
+    def _fetch(self, cache, key, read, what: str, ch: int, idx: int) -> None:
+        """Bring an evicted item back from the live file into *cache*;
+        waveform_ready fires either way so the view redraws."""
+        item = None
+        writer = self.session.writer
+        if writer is not None:
+            try:
+                item = read(writer)
+            except Exception as e:
+                self.signals.error.emit(f"{what}: {e}")
+        if item is not None:
+            with self._cache_lock:
+                cache[key] = item
+        self.signals.waveform_ready.emit(ch, idx)
 
     # ── Session callback (worker thread) ──────────────────────────
 

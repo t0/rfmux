@@ -29,6 +29,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from ...pulse_capture.analysis import window_shortfall
 from .layouts import ElidedLabel, FlowLayout, labelled
 from .utils import (
     ClickableViewBox,
@@ -1513,7 +1514,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.pulse_tree.clear()
         self._channel_items: Dict[int, QtWidgets.QTreeWidgetItem] = {}
         for c in channels:
-            item = QtWidgets.QTreeWidgetItem([f"▤ Channel {c} (0)", "", ""])
+            item = QtWidgets.QTreeWidgetItem(
+                [f"▤ Channel {c} (0)", "", "", ""])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("channel", c))
             self.pulse_tree.addTopLevelItem(item)
             item.setExpanded(True)
@@ -1796,12 +1798,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             text = (f"● Capturing — slow {slow_n} | fast {fast_n} pulses — "
                     f"{s['pairs_matched']} matched / "
                     f"{s['pairs_unmatched']} single-trigger pairs")
-            dropped = {name: s.get(name, {}).get("dropped_invalid_ts", 0)
-                       for name in ("slow", "fast")}
-            if any(dropped.values()):
-                text += " — " + " / ".join(
-                    f"{name} {n} dropped (no timestamp)"
-                    for name, n in dropped.items() if n)
+            text += self._dropped_text(
+                {name: s.get(name, {}).get("dropped_invalid_ts", 0)
+                 for name in ("slow", "fast")})
             colour, tip = self._stream_lag_signal(s)
             if tip:                       # append the drift note when it bites
                 text += f"  —  {tip[0]}"
@@ -1845,35 +1844,51 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         elapsed = int(s.get("elapsed_s", 0))
         hh, rem = divmod(elapsed, 3600)
         mm, ss = divmod(rem, 60)
-        dropped = s.get("dropped_invalid_ts", 0)
-        drop_str = f" — {dropped} dropped (no timestamp)" if dropped else ""
+        drop_str = self._dropped_text(
+            {"": s.get("dropped_invalid_ts", 0)}).replace(" —  ", " — ")
         self._set_status(
             f"● Capturing — {total} pulses ({rate:.1f}/min) — {ch_str} — "
             f"{hh:02d}:{mm:02d}:{ss:02d}{drop_str}"
             + self._source_text(s.get("source")), "#4CC38A")
 
-    @staticmethod
-    def _source_text(source) -> str:
-        """The fast socket's backlog and losses, once either has shown:
-        what the kernel holds for us right now, the most it has held,
-        the buffer it has, and the packets the reorder gave up on."""
+    #: A fast-source backlog peak below this is not worth a note.
+    _SOURCE_NOTE_BACKLOG_S = 0.05
+
+    @classmethod
+    def _source_text(cls, source) -> str:
+        """The fast source's busy fraction, the kernel's queue now and
+        at its peak, and the packets lost, once a loss or a backlog
+        has shown."""
         if not source:
             return ""
         lost = source.get("lost_packets", 0)
         flushed = source.get("flushed_packets", 0)
         peak = source.get("backlog_peak_s") or 0.0
-        if not lost and not flushed and peak < 0.05:
+        if not lost and peak < cls._SOURCE_NOTE_BACKLOG_S:
             return ""
         busy = source.get("busy")
         text = (f" — fast source {busy*100:.0f}% busy, " if busy is not None
                 else " — fast ")
         text += (f"kernel queue {source.get('backlog_s', 0.0):.2f} s "
                  f"(peak {peak:.2f} s)")
-        if lost or flushed:
-            text += f", {max(lost, flushed)} packets lost"
+        if lost:
+            text += f", {lost} packets lost"
         if flushed:
             text += f" ({flushed} flushed to stay current)"
         return text
+
+    @staticmethod
+    def _trigger_clock_text(summary: dict) -> str:
+        utc = summary.get("trigger_utc") if summary else None
+        return f"\ntrigger at {utc} (packet clock)" if utc else ""
+
+    @staticmethod
+    def _dropped_text(counts: dict) -> str:
+        """" — slow 3 dropped (no timestamp) / fast 1 dropped ..." for
+        the nonzero counts, or ''."""
+        parts = [f"{name} {n} dropped (no timestamp)"
+                 for name, n in counts.items() if n]
+        return " — " + " / ".join(parts) if parts else ""
 
     def _flat_df_calibrations(self) -> Dict[int, Any]:
         """Calibrations for the selected module, as {channel: calibration}.
@@ -2299,8 +2314,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"peak {summary.get('peak_amp', 0):.4g} "f"{self._units_label(channel)} "
             f"({summary.get('snr', 0):.1f}σ)\n"
             f"derived τ = {tau_str}"
-            + (f"\ntrigger at {summary['trigger_utc']} (packet clock)"
-               if summary.get("trigger_utc") else "")
+            + self._trigger_clock_text(summary)
             + self._decision_text(wf))
 
         for plot in (self.pulse_plot_i, self.pulse_plot_q):
@@ -2359,25 +2373,24 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 end_ns=ns_end)
             self._annotate_decisions(plot, wf, t0, quad)
 
-    def _window_shortfall(self, meta: dict, fast_wf) -> str:
-        """A note when the fast window does not reach the union window
-        it was asked for: the missing stretch was never in the ring,
-        which on the fast stream means packets lost."""
-        window = meta.get("window")
-        if window is None or fast_wf is None:
+    def _request_once(self, key: tuple, request) -> bool:
+        """Ask the worker for *key* unless it is the request already in
+        flight; True either way, the view is loading."""
+        if self._pending_fetch != key:
+            self._pending_fetch = key
+            request()
+        return True
+
+    def _shortfall_text(self, meta: dict, fast_wf) -> str:
+        """The session's judgement of a fast window short of its union
+        window, as a note."""
+        if fast_wf is None:
             return ""
-        times = np.asarray(fast_wf.get("Time", ()), dtype=float)
-        times = times[np.isfinite(times)]
-        if times.size == 0:
-            return ""
-        slow_period = 1.0 / self._current_sample_rate("slow")
-        head = float(times[0]) - window[0]
-        tail = window[1] - float(times[-1])
-        parts = []
-        if head > slow_period:
-            parts.append(f"first {head*1e3:.2f} ms")
-        if tail > slow_period:
-            parts.append(f"last {tail*1e3:.2f} ms")
+        head, tail = window_shortfall(
+            fast_wf.get("Time", ()), meta.get("window"),
+            1.0 / self._current_sample_rate("slow"))
+        parts = ([f"first {head*1e3:.2f} ms"] if head else []) \
+            + ([f"last {tail*1e3:.2f} ms"] if tail else [])
         if not parts:
             return ""
         return ("\nfast window incomplete: " + " and ".join(parts)
@@ -2404,31 +2417,23 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         elif self.task is not None:
             # Evicted from the task's cache: bring it back from the
             # file with its windows, and show the records meanwhile.
-            key = ("pair", channel, pair_idx)
-            if self._pending_fetch != key:
-                self._pending_fetch = key
-                self.task.request_pair(channel, pair_idx)
-            loading = True
-        if slow_wf is None and meta.get("slow_idx") is not None:
-            slow_wf = self._get_waveform(channel, meta["slow_idx"],
-                                         "slow")
-            if slow_wf is None and self.task is not None:
-                key = ("slow", channel, meta["slow_idx"])
-                if self._pending_fetch != key:
-                    self._pending_fetch = key
-                    self.task.request_waveform(channel,
-                                               meta["slow_idx"], "slow")
-                loading = True
-        if fast_wf is None and meta.get("fast_idx") is not None:
-            fast_wf = self._get_waveform(channel, meta["fast_idx"],
-                                         "fast")
-            if fast_wf is None and self.task is not None:
-                key = ("fast", channel, meta["fast_idx"])
-                if self._pending_fetch != key:
-                    self._pending_fetch = key
-                    self.task.request_waveform(channel,
-                                               meta["fast_idx"], "fast")
-                loading = True
+            loading = self._request_once(
+                ("pair", channel, pair_idx),
+                lambda: self.task.request_pair(channel, pair_idx))
+        for stream, have in (("slow", slow_wf), ("fast", fast_wf)):
+            idx = meta.get(f"{stream}_idx")
+            if have is not None or idx is None:
+                continue
+            wf = self._get_waveform(channel, idx, stream)
+            if wf is None and self.task is not None:
+                loading = self._request_once(
+                    (stream, channel, idx),
+                    lambda s=stream, i=idx: self.task.request_waveform(
+                        channel, i, s)) or loading
+            if stream == "slow":
+                slow_wf = wf
+            else:
+                fast_wf = wf
 
         matched = meta.get("slow_idx") is not None \
             and meta.get("fast_idx") is not None
@@ -2450,15 +2455,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"[{provenance}]\n"
             f"slow #{meta.get('slow_idx')} / fast #{meta.get('fast_idx')}"
             + (f"   Δt(trigger) = {dt*1e6:+.0f} µs  (slow − fast; paired "
-               f"as one event within half the CIC response, "
-               f"{1e6 * 3 / self._current_sample_rate('slow'):.0f} µs)"
+               f"as one event within "
+               f"{1e6 * self._last_stats.get('match_window_s', 0):.0f} µs)"
                if dt is not None and np.isfinite(dt) else "")
             + (f"\nSNR {summ.get('snr', 0):.1f}σ, "
                f"τ = {tau_ms:.2f} ms"
                if np.isfinite(tau_ms) else "")
-            + (f"\ntrigger at {summ['trigger_utc']} (packet clock)"
-               if summ.get("trigger_utc") else "")
-            + self._window_shortfall(meta, fast_wf))
+            + self._trigger_clock_text(summ)
+            + self._shortfall_text(meta, fast_wf))
 
         for plot in (self.pulse_plot_i, self.pulse_plot_q):
             plot.clear()

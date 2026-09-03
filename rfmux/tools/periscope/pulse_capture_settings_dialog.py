@@ -277,9 +277,8 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             c.toggled.connect(self._update_dependent_values)
         adv_box.setChecked(False)
         adv_box.toggled.emit(False)
-        self._update_dependent_values()
         self.setMinimumWidth(520)
-        self._fit_height()
+        self._update_dependent_values()
 
     def get_config(self) -> PulseCaptureConfig:
         return PulseCaptureConfig(

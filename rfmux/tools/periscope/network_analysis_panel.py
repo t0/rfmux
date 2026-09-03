@@ -2,7 +2,7 @@
 
 # Imports from within the 'periscope' subpackage
 from .utils import *
-from .layouts import FlowLayout
+from .layouts import FlowLayout, labelled
 from .tasks import SetCableLengthSignals # Added import
 # from .tasks import * # Not directly used by this class, dialogs will import what they need.
 
@@ -137,19 +137,13 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         toolbar_module_layout = FlowLayout(toolbar_module)
 
         # Cable length control
-        self.cable_length_label = QtWidgets.QLabel("Cable Length (m):")
         self.cable_length_spin = QtWidgets.QDoubleSpinBox()
         self.cable_length_spin.setRange(0.0, 1000.0)
         self.cable_length_spin.setValue(DEFAULT_CABLE_LENGTH)
         self.cable_length_spin.setSingleStep(0.05)
         self.cable_length_spin.valueChanged.connect(self._on_cable_length_changed)
-        cable = QtWidgets.QWidget()
-        cable_layout = QtWidgets.QHBoxLayout(cable)
-        cable_layout.setContentsMargins(0, 0, 0, 0)
-        cable_layout.setSpacing(4)
-        cable_layout.addWidget(self.cable_length_label)
-        cable_layout.addWidget(self.cable_length_spin)
-        toolbar_module_layout.addWidget(cable)
+        toolbar_module_layout.addWidget(
+            labelled("Cable Length (m):", self.cable_length_spin))
 
         # Unwrap Cable Delay button
         unwrap_button = QtWidgets.QPushButton("Unwrap Cable Delay")

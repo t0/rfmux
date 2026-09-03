@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from .extract_params import ParamKeyExtractor
 from PyQt6 import sip
 import numpy as np
+from typing import Optional
 from rfmux.core.transferfunctions import (
     PFB_SAMPLING_FREQ,
     apply_iq_conversion,
@@ -109,19 +110,15 @@ class PeriscopeRuntime:
                            on_frame_end=None):
         """Register a callback to receive slow stream samples for pulse capture.
 
-        Invoked from the GUI timer thread once per PACKET, not once per
-        sample, so it must be fast (e.g. put into a queue).
+        Invoked from the GUI timer thread once per batch, so it must be
+        fast (e.g. put into a queue).
 
-        Signature: ``callback(channels: tuple[int, ...], values: np.ndarray,
-        timestamp: float | None, day_epoch: float | None)`` -- ``values``
-        holds one complex sample per entry of ``channels``, in that
-        order; ``day_epoch`` is the UTC midnight the packet's
-        seconds-of-day count from.
+        Signature: ``callback(channels, values, seconds, day_epoch)``:
+        ``values`` is (packets, len(channels)) complex, one column per
+        entry of ``channels``; ``seconds`` is (packets,) seconds of day
+        with NaN for an undisciplined stamp; ``day_epoch`` the UTC
+        midnight those count from, or None.
 
-        Handing over whole packets keeps the per-packet cost flat in the
-        channel count.  The per-sample callback this replaced cost one
-        Python call and one queue put per channel per packet, which is
-        what made a 200-channel capture outrun the frame budget.
 
         Parameters
         ----------
@@ -137,23 +134,12 @@ class PeriscopeRuntime:
         """
         # Packets already queued predate this capture.  Delivered at the
         # display's pace they would put its clock behind from the start.
-        self._drop_queued_packets()
+        self._discard_packets()
         self._pulse_tap_channels = (
             sorted(set(int(c) for c in channels)) if channels else None)
         self._pulse_tap_cache = None
         self._pulse_tap_frame_end = on_frame_end
         self._pulse_tap = callback
-
-    def _drop_queued_packets(self) -> int:
-        """Discard what the receiver has queued and the display has not
-        drawn yet; returns how many."""
-        q = getattr(getattr(self, "receiver", None), "queue", None)
-        n = 0
-        if q is not None:
-            while not q.empty():
-                q.try_pop()
-                n += 1
-        return n
 
     def unregister_pulse_tap(self):
         """Remove the pulse capture tap callback."""
@@ -691,61 +677,30 @@ class PeriscopeRuntime:
         self._update_plot_data()
         self._update_performance_stats(now)
 
-    def _discard_packets(self):
-        """Discard all packets currently in the receiver queue (when paused)."""
-        if self.receiver.queue is None:
-            return
-        self.receiver.queue.clear()
+    def _discard_packets(self) -> None:
+        """Discard what the receiver has queued and nothing has read:
+        on pause, and when a capture registers its tap."""
+        q = getattr(getattr(self, "receiver", None), "queue", None)
+        if q is not None:
+            q.clear()
 
-    #: Hard ceiling on one drain pass.  This is a backstop against the
-    #: unbounded loop that used to freeze the window, NOT a throughput
-    #: budget: it must sit far above the time an honest frame's worth of
-    #: packets takes, or it invents packet loss at rates the GUI could
-    #: otherwise sustain.  An earlier version capped the drain at half
-    #: the refresh interval and did exactly that -- 32% loss at stage 0
-    #: with 8 channels displayed, on a stream the receiver handles with
-    #: zero loss.  A quarter second still bounds the freeze to something
-    #: a user reads as a stutter.
+    #: Ceiling on one drain pass, far above a frame's worth of packets:
+    #: it bounds a stall without inventing loss the receiver could
+    #: otherwise absorb.
     _DRAIN_DEADLINE_S = 0.25
 
-    def _process_incoming_packets(self):
-        """Process queued packets, stopping only if the drain runs long.
-
-        Draining until the queue is empty looks right and is a trap: it
-        is only bounded if processing outruns arrival.  Widen a pulse
-        capture to a few hundred channels and the per-channel work in
-        _update_buffers costs more than the packet interval, so the
-        queue never empties, this call never returns, and the GUI
-        freezes -- Qt cannot repaint or handle input while it is stuck
-        here.
-
-        Stopping at a deadline leaves the backlog in the C++ queue,
-        which is bounded (queue_max_size) and drops from the far end, so
-        a genuine sustained overrun surfaces as packet loss in the
-        status bar rather than a hang.
-
-        KNOWN LIMIT (measured on a board, 2026-08-19): a 128-channel
-        pulse capture at decimation stage 0 with the viewer also drawing
-        still loses roughly 0.5-10%, and clicking around the GUI adds a
-        little.  Everything cheap has been done -- batched display
-        writes, a batched tap, a 2048-packet receive ceiling -- so what
-        is left is the GIL: three Python threads (drain, capture worker,
-        receive loop) taking turns on one interpreter.  Getting to zero
-        means moving per-packet work out of Python, not tuning these
-        constants.
-
-        Concretely: one batched hand-off instead of two boundary
-        crossings per packet -- a C++ call returning a drain's worth
-        already demuxed into (channel x sample) arrays, so Python touches
-        one object per frame rather than 38k a second.  Circular.extend
-        and SlowIngest.feed_block already take blocks, so what is missing
-        is the getter, not the consumers.
+    def _process_incoming_packets(self) -> None:
+        """Drain the queue a batch at a time until it is empty or the
+        deadline passes.  A backlog left behind is bounded by the C++
+        queue and surfaces as packet loss in the status bar, never as
+        a frozen window.  A receiver built without the batched getter
+        is drained a packet at a time, which the batched path is held
+        equal to.
         """
         if self.receiver.queue is None:
             return
 
         deadline = time.monotonic() + self._DRAIN_DEADLINE_S
-
         pop_batch = getattr(self.receiver.queue, "pop_readout_batch", None)
         if pop_batch is not None:
             while True:
@@ -756,53 +711,38 @@ class PeriscopeRuntime:
                 if time.monotonic() >= deadline:
                     self.drain_overruns += 1
                     break
-            self._flush_display_batch()
-            frame_end = getattr(self, "_pulse_tap_frame_end", None)
-            if frame_end is not None:
-                frame_end()
-            return
-
-        # A receiver built without the batched getter: one packet at a
-        # time, which the batched path is held equal to.
-        while not self.receiver.queue.empty():
-            # Get packet from C++ queue (returns type-erased Packet)
-            packet = self.receiver.queue.try_pop()
-            if packet is None:
-                break
-
-            # Convert to ReadoutPacket
-            pkt = packet.to_python()
-
-            self.pkt_cnt += 1
-            if hasattr(pkt, 'fir_stage'):
-                # The fir_stage field is a 4-bit packed value:
-                #   Bit 3 (MSB): short/long packet flag (1=short/128ch, 0=long/1024ch)
-                #   Bits 2-0:    decimation stage (0-6)
-                self.actual_dec_stage = pkt.fir_stage & 0x7
-                self.is_short_packet = bool(pkt.fir_stage & 0x8)
-            t_rel = self._calculate_relative_timestamp(pkt)
-            self._update_buffers(pkt, t_rel)
-
-            # Track simulation time for speed calculation (mock mode only)
-            if self.is_mock_mode and t_rel is not None:
-                self._update_sim_time_tracking(t_rel)
-
-            if time.monotonic() >= deadline:
-                self.drain_overruns += 1
-                break
+        else:
+            while not self.receiver.queue.empty():
+                packet = self.receiver.queue.try_pop()
+                if packet is None:
+                    break
+                pkt = packet.to_python()
+                self.pkt_cnt += 1
+                # Bit 3 of fir_stage flags a short (128-channel) packet;
+                # bits 2-0 are the decimation stage.
+                if hasattr(pkt, "fir_stage"):
+                    self.actual_dec_stage = pkt.fir_stage & 0x7
+                    self.is_short_packet = bool(pkt.fir_stage & 0x8)
+                t_rel = self._calculate_relative_timestamp(pkt)
+                self._update_buffers(pkt, t_rel)
+                if self.is_mock_mode and t_rel is not None:
+                    self._update_sim_time_tracking(t_rel)
+                if time.monotonic() >= deadline:
+                    self.drain_overruns += 1
+                    break
 
         # Before _update_plot_data reads them, and before all_chs can
         # change under a half-written batch.
         self._flush_display_batch()
-        frame_end = getattr(self, "_pulse_tap_frame_end", None)
-        if frame_end is not None:
-            frame_end()
+        if self._pulse_tap_frame_end is not None:
+            self._pulse_tap_frame_end()
 
     #: Packets per batched pop: 100 ms of stage 0.
     _DRAIN_BATCH_MAX = 4096
 
-    def _ingest_batch(self, samples, seconds, recent, fir_stage, seq,
-                      year, yday) -> None:
+    def _ingest_batch(self, samples: np.ndarray, seconds: np.ndarray,
+                      recent: np.ndarray, fir_stage: np.ndarray,
+                      _seq: np.ndarray, year: int, yday: int) -> None:
         """One popped batch: what the per-packet loop does per packet,
         done once for the batch."""
         n = samples.shape[0]
@@ -818,7 +758,8 @@ class PeriscopeRuntime:
         t_rel = (t_now - self.start_time if self.start_time is not None
                  else np.full(n, np.nan))
         self._update_buffers_batch(samples, t_rel, seconds, recent,
-                                   (int(year), int(yday)))
+                                   (int(year), int(yday)) if recent.any()
+                                   else None)
         if self.is_mock_mode and recent.any():
             self._update_sim_time_tracking(
                 float(t_rel[np.flatnonzero(recent)[-1]]))
@@ -840,8 +781,8 @@ class PeriscopeRuntime:
         ts = pkt.ts
         if ts.recent:
             # Apply a small offset to ensure timestamps are strictly increasing for plotting
-            ts.ss += int(0.02 * streamer.SS_PER_SECOND); ts.renormalize()
-            t_now = ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND
+            ts.ss += int(0.02 * _streamer.SS_PER_SECOND); ts.renormalize()
+            t_now = ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / _streamer.SS_PER_SECOND
             if self.start_time is None: self.start_time = t_now
             return t_now - self.start_time
         return None
@@ -860,8 +801,9 @@ class PeriscopeRuntime:
             np.array([seconds]), np.array([recent]),
             (ts.y, ts.d) if recent else None)
 
-    def _update_buffers_batch(self, samples, t_rel, seconds, recent,
-                              day_key) -> None:
+    def _update_buffers_batch(self, samples: np.ndarray, t_rel: np.ndarray,
+                              seconds: np.ndarray, recent: np.ndarray,
+                              day_key: Optional[tuple]) -> None:
         """A batch (packets, channels) into the display batch and the
         pulse tap.
 
@@ -895,9 +837,7 @@ class PeriscopeRuntime:
                 if day_key is not None:
                     if day_key != self._pulse_tap_day_key:
                         self._pulse_tap_day_key = day_key
-                        self._pulse_tap_day = _streamer.ts_day_epoch(
-                            SimpleNamespace(y=day_key[0], d=day_key[1],
-                                            recent=True))
+                        self._pulse_tap_day = _streamer.day_epoch(*day_key)
                     day = self._pulse_tap_day
                 self._pulse_tap(channels, samples[:, idx], seconds, day)
 

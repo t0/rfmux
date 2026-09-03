@@ -59,17 +59,13 @@ direction; its magnitude is hertz per volt. A pulse moves the resonance
 frequency, so it lies along that one direction in the IQ plane, at an angle
 set by the bias point and the cable delay. Thresholding the raw quadratures
 tests an arbitrary basis instead: at 45 degrees each one sees the pulse
-divided by the square root of two while carrying the full noise. On synthetic
-data, a 7σ pulse at 45 degrees against a 4σ threshold: 18 of 19 detected
-rotated, 3 of 19 on the quadratures.
+divided by the square root of two while carrying the full noise.
 
 Rotating before thresholding is therefore the default wherever a calibration
 exists. Pass `trigger_basis="iq"` to threshold the raw quadratures anyway. A
 channel with no calibration cannot be rotated, so it stays on the quadratures
 and in volts, and one capture can hold both kinds.
 
-Every file records what it holds, so a reader needs nothing from this
-library to interpret it:
 
 | Attribute | Where | Meaning |
 |---|---|---|

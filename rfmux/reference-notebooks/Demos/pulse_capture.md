@@ -179,7 +179,8 @@ MOCK_CONFIG = {
     "num_resonances": 2,
     "resonator_random_seed": 42,
     "auto_bias_kids": True,        # bias the detectors
-    "bias_amplitude": 0.001,
+    "bias_amplitude": 0.001,       # normalized: about -59 dBm at the mock's
+                                   # 1 dBm DAC scale (the dialog shows dBm)
 
     # ── Noise (these are the shipped defaults, spelled out) ─────
     "udp_noise_level": 10.0,       # white readout noise (ADC counts)

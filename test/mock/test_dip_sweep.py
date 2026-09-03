@@ -11,6 +11,7 @@ import contextlib
 import io
 
 import numpy as np
+import pytest
 
 
 def _model(n=3):
@@ -49,6 +50,31 @@ def test_sweep_on_a_fresh_model_is_not_a_different_model():
     fresh = crs._find_s21_dip_frequency(f0, 0.01)
     m.s21_lc_response(f0, 0.01)
     assert crs._find_s21_dip_frequency(f0, 0.01) == fresh
+
+
+def test_two_stage_search_finds_the_brute_force_dip():
+    """The locating pass at 50 kHz plus multisweep's 200 kHz / 101
+    points lands on the same minimum a dense sweep over the whole
+    coupling-shift window finds, to the fine grid's step."""
+    from rfmux.mock.config import BIAS_DBM, bias_amplitude_from_dbm
+    crs, m = _model()
+    amp = bias_amplitude_from_dbm(BIAS_DBM)
+    for f0 in sorted(m.resonator_frequencies):
+        dense = np.linspace(f0 - 3e6, f0 + 3e6, 3001)
+        ref = dense[np.argmin(m.s21_sweep(dense, amp))]
+        found = crs._find_s21_dip_frequency(f0, amp)
+        assert abs(found - ref) <= 2e3, (f0, found, ref)
+        assert abs(found - f0) > 200e3, \
+            "the fixture should exercise the coupling shift"
+
+
+def test_bias_power_round_trips_through_dbm():
+    from rfmux.mock.config import (
+        BIAS_DBM, bias_amplitude_from_dbm, bias_dbm_from_amplitude, defaults)
+    amp = defaults()["bias_amplitude"]
+    assert bias_dbm_from_amplitude(amp) == pytest.approx(BIAS_DBM)
+    assert bias_amplitude_from_dbm(bias_dbm_from_amplitude(0.01)) == \
+        pytest.approx(0.01)
 
 
 def test_sweep_leaves_lekid_state_alone():

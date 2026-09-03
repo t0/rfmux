@@ -8,7 +8,7 @@ directly to MockCRS.generate_resonators().
 
 Groups:
 - Basic: number of resonances, frequency range (GHz), random seed
-- Bias: automatic bias enable and bias amplitude (normalized)
+- Bias: automatic bias enable and bias power (dBm, stored normalized)
 - Advanced (collapsible):
   - Physics: T (K), Popt (W)
   - Circuit: Lg (H), Cc (F), L_junk (H), C_variation, Cc_variation
@@ -175,12 +175,16 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.auto_bias_check.setToolTip("Configure tones on generated resonator frequencies")
         layout.addWidget(self.auto_bias_check, row, 0, 1, 2)
 
-        layout.addWidget(QtWidgets.QLabel("Bias Amplitude (normalized):"), row, 2)
+        layout.addWidget(QtWidgets.QLabel("Bias Power (dBm):"), row, 2)
+        # Shown in dBm; the config holds the normalized amplitude, at the
+        # mock's DAC scale.
         self.bias_amplitude_spin = QtWidgets.QDoubleSpinBox()
-        self.bias_amplitude_spin.setRange(0.0001, 1.0)
-        self.bias_amplitude_spin.setSingleStep(0.001)
-        self.bias_amplitude_spin.setDecimals(4)
-        self.bias_amplitude_spin.setToolTip("Amplitude for automatic biasing (e.g., 0.01 ≈ -40 dBm)")
+        self.bias_amplitude_spin.setRange(-120.0, mc.DAC_SCALE_DBM)
+        self.bias_amplitude_spin.setSingleStep(1.0)
+        self.bias_amplitude_spin.setDecimals(1)
+        self.bias_amplitude_spin.setToolTip(
+            "Tone power the automatic biasing sweeps and biases at, "
+            f"relative to the mock's {mc.DAC_SCALE_DBM:g} dBm DAC scale")
         layout.addWidget(self.bias_amplitude_spin, row, 3)
 
         self.auto_bias_check.toggled.connect(self.bias_amplitude_spin.setEnabled)
@@ -924,7 +928,8 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.random_seed_edit.setText("" if cfg["resonator_random_seed"] is None else str(cfg["resonator_random_seed"]))
         # Bias
         self.auto_bias_check.setChecked(bool(cfg["auto_bias_kids"]))
-        self.bias_amplitude_spin.setValue(float(cfg["bias_amplitude"]))
+        self.bias_amplitude_spin.setValue(
+            mc.bias_dbm_from_amplitude(float(cfg["bias_amplitude"])))
         # Physics-driven mode
         self.T_edit.setText(str(cfg["T"]))
         self.Popt_edit.setText(str(cfg["Popt"]))
@@ -1011,7 +1016,8 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
         # Bias
         self.auto_bias_check.setChecked(bool(cfg.get("auto_bias_kids")))
-        self.bias_amplitude_spin.setValue(float(cfg.get("bias_amplitude")))
+        self.bias_amplitude_spin.setValue(
+            mc.bias_dbm_from_amplitude(float(cfg.get("bias_amplitude"))))
 
         # Physics-driven mode
         self.T_edit.setText(str(cfg.get("T")))
@@ -1154,7 +1160,8 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
             # Bias
             "auto_bias_kids": bool(self.auto_bias_check.isChecked()),
-            "bias_amplitude": float(self.bias_amplitude_spin.value()),
+            "bias_amplitude": mc.bias_amplitude_from_dbm(
+                float(self.bias_amplitude_spin.value())),
 
             # Physics
             "T": float(self.T_edit.text()),

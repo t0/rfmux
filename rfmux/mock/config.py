@@ -17,7 +17,23 @@ from __future__ import annotations
 
 from typing import Any, Dict
 from copy import deepcopy
+import math
 import re
+
+#: The mock's DAC scale, what a tone power in dBm is normalized against
+#: (set_dac_scale's default on the mock board).
+DAC_SCALE_DBM = 1.0
+#: Tone power the automatic biasing sweeps and biases at.
+BIAS_DBM = -55.0
+
+
+def bias_amplitude_from_dbm(dbm: float) -> float:
+    """Normalized tone amplitude for a power in dBm at the mock's DAC scale."""
+    return 10 ** ((dbm - DAC_SCALE_DBM) / 20)
+
+
+def bias_dbm_from_amplitude(amplitude: float) -> float:
+    return 20 * math.log10(max(amplitude, 1e-12)) + DAC_SCALE_DBM
 
 # =============================================================================
 # Unified Default Configuration
@@ -108,7 +124,8 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Automatic KID biasing parameters
     # -------------------------------------------------------------------------
     "auto_bias_kids": False,   # Enable automatic channel configuration
-    "bias_amplitude": 0.0015,    # Bias amplitude in normalized units (≈ -40 dBm)
+    # Normalized units; the dialog shows and edits it in dBm.
+    "bias_amplitude": bias_amplitude_from_dbm(BIAS_DBM),
 
     # -------------------------------------------------------------------------
     # UDP streamer (ADC simulation)

@@ -15,6 +15,7 @@ from ..core.schema import CRS as BaseCRS
 # Import helper classes from this package
 from .resonator_model import MockResonatorModel
 from .udp_streamer import MockUDPManager
+from . import config as mock_config
 
 from ..streamer import LONG_PACKET_CHANNELS, SHORT_PACKET_CHANNELS, Timestamp, TimestampSource
 
@@ -237,7 +238,8 @@ class ServerMockCRS:
         self._rfdc_initialized = False
         self._nco_frequencies = {}
         self._adc_attenuators = {m: {"amplitude": 0.0, "units": self.Units.DB} for m in range(1, 5)}
-        self._dac_scales = {m: {"amplitude": 1.0, "units": self.Units.DBM} for m in range(1, 5)}
+        self._dac_scales = {m: {"amplitude": mock_config.DAC_SCALE_DBM,
+                                "units": self.Units.DBM} for m in range(1, 5)}
         self._adc_autocal = {m: True for m in range(1, 5)}
         self._adc_calibration_mode = {m: self.ADCCalibrationMode.AUTO for m in range(1, 5)}
         self._adc_calibration_coefficients = {}
@@ -306,38 +308,31 @@ class ServerMockCRS:
             traceback.print_exc()
             raise
 
-    def _find_s21_dip_frequency(self, nominal_freq, amplitude=0.01, search_width=10e6, n_points=2000):
-        """Find the actual S21 transmission minimum near a nominal resonance frequency.
+    #: Locating pass.  The S21 minimum sits above compute_fr's impedance
+    #: resonance by the coupling shift, about 0.11% of the frequency
+    #: (1.4 MHz at 1.3 GHz), so the window scales with frequency.  A
+    #: 50 kHz step still shows a 6 kHz-wide dip as the minimum of a
+    #: noise-free sweep.
+    _DIP_LOCATE_FRACTION = 0.0025
+    _DIP_LOCATE_STEP_HZ = 50e3
+    #: Refining pass: multisweep's defaults.
+    _DIP_SPAN_HZ = 200e3
+    _DIP_POINTS = 101
 
-        ``compute_fr()`` returns the impedance resonance (where Im(Z_total) = 0),
-        but the S21 *transmission minimum* is shifted from that by the coupling
-        to the external circuit (attenuator, feedline, LNA).  This method sweeps
-        |S21(f)| over a window around ``nominal_freq`` and returns the frequency
-        of the deepest dip.
+    def _find_s21_dip_frequency(self, nominal_freq, amplitude):
+        """The S21 transmission minimum near ``nominal_freq`` (compute_fr).
 
-        Parameters
-        ----------
-        nominal_freq : float
-            Center of the search window (Hz) — typically ``compute_fr()``.
-        amplitude : float
-            Probe amplitude for S21 evaluation.
-        search_width : float
-            Half-width of the search window (Hz).  Default ±10 MHz.
-        n_points : int
-            Number of frequency points to sweep.
-
-        Returns
-        -------
-        float
-            Frequency (Hz) of the S21 transmission minimum.
+        As on hardware: a coarse sweep locates the dip, then a sweep at
+        multisweep's span and point count pins it.
         """
-        from .resonator_model import MockResonatorModel
-        import numpy as _np
-
         model: MockResonatorModel = self._resonator_model
-        freqs = _np.linspace(nominal_freq - search_width, nominal_freq + search_width, n_points)
-
-        return float(freqs[_np.argmin(model.s21_sweep(freqs, amplitude))])
+        half = self._DIP_LOCATE_FRACTION * nominal_freq
+        coarse = np.arange(nominal_freq - half, nominal_freq + half,
+                           self._DIP_LOCATE_STEP_HZ)
+        guess = coarse[np.argmin(model.s21_sweep(coarse, amplitude))]
+        fine = np.linspace(guess - self._DIP_SPAN_HZ / 2,
+                           guess + self._DIP_SPAN_HZ / 2, self._DIP_POINTS)
+        return float(fine[np.argmin(model.s21_sweep(fine, amplitude))])
 
     async def _auto_bias_kids(self, config, resonance_frequencies, amplitude=None):
         """Automatically configure channels at resonator frequencies (bias KIDs).
@@ -357,7 +352,9 @@ class ServerMockCRS:
         try:
             # Get configuration parameters
             if amplitude is None:
-                amplitude = config.get('bias_amplitude', 0.01)  # Normalized units
+                amplitude = config.get(
+                    'bias_amplitude',
+                    mock_config.bias_amplitude_from_dbm(mock_config.BIAS_DBM))
             module = 1  # Always use module 1 for mock
             
             print(f"[MockCRS] Auto-biasing {len(resonance_frequencies)} KIDs with amplitude {amplitude}")

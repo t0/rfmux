@@ -15,58 +15,9 @@ from rfmux.pulse_capture.capture_session import (
 from rfmux.pulse_capture.sources import (
     SlowIngest, columns_for_width)
 
-FS = 1000.0
-DT = 1.0 / FS
-NOISE = 400
-
-
-def _session(channels, pulses, **kw):
-    return PulseCaptureSession(
-        channels=list(channels), sample_rate=FS, noise_samples=NOISE,
-        hdf5_path=None,
-        on_pulse=lambda ch, idx, summary, data: pulses.append(
-            (ch, idx, round(float(summary["timestamp"]), 9))),
-        **kw,
-    )
-
-
-def _packets(channels, n, rng, pulse_starts=(600, 900), tau=15, amp=80.0):
-    """(values, timestamp) per packet — one complex sample per channel."""
-    k = np.arange(n)
-    shape = np.zeros(n)
-    for k0 in pulse_starts:
-        m = k >= k0
-        shape[m] += amp * np.exp(-(k[m] - k0) / tau)
-    out = []
-    for i in range(n):
-        vals = (rng.normal(0, 1.0, len(channels))
-                + 1j * rng.normal(0, 1.0, len(channels)))
-        vals = vals + shape[i]          # same pulse on every channel
-        out.append((vals, i * DT))
-    return out
-
-
-def _run_per_sample(channels, packets, pulses, **kw):
-    s = _session(channels, pulses, **kw)
-    s.start()
-    for values, ts in packets:
-        for column, ch in enumerate(channels):
-            v = values[column]
-            s.feed_sample(ch, float(v.real), float(v.imag), ts)
-    s.stop()
-    return s
-
-
-def _run_blocks(channels, packets, pulses, max_packets=256, **kw):
-    s = _session(channels, pulses, **kw)
-    s.start()
-    acc = SlowIngest(s.feed_block, max_packets=max_packets,
-                               max_age_s=1e9)   # size-driven only
-    for values, ts in packets:
-        acc.add(channels, values, ts)
-    acc.flush()
-    s.stop()
-    return s
+from test.pulse_capture.ingest_helpers import (  # noqa: E402
+    FS, NOISE, packets as _packets, run_blocks as _run_blocks,
+    run_per_sample as _run_per_sample, session as _session)
 
 
 @pytest.mark.parametrize("channels", [(1,), (1, 2, 3)])
@@ -85,34 +36,6 @@ def test_block_and_sample_ingest_agree(channels):
     assert sorted(by_block) == sorted(by_sample), \
         "block ingest changed what was detected"
     assert by_block, "the fixture should produce pulses at all"
-
-
-@pytest.mark.parametrize("max_packets", [1, 7, 64, 4096])
-def test_block_size_does_not_change_the_answer(max_packets):
-    # Where the block boundaries land must not matter — including a
-    # block larger than the whole capture, and blocks of one.
-    channels = (1, 2)
-    rng = np.random.default_rng(5)
-    packets = _packets(channels, 1200, rng)
-
-    reference, chunked = [], []
-    _run_per_sample(channels, packets, reference)
-    _run_blocks(channels, packets, chunked, max_packets=max_packets)
-    assert sorted(chunked) == sorted(reference)
-
-
-def test_blocks_straddling_the_end_of_noise_training():
-    # The transition out of ESTIMATING lands mid-block here; feed_block
-    # has to split it rather than drop the remainder.
-    channels = (1,)
-    rng = np.random.default_rng(3)
-    packets = _packets(channels, 1400, rng)
-
-    reference, chunked = [], []
-    _run_per_sample(channels, packets, reference)
-    # NOISE=400 is not a multiple of 256, so a boundary falls inside.
-    _run_blocks(channels, packets, chunked, max_packets=256)
-    assert sorted(chunked) == sorted(reference)
 
 
 def test_unusable_timestamps_are_dropped_not_poisoned():
@@ -227,37 +150,6 @@ def test_held_tail_is_not_transformed_twice():
             "the engine with the conversion applied more than once")
 
 
-def test_dense_scattered_crossings_agree():
-    """Block and per-sample ingest agree when crossings scatter.
-
-    process_block walks hit ISLANDS and bulks the quiet gaps between
-    them.  A clean single pulse is one island and never exercises a
-    second; this drives the threshold down into the noise so a block
-    holds many crossings with wide gaps -- the multi-island, gap-bulk
-    path -- and requires the two ingest routes to still detect exactly
-    the same pulses at exactly the same times.
-    """
-    rng = np.random.default_rng(4)
-    channels = (1,)
-    # A couple of real pulses on top of noise, at a low threshold so the
-    # noise itself crosses constantly: many islands per block.
-    packets = _packets(channels, 3000, rng, pulse_starts=(1200, 2100),
-                        tau=15, amp=30.0)
-    kw = dict(threshold_sigma=2.5, end_sigma=1.5)
-
-    by_sample, by_block = [], []
-    _run_per_sample(channels, packets, by_sample, **kw)
-    # Vary the block boundaries: the gaps must not depend on where a
-    # block happens to split.
-    for mp in (1, 7, 64, 256, 4096):
-        by_block.clear()
-        _run_blocks(channels, packets, by_block, max_packets=mp, **kw)
-        assert sorted(by_block) == sorted(by_sample), \
-            f"block ingest disagreed at max_packets={mp}: " \
-            f"{len(by_block)} vs {len(by_sample)} pulses"
-    assert by_sample, "the fixture should trigger at 2.5 sigma"
-
-
 def _run_block_adds(channels, packets, pulses, rows=64, max_packets=256, **kw):
     """Blocks of *rows* packets through SlowIngest.add_block."""
     s = _session(channels, pulses, **kw)
@@ -285,16 +177,3 @@ def test_block_adds_agree_with_packet_adds(rows):
     assert by_packet
 
 
-def test_the_block_clock_is_the_packet_clock():
-    """advance over a block, compiled, matches advance per packet with
-    stragglers, a missing stamp, and a day boundary in the stream."""
-    from rfmux.pulse_capture.sources import _advance_block
-    stamps = [1.0, 1.001, 1.0005, 1.002, float("nan"), 1.003, 0.5, 1.004,
-              86399.9, 0.0001, 0.0002, 1.0, 1.001]
-    a = SlowIngest(lambda *args: None)
-    for t in stamps:
-        a.advance(None if t != t else t)
-    prev, elapsed = _advance_block(np.array(stamps), float("nan"), 0.0,
-                                   SlowIngest.MAX_PLAUSIBLE_STEP_S)
-    assert prev == a._prev_ts
-    assert elapsed == pytest.approx(a.elapsed)

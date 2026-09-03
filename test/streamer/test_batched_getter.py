@@ -15,28 +15,17 @@ import numpy as np
 import pytest
 
 from rfmux import streamer
-from rfmux.streamer import Timestamp, TimestampSource
+from test.packet_helpers import readout_packet
 
 SHORT = streamer.SHORT_PACKET_VERSION
 LONG = streamer.LONG_PACKET_VERSION
 
 
 def _packet(seq, version, rng, *, recent=True, fir_stage=0x8, t_s=43200.0):
-    pkt = streamer.ReadoutPacket()
-    pkt.magic = streamer.READOUT_PACKET_MAGIC
-    pkt.version = version
-    pkt.serial = 24
-    pkt.num_modules = 1
-    pkt.module = 1                            # 0-indexed on the wire
-    pkt.fir_stage = fir_stage
-    pkt.seq = seq
-    width = len(pkt)
-    pkt.raw_samples = rng.integers(-2**23, 2**23, size=2 * width,
+    pkt = readout_packet(seq, version=version, module=2, serial=24,
+                         fir_stage=fir_stage, t_s=t_s, recent=recent)
+    pkt.raw_samples = rng.integers(-2**23, 2**23, size=2 * len(pkt),
                                    dtype=np.int32)
-    h = int(t_s // 3600); m = int(t_s % 3600 // 60); s_ = int(t_s % 60)
-    ss = int((t_s % 1) * streamer.SS_PER_SECOND)
-    pkt.ts = Timestamp(y=26, d=245, h=h, m=m, s=s_, ss=ss, c=0, sbs=0,
-                       source=TimestampSource.TEST, recent=recent)
     return pkt
 
 

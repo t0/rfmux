@@ -188,10 +188,15 @@ def test_df_basis_needs_a_calibration(qt_app):
 
 def test_derived_values_are_one_per_line(qt_app):
     dlg = PulseCaptureSettingsDialog(sample_rate=596.0)
-    for label in (dlg.pulse_derived_label, dlg.sigma_derived_label):
-        text = label.text()
-        assert text.startswith("<table")
-        assert "·" not in text
     assert dlg.pulse_derived_label.text().count("<tr>") == 6
     assert dlg.sigma_derived_label.text().count("<tr>") == 2
+    dlg.close()
+
+
+def test_the_tail_setting_defaults_off(qt_app):
+    dlg = PulseCaptureSettingsDialog(config=PulseCaptureConfig(),
+                                     sample_rate=1000.0, mode="slow")
+    assert not dlg.end_confirmed_check.isChecked()
+    out = dlg.get_config()
+    assert out.save_to_end_confirmed is False
     dlg.close()

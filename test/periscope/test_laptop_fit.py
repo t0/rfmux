@@ -14,6 +14,8 @@ from rfmux.tools.periscope.layouts import FlowLayout  # noqa: E402
 from rfmux.tools.periscope.multisweep_panel import MultisweepPanel  # noqa: E402
 from rfmux.tools.periscope.network_analysis_panel import (  # noqa: E402
     NetworkAnalysisPanel)
+from rfmux.tools.periscope.pulse_capture_panel import (  # noqa: E402
+    PulseCapturePanel)
 
 
 def _flow_layouts(widget):
@@ -24,6 +26,7 @@ def _flow_layouts(widget):
 @pytest.mark.parametrize("make", [
     lambda: MultisweepPanel(dark_mode=False),
     lambda: NetworkAnalysisPanel(modules=[1], dark_mode=False),
+    lambda: PulseCapturePanel(dark_mode=False),
 ])
 def test_panel_toolbars_wrap_and_fit(qt_app, make):
     panel = make()

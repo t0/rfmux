@@ -10,30 +10,23 @@ the summary the viewer shows.
 
 import h5py
 import numpy as np
-import pytest
 
 from rfmux import streamer
 from rfmux.pulse_capture.capture_session import (
     DualPulseCaptureSession, PulseCaptureConfig, PulseCaptureSession)
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
 
-from test.pulse_capture.test_block_ingest_equivalence import (
-    DT, FS, _packets)
-from test.pulse_capture.test_source_drain import Timestamp, TimestampSource
-
-
-def _stamp(y, d, h, m, s, ss=0, recent=True):
-    return Timestamp(y=y, d=d, h=h, m=m, s=s, ss=ss, c=0, sbs=0,
-                     source=TimestampSource.TEST, recent=recent)
+from test.packet_helpers import stamp
+from test.pulse_capture.ingest_helpers import FS, packets as _packets
 
 
 def test_the_day_decodes_from_year_and_day_of_year():
-    ts = _stamp(26, 245, 16, 14, 5)           # 2026-09-02
+    ts = stamp(58445, y=26, d=245)           # 2026-09-02
     day = streamer.ts_day_epoch(ts)
     assert streamer.epoch_to_utc(day) == "2026-09-02T00:00:00.000000Z"
     whole = day + streamer.ts_to_seconds(ts)
     assert streamer.epoch_to_utc(whole) == "2026-09-02T16:14:05.000000Z"
-    assert streamer.ts_day_epoch(_stamp(26, 245, 0, 0, 0, recent=False)) is None
+    assert streamer.ts_day_epoch(stamp(0, y=26, d=245, recent=False)) is None
 
 
 def test_records_carry_the_decoded_trigger_time(tmp_path):
@@ -43,7 +36,7 @@ def test_records_carry_the_decoded_trigger_time(tmp_path):
                             hdf5_path=path,
                             on_pulse=lambda ch, idx, summ, data: got.append(summ))
     s.start()
-    day = streamer.ts_day_epoch(_stamp(26, 245, 0, 0, 0))
+    day = streamer.ts_day_epoch(stamp(0, y=26, d=245))
     s.set_time_origin(day)
     s.set_time_origin(day + 86400)                 # the first wins
     rng = np.random.default_rng(1)
@@ -83,7 +76,7 @@ def test_a_dual_capture_file_records_the_day(tmp_path):
         channels=[1], config=PulseCaptureConfig(), slow_rate=FS,
         fast_rate=1e5, hdf5_path=path)
     d.start()
-    day = streamer.ts_day_epoch(_stamp(26, 245, 0, 0, 0))
+    day = streamer.ts_day_epoch(stamp(0, y=26, d=245))
     d.set_time_origin(day)
     d.stop()
     with h5py.File(path, "r") as f:

@@ -52,7 +52,8 @@ def test_hoisted_matches_reference(pulses):
 
 
 def test_hoisted_dispatches_once_per_batch(monkeypatch):
-    """The per-sample work is gone: one Lk/R kernel dispatch per batch."""
+    """The per-sample work is gone: at most two Lk/R kernel dispatches
+    per batch, where the loop made one per sample."""
     from rfmux.mr_resonator import jit_physics
     crs, m = _model(11, "hoisted")
     calls = {"n": 0}

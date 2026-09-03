@@ -1,13 +1,11 @@
 """
-A pulse that rotates in the IQ plane is one pulse, not a pileup.
+A pulse whose deviation rotates in the IQ plane is one pulse.
 
-The deviation profile below is a fast-stream pulse recorded on hardware
-(2026-09-02, module 2, channel 4), in units of sigma: Q overshoots to
-32 and settles near 22 while I swings from +10 to -14.  Judged per
-quadrature that was decay on Q and a rise on I, and the engine split
-it into a parent with no end and a child with the same trigger.  The
-split is judged on the length of the deviation vector now, and the
-rise is measured against the pulse's own recent level.
+One quadrature decays while the other rises; judged per quadrature
+that is a pileup, judged on the length of the deviation vector, and
+with the rise measured against the pulse's own recent level, it is
+one record.  The profile is a recorded fast-stream pulse in sigma
+units.
 """
 
 import numpy as np

@@ -9,8 +9,6 @@ blocks without the walk, in blocks with it -- and every field of every
 record must agree bitwise.
 """
 
-import math
-
 import numpy as np
 import pytest
 
@@ -18,8 +16,7 @@ from rfmux.pulse_capture import walk
 from rfmux.pulse_capture.detection import PulseCapture
 from rfmux.pulse_capture.sources import SlowIngest
 
-from test.pulse_capture.test_block_ingest_equivalence import (
-    DT, FS, _session)
+from test.pulse_capture.ingest_helpers import DT, session as _session
 
 N = 4600
 FREEZE = (3600, 3900)           # triggers frozen on these packets

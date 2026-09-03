@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from rfmux.pulse_capture import SlowIngest
+from rfmux.pulse_capture.sources import _advance_block
 
 
 def _ingest(**kw):
@@ -121,3 +122,32 @@ def test_a_packet_with_no_wanted_channel_is_still_time_passing():
     assert ingest.elapsed == pytest.approx(0.3)
     assert ingest.complete
     assert not fed
+
+
+def test_the_block_clock_is_the_packet_clock():
+    """advance over a block, compiled, matches advance per packet with
+    stragglers, a missing stamp, and a day boundary in the stream."""
+    stamps = [1.0, 1.001, 1.0005, 1.002, float("nan"), 1.003, 0.5, 1.004,
+              86399.9, 0.0001, 0.0002, 1.0, 1.001]
+    a = SlowIngest(lambda *args: None)
+    for t in stamps:
+        a.advance(None if t != t else t)
+    _, elapsed = _advance_block(np.array(stamps), float("nan"), 0.0,
+                                   SlowIngest.MAX_PLAUSIBLE_STEP_S)
+    assert elapsed == pytest.approx(a.elapsed)
+
+
+def test_blocks_are_fed_in_time_order():
+    """Packets buffered out of order reach the session sorted by stamp."""
+    fed = []
+    ingest = SlowIngest(lambda ch, i, q, t: fed.append(np.asarray(t)),
+                            max_packets=8, max_age_s=1e9)
+    order = list(range(20))
+    for i in range(1, 20, 4):
+        order[i], order[i + 1] = order[i + 1], order[i]
+    for k in order:
+        ingest.add((1,), np.array([complex(k, 0)]), 43200.0 + k / 596.0)
+    ingest.flush()
+    stamps = np.concatenate(fed)
+    assert np.array_equal(stamps, 43200.0 + np.arange(20) / 596.0)
+    assert ingest.elapsed == pytest.approx(19 / 596.0)

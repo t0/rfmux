@@ -67,8 +67,7 @@ def test_one_physics_call_per_frame_and_hardware_sized_packets(dec, channels, mo
 
 
 def test_pulse_triggers_stay_on_the_sub_batch_grid():
-    """A periodic pulse due mid-frame starts on the 26 us sub-batch grid,
-    as it did when every sub-batch was its own physics call."""
+    """A periodic pulse due mid-frame starts on the 26 us sub-batch grid."""
     crs, st = _streamer(6, [1])
     model = crs._resonator_model
     model.set_pulse_mode("periodic", period=0.0007, tau_rise=1e-6,

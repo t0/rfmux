@@ -9,6 +9,7 @@ finalized HDF5 file.
 
 
 import numpy as np
+import pyqtgraph as pg
 import pytest
 
 from test.qt_helpers import spin, spin_until  # noqa: E402
@@ -794,7 +795,6 @@ def test_template_view_fits_data_and_uses_zoombox(qt_app, tmp_path):
     """Template axes track the STACKED region (not the whole pre/post
     grid), and plots default to zoombox (RectMode) like the rest of
     Periscope."""
-    import pyqtgraph as pg
 
     from rfmux.pulse_capture.accumulators import (
         PulseTemplateSet,
@@ -932,7 +932,6 @@ def test_both_mode_annotates_bands_per_stream(qt_app, tmp_path):
 def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
     """Trigger and end-confirmation points, so a wrong-looking capture can
     be read against the decisions that produced it."""
-    import pyqtgraph as pg
 
     runtime = _FakeRuntime()
     panel = _make_panel(qt_app, tmp_path, runtime)
@@ -981,7 +980,6 @@ def test_pair_view_marks_come_from_the_triggered_record(qt_app, tmp_path):
     """In 'both' mode the plots show the UNION ring window, which
     carries no decisions — the marks live on the stream's own triggered
     record and are absolute times, so they still land correctly."""
-    import pyqtgraph as pg
 
     path = _build_dual_file(tmp_path)
     panel = PulseCapturePanel(dark_mode=False)
@@ -1458,7 +1456,6 @@ def test_templates_are_rotated_not_just_scaled(qt_app):
     both linear, so the rotated template is the template of rotated
     pulses -- but only when the pair is converted together.
     """
-    import pyqtgraph as pg
 
     from rfmux.tools.periscope import pulse_capture_panel as m
 
@@ -1543,7 +1540,6 @@ def test_noise_bands_follow_the_rotation(qt_app):
     A baseline is a signed position in the plane, so it rotates.  The
     spreads are magnitudes and take the rotation's length only.
     """
-    import pyqtgraph as pg
 
     from rfmux.core.transferfunctions import apply_iq_conversion
     from rfmux.pulse_capture.detection import ChannelNoiseStats
@@ -1647,3 +1643,82 @@ def test_noise_strip_follows_the_view(qt_app):
 
     panel.close()
     spin(qt_app)
+
+
+def test_the_tap_is_released_however_the_worker_ends(qt_app):
+    from types import SimpleNamespace
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    released = []
+    runtime = SimpleNamespace(unregister_pulse_tap=lambda: released.append(True))
+    panel = PulseCapturePanel(periscope=runtime, dark_mode=False)
+    try:
+        panel._tap_registered = True
+        panel.task = None
+        panel._on_task_finished()
+        assert released == [True]
+        assert panel._tap_registered is False
+    finally:
+        panel.close()
+
+
+def test_a_new_capture_starts_from_the_newest_packets():
+    """Registering the tap discards the receiver's backlog, so the slow
+    stream's clock starts current instead of behind."""
+    from types import SimpleNamespace
+    from rfmux.tools.periscope.app_runtime import PeriscopeRuntime
+
+    class _Q:
+        def __init__(self, n):
+            self.n = n
+
+        def clear(self):
+            self.n = 0
+
+    rt = PeriscopeRuntime.__new__(PeriscopeRuntime)
+    rt.receiver = SimpleNamespace(queue=_Q(37))
+    rt.register_pulse_tap(lambda *a: None)
+    assert rt.receiver.queue.n == 0
+    PeriscopeRuntime.__new__(PeriscopeRuntime)._discard_packets()  # no receiver yet
+
+
+def test_a_new_capture_does_not_show_the_last_runs_counts(qt_app):
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    try:
+        panel._last_stats = {"total_pulses": 57, "rate_per_min": 12.0,
+                             "elapsed_s": 300, "per_channel": {1: 57}}
+        panel._reset_results([1])
+        panel._refresh_status_line()
+        assert "57" not in panel.status_label.text()
+    finally:
+        panel.close()
+
+
+def test_pulse_tree_shows_the_clock_and_stays_resizable(qt_app):
+    """Columns size to their contents as rows arrive, until the user
+    drags a divider; the decoded packet clock has its own column."""
+    from PyQt6 import QtWidgets
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    tree = panel.pulse_tree
+    header = tree.header()
+    assert tree.columnCount() == 4
+    assert header.sectionResizeMode(0) == \
+        QtWidgets.QHeaderView.ResizeMode.Interactive
+    panel._reset_results([1], "now")
+    panel._add_pulse_row(1, 1, {"n_samples": 120, "snr": 7.0,
+                                "trigger_utc": "2026-09-02T16:14:05.123456Z"})
+    row = panel._channel_items[1].child(0)
+    assert row.text(1) == "16:14:05.123456"
+    header.resizeSection(1, 333)          # the user drags a divider
+    panel._add_pulse_row(1, 2, {"n_samples": 5, "snr": 3.0})
+    assert header.sectionSize(1) == 333   # and keeps the width
+
+
+def test_the_file_label_shows_the_name_with_the_path_on_hover(qt_app):
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._show_path("/very/long/session/directory/that/goes/on/and/on/"
+                     "session_20260902_180701/pulse_module2_180833.h5")
+    assert panel.path_label.text() == "HDF5: pulse_module2_180833.h5"
+    assert panel.path_label.toolTip().endswith("pulse_module2_180833.h5")

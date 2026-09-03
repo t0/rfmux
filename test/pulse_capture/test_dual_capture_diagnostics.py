@@ -14,6 +14,7 @@ from rfmux.pulse_capture.sources import run_pfb_source
 from test.qt_helpers import spin
 
 
+@contextlib.contextmanager
 def _private_pfb_socket(monkeypatch):
     """Point run_pfb_source at a private loopback socket nothing sends
     to, so the real PFB multicast group cannot leak packets in."""
@@ -27,7 +28,10 @@ def _private_pfb_socket(monkeypatch):
     from rfmux.pulse_capture import sources as _src
     monkeypatch.setattr(_src, "_PFB_REORDER_WINDOW", 1)
     monkeypatch.setattr(_src, "_PFB_FLUSH_EVERY", 1)
-    return sock
+    try:
+        yield sock
+    finally:
+        sock.close()
 
 
 class _NeverFed:
@@ -37,15 +41,14 @@ class _NeverFed:
         raise AssertionError("a silent socket must feed nothing")
 
 
-@pytest.mark.filterwarnings("ignore:PFB socket buffer")
 def test_silent_pfb_socket_is_an_error(monkeypatch):
     """Zero packets ever is a configuration problem, not an empty
     capture: returning 0.0 would end a dual capture as though it had
     been stopped."""
     monkeypatch.setattr(streamer, "STREAMER_TIMEOUT", 0.2)
-    _private_pfb_socket(monkeypatch)
-    with pytest.raises(TimeoutError, match="fast streamer is not sending"):
-        asyncio.run(run_pfb_source(_NeverFed(), "127.0.0.1", [1]))
+    with _private_pfb_socket(monkeypatch):
+        with pytest.raises(TimeoutError, match="fast streamer is not sending"):
+            asyncio.run(run_pfb_source(_NeverFed(), "127.0.0.1", [1]))
 
 
 class _Signals:
@@ -302,55 +305,6 @@ def test_a_stream_that_never_catches_up_does_not_strand_the_pair():
     d.stop()
 
 
-@pytest.mark.filterwarnings("ignore:PFB socket buffer")
-def test_pfb_source_turns_the_loop_over_per_batch(monkeypatch):
-    """Each popped batch is followed by a turn of the loop, so a dual
-    capture's slow side runs between fast batches."""
-    import time
-
-    from rfmux.pulse_capture import sources as src
-
-    sock = _private_pfb_socket(monkeypatch)
-    monkeypatch.setattr(streamer, "STREAMER_TIMEOUT", 0.3)
-    monkeypatch.setattr(src, "_PFB_POP_MAX", 8)
-    send = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    port = sock.getsockname()[1]
-    pkt = streamer.PFBPacket()
-    pkt.magic = streamer.PFB_PACKET_MAGIC
-    pkt.mode = 0
-    pkt.slot1 = 0                            # channel 1, 0-indexed on the wire
-    pkt.num_samples = 100
-    N = 40
-    for k in range(N):
-        pkt.seq = k
-        send.sendto(bytes(pkt), ("127.0.0.1", port))
-    monkeypatch.setattr(src, "_flush", lambda s: None)
-    time.sleep(0.05)
-
-    yields = {"n": 0}
-    real_sleep = asyncio.sleep
-
-    async def counting_sleep(d):
-        if d == 0:
-            yields["n"] += 1
-        return await real_sleep(d)
-    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
-
-    class _Sink:
-        channels = [1]
-        fed = 0
-
-        def feed_block(self, ch, i, q, t):
-            _Sink.fed += len(i)
-
-    asyncio.run(src.run_pfb_source(
-        _Sink(), "127.0.0.1", [1],
-        should_stop=lambda: _Sink.fed >= N * 100))
-    send.close()
-    assert _Sink.fed == N * 100
-    # 40 packets in pops of at most 8: at least five turns.
-    assert yields["n"] >= 4, f"only {yields['n']} yields for {N} packets"
-
 def test_union_window_spans_the_saved_record():
     """The pair's window covers the saved record, not the core, and a
     summary without saved_end_time still gets the core."""
@@ -367,6 +321,15 @@ def test_union_window_spans_the_saved_record():
            "fast_summary": None}
     t0, t1 = D._union_window(old)
     assert t1 == pytest.approx(T + 0.004 + 0.0004, abs=1e-6)
+
+    # A window shorter than a slow sample is widened to two of them.
+    fast_only = {"slow_summary": None,
+                 "fast_summary": {"timestamp": T, "start_time": T,
+                                  "trigger_time": T + 0.0001,
+                                  "duration_s": 0.0002,
+                                  "saved_end_time": T + 0.0003}}
+    t0, t1 = D._union_window(fast_only, slow_period=0.001)
+    assert t1 - t0 >= 0.002 - 1e-9
 
 
 def test_matcher_pairs_on_the_trigger_instant():

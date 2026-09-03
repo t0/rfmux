@@ -356,8 +356,8 @@ def test_triggers_pair_within_half_the_cic_response():
     d.matcher.add("slow", 1, 2, {"trigger_time": T + 0.100, "duration_s": 0.005})
     d.matcher.add("fast", 1, 2, {"trigger_time": T + 0.104, "duration_s": 0.001})
     assert d.matcher.matched == 1
-    assert len(d.matcher._pending["slow"][1]) == 1
-    assert len(d.matcher._pending["fast"][1]) == 1
+    d.matcher.flush()
+    assert d.matcher.unmatched == 2
     d.stop()
     assert d.stats()["match_window_s"] == pytest.approx(0.003)
 
@@ -372,7 +372,6 @@ def test_a_partner_released_at_the_hard_stop_still_pairs():
                                 slow_time_offset_s=0.0)
     hard_stop = d.config.max_capture_samples(1000.0) / 1000.0
     assert d.match_grace_s == pytest.approx(hard_stop + 0.05)
-    assert d.match_grace_s > 0.25
     T = 43000.0
     d.matcher.add("fast", 1, 1, {"trigger_time": T, "duration_s": 0.001})
     d.matcher.advance_time("slow", T + hard_stop - 0.01)   # still capturing

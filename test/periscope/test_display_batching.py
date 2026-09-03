@@ -1,9 +1,6 @@
 """
-Batching the display writes must not change what gets plotted.
-
-_update_buffers used to write four values per displayed channel per
-packet.  It now buffers packets and writes them a frame at a time,
-which is only safe if the ring contents come out identical.
+Rings and the pulse tap hold the same contents whether packets arrive
+one at a time or as one batch per frame.
 """
 
 from types import SimpleNamespace
@@ -18,6 +15,7 @@ from PyQt6 import QtWidgets  # noqa: E402
 
 from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.utils import Circular  # noqa: E402
+from test.packet_helpers import stamp  # noqa: E402
 
 N = 256
 CHANNELS = [1, 2, 5]
@@ -38,7 +36,7 @@ class _Packet:
         return self._v.shape[0]
 
 
-def _runtime(qt_app, width=128):
+def _runtime(qt_app):
     p = Periscope.__new__(Periscope)
     QtWidgets.QMainWindow.__init__(p)
     p.all_chs = list(CHANNELS)
@@ -68,7 +66,7 @@ def test_batched_writes_match_per_packet_writes(qt_app, n_packets):
     width = 128
     packets = _packets(n_packets, width, rng)
 
-    p = _runtime(qt_app, width)
+    p = _runtime(qt_app)
     for pkt, t_rel in packets:
         p._update_buffers(pkt, t_rel)
     p._flush_display_batch()
@@ -140,11 +138,7 @@ class _TapSink:
 class _StampedPacket(_Packet):
     def __init__(self, values, seconds):
         super().__init__(values)
-        ss = int((seconds % 1) * 156250000)
-        self.ts = SimpleNamespace(recent=True, y=26, d=245,
-                                  h=int(seconds // 3600),
-                                  m=int(seconds % 3600 // 60),
-                                  s=int(seconds % 60), ss=ss)
+        self.ts = stamp(seconds)
 
 
 def test_a_batch_equals_the_packets_one_at_a_time(qt_app):
@@ -161,7 +155,7 @@ def test_a_batch_equals_the_packets_one_at_a_time(qt_app):
     t_rel = np.arange(n) * 2.6e-5
 
     def run(feed):
-        p = _runtime(qt_app, width)
+        p = _runtime(qt_app)
         tap = _TapSink()
         p._pulse_tap = tap
         p._pulse_tap_channels = (1, 5)

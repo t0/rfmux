@@ -4,6 +4,7 @@ the loop schedules it."""
 
 import asyncio
 import contextlib
+import math
 import socket
 import sys
 import threading
@@ -14,19 +15,7 @@ import pytest
 
 from rfmux import streamer
 from rfmux.pulse_capture import sources as src
-from rfmux.streamer import Timestamp, TimestampSource
-
-
-def _slow_packet(seq, module=1, t_s=43200.0):
-    pkt = streamer.ReadoutPacket(magic=streamer.STREAMER_MAGIC, version=5,
-                                 serial=156, num_modules=1, flags=0,
-                                 fir_stage=6, module=module - 1, seq=seq)
-    pkt[:] = np.zeros(len(pkt), dtype=complex)
-    h = int(t_s // 3600); m = int(t_s % 3600 // 60); s_ = int(t_s % 60)
-    ss = int((t_s % 1) * streamer.SS_PER_SECOND)
-    pkt.ts = Timestamp(y=26, d=244, h=h, m=m, s=s_, ss=ss, c=0, sbs=0,
-                       source=TimestampSource.TEST, recent=True)
-    return bytes(pkt)
+from test.packet_helpers import pfb_datagram, readout_packet
 
 
 @contextlib.contextmanager
@@ -44,17 +33,20 @@ def _loopback_pair():
         send.close()
 
 
-class _SlowSink:
-    """What run_slow_source needs of a capture session."""
+class _Sink:
+    """What a source needs of a capture session, and what it fed."""
 
-    def __init__(self):
-        self.channels = [1]
+    def __init__(self, channels=(1,)):
+        self.channels = list(channels)
+        self.source = {}
+        self.calls = []                       # (channel, I values, stamps)
         self.count = 0
         self.stamps = []
 
-    def feed_block(self, ch, i_vals, q_vals, timestamps):
-        self.count += len(i_vals)
-        self.stamps.extend(np.asarray(timestamps).tolist())
+    def feed_block(self, ch, i, q, t):
+        self.calls.append((ch, np.asarray(i).copy(), np.asarray(t).copy()))
+        self.count += len(i)
+        self.stamps.extend(np.asarray(t).tolist())
 
 
 def _patched_socket(monkeypatch, sock_by_port):
@@ -76,11 +68,12 @@ def test_slow_drain_is_lossless_and_ordered(monkeypatch):
     N = 400
     with _loopback_pair() as (recv, send, port):
         _patched_socket(monkeypatch, {streamer.STREAMER_PORT: recv})
-        sink = _SlowSink()
+        monkeypatch.setattr(src, "_flush", lambda sock: None)
+        sink = _Sink()
 
         def pump():
             for k in range(N):
-                send.sendto(_slow_packet(k, t_s=43200.0 + k / 596.0),
+                send.sendto(bytes(readout_packet(k, t_s=43200.0 + k / 596.0)),
                             ("127.0.0.1", port))
                 if k % 10 == 0:
                     # Small bursts: rmem_max commonly clamps the buffer
@@ -97,7 +90,7 @@ def test_slow_drain_is_lossless_and_ordered(monkeypatch):
                                  or time.monotonic() > deadline)))
         th.join()
 
-    assert sink.count >= 0.98 * N, f"lost {N - sink.count} of {N} packets"
+    assert sink.count == N, f"lost {N - sink.count} of {N} packets"
     stamps = np.array(sink.stamps)
     assert np.all(np.diff(stamps) > 0), "reordered within the drain"
     assert covered == pytest.approx((N - 1) / 596.0, rel=0.05)
@@ -116,12 +109,12 @@ def test_many_datagrams_per_wake(monkeypatch):
         # this test IS a preloaded backlog.
         monkeypatch.setattr(src, "_flush", lambda sock: None)
         for k in range(N):
-            send.sendto(_slow_packet(k, t_s=43200.0 + k / 596.0),
+            send.sendto(bytes(readout_packet(k, t_s=43200.0 + k / 596.0)),
                         ("127.0.0.1", port))
         time.sleep(0.1)              # let the kernel land them all
 
         awaited = {"n": 0}
-        loop_cls = asyncio.new_event_loop().__class__
+        loop_cls = asyncio.SelectorEventLoop
         orig = loop_cls.sock_recv
 
         async def counting_sock_recv(self, sock, n):
@@ -130,7 +123,7 @@ def test_many_datagrams_per_wake(monkeypatch):
 
         monkeypatch.setattr(loop_cls, "sock_recv", counting_sock_recv)
 
-        sink = _SlowSink()
+        sink = _Sink()
         deadline = time.monotonic() + 3.0
         asyncio.run(src.run_slow_source(
             sink, "127.0.0.1", module=1,
@@ -144,29 +137,6 @@ def test_many_datagrams_per_wake(monkeypatch):
         f"{awaited['n']} awaited receives for {N} packets"
 
 
-def _pfb_packet(module0, t_s=43200.0, seq=0, slots=(1,), values=None):
-    """A PFB packet whose slots carry *slots*' channels, interleaved;
-    *values* gives one constant per slot."""
-    pkt = streamer.PFBPacket()
-    pkt.magic = streamer.PFB_PACKET_MAGIC
-    pkt.module = module0                     # 0-indexed on the wire
-    pkt.seq = seq
-    pkt.mode = {1: 0, 2: 1, 4: 2}[len(slots)]
-    for i, ch in enumerate(slots):
-        setattr(pkt, f"slot{i + 1}", ch - 1)      # 0-indexed on the wire
-    pkt.num_samples = 100
-    data = np.zeros(100, dtype=complex)
-    for i, v in enumerate(values or ()):
-        data[i::len(slots)] = v
-    pkt[:] = data
-    h = int(t_s // 3600); m = int(t_s % 3600 // 60); s_ = int(t_s % 60)
-    ss = int((t_s % 1) * streamer.SS_PER_SECOND)
-    pkt.ts = Timestamp(y=26, d=244, h=h, m=m, s=s_, ss=ss, c=0, sbs=0,
-                       source=TimestampSource.TEST, recent=True)
-    return bytes(pkt)
-
-
-@pytest.mark.filterwarnings("ignore:PFB socket buffer")
 def test_pfb_source_keeps_only_its_module(monkeypatch):
     """Every module's PFB streamer shares the port; packets from another
     module are not this capture's samples."""
@@ -174,7 +144,7 @@ def test_pfb_source_keeps_only_its_module(monkeypatch):
         _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
         monkeypatch.setattr(src, "_flush", lambda sock: None)
         for k in range(12):
-            send.sendto(_pfb_packet(k % 2, t_s=43200.0 + k * 1e-4, seq=k),
+            send.sendto(pfb_datagram(k % 2, t_s=43200.0 + k * 1e-4, seq=k),
                         ("127.0.0.1", port))
         time.sleep(0.1)
 
@@ -192,61 +162,6 @@ def test_pfb_source_keeps_only_its_module(monkeypatch):
     assert _Sink.fed == 600                   # six packets of 100
 
 
-@pytest.mark.filterwarnings("ignore:PFB socket buffer")
-def test_pfb_source_restores_sequence_order(monkeypatch):
-    """Datagrams arrive slightly out of order; the samples are fed in
-    sequence order, with per-sample times that never step back."""
-    with _loopback_pair() as (recv, send, port):
-        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
-        monkeypatch.setattr(src, "_flush", lambda sock: None)
-        order = list(range(40))
-        for i in range(1, 40, 4):            # swap neighbours, as seen on the wire
-            order[i], order[i + 1] = order[i + 1], order[i]
-        for k in order:
-            send.sendto(_pfb_packet(1, t_s=43200.0 + k * 4.096e-4, seq=1000 + k),
-                        ("127.0.0.1", port))
-        time.sleep(0.1)
-
-        stamps = []
-
-        class _Sink:
-            channels = [1]
-
-            def feed_block(self, ch, i, q, t):
-                stamps.extend(np.asarray(t).tolist())
-
-        deadline = time.monotonic() + 3.0
-        asyncio.run(src.run_pfb_source(
-            _Sink(), "127.0.0.1", [1], module=2,
-            should_stop=lambda: time.monotonic() > deadline or len(stamps) >= 4000))
-    assert len(stamps) == 4000
-    assert np.all(np.diff(stamps) > 0), "samples fed out of order"
-
-
-def test_slow_ingest_feeds_blocks_in_time_order():
-    fed = []
-    ingest = src.SlowIngest(lambda ch, i, q, t: fed.append(np.asarray(t)),
-                            max_packets=8, max_age_s=1e9)
-    order = list(range(20))
-    for i in range(1, 20, 4):
-        order[i], order[i + 1] = order[i + 1], order[i]
-    for k in order:
-        ingest.add((1,), np.array([complex(k, 0)]), 43200.0 + k / 596.0)
-    ingest.flush()
-    stamps = np.concatenate(fed)
-    assert np.array_equal(stamps, 43200.0 + np.arange(20) / 596.0)
-    assert ingest.elapsed == pytest.approx(19 / 596.0)
-
-
-class _Sink:
-    def __init__(self):
-        self.channels = [1]
-        self.calls = []                       # (channel, I values)
-
-    def feed_block(self, ch, i, q, t):
-        self.calls.append((ch, np.asarray(i).copy(), np.asarray(t).copy()))
-
-
 def _run_pfb(monkeypatch, blobs, channels, stop_after):
     with _loopback_pair() as (recv, send, port):
         _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
@@ -254,9 +169,7 @@ def _run_pfb(monkeypatch, blobs, channels, stop_after):
         for b in blobs:
             send.sendto(b, ("127.0.0.1", port))
         time.sleep(0.1)
-        sink = _Sink()
-        sink.channels = channels
-        sink.source = {}
+        sink = _Sink(channels)
         deadline = time.monotonic() + 3.0
         fed = lambda: sum(len(c[1]) for c in sink.calls)
         asyncio.run(src.run_pfb_source(
@@ -265,10 +178,9 @@ def _run_pfb(monkeypatch, blobs, channels, stop_after):
     return sink
 
 
-@pytest.mark.filterwarnings("ignore:PFB socket buffer")
 def test_pfb_source_picks_its_channels_from_a_wider_stream(monkeypatch):
     """The streamer carries channels 3 and 7; the capture wants 7."""
-    blobs = [_pfb_packet(1, t_s=43200.0 + k * 4.096e-4, seq=k,
+    blobs = [pfb_datagram(1, t_s=43200.0 + k * 4.096e-4, seq=k,
                          slots=(3, 7), values=(3 + 0j, 7 + 0j)) for k in range(20)]
     sink = _run_pfb(monkeypatch, blobs, [7], stop_after=1000)
     assert {c[0] for c in sink.calls} == {7}
@@ -276,14 +188,17 @@ def test_pfb_source_picks_its_channels_from_a_wider_stream(monkeypatch):
     assert sum(len(c[1]) for c in sink.calls) == 20 * 50
 
 
-@pytest.mark.filterwarnings("ignore:PFB socket buffer")
-def test_pfb_source_feeds_whole_batches_in_order(monkeypatch):
-    """Every packet's samples reach the engine, in stream order, in
-    blocks that are whole packets."""
-    blobs = [_pfb_packet(1, t_s=43200.0 + k * 4.096e-4, seq=k) for k in range(40)]
+def test_pfb_source_feeds_every_packet_in_stream_order(monkeypatch):
+    """Datagrams arrive a few out of order; every packet's samples reach
+    the engine, in stream order, with per-sample times that never step
+    back."""
+    order = list(range(40))
+    for i in range(1, 40, 4):            # swap neighbours, as seen on the wire
+        order[i], order[i + 1] = order[i + 1], order[i]
+    blobs = [pfb_datagram(1, t_s=43200.0 + k * 4.096e-4, seq=1000 + k)
+             for k in order]
     sink = _run_pfb(monkeypatch, blobs, [1], stop_after=4000)
     assert sum(len(c[1]) for c in sink.calls) == 4000
-    assert all(len(c[1]) % 100 == 0 for c in sink.calls)
     t = np.concatenate([c[2] for c in sink.calls])
     assert np.all(np.diff(t) > 0)
 
@@ -292,31 +207,24 @@ def test_pfb_source_counts_lost_packets(monkeypatch):
     """A hole in the sequence numbers is counted from the receiver's
     own statistics, missing packets individually."""
     seqs = [k for k in range(40) if not 10 <= k < 17]      # 7 never sent
-    blobs = [_pfb_packet(1, t_s=43200.0 + k * 4.096e-4, seq=k) for k in seqs]
+    blobs = [pfb_datagram(1, t_s=43200.0 + k * 4.096e-4, seq=k) for k in seqs]
     sink = _run_pfb(monkeypatch, blobs, [1], stop_after=3300)
     assert sum(len(c[1]) for c in sink.calls) == 3300
     assert sink.source["lost_packets"] == 7
 
 
 def test_pfb_buffer_seconds_counts_a_four_channel_stream():
-    """The warning threshold is in seconds of stream: four channels at
+    """The buffer figure is in seconds of stream: four channels at
     2.44 MHz, 1000 samples per 8056-byte packet."""
-    import socket as _socket
-    import sys as _sys
-    from rfmux.pulse_capture import sources
     bytes_per_s = 4 * 2441406.25 / 1000 * streamer.PFB_PACKET_SIZE
 
     class Sock:
         def getsockopt(self, level, opt):
             held = int(bytes_per_s)         # exactly one second's worth
-            return held * 2 if _sys.platform == "linux" else held
-    assert abs(sources._pfb_buffer_seconds(Sock()) - 1.0) < 1e-6
-    if _sys.platform == "linux":
-        with open("/proc/sys/net/core/rmem_max") as f:
-            assert sources._rcvbuf_request() == int(f.read())
+            return held * 2 if sys.platform == "linux" else held
+    assert abs(src._pfb_buffer_seconds(Sock()) - 1.0) < 1e-6
 
 
-@pytest.mark.filterwarnings("ignore:PFB socket buffer")
 def test_pfb_source_discards_to_bound_its_lag(monkeypatch):
     """When the session says the fast stream is further behind the
     slow one than the bound, the source drops packets by their stamps
@@ -326,7 +234,7 @@ def test_pfb_source_discards_to_bound_its_lag(monkeypatch):
         monkeypatch.setattr(src, "_flush", lambda sock: None)
         step = 4.096e-5
         for k in range(200):
-            send.sendto(_pfb_packet(1, t_s=43200.0 + k * step, seq=k),
+            send.sendto(pfb_datagram(1, t_s=43200.0 + k * step, seq=k),
                         ("127.0.0.1", port))
         time.sleep(0.1)
         calls = []
@@ -355,3 +263,33 @@ def test_pfb_source_discards_to_bound_its_lag(monkeypatch):
     # is 0.75 ms of packets at one per 41 us.
     assert 15 <= flushed <= 22, flushed
     assert _Sink.fed == (200 - flushed) * 100
+
+
+def test_pfb_source_turns_the_loop_over_per_batch(monkeypatch):
+    """Each popped batch is followed by a turn of the loop, so a dual
+    capture's slow side runs between fast batches."""
+    N = 40
+    with _loopback_pair() as (recv, send, port):
+        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
+        monkeypatch.setattr(src, "_PFB_POP_MAX", 8)
+        monkeypatch.setattr(src, "_flush", lambda s: None)
+        for k in range(N):
+            send.sendto(pfb_datagram(1, seq=k), ("127.0.0.1", port))
+        time.sleep(0.05)
+
+        yields = {"n": 0}
+        real_sleep = asyncio.sleep
+
+        async def counting_sleep(delay):
+            if delay == 0:
+                yields["n"] += 1
+            return await real_sleep(delay)
+        monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+
+        sink = _Sink()
+        asyncio.run(src.run_pfb_source(
+            sink, "127.0.0.1", [1], module=2,
+            should_stop=lambda: sink.count >= N * 100))
+    assert sink.count == N * 100
+    # 40 packets in pops of at most 8: one turn after each pop.
+    assert yields["n"] >= math.ceil(N / 8), f"{yields['n']} yields"

@@ -69,42 +69,57 @@ async def measure_df_calibrations(
         usable derivative are left out rather than guessed at.
     """
     nco = await crs.get_nco_frequency(module=module)
-    out: Dict[int, complex] = {}
-
+    channels = [int(c) for c in channels]
+    if not channels:
+        return {}
+    bias: Dict[int, float] = {}
     for channel in channels:
         rel = await crs.get_frequency(channel=channel, module=module)
-        bias = nco + rel
-        cal = None
-        try:
-            half = 0.5 * span_hz
-            n_points = max(5, int(round(span_hz / resolution_hz)) + 1)
-            freqs = np.linspace(bias - half, bias + half, n_points)
-            iq = np.empty(n_points, dtype=complex)
-            for k, f in enumerate(freqs):
-                await crs.set_frequency(f - nco, channel=channel,
-                                        module=module)
-                s = await crs.get_samples(n_samples, channel=channel,
-                                          module=module)
-                # A board hands back an object with .i/.q; an in-process
-                # caller can see the underlying dict.
-                si = s["i"] if isinstance(s, dict) else s.i
-                sq = s["q"] if isinstance(s, dict) else s.q
-                iq[k] = np.mean(np.asarray(si)) + 1j * np.mean(np.asarray(sq))
+        bias[channel] = nco + rel
 
-            cal = convert_iq_to_df(np.array([1.0 + 0j]), bias, freqs,
-                                   convert_roc_to_volts(iq))[0]
+    half = 0.5 * span_hz
+    n_points = max(5, int(round(span_hz / resolution_hz)) + 1)
+    offsets = np.linspace(-half, half, n_points)
+    iq = {ch: np.full(n_points, np.nan, dtype=complex) for ch in channels}
+    try:
+        # Every channel steps together: one batched frequency write and
+        # one read of the module per point, not a round trip per channel
+        # per point.  On the simulator each read runs the whole array's
+        # physics, so per channel the old loop was minutes at 100 tones.
+        for k, off in enumerate(offsets):
+            async with crs.tuber_context() as ctx:
+                for ch in channels:
+                    ctx.set_frequency(bias[ch] + off - nco, channel=ch,
+                                      module=module)
+                await ctx()
+            s = await crs.get_samples(n_samples, module=module)
+            # A board hands back an object with .i/.q; an in-process
+            # caller can see the underlying dict.  Both index channels
+            # from zero.
+            si = s["i"] if isinstance(s, dict) else s.i
+            sq = s["q"] if isinstance(s, dict) else s.q
+            for ch in channels:
+                iq[ch][k] = (np.mean(np.asarray(si[ch - 1]))
+                             + 1j * np.mean(np.asarray(sq[ch - 1])))
+    finally:
+        async with crs.tuber_context() as ctx:
+            for ch in channels:
+                ctx.set_frequency(bias[ch] - nco, channel=ch, module=module)
+            await ctx()
+
+    out: Dict[int, complex] = {}
+    for ch in channels:
+        try:
+            cal = convert_iq_to_df(np.array([1.0 + 0j]), bias[ch],
+                                   bias[ch] + offsets,
+                                   convert_roc_to_volts(iq[ch]))[0]
         except Exception as exc:
             # Skipping one channel is fine -- it simply gets no
             # calibration -- but skipping all of them silently would
             # look identical to a board that has none, so say which.
-            warnings.warn(f"df calibration failed on channel {channel}: "
+            warnings.warn(f"df calibration failed on channel {ch}: "
                           f"{exc}", stacklevel=2)
-            cal = None
-        finally:
-            await crs.set_frequency(bias - nco, channel=channel,
-                                    module=module)
-
+            continue
         if cal is not None and np.isfinite(cal) and cal != 0:
-            out[int(channel)] = complex(cal)
-
+            out[ch] = complex(cal)
     return out

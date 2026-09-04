@@ -67,3 +67,33 @@ def test_no_fit_means_a_warning_a_fit_and_a_stored_fit():
 
 def test_fit_if_missing_false_returns_none():
     assert dc.df_calibration_for_entry(_entry(), fit_if_missing=False) is None
+
+
+def test_bias_frequency_from_fit_uses_stored_params(monkeypatch):
+    # A symmetric resonance: the IQ trajectory is fastest, and |S21|
+    # least, on resonance.  The sweep grid straddles fr without a point
+    # on it, so a grid-bound answer would be off by half a step.
+    entry = _entry(n=40)
+    entry["nonlinear_fit_params"] = dict(PARAMS)
+    entry["gain_complex"] = 1.0
+    monkeypatch.setattr(dc, "fit_for_calibration",
+                        lambda *a, **k: pytest.fail("should not fit"))
+    step = entry["frequencies"][1] - entry["frequencies"][0]
+    assert abs(dc.bias_frequency_from_fit(entry) - FR) < step / 20
+    # |S21| is least on resonance only without the mismatch angle.
+    entry["nonlinear_fit_params"]["phi"] = 0.0
+    assert abs(dc.bias_frequency_from_fit(entry, "min-s21") - FR) < step / 20
+
+
+def test_bias_frequency_from_fit_fits_and_keeps_the_fit():
+    entry = _entry(n=40)
+    f_bias = dc.bias_frequency_from_fit(entry)
+    assert f_bias == pytest.approx(FR, abs=50.0)
+    assert entry["nonlinear_fit_params"]["fr"] == pytest.approx(FR, rel=1e-4)
+    assert entry["nonlinear_fit_success"] is True
+
+
+def test_bias_frequency_from_fit_declines_unknown_method_and_failed_fit(monkeypatch):
+    assert dc.bias_frequency_from_fit(_entry(), None) is None
+    monkeypatch.setattr(dc, "fit_for_calibration", lambda *a, **k: None)
+    assert dc.bias_frequency_from_fit(_entry()) is None

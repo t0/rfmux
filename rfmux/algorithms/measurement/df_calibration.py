@@ -27,7 +27,8 @@ from ...core.transferfunctions import convert_iq_to_df, convert_roc_to_volts
 from .fitting import identify_bifurcation
 
 __all__ = ["measure_df_calibrations", "df_calibration_from_sweep",
-           "df_calibration_for_entry", "slope_from_nonlinear",
+           "df_calibration_for_entry", "bias_frequency_from_fit",
+           "slope_from_nonlinear",
            "slope_from_skewed", "fit_for_calibration"]
 
 
@@ -78,12 +79,15 @@ def fit_for_calibration(freqs, iq_volts):
     ``(params, gain_complex)`` as fit_nonlinear_iq_multisweep stores
     them, or None when it does not converge.
 
-    Sampling sets the accuracy, not the model: at 500 Hz spacing on a
-    6 kHz linewidth the slope's phase is within 2 degrees of truth on
-    the simulator, at the multisweep's 2 kHz spacing within 7, because
-    the fitted resonance frequency is then uncertain by a few hundred
-    hertz and the slope's phase turns quickly with distance from
-    resonance."""
+    At 500 Hz spacing on a 6 kHz linewidth the slope's phase is within
+    2 degrees of truth on the simulator, at the multisweep's 2 kHz
+    spacing within 7.  The fit's nonlinearity parameter is not to be
+    trusted: its model can only lean a resonance toward higher
+    frequency, a kinetic-inductance resonance leans lower, so the fit
+    reports a = 0 and absorbs the lean into fr, which then sits above
+    the point of fastest IQ motion by a fraction of a linewidth.  The
+    slope is evaluated at the bias point, not at fr, so the calibration
+    survives that; the fitted fr on its own does not."""
     from .fitting_nonlinear import estimate_and_remove_gain, fit_nonlinear_iq
     f = np.asarray(freqs, dtype=np.float64)
     z = np.asarray(iq_volts, dtype=complex)
@@ -97,6 +101,43 @@ def fit_for_calibration(freqs, iq_volts):
         return None
     names = ("fr", "Qr", "amp", "phi", "a", "i0", "q0")
     return dict(zip(names, (float(v) for v in popt))), gain_mag * np.exp(1j * gain_phase)
+
+
+def bias_frequency_from_fit(entry, method="max-diq"):
+    """The bias frequency the multisweep's *method* picks, read off the
+    fitted resonance instead of the raw sweep points.
+
+    "max-diq" is where the IQ trajectory moves fastest with frequency,
+    "min-s21" where |S21| is least.  On the raw sweep both are the
+    largest of a noisy quantity on the sweep's own grid, so they carry
+    its noise and its spacing (2 kHz at the multisweep's defaults, a
+    third of a linewidth); on the model they are the extremum of a
+    smooth curve, found on a fine grid.  Runs and keeps the nonlinear
+    fit if the entry has none.  Returns None when nothing fits.
+    """
+    from .fitting_nonlinear import nonlinear_iq
+    if method not in ("max-diq", "min-s21"):
+        return None
+    f = np.asarray(entry["frequencies"], dtype=np.float64)
+    order = np.argsort(f)
+    f = f[order]
+    nl = entry.get("nonlinear_fit_params")
+    if not (nl and entry.get("nonlinear_fit_success", True) and _finite(nl.get("fr"))):
+        fitted = fit_for_calibration(
+            f, convert_roc_to_volts(np.asarray(entry["iq_complex"])[order]))
+        if fitted is None:
+            return None
+        nl, gain = fitted
+        entry["nonlinear_fit_params"] = nl
+        entry["gain_complex"] = gain
+        entry["nonlinear_fit_success"] = True
+    p = [nl[k] for k in ("fr", "Qr", "amp", "phi", "a", "i0", "q0")]
+    grid = np.linspace(f[0], f[-1], 4001)
+    z = nonlinear_iq(grid, *p)
+    if method == "min-s21":
+        return float(grid[np.argmin(np.abs(z))])
+    speed = np.abs(np.gradient(z, grid))
+    return float(grid[np.argmax(speed)])
 
 
 def df_calibration_for_entry(entry, *, fit_if_missing=True, warn=True):

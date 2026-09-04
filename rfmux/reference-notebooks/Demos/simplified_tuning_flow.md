@@ -26,15 +26,16 @@ Everything here is the same code path Periscope's tuning panels drive. The GUI
 runs these functions from `QThread` workers and draws the results; this notebook
 calls them directly and plots instead.
 
-| Step | Function |
-|---|---|
-| Sweep the band | `crs.take_netanal()` |
-| Remove the cable delay | `fit_cable_delay`, `calculate_new_cable_length` |
-| Find the resonators | `find_resonances()` |
-| Characterise each one | `crs.multisweep()` |
-| Fit the resonances | `fit_skewed_multisweep`, `fit_nonlinear_iq_multisweep` |
-| Park the carriers | `bias_kids()` |
-| Measure the noise | `crs.py_get_samples()`, `crs.py_get_pfb_samples()` |
+| Step | Function | Lives in |
+|---|---|---|
+| Sweep the band | `crs.take_netanal()` | `rfmux.algorithms.measurement.take_netanal` |
+| Remove the cable delay | `fit_cable_delay`, `calculate_new_cable_length` | `rfmux.core.transferfunctions` |
+| Find the resonators | `find_resonances()` | `rfmux.algorithms.measurement.fitting` |
+| Characterise each one | `crs.multisweep()` | `rfmux.algorithms.measurement.multisweep` |
+| Fit the resonances | `fit_skewed_multisweep` | `rfmux.algorithms.measurement.fitting` |
+| | `fit_nonlinear_iq_multisweep` | `rfmux.algorithms.measurement.fitting_nonlinear` |
+| Park the carriers | `bias_kids()` | `rfmux.algorithms.measurement.bias_kids` |
+| Measure the noise | `crs.py_get_samples()`, `crs.py_get_pfb_samples()` | CRS methods |
 
 ## How to use this document
 
@@ -372,7 +373,8 @@ sweep it has.
 
 ## 5. Find the resonances
 
-`find_resonances` looks for dips: it works on `-|S21|**data_exponent`, runs
+`rfmux.algorithms.measurement.fitting.find_resonances` looks for dips: it works
+on `-|S21|**data_exponent`, runs
 `scipy.signal.find_peaks`, and then filters what it finds by physical
 plausibility.
 

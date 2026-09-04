@@ -30,7 +30,7 @@ starts:
 
 | You have | You pass | Sweep sections keyed by |
 |---|---|---|
-| Already done a netanal and used `find_resonances` to make a `ResonatorCatalog` | a `ResonatorCatalog` | resonator name (`"R0001"`) |
+| Already done a netanal and used `rfmux.tuning.find_resonances` to make a `rfmux.core.resonators.ResonatorCatalog` | a `ResonatorCatalog` | resonator name (`"R0001"`) |
 | A list of frequencies | `center_frequencies=` + `amp=` | section name (`"S0001"`) |
 
 Those names key the sweep sections, which sit a few levels inside what the call
@@ -461,7 +461,8 @@ sensible way.
 | Coordinating the amplitudes | `rfmux.tuning.multisweep_amplitudes` |
 | Reading the results back out | `rfmux.tuning.sweep_results` |
 
-The amplitude iteration options are specified using a `AmplitudeSchedule` object. An amplitude
+The amplitude iteration options are specified using a
+`rfmux.tuning.AmplitudeSchedule` object. An amplitude
 schedule has two key components for every resonator in the catalog: the **base** amplitude, 
 and the **ladder** of amplitude steps that that resonator will be `multiswept` over.
 The **base** amplitude is generally the `bias_amplitude` for that resonator, as found in the catalog.
@@ -946,9 +947,10 @@ except ValueError as e:
 
 ## 8. What is not here yet
 
-- **Choosing the operating amplitude.** Iterating over amplitudes gives you the
-  data to see where each detector bifurcates; deciding which step to bias at, and
-  writing that back into the catalog, is `find_bias_points` and is not ported yet.
+- **Choosing the operating amplitude.** Not missing any more —
+  `rfmux.tuning.find_bias_points` reads an amplitude ladder, works out where each
+  detector bifurcates, and returns a new catalog biased one step below that.
+  `bias_finding.md` is the notebook.
 - **Fitting.** Not missing any more — `rfmux.tuning.fit_sweeps` takes what
   `multiamp_multisweep` returned and writes each model's answers into the sweep
   entry it fitted, under `fits`. `fitting_resonators.md` is the notebook.

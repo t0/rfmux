@@ -462,7 +462,7 @@ show_sweep_section(sections_of(multiamp_results)["R0001"])
 
 ## 3. Fitting the data
 
-`fit_sweeps` does the whole thing in one call. It walks the results dictionary,
+`rfmux.tuning.fit_sweeps` does the whole thing in one call. It walks the results dictionary,
 fits every sweep it finds in there, and writes each model's results back into
 the sweep entry it fitted, so that the fit parameters end up stored alongside
 the data they came from.
@@ -488,12 +488,12 @@ of arguments in one place. They are all keyword-only.
 The first four choose **which sweeps get fitted**. Each takes a single value or
 an iterable of them, and `None` — the default — means all of them:
 
-| Argument | Selects |
-|---|---|
-| `models` | which of the three models to run. Only want Q values? `models=("skewed",)` and you have skipped the expensive one |
-| `names` | which resonators, or which sections for a bare frequency list |
-| `iterations` | which amplitude steps |
-| `directions` | `"upward"`, `"downward"`, or both |
+| Argument | Default | Selects |
+|---|---|---|
+| `models` | `("skewed", "nonlinear", "circle")` | which of the three models to run. Only want Q values? `models=("skewed",)` and you have skipped the expensive one |
+| `names` | `None` | which resonators, or which sections for a bare frequency list |
+| `iterations` | `None` | which amplitude steps |
+| `directions` | `None` | `"upward"`, `"downward"`, or both |
 
 Section 6 is where these get used in earnest, including the case they cannot
 express: fitting each resonator at *its own* bias amplitude, which is a
@@ -502,32 +502,21 @@ different amplitude step per resonator.
 The rest control **how each fit is done**. The circle fit takes none of them —
 it is a linear solve with nothing to tune:
 
-| Argument | Model | Does |
-|---|---|---|
-| `approx_Qr` | skewed | the initial guess for `Qr`. Worth setting if your array is far from the default and the fits are missing |
-| `normalize` | skewed | divide each trace by its last point before fitting, so `A` comes out near 1 and the model is in units of the off-resonance level. This changes the units `skewed_model_magnitude` returns — section 5 |
-| `fr_limit_hz` | skewed | how far `fr` is allowed to move from the sweep centre. `None` means 37.5% of the span, which stops the fit wandering onto a neighbouring resonator that leaked into the edge |
-| `fit_nonlinearity` | nonlinear | fit `a`, or hold it at zero and fit a linear resonator on the same seven-parameter machinery |
-| `n_extrema_points` | nonlinear | how many points at each end of the sweep are averaged to estimate the readout gain |
-| `max_residual` | nonlinear | the ceiling above which a converged fit is reported as a bad one. Section 8 abuses this to make fits fail on purpose |
+| Argument | Default | Model | Does |
+|---|---|---|---|
+| `approx_Qr` | `10000.0` | skewed | the initial guess for `Qr`. Worth setting if your array is far from the default and the fits are missing |
+| `normalize` | `True` | skewed | divide each trace by its last point before fitting, so `A` comes out near 1 and the model is in units of the off-resonance level. This changes the units `rfmux.tuning.skewed_model_magnitude` returns — section 5 |
+| `fr_limit_hz` | `None` | skewed | how far `fr` is allowed to move from the sweep centre. `None` means 37.5% of the span, which stops the fit wandering onto a neighbouring resonator that leaked into the edge |
+| `fit_nonlinearity` | `True` | nonlinear | fit `a`, or hold it at zero and fit a linear resonator on the same seven-parameter machinery |
+| `n_extrema_points` | `5` | nonlinear | how many points at each end of the sweep are averaged to estimate the readout gain |
+| `max_residual` | `0.1` | nonlinear | the ceiling above which a converged fit is reported as a bad one. Section 8 abuses this to make fits fail on purpose |
 
 And two about **how it runs**, which change nothing about the answers:
 
-| Argument | Does |
-|---|---|
-| `max_workers` | threads to fit on. One sweep is one job, so all of a sweep's models run on the same thread. `None` uses `min(4, cpu_count)` |
-| `progress_callback` | called `(completed, total)` after each sweep, where *total* counts sweeps rather than fits. For driving a progress bar |
-
-The defaults, from the function itself rather than from this table, so they
-cannot quietly drift apart:
-
-```python
-import inspect
-
-for parameter in inspect.signature(fit_sweeps).parameters.values():
-    if parameter.default is not inspect.Parameter.empty:
-        print(f"{parameter.name:<20} {parameter.default!r}")
-```
+| Argument | Default | Does |
+|---|---|---|
+| `max_workers` | `None` | threads to fit on. One sweep is one job, so all of a sweep's models run on the same thread. `None` uses `min(4, cpu_count)` |
+| `progress_callback` | `None` | called `(completed, total)` after each sweep, where *total* counts sweeps rather than fits. For driving a progress bar |
 
 The report counts each model separately. It also carries a `settings` dict
 recording what the fitters were asked for — the second table above, the
@@ -644,7 +633,8 @@ It is worth watching what this shows. The amplitude steps were measured at
 samples, and the fitted curve still runs through them.
 
 Starting with the skewed Lorentzian, in magnitude. One thing to watch out for:
-`skewed_model_magnitude` returns the model in whatever units the fit worked in.
+`rfmux.tuning.skewed_model_magnitude` returns the model in whatever units the
+fit worked in.
 With the default `normalize=True`, the fitter divides the trace by its last
 point before fitting, so the model should be compared against
 `np.abs(iq_counts / iq_counts[-1])` rather than the raw magnitude.
@@ -749,7 +739,8 @@ print(f"R0001 fits: {list(sections_of(fine_multisweep)['R0001']['fits'])}")
 ```
 
 The middle panel below shows what the fitter actually worked with:
-`gain_corrected_iq` is `iq_counts` divided by the single complex gain value the
+`rfmux.tuning.gain_corrected_iq` is `iq_counts` divided by the single complex
+gain value the
 fit estimated and stored.
 
 ```python
@@ -821,7 +812,8 @@ plot_nonlinear_fit(sections_of(fine_multisweep))
 bifurcation is expected around `a ≈ 0.77`. At this array's bias amplitude it
 comes out near zero.
 
-Finally, the circle fit, which stores just a centre and a radius. `centered_iq`
+Finally, the circle fit, which stores just a centre and a radius.
+`rfmux.tuning.centered_iq`
 uses the centre to shift the IQ loop so that it sits around the origin. You
 will need to do this before talking about the "phase" direction for a resonator,
  since a phase measured about the
@@ -950,8 +942,9 @@ print(f"after circle:            {list(sweep_section['fits'])}  ← skewed kept"
 ### At the amplitude each resonator is biased at
 
 This is a common thing to want after running a multiamp multisweep measurement. The multiple amplitude steps were
-measured in order to find a sensible operating amplitude (the process of selecting this operating amplitude is documented TODO ELSEWHERE), and it is the operating
-amplitude itself that you now want fitted. `fit_sweeps_at_bias_amplitude` works out that
+measured in order to find a sensible operating amplitude (`bias_finding.md` covers how that one gets chosen), and it is the operating
+amplitude itself that you now want fitted.
+`rfmux.tuning.fit_sweeps_at_bias_amplitude` works out that
 step for each resonator individually, reading each one's bias amplitude from the
 catalog snapshot that `multiamp_multisweep` recorded in `call_params`.
 
@@ -1009,7 +1002,7 @@ for fit in fixed_report.fits:
 Note that the matching is on *nearest*, not exact. There is always a nearest
 step, so it will give you an answer even when nothing in the ladder is
 particularly close to what you asked for. If the match needs to be a good one,
-check it against `get_amplitudes_at_iteration`, as above.
+check it against `rfmux.tuning.get_amplitudes_at_iteration`, as above.
 
 ## 7. Fitted parameters across all amplitude steps
 
@@ -1206,13 +1199,14 @@ what stopped it.
 
 A few related things that this layer does not currently do:
 
-- **df calibration.** Converting a timestream into a frequency shift needs a
-  Hz-per-volt scale, taken from the fit of the sweep the timestream belongs to.
-  The fitters produce the parameters this needs, but the calibration itself has
-  not been written.
+- **df calibration off a fit.** Converting a timestream into a frequency shift
+  needs a Hz-per-volt scale. There is one today, but it comes from the IQ
+  derivatives measured at the bias point rather than from a fit — see
+  `bias_finding.md`. The fitters produce the parameters a fitted version would
+  need; nothing here computes one.
 - **Choosing the operating amplitude, and writing it back to the catalog.**
-  Section 7 gives you the data you would use to make that decision, but
-  `find_bias_points` and the catalog update have not been ported over yet.
+  Not missing any more: section 7 gives you the data behind that decision, and
+  `rfmux.tuning.find_bias_points` makes it. `bias_finding.md` is the notebook.
 - **Fitting from Periscope.** The GUI currently fits inline during its own
   multisweep, using the deprecated functions in
   `rfmux.algorithms.measurement.fitting`. The plan is for this to become a

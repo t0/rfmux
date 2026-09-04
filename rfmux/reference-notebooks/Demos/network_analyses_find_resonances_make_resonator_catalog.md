@@ -186,7 +186,8 @@ plt.tight_layout(); plt.show()
 
 ## 3. Find the resonances
 
-`find_resonances_in_netanal` unpacks the sweep and searches it. The search
+`rfmux.tuning.find_resonances_in_netanal` unpacks the sweep and searches it.
+The search
 converts `|S21|` to dB, inverts it (since the peak finder algorithm expects 
 positive peaks), and hands it to
 `scipy.signal.find_peaks` with two physical constraints:
@@ -218,7 +219,7 @@ found = find_resonances_in_netanal(
 print(found)
 ```
 
-The result is a `ResonanceSearch`. It carries the accepted
+The result is a `rfmux.tuning.ResonanceSearch`. It carries the accepted
 candidates, everything a rejection pass threw out and why, the processed trace
 that was searched, and the settings used:
 
@@ -351,7 +352,8 @@ same `npoints` buys the same resolution for less time.
 ## 4. Seed a resonator catalog
 
 `ResonanceSearch.to_catalog()` is where anonymous dips become tracked
-resonators. Each gets a name (a string of the format of your choosing), a hardware channel, and a `BiasPoint` at its found
+resonators. Each gets a name (a string of the format of your choosing), a hardware channel, and a
+`rfmux.core.resonators.BiasPoint` at its found
 frequency — the operating point as first guessed. Multisweep and bias finding
 will refine and update this BiasPoint as we progress through the tuning flow.
 
@@ -394,7 +396,8 @@ pertains to which detector.
 
 **A Resonator has a BiasPoint**, which can be reset as needed during tuning 
 processes.
-`find_resonances` seeds its original values, and bias finding routines refine it.
+`rfmux.tuning.find_resonances` seeds its original values, and bias finding
+routines refine it.
 It snaps to the hardware tone grid, to avoid in-band IMD products.
 
 **A given BiasPoint is frozen.** A tone
@@ -507,7 +510,8 @@ print(f"recalibrated: {r.bias.frequency_hz/1e6:.4f} MHz, "
 ### Quantizing onto the tone grid
 
 To avoid seeing in-band intermodulation distortion products, the hardware is only
-allowed to place a tone on a multiple of `BASE_FREQUENCY`.
+allowed to place a tone on a multiple of
+`rfmux.core.transferfunctions.BASE_FREQUENCY`.
 
 A `BiasPoint` does that to itself, at construction, always. Every frequency
 above came out already on the grid, and so does every frequency you set later

@@ -11,7 +11,7 @@ import warnings
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.transferfunctions import convert_roc_to_volts
-from .df_calibration import df_calibration_from_sweep
+from .df_calibration import df_calibration_for_entry
 from .fitting import identify_bifurcation
 from .fitting import center_resonance_iq_circle
 from typing import Optional, Tuple # Added for type hinting
@@ -558,8 +558,17 @@ async def multisweep(
                 # simulator's noise, the fit stays within 10%.  Multiply
                 # IQ in volts by this to get frequency shift and
                 # dissipation.
-                df_calibration = df_calibration_from_sweep(
-                    cal_freqs, cal_iq_volts, bias_freq)
+                # Through a result entry, so the fit it runs is kept on
+                # the entry and the flow's fit step, or bias_kids, need
+                # not run it again.
+                cal_entry = {"frequencies": cal_freqs,
+                             "iq_complex": final_iq_complex[sort_idx],
+                             "bias_frequency": bias_freq}
+                df_calibration = df_calibration_for_entry(cal_entry, warn=False)
+                for k in ("nonlinear_fit_params", "gain_complex",
+                          "nonlinear_fit_success"):
+                    if k in cal_entry:
+                        data_entry[k] = cal_entry[k]
                 # A bifurcated resonance (too much amplitude) has no
                 # slope at the bias to calibrate with; say so, under the
                 # flag bias_kids reads, and still hand over the number.

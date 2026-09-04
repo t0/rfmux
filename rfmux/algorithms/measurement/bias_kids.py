@@ -6,6 +6,7 @@ based on multisweep characterization data.
 import numpy as np
 import asyncio
 import warnings
+from .df_calibration import df_calibration_for_entry
 from typing import Union, Dict, List, Optional, Any, Tuple, Callable
 from scipy.signal import butter, filtfilt
 
@@ -412,6 +413,17 @@ async def bias_kids(
             biased_data['optimal_phase_degrees'] = optimal_phase
             biased_data['phase_optimization_std'] = phase_std
             
+            # The calibration from the best fit this result carries: the
+            # flow's nonlinear fit if it ran, else the skewed fit, else
+            # what multisweep fitted for it.
+            try:
+                cal = df_calibration_for_entry(biased_data, fit_if_missing=False)
+                if cal is not None:
+                    biased_data['df_calibration'] = cal
+            except Exception as exc:
+                warnings.warn(f"Detector {det_idx}: df calibration from the fit "
+                              f"failed ({exc}); keeping the multisweep's")
+
             # If we have df calibration and applied a phase, rotate it
             if 'df_calibration' in biased_data and biased_data['df_calibration'] is not None and optimal_phase != 0.0:
                 # Rotate the df calibration by the applied phase

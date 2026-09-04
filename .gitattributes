@@ -1,2 +1,9 @@
 *.pkl filter=lfs diff=lfs merge=lfs -text
 *.ipynb filter=lfs diff=lfs merge=lfs -text
+
+# Recorded inputs for the reference notebooks are documentation, not data: a
+# few hundred KB, written once and never touched again. Keeping them as plain
+# blobs means a clone without git-lfs installed still runs the notebooks,
+# rather than handing them a 131-byte pointer file and an unpickling error
+# that says nothing about LFS.
+rfmux/reference-notebooks/**/*.pkl -filter -diff -merge

@@ -23,86 +23,49 @@ import numpy as np
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...core.transferfunctions import convert_roc_to_volts
+from ...core.transferfunctions import convert_iq_to_df, convert_roc_to_volts
+from .fitting import identify_bifurcation
 
-__all__ = ["measure_df_calibrations", "df_calibration_from_sweep",
-           "fit_resonance_slope", "sweep_jumps"]
-
-
-def fit_resonance_slope(freqs, iq_volts, f_bias):
-    """d(I + jQ)/df at *f_bias*, from a resonance fitted to the sweep.
-
-    The model is a Lorentzian on a linear baseline,
-    ``c0 + c1 (f - f_bias) + d / (1 + 2jQ (f - fr) / fr)`` with complex
-    c0, c1, d and real Q, fr, differentiated analytically at the bias
-    frequency.  Differentiating a spline through the points instead
-    hands the slope to the nearest neighbours, and on a real sweep,
-    whose points carry drift as well as noise, repeated measurements
-    disagreed by a factor of two; a polynomial through the points has
-    no such variance but reads a Lorentzian's central slope low by the
-    curvature it cannot follow (25% over three quarters of a
-    linewidth).  A resonance fitted to its own shape is unbiased and
-    uses every point.
-    """
-    from scipy.optimize import least_squares
-    f = np.asarray(freqs, dtype=np.float64)
-    z = np.asarray(iq_volts, dtype=complex)
-    x = f - f_bias
-    n_edge = max(2, len(f) // 10)
-    c0 = 0.5 * (z[:n_edge].mean() + z[-n_edge:].mean())
-    k_dip = int(np.argmax(np.abs(z - c0)))
-    d = z[k_dip] - c0
-    # Linewidth from where the deviation from the baseline halves.
-    dev = np.abs(z - c0)
-    half = np.flatnonzero(dev >= 0.5 * dev[k_dip])
-    width = max(f[half[-1]] - f[half[0]], f[1] - f[0])
-    fr0 = f[k_dip]
-    q0 = fr0 / width
-    scale = max(abs(d), 1e-30)
-    # The slope is wanted at the bias, and a real resonance is only a
-    # Lorentzian near its centre (drive skews it), so points are
-    # weighted down with distance from the bias on the scale of the
-    # linewidth: the fit describes the resonance where it is read.
-    weight = np.exp(-0.5 * (x / width) ** 2)
-
-    def model(p):
-        c0r, c0i, c1r, c1i, dr, di, q, fr = p
-        return ((c0r + 1j * c0i) + (c1r + 1j * c1i) * x
-                + (dr + 1j * di) / (1 + 2j * q * (f - fr) / fr))
-
-    def resid(p):
-        r = weight * (model(p) - z) / scale
-        return np.concatenate([r.real, r.imag])
-
-    p0 = [c0.real, c0.imag, 0.0, 0.0, d.real, d.imag, q0, fr0]
-    fit = least_squares(resid, p0, x_scale="jac")
-    c0r, c0i, c1r, c1i, dr, di, q, fr = fit.x
-    den = 1 + 2j * q * (f_bias - fr) / fr
-    return (c1r + 1j * c1i) + (dr + 1j * di) * (-2j * q / fr) / den ** 2
-
-
-def sweep_jumps(iq, threshold: float = 0.5) -> bool:
-    """True when neighbouring sweep points are further apart than half
-    the sweep's whole extent in the IQ plane: a bifurcated resonance's
-    jump.  A smooth resonance sampled a dozen times across its
-    linewidth moves a tenth of its extent per point; on the simulator
-    the largest step is 0.07 at -55 dBm, 0.29 at -50 where the shape
-    is skewed but continuous, and 0.76 once it bifurcates at -48.
-    """
-    iq = np.asarray(iq, dtype=complex)
-    if len(iq) < 3:
-        return False
-    extent = 2 * np.max(np.abs(iq - iq.mean()))
-    if not np.isfinite(extent) or extent == 0:
-        return False
-    return bool(np.max(np.abs(np.diff(iq))) > threshold * extent)
+__all__ = ["measure_df_calibrations", "df_calibration_from_sweep"]
 
 
 def df_calibration_from_sweep(freqs, iq_volts, f_bias) -> complex:
-    """The calibration ``bias_kids`` reports: multiply IQ in volts by it
-    to get frequency shift + j dissipation.  The inverse of the fitted
-    slope, so the same number convert_iq_to_df gives for unit IQ."""
-    return complex(1.0 / fit_resonance_slope(freqs, iq_volts, f_bias))
+    """The calibration ``bias_kids`` reports, from a sweep: multiply IQ
+    in volts by it to get frequency shift + j dissipation.
+
+    It is the inverse of d(I + jQ)/df at *f_bias*, taken from the
+    nonlinear resonator model the rest of the flow fits
+    (:func:`~.fitting_nonlinear.fit_nonlinear_iq`, after its gain
+    removal) and differentiated there.  Differentiating a spline
+    through the sweep points instead handed the slope to the two
+    nearest, and on a real sweep, whose points carry drift as well as
+    noise, repeated measurements disagreed by a factor of two; against
+    a noise-free truth on the simulator the model's slope is within a
+    few percent.  If the fit does not converge the spline is what
+    remains, with a warning.
+    """
+    from .fitting_nonlinear import (
+        estimate_and_remove_gain, fit_nonlinear_iq, nonlinear_iq)
+    f = np.asarray(freqs, dtype=np.float64)
+    z = np.asarray(iq_volts, dtype=complex)
+    order = np.argsort(f)
+    f, z = f[order], z[order]
+    corrected, gain_mag, gain_phase = estimate_and_remove_gain(f, z)
+    gain = gain_mag * np.exp(1j * gain_phase)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _, popt, _, residual = fit_nonlinear_iq(f, corrected)
+    if np.isfinite(residual) and residual < 0.1:
+        # The model is analytic: a step far inside any linewidth.
+        h = 1e-4 * popt[0] / max(popt[1], 1.0)
+        z_pm = nonlinear_iq(np.array([f_bias - h, f_bias + h]), *popt)
+        slope = gain * (z_pm[1] - z_pm[0]) / (2 * h)
+    else:
+        warnings.warn("resonance fit did not converge; the df calibration "
+                      "is the spline derivative through the sweep points",
+                      stacklevel=2)
+        slope = 1.0 / convert_iq_to_df(np.array([1.0 + 0j]), f_bias, f, z)[0]
+    return complex(1.0 / slope)
 
 
 @macro(CRS, register=True)
@@ -126,14 +89,13 @@ async def measure_df_calibrations(
     module : int
         Module index (1-based).
     span_hz : float
-        Full width of the sweep, centred on the bias point.  The slope
-        is fitted over the central half of it, so about three
-        linewidths is right: wide enough for the fit to see the
-        curvature, narrow enough that a cubic still describes it.
+        Full width of the sweep, centred on the bias point.  A
+        resonance is fitted to it, so a few linewidths is enough; the
+        fit's own guidance is six linewidths, and three measures the
+        same slope in a third of the time.
     resolution_hz : float
-        Spacing between points.  The fit wants a dozen or more points
-        across its window, so the spacing must be well inside the
-        linewidth.
+        Spacing between points, well inside the linewidth so the fit
+        has a dozen or more points across the resonance.
     n_samples : int
         Samples averaged per point.
     progress : callable, optional
@@ -193,14 +155,14 @@ async def measure_df_calibrations(
 
     out: Dict[int, complex] = {}
     for ch in channels:
-        if sweep_jumps(iq[ch]):
+        if identify_bifurcation(iq[ch]):
             # Too much bias power: the resonance is bifurcated and the
-            # sweep steps across the jump.  There is no slope there to
-            # calibrate with, whatever estimates it.
-            warnings.warn(f"df calibration skipped on channel {ch}: the "
-                          f"sweep jumps, so the resonance is bifurcated at "
-                          f"this bias power", stacklevel=2)
-            continue
+            # sweep steps across the jump, so no estimate of the slope
+            # there means much.  The number is still reported, and the
+            # channel still biased, with the caveat said out loud.
+            warnings.warn(f"channel {ch}: the sweep jumps, so the "
+                          f"resonance is bifurcated at this bias power and "
+                          f"its df calibration is unreliable", stacklevel=2)
         try:
             cal = df_calibration_from_sweep(
                 bias[ch] + offsets, convert_roc_to_volts(iq[ch]), bias[ch])

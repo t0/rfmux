@@ -64,6 +64,12 @@ set by the bias point and the cable delay. Thresholding the raw quadratures
 tests an arbitrary basis instead: at 45 degrees each one sees the pulse
 divided by the square root of two while carrying the full noise.
 
+The calibration is the slope of the resonance at the bias point, from a
+resonance fitted to the sweep. A resonance biased into bifurcation has no
+such slope: the sweep jumps, and both `bias_kids` and
+`measure_df_calibrations` warn that its calibration is unreliable while
+still biasing it.
+
 Rotating before thresholding is therefore the default wherever a calibration
 exists. Pass `trigger_basis="iq"` to threshold the raw quadratures anyway. A
 channel with no calibration cannot be rotated, so it stays on the quadratures

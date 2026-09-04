@@ -12,6 +12,7 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.transferfunctions import convert_roc_to_volts
 from .df_calibration import df_calibration_from_sweep
+from .fitting import identify_bifurcation
 from .fitting import center_resonance_iq_circle
 from typing import Optional, Tuple # Added for type hinting
 
@@ -559,6 +560,15 @@ async def multisweep(
                 # dissipation.
                 df_calibration = df_calibration_from_sweep(
                     cal_freqs, cal_iq_volts, bias_freq)
+                # A bifurcated resonance (too much amplitude) has no
+                # slope at the bias to calibrate with; say so, under the
+                # flag bias_kids reads, and still hand over the number.
+                data_entry['is_bifurcated'] = identify_bifurcation(cal_iq_volts)
+                if data_entry['is_bifurcated']:
+                    warnings.warn(
+                        f"resonance at {bias_freq / 1e6:.3f} MHz: the sweep "
+                        f"jumps, so it is bifurcated at this amplitude and "
+                        f"its df calibration is unreliable", stacklevel=2)
 
                 # If we have a TOD, calibrate it too, with the same slope
                 if data_entry.get('rotation_tod') is not None:

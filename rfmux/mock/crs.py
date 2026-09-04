@@ -239,6 +239,9 @@ class ServerMockCRS:
         self._rfdc_initialized = False
         self._nco_frequencies = {}
         self._adc_attenuators = {m: {"amplitude": 0.0, "units": self.Units.DB} for m in range(1, 5)}
+        #: What generate_resonators is doing right now, for a client
+        #: showing progress: stage, resonators or channels done, total.
+        self._build_progress = {"stage": "idle", "done": 0, "total": 0}
         self._dac_scales = {m: {"amplitude": mock_config.DAC_SCALE_DBM,
                                 "units": self.Units.DBM} for m in range(1, 5)}
         self._adc_autocal = {m: True for m in range(1, 5)}
@@ -277,8 +280,24 @@ class ServerMockCRS:
             for key in [k for k in store.keys() if k[1] > max_channels]:
                 store.pop(key, None)
 
+    def _progress(self, stage: str, done: int, total: int) -> None:
+        self._build_progress = {"stage": stage, "done": int(done),
+                                "total": int(total)}
+
+    async def get_build_progress(self):
+        """Where generate_resonators is: ``{"stage", "done", "total"}``.
+
+        Answerable while a build runs, because the build's work is on a
+        thread rather than on this server's event loop.
+        """
+        return dict(self._build_progress)
+
     async def generate_resonators(self, config=None):
-        """Generate/regenerate resonators with current or provided parameters."""
+        """Generate/regenerate resonators with current or provided parameters.
+
+        The CPU-bound parts run on a thread so the server keeps
+        answering, get_build_progress in particular.
+        """
         try:
             if not hasattr(self, 'resonator_model') or self._resonator_model is None:
                 self._resonator_model = MockResonatorModel(self)
@@ -289,10 +308,12 @@ class ServerMockCRS:
             active_config = self._physics_config
             num_resonances = active_config.get('num_resonances', 2)
 
-            self._resonator_model.generate_resonators(
-                num_resonances=num_resonances,
-                config=active_config
-            )
+            self._progress("generating", 0, num_resonances)
+            await asyncio.to_thread(
+                self._resonator_model.generate_resonators,
+                num_resonances=num_resonances, config=active_config,
+                progress=lambda done, total:
+                    self._progress("generating", done, total))
 
             resonator_count = len(self._resonator_model.mr_lekids)
             resonance_frequencies = self._resonator_model.resonator_frequencies.copy()
@@ -302,11 +323,14 @@ class ServerMockCRS:
                 await self._auto_bias_kids(active_config, resonance_frequencies)
                 # One pulse through the block path now, behind the
                 # build, so the first real one does not stall the stream.
+                self._progress("warming", 0, 1)
                 dec = self._fir_stage if self._fir_stage is not None else 6
-                self._resonator_model.warm_pulse_caches(
+                await asyncio.to_thread(
+                    self._resonator_model.warm_pulse_caches,
                     1, decimation_to_sampling(dec),
                     MockCRSStreamer.slow_block_len(dec))
 
+            self._progress("done", resonator_count, resonator_count)
             return resonator_count, resonance_frequencies
 
         except Exception as e:
@@ -371,15 +395,20 @@ class ServerMockCRS:
             print(f"[MockCRS] Setting NCO frequency to {nco_freq:.3e} Hz")
             await self.set_nco_frequency(nco_freq, module=module)
             
-            # Configure channels for each resonator (up to 256 channels per module)
-            chan_limit = min(self.channels_per_module(), 256)
+            # One channel per resonator, as many as a packet carries.
+            chan_limit = self.channels_per_module()
+            to_bias = resonance_frequencies[:chan_limit]
             configured_count = 0
-            for i, freq_Hz in enumerate(resonance_frequencies[:chan_limit]):
+            for i, freq_Hz in enumerate(to_bias):
                 channel = i + 1  # Channels are 1-indexed
-                
+                self._progress("biasing", i, len(to_bias))
+
                 # Find the actual S21 dip frequency (may differ from compute_fr()
-                # by ~1 MHz due to coupling-induced shift)
-                dip_freq = self._find_s21_dip_frequency(freq_Hz, amplitude)
+                # by ~1 MHz due to coupling-induced shift).  On a thread:
+                # the sweep is the build's cost, and the server keeps
+                # answering meanwhile.
+                dip_freq = await asyncio.to_thread(
+                    self._find_s21_dip_frequency, freq_Hz, amplitude)
                 offset = dip_freq - freq_Hz
                 if abs(offset) > 1e3:  # Only log if shift > 1 kHz
                     print(f"[MockCRS]   Ch {channel}: compute_fr={freq_Hz/1e9:.6f} GHz, "

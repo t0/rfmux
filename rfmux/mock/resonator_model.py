@@ -177,8 +177,12 @@ class MockResonatorModel:
         self._param_arrays_cached = True
     
     # --- MR_Resonator Methods ---
-    def generate_resonators(self, num_resonances=2, config=None):
+    def generate_resonators(self, num_resonances=2, config=None,
+                            progress=None):
         """Regenerate the resonator set, atomically w.r.t. the streamer.
+
+        *progress*, if given, is called as ``progress(done, total)``
+        before each resonator is built.
 
         Regeneration empties mr_lekids / mr_complex_resonators /
         base_nqp_values and refills them one resonator at a time.  The
@@ -189,9 +193,11 @@ class MockResonatorModel:
         s21 call made during generation is fine.
         """
         with self._physics_lock:
-            return self._generate_resonators_locked(num_resonances, config)
+            return self._generate_resonators_locked(num_resonances, config,
+                                                    progress)
 
-    def _generate_resonators_locked(self, num_resonances=2, config=None):
+    def _generate_resonators_locked(self, num_resonances=2, config=None,
+                                    progress=None):
         '''
         Generate mr_resonator objects with circuit parameters.
 
@@ -411,6 +417,8 @@ class MockResonatorModel:
         max_c_iterations = 20  # Maximum iterations for C-finding
         
         for x in range(num_resonances):
+            if progress is not None:
+                progress(x, num_resonances)
             try:
                 # Calculate target frequency for this resonator
                 if num_resonances == 1:

@@ -36,23 +36,33 @@ from PyQt6 import QtCore, QtGui
 PROGRESS_MIN_RESONATORS = 25
 
 
-def _build_with_progress(crs_obj, config):
+_STAGE_TEXT = {
+    "generating": "Generating resonators",
+    "biasing": "Biasing detectors",
+    "warming": "Warming pulse caches",
+}
+
+
+def _build_with_progress(crs_obj, config, loop):
     """generate_resonators in a worker thread, with a progress window
-    on the main thread meanwhile.
+    on the main thread showing where the build is.
 
     The build is one RPC that takes seconds at many tones.  Blocking
     the GUI thread on it left a window that answered no events, which
     the window manager reports as hung; the worker keeps the event loop
-    alive, so the window can be moved and nothing looks stuck.
+    alive, and the main thread polls get_build_progress on *loop*
+    (idle while the worker runs) to fill the bar: resonators generated,
+    then channels biased, then the pulse-cache warm-up.
     """
     import threading
+    import time
 
     n = config.get("num_resonances", 0)
-    text = f"Building the mock array: {n} resonators"
-    if config.get("auto_bias_kids"):
-        text += ", sweeping and biasing each."
-    text += "\nThe window opens when it is done."
-    dialog = QtWidgets.QProgressDialog(text, None, 0, 0)
+    biasing = bool(config.get("auto_bias_kids"))
+    offsets = {"generating": 0, "biasing": n, "warming": 2 * n}
+    total = 2 * n + 1 if biasing else n
+    dialog = QtWidgets.QProgressDialog(
+        f"Building the mock array: {n} resonators", None, 0, total)
     dialog.setWindowTitle("Periscope")
     dialog.setMinimumDuration(0)
     dialog.setMinimumWidth(420)
@@ -61,22 +71,41 @@ def _build_with_progress(crs_obj, config):
     result = {}
 
     def work():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        worker_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(worker_loop)
         try:
-            result["count"] = loop.run_until_complete(
+            result["count"] = worker_loop.run_until_complete(
                 crs_obj.generate_resonators(config))
         except Exception as exc:
             result["error"] = exc
         finally:
-            loop.close()
+            worker_loop.close()
 
     worker = threading.Thread(target=work, daemon=True)
     worker.start()
+    last_poll = 0.0
     while worker.is_alive():
         QtWidgets.QApplication.processEvents(
             QtCore.QEventLoop.ProcessEventsFlag.AllEvents
             | QtCore.QEventLoop.ProcessEventsFlag.WaitForMoreEvents, 50)
+        if time.monotonic() - last_poll < 0.2:
+            continue
+        last_poll = time.monotonic()
+        try:
+            p = loop.run_until_complete(crs_obj.get_build_progress())
+        except Exception:
+            continue
+        # Over tuber the dict comes back as an attribute-access result;
+        # in-process it is the dict itself.
+        field = (p.get if isinstance(p, dict)
+                 else lambda k, d=None: getattr(p, k, d))
+        stage = field("stage", "")
+        if stage in _STAGE_TEXT:
+            done, stage_total = field("done", 0), field("total", 0)
+            dialog.setLabelText(
+                f"{_STAGE_TEXT[stage]}: {done} / {stage_total}"
+                if stage != "warming" else _STAGE_TEXT[stage])
+            dialog.setValue(min(total, offsets[stage] + done))
     worker.join()
     dialog.close()
     if "error" in result:
@@ -361,7 +390,7 @@ def main():
                     # tones, before there is a window: show one.  A small
                     # array is done before it would be read.
                     if initial_mock_config.get("num_resonances", 0) > PROGRESS_MIN_RESONATORS:
-                        resonator_count = _build_with_progress(crs_obj, initial_mock_config)
+                        resonator_count = _build_with_progress(crs_obj, initial_mock_config, loop)
                     else:
                         resonator_count = loop.run_until_complete(crs_obj.generate_resonators(initial_mock_config))
                     if load_mock_config_from_session:

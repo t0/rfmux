@@ -49,13 +49,13 @@ mock streamer die with the kernel that made it (a parent-death watch, or a
 heartbeat the server times out on), and/or surface the conflict as a pytest
 `skip`/`error` with the real message rather than an opaque notebook assertion.
 
-## Periscope's `data_callback` is two arguments too narrow for a ladder
+## Periscope's `data_callback` is two arguments too narrow for a multi-amplitude sweep
 
 `multiamp_multisweep` calls `data_callback(module, partial_results, step,
 direction)`, where `multisweep` calls it `(module, partial_results)`. The extra
-pair is not decoration: inside a ladder a consumer plotting partial data has no
-way to tell which amplitude step and direction the points belong to, which is
-exactly what the live multisweep grid needs.
+pair is not decoration: inside a multi-amplitude sweep a consumer plotting
+partial data has no way to tell which amplitude step and direction the points
+belong to, which is exactly what the live multisweep grid needs.
 
 `multisweep` itself is unchanged, so nothing is broken today — but a Periscope
 task that passes its narrow callback to the driver will `TypeError` on the first
@@ -63,11 +63,11 @@ partial-data emission. To carry across when Periscope is rewired (step 5 of
 `tuning_multisweep_amplitudes_plan.md`):
 
 * `MultisweepTask.run` (`tools/periscope/tasks.py:508`) is where the loop over
-  amplitude rungs lives today; it goes away in favour of one driver call.
+  amplitude steps lives today; it goes away in favour of one driver call.
 * Its `data_callback` and the `multisweep_signals` it re-emits need the two new
   coordinates plumbed through, replacing whatever it currently derives from its
   own loop counter.
-* `sweep_callback(record)` is the replacement for the task's per-rung
+* `sweep_callback(record)` is the replacement for the task's per-step
   bookkeeping — it carries `step`, `direction`, `amplitudes`, `factor`,
   `completed` and `total`, which is everything the progress UI reads.
 
@@ -104,7 +104,7 @@ lost the same three pass-throughs, `pack_results` dropped them from
 Two things to bring back, deliberately, when there is something to bring them
 back *for*:
 
-1. **Re-centring across an amplitude ladder.** The point of the old
+1. **Re-centring across amplitude steps.** The point of the old
    recalculation was to let a sweep centre follow a resonance that moves
    between amplitude steps. When it returns it adjusts the *sweep centre* of
    the next step, decided by whatever analysis found the dip — not a
@@ -225,10 +225,43 @@ What is left:
    question better — bifurcation is at `a ≈ 0.77` — so the flag may not survive
    the rewire at all.
 4. **A flag on `multiamp_multisweep`** to fit as it goes. Deliberately not
-   built: the driver measures, and a caller who wants the ladder fitted calls
-   `fit_sweeps` on what came back. If it is ever added it should take the
+   built: the driver measures, and a caller who wants every amplitude step
+   fitted calls `fit_sweeps` on what came back. If it is ever added it should take the
    fitting arguments and hand them straight over, so there is one fitter and
    not two.
+
+## Calibrate the bifurcation thresholds against a real array
+
+`rfmux/tuning/bias.py` ships two ways to spot a bifurcated amplitude step, and
+neither default has been checked against a cryostat.
+
+* **`derivative`** carries the GUI's long-standing `spike_prominence_factor=2.0`
+  / `spike_height_factor=3.0`, ported unchanged. On the sweep shipped with
+  `Demos/bias_finding.md` it behaves: `metric/threshold` runs 0.4–0.6 on the
+  clean amplitude steps and 1.8–1.9 on the jumped ones, and all four resonators
+  flip between 2 mV and 4 mV. But the margin is a factor of two, not orders of
+  magnitude, and the one step that sits above 1.0 without being called
+  bifurcated (R0003 at 1 mV, 1.24) is held back only by the adjacency rule.
+  Two known ways to fool it, both documented on the function: a sweep too
+  coarse to resolve the resonance (a dip crossed in two samples *is* a
+  discontinuity), and a sweep with no resonance in it at all (the largest noise
+  excursion then sets the scale a threshold is a fraction of).
+* **`hysteresis`** — new here, no ancestor to inherit a number from —
+  defaults to `max_discrepancy=0.25` loop radii. It cannot be exercised against
+  the simulator at all: MockCRS computes each sweep point independently, so its
+  upward and downward traces are identical up to noise and the metric sits at
+  0.03–0.08 at every amplitude, clean or jumped. That is a noise floor with
+  roughly a factor of three of headroom under the default, and nothing more.
+
+Both report `metric` and `threshold` on every `BifurcationCheck` precisely so
+this can be settled by reading them across the amplitude steps of a resonator
+that is known to bifurcate. Note `threshold` for `derivative` is the larger of
+the prominence and height bars, since a spike has to clear both; on the shipped
+sweep the prominence bar is the binding one at every amplitude, which is worth
+knowing before turning `spike_height_factor`. Worth settling before either default is quoted anywhere
+as a recommendation, and worth reconciling with the nonlinear fit's `a`
+(bifurcation at ≈ 0.77) — see the fit-walker entry above, which asks the same
+question from the other side.
 
 ## Decide whether the width window earns its keep at real sampling
 

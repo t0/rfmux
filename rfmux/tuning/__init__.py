@@ -16,6 +16,7 @@ The layers, in the order a tuning run uses them::
     multisweep_amplitudes decide the amplitude steps of a multi-amplitude sweep
     sweep_results         pack what a sweep measured, and read it back out
     fits                  fit resonator models to the sweeps that came back
+    bias                  choose an operating point per resonator, from those sweeps
 
 The array bookkeeping those steps pass between each other —
 ``Resonator``, ``BiasPoint``, ``ResonatorCatalog`` — lives in
@@ -32,12 +33,31 @@ Typical headless use::
 
     sweeps = await crs.multiamp_multisweep(catalog, span_hz=200e3,
                                            npoints_per_sweep=101)
-    fit_sweeps(sweeps)   # writes each sweep's fits alongside the sweep
+    module_sweeps = sweeps[crs.module[2].index()]
+    fit_sweeps(module_sweeps)   # writes each sweep's fits alongside the sweep
+
+    report = find_bias_points(module_sweeps)   # a new catalog, tuned
 
 See ``tuning_refactor_design.md`` in the repository root for the plan this
 package is being built out against.
 """
 
+from .bias import (
+    BIFURCATION_METHODS,
+    FREQUENCY_METHODS,
+    AmplitudeChoice,
+    BiasFinding,
+    BiasReport,
+    BifurcationCheck,
+    bifurcated_by_derivative,
+    bifurcated_by_hysteresis,
+    find_bias_amplitude,
+    find_bias_frequency,
+    find_bias_points,
+    iq_arc_speed,
+    iq_derivatives_at,
+    normalized_arc_speed,
+)
 from .find_resonances import (
     ResonanceCandidate,
     ResonanceSearch,
@@ -73,6 +93,20 @@ from .sweep_results import (
 )
 
 __all__ = [
+    "BIFURCATION_METHODS",
+    "FREQUENCY_METHODS",
+    "AmplitudeChoice",
+    "BiasFinding",
+    "BiasReport",
+    "BifurcationCheck",
+    "bifurcated_by_derivative",
+    "bifurcated_by_hysteresis",
+    "find_bias_amplitude",
+    "find_bias_frequency",
+    "find_bias_points",
+    "iq_arc_speed",
+    "iq_derivatives_at",
+    "normalized_arc_speed",
     "ResonanceCandidate",
     "ResonanceSearch",
     "find_resonances",

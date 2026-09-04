@@ -1,0 +1,102 @@
+"""bias_kids works from the resonance fit it is told to: it fits the
+sweeps that lack it, moves the bias frequency onto the fitted curve,
+chooses the amplitude by the fitted nonlinearity, and calibrates there."""
+import contextlib
+
+import numpy as np
+import pytest
+
+from rfmux.algorithms.measurement import bias_kids as bk
+from rfmux.algorithms.measurement.fitting_nonlinear import nonlinear_iq
+from rfmux.core.transferfunctions import VOLTS_PER_ROC
+
+FR, QR, NCO = 1.0e9, 5.0e4, 0.9e9
+
+
+class _Ctx:
+    def __init__(self, log):
+        self.log = log
+
+    def set_frequency(self, f, channel, module):
+        self.log.append(("frequency", channel, f))
+
+    def set_amplitude(self, a, channel, module):
+        self.log.append(("amplitude", channel, a))
+
+    def set_phase(self, p, units, target, channel, module):
+        self.log.append(("phase", channel, p))
+
+    async def __call__(self):
+        pass
+
+
+class _Board:
+    class UNITS:
+        DEGREES = "deg"
+
+    class TARGET:
+        ADC = "adc"
+
+    def __init__(self):
+        self.log = []
+
+    async def get_nco_frequency(self, module):
+        return NCO
+
+    @contextlib.asynccontextmanager
+    async def tuber_context(self):
+        yield _Ctx(self.log)
+
+    async def set_phase(self, *a, **k):
+        pass
+
+
+def _entry(a=0.0, amplitude=0.01, n=101, span=200e3):
+    """A multisweep result entry, its bias frequency on the raw grid
+    two steps above the resonance, as a noisy max-diq might put it."""
+    f = np.linspace(FR - span / 2, FR + span / 2, n)
+    z = nonlinear_iq(f, FR, QR, 0.6, 0.1, a, 1.0, 0.2) / VOLTS_PER_ROC
+    return {"frequencies": f, "iq_complex": z, "original_center_frequency": FR,
+            "bias_frequency": float(f[n // 2 + 2]), "recalculation_method_applied": "max-diq",
+            "sweep_amplitude": amplitude, "amplitude": amplitude, "direction": "upward",
+            "is_bifurcated": False}
+
+
+@pytest.mark.asyncio
+async def test_fits_moves_the_bias_point_and_calibrates():
+    board = _Board()
+    entry = _entry()
+    out = await bk.bias_kids(board, {1: entry}, module=1)
+    assert entry["nonlinear_fit_success"]
+    assert entry["bias_frequency_source"] == "nonlinear"
+    # a = 0: the IQ trajectory is fastest on resonance, well inside the
+    # 2 kHz grid step the raw choice was off by.
+    assert entry["bias_frequency"] == pytest.approx(FR, abs=100.0)
+    assert out[1]["bias_frequency"] == entry["bias_frequency"]
+    assert np.isfinite(out[1]["df_calibration"])
+    freqs = [f for kind, ch, f in board.log if kind == "frequency"]
+    assert freqs and abs(freqs[0] + NCO - FR) < 300.0
+
+
+@pytest.mark.asyncio
+async def test_skewed_choice_uses_the_skewed_fit_and_runs_no_nonlinear_fit(monkeypatch):
+    monkeypatch.setattr("rfmux.algorithms.measurement.fitting_nonlinear."
+                        "fit_nonlinear_iq_multisweep",
+                        lambda *a, **k: pytest.fail("nonlinear fit ran"))
+    entry = _entry()
+    entry["fit_params"] = {"fr": FR, "Qr": QR, "Qcre": QR / 0.6, "Qcim": 0.0}
+    out = await bk.bias_kids(_Board(), {1: entry}, module=1, fit_method="skewed")
+    assert entry["bias_frequency_source"] == "skewed"
+    assert entry["bias_frequency"] == pytest.approx(FR, abs=100.0)
+    assert np.isfinite(out[1]["df_calibration"])
+
+
+@pytest.mark.asyncio
+async def test_amplitude_choice_comes_from_the_fitted_nonlinearity():
+    # Two amplitudes, neither sweep jumping: only the fitted nonlinearity
+    # can rule the louder one out, and it has to be fitted first.
+    results = {"results_by_detector": {1: {0: _entry(a=0.2, amplitude=0.01),
+                                           1: _entry(a=0.9, amplitude=0.03)}}}
+    out = await bk.bias_kids(_Board(), results, module=1)
+    assert out[1]["selected_amplitude"] == 0.01
+    assert out[1]["nonlinear_fit_params"]["a"] == pytest.approx(0.2, abs=0.05)

@@ -11,7 +11,6 @@ import warnings
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.transferfunctions import convert_roc_to_volts
-from .df_calibration import df_calibration_for_entry
 from .fitting import identify_bifurcation
 from .fitting import center_resonance_iq_circle
 from typing import Optional, Tuple # Added for type hinting
@@ -94,7 +93,6 @@ async def multisweep(
     bias_frequency_method: Optional[str] = "max-diq", # Options: "min-s21", "max-diq", or None
     rotate_saved_data: bool = False,  # Whether to rotate sweep data based on TOD analysis
     sweep_direction: str = "upward", # Options: "upward", "downward"
-    apply_df_calibration: bool = True,  # Enable frequency shift/dissipation calibration
     *,
     module,
     progress_callback=None,
@@ -125,7 +123,8 @@ async def multisweep(
                          This finds where the IQ trajectory is moving fastest, considering both angular and
                          radial motion.
             - None: No recalculation. Use original center frequency.
-            Defaults to "max-diq".
+            Defaults to "max-diq".  Both are read off the raw sweep grid here;
+            bias_kids reads the same point off the fitted resonance.
         rotate_saved_data (bool, optional):
             Whether to rotate sweep data based on TOD analysis. When True and bias_frequency_method
             is not None:
@@ -136,9 +135,6 @@ async def multisweep(
             - "upward": Sweep from lower to higher frequencies.
             - "downward": Sweep from higher to lower frequencies.
             Defaults to "upward".
-        apply_df_calibration (bool, optional): Whether to apply frequency shift/dissipation calibration.
-            When True, converts IQ data to frequency shift and dissipation units using sweep derivatives.
-            Defaults to True.
         module (int | list[int]): The target readout module(s).
         progress_callback (callable, optional): Function called with (module, progress_percentage).
         data_callback (callable, optional): Function called with intermediate results during acquisition.
@@ -159,8 +155,9 @@ async def multisweep(
                       'sweep_direction': str, # "upward" or "downward"
                       'sweep_amplitude': float, # Normalized amplitude used in sweep
                       'iq_complex_volts': Optional[np.ndarray], # Sweep IQ data in voltage units
-                      'df_calibration': Optional[complex], # Calibration factor: multiply IQ data (volts) by this to get freq shift + j*dissipation
-                      'calibrated_tod_df': Optional[np.ndarray], # rotation_tod converted to freq shift + j*dissipation
+                      'is_bifurcated': bool, # The sweep jumps: too much amplitude for this resonance
+                      'df_calibration': None, # bias_kids fills this in, from a resonance fit
+                      'calibrated_tod_df': None,
                       
                       # Fitting results (if fitting was applied):
                       'is_bifurcated': bool, # Whether bifurcation was detected
@@ -534,61 +531,18 @@ async def multisweep(
         bias_freq = data_entry.get('bias_frequency', original_cf)
         recalc_method_applied = data_entry.get('recalculation_method_applied', "none")
         
-        # Apply calibration if requested
-        iq_complex_volts = None
-        df_calibration = None
-        calibrated_tod_df = None
-        
-        if apply_df_calibration:
-            # Convert sweep IQ data from ADC counts to volts
-            iq_complex_volts = convert_roc_to_volts(final_iq_complex)
-            
-            # Ensure frequencies are in ascending order for interpolation
-            # (downward sweeps produce a decreasing sequence which scipy rejects)
-            sort_idx = np.argsort(data_entry['frequencies'])
-            cal_freqs = data_entry['frequencies'][sort_idx]
-            cal_iq_volts = iq_complex_volts[sort_idx]
-            
-            # Calculate calibration at bias frequency
-            try:
-                # The slope of the resonance at the bias point, from a
-                # resonance fitted to the sweep rather than a spline
-                # differenced through its points: against a noise-free
-                # truth the spline scattered 0.3x to 1.7x under the
-                # simulator's noise, the fit stays within 10%.  Multiply
-                # IQ in volts by this to get frequency shift and
-                # dissipation.
-                # Through a result entry, so the fit it runs is kept on
-                # the entry and the flow's fit step, or bias_kids, need
-                # not run it again.
-                cal_entry = {"frequencies": cal_freqs,
-                             "iq_complex": final_iq_complex[sort_idx],
-                             "bias_frequency": bias_freq}
-                df_calibration = df_calibration_for_entry(cal_entry, warn=False)
-                for k in ("nonlinear_fit_params", "gain_complex",
-                          "nonlinear_fit_success"):
-                    if k in cal_entry:
-                        data_entry[k] = cal_entry[k]
-                # A bifurcated resonance (too much amplitude) has no
-                # slope at the bias to calibrate with; say so, under the
-                # flag bias_kids reads, and still hand over the number.
-                data_entry['is_bifurcated'] = identify_bifurcation(cal_iq_volts)
-                if data_entry['is_bifurcated']:
-                    warnings.warn(
-                        f"resonance at {bias_freq / 1e6:.3f} MHz: the sweep "
-                        f"jumps, so it is bifurcated at this amplitude and "
-                        f"its df calibration is unreliable", stacklevel=2)
-
-                # If we have a TOD, calibrate it too, with the same slope
-                if data_entry.get('rotation_tod') is not None:
-                    rotation_tod_volts = convert_roc_to_volts(data_entry['rotation_tod'])
-                    calibrated_tod_df = rotation_tod_volts * df_calibration
-                    
-            except Exception as e:
-                warnings.warn(f"Calibration failed for resonance {idx}: {e}")
-                df_calibration = None
-                calibrated_tod_df = None
-
+        # No fit runs here: a multisweep with no fit selected is the quick
+        # look, and at thousands of resonances a fit per sweep is tens of
+        # seconds.  bias_kids fits what it needs and calibrates then.
+        # Whether the sweep jumps needs no fit, and both bias_kids and
+        # the digest read it.
+        iq_complex_volts = convert_roc_to_volts(final_iq_complex)
+        sort_idx = np.argsort(data_entry['frequencies'])
+        data_entry['is_bifurcated'] = identify_bifurcation(iq_complex_volts[sort_idx])
+        if data_entry['is_bifurcated']:
+            warnings.warn(
+                f"resonance at {bias_freq / 1e6:.3f} MHz: the sweep jumps, so "
+                f"it is bifurcated at this amplitude", stacklevel=2)
         result_dict = {
             'frequencies': data_entry['frequencies'],
             'iq_complex': final_iq_complex,
@@ -601,8 +555,9 @@ async def multisweep(
             'sweep_direction': sweep_direction,
             'sweep_amplitude': amp,  # Store the amplitude used in the sweep
             'iq_complex_volts': iq_complex_volts,  # Sweep IQ data in voltage units
-            'df_calibration': df_calibration,  # Calibration parameters
-            'calibrated_tod_df': calibrated_tod_df  # Calibrated TOD data
+            'is_bifurcated': data_entry['is_bifurcated'],
+            'df_calibration': None,
+            'calibrated_tod_df': None,
         }
         results_by_index[idx] = result_dict
     

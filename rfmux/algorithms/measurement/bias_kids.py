@@ -6,7 +6,8 @@ based on multisweep characterization data.
 import numpy as np
 import asyncio
 import warnings
-from .df_calibration import df_calibration_for_entry
+from .df_calibration import (bias_frequency_from_fit, df_calibration_for_entry,
+                             ensure_fits)
 from typing import Union, Dict, List, Optional, Any, Tuple, Callable
 from scipy.signal import butter, filtfilt
 
@@ -166,6 +167,26 @@ def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[int,
     return results_by_detector, metadata
 
 
+def _fit_entries(entries, fit_method: str) -> int:
+    """Give every entry the fit bias_kids works from; say how many
+    needed it, since at thousands of resonators that is seconds."""
+    n = ensure_fits(entries, fit_method)
+    if n:
+        print(f"[Bias] {fit_method} fit run for {n} of {len(entries)} sweeps "
+              f"that had none")
+    return n
+
+
+def _bias_point_from_fit(entry: Dict, fit_method: str) -> None:
+    """Move the entry's bias frequency to the fitted curve's version of
+    the multisweep's choice, when the entry carries that fit."""
+    method = entry.get('recalculation_method_applied', 'max-diq')
+    f_fit = bias_frequency_from_fit(entry, method, fit_method)
+    if f_fit is not None and np.isfinite(f_fit):
+        entry['bias_frequency'] = float(f_fit)
+        entry['bias_frequency_source'] = fit_method
+
+
 async def bias_kids(
     crs,
     multisweep_results: Union[Dict, List[Dict]],
@@ -175,16 +196,23 @@ async def bias_kids(
     bandpass_params: Optional[Dict[str, float]] = None,
     num_phase_samples: int = 300,
     phase_step: int = 5,
+    fit_method: str = "nonlinear",
     *,
     module: Optional[Union[int, List[int]]] = None,
     progress_callback: Optional[Callable] = None
 ) -> Union[Dict[int, Dict], List[Dict[int, Dict]]]:
     """
     Bias KIDs at their optimal operating points based on multisweep characterization.
-    
-    This algorithm analyzes multisweep results to find the best amplitude for each
-    detector (highest amplitude that is not bifurcated and has nonlinear parameter < threshold),
-    then programs the detectors with the appropriate frequency, phase, and amplitude.
+
+    Every sweep is given the resonance fit named by *fit_method*, run here
+    with the flow's own fitter for the sweeps that lack it and left alone
+    for those that carry it.  From that fit come the amplitude choice
+    (nonlinear fit only: the skewed fit has no nonlinearity parameter,
+    so with it only the jump detector rules an amplitude out), the bias
+    frequency (the multisweep's max-diq or min-s21 point read off the
+    fitted curve rather than the raw sweep grid), and the df calibration
+    at that frequency.  The fits and the bias frequency are written back
+    onto the entries handed in, so a second call does not fit again.
     
     Args:
         crs: The CRS object to use for hardware communication.
@@ -208,6 +236,8 @@ async def bias_kids(
                                Defaults to 300.
         phase_step (int): Phase step size in degrees for optimization scan.
                         Defaults to 5.
+        fit_method (str): "nonlinear" (default) or "skewed": the resonance fit the
+                        amplitude choice, bias frequency and calibration come from.
         module (int | list[int], optional): Target module(s). If None, extracted from results.
         progress_callback (callable, optional): Function called with (module, progress_percentage).
         
@@ -220,6 +250,9 @@ async def bias_kids(
         - 'bias_successful': Whether the detector was successfully biased
         - 'optimal_phase_degrees': The optimal ADC phase found (if phase optimization enabled)
         - 'phase_optimization_std': The bandpass-filtered Q std at optimal phase
+        - 'bias_frequency': Where the detector was biased; from the fit when
+          'bias_frequency_source' names one, else the multisweep's own choice
+        - 'df_calibration': Hz per volt at the bias point, from the fit
     """
     
     # Detect multi-amplitude format and find optimal bias points
@@ -234,12 +267,15 @@ async def bias_kids(
         results_by_detector, _ = _extract_data_from_gui_format(multisweep_results)
 
     if results_by_detector is not None:
+        _fit_entries([e for d in results_by_detector.values() for e in d.values()],
+                     fit_method)
         # Find optimal configuration for each detector
         optimal_configs = analyze_multiamp_data(results_by_detector, nonlinear_threshold, fallback_to_lowest)
 
         # Convert to single result set using optimal configurations
         single_results = {}
         for det_idx, config in optimal_configs.items():
+            _bias_point_from_fit(config['selected_data'], fit_method)
             single_results[det_idx] = config['selected_data'].copy()
             single_results[det_idx]['selected_amplitude'] = config['selected_amplitude']
             single_results[det_idx]['bifurcation_ever_seen'] = config.get('bifurcation_ever_seen', False)
@@ -274,6 +310,7 @@ async def bias_kids(
                     bandpass_params=bandpass_params,
                     num_phase_samples=num_phase_samples,
                     phase_step=phase_step,
+                    fit_method=fit_method,
                     module=mod_num,
                     progress_callback=progress_callback
                 )
@@ -286,6 +323,10 @@ async def bias_kids(
         raise ValueError("Module must be specified for single result set")
     
     # Get current NCO frequency
+    _fit_entries(list(multisweep_results.values()), fit_method)
+    for det_data in multisweep_results.values():
+        _bias_point_from_fit(det_data, fit_method)
+
     nco_freq = await crs.get_nco_frequency(module=module)
     
     # Base frequency (Nyquist frequency) for quantization
@@ -306,11 +347,13 @@ async def bias_kids(
         
         # Extract key parameters
         is_bifurcated = det_data.get('is_bifurcated', False)
-        nonlinear_params = det_data.get('nonlinear_fit_params', {})
+        nonlinear_params = det_data.get('nonlinear_fit_params') or {}
         nonlinear_a = nonlinear_params.get('a', float('inf'))
-        
-        # Check if detector meets criteria
-        suitable = not is_bifurcated and nonlinear_a < nonlinear_threshold
+
+        if det_data.get('nonlinear_fit_success', False):
+            suitable = not is_bifurcated and nonlinear_a < nonlinear_threshold
+        else:
+            suitable = not is_bifurcated
         
         if suitable or fallback_to_lowest:
             # Prepare bias configuration
@@ -417,7 +460,8 @@ async def bias_kids(
             # flow's nonlinear fit if it ran, else the skewed fit, else
             # what multisweep fitted for it.
             try:
-                cal = df_calibration_for_entry(biased_data, fit_if_missing=False)
+                cal = df_calibration_for_entry(biased_data, prefer=fit_method,
+                                               fit_if_missing=False)
                 if cal is not None:
                     biased_data['df_calibration'] = cal
             except Exception as exc:

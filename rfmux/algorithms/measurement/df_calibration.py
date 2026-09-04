@@ -28,7 +28,7 @@ from .fitting import identify_bifurcation
 
 __all__ = ["measure_df_calibrations", "df_calibration_from_sweep",
            "df_calibration_for_entry", "bias_frequency_from_fit",
-           "slope_from_nonlinear",
+           "ensure_fits", "slope_from_nonlinear",
            "slope_from_skewed", "fit_for_calibration"]
 
 
@@ -51,27 +51,45 @@ def slope_from_nonlinear(f_bias, params, gain_complex=1.0) -> complex:
     return complex(gain_complex * (z_pm[1] - z_pm[0]) / (2 * h))
 
 
-def slope_from_skewed(freqs, iq_volts, f_bias, fit_params) -> complex:
-    """d(I + jQ)/df at *f_bias* from a skewed-Lorentzian fit.
-
-    That fit is to |S21| alone, so it has the resonance's shape (fr,
-    Qr, complex Qc) but not the IQ trajectory's orientation or scale.
-    One complex gain, the least-squares factor aligning the model's
-    trajectory to the sweep's, supplies both; the model is then
-    differentiated at the bias.
-    """
+def _skewed_model(freqs, iq_volts, fit_params):
+    """The skewed-Lorentzian fit as an IQ trajectory: ``model(f)`` in
+    the sweep's volts.  The fit is to |S21| alone, so it has the
+    resonance's shape (fr, Qr, complex Qc) but not the trajectory's
+    orientation or scale; one complex gain, the least-squares factor
+    aligning the model to the sweep, supplies both."""
     fr, qr = float(fit_params["fr"]), float(fit_params["Qr"])
     qe = float(fit_params["Qcre"]) + 1j * float(fit_params["Qcim"])
 
-    def model(ff):
-        return 1 - (qr / qe) / (1 + 2j * qr * (np.asarray(ff) - fr) / fr)
-    f = np.asarray(freqs, dtype=np.float64)
-    z = np.asarray(iq_volts, dtype=complex)
-    m = model(f)
-    gain = np.vdot(m, z) / np.vdot(m, m)
-    h = 1e-4 * fr / max(qr, 1.0)
+    def shape(ff):
+        return 1 - (qr / qe) / (1 + 2j * qr * (np.asarray(ff, dtype=np.float64) - fr) / fr)
+    m = shape(np.asarray(freqs, dtype=np.float64))
+    gain = np.vdot(m, np.asarray(iq_volts, dtype=complex)) / np.vdot(m, m)
+    return lambda ff: gain * shape(ff)
+
+
+def slope_from_skewed(freqs, iq_volts, f_bias, fit_params) -> complex:
+    """d(I + jQ)/df at *f_bias* of the skewed-Lorentzian fit, in volts
+    per hertz."""
+    model = _skewed_model(freqs, iq_volts, fit_params)
+    h = 1e-4 * float(fit_params["fr"]) / max(float(fit_params["Qr"]), 1.0)
     z_pm = model(np.array([f_bias - h, f_bias + h]))
-    return complex(gain * (z_pm[1] - z_pm[0]) / (2 * h))
+    return complex((z_pm[1] - z_pm[0]) / (2 * h))
+
+
+def _has_nonlinear_fit(entry) -> bool:
+    nl = entry.get("nonlinear_fit_params")
+    return bool(nl and entry.get("nonlinear_fit_success", True) and _finite(nl.get("fr")))
+
+
+def _has_skewed_fit(entry) -> bool:
+    sk = entry.get("fit_params")
+    return bool(sk and all(_finite(sk.get(k)) for k in ("fr", "Qr", "Qcre", "Qcim")))
+
+
+def _sorted_sweep(entry):
+    f = np.asarray(entry["frequencies"], dtype=np.float64)
+    order = np.argsort(f)
+    return f[order], convert_roc_to_volts(np.asarray(entry["iq_complex"])[order])
 
 
 def fit_for_calibration(freqs, iq_volts):
@@ -98,64 +116,57 @@ def fit_for_calibration(freqs, iq_volts):
     return dict(zip(names, (float(v) for v in popt))), gain_mag * np.exp(1j * gain_phase)
 
 
-def bias_frequency_from_fit(entry, method="max-diq"):
+def bias_frequency_from_fit(entry, method="max-diq", fit="nonlinear"):
     """The bias frequency the multisweep's *method* picks, read off the
-    fitted resonance instead of the raw sweep points.
+    resonance *fit* ("nonlinear" or "skewed") the entry carries.
 
     "max-diq" is where the IQ trajectory moves fastest with frequency,
     "min-s21" where |S21| is least.  On the raw sweep both are the
     largest of a noisy quantity on the sweep's own grid, so they carry
     its noise and its spacing (2 kHz at the multisweep's defaults, a
     third of a linewidth); on the model they are the extremum of a
-    smooth curve, found on a fine grid.  Runs and keeps the nonlinear
-    fit if the entry has none.  Returns None when nothing fits.
+    smooth curve, found on a fine grid.  Returns None when the entry
+    has no such fit or the method is not one of those two.
     """
-    from .fitting_nonlinear import nonlinear_iq
     if method not in ("max-diq", "min-s21"):
         return None
-    f = np.asarray(entry["frequencies"], dtype=np.float64)
-    order = np.argsort(f)
-    f = f[order]
-    nl = entry.get("nonlinear_fit_params")
-    if not (nl and entry.get("nonlinear_fit_success", True) and _finite(nl.get("fr"))):
-        fitted = fit_for_calibration(
-            f, convert_roc_to_volts(np.asarray(entry["iq_complex"])[order]))
-        if fitted is None:
-            return None
-        nl, gain = fitted
-        entry["nonlinear_fit_params"] = nl
-        entry["gain_complex"] = gain
-        entry["nonlinear_fit_success"] = True
-    p = [nl[k] for k in ("fr", "Qr", "amp", "phi", "a", "i0", "q0")]
+    f, iq = _sorted_sweep(entry)
+    if fit == "nonlinear" and _has_nonlinear_fit(entry):
+        from .fitting_nonlinear import nonlinear_iq
+        nl = entry["nonlinear_fit_params"]
+        p = [nl[k] for k in ("fr", "Qr", "amp", "phi", "a", "i0", "q0")]
+        model = lambda ff: nonlinear_iq(np.asarray(ff, dtype=np.float64), *p)
+    elif fit == "skewed" and _has_skewed_fit(entry):
+        model = _skewed_model(f, iq, entry["fit_params"])
+    else:
+        return None
     grid = np.linspace(f[0], f[-1], 4001)
-    z = nonlinear_iq(grid, *p)
+    z = model(grid)
     if method == "min-s21":
         return float(grid[np.argmin(np.abs(z))])
-    speed = np.abs(np.gradient(z, grid))
-    return float(grid[np.argmax(speed)])
+    return float(grid[np.argmax(np.abs(np.gradient(z, grid)))])
 
 
-def df_calibration_for_entry(entry, *, fit_if_missing=True, warn=True):
-    """The calibration for one multisweep result, from the best fit it
-    carries: the nonlinear IQ fit if it has one, else the skewed fit,
-    else (with a warning, since a fit is being run for it) the nonlinear
-    fit, which is then stored on the entry so it is not run again.
-    The sweep's IQ is in counts, as multisweep stores it.  Returns None
-    when nothing can be fitted.
+def df_calibration_for_entry(entry, *, prefer="nonlinear", fit_if_missing=True,
+                             warn=True):
+    """The calibration for one multisweep result at its bias frequency,
+    from the fit it carries: the *prefer*red one ("nonlinear" or
+    "skewed") if present, else the other, else (with a warning, since
+    a fit is being run for it) the nonlinear fit, which is then stored
+    on the entry so it is not run again.  The sweep's IQ is in counts,
+    as multisweep stores it.  Returns None when nothing can be fitted.
     """
-    f = np.asarray(entry["frequencies"], dtype=np.float64)
-    order = np.argsort(f)
-    f = f[order]
-    iq = convert_roc_to_volts(np.asarray(entry["iq_complex"])[order])
+    f, iq = _sorted_sweep(entry)
     f_bias = float(entry.get("bias_frequency",
                              entry.get("original_center_frequency")))
-    nl = entry.get("nonlinear_fit_params")
-    if nl and entry.get("nonlinear_fit_success", True) and _finite(nl.get("fr")):
-        slope = slope_from_nonlinear(f_bias, nl, entry.get("gain_complex", 1.0))
-        return complex(1.0 / slope)
-    sk = entry.get("fit_params")
-    if sk and all(_finite(sk.get(k)) for k in ("fr", "Qr", "Qcre", "Qcim")):
-        return complex(1.0 / slope_from_skewed(f, iq, f_bias, sk))
+    order = ("skewed", "nonlinear") if prefer == "skewed" else ("nonlinear", "skewed")
+    for fit in order:
+        if fit == "nonlinear" and _has_nonlinear_fit(entry):
+            slope = slope_from_nonlinear(f_bias, entry["nonlinear_fit_params"],
+                                         entry.get("gain_complex", 1.0))
+            return complex(1.0 / slope)
+        if fit == "skewed" and _has_skewed_fit(entry):
+            return complex(1.0 / slope_from_skewed(f, iq, f_bias, entry["fit_params"]))
     if not fit_if_missing:
         return None
     if warn:
@@ -173,6 +184,42 @@ def df_calibration_for_entry(entry, *, fit_if_missing=True, warn=True):
     entry["gain_complex"] = gain
     entry["nonlinear_fit_success"] = True
     return complex(1.0 / slope_from_nonlinear(f_bias, params, gain))
+
+
+def ensure_fits(entries, fit="nonlinear", parallel=False) -> int:
+    """Run the resonance *fit* ("nonlinear" or "skewed") on every entry
+    in *entries* (an iterable of multisweep result dicts) that lacks
+    it, with the flow's own batch fitter, storing what the flow's fit
+    step would store.  Entries that already carry the fit are left
+    alone.  Returns how many were fitted.
+
+    Cost: 21 ms per sweep for the nonlinear fit, 3.5 ms for the skewed,
+    on 101-point sweeps.  The batch fitter's thread pool makes the
+    nonlinear fit slower, not faster (the work holds the GIL), so it is
+    off by default.
+    """
+    if fit == "nonlinear":
+        from .fitting_nonlinear import fit_nonlinear_iq_multisweep
+        has, keys = _has_nonlinear_fit, ("nonlinear_fit_params", "nonlinear_fit_errors",
+                                         "nonlinear_fit_residual", "nonlinear_fit_success",
+                                         "gain_complex", "iq_gain_corrected")
+        run = lambda batch: fit_nonlinear_iq_multisweep(batch, parallel=parallel)
+    elif fit == "skewed":
+        from .fitting import fit_skewed_multisweep
+        has, keys = _has_skewed_fit, ("fit_params", "iq_centered")
+        run = fit_skewed_multisweep
+    else:
+        raise ValueError(f"unknown fit {fit!r}: expected 'nonlinear' or 'skewed'")
+    todo = [e for e in entries if not has(e)]
+    if not todo:
+        return 0
+    # The batch fitters key by integer index and hand back copies.
+    fitted = run({i: dict(e) for i, e in enumerate(todo)})
+    for i, e in enumerate(todo):
+        for k in keys:
+            if k in fitted.get(i, {}):
+                e[k] = fitted[i][k]
+    return len(todo)
 
 
 def df_calibration_from_sweep(freqs, iq_volts, f_bias) -> complex:

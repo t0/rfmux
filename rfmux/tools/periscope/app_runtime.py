@@ -2405,6 +2405,7 @@ class PeriscopeRuntime:
         )
     
         self.bias_params = {
+            "fit_method": "nonlinear",
             "nonlinear_threshold": 0.77,
             "fallback_to_lowest": True,
             "optimize_phase": True,

@@ -58,8 +58,10 @@ def load_bias_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
 class BiasKidsDialog(QDialog):
     """Dialog for configuring Bias KIDs algorithm parameters."""
     
-    def __init__(self, parent=None, active_module : int | None = None, load_bias = False, loaded_data: dict | None = None):
+    def __init__(self, parent=None, active_module : int | None = None, load_bias = False,
+                 loaded_data: dict | None = None, fits_present: set | None = None):
         super().__init__(parent)
+        self._fits_present = set(fits_present or ())
         self.setWindowTitle("Bias KIDs Configuration")
         self.setModal(True)
         self.setMinimumWidth(400)
@@ -92,6 +94,23 @@ class BiasKidsDialog(QDialog):
             "Detectors with 'a' above this threshold will use fallback amplitude."
         )
         basic_layout.addRow("Nonlinear Threshold:", self.nonlinear_threshold_spin)
+
+        # Which resonance fit the bias point, amplitude choice and df
+        # calibration come from.  Preselect the one the sweeps carry;
+        # bias_kids runs the chosen fit for sweeps that lack it.
+        self.fit_method_combo = QtWidgets.QComboBox()
+        self.fit_method_combo.addItem("Nonlinear fit", "nonlinear")
+        self.fit_method_combo.addItem("Skewed Lorentzian fit", "skewed")
+        if "nonlinear" not in self._fits_present and "skewed" in self._fits_present:
+            self.fit_method_combo.setCurrentIndex(1)
+        self.fit_method_combo.setToolTip(
+            "The resonance fit the bias frequency, the amplitude choice and the\n"
+            "df calibration are read from.  Sweeps that do not carry it are\n"
+            "fitted now (about 20 ms each for the nonlinear fit, 4 ms for the\n"
+            "skewed).  The skewed fit has no nonlinearity parameter, so with it\n"
+            "only a jump in the sweep rules an amplitude out."
+        )
+        basic_layout.addRow("Bias point from:", self.fit_method_combo)
         
         # Fallback to lowest checkbox
         self.fallback_checkbox = QCheckBox("Fallback to Lowest Amplitude")
@@ -441,6 +460,7 @@ class BiasKidsDialog(QDialog):
     def get_parameters(self):
         """Get the configured parameters as a dictionary."""
         params = {
+            'fit_method': self.fit_method_combo.currentData(),
             'nonlinear_threshold': self.nonlinear_threshold_spin.value(),
             'fallback_to_lowest': self.fallback_checkbox.isChecked(),
             'optimize_phase': self.optimize_phase_checkbox.isChecked(),

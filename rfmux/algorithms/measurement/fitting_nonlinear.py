@@ -97,7 +97,8 @@ def get_y_nonlinear(yg: Union[float, np.ndarray], a: float) -> Union[float, np.n
 
     The pull a/(1 + 4y^2) lies in (0, a], so y is in [yg, yg + a], and
     below bifurcation (a < 4*sqrt(3)/9) the equation is monotone in y
-    with one root there: bisection on that bracket always converges.
+    with one root there: bisection on that bracket always converges,
+    and Newton steps from the narrowed bracket finish it quickly.
     Above bifurcation the bracket holds up to three roots and the one
     found is whichever the bisection lands on.
 
@@ -119,12 +120,17 @@ def get_y_nonlinear(yg: Union[float, np.ndarray], a: float) -> Union[float, np.n
     yg = np.atleast_1d(np.asarray(yg, dtype=np.float64))
     lo = yg.copy()
     hi = yg + a
-    for _ in range(60):
+    for _ in range(12):
         mid = 0.5 * (lo + hi)
         above = mid - a / (1 + 4 * mid * mid) > yg
         hi = np.where(above, mid, hi)
         lo = np.where(above, lo, mid)
     y = 0.5 * (lo + hi)
+    for _ in range(4):
+        denom = 1 + 4 * y * y
+        g = y - a / denom - yg
+        g_prime = 1 + 8 * a * y / (denom * denom)
+        y = np.clip(y - g / np.where(np.abs(g_prime) > 1e-12, g_prime, 1e-12), lo, hi)
     return float(y[0]) if scalar else y
 
 

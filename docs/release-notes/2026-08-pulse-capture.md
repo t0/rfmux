@@ -65,8 +65,16 @@ tests an arbitrary basis instead: at 45 degrees each one sees the pulse
 divided by the square root of two while carrying the full noise.
 
 The calibration is the slope of the resonance at the bias point, from a
-resonance fitted to the sweep. A resonance biased into bifurcation has no
-such slope: the sweep jumps, and both `bias_kids` and
+resonance fitted to the sweep. `bias_kids` works from one fit, chosen with
+`fit_method`: the nonlinear IQ fit (the default) or the skewed Lorentzian.
+Sweeps that already carry that fit are used as they are; the rest are fitted
+then, about 20 ms each for the nonlinear fit and 4 ms for the skewed. A
+multisweep with no fit selected runs no fit at all, so it stays the quick
+look. From the chosen fit come the bias frequency (the max-diq or min-s21
+point read off the fitted curve, not the raw grid), the amplitude choice, and
+the calibration. In Periscope the Bias KIDs dialog has the same choice,
+preselected to whatever fit the sweeps carry. A resonance biased into
+bifurcation has no such slope: the sweep jumps, and both `bias_kids` and
 `measure_df_calibrations` warn that its calibration is unreliable while
 still biasing it.
 

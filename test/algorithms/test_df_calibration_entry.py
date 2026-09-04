@@ -85,15 +85,46 @@ def test_bias_frequency_from_fit_uses_stored_params(monkeypatch):
     assert abs(dc.bias_frequency_from_fit(entry, "min-s21") - FR) < step / 20
 
 
-def test_bias_frequency_from_fit_fits_and_keeps_the_fit():
+def test_bias_frequency_from_fit_reads_the_skewed_fit_too():
     entry = _entry(n=40)
-    f_bias = dc.bias_frequency_from_fit(entry)
-    assert f_bias == pytest.approx(FR, abs=50.0)
-    assert entry["nonlinear_fit_params"]["fr"] == pytest.approx(FR, rel=1e-4)
-    assert entry["nonlinear_fit_success"] is True
+    entry["fit_params"] = {"fr": FR, "Qr": QR, "Qcre": QR / 0.6, "Qcim": 0.0}
+    step = entry["frequencies"][1] - entry["frequencies"][0]
+    assert abs(dc.bias_frequency_from_fit(entry, fit="skewed") - FR) < step / 20
+    assert dc.bias_frequency_from_fit(entry, fit="nonlinear") is None
 
 
-def test_bias_frequency_from_fit_declines_unknown_method_and_failed_fit(monkeypatch):
-    assert dc.bias_frequency_from_fit(_entry(), None) is None
-    monkeypatch.setattr(dc, "fit_for_calibration", lambda *a, **k: None)
+def test_bias_frequency_from_fit_never_fits():
     assert dc.bias_frequency_from_fit(_entry()) is None
+
+
+def test_prefer_skewed_wins_when_both_fits_exist(monkeypatch):
+    entry = _entry()
+    entry["nonlinear_fit_params"] = dict(PARAMS)
+    entry["fit_params"] = {"fr": FR, "Qr": QR, "Qcre": QR / 0.6, "Qcim": 0.0}
+    monkeypatch.setattr(dc, "slope_from_nonlinear",
+                        lambda *a, **k: pytest.fail("nonlinear slope used"))
+    assert np.isfinite(dc.df_calibration_for_entry(entry, prefer="skewed"))
+
+
+def test_ensure_fits_fits_only_what_lacks_the_fit(monkeypatch):
+    seen = []
+
+    def fake_batch(batch, parallel=True):
+        seen.append(sorted(batch))
+        return {k: {"nonlinear_fit_params": dict(PARAMS), "nonlinear_fit_success": True,
+                    "gain_complex": 1.0} for k in batch}
+    monkeypatch.setattr("rfmux.algorithms.measurement.fitting_nonlinear."
+                        "fit_nonlinear_iq_multisweep", fake_batch)
+    fitted, bare = _entry(), _entry()
+    fitted["nonlinear_fit_params"] = dict(PARAMS)
+    assert dc.ensure_fits([fitted, bare], "nonlinear") == 1
+    assert seen == [[0]]
+    assert bare["nonlinear_fit_success"] is True
+    assert dc.ensure_fits([fitted, bare], "nonlinear") == 0
+    assert seen == [[0]]
+
+
+def test_bias_frequency_from_fit_declines_unknown_method():
+    entry = _entry()
+    entry["nonlinear_fit_params"] = dict(PARAMS)
+    assert dc.bias_frequency_from_fit(entry, None) is None

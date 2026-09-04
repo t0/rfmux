@@ -2172,7 +2172,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         from .bias_kids_dialog import BiasKidsDialog
         
         # Show dialog to get parameters
-        dialog = BiasKidsDialog(self, self.target_module)
+        dialog = BiasKidsDialog(self, self.target_module,
+                                fits_present=self._fits_present())
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return  # User cancelled
         
@@ -2219,6 +2220,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Could update a progress indicator if desired
         pass
     
+    def _fits_present(self) -> set:
+        """Which resonance fits the current results carry, for the Bias
+        KIDs dialog to preselect from."""
+        from rfmux.algorithms.measurement.df_calibration import (
+            _has_nonlinear_fit, _has_skewed_fit)
+        present = set()
+        for iterations in self.results_by_detector.values():
+            for entry in iterations.values():
+                if _has_nonlinear_fit(entry):
+                    present.add("nonlinear")
+                if _has_skewed_fit(entry):
+                    present.add("skewed")
+        return present
+
     def _bias_kids_completed(self, module, biased_results, df_calibrations, nco_frequency_hz):
         """Handle completion of the bias_kids task."""
         # Store the output

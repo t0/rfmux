@@ -1085,6 +1085,8 @@ class BiasKidsTask(QtCore.QThread):
         }
         
         # Add optional parameters from dialog
+        if 'fit_method' in self.bias_params:
+            kwargs['fit_method'] = self.bias_params['fit_method']
         if 'nonlinear_threshold' in self.bias_params:
             kwargs['nonlinear_threshold'] = self.bias_params['nonlinear_threshold']
         if 'fallback_to_lowest' in self.bias_params:

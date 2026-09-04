@@ -34,8 +34,13 @@ def nonlinear_iq(f: np.ndarray, fr: float, Qr: float, amp: float, phi: float,
                     |     --------------  X  ------------   |
                      \     Qc * cos(phi)       (1+ 2jy)    /
 
-    where the nonlinearity of y is described by:
-        yg = y + a/(1+y^2)  where yg = Qr*xg and xg = (f-fr)/fr
+    where y is the detuning from the power-shifted resonance and yg the
+    generator's detuning from the low-power resonance fr, related by
+    Swenson et al. 2013 (J. Appl. Phys. 113, 104501), eq. 13:
+        y = yg + a/(1 + 4 y^2)   where yg = Qr*(f - fr)/fr
+    The stored energy pulls the resonance to lower frequency, so the
+    dip sits below fr and a sweep leans that way; for a > 4*sqrt(3)/9
+    the relation is multivalued (bifurcation).
 
     Note: Cable delay tau is not included as rfmux handles it separately.
 
@@ -87,86 +92,40 @@ def nonlinear_iq(f: np.ndarray, fr: float, Qr: float, amp: float, phi: float,
 
 def get_y_nonlinear(yg: Union[float, np.ndarray], a: float) -> Union[float, np.ndarray]:
     """
-    Calculates the largest real root of the nonlinear equation:
-        yg = y + a / (1 + y^2)
-    
-    This describes the frequency-pulling effect in a nonlinear resonator.
-    Fully vectorized implementation using NumPy operations.
-    
+    Solves Swenson et al. 2013 eq. 13 for the actual detuning y:
+        y = yg + a / (1 + 4 y^2)
+
+    The pull a/(1 + 4y^2) lies in (0, a], so y is in [yg, yg + a], and
+    below bifurcation (a < 4*sqrt(3)/9) the equation is monotone in y
+    with one root there: bisection on that bracket always converges.
+    Above bifurcation the bracket holds up to three roots and the one
+    found is whichever the bisection lands on.
+
     Parameters
     ----------
     yg : float or np.ndarray
-        Unmodified (linear) resonance shift: yg = Qr * (f - fr) / fr
+        Generator detuning from the low-power resonance: Qr * (f - fr) / fr
     a : float
         Nonlinearity parameter
-        
+
     Returns
     -------
     y : float or np.ndarray
-        Largest real root of the nonlinear equation
+        Detuning from the power-shifted resonance, in units of fr / Qr
     """
     if a == 0:
-        # Linear case - no frequency pulling
         return yg
-    
-    # Handle scalar case
-    if np.isscalar(yg):
-        return _solve_single_y(yg, a)
-    
-    # Vectorized Newton's method for arrays
-    yg = np.asarray(yg)
-    y = yg.copy()  # Initial guess
-    
-    # Perform Newton iterations
-    for _ in range(50):  # Maximum iterations
-        # Vectorized function evaluation: f(y) = y + a/(1+y^2) - yg
-        y_sq = y * y
-        f_val = y + a / (1 + y_sq) - yg
-        
-        # Vectorized derivative: f'(y) = 1 - 2*a*y/(1+y^2)^2
-        denom_sq = (1 + y_sq) ** 2
-        f_prime = 1 - 2 * a * y / denom_sq
-        
-        # Update where derivative is not too small
-        mask = np.abs(f_prime) > 1e-10
-        if not np.any(mask):
-            break
-            
-        # Newton update: y_new = y - f(y)/f'(y)
-        y[mask] -= f_val[mask] / f_prime[mask]
-        
-        # Check convergence
-        if np.all(np.abs(f_val) < 1e-10):
-            break
-    
-    return y
-
-
-def _solve_single_y(yg: float, a: float) -> float:
-    """Solve the nonlinear equation for a single yg value."""
-    # The equation y + a/(1+y^2) - yg = 0 can be rearranged to:
-    # y(1+y^2) + a - yg(1+y^2) = 0
-    # y^3 + y - yg*y^2 - yg + a = 0
-    # y^3 - yg*y^2 + y + (a - yg) = 0
-    
-    # For small a and yg not too large, we can use Newton's method
-    # starting from y = yg
-    y = yg
-    for _ in range(50):  # Maximum iterations
-        f_val = y + a / (1 + y**2) - yg
-        f_prime = 1 - 2 * a * y / (1 + y**2)**2
-        
-        if abs(f_prime) < 1e-10:
-            break
-            
-        y_new = y - f_val / f_prime
-        
-        if abs(y_new - y) < 1e-10:
-            break
-            
-        y = y_new
-    
-    return y
+    scalar = np.isscalar(yg)
+    yg = np.atleast_1d(np.asarray(yg, dtype=np.float64))
+    lo = yg.copy()
+    hi = yg + a
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        above = mid - a / (1 + 4 * mid * mid) > yg
+        hi = np.where(above, mid, hi)
+        lo = np.where(above, lo, mid)
+    y = 0.5 * (lo + hi)
+    return float(y[0]) if scalar else y
 
 
 def estimate_and_remove_gain(frequencies: np.ndarray, iq_complex: np.ndarray, 

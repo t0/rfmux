@@ -79,15 +79,10 @@ def fit_for_calibration(freqs, iq_volts):
     ``(params, gain_complex)`` as fit_nonlinear_iq_multisweep stores
     them, or None when it does not converge.
 
-    At 500 Hz spacing on a 6 kHz linewidth the slope's phase is within
-    2 degrees of truth on the simulator, at the multisweep's 2 kHz
-    spacing within 7.  The fit's nonlinearity parameter is not to be
-    trusted: its model can only lean a resonance toward higher
-    frequency, a kinetic-inductance resonance leans lower, so the fit
-    reports a = 0 and absorbs the lean into fr, which then sits above
-    the point of fastest IQ motion by a fraction of a linewidth.  The
-    slope is evaluated at the bias point, not at fr, so the calibration
-    survives that; the fitted fr on its own does not."""
+    On the simulator the slope is within 3% and 2 degrees of truth
+    from -60 to -55 dBm, at 500 Hz spacing and at the multisweep's
+    2 kHz spacing alike; at -50 dBm, near bifurcation, within 20% and
+    5 degrees."""
     from .fitting_nonlinear import estimate_and_remove_gain, fit_nonlinear_iq
     f = np.asarray(freqs, dtype=np.float64)
     z = np.asarray(iq_volts, dtype=complex)

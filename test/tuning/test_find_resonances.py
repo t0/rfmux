@@ -10,7 +10,11 @@ import numpy as np
 import pytest
 
 from rfmux.core.resonators import ResonatorCatalog
-from rfmux.tuning import find_resonances, find_resonances_in_netanal
+from rfmux.tuning import (
+    ResonanceSearch,
+    find_resonances,
+    find_resonances_in_netanal,
+)
 
 pytestmark = pytest.mark.portable
 
@@ -368,3 +372,36 @@ def test_repr_summarises_without_dumping_the_array():
 
     assert "4 found" in text
     assert "0 rejected" in text
+
+
+# ─── Persistence ──────────────────────────────────────────────────────────────
+
+
+def test_a_search_survives_a_round_trip_through_builtins():
+    found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6, label="module 2")
+    restored = ResonanceSearch.from_dict(found.to_dict())
+
+    assert restored.label == found.label
+    assert restored.candidates == found.candidates
+    assert restored.rejected == found.rejected
+    assert np.array_equal(restored.frequencies_hz, found.frequencies_hz)
+    assert np.array_equal(restored.magnitude_db, found.magnitude_db)
+
+
+def test_a_searchs_dict_holds_no_rfmux_classes():
+    """Files have to open on a machine that has never heard of rfmux."""
+    d = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6).to_dict()
+
+    assert d["schema_version"] == ResonanceSearch.SCHEMA_VERSION
+    assert all(type(c).__name__ == "dict" for c in d["candidates"])
+    assert all(
+        type(v).__module__ in ("builtins", "numpy") for v in d["settings"].values()
+    )
+
+
+def test_a_search_from_another_version_is_refused():
+    d = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6).to_dict()
+    d["schema_version"] = ResonanceSearch.SCHEMA_VERSION + 1
+
+    with pytest.raises(ValueError, match="schema_version"):
+        ResonanceSearch.from_dict(d)

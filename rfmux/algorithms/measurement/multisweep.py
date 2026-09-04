@@ -38,6 +38,7 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.resonators import ResonatorCatalog
 from ...core.transferfunctions import convert_roc_to_volts
+from ...tuning import store
 from ...tuning.sweep_results import merge_modules, pack_sweep
 
 
@@ -225,6 +226,8 @@ async def multisweep(
     module=None,
     progress_callback=None,
     data_callback=None,
+    save=None,
+    label=None,
 ):
     """
     Perform simultaneous, high-resolution frequency sweeps around many center
@@ -324,6 +327,13 @@ async def multisweep(
         data_callback (callable, optional): Function called with (module, partial_results)
             during acquisition, carrying the current NCO region's resonators
             sliced to the points measured so far.
+        save (bool, optional): Write the result to the output folder when the
+            sweep finishes. Defaults to whatever
+            ``rfmux.tuning.store.autosave_enabled()`` says, which is on unless
+            your config file or ``$RFMUX_AUTOSAVE`` turns it off. A list of
+            modules produces one file covering all of them.
+        label (str, optional): Your name for this sweep, appended to the
+            filename. Ignored when nothing is being saved.
 
     Returns:
         dict: keyed by module identifier — ``crs.module[m].index()``, e.g.
@@ -427,11 +437,16 @@ async def multisweep(
                 module=m, # Pass single module here
                 progress_callback=progress_callback,
                 data_callback=data_callback,
+                # The per-module calls do not save. One call is one file, so
+                # the fan-out saves once, below, over the merged container.
+                save=False,
             ))
         # Each of those returns a container of its own, keyed by module, so the
         # several modules merge into one rather than stacking into a list whose
         # order was the only thing saying which element was which.
-        return merge_modules(await asyncio.gather(*tasks))
+        merged = merge_modules(await asyncio.gather(*tasks))
+        store.maybe_save(merged, "multisweep", save=save, label=label)
+        return merged
     # --- End parallel execution handling ---
 
     # --- Resolve what to sweep ----------------------------------------------
@@ -460,7 +475,9 @@ async def multisweep(
         # provenance of a sweep that measured nothing is worth as much as any
         # other's.
         warnings.warn("Nothing to sweep. Returning a result with no sections.")
-        return packed({})
+        empty = packed({})
+        store.maybe_save(empty, "multisweep", save=save, label=label)
+        return empty
 
     # --- Validate inputs for single module execution ---
     # Check if number of resonances exceeds maximum channels
@@ -664,4 +681,6 @@ async def multisweep(
     except Exception as e:
         warnings.warn(f"Hardware cleanup failed for module {module}: {e}")
 
-    return packed(results)
+    swept = packed(results)
+    store.maybe_save(swept, "multisweep", save=save, label=label)
+    return swept

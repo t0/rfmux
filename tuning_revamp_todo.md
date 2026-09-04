@@ -290,24 +290,58 @@ belong in Periscope (or a notebook), not in the analysis module.
 `magnitude_db`, and each candidate's `index` into them, plus `rejected` with
 reasons so discarded candidates can be drawn differently.
 
-## `store.py` should own catalog persistence, and the notebook should point at it
+## `store.py` owns persistence; what is left is a run-level layout
 
-Section 6 of `Demos/network_analyses_find_resonances_make_resonator_catalog.md`
-currently hand-rolls `pickle.dump(catalog.to_dict(), f)`, which makes a demo the
-de facto spec for how a catalog reaches disk. That is fine while nothing else
-writes one, and wrong once `store.py` exists (design doc §2, §11 step 4).
+Done. `rfmux/tuning/store.py` writes one dated folder per day
+(`ipy_session_YYYYMMDD`) under a configurable root, names files
+`{type}_{date}_{time}_{label}.pkl`, and stamps a `file_metadata` block into each
+module's block of what it writes. The drivers and analyses save by default
+through `save=` / `label=`; `rfmux/config_template.yaml` and `$RFMUX_DATA_DIR`
+say where and whether. Both rules this section was holding onto survived: the
+dict goes in the file, never the object, and the `schema_version` check comes
+along with it. §13's question is answered for now as *pickle, behind
+`store.py`*, so the format can move to HDF5 later without touching callers.
 
-Two things to carry across when it lands:
+What is still missing is a level up: a **folder per tuning run** that ties a
+catalog to the sweeps and the settings that produced it. Today each measurement
+is a file that knows its own name and nothing about its siblings, so
+reconstructing "the run that produced this catalog" means reading timestamps.
+Design doc §2 and §11 step 4 describe the folder; `store.py` is where it goes.
 
-* **Pickle the dict, never the object.** `pickle.dump(catalog, f)` round-trips,
-  but unpickling does not call `__init__`, so none of the catalog's invariants
-  run — a file holding two resonators on one frequency restores without
-  complaint, verified. It also bakes the class's import path into the file, so
-  renaming or moving `ResonatorCatalog` strands every old file. `to_dict` /
-  `from_dict` avoids both and gets the `schema_version` check for free.
-* The design doc's §13 question — pickle now and HDF5 later, or HDF5 straight
-  away — is still open, and `store.py` is where it gets answered. The notebook
-  should then show `store.save(catalog, ...)` rather than the `pickle` module.
+Two smaller follow-ups it should pick up:
+
+* **The legacy readers** still inline in `app_runtime.py` — top-level
+  `bias_kids_output`, integer detector keys, missing `iq_volts`, flat fit keys —
+  which the design doc lists as `store.py`'s (§7).
+* **A wheel built from a configured checkout carries `rfmux/config.yaml`**,
+  because `wheel.packages = ["rfmux"]` copies the whole package directory.
+  Gitignored, so it never reaches a commit, but `scikit-build-core`'s
+  `wheel.exclude` would close it properly — it needs >=0.5.0, and
+  `pyproject.toml` currently floors at 0.3.3.
+
+## Normalize what `take_netanal` returns onto the sweep container shape
+
+`take_netanal` is the only driver that does not return a module-keyed envelope.
+It returns a flat `{frequencies, iq_complex, phase_degrees}` for one module and a
+**bare list** for several (`take_netanal.py:83-114`), and in neither form does it
+record which module produced the data. `multisweep` and `multiamp_multisweep`
+both return `{module_id: {schema_version, module, call_params, results}}` from
+`pack_sweep` / `pack_results`.
+
+The cost of the difference, in three places:
+
+* `find_resonances_in_netanal` (`tuning/find_resonances.py`) exists largely to
+  sniff which of the three shapes it was handed — flat dict, list, or a dict
+  keyed by module number that nothing actually produces any more.
+* `store.py`'s `_blocks` needs two of its four cases for netanal alone, and has
+  to be *told* the module number by the driver because the payload cannot say.
+* A netanal result on disk records its module only in the `file_metadata` a save
+  put there. Load one that was written before autosave and there is nothing.
+
+Packing netanal through the same envelope would delete all three. It is a
+breaking change to the shape Periscope reads (`tools/periscope/tasks.py`) and to
+`network_analysis_export.py`'s own `parameters`/`modules` payload, so it wants to
+land with the Periscope rewire rather than before it.
 
 ## Carry the "How to use this document" section into later notebooks
 

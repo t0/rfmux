@@ -56,6 +56,8 @@ import numpy as np
 from scipy import signal
 
 from ..core.resonators import ResonatorCatalog
+from . import store
+from .store import plain
 
 __all__ = [
     "ResonanceCandidate",
@@ -89,6 +91,33 @@ class ResonanceCandidate:
     def accepted(self) -> bool:
         return self.rejected_because is None
 
+    def to_dict(self) -> dict:
+        """Plain builtins only — files never contain these classes.
+
+        No version of its own: a candidate is only ever written as part of a
+        :class:`ResonanceSearch`, and one stamp on the thing that becomes a file
+        is the version that matters.
+        """
+        return {
+            "frequency_hz": float(self.frequency_hz),
+            "index": int(self.index),
+            "depth_db": float(self.depth_db),
+            "width_hz": float(self.width_hz),
+            "q_estimate": float(self.q_estimate),
+            "rejected_because": self.rejected_because,
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> ResonanceCandidate:
+        return cls(
+            frequency_hz=float(d["frequency_hz"]),
+            index=int(d["index"]),
+            depth_db=float(d["depth_db"]),
+            width_hz=float(d["width_hz"]),
+            q_estimate=float(d["q_estimate"]),
+            rejected_because=d.get("rejected_because"),
+        )
+
 
 @dataclass(slots=True)
 class ResonanceSearch:
@@ -97,6 +126,12 @@ class ResonanceSearch:
     Carries the processed trace as well as the candidates, so a caller can plot
     exactly what the finder looked at rather than reconstructing it.
     """
+
+    # Stamped into to_dict output and required exactly by from_dict, so a file
+    # from another version of this module fails loudly rather than being half
+    # understood. Bump whenever the dict shape changes in a way from_dict
+    # cannot absorb.
+    SCHEMA_VERSION = 1
 
     frequencies_hz: np.ndarray  # the frequency grid that was searched
     magnitude_db: np.ndarray  # the normalized dB trace that was searched
@@ -123,6 +158,43 @@ class ResonanceSearch:
         """
         return ResonatorCatalog.from_frequencies(
             self.resonance_frequencies_hz, module=module, amplitude=amplitude, **kwargs
+        )
+
+    # -- persistence ----------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """Plain builtins and ndarrays — files never contain these classes.
+
+        The searched trace stays an ndarray. It is measured data, and a
+        five-thousand-point list of Python floats is a worse file than the array
+        it came from; numpy is not what "readable without rfmux" was about.
+        """
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "frequencies_hz": np.asarray(self.frequencies_hz),
+            "magnitude_db": np.asarray(self.magnitude_db),
+            "candidates": [c.to_dict() for c in self.candidates],
+            "rejected": [c.to_dict() for c in self.rejected],
+            "settings": plain(self.settings),
+            "label": self.label,
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> ResonanceSearch:
+        version = d.get("schema_version")
+        if version != cls.SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version={version!r}, expected {cls.SCHEMA_VERSION}: "
+                f"this dict was written by a different version of "
+                f"ResonanceSearch."
+            )
+        return cls(
+            frequencies_hz=np.asarray(d["frequencies_hz"]),
+            magnitude_db=np.asarray(d["magnitude_db"]),
+            candidates=[ResonanceCandidate.from_dict(c) for c in d["candidates"]],
+            rejected=[ResonanceCandidate.from_dict(c) for c in d["rejected"]],
+            settings=d.get("settings", {}),
+            label=d.get("label"),
         )
 
     def __repr__(self) -> str:
@@ -455,7 +527,9 @@ def _count_pass(candidates, expected: int, who: str):
 # ─── Netanal convenience wrapper ──────────────────────────────────────────────
 
 
-def find_resonances_in_netanal(netanal, *, label: str | None = None, **kwargs):
+def find_resonances_in_netanal(
+    netanal, *, label: str | None = None, save=None, **kwargs
+):
     """Run :func:`find_resonances` on the output of ``crs.take_netanal()``.
 
     Unpacks the netanal container and returns results in the same shape:
@@ -466,8 +540,15 @@ def find_resonances_in_netanal(netanal, *, label: str | None = None, **kwargs):
       labelled by its module
 
     ``label`` names the trace in warnings; the multi-trace forms derive one per
-    entry unless you pass your own. Remaining keyword arguments go straight
-    through to :func:`find_resonances`::
+    entry unless you pass your own. It doubles as the name on the saved file,
+    which is why there is not a second label argument to keep straight.
+
+    ``save`` writes the search to the output folder — a new
+    ``find_resonances_*.pkl``, since a search is something the netanal did not
+    already contain, not an annotation on it. One file per call however many
+    traces went in. Defaults to ``rfmux.tuning.store.autosave_enabled()``.
+
+    Remaining keyword arguments go straight through to :func:`find_resonances`::
 
         netanal = await crs.take_netanal(module=2, amp=0.001)
         found = find_resonances_in_netanal(netanal, min_dip_depth_db=0.5)
@@ -477,12 +558,21 @@ def find_resonances_in_netanal(netanal, *, label: str | None = None, **kwargs):
     is one call, while the algorithm stays free of any measurement format.
     """
     if isinstance(netanal, (list, tuple)):
-        return [
+        searches = [
+            # save=False on the way down: one call is one file, and the
+            # assembled result is saved once below.
             find_resonances_in_netanal(
-                entry, label=label or f"sweep {i}", **kwargs
+                entry, label=label or f"sweep {i}", save=False, **kwargs
             )
             for i, entry in enumerate(netanal)
         ]
+        store.maybe_save(
+            [s.to_dict() for s in searches],
+            "find_resonances",
+            save=save,
+            label=label,
+        )
+        return searches
 
     if not isinstance(netanal, dict):
         raise TypeError(
@@ -492,14 +582,25 @@ def find_resonances_in_netanal(netanal, *, label: str | None = None, **kwargs):
 
     # A dict keyed by module number, each value a netanal result. Distinguished
     # from a single result by its keys: take_netanal names its arrays with
-    # strings, so integer keys mean modules.
-    if netanal and all(isinstance(k, (int, np.integer)) for k in netanal):
-        return {
+    # strings, so integer keys mean modules. The file_metadata key that saving
+    # adds is a string too, so it is stripped before the test rather than left
+    # to make a saved result look like a single trace.
+    keys = [k for k in netanal if k != store.METADATA_KEY]
+    if keys and all(isinstance(k, (int, np.integer)) for k in keys):
+        searches = {
             module: find_resonances_in_netanal(
-                entry, label=label or f"module {module}", **kwargs
+                netanal[module], label=label or f"module {module}",
+                save=False, **kwargs
             )
-            for module, entry in netanal.items()
+            for module in keys
         }
+        store.maybe_save(
+            {module: s.to_dict() for module, s in searches.items()},
+            "find_resonances",
+            save=save,
+            label=label,
+        )
+        return searches
 
     missing = {"frequencies", "iq_complex"} - set(netanal)
     if missing:
@@ -509,6 +610,16 @@ def find_resonances_in_netanal(netanal, *, label: str | None = None, **kwargs):
             f"{', '.join(repr(k) for k in netanal)}). Call find_resonances() "
             f"with the two arrays directly if your data is in another shape."
         )
-    return find_resonances(
+    search = find_resonances(
         netanal["frequencies"], netanal["iq_complex"], label=label, **kwargs
     )
+    store.maybe_save(
+        search.to_dict(),
+        "find_resonances",
+        save=save,
+        label=label,
+        # The netanal this came off records its own module only in the
+        # file_metadata a save put there, so this is where it comes from.
+        module=netanal.get(store.METADATA_KEY, {}).get("module"),
+    )
+    return search

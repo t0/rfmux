@@ -955,9 +955,12 @@ except ValueError as e:
   `multiamp_multisweep` returned and writes each model's answers into the sweep
   entry it fitted, under `fits`. `fitting_resonators.md` is the notebook.
   Writing the results back into the *catalog* is still to come.
-- **Saving to disk.** `pickle.dump` on the returned dict works today — it is
-  plain builtins and ndarrays throughout — but a proper `store.py` with a file
-  layout is still to come.
+- **Saving to disk.** Not missing any more, and not something you have to
+  remember to do: `multisweep` writes what it measured to
+  `~/rfmux_data/ipy_session_<today>/` on its way out, and the result carries the
+  path it went to under `file_metadata`. Pass `save=False` for a sweep you are
+  throwing away, `label="cooldown3"` to put a name on the file, and see
+  `rfmux.tuning.store` for where the folder comes from and how to move it.
 
 One cleanup note: multisweep silences the channels it swept, but only those. If
 you parked tones on this module by hand, they are still live.

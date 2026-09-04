@@ -113,6 +113,8 @@ from scipy.interpolate import CubicSpline
 from scipy.signal import find_peaks
 
 from ..core.resonators import BiasPoint, ResonatorCatalog
+from . import store
+from .store import plain
 from .sweep_results import _iterations, collect_amplitude_iterations_for
 
 __all__ = [
@@ -168,6 +170,24 @@ class BifurcationCheck(NamedTuple):
     metric: float
     threshold: float
 
+    def to_dict(self) -> dict:
+        """Plain builtins only — files never contain these classes."""
+        return {
+            "method": self.method,
+            "bifurcated": bool(self.bifurcated),
+            "metric": float(self.metric),
+            "threshold": float(self.threshold),
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> "BifurcationCheck":
+        return cls(
+            method=d["method"],
+            bifurcated=bool(d["bifurcated"]),
+            metric=float(d["metric"]),
+            threshold=float(d["threshold"]),
+        )
+
 
 class AmplitudeChoice(NamedTuple):
     """Which amplitude step one resonator should be biased at.
@@ -194,6 +214,24 @@ class AmplitudeChoice(NamedTuple):
         :func:`find_bias_amplitude` for why that is still the answer.
         """
         return self.bifurcated_at is not None and self.bifurcated_at == self.amplitude
+
+    def to_dict(self) -> dict:
+        """Plain builtins only — files never contain these classes."""
+        return {
+            "iteration": int(self.iteration),
+            "amplitude": float(self.amplitude),
+            "bifurcated_at": _or_none(self.bifurcated_at),
+            "checks": _checks_to_dict(self.checks),
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> "AmplitudeChoice":
+        return cls(
+            iteration=int(d["iteration"]),
+            amplitude=float(d["amplitude"]),
+            bifurcated_at=_or_none(d.get("bifurcated_at")),
+            checks=_checks_from_dict(d["checks"]),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +262,63 @@ class BiasFinding:
         """Nothing about this bias point needs a second look."""
         return self.flagged_because is None
 
+    def to_dict(self) -> dict:
+        """Plain builtins only — files never contain these classes.
+
+        No version of its own: a finding is only ever written as part of a
+        :class:`BiasReport`, and one stamp on the thing that becomes a file is
+        the version that matters.
+        """
+        return {
+            "name": self.name,
+            "iteration": int(self.iteration),
+            "amplitude": float(self.amplitude),
+            "frequency_hz": float(self.frequency_hz),
+            "dI_df": float(self.dI_df),
+            "dQ_df": float(self.dQ_df),
+            "bifurcated_at": _or_none(self.bifurcated_at),
+            "checks": _checks_to_dict(self.checks),
+            "flagged_because": self.flagged_because,
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> "BiasFinding":
+        return cls(
+            name=d["name"],
+            iteration=int(d["iteration"]),
+            amplitude=float(d["amplitude"]),
+            frequency_hz=float(d["frequency_hz"]),
+            dI_df=float(d["dI_df"]),
+            dQ_df=float(d["dQ_df"]),
+            bifurcated_at=_or_none(d.get("bifurcated_at")),
+            checks=_checks_from_dict(d["checks"]),
+            flagged_because=d.get("flagged_because"),
+        )
+
+
+def _or_none(value):
+    """``float(value)``, but ``None`` survives as ``None``.
+
+    ``bifurcated_at`` is an amplitude or the statement that no amplitude step
+    bifurcated, and those are different answers — coercing the second to 0.0
+    would say the detector bifurcates at zero drive.
+    """
+    return None if value is None else float(value)
+
+
+def _checks_to_dict(checks: Mapping) -> dict:
+    """A ``{iteration: BifurcationCheck}`` map, as builtins.
+
+    The keys stay integers. They are amplitude-step numbers and get compared
+    and sorted as such; JSON would force them to strings, but this goes into a
+    pickle, which has no such quarrel with an int.
+    """
+    return {int(k): v.to_dict() for k, v in checks.items()}
+
+
+def _checks_from_dict(d: Mapping) -> dict:
+    return {int(k): BifurcationCheck.from_dict(v) for k, v in d.items()}
+
 
 @dataclass(slots=True)
 class BiasReport:
@@ -235,6 +330,12 @@ class BiasReport:
     :class:`~rfmux.tuning.fits.FitReport` — recording them alongside the data
     is the output folder's job.
     """
+
+    # Stamped into to_dict output and required exactly by from_dict, so a file
+    # from another version of this module fails loudly rather than being half
+    # understood. Bump whenever the dict shape changes in a way from_dict
+    # cannot absorb.
+    SCHEMA_VERSION = 1
 
     catalog: ResonatorCatalog
     findings: list[BiasFinding]
@@ -261,6 +362,37 @@ class BiasReport:
 
     def __len__(self) -> int:
         return len(self.findings)
+
+    # -- persistence ----------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """Plain builtins only — files never contain these classes.
+
+        The catalog goes in through its own ``to_dict``, keeping its version
+        stamp beside this one: the answer and the working behind it can be read
+        back independently, and a catalog that outgrows this file's shape says
+        so on its own terms.
+        """
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "catalog": self.catalog.to_dict(),
+            "findings": [f.to_dict() for f in self.findings],
+            "settings": plain(self.settings),
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> "BiasReport":
+        version = d.get("schema_version")
+        if version != cls.SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version={version!r}, expected {cls.SCHEMA_VERSION}: "
+                f"this dict was written by a different version of BiasReport."
+            )
+        return cls(
+            catalog=ResonatorCatalog.from_dict(d["catalog"]),
+            findings=[BiasFinding.from_dict(f) for f in d["findings"]],
+            settings=d.get("settings", {}),
+        )
 
     def __repr__(self) -> str:
         flagged = self.flagged
@@ -289,6 +421,8 @@ def find_bias_points(
     spike_height_factor: float = 3.0,
     max_discrepancy: float = 0.25,
     max_distance_hz: float | None = None,
+    save=None,
+    label=None,
 ) -> BiasReport:
     """Find an operating point for every resonator in a catalog.
 
@@ -327,6 +461,11 @@ def find_bias_points(
             is everything the trace could offer: the answer is a point of the
             trace, so it is inside the span whatever happens, and this only
             means something when it is tighter than the span.
+        save: write the report to the output folder. Unlike fitting, this
+            produces something new — a catalog the sweeps did not have — so it
+            gets its own ``bias_report_*.pkl`` rather than updating the sweep
+            file. Defaults to ``rfmux.tuning.store.autosave_enabled()``.
+        label: your name for the file, appended after the timestamp.
 
     Returns:
         BiasReport: a new catalog carrying the bias points, and one
@@ -390,7 +529,7 @@ def find_bias_points(
         for resonator in biased
     ]
 
-    return BiasReport(
+    report = BiasReport(
         catalog=biased,
         findings=findings,
         settings={
@@ -404,6 +543,17 @@ def find_bias_points(
             "max_distance_hz": max_distance_hz,
         },
     )
+    # to_dict, not the report: a pickled class records its import path and
+    # skips its constructor coming back, so the file would outlive a rename
+    # only by restoring into a state BiasReport would have refused to build.
+    store.maybe_save(
+        report.to_dict(),
+        "bias_report",
+        save=save,
+        label=label,
+        module=sweeps.get("module"),
+    )
+    return report
 
 
 def _bias_one(
@@ -711,7 +861,10 @@ def bifurcated_by_derivative(
         up, _ = find_peaks(jumps, prominence=prominence, height=height)
         down, _ = find_peaks(-jumps, prominence=prominence, height=height)
 
-        # Adjacent, and up before down: onto the jump and off it again.
+        # look for adjacent spikes, with one up before one down:
+        # TODO we are assuming there will only be one spike here - is that okay?
+        # maybe filtering for multiple spikes could cut down on getting tripped up
+        ## by noisy data
         if len(up) and len(down) and down[0] == up[0] + 1:
             verdict = True
 

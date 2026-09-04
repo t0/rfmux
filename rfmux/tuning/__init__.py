@@ -82,6 +82,7 @@ from .multisweep_amplitudes import (
     AmplitudeSchedule,
     AmplitudeStep,
 )
+from . import store
 from .sweep_results import (
     RESULTS_SCHEMA_VERSION,
     collect_amplitude_iterations_for,
@@ -125,6 +126,10 @@ __all__ = [
     "skewed_model_magnitude",
     "AmplitudeSchedule",
     "AmplitudeStep",
+    # The module, not its functions: `store.save(...)` and `store.load(...)`
+    # say which save and which load, where a bare `load` in a namespace of
+    # fit_sweeps and find_bias_points would not.
+    "store",
     "RESULTS_SCHEMA_VERSION",
     "collect_amplitude_iterations_for",
     "find_iteration_matching_amplitude",

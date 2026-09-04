@@ -537,3 +537,56 @@ def test_progress_is_reported_per_sweep_and_not_per_fit():
     )
 
     assert ticks == [(i, 6) for i in range(1, 7)]
+
+
+# ─── Persistence ──────────────────────────────────────────────────────────────
+
+
+def test_a_report_survives_a_round_trip_through_builtins():
+    report = fit_sweeps(a_multisweep(), models=("circle",), save=False)
+    restored = FitReport.from_dict(report.to_dict())
+
+    assert restored.fits == report.fits
+    # settings is provenance, and comes back in its plain form: the tuple of
+    # model names is a list on the way out, because that is what a file holds.
+    assert restored.settings["models"] == list(report.settings["models"])
+    assert {k: v for k, v in restored.settings.items() if k != "models"} == {
+        k: v for k, v in report.settings.items() if k != "models"
+    }
+
+
+def test_a_reports_dict_holds_no_rfmux_classes():
+    """Files have to open on a machine that has never heard of rfmux."""
+    d = fit_sweeps(a_multisweep(), models=("circle", "skewed"), save=False).to_dict()
+
+    assert d["schema_version"] == FitReport.SCHEMA_VERSION
+    assert all(type(f).__name__ == "dict" for f in d["fits"])
+    assert all(
+        type(v).__module__ in ("builtins", "numpy") for v in d["settings"].values()
+    )
+
+
+def test_a_report_from_another_version_is_refused():
+    d = fit_sweeps(a_multisweep(), models=("circle",), save=False).to_dict()
+    d["schema_version"] = FitReport.SCHEMA_VERSION + 1
+
+    with pytest.raises(ValueError, match="schema_version"):
+        FitReport.from_dict(d)
+
+
+def test_fitting_saves_the_sweeps_over_the_file_they_came_from(tmp_path):
+    """The fits went into the entries, so the sweep is what changed on disk."""
+    from rfmux.tuning import store
+
+    store.set_output_directory(tmp_path)
+    try:
+        sweeps = a_multisweep()
+        first = store.save(sweeps, "multisweep", label="cooldown3")
+
+        fit_sweeps(sweeps, models=("circle",), save=True)
+
+        assert list(first.parent.glob("*.pkl")) == [first]
+        entry = store.load(first)["results"][0]["upward"]["R0001"]
+        assert "circle" in entry["fits"]
+    finally:
+        store.set_output_directory(None)

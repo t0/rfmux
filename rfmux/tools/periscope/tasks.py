@@ -431,7 +431,12 @@ class NetworkAnalysisTask(QtCore.QThread):
                     'max_span': task_params['max_span'],
                     'module': self.module,
                     'progress_callback': progress_cb,
-                    'data_callback': data_cb
+                    'data_callback': data_cb,
+                    # Periscope writes its own session export through
+                    # SessionManager. Leaving the driver's autosave on would
+                    # put a second copy of every measurement in a second
+                    # folder, in a second layout.
+                    'save': False,
                 }
                 
                 # Process the network analysis asynchronously without blocking
@@ -668,7 +673,9 @@ class MultisweepTask(QtCore.QThread):
                         'progress_callback': self._progress_callback_wrapper,
                         'bias_frequency_method': self.params.get('bias_frequency_method', 'max-diq'),
                         'rotate_saved_data': self.params.get('rotate_saved_data', False),
-                        'sweep_direction': direction_val
+                        'sweep_direction': direction_val,
+                        # As above: SessionManager owns Periscope's files.
+                        'save': False,
                     }
                     
                     raw_results_from_crs = loop.run_until_complete(self._process_multisweep(loop, multisweep_params))

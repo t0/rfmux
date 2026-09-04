@@ -766,3 +766,66 @@ def test_the_report_reads_like_what_happened():
     assert "loudest amplitude measured" in repr(report)
     with pytest.raises(KeyError):
         report["R9999"]
+
+
+# ─── Persistence ──────────────────────────────────────────────────────────────
+
+
+def test_a_report_survives_a_round_trip_through_builtins():
+    report = find_bias_points(a_multiamp_multisweep(), save=False)
+    restored = BiasReport.from_dict(report.to_dict())
+
+    assert restored.findings == report.findings
+    assert restored.settings == report.settings
+    assert [r.name for r in restored.catalog] == [r.name for r in report.catalog]
+    assert [r.bias for r in restored.catalog] == [r.bias for r in report.catalog]
+
+
+def test_a_reports_dict_holds_no_rfmux_classes():
+    """Files have to open on a machine that has never heard of rfmux."""
+    d = find_bias_points(a_multiamp_multisweep(), save=False).to_dict()
+
+    assert d["schema_version"] == BiasReport.SCHEMA_VERSION
+    assert type(d["catalog"]).__name__ == "dict"
+    assert all(type(f).__name__ == "dict" for f in d["findings"])
+    # The per-step verdicts nest two deep and are the easiest thing to leave
+    # as NamedTuples by accident.
+    assert all(
+        type(c).__name__ == "dict"
+        for f in d["findings"]
+        for c in f["checks"].values()
+    )
+
+
+def test_check_keys_stay_the_amplitude_steps_they_name():
+    d = find_bias_points(a_multiamp_multisweep(), save=False).to_dict()
+    assert all(
+        isinstance(k, int) for f in d["findings"] for k in f["checks"]
+    )
+
+
+def test_a_report_from_another_version_is_refused():
+    d = find_bias_points(a_multiamp_multisweep(), save=False).to_dict()
+    d["schema_version"] = BiasReport.SCHEMA_VERSION + 1
+
+    with pytest.raises(ValueError, match="schema_version"):
+        BiasReport.from_dict(d)
+
+
+def test_bias_finding_writes_its_own_file(tmp_path):
+    """A new catalog is not an annotation on the sweep, so it gets a new file."""
+    from rfmux.tuning import store
+
+    store.set_output_directory(tmp_path)
+    try:
+        sweeps = a_multiamp_multisweep()
+        report = find_bias_points(sweeps, save=True, label="cooldown3")
+
+        path = next(store.session_directory().glob("bias_report_*.pkl"))
+        assert path.stem.endswith("_cooldown3")
+
+        restored = BiasReport.from_dict(store.load(path))
+        assert len(restored) == len(report)
+        assert restored.catalog.module == report.catalog.module
+    finally:
+        store.set_output_directory(None)

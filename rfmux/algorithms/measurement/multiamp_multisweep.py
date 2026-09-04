@@ -24,6 +24,7 @@ from collections.abc import Sequence
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.resonators import ResonatorCatalog
+from ...tuning import store
 from ...tuning.multisweep_amplitudes import AmplitudeSchedule
 from ...tuning.sweep_results import pack_results
 from .multisweep import _resolve_section_names
@@ -120,6 +121,8 @@ async def multiamp_multisweep(
     progress_callback=None,
     data_callback=None,
     sweep_callback=None,
+    save=None,
+    label=None,
 ):
     """Sweep one array at a ladder of probe amplitudes.
 
@@ -226,6 +229,13 @@ async def multiamp_multisweep(
             are the same for every sweep in the ladder, and a hand-over is not
             a result. The coordinates that *do* vary are the record's own
             ``step`` and ``direction``.
+        save (bool, optional): Write the result to the output folder when the
+            whole ladder finishes. Defaults to whatever
+            ``rfmux.tuning.store.autosave_enabled()`` says, which is on unless
+            your config file or ``$RFMUX_AUTOSAVE`` turns it off. One file for
+            the ladder, not one per step — the steps are one measurement.
+        label (str, optional): Your name for this ladder, appended to the
+            filename. Ignored when nothing is being saved.
 
     Returns:
         dict: the same shape ``multisweep`` returns, keyed by module identifier
@@ -337,6 +347,10 @@ async def multiamp_multisweep(
                 module=resolved_module,
                 progress_callback=progress_callback,
                 data_callback=inner_data_callback,
+                # The ladder is one measurement and gets one file, written
+                # below. A step that saved itself would leave a folder full of
+                # partial sweeps beside the whole one.
+                save=False,
             )
             if catalog is not None:
                 swept = await crs.multisweep(catalog, **sweep_kwargs)
@@ -370,7 +384,7 @@ async def multiamp_multisweep(
 
         results[step.step] = per_direction
 
-    return pack_results(
+    packed = pack_results(
         results,
         module_id=module_id,
         module=resolved_module,
@@ -384,3 +398,5 @@ async def multiamp_multisweep(
         names=names,
         requested_module=module,
     )
+    store.maybe_save(packed, "multiamp_multisweep", save=save, label=label)
+    return packed

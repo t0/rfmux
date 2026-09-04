@@ -8,6 +8,7 @@ import asyncio
 import numpy as np
 from ...core.hardware_map import macro
 from ...core.schema import CRS
+from ...tuning import store
 
 
 @macro(CRS, register=True)
@@ -25,6 +26,8 @@ async def take_netanal(
     module,
     progress_callback=None,
     data_callback=None,
+    save=None,
+    label=None,
 ):
     """
     Perform a network analysis over the frequency range [fmin, fmax].
@@ -68,6 +71,14 @@ async def take_netanal(
         Callback function that receives (module, progress_percentage) updates.
     data_callback : callable, optional
         Callback function that receives (module, freqs, amps, phases) updates.
+    save : bool, optional
+        Write the result to the output folder when the measurement finishes.
+        Defaults to whatever ``rfmux.tuning.store.autosave_enabled()`` says,
+        which is on unless your config file or ``$RFMUX_AUTOSAVE`` turns it off.
+        A list of modules produces one file covering all of them.
+    label : str, optional
+        Your name for this measurement, appended to the filename. Ignored when
+        nothing is being saved.
 
     Returns
     -------
@@ -109,8 +120,14 @@ async def take_netanal(
                 module=m,
                 progress_callback=progress_callback,
                 data_callback=data_callback,
+                # The per-module calls do not save. One call is one file, so
+                # the fan-out saves once, below, over everything it gathered.
+                save=False,
             ))
         results = await asyncio.gather(*tasks)
+        store.maybe_save(
+            results, "netanal", save=save, label=label, module=list(module)
+        )
         return results
 
     # Generate a global array of frequencies across [fmin, fmax].
@@ -304,11 +321,13 @@ async def take_netanal(
 
     if len(fs_all_np) == 0: # Handle empty data
         # Return arrays in the expected dictionary structure
-        return {
+        empty = {
             'frequencies': np.array([]),
             'iq_complex': np.array([]),
             'phase_degrees': np.array([])
         }
+        store.maybe_save(empty, "netanal", save=save, label=label, module=module)
+        return empty
 
     sort_indices = np.argsort(fs_all_np)
     fs_sorted = fs_all_np[sort_indices]
@@ -320,7 +339,8 @@ async def take_netanal(
         'iq_complex': iq_sorted,
         'phase_degrees': phase_sorted
     }
-            
+
+    store.maybe_save(result_dict, "netanal", save=save, label=label, module=module)
     return result_dict
 
 def _safe_concatenate_frequencies(comb, nco_freq):

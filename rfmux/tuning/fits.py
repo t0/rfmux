@@ -92,6 +92,8 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import OptimizeWarning, curve_fit
 
+from . import store
+from .store import plain
 from .sweep_results import _refuse_container, find_iteration_matching_amplitude
 
 __all__ = [
@@ -190,6 +192,31 @@ class SweepFit:
         """
         return f"{self.name}@{self.iteration} {self.direction}"
 
+    def to_dict(self) -> dict:
+        """Plain builtins only — files never contain these classes.
+
+        No version of its own: a fit is only ever written as part of a
+        :class:`FitReport`, and one stamp on the thing that becomes a file is
+        the version that matters.
+        """
+        return {
+            "name": self.name,
+            "model": self.model,
+            "iteration": int(self.iteration),
+            "direction": self.direction,
+            "failed_because": self.failed_because,
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> "SweepFit":
+        return cls(
+            name=d["name"],
+            model=d["model"],
+            iteration=int(d["iteration"]),
+            direction=d["direction"],
+            failed_because=d.get("failed_because"),
+        )
+
 
 @dataclass(slots=True)
 class FitReport:
@@ -200,6 +227,12 @@ class FitReport:
     notebook can print how a set of fits was produced without the settings
     being copied onto a thousand entries.
     """
+
+    # Stamped into to_dict output and required exactly by from_dict, so a file
+    # from another version of this module fails loudly rather than being half
+    # understood. Bump whenever the dict shape changes in a way from_dict
+    # cannot absorb.
+    SCHEMA_VERSION = 1
 
     fits: list[SweepFit]
     settings: dict = field(default_factory=dict)
@@ -218,6 +251,34 @@ class FitReport:
 
     def __len__(self) -> int:
         return len(self.fits)
+
+    # -- persistence ----------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """Plain builtins only — files never contain these classes.
+
+        What the fits *found* is not in here, and deliberately: the parameters
+        live in the sweep entries, which are saved as the sweep. This is the
+        record of which fits were run and which of them worked.
+        """
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "fits": [f.to_dict() for f in self.fits],
+            "settings": plain(self.settings),
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> "FitReport":
+        version = d.get("schema_version")
+        if version != cls.SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version={version!r}, expected {cls.SCHEMA_VERSION}: "
+                f"this dict was written by a different version of FitReport."
+            )
+        return cls(
+            fits=[SweepFit.from_dict(f) for f in d["fits"]],
+            settings=d.get("settings", {}),
+        )
 
     def __repr__(self) -> str:
         head = f"FitReport: {len(self.fitted)}/{len(self.fits)} fitted"
@@ -255,6 +316,8 @@ def fit_sweeps(
     max_residual: float = 0.1,
     max_workers: int | None = None,
     progress_callback=None,
+    save=None,
+    label=None,
 ) -> FitReport:
     """Fit resonator models to sweeps that have already been measured.
 
@@ -307,6 +370,15 @@ def fit_sweeps(
         progress_callback: called ``(completed, total)`` after each sweep, where
             *total* counts sweeps and not fits. For a notebook or a GUI that
             wants a bar; a script can ignore it.
+        save: save the fitted *sweeps* — not the report. The fits went into the
+            sweep entries, so what changed on disk is the sweep, and re-saving
+            it updates the file it was read from rather than leaving a
+            near-identical copy beside it. Sweeps that were never saved get a
+            new file. Defaults to
+            ``rfmux.tuning.store.autosave_enabled()``.
+        label: your name for the file, used only when these sweeps are being
+            written for the first time — a re-save keeps the name the file
+            already has.
 
     Returns:
         FitReport: which fits ran, which worked, and what was asked for.
@@ -320,7 +392,7 @@ def fit_sweeps(
     sections = _select(
         sweeps, names=names, iterations=iterations, directions=directions
     )
-    return _fit(
+    report = _fit(
         sections,
         module=sweeps.get("module"),
         models=models,
@@ -333,6 +405,8 @@ def fit_sweeps(
         max_workers=max_workers,
         progress_callback=progress_callback,
     )
+    store.maybe_save(sweeps, "multisweep", save=save, label=label)
+    return report
 
 
 def fit_sweeps_at_bias_amplitude(
@@ -341,6 +415,8 @@ def fit_sweeps_at_bias_amplitude(
     amplitude: float | None = None,
     names=None,
     directions=None,
+    save=None,
+    label=None,
     **settings,
 ) -> FitReport:
     """Fit each resonator only at the amplitude it is biased at.
@@ -363,6 +439,8 @@ def fit_sweeps_at_bias_amplitude(
             ``call_params``.
         names: which resonators to fit, or None for all of them.
         directions: which sweep directions, or None for all of them.
+        save: save the fitted *sweeps*, as :func:`fit_sweeps`.
+        label: your name for the file, as :func:`fit_sweeps`.
         **settings: passed to :func:`fit_sweeps` — *models*, *approx_Qr* and
             the rest.
 
@@ -394,7 +472,9 @@ def fit_sweeps_at_bias_amplitude(
             f"Nothing to fit: no sweep of {sorted(wanted)[:4]} at its bias "
             f"amplitude survived directions={directions!r}."
         )
-    return _fit(sections, module=sweeps.get("module"), **settings)
+    report = _fit(sections, module=sweeps.get("module"), **settings)
+    store.maybe_save(sweeps, "multiamp_multisweep", save=save, label=label)
+    return report
 
 
 def fit_section(

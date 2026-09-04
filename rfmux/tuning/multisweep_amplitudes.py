@@ -104,6 +104,16 @@ class AmplitudeStep:
             "factor": self.factor,
         }
 
+    @classmethod
+    def from_dict(cls, d: Mapping) -> AmplitudeStep:
+        # Unversioned, like the to_dict above it: a step is a rung's worth of
+        # provenance inside a schedule's output, not a file of its own.
+        return cls(
+            step=int(d["step"]),
+            amplitudes={str(k): float(v) for k, v in d["amplitudes"].items()},
+            factor=None if d.get("factor") is None else float(d["factor"]),
+        )
+
     def __repr__(self) -> str:
         values = list(self.amplitudes.values())
         span = (

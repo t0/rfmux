@@ -12,10 +12,45 @@ import pytest_asyncio
 # live one, so even its crs_mock fixture needs a board behind it.
 HARDWARE_FIXTURES = frozenset({"live_session", "crs", "serial"})
 
+# What _isolate_store redirects, and puts back afterwards.
+_STORE_VARS = ("RFMUX_AUTOSAVE", "RFMUX_DATA_DIR", "RFMUX_CONFIG")
+
 # --serial and --tier are declared in the ROOT conftest.py, not here.
 # pytest only honours pytest_addoption from an initial conftest, so options
 # declared in this file are invisible whenever the arguments do not point into
 # test/ — e.g. running pytest from a subdirectory.
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_store(tmp_path_factory):
+    """Keep the suite out of the developer's real measurement output folder.
+
+    The measurement drivers save by default — that is the whole point of
+    rfmux.tuning.store — so an un-isolated suite would drop a .pkl into
+    ~/rfmux_data every time a test called crs.multisweep(), which
+    test_multisweep_channels.py does for real. Same hazard as
+    _isolate_qsettings below, and the same answer: redirect, do not disable, so
+    tests that genuinely exercise saving still have somewhere to write.
+
+    Autosave is off on top of that, so a test only writes when it says it
+    wants to. Both are read fresh on every call rather than cached, so a test
+    is free to monkeypatch either back for its own purposes.
+    """
+    empty = tmp_path_factory.mktemp("rfmux_config") / "empty.yaml"
+    empty.write_text("{}\n")
+
+    original = {k: os.environ.get(k) for k in _STORE_VARS}
+    os.environ["RFMUX_AUTOSAVE"] = "0"
+    os.environ["RFMUX_DATA_DIR"] = str(tmp_path_factory.mktemp("rfmux_data"))
+    # No config file, whatever the developer has in their checkout: resolution
+    # would otherwise depend on whether rfmux/config.yaml happens to exist.
+    os.environ["RFMUX_CONFIG"] = str(empty)
+    yield
+    for key, was in original.items():
+        if was is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = was
 
 
 @pytest.fixture(scope="session", autouse=True)

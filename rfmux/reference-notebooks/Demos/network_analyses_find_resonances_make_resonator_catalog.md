@@ -625,18 +625,33 @@ file could restore into a state the class would have refused to build. Going
 through `to_dict` / `from_dict` avoids both: the file holds only builtins, and
 loading it is a normal construction with every check in place.
 
+`rfmux.tuning.store` does the file handling: it picks the folder, names the
+file, and stamps a `file_metadata` block into what it writes saying what the
+file is and where it lives.
+
 ```python
-import pickle
+from rfmux.tuning import store
 
-pkl_path = OUTPUT_DIR / "catalog.pkl"
-with pkl_path.open("wb") as f:
-    pickle.dump(by_hand.to_dict(), f)
-print(f"wrote {pkl_path} ({pkl_path.stat().st_size} bytes)")
+pkl_path = store.save(by_hand.to_dict(), "catalog", label="by_hand",
+                      directory=OUTPUT_DIR)
+print(f"wrote {pkl_path.name} ({pkl_path.stat().st_size} bytes)")
 
-with pkl_path.open("rb") as f:
-    from_disk = ResonatorCatalog.from_dict(pickle.load(f))
+from_disk = ResonatorCatalog.from_dict(store.load(pkl_path))
 print(from_disk)
 ```
+
+`directory=` is here only because this notebook keeps its files together in
+`OUTPUT_DIR`. Leave it off and the file goes where every measurement goes:
+`~/rfmux_data/ipy_session_<today>/`, the folder `take_netanal` and `multisweep`
+write into when they finish, since they call this same `store.save` for you.
+`store.output_directory()` says where that is, and `rfmux.tuning.store`'s
+docstring covers moving it — for one session, or for good.
+
+Two things came back that you did not put in. The filename gained a date and a
+time, so two catalogs saved an hour apart do not collide; and the dictionary
+gained a `file_metadata` key recording what the file is and where it lives.
+`ResonatorCatalog.from_dict` ignores the extra key, so a saved catalog and a
+hand-built one load exactly the same way.
 
 The usual caution applies: unpickling runs code from the file, so load `.pkl`
 files you produced or trust, not ones that arrived from somewhere unknown.
@@ -687,8 +702,7 @@ Finally, the catalog the sweep produced, saved both ways:
 
 ```python
 (OUTPUT_DIR / "found.csv").write_text(catalog.to_csv())
-with (OUTPUT_DIR / "found.pkl").open("wb") as f:
-    pickle.dump(catalog.to_dict(), f)
+store.save(catalog.to_dict(), "catalog", label="found", directory=OUTPUT_DIR)
 print(f"wrote {len(catalog)} resonators to {OUTPUT_DIR}")
 for p in sorted(OUTPUT_DIR.iterdir()):
     print(f"  {p.name:<16} {p.stat().st_size:>7} bytes")

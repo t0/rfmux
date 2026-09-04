@@ -1132,7 +1132,10 @@ they are a fallback.
   from the GUI and `max_discrepancy` was picked to be roughly right; neither has
   been calibrated against hardware that is known to bifurcate. Read `metric` and
   `threshold` across your own amplitude steps before trusting the defaults.
-- **Saving the result.** `bias_report.catalog.to_dict()` pickles as plain builtins
-  today, as `network_analyses_find_resonances_make_resonator_catalog.md` shows.
-  A `store.py` with a defined layout for a whole tuning run — catalog, sweeps and
-  the settings that produced them — is still to come.
+- **Saving the result.** Not missing any more: `find_bias_points` writes the
+  whole report — the biased catalog and the working behind it — to
+  `~/rfmux_data/ipy_session_<today>/bias_report_*.pkl`, and
+  `BiasReport.from_dict(rfmux.tuning.store.load(path))` reads it back. Pass
+  `save=False` to skip it. What is still to come is one *folder* per tuning run
+  that ties a catalog to the sweeps and settings that produced it; today each
+  measurement is its own file, found by its name and its `file_metadata`.

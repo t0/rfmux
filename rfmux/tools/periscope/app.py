@@ -2227,7 +2227,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             cfg = mc.defaults()
         extra = ""
         if self.qp_pulse_mode == 'periodic':
-            extra = f"\nPeriod={cfg.get('pulse_period', 10.0)} s, tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, tau_decay={cfg.get('pulse_tau_decay', 1e-1)} s, amp={cfg.get('pulse_amplitude', 2.0)}, res={cfg.get('pulse_resonators', 'all')}"
+            extra = f"\nPeriod={cfg.get('pulse_period', 10.0)} s, tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, tau_decay={cfg.get('pulse_tau_decay', 5e-3)} s, amp={cfg.get('pulse_amplitude', 2.0)}, res={cfg.get('pulse_resonators', 'all')}"
         elif self.qp_pulse_mode == 'random':
             ram = cfg.get('pulse_random_amp_mode', 'fixed')
             if ram == 'uniform':
@@ -2236,7 +2236,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 extra = (
                     f"\nProb={cfg.get('pulse_probability', 0.001)}/s, "
                     f"tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, "
-                    f"tau_decay={cfg.get('pulse_tau_decay', 1e-1)} s, "
+                    f"tau_decay={cfg.get('pulse_tau_decay', 5e-3)} s, "
                     f"ampMode=uniform[{amin},{amax}], "
                     f"res={cfg.get('pulse_resonators', 'all')}"
                 )
@@ -2246,7 +2246,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 extra = (
                     f"\nProb={cfg.get('pulse_probability', 0.001)}/s, "
                     f"tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, "
-                    f"tau_decay={cfg.get('pulse_tau_decay', 1e-1)} s, "
+                    f"tau_decay={cfg.get('pulse_tau_decay', 5e-3)} s, "
                     f"ampMode=lognormal[μ={mu},σ={sigma}], "
                     f"res={cfg.get('pulse_resonators', 'all')}"
                 )
@@ -2254,7 +2254,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 extra = (
                     f"\nProb={cfg.get('pulse_probability', 0.001)}/s, "
                     f"tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, "
-                    f"tau_decay={cfg.get('pulse_tau_decay', 1e-1)} s, "
+                    f"tau_decay={cfg.get('pulse_tau_decay', 5e-3)} s, "
                     f"amp=fixed({cfg.get('pulse_amplitude', 2.0)}), "
                     f"res={cfg.get('pulse_resonators', 'all')}"
                 )

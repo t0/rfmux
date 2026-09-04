@@ -347,7 +347,7 @@ class MockResonatorModel:
             'period': config.get('pulse_period', 10.0),
             'probability': config.get('pulse_probability', 0.001),
             'tau_rise': config.get('pulse_tau_rise', 1e-6),
-            'tau_decay': config.get('pulse_tau_decay', 1e-1),
+            'tau_decay': config.get('pulse_tau_decay', 5e-3),
             'amplitude': config.get('pulse_amplitude', 2.0),
             'resonators': config.get('pulse_resonators', 'all'),
             'random_amp_mode': config.get('pulse_random_amp_mode', 'fixed'),
@@ -1307,9 +1307,10 @@ class MockResonatorModel:
 
         This is the first pulse's whole cost, paid here instead: one
         convergence of the array per tone per distinct quasiparticle
-        key along the decay, 36,500 of them (28 s) at 100 tones with
-        the default 0.1 s decay.  *progress* is called per block as
-        ``progress(done, total)``.
+        key along the decay, so it scales with tones times decay
+        length: 2,700 of them (2 s) at 100 tones with the default 5 ms
+        decay, 36,500 (28 s) at 0.1 s.  *progress* is called per block
+        as ``progress(done, total)``.
         """
         if not self.mr_lekids:
             return
@@ -1381,7 +1382,7 @@ class MockResonatorModel:
             sigma = float(self.pulse_config.get('random_tau_logsigma', 0.5))
             tau = np.random.lognormal(mean=mu, sigma=sigma)
         else:
-            tau = float(self.pulse_config.get('tau_decay', 0.1))
+            tau = float(self.pulse_config.get('tau_decay', 5e-3))
         # tau_decay must be strictly positive
         return max(1e-9, tau)
 

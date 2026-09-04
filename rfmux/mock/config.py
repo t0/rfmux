@@ -146,7 +146,7 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "pulse_period": 2.0,          # seconds (periodic mode)
     "pulse_probability": 0.1,     # per-timestep probability (random mode)
     "pulse_tau_rise": 1e-6,       # seconds
-    "pulse_tau_decay": 0.1,       # seconds
+    "pulse_tau_decay": 5e-3,      # seconds
     "pulse_amplitude": 2.0,       # multiplicative factor relative to base nqp
     "pulse_resonators": "all",    # 'all' or list of resonator indices
 

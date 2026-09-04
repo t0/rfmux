@@ -185,6 +185,10 @@ topics covered in these notebooks.
 
 ```python
 
+```
+
+```python
+
 from rfmux.tuning import (
     collect_amplitude_iterations_for,
     get_amplitudes_at_iteration,
@@ -276,14 +280,13 @@ resonator at a time. Its arguments:
 |---|---|---|
 | `iterations` | required | multiamplitude multisweep measurements of a resonator in the usual form: `{iteration: {direction: entry}}`. This can be extracted using the convenience wrapper `rfmux.tuning.collect_amplitude_iterations_for` |
 | `method` | `"derivative"` | which bifurcation detection method to apply. Options are: `"derivative"` (reads the shape of a single trace and looks for jumps) and `"hysteresis"` (compares the two sweep directions against each other to see when they diverge) |
-| `spike_prominence_factor` | `2.0` | `"derivative"` method only: how far a spike has to stand out from its surroundings to count as a jump. Larger is less sensitive |
-| `spike_height_factor` | `3.0` | `"derivative"` method only: how tall a spike has to be to count as a jump. Larger is less sensitive |
+| `spike_prominence_factor` | `0.5` | `"derivative"` method only: how far a spike has to stand out from its surroundings to count as a jump, as a multiple of the arc speed's range. Larger is less sensitive |
 | `max_discrepancy` | `0.25` | `"hysteresis"` method only: how far the upward and downward traces may part company, in units of the IQ loop's radius, before the step is called bifurcated |
 
-`iterations` is positional; everything after it is keyword-only. The two spike
-factors and `max_discrepancy` are handed straight down to whichever detector
-`method` selected, so passing all of them is harmless — the test that has no use
-for a knob never sees it.
+`iterations` is positional; everything after it is keyword-only.
+`spike_prominence_factor` and `max_discrepancy` are handed straight down to
+whichever detector `method` selected, so passing both is harmless — the test
+that has no use for a knob never sees it.
 
 Called with nothing but the sweeps, on the first resonator:
 
@@ -400,18 +403,24 @@ after it: the trace jumping onto the other state and dropping back off it again.
 `find_bias_amplitude` calls `bifurcated_by_derivative` on each amplitude step, 
 in both directions (if present). The amplitude step is counted as bifurcated if either
 direction triggers the threshold. You can also call it yourself, on one step at
-a time, which is how you work out what the two factors should be. Its whole
+a time, which is how you work out what the factor should be. Its whole
 argument list:
 
 | Argument | Default | Does |
 |---|---|---|
 | `entries` | required | one amplitude step, `{direction: entry}` — one value out of what `collect_amplitude_iterations_for` returns. Every direction present is tested, and the step counts as bifurcated if any of them says so: a bifurcated resonator jumps whichever way the sweep runs, so needing both to agree would only lose the one that happened to catch it |
-| `spike_prominence_factor` | `2.0` | a spike must stand out from its surroundings by more than the full range of the arc speed divided by this. Larger is less sensitive |
-| `spike_height_factor` | `3.0` | a spike must be taller than this many standard deviations of the point-to-point change. Larger is less sensitive |
+| `spike_prominence_factor` | `0.5` | a spike must stand out from its surroundings by more than this factor times the full range of the arc speed. It multiplies, so larger asks for a bigger spike: larger is less sensitive |
 
-A spike has to clear **both** bars, and both are set relative to the sweep
-itself, which is what makes them portable from one resonator to another. On the
-last clean step and the first bifurcated one, at those defaults:
+So the default of `0.5` asks a spike to stand a full half of the arc speed's
+range out of its own neighbourhood. The bar is set relative to the sweep
+itself, which is what makes one number portable from one resonator to another.
+
+If you are coming from the Periscope GUI, note that this is the same bar under
+the same argument name but **not the same number**: the GUI *divided* the range
+by a `spike_prominence_factor` of `2.0`, so turning its knob up made the test
+more sensitive. Here the factor multiplies, which is what a factor does, and
+`0.5` is the reciprocal that lands on the identical threshold. On the last
+clean step and the first bifurcated one, at that default:
 
 ```python
 from rfmux.tuning import bifurcated_by_derivative
@@ -421,12 +430,11 @@ for iteration in (1, 2):
     print(f"step {iteration}: {check}")
 ```
 
-Here are both bars drawn on the data, computed the way the detector computes
-them, for the same two steps:
+Here is that bar drawn on the data, computed the way the detector computes it,
+for the same two steps:
 
 ```python
-SPIKE_PROMINENCE_FACTOR = 2.0
-SPIKE_HEIGHT_FACTOR = 3.0
+SPIKE_PROMINENCE_FACTOR = 0.5
 
 fig, axes = plt.subplots(1, 2, figsize=(11, 3.4), constrained_layout=True)
 
@@ -438,15 +446,14 @@ for panel, iteration in zip(axes, (1, 2)):
     step_centre = entry["original_center_frequency"]
 
     # Exactly what bifurcated_by_derivative computes before calling find_peaks.
-    prominence = (speed.max() - speed.min()) / SPIKE_PROMINENCE_FACTOR
-    height = SPIKE_HEIGHT_FACTOR * np.std(jumps)
+    prominence_threshold = SPIKE_PROMINENCE_FACTOR * (speed.max() - speed.min())
 
     panel.plot((midpoints - step_centre) / 1e3, jumps, lw=1.0, color="0.2")
-    for bar, colour, label in ((height, "tab:orange", "height"),
-                               (prominence, "tab:red", "prominence")):
-        panel.axhline(bar, color=colour, ls="--", lw=1.0,
-                      label=f"{label} bar {bar:.2e}")
-        panel.axhline(-bar, color=colour, ls="--", lw=1.0)
+    for sign in (1, -1):
+        panel.axhline(sign * prominence_threshold, color="tab:red", ls="--",
+                      lw=1.0,
+                      label=f"prominence bar {prominence_threshold:.2e}"
+                      if sign > 0 else None)
 
     check = bifurcated_by_derivative({"upward": entry})
     panel.set_title(f"step {iteration}, amp {entry['sweep_amplitude']:.4f}"
@@ -460,27 +467,21 @@ axes[0].set_ylabel("point-to-point change in arc speed", fontsize=8)
 plt.show()
 ```
 
-That is the whole story of why step 1 is called clean. It plainly has a spike,
-and that spike is well clear of the height bar — but not of the prominence bar,
-because next to the broad hump the arc speed makes on the way up, it is not a
-big enough departure from its surroundings. By step 2 the spike is several times
-the prominence bar. On this array the prominence bar is the binding one at every
-amplitude, which is worth knowing before you reach for `spike_height_factor`.
-
-Every `rfmux.tuning.BifurcationCheck` reports the numbers it compared, not just its verdict,
-because these factors are knobs you have to set against your own array:
+Step 1 clearly has a spike, but it's too small to meet the threshold we set with
+the `spike_prominence_factor`, so it does not flag as bifurcated.
+ On step 2 the spike is much larger, and exceeds the threshold set.
+ 
+`rfmux.tuning.BifurcationCheck` reports the numbers it compared as well
+as its verdict based on them, to facilitate troubleshooting
 
 | Field | Is |
 |---|---|
 | `method` | which test produced this, `"derivative"` or `"hysteresis"` |
 | `bifurcated` | the verdict |
 | `metric` | the largest positive jump seen, for `"derivative"` |
-| `threshold` | the bar it had to clear: the larger of the two above, since it has to clear both |
+| `threshold` | the bar a spike had to clear, for `"derivative"`: `spike_prominence_factor` times the arc speed's range |
 
-`metric` above `threshold` is necessary but not sufficient, because the up-spike
-still has to be followed by a down-spike. Watching the ratio across the
-amplitude steps is the practical way to choose the factors — filled markers
-below are the steps that were actually called bifurcated:
+
 
 ```python
 fig, panel = plt.subplots(figsize=(6.5, 3.4), constrained_layout=True)
@@ -505,41 +506,38 @@ for name in resonator_names:
 panel.axhline(1.0, color="0.6", ls="--", lw=1.0)
 panel.set_xscale("log")
 panel.set_xlabel("drive amplitude")
-panel.set_ylabel("metric / threshold")
-panel.set_title("How far over the bar each amplitude step is", fontsize=10)
+panel.set_ylabel("measured spike height / threshold spike height")
+panel.set_title("How far over the threshold each amplitude step is", fontsize=10)
 panel.legend(fontsize=8)
 plt.show()
 ```
 
+<!-- #region -->
 All four cross the line together between 0.002 and 0.004, which is the drive at
 which this simulated array starts jumping. Note the margin either side of the
 crossing: about 0.5 below and about 1.9 above, so a factor of two rather than
 the orders of magnitude you might hope for. And R0003 at the quietest amplitude
 sits just over the line without being called bifurcated, held back only by the
-adjacency rule. Neither of the two factors has been calibrated against real
-hardware, so read your own array before trusting the defaults on it.
+adjacency rule. The factor has not been calibrated against real hardware, so
+read your own array before trusting the default on it.
 
-### How bifurcation is decided: `"hysteresis"`
+### Bifurcation detection method #2 `"hysteresis"`
 
-The other test, `rfmux.tuning.bifurcated_by_hysteresis`, does not need to know
-what a jump looks like. A resonator below
-bifurcation does not care which direction it was swept in: the upward and
-downward traces lie on top of each other. Above it, the resonator jumps at a
-different frequency going up than it does coming down, so the two traces part
-company in between. The amplitude at which they *begin* to differ is the
-amplitude at which bifurcation set in.
+The other test, `rfmux.tuning.bifurcated_by_hysteresis`, looks for the amplitude at which 
+the upward and downward frequency sweeps *begin* to differ.
 
-Two arguments, and one of them is the data:
+
 
 | Argument | Default | Does |
 |---|---|---|
-| `entries` | required | one amplitude step, `{direction: entry}`, same as the derivative test takes. Both `"upward"` and `"downward"` are required here rather than optional — this test *is* the comparison, so a step missing one of them raises |
-| `max_discrepancy` | `0.25` | how far apart the two traces may be, in units of the IQ loop's radius, before the step is called bifurcated. This is the one number in the module with no history behind it — a starting point rather than a measured value |
+| `entries` | required | one amplitude step, `{direction: entry}`, where `"upward"` and `"downward"` are required |
+| `max_discrepancy` | `0.25` | how far apart the two traces may be, in units of the IQ loop's radius, before the step is called bifurcated |
 
-That needs a sweep taken in both directions — which this one is — and it needs
-the hardware to have some memory of where it was, which is where the simulator
-lets us down. It computes each sweep point independently, so its upward and
-downward traces are identical up to noise, at every drive:
+Unfortunately, mock mode computes each sweep point independently, so upward and
+downward traces are identical up to noise, at every drive. This test is therefore not so useful
+when using a simulated array, but we'll walk through it anyway to demonstrate the calls.
+
+<!-- #endregion -->
 
 ```python
 from rfmux.tuning import bifurcated_by_hysteresis
@@ -604,43 +602,30 @@ fig.suptitle("The hysteresis test compares these two", fontsize=11)
 plt.show()
 ```
 
-`max_discrepancy` is the threshold, in those loop radii, and it is the one
-number in this module with no history behind it — 0.25 is a starting point, not
-a measured value. The way to set it is to read `metric` across the amplitude
-steps of a resonator you know bifurcates, which is why every check reports it.
+<!-- #region -->
 
-Which test to use, then:
 
-| | `"derivative"` | `"hysteresis"` |
-|---|---|---|
-| Needs | one direction | both directions, so twice the measurement |
-| Looks for | the shape of a jump in one trace | disagreement between two traces |
-| Fooled by | a sweep too coarse to resolve the resonance, or one with no resonance in it — both look like a jump | its own noise floor, if `max_discrepancy` is set anywhere near it. And it sees nothing at all if the jump is not hysteretic |
-| Tuned with | `spike_prominence_factor`, `spike_height_factor` | `max_discrepancy` |
+## 3. Selecting a bias frequency
 
-## 3. Choosing the frequency
+Once the bias amplitude has been chosen, we can choose the bias frequency to use
+at that amplitude.
 
-With the amplitude settled, the tone still has to go somewhere inside that
-sweep. The sweep centre is where we *looked* — it came from the catalog, which
-was seeded from a network analysis at some other drive — and the resonance is
-wherever it turned out to be, which the plots in section 1 showed can be tens of
-kilohertz away.
-
-`rfmux.tuning.find_bias_frequency` is what answers that. Two arguments:
+`rfmux.tuning.find_bias_frequency` takes two arguments:
 
 | Argument | Default | Does |
 |---|---|---|
-| `entry` | required | **one** sweep, as `multisweep` returns it — a single direction of a single amplitude step, not the `{direction: entry}` mapping the bifurcation tests take. A frequency has to come off one trace |
-| `method` | `"iq_derivative"` | where in that trace to put the tone, from the two below |
+| `entry` | required | **one** sweep, as `multisweep` returns it — a single direction of a single amplitude step, not the `{direction: entry}` mapping the bifurcation tests take.  |
+| `method` | `"iq_derivative"` | how to decide where in that trace to put the tone |
+
+There are two methods available for deciding at what frequency to bias, within the given sweep trace:
 
 | `method` | Puts the tone at | Because |
 |---|---|---|
-| `"iq_derivative"` (the default) | maximum `\|dI/df + j·dQ/df\|` | that is where the IQ trace moves fastest per hertz, so a small shift in the resonance makes the largest signal — the point you want to sit on |
-| `"minimum"` | minimum `\|S21\|` | the bottom of the dip. Says nothing about responsivity, but it survives traces the derivative method finds noisy |
+| `"iq_derivative"` (the default) | maximum `\|dI/df + j·dQ/df\|` | where the IQ trace moves fastest per hertz, so a small shift in the resonance makes the largest signal  |
+| `"minimum"` | minimum `\|S21\|` | the bottom of the dip. Survives traces the derivative method finds noisy |
 
-Both return a point of the measured grid. Neither needs a fit to have converged.
-The one trace to use is the chosen amplitude step, in whichever direction we
-prefer to read:
+**Note** that both methods return a point on the measured grid. 
+<!-- #endregion -->
 
 ```python
 from rfmux.tuning import find_bias_frequency, iq_arc_speed
@@ -685,25 +670,14 @@ for panel in axes:
     panel.axvline(0.0, color="0.7", lw=1.0, label="sweep centre")
 
 axes[0].legend(fontsize=8)
-fig.suptitle(f"R0001 at step {amplitude_choice.iteration}: where the tone goes",
+fig.suptitle(f"R0001 at chosen bias amplitude {amplitude_choice.amplitude}: bias frequency selection",
              fontsize=11)
 plt.show()
 ```
 
-The two answers are close but not identical, and which of them is *right*
-depends on what you want from the tone. The arc-speed peak is the responsivity
-argument; the dip bottom is the simpler thing to defend when the trace is ugly.
+The two answers will generally be close but not identical.
 
-### When the answer is not plausible
 
-`find_bias_frequency` always answers, and the answer is always a point of the
-trace. Whether it is a *believable* point is a separate question, and it needs
-two things this function does not have: the sweep centre, and how far from it
-you are willing to believe. So the judgement lives in `find_bias_points`, under
-`max_distance_hz` — section 5.
-
-It is worth seeing why. R0004's resonance is pulled off the bottom of its own
-sweep as the drive goes up:
 
 ```python
 iterations_of_R0004 = collect_amplitude_iterations_for(
@@ -722,76 +696,71 @@ for iteration, amplitude_step in iterations_of_R0004.items():
           f"{answer/1e3:+7.2f} kHz")
 ```
 
-Steps 0 to 3 march steadily downwards, which is the resonance being pulled. By
-step 5 the answer is out at −26.7 kHz, all but on the edge — a resonance that
-has essentially left the span, and a bias frequency you would want to know
-about before trusting it.
+<!-- #region -->
 
-Step 4 is the honest caveat about any distance test. Its answer jumps back to
-*+5.4 kHz*, on the wrong side of the centre, because by then the resonance is
-gone from the span and the largest arc speed is simply the worst noise sample in
-a flat trace. A distance test cannot catch that one: the noise landed near the
-middle, so the answer is implausible without being far away. What fixes step 4
-is a wider span, or re-centring the sweep between amplitude steps — a
-measurement decision rather than an analysis one.
 
-What happens to an answer that fails the distance test is that the tone is left
-where the sweep was centred — the frequency it already had — and the finding is
-flagged. Moving the tone onto a peak we do not believe would be worse than not
-moving it at all. The calibration is then measured at the centre too, so a bias
-point never carries derivatives read somewhere the tone is not.
+## 4. Making a `BiasPoint` for each `Resonator` in the `ResonatorCatalog`
 
-## 4. The calibration at that point
+Each resonator in the catalog must have a 
+`rfmux.core.resonators.BiasPoint`, which comprises (at a minimum) a
+frequency and an amplitude.
 
-An amplitude and a frequency are enough to make a
-`rfmux.core.resonators.BiasPoint`, which is the
-type the catalog holds one of per resonator. Building it is also the moment the
-frequency is quantized:
+
+### base frequency quantization
+
+For intermodulation distortion reasons that are outside the scope of this demo, 
+we only synthesize bias tones at integer multiples of a base frequency. This
+quantization is applied automatically when adding bias points to the catalog.
+<!-- #endregion -->
 
 ```python
-quantized_bias_point = BiasPoint(
+bias_point = BiasPoint(
     frequency_hz=bias_frequency_by_derivative,
     amplitude=amplitude_choice.amplitude,
 )
 
 print(f"asked for  {bias_frequency_by_derivative:.3f} Hz")
-print(f"stored     {quantized_bias_point.frequency_hz:.3f} Hz")
+print(f"stored     {bias_point.frequency_hz:.3f} Hz")
 print(f"difference "
-      f"{quantized_bias_point.frequency_hz - bias_frequency_by_derivative:+.3f} Hz, "
-      f"on a grid of {BASE_FREQUENCY:.3f} Hz")
+      f"{bias_point.frequency_hz - bias_frequency_by_derivative:+.3f} Hz "
+      f"(aligned to a grid of {BASE_FREQUENCY:.3f} Hz)")
 ```
 
-Bias frequencies land on the hardware tone grid as they are set, so what you
-read back is what the board will actually play, and no later reader has to
-wonder which of the two numbers it is holding.
+<!-- #region -->
+**Note that the number that is stored in the Bias Point is the true frequency that the board will output.**
 
-That matters here, because the last step measures the two IQ derivatives **at
-that quantized frequency** rather than at the peak we found: the calibration
-should describe the tone that will be there, not one half a grid step away.
-`rfmux.tuning.iq_derivatives_at` does the measuring, off `iq_volts` and nothing
-else — the units are the entire point, and counts per hertz would be a number of
-the right magnitude and the wrong meaning. Both of its arguments are positional,
-and it has no options:
+### Measure I and Q derivatives with frequency to apply a conversion to df units
+
+Finally, we measure the IQ derivatives **at
+the quantized bias frequency**, so that the calibration is accurate at the true
+operational frequency. 
+
+`rfmux.tuning.iq_derivatives_at` extracts these derivatives based on the multisweep
+entry at the chosen bias amplitude.
+
 
 | Argument | Default | Does |
 |---|---|---|
-| `entry` | required | one sweep, the same single trace `find_bias_frequency` reads. It must carry `iq_volts`, or this raises rather than quietly answering in counts |
-| `frequency_hz` | required | where along that trace to evaluate the slopes. Normally the bias frequency *after* quantization, so the calibration belongs to the tone that will actually be played |
+| `entry` | required | the same single multisweep trace `find_bias_frequency` reads |
+| `frequency_hz` | required | where along that trace to evaluate the slopes. Since the true bias frequency may not be a measured point in the sweep, it uses splines to interpolate |
+<!-- #endregion -->
 
 ```python
 from rfmux.tuning import iq_derivatives_at
 
-dI_df, dQ_df = iq_derivatives_at(chosen_sweep, quantized_bias_point.frequency_hz)
+dI_df, dQ_df = iq_derivatives_at(chosen_sweep, bias_point.frequency_hz)
 
 print(f"dI_df  {dI_df:+.4e} V/Hz")
 print(f"dQ_df  {dQ_df:+.4e} V/Hz")
+
+print(bias_point)
 ```
 
 These are slopes: how many volts of I, and of Q, you get per hertz the resonance
 moves. Here they are drawn as tangents on the measured trace:
 
 ```python
-bias_frequency = quantized_bias_point.frequency_hz
+bias_frequency = bias_point.frequency_hz
 
 window = 800.0   # Hz either side, for drawing the tangent
 tangent_frequencies = np.linspace(bias_frequency - window,
@@ -858,19 +827,26 @@ plt.show()
 
 ### `df_calibration`
 
-The two slopes are stored, and the thing you actually use is derived from them:
+The `BiasPoint` saves the derivatives and computes:
 
 ```text
 df_calibration = 1 / (dI_df + j·dQ_df)     Hz/V
 ```
 
-which is the factor that turns a measured voltage excursion into a frequency
-shift — the whole point of the exercise, and what df display units are computed
-through. It is a property on `BiasPoint` rather than a stored field, so it
-cannot disagree with the derivatives it comes from:
+This factor will be used later to transform voltage data
+for this resonator **at this bias point** into df units.
+
+**Note how, clearly, if we update either the bias frequency or the bias
+amplitude, this calibration data will no longer be valid! And thus we would
+need to remeasure it. This is why we enforce that changing either of those
+parameters requires generating a whole new `BiasPoint`.**
+
+This bookkeeping lock is currently also applied to the df calibration numbers, so 
+to manually update them for our existing bias_point we must in fact generate a new bias point,
+which will use our existing one and add our new df calibration numbers to it:
 
 ```python
-bias_point = replace(quantized_bias_point, dI_df=dI_df, dQ_df=dQ_df)
+bias_point = replace(bias_point, dI_df=dI_df, dQ_df=dQ_df)
 
 print(bias_point)
 print(f"\ndf_calibration   {bias_point.df_calibration}")
@@ -898,39 +874,34 @@ retuned_resonator.set_bias(frequency_hz=bias_point.frequency_hz + 10e3)
 print(f"after:  df_calibration = {retuned_resonator.bias.df_calibration}")
 ```
 
-A stale calibration is not something you have to remember to avoid here; it is
-not representable.
+<!-- #region -->
 
-## 5. All three steps at once: `find_bias_points`
 
-Sections 2 to 4 are one resonator at a time, deliberately, because that is how
-you work out whether the analysis is doing something sensible.
-`rfmux.tuning.find_bias_points`
-runs the same three steps over every resonator in a catalog and assembles the
+## 5. All-in-one: `find_bias_points`
+
+In the above sections we stepped through the bias finding routines manually to explore
+how they worked. This is a useful exercise, and to determine whether the values you're using
+for a particular array, it may be helpful to work through them manually again later.
+
+However, we also provide a Jesus-take-the-wheel function:
+`rfmux.tuning.find_bias_points`, which
+runs the same bias finding steps over every resonator in a catalog and assembles the
 result.
 
-Its arguments are the union of the three steps' arguments, plus one of its own.
-Nothing here is new except `catalog`, `direction` and `max_distance_hz` — the
-rest are the knobs from sections 2 and 3, passed through to the function that
-uses them:
 
 | Argument | Default | Does |
 |---|---|---|
-| `sweeps` | required | **one module's** value out of what `multiamp_multisweep` returned, `multiamp_ms[crs.module[MODULE].index()]`. The whole container, keyed by module, is refused: a report is about one module, and which one is your choice to make |
-| `catalog` | `None` | the resonators to bias, and the source of everything the new catalog keeps unchanged — names, channels, the module, the separation rule. `None` takes the snapshot recorded in the sweep's `call_params`, which is the usual case: you are biasing the array you swept |
-| `amplitude_method` | `"derivative"` | which bifurcation test the amplitude search uses — section 2. `"hysteresis"` requires the sweeps to have been taken in both directions, and is refused up front if they were not |
-| `frequency_method` | `"iq_derivative"` | where in the chosen sweep the tone goes — section 3 |
-| `direction` | `None` | which direction's sweep to measure the bias frequency and the calibration on, since those have to come off a single trace. `None` prefers `"upward"`. The amplitude search is unaffected: a detector sees every direction of its own step |
-| `spike_prominence_factor` | `2.0` | passed to `rfmux.tuning.bifurcated_by_derivative` — section 2 |
-| `spike_height_factor` | `3.0` | passed to `bifurcated_by_derivative` — section 2 |
+| `sweeps` | required | **one module's** `multiamp_multisweep` outputs, i.e. `multiamp_ms[crs.module[MODULE].index()]`. e |
+| `catalog` | `None` | the resonators to bias, which must match the catalog used to make the above multisweeps. `None` uses the one recorded in the sweep's `call_params`, which is the usual case. |
+| `amplitude_method` | `"derivative"` | which bifurcation test the amplitude search uses — section 2. `"hysteresis"` requires the sweeps to have been taken in both directions. |
+| `frequency_method` | `"iq_derivative"` | what method to use to determine what frequency to bias at — section 3 |
+| `direction` | `None` | which sweep direction to measure the bias frequency and the calibration on. `None` prefers `"upward"`. |
+| `spike_prominence_factor` | `0.5` | passed to `rfmux.tuning.bifurcated_by_derivative` — section 2 |
 | `max_discrepancy` | `0.25` | passed to `rfmux.tuning.bifurcated_by_hysteresis` — section 2 |
-| `max_distance_hz` | `None` | how far from the sweep centre a resonance may come out before the answer is disbelieved. Past this, the tone is left where the sweep was centred and the finding is flagged — section 3. `None` believes anything, which is everything the trace could offer: the answer is always a point of the trace, so this only means something when it is tighter than the span |
+| `max_distance_hz` | `None` | how far from the sweep centre a resonance may come out before the bias frequency is rejected. Past this, the tone is left where the sweep was centred and the finding is flagged. Useful for handling densely packed arrays or collisions. |
 
-`sweeps` is positional; everything after it is keyword-only except `catalog`,
-which can be given either way.
-
-Called with nothing but one module's sweeps, which is the whole of it for a
-measurement that came out well:
+The function 
+<!-- #endregion -->
 
 ```python
 from rfmux.tuning import find_bias_points
@@ -938,13 +909,15 @@ from rfmux.tuning import find_bias_points
 bias_report = find_bias_points(multiamp_module_results)
 
 print(bias_report)
+print(bias_report.catalog)
+
 ```
 
 No catalog was passed, so it used the one recorded in the sweep's `call_params`
 — the array that was swept, which is nearly always the array you want to bias.
 Pass `catalog=` to override that.
 
-**The answer is `bias_report.catalog`**, a new `ResonatorCatalog`:
+**note that `bias_report.catalog`** is a new `ResonatorCatalog`, not the one the function started with from `call_params`:
 
 ```python
 print(bias_report.catalog)
@@ -960,26 +933,20 @@ for before, after in zip(swept_catalog, bias_report.catalog):
           f"  ({(after.bias.frequency_hz - before.bias.frequency_hz)/1e3:+.2f} kHz)")
 ```
 
-Every one of them moved down in frequency and up in amplitude: the array was
-biased too quietly, and at the higher drive the resonances sit lower.
 
-The catalog that went in is untouched — as are the sweeps, which is why the
-analysis can be re-run with different settings on the same data as many times as
+The catalog that went in is untouched, as are the sweeps. This allows the
+analysis to be re-run with different settings on the same data as many times as
 you like:
 
 ```python
 print(f"the catalog we started from is still: {swept_catalog['R0001'].bias}")
-print(f"\nit is a different object:            "
-      f"{bias_report.catalog['R0001'] is not swept_catalog['R0001']}")
-print(f"names and channels are the same:     "
-      f"{[r.name for r in bias_report.catalog] == [r.name for r in swept_catalog]}, "
-      f"{[r.channel for r in bias_report.catalog] == [r.channel for r in swept_catalog]}")
+
 ```
 
 ### The report
 
-`bias_report.catalog` is the answer; the findings are the working. There is one
-`rfmux.tuning.BiasFinding` per resonator, and it says how that resonator's bias
+The function also return one
+`rfmux.tuning.BiasFinding` per resonator, which says how that resonator's bias
 point was
 arrived at:
 
@@ -1009,8 +976,7 @@ for f in bias_report.findings:
 
 `bias_report.flagged` and `bias_report.good` split the findings by whether the
 answer is something the amplitude steps established or a default that was
-fallen back to — the next section is about that. It is the list to read before
-applying anything:
+fallen back to. It's a good idea to read this list before trusting and applying the biases.
 
 ```python
 print(f"biased:  {len(bias_report)}")
@@ -1018,101 +984,6 @@ print(f"good:    {len(bias_report.good)}")
 print(f"flagged: {len(bias_report.flagged)}")
 ```
 
-And a `settings` dict recording what the analysis was asked for. These are not
-copied onto the individual bias points, since they would be the same values
-repeated on every resonator:
-
-```python
-for key, value in bias_report.settings.items():
-    print(f"  {key:<24} {value!r}")
-```
-
-### When the answer is a default rather than a measurement
-
-**Every resonator in the catalog comes back with a bias point.** There is no
-unbiased outcome to check for: the sweeps were taken from this catalog, so
-every resonator has the data the three steps need, and the three steps always
-produce an answer. (A catalog holding a resonator these sweeps do not cover, or
-a sweep with no `iq_volts`, means the two arguments did not come from the same
-measurement — that raises, rather than turning into a per-resonator result.)
-
-What does happen is that an answer comes out as a **default**. There are three,
-and `flagged_because` says which:
-
-| Flagged when | Meaning |
-|---|---|
-| the quietest amplitude measured was already bifurcated | there was nothing below it to fall back to, so the operating point is the best of a bad set. Start the schedule lower |
-| nothing bifurcated at all | this is simply the loudest amplitude measured, not a limit that was found. Extend the schedule higher |
-| the bias frequency landed further than `max_distance_hz` from the sweep centre | usually a neighbour in the span, or a resonance pulled out of it — section 3 |
-
-Those bias points are perfectly usable, and they are the best the measurement
-supports. They are just not what the analysis set out to find, which is the
-distinction the flag draws. The first two are the ones you meet in practice, and
-both are a statement about the amplitude schedule rather than about the
-resonator:
-
-```python
-nothing_bifurcated_report = find_bias_points(
-    multiamp_module_results, spike_height_factor=1e6
-)
-print("nothing looks bifurcated at all:")
-print(nothing_bifurcated_report)
-
-print()
-print(f"still biased: "
-      f"{len(nothing_bifurcated_report.good) + len(nothing_bifurcated_report.flagged)}"
-      f" of {len(nothing_bifurcated_report)}, at "
-      f"{nothing_bifurcated_report['R0001'].amplitude} (the loudest measured)")
-```
-
-That run turned the spike threshold up until nothing could clear it, which is
-the same situation as an amplitude schedule that never drove the array hard
-enough. Note that every resonator still has a bias point, and every one is
-flagged.
-
-Only the first concern is reported, worst first, so a resonator whose sweeps
-never bifurcated does not also get told its tone is a little off centre.
-
-### Swapping out one of the three steps
-
-Swapping a method swaps a step, and everything else stays as it was. Two runs
-over the same sweeps, differing only in how the frequency was chosen:
-
-```python
-minimum_frequency_report = find_bias_points(
-    multiamp_module_results, frequency_method="minimum"
-)
-
-print(f"{'name':<7}{'iq_derivative':>18}{'minimum':>16}{'difference':>14}")
-for a, b in zip(bias_report.findings, minimum_frequency_report.findings):
-    print(f"{a.name:<7}{a.frequency_hz/1e6:>18.6f}{b.frequency_hz/1e6:>16.6f}"
-          f"{(b.frequency_hz - a.frequency_hz):>13.0f} Hz")
-```
-
-One to three tone-grid steps apart, on this data. Which of them is right depends
-on what you want from the tone, and on a noisier trace they can part company by
-a good deal more than that.
-
-And the same comparison for the amplitude, which on this data shows the
-simulator's lack of hysteresis rather than anything about the two methods:
-
-```python
-hysteresis_amplitude_report = find_bias_points(
-    multiamp_module_results, amplitude_method="hysteresis"
-)
-
-print(f"{'name':<7}{'derivative':>14}{'hysteresis':>14}")
-for a, b in zip(bias_report.findings, hysteresis_amplitude_report.findings):
-    print(f"{a.name:<7}{a.amplitude:>14.4f}{b.amplitude:>14.4f}")
-
-print(f"\n{hysteresis_amplitude_report}")
-```
-
-Every resonator still comes back biased, and every one of them is flagged — the
-hysteresis run found no bifurcation anywhere, so all four answers are the
-loudest amplitude measured rather than a limit that was found. That is exactly
-what the flag is for: the numbers look like an answer, and the report tells you
-they are a fallback.
 
 ## 6. What is not here yet
 
@@ -1128,14 +999,12 @@ they are a fallback.
   third `frequency_method` is a small job; the methods take a whole sweep entry
   rather than two arrays precisely so that one of them can read the entry's
   `fits`.
-- **Thresholds that have met a real array.** The two spike factors are inherited
-  from the GUI and `max_discrepancy` was picked to be roughly right; neither has
-  been calibrated against hardware that is known to bifurcate. Read `metric` and
-  `threshold` across your own amplitude steps before trusting the defaults.
-- **Saving the result.** Not missing any more: `find_bias_points` writes the
-  whole report — the biased catalog and the working behind it — to
-  `~/rfmux_data/ipy_session_<today>/bias_report_*.pkl`, and
-  `BiasReport.from_dict(rfmux.tuning.store.load(path))` reads it back. Pass
-  `save=False` to skip it. What is still to come is one *folder* per tuning run
-  that ties a catalog to the sweeps and settings that produced it; today each
-  measurement is its own file, found by its name and its `file_metadata`.
+- **Thresholds that have met a real array.** `spike_prominence_factor` is the
+  GUI's bar restated as a multiplication, and `max_discrepancy` was picked to be
+  roughly right; neither has been calibrated against hardware that is known to
+  bifurcate. Read `metric` and `threshold` across your own amplitude steps
+  before trusting the defaults.
+
+
+
+

@@ -637,8 +637,7 @@ def plot_arc_speed_panels(
     iterations=None,
     direction=PREFERRED_DIRECTION,
     annotate=True,
-    spike_prominence_factor=2.0,
-    spike_height_factor=3.0,
+    spike_prominence_factor=0.5,
     ncols=None,
     panel_size=(7.0, 5.0),
     title=None,
@@ -648,8 +647,8 @@ def plot_arc_speed_panels(
 
     Every amplitude step overlaid and coloured by drive, so that the step where
     a quantity stops looking like the others is visible as such. This is the
-    plot for choosing ``spike_prominence_factor`` and ``spike_height_factor``
-    by eye, and for seeing what the frequency method had to pick a maximum from.
+    plot for choosing ``spike_prominence_factor`` by eye, and for seeing what
+    the frequency method had to pick a maximum from.
 
     What ``annotate`` draws depends on the quantity, because what each one is
     compared against differs:
@@ -663,23 +662,21 @@ def plot_arc_speed_panels(
     ``spikes``
         A dashed line at ``±threshold`` per amplitude step, in that step's
         colour: the bar a spike has to clear for the step to count as
-        bifurcated. It is read straight off
+        bifurcated, which is ``spike_prominence_factor`` times the span of
+        that step's arc speed. It is read straight off
         :func:`~rfmux.tuning.bifurcated_by_derivative` rather than recomputed
         here, so the line cannot disagree with the detector. A step whose
-        verdict is positive gets a solid line instead of a dashed one.
+        verdict is positive gets a solid line instead of a dashed one. The bar
+        scales off the sweep, so it moves when the data does, which is why
+        there is one line per step rather than one per panel.
 
-    Note what ``threshold`` is: the detector requires a spike to clear *two*
-    bars — a prominence, set to the span of the step's arc speed divided by
-    ``spike_prominence_factor``, and a height, set to
-    ``spike_height_factor`` standard deviations of the differenced speed — and
-    reports the larger of the two, since that is the one that decides. Both
-    scale off the sweep, so the line moves when the data does, which is why
-    there is one per step rather than one per panel.
-
-    Clearing the line is necessary but not sufficient: the up-spike still has
-    to be followed immediately by a down-spike, on and back off the jump. So an
-    excursion poking past a dashed line is a step the detector considered and
-    rejected on the pattern, not a disagreement.
+    Two reasons an excursion may poke past a dashed line without the step being
+    called bifurcated, and neither is a disagreement. The detector compares
+    *prominence* — how far a spike stands out of its own neighbourhood — while
+    this draws the curve itself, so a spike sitting on a raised shoulder is
+    shorter than it looks against the line. And the up-spike still has to be
+    followed immediately by a down-spike, on and back off the jump, so a step
+    can clear the bar and be rejected on the pattern.
 
     Every step drawn is evaluated here, which is not the same set the amplitude
     search examined — it stops at the first step that fires, so the loud end of
@@ -702,8 +699,7 @@ def plot_arc_speed_panels(
         annotate: draw the per-quantity marks described above.
         spike_prominence_factor: as :func:`~rfmux.tuning.find_bias_points`
             takes it. Only used to place the ``spikes`` thresholds — pass the
-            factors you are considering and watch the lines move.
-        spike_height_factor: likewise.
+            factor you are considering and watch the lines move.
         ncols: panels per row, or ``None`` to let :func:`panels_per_row` pick.
         panel_size: ``(width, height)`` of one panel, in inches.
         title: overrides the figure title. The batch marker is still appended.
@@ -788,7 +784,6 @@ def plot_arc_speed_panels(
                         check = bifurcated_by_derivative(
                             {direction: entry},
                             spike_prominence_factor=spike_prominence_factor,
-                            spike_height_factor=spike_height_factor,
                         )
                         bifurcated_any |= check.bifurcated
                         for sign in (1, -1):

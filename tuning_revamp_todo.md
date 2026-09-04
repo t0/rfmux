@@ -241,8 +241,16 @@ What is left:
 `rfmux/tuning/bias.py` ships two ways to spot a bifurcated amplitude step, and
 neither default has been checked against a cryostat.
 
-* **`derivative`** carries the GUI's long-standing `spike_prominence_factor=2.0`
-  / `spike_height_factor=3.0`, ported unchanged. On the sweep shipped with
+* **`derivative`** carries the GUI's long-standing prominence bar, restated as
+  `spike_prominence_factor=0.5` multiplying the span of the arc speed. The GUI
+  *divided* the span by a `spike_prominence_factor` of 2.0, so turning its knob
+  up made the test more sensitive; same argument name here, reciprocal value,
+  identical threshold. Anything quoting the GUI's 2.0 needs converting rather
+  than copying — a 2.0 passed to this one asks for a spike twice the whole
+  range, which nothing clears.
+  The GUI's companion `spike_height_factor=3.0` is *not* ported: the prominence
+  bar was the binding one at every amplitude on the shipped sweep, so the height
+  bar only ever added a knob that never decided anything. On the sweep shipped with
   `Demos/bias_finding.md` it behaves: `metric/threshold` runs 0.4–0.6 on the
   clean amplitude steps and 1.8–1.9 on the jumped ones, and all four resonators
   flip between 2 mV and 4 mV. But the margin is a factor of two, not orders of
@@ -261,10 +269,13 @@ neither default has been checked against a cryostat.
 
 Both report `metric` and `threshold` on every `BifurcationCheck` precisely so
 this can be settled by reading them across the amplitude steps of a resonator
-that is known to bifurcate. Note `threshold` for `derivative` is the larger of
-the prominence and height bars, since a spike has to clear both; on the shipped
-sweep the prominence bar is the binding one at every amplitude, which is worth
-knowing before turning `spike_height_factor`. Worth settling before either default is quoted anywhere
+that is known to bifurcate. Note that `derivative`'s `metric` and `threshold`
+are not quite the same quantity — the metric is the largest positive jump,
+measured from zero, and the threshold is compared against a *prominence*,
+measured from the spike's own neighbourhood — so the ratio is a margin and not
+a verdict. Reporting the prominence itself would make the pair commensurate and
+is worth doing if the ratio turns out to be what a real calibration is read
+off. Worth settling before either default is quoted anywhere
 as a recommendation, and worth reconciling with the nonlinear fit's `a`
 (bifurcation at ≈ 0.77) — see the fit-walker entry above, which asks the same
 question from the other side.

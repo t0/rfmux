@@ -256,11 +256,15 @@ def test_a_jumped_trace_is_bifurcated():
     assert check.metric > check.threshold
 
 
-def test_the_factors_are_what_makes_the_test_less_sensitive():
+def test_a_bigger_prominence_factor_is_what_makes_the_test_less_sensitive():
+    """The factor multiplies the span of the arc speed to get the bar, so it
+    reads the way it behaves: ask for enough and the jump stops clearing it."""
     step = a_step(a=JUMPED)
+    demanding = bifurcated_by_derivative(step, spike_prominence_factor=1e6)
 
     assert bifurcated_by_derivative(step).bifurcated
-    assert not bifurcated_by_derivative(step, spike_height_factor=1e6).bifurcated
+    assert not demanding.bifurcated
+    assert demanding.threshold > bifurcated_by_derivative(step).threshold
 
 
 def test_the_derivative_test_reads_the_shape_and_not_the_scale():

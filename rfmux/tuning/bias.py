@@ -155,14 +155,15 @@ PREFERRED_DIRECTION = "upward"
 class BifurcationCheck(NamedTuple):
     """One method's verdict on one amplitude step, and the numbers behind it.
 
-    Carries what it compared as well as the verdict, because the factors that
+    Carries what it compared as well as the verdict, because the settings that
     produce them are knobs a user has to turn against their own array: a
     detector that only ever says yes or no gives them nothing to turn them by.
 
     ``metric`` and ``threshold`` are in whatever units the method works in —
-    see the detector for what they mean. Above the threshold is *necessary* for
-    a positive verdict, not sufficient: ``"derivative"`` also requires the
-    spikes to be adjacent and prominent.
+    see the detector for what they mean, and for how closely the verdict tracks
+    the comparison. Above the threshold is not on its own a positive verdict:
+    ``"derivative"`` also requires the spikes it found to be adjacent, and in
+    the right order.
     """
 
     method: str
@@ -417,8 +418,7 @@ def find_bias_points(
     amplitude_method: str = "derivative",
     frequency_method: str = "iq_derivative",
     direction: str | None = None,
-    spike_prominence_factor: float = 2.0,
-    spike_height_factor: float = 3.0,
+    spike_prominence_factor: float = 0.5,
     max_discrepancy: float = 0.25,
     max_distance_hz: float | None = None,
     save=None,
@@ -451,8 +451,7 @@ def find_bias_points(
             the calibration on. None takes ``"upward"`` when it is there, and
             the only direction there is otherwise. The amplitude search is
             unaffected — a detector sees every direction of its own step.
-        spike_prominence_factor, spike_height_factor: passed to
-            :func:`bifurcated_by_derivative`.
+        spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
         max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
         max_distance_hz: how far from the sweep centre a resonance may come
             out before the answer is disbelieved. Past this, the tone is left
@@ -511,7 +510,6 @@ def find_bias_points(
     amplitude_settings = dict(
         method=amplitude_method,
         spike_prominence_factor=spike_prominence_factor,
-        spike_height_factor=spike_height_factor,
         max_discrepancy=max_discrepancy,
     )
 
@@ -538,7 +536,6 @@ def find_bias_points(
             "frequency_method": frequency_method,
             "direction": direction,
             "spike_prominence_factor": spike_prominence_factor,
-            "spike_height_factor": spike_height_factor,
             "max_discrepancy": max_discrepancy,
             "max_distance_hz": max_distance_hz,
         },
@@ -556,7 +553,7 @@ def find_bias_points(
     return report
 
 
-def _bias_one(
+def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias one" implies applying the bias to the resonator.
     sweeps,
     resonator,
     *,
@@ -697,8 +694,7 @@ def find_bias_amplitude(
     iterations: Mapping[int, Mapping[str, dict]],
     *,
     method: str = "derivative",
-    spike_prominence_factor: float = 2.0,
-    spike_height_factor: float = 3.0,
+    spike_prominence_factor: float = 0.5,
     max_discrepancy: float = 0.25,
 ) -> AmplitudeChoice:
     """Search one resonator's amplitude steps for the one to bias at.
@@ -726,8 +722,7 @@ def find_bias_amplitude(
             returns. A single ``multisweep`` gives one amplitude step, which is
             a legitimate thing to hand over.
         method: which test, from :data:`BIFURCATION_METHODS`.
-        spike_prominence_factor, spike_height_factor: passed to
-            :func:`bifurcated_by_derivative`.
+        spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
         max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
 
     Returns:
@@ -742,13 +737,10 @@ def find_bias_amplitude(
         raise ValueError("No sweeps here, so there is no amplitude to choose.")
 
     detector = _BIFURCATION[method]
-    # Each detector takes only its own factors, so a caller passing all of them
-    # does not hand the hysteresis test a spike threshold it has no use for.
+    # Each detector takes only its own setting, so a caller passing both does
+    # not hand the hysteresis test a spike threshold it has no use for.
     settings = (
-        {
-            "spike_prominence_factor": spike_prominence_factor,
-            "spike_height_factor": spike_height_factor,
-        }
+        {"spike_prominence_factor": spike_prominence_factor}
         if method == "derivative"
         else {"max_discrepancy": max_discrepancy}
     )
@@ -792,8 +784,7 @@ def find_bias_amplitude(
 def bifurcated_by_derivative(
     entries: Mapping[str, dict],
     *,
-    spike_prominence_factor: float = 2.0,
-    spike_height_factor: float = 3.0,
+    spike_prominence_factor: float = 0.5,
 ) -> BifurcationCheck:
     """Is this sweep bifurcated? Ask the jumps in its IQ arc-length speed.
 
@@ -808,23 +799,29 @@ def bifurcated_by_derivative(
     own range first, and each difference by the frequency spacing it spans, so
     what remains is shape.
 
-    The two factors set how big a jump has to be, both relative to the sweep
-    itself: prominence must exceed the span of the arc-length speed divided by
-    *spike_prominence_factor*, and height must exceed *spike_height_factor*
-    standard deviations of the differentiated speed. Larger is less sensitive,
-    for both.
+    How big a spike has to be is set relative to the sweep itself: a spike has
+    to stand out from its surroundings — scipy's *prominence* — by more than
+    *spike_prominence_factor* times the span of the arc-length speed. The factor
+    multiplies, so it reads the way it behaves: the default of 0.5 asks a spike
+    to stand a full half of the speed's whole range out of its own
+    neighbourhood, and raising it asks for more, which is less sensitive.
 
-    Both of those scale off the sweep, which is what makes them portable
-    between resonators and also what makes this test say yes too readily on a
-    sweep with no resonance in it: the largest noise excursion is then the
-    whole dynamic range, so it clears a threshold set as a fraction of itself.
-    A sweep too coarse to resolve the resonance has the same problem for the
-    opposite reason — a dip crossed in two samples is a discontinuity, and this
-    test cannot tell that from a jump. Both show up as a ``metric`` only just
-    over ``threshold``, which is why they are reported: a resonator that
-    bifurcates has a jump that clears it by a wide margin, and the factors are
-    what you raise when yours do not. The defaults are the ones the GUI has
-    always shipped and have not been re-derived here.
+    It is the same bar the GUI has always applied, but **not the same number**:
+    the GUI *divided* the span by a ``spike_prominence_factor`` of 2.0, so
+    turning its knob up made the test more sensitive. Same argument name, the
+    reciprocal value, arithmetic that no longer runs backwards. The bar itself
+    has not been re-derived here.
+
+    Scaling off the sweep is what makes one factor portable between resonators,
+    and also what makes this test say yes too readily on a sweep with no
+    resonance in it: the largest noise excursion is then the whole dynamic
+    range, so it clears a threshold set as a fraction of itself. A sweep too
+    coarse to resolve the resonance has the same problem for the opposite
+    reason — a dip crossed in two samples is a discontinuity, and this test
+    cannot tell that from a jump. Both show up as a ``metric`` only just over
+    ``threshold``, which is why they are reported: a resonator that bifurcates
+    has a jump that clears it by a wide margin, and the factor is what you
+    raise when yours does not.
 
     Args:
         entries: one amplitude step, ``{direction: entry}``. Every direction
@@ -832,16 +829,19 @@ def bifurcated_by_derivative(
             says so — a bifurcated resonator jumps whichever way the sweep
             runs, so needing both to agree would only lose the one that
             happened to catch it.
-        spike_prominence_factor: larger is less sensitive.
-        spike_height_factor: larger is less sensitive.
+        spike_prominence_factor: the bar a spike has to clear, as a multiple
+            of the span of the arc-length speed. Larger is less sensitive.
 
     Returns:
         BifurcationCheck: with ``metric`` the largest positive jump seen in any
-        direction, and ``threshold`` the larger of the two bars above — a spike
-        has to clear both, so the larger one is what decides. Clearing it is
-        necessary but not sufficient, because the up-spike still has to be
-        followed by a down-spike: a metric above threshold with a negative
-        verdict means the jump was big enough and the pattern was not there.
+        direction and ``threshold`` the bar that direction's spikes had to
+        clear. The two are not quite the same quantity — a jump is measured
+        from zero and a prominence from whatever the spike's own neighbourhood
+        sits at — so read their ratio as the margin this sweep has, not as the
+        verdict. The verdict needs more than a big spike anyway: the up-spike
+        has to be followed by a down-spike, so a metric well over threshold
+        with a negative verdict means the jump was there and the pattern was
+        not.
 
     Raises:
         ValueError: if none of the directions holds a usable sweep.
@@ -855,11 +855,12 @@ def bifurcated_by_derivative(
             continue
 
         jumps = np.diff(speed)
-        prominence = (speed.max() - speed.min()) / spike_prominence_factor
-        height = spike_height_factor * float(np.std(jumps))
+        prominence_threshold = float(
+            spike_prominence_factor * (speed.max() - speed.min())
+        )
 
-        up, _ = find_peaks(jumps, prominence=prominence, height=height)
-        down, _ = find_peaks(-jumps, prominence=prominence, height=height)
+        up, _ = find_peaks(jumps, prominence=prominence_threshold)
+        down, _ = find_peaks(-jumps, prominence=prominence_threshold)
 
         # look for adjacent spikes, with one up before one down:
         # TODO we are assuming there will only be one spike here - is that okay?
@@ -868,14 +869,10 @@ def bifurcated_by_derivative(
         if len(up) and len(down) and down[0] == up[0] + 1:
             verdict = True
 
-        # A spike has to clear both bars, so the larger of the two is the one
-        # that actually decides — and on real data that is usually the
-        # prominence, since a jump is a big fraction of the whole arc-speed
-        # range while a wobble on the way up to it is not. Reported as a pair
-        # from one direction, so metric and threshold are numbers that were
-        # compared with each other.
+        # Reported as a pair from one direction, so the metric and the
+        # threshold beside it come from the same sweep.
         if biggest is None or float(jumps.max()) > biggest[0]:
-            biggest = (float(jumps.max()), max(prominence, height))
+            biggest = (float(jumps.max()), prominence_threshold)
 
     if biggest is None:
         raise ValueError(
@@ -1046,7 +1043,7 @@ def normalized_arc_speed(entry: Mapping) -> tuple[np.ndarray, np.ndarray]:
 
     What :func:`bifurcated_by_derivative` differentiates and looks for spikes
     in, so plotting this — and ``np.diff`` of it — is how you see what that test
-    saw, and how you pick its factors.
+    saw, and how you pick its factor.
 
     One pair of sweep points at a time rather than off a spline, and with I and
     Q each divided by their own range first. See the detector for why both of
@@ -1257,8 +1254,8 @@ def _point_to_point_speed(
 
     I and Q are each divided by their own range before differencing, so the
     result depends on the *shape* of the loop and not on how deep the resonance
-    is or how big the readout gain was. That is what lets one pair of spike
-    factors mean the same thing on every resonator of an array.
+    is or how big the readout gain was. That is what lets one spike factor mean
+    the same thing on every resonator of an array.
 
     Deliberately finite differences rather than the spline
     :func:`_arc_length_speed` uses: a spline smooths a jump across several

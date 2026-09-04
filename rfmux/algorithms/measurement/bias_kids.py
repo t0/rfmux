@@ -41,76 +41,62 @@ async def find_optimal_phases_parallel(
     fs: float = 597,
     lowcut: float = 5,
     highcut: float = 20,
-    phase_step: int = 5
 ) -> Dict[int, Tuple[float, float]]:
     """
-    Find optimal ADC phases for multiple channels in parallel.
-    
+    The ADC phase per detector that puts its timestream's principal axis
+    along Q, from one set of samples taken at phase zero.
+
+    Signal and noise move mostly along the resonance's frequency
+    direction, so the principal component of (I, Q) is that direction
+    and one PCA gives the angle.  The board rotates samples by +phase,
+    so a principal axis at theta lands on Q at 90 - theta.
+
     Args:
         crs: CRS object
         bias_configs: Dictionary of bias configurations {det_idx: config}
         module: Module number
-        num_samples: Number of samples to collect at each phase
-        apply_bandpass: Whether to apply bandpass filter to Q data
-        fs: Sampling frequency (Hz) - only used if apply_bandpass is True
-        lowcut: Bandpass filter low cutoff (Hz) - only used if apply_bandpass is True
-        highcut: Bandpass filter high cutoff (Hz) - only used if apply_bandpass is True
-        phase_step: Phase step size in degrees
-        
+        num_samples: Number of samples in the one set
+        apply_bandpass: Whether to bandpass the samples before the PCA
+        fs, lowcut, highcut: The bandpass, in Hz
+
     Returns:
-        Dictionary of {det_idx: (best_phase_degrees, max_std_q)}
+        Dictionary of {det_idx: (phase_degrees, std along the principal axis)}
     """
-    optimal_phases = {}
-    
-    # Initialize best phases and stds for each detector
-    for det_idx in bias_configs:
-        optimal_phases[det_idx] = (0.0, -np.inf)
-    
-    # Scan through phases
-    for phase in range(0, 360, phase_step):
-        # Set phase for all channels simultaneously
-        async with crs.tuber_context() as ctx:
-            for det_idx, config in bias_configs.items():
-                ctx.set_phase(phase, units=crs.UNITS.DEGREES, target=crs.TARGET.ADC, 
-                             channel=config['channel'], module=module)
-            await ctx()
-        
-        # Collect samples for all channels at once
-        samples = await crs.get_samples(num_samples, channel=None, module=module, average=False)
-        
-        # Process each detector's Q data
+    async with crs.tuber_context() as ctx:
         for det_idx, config in bias_configs.items():
-            channel_idx = config['channel'] - 1  # Convert to 0-based index
-            
-            # Extract Q data for this channel
-            q_data = np.array(samples.q[channel_idx])
-            
-            # Calculate standard deviation (with or without bandpass filter)
+            ctx.set_phase(0.0, units=crs.UNITS.DEGREES, target=crs.TARGET.ADC,
+                          channel=config['channel'], module=module)
+        await ctx()
+    samples = await crs.get_samples(num_samples, channel=None, module=module, average=False)
+
+    optimal_phases = {}
+    for det_idx, config in bias_configs.items():
+        k = config['channel'] - 1
+        i = np.asarray(samples.i[k], dtype=float)
+        q = np.asarray(samples.q[k], dtype=float)
+        if apply_bandpass:
             try:
-                if apply_bandpass:
-                    q_processed = bandpass_filter(q_data, fs, lowcut, highcut)
-                else:
-                    q_processed = q_data
-                    
-                std_q = float(np.std(q_processed))
-                
-                # Update if this is better than the current best
-                current_best_phase, current_best_std = optimal_phases[det_idx]
-                if std_q > current_best_std:
-                    optimal_phases[det_idx] = (float(phase), std_q)
-                    
+                i = bandpass_filter(i, fs, lowcut, highcut)
+                q = bandpass_filter(q, fs, lowcut, highcut)
             except Exception as e:
-                if apply_bandpass:
-                    warnings.warn(f"Bandpass filter failed for detector {det_idx} at phase {phase}°: {e}")
-                else:
-                    warnings.warn(f"Failed to process Q data for detector {det_idx} at phase {phase}°: {e}")
-                continue
-    
-    # Report results
-    filter_desc = "filtered " if apply_bandpass else ""
-    for det_idx, (best_phase, best_std) in optimal_phases.items():
-        print(f"Detector {det_idx}: Optimal phase = {best_phase}°, {filter_desc}std(Q) = {best_std:.4f}")
-    
+                warnings.warn(f"Bandpass filter failed for detector {det_idx}: {e}; "
+                              f"using the raw samples")
+        w, v = np.linalg.eigh(np.cov(np.vstack((i, q))))
+        scale = float(np.mean(i * i + q * q))
+        if not np.isfinite(w).all() or w.max() <= 1e-18 * max(scale, 1e-300):
+            # No variation to find an axis in (a simulated board without
+            # noise, say): leave the phase alone rather than rotate by
+            # the angle of rounding error.
+            warnings.warn(f"Detector {det_idx}: the samples show no variation, "
+                          f"so no ADC phase was chosen")
+            optimal_phases[det_idx] = (0.0, 0.0)
+            continue
+        pc = v[:, np.argmax(w)]
+        # An axis, not a direction: fold the eigenvector's sign away.
+        theta = (np.degrees(np.arctan2(pc[1], pc[0])) + 90.0) % 180.0 - 90.0
+        phase = (90.0 - theta) % 360.0
+        optimal_phases[det_idx] = (float(phase), float(np.sqrt(w.max())))
+        print(f"Detector {det_idx}: principal axis at {theta:.1f} deg, ADC phase {phase:.1f} deg")
     return optimal_phases
 
 
@@ -208,7 +194,6 @@ async def bias_kids(
     optimize_phase: bool = False,
     bandpass_params: Optional[Dict[str, float]] = None,
     num_phase_samples: int = 300,
-    phase_step: int = 5,
     fit_method: str = "nonlinear",
     *,
     module: Optional[Union[int, List[int]]] = None,
@@ -239,16 +224,14 @@ async def bias_kids(
         fallback_to_lowest (bool): If True and no suitable amplitude found,
                                  use the lowest available amplitude. If False,
                                  skip the detector. Defaults to True.
-        optimize_phase (bool): If True, scan through ADC phases to find the phase that
-                             maximizes variance in bandpass-filtered Q timestream.
-                             Defaults to False.
+        optimize_phase (bool): If True, set each detector's ADC phase so the
+                             timestream's principal axis lies along Q, from one
+                             set of samples.  Defaults to False.
         bandpass_params (dict, optional): Parameters for bandpass filter used in phase optimization.
                                         Keys: 'lowcut' (Hz), 'highcut' (Hz), 'fs' (sampling freq Hz).
                                         Defaults: {'lowcut': 5, 'highcut': 20, 'fs': 597}.
         num_phase_samples (int): Number of samples to collect for phase optimization.
                                Defaults to 300.
-        phase_step (int): Phase step size in degrees for optimization scan.
-                        Defaults to 5.
         fit_method (str): "nonlinear" (default) or "skewed": the resonance fit the
                         amplitude choice, bias frequency and calibration come from.
         module (int | list[int], optional): Target module(s). If None, extracted from results.
@@ -326,7 +309,6 @@ async def bias_kids(
                     optimize_phase=optimize_phase,
                     bandpass_params=bandpass_params,
                     num_phase_samples=num_phase_samples,
-                    phase_step=phase_step,
                     fit_method=fit_method,
                     module=mod_num,
                     progress_callback=progress_callback
@@ -442,7 +424,6 @@ async def bias_kids(
             fs=bandpass_params.get('fs', 597) if bandpass_params else 597,
             lowcut=bandpass_params.get('lowcut', 5) if bandpass_params else 5,
             highcut=bandpass_params.get('highcut', 20) if bandpass_params else 20,
-            phase_step=phase_step
         )
     else:
         # No optimization - all phases are 0
@@ -477,12 +458,11 @@ async def bias_kids(
                 warnings.warn(f"Detector {det_idx}: df calibration from the fit "
                               f"failed ({exc}); keeping the multisweep's")
 
-            # If we have df calibration and applied a phase, rotate it
             if 'df_calibration' in biased_data and biased_data['df_calibration'] is not None and optimal_phase != 0.0:
-                # Rotate the df calibration by the applied phase
-                phase_rad = np.radians(optimal_phase)
-                rotation_factor = np.exp(1j * phase_rad)
-                biased_data['df_calibration'] *= rotation_factor
+                # The board rotates the samples by +phase; the calibration
+                # multiplies them, so it turns the other way to keep
+                # samples * calibration the same frequency shift.
+                biased_data['df_calibration'] *= np.exp(-1j * np.radians(optimal_phase))
                 biased_data['df_calibration_rotated'] = True
             
             successfully_biased[det_idx] = biased_data

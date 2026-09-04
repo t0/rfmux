@@ -914,7 +914,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                 
                 # Nonlinearity parameter 'a'
                 a_value = nl_params_dict.get('a', 0)
-                self.nl_table.item(NL_A_ROW, 1).setText(f"{a_value:.3e}")
+                self.nl_table.item(NL_A_ROW, 1).setText(f"{a_value:.3f}")
                 
                 # Bifurcation threshold is 4*sqrt(3)/9 ≈ 0.77
                 bifurcation_threshold = 4 * np.sqrt(3) / 9

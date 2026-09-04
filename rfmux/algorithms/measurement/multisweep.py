@@ -352,6 +352,12 @@ async def multisweep(
                     ctx.set_frequency(freq_rel, channel=channel, module=module)
                     if not point_idx: # only set amplitude once per sweep
                         ctx.set_amplitude(amp, channel=channel, module=module)
+                        # The sweep defines the frame the calibration is
+                        # in: an ADC phase left by an earlier bias would
+                        # rotate it.
+                        ctx.set_phase(0.0, units=crs.UNITS.DEGREES,
+                                      target=crs.TARGET.ADC,
+                                      channel=channel, module=module)
 
                 # Zero out unused resonance channels
                 if not point_idx: # only need to do this once per sweep

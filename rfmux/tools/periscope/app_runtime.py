@@ -2410,7 +2410,6 @@ class PeriscopeRuntime:
             "fallback_to_lowest": True,
             "optimize_phase": True,
             "num_phase_samples": 300,
-            "phase_step": 5,
             "bandpass_params": {
                 "apply_bandpass": True,
                 "lowcut": 5.0,

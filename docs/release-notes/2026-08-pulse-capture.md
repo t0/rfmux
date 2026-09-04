@@ -79,7 +79,10 @@ and in Periscope; it needs no fit of its own, since the multisweep reads that
 point off the raw grid and `bias_kids` reads it off the fit. A resonance
 biased into bifurcation has no such slope: the sweep jumps, `multisweep` and
 `measure_df_calibrations` say so, and `bias_kids` still biases it, at the
-lowest amplitude swept when it has a choice.
+lowest amplitude swept when it has a choice. With `optimize_phase=True`,
+`bias_kids` also sets each detector's ADC phase so its timestream's principal
+axis lies along Q, from one set of samples, and turns the calibration to
+match, so samples times calibration is the same frequency shift either way.
 
 Rotating before thresholding is therefore the default wherever a calibration
 exists. Pass `trigger_basis="iq"` to threshold the raw quadratures anyway. A

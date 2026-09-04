@@ -157,9 +157,11 @@ def df_calibration_for_entry(entry, *, prefer="nonlinear"):
     order = ("skewed", "nonlinear") if prefer == "skewed" else ("nonlinear", "skewed")
     for fit in order:
         if fit == "nonlinear" and _has_nonlinear_fit(entry):
+            # The flow fits the sweep in counts, so the model's slope is
+            # counts per hertz; the calibration is hertz per volt.
             slope = slope_from_nonlinear(f_bias, entry["nonlinear_fit_params"],
                                          entry.get("gain_complex", 1.0))
-            return complex(1.0 / slope)
+            return complex(1.0 / convert_roc_to_volts(slope))
         if fit == "skewed" and _has_skewed_fit(entry):
             f, iq = _sorted_sweep(entry)
             return complex(1.0 / slope_from_skewed(f, iq, f_bias, entry["fit_params"]))

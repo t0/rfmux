@@ -16,5 +16,9 @@ def test_fit_choice_defaults_to_nonlinear(qt_app):
 def test_fit_choice_follows_the_only_fit_present(qt_app):
     dlg = BiasKidsDialog(None, 1, fits_present={"skewed"})
     assert dlg.get_parameters()["fit_method"] == "skewed"
+    # The threshold reads the nonlinear fit's parameter, so it is greyed
+    # out while the skewed fit is chosen.
+    assert not dlg.nonlinear_threshold_spin.isEnabled()
     dlg.fit_method_combo.setCurrentIndex(0)
     assert dlg.get_parameters()["fit_method"] == "nonlinear"
+    assert dlg.nonlinear_threshold_spin.isEnabled()

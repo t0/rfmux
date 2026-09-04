@@ -50,6 +50,38 @@ class _Board:
     async def set_phase(self, *a, **k):
         pass
 
+    samples = None
+
+    async def get_samples(self, n, channel=None, module=None, average=False):
+        return self.samples
+
+
+class _Samples:
+    def __init__(self, i, q):
+        self.i, self.q = [np.asarray(i)], [np.asarray(q)]
+
+
+@pytest.mark.asyncio
+async def test_phase_puts_the_principal_axis_along_q():
+    t = np.linspace(-1, 1, 200)
+    board = _Board()
+    # Samples along 30 degrees: the board rotates by +phase, so 60
+    # degrees more puts that axis on Q.
+    board.samples = _Samples(t * np.cos(np.radians(30)), t * np.sin(np.radians(30)))
+    phases = await bk.find_optimal_phases_parallel(
+        board, {1: {"channel": 1}}, module=1, apply_bandpass=False)
+    assert phases[1][0] == pytest.approx(60.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_no_variation_means_no_phase():
+    board = _Board()
+    board.samples = _Samples(np.full(200, 3.0), np.full(200, -2.0))
+    with pytest.warns(UserWarning, match="no variation"):
+        phases = await bk.find_optimal_phases_parallel(
+            board, {1: {"channel": 1}}, module=1, apply_bandpass=False)
+    assert phases[1] == (0.0, 0.0)
+
 
 def _entry(a=0.0, amplitude=0.01, n=101, span=200e3):
     """A multisweep result entry, its bias frequency on the raw grid

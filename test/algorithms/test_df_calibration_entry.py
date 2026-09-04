@@ -29,8 +29,10 @@ def _exact(entry):
 
 def test_nonlinear_params_are_used_without_fitting(monkeypatch):
     entry = _entry()
+    # As the flow stores them: the model describes the sweep in counts,
+    # the gain carrying the scale.
     entry["nonlinear_fit_params"] = dict(PARAMS)
-    entry["gain_complex"] = 1.0
+    entry["gain_complex"] = 1.0 / VOLTS_PER_ROC
     monkeypatch.setattr(dc, "fit_for_calibration",
                         lambda *a, **k: pytest.fail("should not fit"))
     cal = dc.df_calibration_for_entry(entry)

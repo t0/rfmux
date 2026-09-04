@@ -817,6 +817,7 @@ objects this notebook does:
 | (how the GUI tap feeds the session) | `SlowIngest` — the same class `run_slow_source` uses, so the GUI and this notebook block, keep sample time and stop on duration identically |
 | **⟳ Re-estimate Noise** | `capture_session.re_estimate_noise()` |
 | Live pulse / histogram / template plots | `on_pulse`, `on_histograms`, `on_templates` callbacks |
+| **Plot** field: `1,2,4`, `1-5`, `*` | `plot_groups(...)`, `combine_histograms(...)`, `combine_templates(...)` in `rfmux.pulse_capture.analysis` |
 | View basis / units controls | `display_transform(...)` |
 | Output `.h5` + Session Browser review | `hdf5_path=` + `PulseHDF5Reader` |
 

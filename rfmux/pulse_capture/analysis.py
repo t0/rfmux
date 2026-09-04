@@ -331,3 +331,103 @@ def window_shortfall(times, window, tolerance: float) -> tuple:
     tail = window[1] - float(t[-1])
     return (head if head > tolerance else 0.0,
             tail if tail > tolerance else 0.0)
+
+
+# ── Plotting many channels ──────────────────────────────────────────
+
+def plot_groups(spec: str, channels) -> list:
+    """What to draw from *channels*, one entry per series.
+
+    Each comma-separated item of *spec* is one series: a channel on
+    its own, a range ``a-b`` whose channels are combined into one, or
+    ``*`` / ``all`` for every channel combined.  An empty spec is one
+    series per channel.  Channels absent from *channels* are dropped,
+    and a series that ends up empty is dropped with them.
+
+    Returns ``[(label, [channels...]), ...]``.  Raises ValueError with
+    the offending token, since the caller is a GUI field.
+    """
+    present = sorted(int(c) for c in channels)
+    cleaned = "".join(spec.split())
+    if not cleaned:
+        return [(f"Ch{c}", [c]) for c in present]
+    out = []
+    for token in cleaned.split(","):
+        if not token:
+            continue
+        if token.lower() in ("*", "all"):
+            if present:
+                out.append((f"All {len(present)} ch", list(present)))
+            continue
+        lo, sep, hi = token.partition("-")
+        try:
+            start = int(lo)
+            stop = int(hi) if sep else start
+        except ValueError:
+            raise ValueError(
+                f"Could not read {token!r}. Use channels like \"1,2\", "
+                f"ranges like \"2-19\" to combine, or \"*\".") from None
+        if stop < start:
+            raise ValueError(
+                f"Range {token!r} runs backwards -- write "
+                f"\"{stop}-{start}\".")
+        members = [c for c in present if start <= c <= stop]
+        if not members:
+            continue
+        label = f"Ch{start}" if not sep else f"Ch{start}-{stop}"
+        out.append((label, members))
+    return out
+
+
+def rebin_counts(src_edges, counts, dst_edges) -> np.ndarray:
+    """Counts redistributed from one bin grid onto another, exactly for
+    a density that is uniform within each source bin."""
+    src_edges = np.asarray(src_edges, dtype=np.float64)
+    cum = np.concatenate([[0.0], np.cumsum(np.nan_to_num(
+        np.asarray(counts, dtype=np.float64)))])
+    cum_dst = np.interp(np.asarray(dst_edges, dtype=np.float64),
+                        src_edges, cum, left=0.0, right=cum[-1])
+    return np.diff(cum_dst)
+
+
+def combine_histograms(edges_list, counts_list):
+    """One histogram from several: summed on a shared grid, or rebinned
+    onto one spanning them all when the grids differ (channels in Hz
+    have their own calibration scale)."""
+    edges0 = np.asarray(edges_list[0], dtype=np.float64)
+    same = all(np.array_equal(np.asarray(e, dtype=np.float64), edges0)
+               for e in edges_list[1:])
+    if same:
+        total = np.zeros(len(edges0) - 1)
+        for c in counts_list:
+            total += np.nan_to_num(np.asarray(c, dtype=np.float64))
+        return edges0, total
+    lo = min(float(np.min(e)) for e in edges_list)
+    hi = max(float(np.max(e)) for e in edges_list)
+    grid = np.linspace(lo, hi, len(edges0))
+    total = np.zeros(len(grid) - 1)
+    for e, c in zip(edges_list, counts_list):
+        total += rebin_counts(e, c, grid)
+    return grid, total
+
+
+def combine_templates(means, resids, counts):
+    """Stack several channels' templates as if their pulses had been
+    stacked together: count-weighted mean, and the RMS about it
+    (each channel's own spread plus its offset from the joint mean)."""
+    m = np.asarray(means, dtype=np.float64)
+    n = np.nan_to_num(np.asarray(counts, dtype=np.float64))
+    n = np.where(np.isfinite(m), n, 0.0)
+    m0 = np.nan_to_num(m)
+    total = n.sum(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.where(total > 0, (n * m0).sum(axis=0) / total, np.nan)
+        if resids is None:
+            resid = None
+        else:
+            r0 = np.nan_to_num(np.asarray(resids, dtype=np.float64))
+            second = (n * (r0 ** 2 + m0 ** 2)).sum(axis=0) / total
+            resid = np.where(total > 0,
+                             np.sqrt(np.maximum(second - mean ** 2, 0.0)),
+                             np.nan)
+    return mean, resid, total

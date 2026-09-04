@@ -1307,6 +1307,62 @@ def test_histogram_legend_kept_for_a_few_channels(qt_app):
     spin(qt_app)
 
 
+def _curves(plot):
+    return [it for it in plot.getPlotItem().listDataItems()]
+
+
+def test_plot_field_selects_and_combines(qt_app):
+    """"1-5" is one series holding five channels' counts; "2,4" two;
+    "*" everything; and both views follow the one field."""
+    panel = PulseCapturePanel(dark_mode=False)
+    channels = list(range(1, 21))
+    panel._counts = {c: 3 for c in channels}
+    panel._hist_data = _hist_data(channels)
+    panel._template_data = _template_data(channels)
+
+    panel.plot_spec_edit.setText("1-5")
+    panel._on_plot_spec_edited(panel.plot_spec_edit)
+    assert panel.template_spec_edit.text() == "1-5"
+    curves = _curves(panel.hist_plots["snr"])
+    assert len(curves) == 1
+    assert curves[0].yData.sum() == pytest.approx(5 * 8 * 3)
+    assert _legend_rows(panel.hist_plots["snr"]) == 1
+    assert len(_curves(panel.template_plot_i)) == 1
+    assert "Ch1-5: 25" in panel.template_info.text()
+
+    panel.template_spec_edit.setText("2,4")
+    panel._on_plot_spec_edited(panel.template_spec_edit)
+    assert panel.plot_spec_edit.text() == "2,4"
+    assert len(_curves(panel.hist_plots["snr"])) == 2
+
+    panel.plot_spec_edit.setText("*")
+    panel._on_plot_spec_edited(panel.plot_spec_edit)
+    curves = _curves(panel.hist_plots["snr"])
+    assert len(curves) == 1
+    assert curves[0].yData.sum() == pytest.approx(20 * 8 * 3)
+
+    # A bad spec is shown on the field and changes nothing.
+    panel.plot_spec_edit.setText("5-1")
+    panel._on_plot_spec_edited(panel.plot_spec_edit)
+    assert panel._plot_spec == "*"
+    assert "border" in panel.plot_spec_edit.styleSheet()
+
+    panel.close()
+    spin(qt_app)
+
+
+def test_template_info_stays_one_line(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    channels = list(range(1, 129))
+    panel._counts = {c: 5 for c in channels}
+    panel._template_data = _template_data(channels)
+    panel._render_templates()
+    h = panel.template_info.sizeHint().height()
+    assert h <= 2 * panel.template_info.fontMetrics().height()
+    panel.close()
+    spin(qt_app)
+
+
 def test_template_legend_does_not_grow_without_bound(qt_app):
     # The summary text itself is covered by test_many_channels_are_
     # summarised; this is the plot-side half of the same rule.

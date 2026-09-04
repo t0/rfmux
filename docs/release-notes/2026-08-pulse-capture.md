@@ -150,6 +150,13 @@ Signal-to-noise, peak amplitude, duration and derived decay constant are
 accumulated over every pulse and updated live. Ranges expand as new pulses
 arrive, so there is nothing to configure up front.
 
+With many channels the per-channel lines stop being readable, so the Plot
+field on the histogram and template tabs says what to draw, in the same
+language as the Channels field: `1,2,4` draws those channels, `1-5` combines
+five channels into one histogram or template, and `*` combines them all.
+Combined templates are stacked as if the pulses had been stacked together,
+weighted by each channel's count.
+
 One Units control in the toolbar drives the waveforms, the histograms and the
 templates together. It offers counts, volts, and df in hertz; the last needs
 a calibrated channel, the other two do not.

@@ -57,7 +57,10 @@ from ...core.transferfunctions import (
 )
 from ...pulse_capture.detection import ChannelNoiseStats
 from ...pulse_capture.analysis import (
+    combine_histograms,
+    combine_templates,
     display_transform,
+    plot_groups,
     storage_transform,
 )
 
@@ -122,17 +125,23 @@ def _noise_line_sigma(stats: dict) -> str:
         lambda st: f"{len(st)} ch — σI {_spread(n.std_I for n in st.values())}")
 
 
-def _legend_name(channel: int, count, n_channels: int):
+def _series_name(label: str, count, n_series: int):
     """Curve name, or None to keep it out of the legend.
 
     pyqtgraph draws one legend row per named curve, so a 128-channel
     capture buries the plot under its own key.  Past
-    MAX_LISTED_CHANNELS the curves stay unnamed and the channel count
-    goes in the title instead.
+    MAX_LISTED_CHANNELS the curves stay unnamed and the series count
+    goes in the title instead; the Plot field is how to get fewer.
     """
-    if n_channels > MAX_LISTED_CHANNELS:
+    if n_series > MAX_LISTED_CHANNELS:
         return None
-    return f"Ch {channel} (n={count})"
+    return f"{label} (n={count})"
+
+
+_PLOT_SPEC_TIP = (
+    "Which channels to draw.  Empty: every channel.  \"1,2,4\": those "
+    "channels, one line each.  \"1-5\": channels 1 to 5 combined into "
+    "one.  \"*\": all channels combined.  Items can be mixed: \"1,3-8,*\".")
 
 
 def _noise_detail(stats: dict, names=("I", "Q"), unit: str = "") -> str:
@@ -228,6 +237,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._counts: Dict[int, int] = {}
         self._last_stats: dict = {}
         self._hist_data: dict = {}
+        #: The Plot field: what the histograms and templates draw.
+        self._plot_spec: str = ""
         self._capture_start_wall: Optional[float] = None
 
         #: Set once the user picks a view; the frequency-view default
@@ -682,9 +693,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         v.setContentsMargins(4, 4, 4, 4)
 
         controls = QtWidgets.QHBoxLayout()
-        self.log_check = QtWidgets.QCheckBox("Log y")
-        self.log_check.toggled.connect(self._render_histograms)
-        controls.addWidget(self.log_check)
+        self.plot_spec_edit = self._make_plot_spec_edit()
+        controls.addWidget(labelled("Plot:", self.plot_spec_edit))
         self.hist_stream_combo = QtWidgets.QComboBox()
         self.hist_stream_combo.addItems(["slow", "fast"])
         self.hist_stream_combo.setToolTip(
@@ -713,6 +723,43 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         v.addWidget(grid_holder, stretch=1)
         return w
 
+    def _make_plot_spec_edit(self) -> QtWidgets.QLineEdit:
+        edit = QtWidgets.QLineEdit()
+        edit.setPlaceholderText("all  (1,2,4  |  1-5  |  *)")
+        edit.setToolTip(_PLOT_SPEC_TIP)
+        edit.setMaximumWidth(220)
+        edit.editingFinished.connect(
+            lambda e=edit: self._on_plot_spec_edited(e))
+        return edit
+
+    def _on_plot_spec_edited(self, edit: QtWidgets.QLineEdit) -> None:
+        """One spec drives the histograms and the templates; the two
+        fields mirror each other."""
+        text = edit.text()
+        try:
+            plot_groups(text, [1])
+        except ValueError as e:
+            edit.setStyleSheet("border: 1px solid #CC3333")
+            edit.setToolTip(f"{e}\n\n{_PLOT_SPEC_TIP}")
+            return
+        for other in (self.plot_spec_edit, self.template_spec_edit):
+            other.setStyleSheet("")
+            other.setToolTip(_PLOT_SPEC_TIP)
+            if other.text() != text:
+                other.setText(text)
+        if text != self._plot_spec:
+            self._plot_spec = text
+            self._render_histograms()
+            self._render_templates()
+
+    def _plot_series(self) -> list:
+        """``[(label, [channels]), ...]`` the histograms and templates
+        draw: one per channel, or what the Plot field asks for."""
+        try:
+            return plot_groups(self._plot_spec, sorted(self._counts))
+        except ValueError:
+            return plot_groups("", sorted(self._counts))
+
     def _build_template_view(self) -> QtWidgets.QWidget:
         """Trigger-aligned pulse stack: mean template ± residual RMS."""
         w = QtWidgets.QWidget()
@@ -720,13 +767,15 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         v.setContentsMargins(4, 4, 4, 4)
 
         controls = QtWidgets.QHBoxLayout()
-        self.template_info = QtWidgets.QLabel("No pulses stacked yet")
-        self.template_info.setWordWrap(True)
-        self.template_info.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Ignored,
-            QtWidgets.QSizePolicy.Policy.Preferred)
+        # One line, elided: a word-wrapped label sharing the row with
+        # the controls grew into a tall block of mostly empty space on
+        # a narrow panel.  The full text is the tooltip.
+        self.template_info = ElidedLabel("No pulses stacked yet",
+                                         max_width=900)
         controls.addWidget(self.template_info)
         controls.addStretch(1)
+        self.template_spec_edit = self._make_plot_spec_edit()
+        controls.addWidget(labelled("Plot:", self.template_spec_edit))
         self.template_residual_check = QtWidgets.QCheckBox(
             "Show residual RMS")
         self.template_residual_check.setChecked(True)
@@ -773,85 +822,111 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         show_band = self.template_residual_check.isChecked()
+        series = self._plot_series()
         totals = []
         # Track the data extent so the view fits the STACKED region:
         # bins outside it are NaN/empty and would otherwise stretch the
         # axes over the full pre/post grid.
         x_lo = x_hi = None
         y_lim = {"I": [None, None], "Q": [None, None]}
-        for ch in sorted(self._counts):
-            t = data.get(f"time_s_ch{ch}")
-            counts = data.get(f"counts_ch{ch}")
-            if t is None or counts is None:
+        for label, chans in series:
+            # Each channel converted to the view first, then the group
+            # stacked as if its pulses had been stacked together.
+            t_ref = None
+            means_by = {"I": [], "Q": []}
+            resids_by = {"I": [], "Q": []}
+            counts_list = []
+            n_pulses = 0
+            for ch in chans:
+                t = data.get(f"time_s_ch{ch}")
+                counts = data.get(f"counts_ch{ch}")
+                if t is None or counts is None:
+                    continue
+                t_arr = np.asarray(t, dtype=np.float64)
+                if t_ref is None:
+                    t_ref = t_arr
+                elif len(t_arr) != len(t_ref):
+                    continue  # a different grid cannot be stacked
+                counts = np.asarray(counts, dtype=np.float64)
+                n_pulses += int(np.max(counts)) if len(counts) else 0
+                scale = self._amp_scale(ch)
+                # Convert the pair together.  Averaging and the
+                # conversion are both linear, so a rotated template
+                # equals the template of rotated pulses -- but only if
+                # the two axes are transformed as a pair.
+                view = self._view_coeffs(ch)
+                means = {q: data.get(f"template_{q}_ch{ch}")
+                         for q in ("I", "Q")}
+                rotated = (view is not None and means["I"] is not None
+                           and means["Q"] is not None)
+                if rotated:
+                    a, b = apply_iq_conversion(
+                        np.asarray(means["I"], dtype=np.float64),
+                        np.asarray(means["Q"], dtype=np.float64), view[0])
+                    means = {"I": a, "Q": b}
+                blank = np.full(len(t_ref), np.nan)
+                for quad in ("I", "Q"):
+                    mean = means.get(quad)
+                    if mean is None:
+                        means_by[quad].append(blank)
+                        resids_by[quad].append(blank)
+                        continue
+                    mean = np.asarray(mean, dtype=np.float64)
+                    if scale is not None and not rotated:
+                        mean = mean * scale
+                    # The residual is a spread, not a signed pair: the
+                    # rotation mixes the quadratures, so only its length
+                    # carries over -- which is what `scale` already is.
+                    resid = data.get(f"residual_{quad}_ch{ch}")
+                    if resid is None:
+                        resid = blank
+                    else:
+                        resid = np.asarray(resid, dtype=np.float64)
+                        if scale is not None:
+                            resid = resid * scale
+                    means_by[quad].append(mean)
+                    resids_by[quad].append(resid)
+                counts_list.append(counts)
+            if t_ref is None:
                 continue
-            counts = np.asarray(counts)
-            n_pulses = int(np.max(counts)) if len(counts) else 0
-            totals.append((ch, n_pulses))
-            t_arr = np.asarray(t, dtype=np.float64)
-            populated = np.nonzero(counts > 0)[0]
+            totals.append((label, n_pulses))
+            populated = np.nonzero(np.sum(counts_list, axis=0) > 0)[0]
             if len(populated):
-                lo, hi = t_arr[populated[0]], t_arr[populated[-1]]
+                lo, hi = t_ref[populated[0]], t_ref[populated[-1]]
                 x_lo = lo if x_lo is None else min(x_lo, lo)
                 x_hi = hi if x_hi is None else max(x_hi, hi)
-            color = _channel_color(ch)
-            scale = self._amp_scale(ch)
-            # Convert the pair together.  Averaging and the conversion are
-            # both linear, so a rotated template equals the template of
-            # rotated pulses -- but only if the two axes are transformed
-            # as a pair.  Scaling them one at a time left the templates
-            # unrotated under df/dissipation labels.
-            view = self._view_coeffs(ch)
-            means = {q: data.get(f"template_{q}_ch{ch}") for q in ("I", "Q")}
-            rotated = (view is not None and means["I"] is not None
-                       and means["Q"] is not None)
-            if rotated:
-                a, b = apply_iq_conversion(
-                    np.asarray(means["I"], dtype=np.float64),
-                    np.asarray(means["Q"], dtype=np.float64), view[0])
-                means = {"I": a, "Q": b}
+            color = _channel_color(chans[0])
             for quad, plot in (("I", self.template_plot_i),
                                ("Q", self.template_plot_q)):
-                mean = means.get(quad)
-                if mean is None:
+                if len(counts_list) == 1:
+                    mean, resid = means_by[quad][0], resids_by[quad][0]
+                else:
+                    mean, resid, _ = combine_templates(
+                        means_by[quad], resids_by[quad], counts_list)
+                finite = np.isfinite(mean)
+                if not np.any(finite):
                     continue
-                mean = np.asarray(mean, dtype=np.float64)
-                if scale is not None and not rotated:
-                    mean = mean * scale
-                plot.plot(np.asarray(t, float), mean,
+                plot.plot(t_ref, mean,
                           pen=pg.mkPen(color, width=2.2),
                           connect="finite",
-                          name=_legend_name(ch, n_pulses,
-                                            len(self._counts)))
-                finite = np.isfinite(mean)
-                if np.any(finite):
-                    lo, hi = float(np.min(mean[finite])), \
-                        float(np.max(mean[finite]))
-                    cur = y_lim[quad]
-                    cur[0] = lo if cur[0] is None else min(cur[0], lo)
-                    cur[1] = hi if cur[1] is None else max(cur[1], hi)
+                          name=_series_name(label, n_pulses, len(series)))
+                lo, hi = float(np.min(mean[finite])), \
+                    float(np.max(mean[finite]))
+                cur = y_lim[quad]
+                cur[0] = lo if cur[0] is None else min(cur[0], lo)
+                cur[1] = hi if cur[1] is None else max(cur[1], hi)
 
-                # The residual is a spread, not a signed pair: the
-                # rotation mixes the quadratures, so only its length
-                # carries over -- which is what `scale` already is.
-                resid = data.get(f"residual_{quad}_ch{ch}")
-                if show_band and resid is not None:
-                    resid = np.asarray(resid, dtype=np.float64)
-                    if scale is not None:
-                        resid = resid * scale
-                    both = np.isfinite(mean) & np.isfinite(resid)
-                    if np.any(both):
-                        cur = y_lim[quad]
-                        cur[0] = min(cur[0], float(np.min(
-                            (mean - resid)[both])))
-                        cur[1] = max(cur[1], float(np.max(
-                            (mean + resid)[both])))
+                both = finite & np.isfinite(resid)
+                if show_band and np.any(both):
+                    cur[0] = min(cur[0], float(np.min(
+                        (mean - resid)[both])))
+                    cur[1] = max(cur[1], float(np.max(
+                        (mean + resid)[both])))
                     band = QtGui.QColor(color)
                     band.setAlpha(60)
-                    upper = pg.PlotDataItem(np.asarray(t, float),
-                                            mean + resid,
+                    upper = pg.PlotDataItem(t_ref, mean + resid,
                                             connect="finite")
-                    lower = pg.PlotDataItem(np.asarray(t, float),
-                                            mean - resid,
+                    lower = pg.PlotDataItem(t_ref, mean - resid,
                                             connect="finite")
                     fill = pg.FillBetweenItem(upper, lower, brush=band)
                     plot.addItem(fill)
@@ -878,16 +953,16 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         elif len(totals) <= MAX_LISTED_CHANNELS:
             self.template_info.setText(
                 "Trigger-aligned stack — "
-                + ", ".join(f"Ch{c}: {n}" for c, n in totals))
+                + ", ".join(f"{label}: {n}" for label, n in totals))
         else:
             stacked = sum(n for _, n in totals)
-            busiest = max(totals, key=lambda cn: (cn[1], -cn[0]))
+            busiest = max(totals, key=lambda ln: ln[1])
             self.template_info.setText(
                 f"Trigger-aligned stack — {len(totals)} ch, "
                 f"{stacked:,} pulses stacked, "
-                f"deepest Ch{busiest[0]}: {busiest[1]}")
+                f"deepest {busiest[0]}: {busiest[1]}")
         self.template_info.setToolTip(
-            "\n".join(f"Ch{c}  {n}" for c, n in totals))
+            "\n".join(f"{label}  {n}" for label, n in totals))
 
     # ── Capture lifecycle ─────────────────────────────────────────
 
@@ -2554,15 +2629,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     # ── Histograms ────────────────────────────────────────────────
 
     def _render_histograms(self) -> None:
-        log_y = self.log_check.isChecked()
+        series = self._plot_series()
         for metric, title, _xlabel in _HIST_METRICS:
             plot = self.hist_plots[metric]
             item = plot.getPlotItem()
             plot.clear()
             item.setTitle(
-                title if len(self._counts) <= MAX_LISTED_CHANNELS
-                else f"{title} — {len(self._counts)} ch")
-            item.setLogMode(y=log_y)
+                title if len(series) <= MAX_LISTED_CHANNELS
+                else f"{title} — {len(series)} ch")
 
             edges = self._hist_data.get(f"{metric}_edges")
             if edges is None:
@@ -2571,19 +2645,23 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             # Amplitude is the only metric with ADC-count units; SNR,
             # duration and tau are dimensionless or times.
             scalable = (metric == "amplitude") and self._units_are_hz()
-            any_scaled = False
             occupied_lo = occupied_hi = None
-            for ch in sorted(self._counts):
-                counts = self._hist_data.get(f"{metric}_counts_ch{ch}")
-                if counts is None:
+            for label, chans in series:
+                edges_list, counts_list = [], []
+                for ch in chans:
+                    counts = self._hist_data.get(f"{metric}_counts_ch{ch}")
+                    if counts is None:
+                        continue
+                    edges = base_edges
+                    if scalable:
+                        scale = self._amp_scale(ch)
+                        if scale is not None:
+                            edges = base_edges * scale
+                    edges_list.append(edges)
+                    counts_list.append(np.asarray(counts, dtype=np.float64))
+                if not counts_list:
                     continue
-                edges = base_edges
-                if scalable:
-                    scale = self._amp_scale(ch)
-                    if scale is not None:
-                        edges = base_edges * scale
-                        any_scaled = True
-                counts = np.asarray(counts, dtype=np.float64)
+                edges, counts = combine_histograms(edges_list, counts_list)
                 nz = np.nonzero(counts > 0)[0]
                 if len(nz):
                     lo, hi = edges[nz[0]], edges[nz[-1] + 1]
@@ -2591,19 +2669,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                         else min(occupied_lo, lo)
                     occupied_hi = hi if occupied_hi is None \
                         else max(occupied_hi, hi)
-                if log_y:
-                    counts = np.where(counts > 0, counts, np.nan)
-                color = _channel_color(ch)
+                color = _channel_color(chans[0])
                 brush = QtGui.QColor(color)
                 brush.setAlpha(110)
                 plot.plot(
                     edges, counts,
                     stepMode="center",
-                    fillLevel=0 if not log_y else None,
+                    fillLevel=0,
                     brush=brush,
                     pen=pg.mkPen(color, width=1.2),
-                    name=_legend_name(ch, int(np.nansum(counts)),
-                                      len(self._counts)),
+                    name=_series_name(label, int(np.nansum(counts)),
+                                      len(series)),
                     connect="finite",
                 )
             if metric == "amplitude":

@@ -14,8 +14,9 @@ from ..core.schema import CRS as BaseCRS
 
 # Import helper classes from this package
 from .resonator_model import MockResonatorModel
-from .udp_streamer import MockUDPManager
+from .udp_streamer import MockUDPManager, MockCRSStreamer
 from . import config as mock_config
+from ..core.transferfunctions import decimation_to_sampling
 
 from ..streamer import LONG_PACKET_CHANNELS, SHORT_PACKET_CHANNELS, Timestamp, TimestampSource
 
@@ -299,6 +300,12 @@ class ServerMockCRS:
             auto_bias = active_config.get('auto_bias_kids', True)
             if auto_bias and resonance_frequencies:
                 await self._auto_bias_kids(active_config, resonance_frequencies)
+                # One pulse through the block path now, behind the
+                # build, so the first real one does not stall the stream.
+                dec = self._fir_stage if self._fir_stage is not None else 6
+                self._resonator_model.warm_pulse_caches(
+                    1, decimation_to_sampling(dec),
+                    MockCRSStreamer.slow_block_len(dec))
 
             return resonator_count, resonance_frequencies
 

@@ -1288,6 +1288,42 @@ class MockResonatorModel:
                              if t_from - p['start_time']
                              < p['tau_rise'] + p['tau_decay'] * 15]
 
+    def warm_pulse_caches(self, module, sample_rate, block_len):
+        """Run one pulse on every resonator through the block path the
+        streamer uses, so the first real pulse does not stall the stream
+        on cold convergence caches and kernels (0.8 s at 100 tones).
+        Time and pulse state are put back; the caches are what remain.
+        The configured pulse parameters decide which keys are warmed, so
+        a pulse amplitude or decay changed later warms itself.
+        """
+        if not self.mr_lekids:
+            return
+        with self._physics_lock:
+            saved = (self.last_update_time, dict(self.pulse_config),
+                     list(self.pulse_events), dict(self.last_pulse_time))
+            try:
+                self.pulse_config['mode'] = 'periodic'
+                self.pulse_config['resonators'] = 'all'
+                self.pulse_events = []
+                self.last_pulse_time = {}
+                dt = 1.0 / sample_rate
+                span = (self.pulse_config['tau_rise']
+                        + 15 * self.pulse_config['tau_decay'])
+                t = self.last_update_time
+                end = t + span + block_len * dt
+                while t < end:
+                    self.advance_pulses_to(t + (block_len - 1) * dt,
+                                           block_len, dt)
+                    self.calculate_module_response_coupled(
+                        module, num_samples=block_len,
+                        sample_rate=sample_rate, start_time=t,
+                        pulse_time=t)
+                    t += block_len * dt
+            finally:
+                (self.last_update_time, self.pulse_config,
+                 self.pulse_events, self.last_pulse_time) = saved
+                self._nqp_state_t = None
+
     def _sample_random_pulse_amplitude(self):
         """Sample a pulse amplitude based on configured distribution.
         

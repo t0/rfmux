@@ -297,12 +297,16 @@ is about fifteen samples long. A decay shorter than the sample period lands
 inside one sample and is detected but not resolved, which looks like a single
 spike rather than a pulse.
 
+`auto_bias_kids` is the simulation's own tuning: it sweeps each resonator at
+`bias_amplitude`, a tone power of -55 dBm by default, and parks the tone on
+the S21 minimum it finds. That gives tones, not a df calibration, so
+`measure_df_calibrations(module=1)` measures one for every biased channel
+afterwards; Periscope does this itself at startup in mock mode. Both work
+headlessly, and both are what a notebook gets from `create_mock_crs`.
+
 `periscope --mock` gives the same simulation behind the GUI. The screenshots
 in this document were taken from a mock capture, triggered in the frequency
-basis, by `docs/make_release_note_screenshots.py`, with the config above. The
-mock's `auto_bias_kids` skips the sweep-and-fit that produces a calibration
-on hardware, so the script calls `measure_df_calibrations` first, which is
-that sweep on its own.
+basis, by `docs/make_release_note_screenshots.py`, with the config above.
 
 The mock generates both streams in one process, so fast and dual captures run
 slower than real time: two PFB channels is 4.9 M complex samples a second to

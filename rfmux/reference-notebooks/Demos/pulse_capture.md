@@ -148,6 +148,10 @@ below no-ops in that case.
 
 If you have no hardware, this stands up a simulated CRS: two resonators
 biased and carrying tones, and periodic quasiparticle pulses to detect.
+`auto_bias_kids` is what biases them: the simulation sweeps each resonator at
+`bias_amplitude` (a tone power, -55 dBm by default) and parks the tone on the
+S21 minimum it finds, the way a tuning flow would. It gives tones, not a df
+calibration; section 7 measures that separately.
 
 Pulse heights are drawn uniformly between `pulse_random_amp_min` and
 `pulse_random_amp_max`, so the amplitude histogram in section 7 shows a
@@ -175,12 +179,14 @@ The noise is deliberately not idealised:
 > mode, attach to *its* simulation with option 1A instead.
 
 ```python
+from rfmux.mock.config import bias_amplitude_from_dbm
+
 MOCK_CONFIG = {
     "num_resonances": 2,
     "resonator_random_seed": 42,
     "auto_bias_kids": True,        # bias the detectors
-    "bias_amplitude": 0.001,       # normalized: about -59 dBm at the mock's
-                                   # 1 dBm DAC scale (the dialog shows dBm)
+    "bias_amplitude": bias_amplitude_from_dbm(-55.0),   # tone power for the
+                                   # sweep and the bias (the dialog shows dBm)
 
     # ── Noise (these are the shipped defaults, spelled out) ─────
     "udp_noise_level": 10.0,       # white readout noise (ADC counts)
@@ -642,15 +648,18 @@ between two by an angle nothing controls. A channel without a calibration
 stays on the quadratures, and in volts. Pass `trigger_basis="iq"` to threshold
 the raw quadratures even where a calibration exists.
 
-`auto_bias_kids` skips the sweep-and-fit, so a simulated array has no
-calibration yet. `measure_df_calibrations` is that measurement on its own: a
-narrow sweep around each bias point through the same `convert_iq_to_df`. It is
+`auto_bias_kids` puts tones on the resonances but does not produce a
+calibration, so a simulated array has none yet. `measure_df_calibrations` is
+that measurement on its own: a narrow sweep around each bias point, every
+channel stepping together, through the same `convert_iq_to_df`. It is
 host-side and uses only `set_frequency` and `get_samples`, so it runs against a
 board too — though on hardware you would normally take the calibration from
-`bias_kids` rather than sweep a tuned array again.
+`bias_kids` rather than sweep a tuned array again. With no channel list it
+measures every channel the module reports as biased, which is what Periscope
+does at startup in mock mode.
 
 ```python
-df_cals = await crs.measure_df_calibrations(channels=CHANNELS, module=MODULE)
+df_cals = await crs.measure_df_calibrations(module=MODULE)
 for ch, cal in sorted(df_cals.items()):
     print(f"  ch{ch}: {abs(cal):.3g} Hz per volt, "
           f"{np.degrees(np.angle(cal)):+.1f} deg")

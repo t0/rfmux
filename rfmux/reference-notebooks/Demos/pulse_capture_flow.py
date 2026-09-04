@@ -41,6 +41,7 @@ from rfmux.algorithms.measurement.streamer_config import (
     validate,
 )
 from rfmux.streamer import find_streamer_conflict
+from rfmux.mock.config import bias_amplitude_from_dbm
 
 # ── What to capture ───────────────────────────────────────────────
 MODULE = 1
@@ -64,7 +65,7 @@ MOCK_CONFIG = {
     "num_resonances": 2,
     "resonator_random_seed": 42,
     "auto_bias_kids": True,
-    "bias_amplitude": 0.001,
+    "bias_amplitude": bias_amplitude_from_dbm(-55.0),
     "pulse_mode": "periodic",
     "pulse_period": 0.05,
     "pulse_tau_rise": 1e-6,

@@ -192,7 +192,7 @@ class ResonatorCatalog:
     The object algorithms accept and return::
 
         catalog = ResonatorCatalog.from_frequencies(found, module=2, amplitude=0.01)
-        await crs.multisweep(catalog, span_hz=200e3, npoints_per_sweep=101)
+        await crs.multisweep(catalog)
         find_bias_points(catalog, sweeps)
         await crs.apply_bias(catalog)
 

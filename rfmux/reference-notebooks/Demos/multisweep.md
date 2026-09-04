@@ -185,6 +185,11 @@ beyond specifying the sweep bandwidth and resolution:
 
 The catalog even knows its own module.
 
+`span_hz` and `npoints_per_sweep` default to 100 kHz and 101 points — the same
+values this notebook uses — so `await crs.multisweep(catalog)` on its own is a
+complete call. We spell them out anyway, because a sweep's bandwidth and
+resolution are the two settings you will most often want to change.
+
 **Multisweep does not modify the catalog.** 
 
 Everything a multisweep produces comes back in the returned dict.

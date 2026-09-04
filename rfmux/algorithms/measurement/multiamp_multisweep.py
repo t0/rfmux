@@ -110,8 +110,8 @@ async def multiamp_multisweep(
     crs: CRS,
     catalog: ResonatorCatalog | None = None,
     *,
-    span_hz: float,
-    npoints_per_sweep: int,
+    span_hz: float = 100e3,
+    npoints_per_sweep: int = 101,
     amp_schedule: AmplitudeSchedule | None = None,
     directions: Sequence[str] = ("upward",),
     nsamps: int = 10,
@@ -150,8 +150,7 @@ async def multiamp_multisweep(
     the useful degenerate call is an up-and-down pair with nothing else said::
 
         results = await crs.multiamp_multisweep(
-            catalog, span_hz=200e3, npoints_per_sweep=101,
-            directions=("upward", "downward"),
+            catalog, directions=("upward", "downward"),
         )
 
     A bare frequency list works the same way, for an array that is not tuned
@@ -171,9 +170,10 @@ async def multiamp_multisweep(
         catalog (ResonatorCatalog, optional): What to sweep, as for
             ``multisweep``. Read, never written. Pass this or
             *center_frequencies*, not both.
-        span_hz (float): Total frequency width (Hz) of each sweep. The same for
-            every step.
-        npoints_per_sweep (int): Points measured within each sweep's span.
+        span_hz (float, optional): Total frequency width (Hz) of each sweep. The
+            same for every step. Defaults to 100 kHz.
+        npoints_per_sweep (int, optional): Points measured within each sweep's
+            span. Defaults to 101.
         amp_schedule (AmplitudeSchedule, optional): The amplitude steps. Defaults
             to ``AmplitudeSchedule()`` — one step, at whatever amplitude the
             catalog already carries. Built through

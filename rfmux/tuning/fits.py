@@ -3,7 +3,7 @@ Fit resonator models to sweeps that have already been measured.
 
 Fitting is a separate step, run by hand on data that exists::
 
-    sweeps = await crs.multiamp_multisweep(catalog, span_hz=200e3, npoints_per_sweep=101)
+    sweeps = await crs.multiamp_multisweep(catalog)
 
     module_sweeps = sweeps[crs.module[2].index()]
     report = fit_sweeps(module_sweeps)

@@ -216,8 +216,8 @@ async def multisweep(
     crs: CRS,
     catalog: ResonatorCatalog | None = None,
     *,
-    span_hz: float,
-    npoints_per_sweep: int,
+    span_hz: float = 100e3,
+    npoints_per_sweep: int = 101,
     amp: float | list[float] | Mapping[str, float] | None = None,
     nsamps: int = 10,
     sweep_direction: str = "upward", # Options: "upward", "downward"
@@ -255,7 +255,7 @@ async def multisweep(
     With a catalog, which brings its own frequencies, amplitudes and channels::
 
         catalog = ResonatorCatalog.from_frequencies(found, module=2, amplitude=1e-3)
-        sweeps = await crs.multisweep(catalog, span_hz=200e3, npoints_per_sweep=101)
+        sweeps = await crs.multisweep(catalog)
 
         module_sweeps = sweeps[crs.module[2].index()]
         module_sweeps["results"][0]["upward"]["R0001"]["iq_counts"]
@@ -278,8 +278,10 @@ async def multisweep(
             ``channel`` as the hardware channel, and — unless *amp* overrides
             it — its ``bias.amplitude`` as the probe amplitude. Pass this or
             *center_frequencies*, not both.
-        span_hz (float): Total frequency width (Hz) of each sweep.
-        npoints_per_sweep (int): Number of points to measure within each sweep's span.
+        span_hz (float, optional): Total frequency width (Hz) of each sweep.
+            Defaults to 100 kHz.
+        npoints_per_sweep (int, optional): Number of points to measure within
+            each sweep's span. Defaults to 101.
         amp (float | list[float] | Mapping[str, float] | None, optional): Probe
             amplitude, in normalized DAC units.
 

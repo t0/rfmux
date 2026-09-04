@@ -31,8 +31,7 @@ Typical headless use::
     found = find_resonances_in_netanal(netanal, min_dip_depth_db=1.0)
     catalog = found.to_catalog(module=2, amplitude=0.001)
 
-    sweeps = await crs.multiamp_multisweep(catalog, span_hz=200e3,
-                                           npoints_per_sweep=101)
+    sweeps = await crs.multiamp_multisweep(catalog)
     module_sweeps = sweeps[crs.module[2].index()]
     fit_sweeps(module_sweeps)   # writes each sweep's fits alongside the sweep
 
